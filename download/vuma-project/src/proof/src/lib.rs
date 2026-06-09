@@ -30,7 +30,9 @@ pub mod rules;
 pub mod tactics;
 
 // Re-export the primary types for convenience
-pub use checker::{CheckResult, ProofChecker};
+pub use checker::{
+    AutoProofResult, CheckResult, CompositionError, IVEProofObligation, ProofChecker,
+};
 pub use counterexample::{CounterExample, Step, ViolationPoint};
 pub use proof::{Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 pub use origin_proofs::{

@@ -975,6 +975,955 @@ pub fn infer_bd(scg: &SCG) -> InferenceResult {
 }
 
 // ===========================================================================
+// Direct SCG-based BD Inference (Phase 2 milestone M2.3)
+// ===========================================================================
+//
+// These functions infer RepD, CapD, and RelD directly from the SCG structure,
+// complementing the 3-phase engine above. They examine node types, payloads,
+// edge kinds, and region membership to produce behavioral descriptors.
+
+// ---------------------------------------------------------------------------
+// RepD Inference from SCG
+// ---------------------------------------------------------------------------
+
+/// Infers a [`RepD`] for each node in the SCG based on node type, payload,
+/// and access pattern analysis.
+///
+/// # Rules
+///
+/// - **AllocationNode**: RepD inferred from allocation size and alignment,
+///   refined by subsequent access patterns.
+///   - 1-byte allocation with byte-level access → `Byte(1,1)`
+///   - 4-byte allocation with 4-byte aligned access → `Byte(4,4)` or
+///     `Struct` based on access patterns
+///   - Multiple accesses at different offsets within same allocation →
+///     `Struct` with fields at those offsets
+///   - Pointer-sized allocation (8 bytes on AArch64) → `Ptr(Byte(8,8))`
+///
+/// - **AccessNode**: RepD from the size and alignment of the access.
+///
+/// - **CastNode**: RepD from the target type of the cast.
+///
+/// - **ComputationNode**: RepD from the computation's output type hint.
+pub fn infer_repd_from_scg(scg: &SCG) -> HashMap<NodeId, RepD> {
+    let mut result: HashMap<NodeId, RepD> = HashMap::new();
+    let engine = BDInferenceEngine::new();
+
+    // First pass: compute basic RepD from node payloads
+    for node_id in scg.node_ids() {
+        if let Some(node_data) = scg.get_node(node_id) {
+            let repd = match node_data.node_type {
+                NodeType::Allocation => {
+                    if let NodePayload::Allocation(ref alloc) = node_data.payload {
+                        // Pointer-sized allocation → Ptr
+                        if alloc.size == 8 && alloc.align == 8 {
+                            // Check if any successor cast or access suggests pointer usage
+                            let is_ptr = has_pointer_successor(scg, node_id);
+                            if is_ptr {
+                                RepD::Ptr(crate::repd::PtrRep {
+                                    pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+                                })
+                            } else {
+                                RepD::Byte(ByteRep { size: alloc.size, align: alloc.align })
+                            }
+                        } else {
+                            RepD::Byte(ByteRep { size: alloc.size, align: alloc.align })
+                        }
+                    } else {
+                        RepD::Byte(ByteRep { size: 0, align: 1 })
+                    }
+                }
+                NodeType::Access => {
+                    if let NodePayload::Access(ref access) = node_data.payload {
+                        if let Some(size) = access.access_size {
+                            let align = if let Some(offset) = access.offset {
+                                // Alignment cannot exceed the natural alignment
+                                // relative to the offset
+                                let natural_align = if offset == 0 { size } else { 1u64.checked_shl(offset.trailing_zeros()).unwrap_or(size) };
+                                size.min(natural_align)
+                            } else {
+                                size
+                            };
+                            RepD::Byte(ByteRep { size, align: align.min(size) })
+                        } else {
+                            // Inherit from predecessor
+                            inherit_predecessor_repd(scg, node_id, &result)
+                        }
+                    } else {
+                        RepD::Byte(ByteRep { size: 0, align: 1 })
+                    }
+                }
+                NodeType::Cast => {
+                    if let NodePayload::Cast(ref cast) = node_data.payload {
+                        engine.repd_from_type_name(&cast.to_type)
+                    } else {
+                        RepD::Byte(ByteRep { size: 0, align: 1 })
+                    }
+                }
+                NodeType::Computation => {
+                    if let NodePayload::Computation(ref comp) = node_data.payload {
+                        if let Some(ref rt) = comp.result_type {
+                            engine.repd_from_type_name(rt)
+                        } else {
+                            inherit_predecessor_repd(scg, node_id, &result)
+                        }
+                    } else {
+                        RepD::Byte(ByteRep { size: 0, align: 1 })
+                    }
+                }
+                NodeType::Deallocation => {
+                    inherit_predecessor_repd(scg, node_id, &result)
+                }
+                NodeType::Effect => {
+                    inherit_predecessor_repd(scg, node_id, &result)
+                }
+                NodeType::Control => {
+                    inherit_predecessor_repd(scg, node_id, &result)
+                }
+                NodeType::Phantom => {
+                    inherit_predecessor_repd(scg, node_id, &result)
+                }
+            };
+            result.insert(node_id, repd);
+        }
+    }
+
+    // Second pass: refine allocation nodes based on access patterns
+    // If multiple accesses at different offsets target the same allocation,
+    // upgrade the allocation's RepD from Byte to Struct.
+    refine_allocation_repd_from_accesses(scg, &mut result);
+
+    result
+}
+
+/// Checks whether any successor node of `node_id` suggests pointer usage
+/// (e.g., a cast to a pointer type, or DerivePtr in capabilities).
+fn has_pointer_successor(scg: &SCG, node_id: NodeId) -> bool {
+    if let Some(successors) = scg.successors(node_id) {
+        for succ_id in successors {
+            if let Some(succ_data) = scg.get_node(succ_id) {
+                match &succ_data.payload {
+                    NodePayload::Cast(cast) => {
+                        if cast.to_type == "ptr" || cast.to_type == "*mut" || cast.to_type == "*const" {
+                            return true;
+                        }
+                    }
+                    NodePayload::Access(access) => {
+                        // Access that reads a pointer-sized value and feeds
+                        // into a dereference-like operation
+                        if access.access_size == Some(8) {
+                            // Check if this feeds into a Computation with
+                            // pointer-like operation
+                            if let Some(next_succs) = scg.successors(succ_id) {
+                                for ns in next_succs {
+                                    if let Some(ns_data) = scg.get_node(ns) {
+                                        if let NodePayload::Computation(ref comp) = ns_data.payload {
+                                            if comp.operation.contains("deref")
+                                                || comp.operation.contains("load")
+                                                || comp.operation.contains("ptr")
+                                            {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Inherits the RepD from a predecessor node. Uses the first predecessor's
+/// RepD if available, otherwise falls back to a minimal Byte(0, 1).
+fn inherit_predecessor_repd(
+    scg: &SCG,
+    node_id: NodeId,
+    repd_map: &HashMap<NodeId, RepD>,
+) -> RepD {
+    if let Some(preds) = scg.predecessors(node_id) {
+        for pred_id in preds {
+            if let Some(repd) = repd_map.get(&pred_id) {
+                return repd.clone();
+            }
+        }
+    }
+    RepD::Byte(ByteRep { size: 0, align: 1 })
+}
+
+/// Refines allocation node RepDs by examining the access patterns of
+/// successor nodes. If multiple accesses at different offsets target the
+/// same allocation, the allocation's RepD is upgraded from `Byte` to `Struct`
+/// with fields at those offsets.
+fn refine_allocation_repd_from_accesses(
+    scg: &SCG,
+    repd_map: &mut HashMap<NodeId, RepD>,
+) {
+    // Collect access offsets per allocation node
+    let mut alloc_accesses: HashMap<NodeId, Vec<(u64, u64)>> = HashMap::new(); // (offset, size)
+
+    for node_id in scg.node_ids() {
+        if let Some(node_data) = scg.get_node(node_id) {
+            if node_data.node_type == NodeType::Access {
+                if let NodePayload::Access(ref access) = node_data.payload {
+                    let offset = access.offset.unwrap_or(0);
+                    let size = access.access_size.unwrap_or(0);
+
+                    // Find the allocation predecessor
+                    if let Some(preds) = scg.predecessors(node_id) {
+                        for pred_id in preds {
+                            if let Some(pred_data) = scg.get_node(pred_id) {
+                                if pred_data.node_type == NodeType::Allocation {
+                                    alloc_accesses
+                                        .entry(pred_id)
+                                        .or_default()
+                                        .push((offset, size));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // For allocations with multiple accesses at different offsets, upgrade to Struct
+    for (alloc_id, accesses) in &alloc_accesses {
+        if accesses.len() >= 2 {
+            // Check if there are accesses at distinct offsets
+            let distinct_offsets: HashSet<u64> =
+                accesses.iter().map(|(off, _)| *off).collect();
+            if distinct_offsets.len() >= 2 {
+                // Build a Struct RepD from the access pattern
+                let mut fields: Vec<(u64, RepD)> = accesses
+                    .iter()
+                    .map(|(offset, size)| {
+                        (*offset, RepD::Byte(ByteRep {
+                            size: *size,
+                            align: (*size).min(1u64.checked_shl(offset.trailing_zeros()).unwrap_or(*size)),
+                        }))
+                    })
+                    .collect();
+                // Sort fields by offset
+                fields.sort_by_key(|(off, _)| *off);
+
+                // Compute total size and alignment
+                let total_size = fields
+                    .iter()
+                    .map(|(off, rep)| off + rep.size())
+                    .max()
+                    .unwrap_or(0);
+                let align = fields
+                    .iter()
+                    .map(|(_, rep)| rep.alignment())
+                    .max()
+                    .unwrap_or(1);
+
+                // Only upgrade if the original was a Byte RepD
+                if let Some(existing) = repd_map.get(alloc_id) {
+                    if matches!(existing, RepD::Byte(_)) {
+                        repd_map.insert(
+                            *alloc_id,
+                            RepD::Struct(crate::repd::StructRep {
+                                fields,
+                                total_size,
+                                align,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CapD Inference from SCG
+// ---------------------------------------------------------------------------
+
+/// Infers a [`CapD`] for each node in the SCG based on access patterns,
+/// effect reachability, and security boundaries.
+///
+/// # Rules
+///
+/// - Node with only DataFlow edges going to reads → **Read-only**
+///   (`Read` capability only)
+/// - Node with any incoming write edge → **Read+Write**
+/// - Node that reaches an EffectNode → **Read+Write+Persist**
+/// - Data that crosses a security boundary → **Security(Audit)** added
+/// - Data used in pointer arithmetic → **Compute** capability added
+pub fn infer_capd_from_scg(scg: &SCG) -> HashMap<NodeId, CapD> {
+    let mut result: HashMap<NodeId, CapD> = HashMap::new();
+
+    // Pre-compute which nodes can reach an Effect node
+    let reaches_effect = compute_reaches_effect(scg);
+
+    // Pre-compute which nodes cross security boundaries
+    let crosses_boundary = compute_crosses_security_boundary(scg);
+
+    // Pre-compute which nodes are used in pointer arithmetic
+    let used_in_ptr_arith = compute_used_in_ptr_arithmetic(scg);
+
+    for node_id in scg.node_ids() {
+        if let Some(node_data) = scg.get_node(node_id) {
+            let capd = infer_node_capd(
+                scg,
+                node_id,
+                &node_data,
+                &reaches_effect,
+                &crosses_boundary,
+                &used_in_ptr_arith,
+            );
+            result.insert(node_id, capd);
+        }
+    }
+
+    result
+}
+
+/// Infers CapD for a single node based on its access patterns and context.
+fn infer_node_capd(
+    scg: &SCG,
+    node_id: NodeId,
+    node_data: &vuma_scg::node::NodeData,
+    reaches_effect: &HashSet<NodeId>,
+    crosses_boundary: &HashSet<NodeId>,
+    used_in_ptr_arith: &HashSet<NodeId>,
+) -> CapD {
+    let mut caps = HashSet::new();
+
+    // Base capabilities depend on node type
+    match node_data.node_type {
+        NodeType::Allocation => {
+            // Allocation nodes produce values with Read + Write
+            caps.insert(Capability::Read);
+            caps.insert(Capability::Write);
+            caps.insert(Capability::DerivePtr);
+            caps.insert(Capability::Drop);
+            caps.insert(Capability::Move);
+            caps.insert(Capability::Fork);
+            caps.insert(Capability::Share);
+        }
+        NodeType::Access => {
+            if let NodePayload::Access(ref access) = node_data.payload {
+                match access.mode {
+                    AccessMode::Read => {
+                        // Read-only access pattern → Read only
+                        caps.insert(Capability::Read);
+                    }
+                    AccessMode::Write => {
+                        // Write access → Read + Write
+                        caps.insert(Capability::Read);
+                        caps.insert(Capability::Write);
+                    }
+                    AccessMode::ReadWrite => {
+                        caps.insert(Capability::Read);
+                        caps.insert(Capability::Write);
+                    }
+                }
+            } else {
+                caps.insert(Capability::Read);
+            }
+        }
+        NodeType::Computation => {
+            caps.insert(Capability::Read);
+            caps.insert(Capability::Execute);
+        }
+        NodeType::Cast => {
+            caps.insert(Capability::Read);
+            caps.insert(Capability::Cast);
+        }
+        NodeType::Effect => {
+            caps.insert(Capability::Read);
+            caps.insert(Capability::Write);
+            caps.insert(Capability::Persist);
+        }
+        NodeType::Deallocation => {
+            caps.insert(Capability::Drop);
+        }
+        NodeType::Control => {
+            caps.insert(Capability::Read);
+        }
+        NodeType::Phantom => {
+            caps.insert(Capability::Read);
+        }
+    }
+
+    // If any predecessor has Write, add Read+Write
+    if has_write_predecessor(scg, node_id) {
+        caps.insert(Capability::Read);
+        caps.insert(Capability::Write);
+    }
+
+    // If this node reaches an Effect node, add Persist
+    if reaches_effect.contains(&node_id) {
+        caps.insert(Capability::Read);
+        caps.insert(Capability::Write);
+        caps.insert(Capability::Persist);
+    }
+
+    // If data crosses security boundary, add Security(Audit)-related cap
+    if crosses_boundary.contains(&node_id) {
+        caps.insert(Capability::Read);
+        caps.insert(Capability::Compare);
+    }
+
+    // If used in pointer arithmetic, add Compute
+    if used_in_ptr_arith.contains(&node_id) {
+        caps.insert(Capability::Compute);
+        caps.insert(Capability::DerivePtr);
+    }
+
+    CapD {
+        caps,
+        conditions: HashSet::new(),
+    }
+}
+
+/// Checks whether any predecessor of `node_id` carries a Write capability
+/// (i.e., any predecessor that is a Write/ReadWrite Access node).
+fn has_write_predecessor(scg: &SCG, node_id: NodeId) -> bool {
+    if let Some(preds) = scg.predecessors(node_id) {
+        for pred_id in preds {
+            if let Some(pred_data) = scg.get_node(pred_id) {
+                if let NodePayload::Access(ref access) = pred_data.payload {
+                    if access.mode == AccessMode::Write || access.mode == AccessMode::ReadWrite {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Computes the set of nodes that can reach an EffectNode via DataFlow edges.
+fn compute_reaches_effect(scg: &SCG) -> HashSet<NodeId> {
+    let mut reaches: HashSet<NodeId> = HashSet::new();
+
+    // Find all Effect nodes
+    let effect_nodes: Vec<NodeId> = scg
+        .node_ids()
+        .filter(|&id| {
+            scg.get_node(id)
+                .map_or(false, |n| n.node_type == NodeType::Effect)
+        })
+        .collect();
+
+    // For each effect node, walk backwards via DataFlow edges
+    for effect_id in effect_nodes {
+        let mut worklist = vec![effect_id];
+        let mut visited = HashSet::new();
+        while let Some(current) = worklist.pop() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current);
+            reaches.insert(current);
+            if let Some(preds) = scg.predecessors(current) {
+                for pred_id in preds {
+                    if let Some(edge) = find_edge_between(scg, pred_id, current) {
+                        if edge.kind == EdgeKind::DataFlow {
+                            worklist.push(pred_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    reaches
+}
+
+/// Computes the set of nodes whose data crosses a security boundary
+/// (i.e., DataFlow edges where source and target are in different regions
+/// with at least one being a security boundary).
+fn compute_crosses_security_boundary(scg: &SCG) -> HashSet<NodeId> {
+    let mut crosses: HashSet<NodeId> = HashSet::new();
+
+    for edge in scg.edges() {
+        if edge.kind == EdgeKind::DataFlow {
+            // Check if source and target are in different security-boundary regions
+            let src_boundary = node_in_security_boundary(scg, edge.source);
+            let tgt_boundary = node_in_security_boundary(scg, edge.target);
+
+            if src_boundary || tgt_boundary {
+                crosses.insert(edge.source);
+                crosses.insert(edge.target);
+            }
+        }
+    }
+
+    crosses
+}
+
+/// Checks if a node belongs to a region that is a security boundary.
+fn node_in_security_boundary(scg: &SCG, node_id: NodeId) -> bool {
+    // Check each region to see if it contains this node and is a security boundary
+    for region in scg.regions() {
+        if region.security_boundary && region.contains_node(&node_id) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Computes the set of nodes whose values are used in pointer arithmetic
+/// (i.e., they flow into a Computation node with a pointer-related operation).
+fn compute_used_in_ptr_arithmetic(scg: &SCG) -> HashSet<NodeId> {
+    let mut used: HashSet<NodeId> = HashSet::new();
+
+    for node_id in scg.node_ids() {
+        if let Some(node_data) = scg.get_node(node_id) {
+            if let NodePayload::Computation(ref comp) = node_data.payload {
+                if comp.operation.contains("ptr_add")
+                    || comp.operation.contains("ptr_sub")
+                    || comp.operation.contains("offset")
+                    || comp.operation.contains("gep")
+                {
+                    // Mark all DataFlow predecessors as used in ptr arithmetic
+                    if let Some(preds) = scg.predecessors(node_id) {
+                        for pred_id in preds {
+                            if let Some(edge) = find_edge_between(scg, pred_id, node_id) {
+                                if edge.kind == EdgeKind::DataFlow {
+                                    used.insert(pred_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    used
+}
+
+/// Finds an edge between two nodes (if any). Standalone helper that
+/// does not require `BDInferenceEngine`.
+fn find_edge_between(
+    scg: &SCG,
+    source: NodeId,
+    target: NodeId,
+) -> Option<vuma_scg::edge::EdgeData> {
+    for edge in scg.edges() {
+        if edge.source == source && edge.target == target {
+            return Some(edge.clone());
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// RelD Inference from SCG
+// ---------------------------------------------------------------------------
+
+/// Infers a [`RelD`] for each node in the SCG based on edge kinds,
+/// region membership, and node annotations.
+///
+/// # Rules
+///
+/// - **DataFlow edges** → Aliasing or Containment relations
+/// - **Derivation edges** → Derivation relation (`Dependency(DataDep)`)
+/// - **Annotation edges** → explicit RelD from annotations
+/// - **Nodes in the same region** → Containment relation
+pub fn infer_reld_from_scg(scg: &SCG) -> HashMap<NodeId, RelD> {
+    let mut result: HashMap<NodeId, RelD> = HashMap::new();
+
+    // Initialize each node with an empty RelD
+    for node_id in scg.node_ids() {
+        result.insert(node_id, RelD::empty());
+    }
+
+    // Process edges to infer relations
+    for edge in scg.edges() {
+        // Ensure both source and target have entries
+        if !result.contains_key(&edge.source) {
+            result.insert(edge.source, RelD::empty());
+        }
+        if !result.contains_key(&edge.target) {
+            result.insert(edge.target, RelD::empty());
+        }
+
+        match edge.kind {
+            EdgeKind::DataFlow => {
+                // DataFlow edges imply either Aliasing or Containment
+                // If target is a sub-region of source, use Containment;
+                // otherwise use Alias dependency
+                let source_reld = result.entry(edge.source).or_insert_with(RelD::empty);
+                source_reld
+                    .relations
+                    .insert(Relation::Dependency(DepKind::AliasDep));
+
+                let target_reld = result.entry(edge.target).or_insert_with(RelD::empty);
+                target_reld
+                    .relations
+                    .insert(Relation::Dependency(DepKind::DataDep));
+
+                // If target is an Access node accessing a sub-region, add Containment
+                if let Some(target_data) = scg.get_node(edge.target) {
+                    if target_data.node_type == NodeType::Access {
+                        target_reld.relations.insert(Relation::Containment);
+                    }
+                }
+            }
+            EdgeKind::Derivation => {
+                // Derivation edges → Derivation dependency
+                let target_reld = result.entry(edge.target).or_insert_with(RelD::empty);
+                target_reld
+                    .relations
+                    .insert(Relation::Dependency(DepKind::DataDep));
+            }
+            EdgeKind::Annotation => {
+                // Annotation edges → Equivalence (the annotation describes the target)
+                let target_reld = result.entry(edge.target).or_insert_with(RelD::empty);
+                target_reld.relations.insert(Relation::Equivalence);
+            }
+            EdgeKind::ControlFlow => {
+                // Control flow edges → Control dependency
+                let target_reld = result.entry(edge.target).or_insert_with(RelD::empty);
+                target_reld
+                    .relations
+                    .insert(Relation::Dependency(DepKind::ControlDep));
+            }
+        }
+    }
+
+    // Process region membership: nodes in the same region → Containment
+    for region in scg.regions() {
+        let nodes: Vec<NodeId> = region.iter_nodes().copied().collect();
+        if nodes.len() > 1 {
+            for &node_id in &nodes {
+                if let Some(reld) = result.get_mut(&node_id) {
+                    reld.relations.insert(Relation::Containment);
+                }
+            }
+        }
+    }
+
+    // Add node-type-specific relations
+    for node_id in scg.node_ids() {
+        if let Some(node_data) = scg.get_node(node_id) {
+            if let Some(reld) = result.get_mut(&node_id) {
+                match node_data.node_type {
+                    NodeType::Deallocation => {
+                        reld.relations.insert(Relation::Liveness);
+                    }
+                    NodeType::Effect => {
+                        reld
+                            .relations
+                            .insert(Relation::Dependency(DepKind::ControlDep));
+                    }
+                    NodeType::Computation => {
+                        reld
+                            .relations
+                            .insert(Relation::Dependency(DepKind::DataDep));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Full BD Inference from SCG
+// ---------------------------------------------------------------------------
+
+/// Infers a complete [`BD`] for each node in the SCG by combining all three
+/// inference passes: RepD, CapD, and RelD.
+///
+/// This is the primary entry point for Phase 2 milestone M2.3.
+pub fn infer_bd_from_scg(scg: &SCG) -> HashMap<NodeId, BD> {
+    let repd_map = infer_repd_from_scg(scg);
+    let capd_map = infer_capd_from_scg(scg);
+    let reld_map = infer_reld_from_scg(scg);
+
+    let mut bd_map: HashMap<NodeId, BD> = HashMap::new();
+
+    for node_id in scg.node_ids() {
+        let repd = repd_map
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_else(|| RepD::Byte(ByteRep { size: 0, align: 1 }));
+        let capd = capd_map
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_else(CapD::empty);
+        let reld = reld_map
+            .get(&node_id)
+            .cloned()
+            .unwrap_or_else(RelD::empty);
+
+        bd_map.insert(node_id, BD::new(repd, capd, reld));
+    }
+
+    bd_map
+}
+
+// ---------------------------------------------------------------------------
+// Consistency Checking
+// ---------------------------------------------------------------------------
+
+/// Kind of inconsistency detected during BD consistency checking.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InconsistencyKind {
+    /// RepD size doesn't match the allocation size.
+    SizeMismatch,
+    /// CapD allows an operation that shouldn't be possible given the node's
+    /// context (e.g., Write on a read-only value).
+    CapabilityViolation,
+    /// RelD has contradictory relations (e.g., Outlives + Succeeds).
+    RelationContradiction,
+    /// BD changes across a data flow edge incompatibly (e.g., size changes
+    /// without a cast).
+    FlowViolation,
+}
+
+impl fmt::Display for InconsistencyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InconsistencyKind::SizeMismatch => write!(f, "SizeMismatch"),
+            InconsistencyKind::CapabilityViolation => write!(f, "CapabilityViolation"),
+            InconsistencyKind::RelationContradiction => write!(f, "RelationContradiction"),
+            InconsistencyKind::FlowViolation => write!(f, "FlowViolation"),
+        }
+    }
+}
+
+/// A single inconsistency detected during BD consistency checking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BDInconsistency {
+    /// The node where the inconsistency was detected.
+    pub node: NodeId,
+    /// The kind of inconsistency.
+    pub kind: InconsistencyKind,
+    /// A human-readable description of the inconsistency.
+    pub description: String,
+}
+
+impl fmt::Display for BDInconsistency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BDInconsistency({} at {}: {})", self.kind, self.node, self.description)
+    }
+}
+
+/// Checks the consistency of inferred BDs against the SCG structure.
+///
+/// Detects four kinds of inconsistencies:
+///
+/// 1. **SizeMismatch**: RepD size doesn't match the allocation size for
+///    allocation nodes.
+/// 2. **CapabilityViolation**: CapD allows an operation that shouldn't be
+///    possible given the node's access mode or context.
+/// 3. **RelationContradiction**: RelD has contradictory temporal relations.
+/// 4. **FlowViolation**: BD changes across a DataFlow edge incompatibly
+///    (e.g., size changes without a cast, or CapD gains capabilities).
+pub fn check_bd_consistency(
+    bds: &HashMap<NodeId, BD>,
+    scg: &SCG,
+) -> Vec<BDInconsistency> {
+    let mut inconsistencies = Vec::new();
+
+    for node_id in scg.node_ids() {
+        if let Some(bd) = bds.get(&node_id) {
+            if let Some(node_data) = scg.get_node(node_id) {
+                // ── Check 1: SizeMismatch ──
+                check_size_mismatch(node_id, &node_data, bd, &mut inconsistencies);
+
+                // ── Check 2: CapabilityViolation ──
+                check_capability_violation(node_id, &node_data, bd, &mut inconsistencies);
+
+                // ── Check 3: RelationContradiction ──
+                check_relation_contradiction(node_id, bd, &mut inconsistencies);
+            }
+        }
+
+        // ── Check 4: FlowViolation across DataFlow edges ──
+        check_flow_violations(node_id, bds, scg, &mut inconsistencies);
+    }
+
+    inconsistencies
+}
+
+/// Checks that an allocation node's RepD size matches its payload size.
+fn check_size_mismatch(
+    node_id: NodeId,
+    node_data: &vuma_scg::node::NodeData,
+    bd: &BD,
+    inconsistencies: &mut Vec<BDInconsistency>,
+) {
+    if let NodePayload::Allocation(ref alloc) = node_data.payload {
+        let repd_size = bd.repd.size();
+        if repd_size != alloc.size {
+            inconsistencies.push(BDInconsistency {
+                node: node_id,
+                kind: InconsistencyKind::SizeMismatch,
+                description: format!(
+                    "RepD size ({}) does not match allocation size ({})",
+                    repd_size, alloc.size
+                ),
+            });
+        }
+    }
+}
+
+/// Checks that a node's CapD doesn't grant capabilities that violate
+/// its access mode.
+fn check_capability_violation(
+    node_id: NodeId,
+    node_data: &vuma_scg::node::NodeData,
+    bd: &BD,
+    inconsistencies: &mut Vec<BDInconsistency>,
+) {
+    if let NodePayload::Access(ref access) = node_data.payload {
+        match access.mode {
+            AccessMode::Read => {
+                if bd.capd.caps.contains(&Capability::Write) {
+                    inconsistencies.push(BDInconsistency {
+                        node: node_id,
+                        kind: InconsistencyKind::CapabilityViolation,
+                        description: "Read-only access node has Write capability".to_string(),
+                    });
+                }
+            }
+            AccessMode::Write => {
+                // Write-only access: having Read is not necessarily a
+                // violation, but not having Write is
+                if !bd.capd.caps.contains(&Capability::Write) {
+                    inconsistencies.push(BDInconsistency {
+                        node: node_id,
+                        kind: InconsistencyKind::CapabilityViolation,
+                        description: "Write access node lacks Write capability".to_string(),
+                    });
+                }
+            }
+            AccessMode::ReadWrite => {
+                if !bd.capd.caps.contains(&Capability::Read)
+                    || !bd.capd.caps.contains(&Capability::Write)
+                {
+                    inconsistencies.push(BDInconsistency {
+                        node: node_id,
+                        kind: InconsistencyKind::CapabilityViolation,
+                        description:
+                            "ReadWrite access node lacks Read or Write capability".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Deallocation nodes should not have Read, Write, DerivePtr, or Execute
+    if node_data.node_type == NodeType::Deallocation {
+        if bd.capd.caps.contains(&Capability::Read)
+            || bd.capd.caps.contains(&Capability::Write)
+            || bd.capd.caps.contains(&Capability::DerivePtr)
+            || bd.capd.caps.contains(&Capability::Execute)
+        {
+            inconsistencies.push(BDInconsistency {
+                node: node_id,
+                kind: InconsistencyKind::CapabilityViolation,
+                description: "Deallocation node has capabilities that should be removed \
+                    (Read/Write/DerivePtr/Execute)"
+                    .to_string(),
+            });
+        }
+    }
+}
+
+/// Checks that the RelD doesn't contain contradictory temporal relations.
+fn check_relation_contradiction(
+    node_id: NodeId,
+    bd: &BD,
+    inconsistencies: &mut Vec<BDInconsistency>,
+) {
+    if !bd.reld.is_consistent() {
+        inconsistencies.push(BDInconsistency {
+            node: node_id,
+            kind: InconsistencyKind::RelationContradiction,
+            description: "RelD contains contradictory temporal relations".to_string(),
+        });
+    }
+}
+
+/// Checks for FlowViolation across DataFlow edges: if two nodes are
+/// connected by a DataFlow edge and the target is not a Cast, then
+/// the RepD sizes should be compatible and CapD should not gain
+/// capabilities.
+fn check_flow_violations(
+    node_id: NodeId,
+    bds: &HashMap<NodeId, BD>,
+    scg: &SCG,
+    inconsistencies: &mut Vec<BDInconsistency>,
+) {
+    if let Some(successors) = scg.successors(node_id) {
+        for succ_id in successors {
+            if let Some(edge) = find_edge_between(scg, node_id, succ_id) {
+                if edge.kind == EdgeKind::DataFlow {
+                    if let (Some(src_bd), Some(tgt_bd)) =
+                        (bds.get(&node_id), bds.get(&succ_id))
+                    {
+                        // Skip size compatibility check if target is a Cast
+                        // (casts intentionally change representation)
+                        let is_cast = scg
+                            .get_node(succ_id)
+                            .map_or(false, |n| n.node_type == NodeType::Cast);
+
+                        if !is_cast {
+                            // RepD sizes should not change across a DataFlow edge
+                            // without a Cast node
+                            if src_bd.repd.size() > 0
+                                && tgt_bd.repd.size() > 0
+                                && src_bd.repd.size() != tgt_bd.repd.size()
+                            {
+                                inconsistencies.push(BDInconsistency {
+                                    node: succ_id,
+                                    kind: InconsistencyKind::FlowViolation,
+                                    description: format!(
+                                        "RepD size changes across DataFlow edge \
+                                        ({} -> {}) without a Cast node",
+                                        src_bd.repd.size(),
+                                        tgt_bd.repd.size()
+                                    ),
+                                });
+                            }
+                        }
+
+                        // CapD should not gain capabilities (target should be
+                        // a subset of source)
+                        if !src_bd.capd.is_superset(&tgt_bd.capd) {
+                            // Only flag if target has strictly more capabilities
+                            // that aren't implied by the node type
+                            let extra: Vec<_> = tgt_bd
+                                .capd
+                                .caps
+                                .difference(&src_bd.capd.caps)
+                                .collect();
+                            if !extra.is_empty() {
+                                inconsistencies.push(BDInconsistency {
+                                    node: succ_id,
+                                    kind: InconsistencyKind::FlowViolation,
+                                    description: format!(
+                                        "CapD gains capabilities across DataFlow edge: {:?}",
+                                        extra
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1701,6 +2650,454 @@ mod tests {
         assert!(
             !dealloc_bd.capd.caps.contains(&Capability::Read),
             "Deallocated value should lose Read"
+        );
+    }
+
+    // =======================================================================
+    // Phase 2 Milestone M2.3 Tests: Direct SCG-based BD Inference
+    // =======================================================================
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 1: RepD inference for simple allocation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_repd_simple_allocation() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i32".to_string()),
+            }),
+            pp(),
+        );
+
+        let repd_map = infer_repd_from_scg(&scg);
+        assert!(repd_map.contains_key(&n1));
+        let repd = &repd_map[&n1];
+        assert_eq!(repd.size(), 4);
+        assert_eq!(repd.alignment(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 2: RepD inference for struct access pattern
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_repd_struct_access_pattern() {
+        let mut scg = SCG::new();
+
+        // Allocate 8 bytes, then access at offset 0 (4 bytes) and offset 4 (4 bytes)
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 8,
+                align: 4,
+                region_id: region(),
+                type_name: None,
+            }),
+            pp(),
+        );
+        let access1 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+        let access2 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id: region(),
+                offset: Some(4),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+
+        scg.add_edge(alloc, access1, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc, access2, EdgeKind::DataFlow).unwrap();
+
+        let repd_map = infer_repd_from_scg(&scg);
+
+        // The allocation should be upgraded to a Struct
+        let alloc_repd = &repd_map[&alloc];
+        assert!(
+            matches!(alloc_repd, RepD::Struct(_)),
+            "Allocation with multiple accesses at different offsets should be inferred as Struct, got {:?}",
+            alloc_repd
+        );
+
+        if let RepD::Struct(s) = alloc_repd {
+            assert_eq!(s.fields.len(), 2);
+            assert_eq!(s.fields[0].0, 0); // first field at offset 0
+            assert_eq!(s.fields[1].0, 4); // second field at offset 4
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 3: RepD inference for pointer allocation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_repd_pointer_allocation() {
+        let mut scg = SCG::new();
+
+        // 8-byte allocation that is cast to a pointer
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 8,
+                align: 8,
+                region_id: region(),
+                type_name: None,
+            }),
+            pp(),
+        );
+        let cast = scg.add_node(
+            NodeType::Cast,
+            NodePayload::Cast(CastNode {
+                from_type: "i64".to_string(),
+                to_type: "ptr".to_string(),
+                is_lossless: true,
+            }),
+            pp(),
+        );
+
+        scg.add_edge(alloc, cast, EdgeKind::DataFlow).unwrap();
+
+        let repd_map = infer_repd_from_scg(&scg);
+
+        // The allocation should be inferred as a Ptr since it feeds into a cast to ptr
+        let alloc_repd = &repd_map[&alloc];
+        assert!(
+            matches!(alloc_repd, RepD::Ptr(_)),
+            "Pointer-sized allocation feeding a cast to ptr should be inferred as Ptr, got {:?}",
+            alloc_repd
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 4: CapD inference for read-only access
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_capd_read_only() {
+        let mut scg = SCG::new();
+        let access = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+
+        let capd_map = infer_capd_from_scg(&scg);
+        let capd = &capd_map[&access];
+
+        assert!(
+            capd.caps.contains(&Capability::Read),
+            "Read-only access should have Read capability"
+        );
+        assert!(
+            !capd.caps.contains(&Capability::Write),
+            "Read-only access should not have Write capability"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 5: CapD inference for read-write access
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_capd_read_write() {
+        let mut scg = SCG::new();
+        let access = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::ReadWrite,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+
+        let capd_map = infer_capd_from_scg(&scg);
+        let capd = &capd_map[&access];
+
+        assert!(
+            capd.caps.contains(&Capability::Read),
+            "ReadWrite access should have Read capability"
+        );
+        assert!(
+            capd.caps.contains(&Capability::Write),
+            "ReadWrite access should have Write capability"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 6: RelD inference from data flow
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_reld_data_flow() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
+            }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(),
+                result_type: Some("i32".to_string()),
+            }),
+            pp(),
+        );
+
+        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+
+        let reld_map = infer_reld_from_scg(&scg);
+
+        // Source should have AliasDep (from DataFlow edge)
+        let reld1 = &reld_map[&n1];
+        assert!(
+            reld1.relations.contains(&Relation::Dependency(DepKind::AliasDep)),
+            "Source of DataFlow edge should have AliasDep relation"
+        );
+
+        // Target should have DataDep (from DataFlow edge)
+        let reld2 = &reld_map[&n2];
+        assert!(
+            reld2.relations.contains(&Relation::Dependency(DepKind::DataDep)),
+            "Target of DataFlow edge should have DataDep relation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 7: Full BD inference pipeline
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_full_bd_inference() {
+        let mut scg = SCG::new();
+
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i32".to_string()),
+            }),
+            pp(),
+        );
+        let access = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+
+        scg.add_edge(alloc, access, EdgeKind::DataFlow).unwrap();
+
+        let bd_map = infer_bd_from_scg(&scg);
+
+        // Both nodes should have BDs
+        assert_eq!(bd_map.len(), 2);
+
+        // Allocation should have RepD with size 4
+        let alloc_bd = &bd_map[&alloc];
+        assert_eq!(alloc_bd.repd.size(), 4);
+
+        // Access should have Read-only CapD
+        let access_bd = &bd_map[&access];
+        assert!(access_bd.capd.caps.contains(&Capability::Read));
+        assert!(!access_bd.capd.caps.contains(&Capability::Write));
+
+        // Access should have Containment relation
+        assert!(access_bd.reld.relations.contains(&Relation::Containment));
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 8: Consistency checking catches size mismatch
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_consistency_size_mismatch() {
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i32".to_string()),
+            }),
+            pp(),
+        );
+
+        // Create a BD with wrong size for this allocation
+        let mut bd_map = HashMap::new();
+        bd_map.insert(
+            alloc,
+            BD::new(
+                RepD::Byte(ByteRep { size: 8, align: 4 }), // Wrong: should be size 4
+                CapD::empty().strengthen(&[Capability::Read]),
+                RelD::empty(),
+            ),
+        );
+
+        let inconsistencies = check_bd_consistency(&bd_map, &scg);
+
+        assert!(
+            inconsistencies
+                .iter()
+                .any(|i| i.kind == InconsistencyKind::SizeMismatch),
+            "Should detect SizeMismatch inconsistency"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 9: Consistency checking catches capability violation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_consistency_capability_violation() {
+        let mut scg = SCG::new();
+        let access = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            pp(),
+        );
+
+        // Create a BD with Write capability for a Read-only access
+        let mut bd_map = HashMap::new();
+        bd_map.insert(
+            access,
+            BD::new(
+                RepD::Byte(ByteRep { size: 4, align: 4 }),
+                CapD::empty().strengthen(&[Capability::Read, Capability::Write]), // Violation!
+                RelD::empty(),
+            ),
+        );
+
+        let inconsistencies = check_bd_consistency(&bd_map, &scg);
+
+        assert!(
+            inconsistencies
+                .iter()
+                .any(|i| i.kind == InconsistencyKind::CapabilityViolation),
+            "Should detect CapabilityViolation: read-only access has Write"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M2.3 Test 10: Complex SCG with multiple nodes
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_complex_scg_multiple_nodes() {
+        let mut scg = SCG::new();
+
+        // alloc -> compute -> access(read) -> effect
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 8,
+                align: 8,
+                region_id: region(),
+                type_name: Some("i64".to_string()),
+            }),
+            pp(),
+        );
+        let compute = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "process".to_string(),
+                result_type: Some("i64".to_string()),
+            }),
+            pp(),
+        );
+        let access = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::ReadWrite,
+                region_id: region(),
+                offset: Some(0),
+                access_size: Some(8),
+            }),
+            pp(),
+        );
+        let effect = scg.add_node(
+            NodeType::Effect,
+            NodePayload::Effect(EffectNode {
+                effect_kind: "io_write".to_string(),
+                is_observable: true,
+            }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc,
+                region_id: region(),
+            }),
+            pp(),
+        );
+
+        scg.add_edge(alloc, compute, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(compute, access, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(access, effect, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(effect, dealloc, EdgeKind::Derivation).unwrap();
+
+        let bd_map = infer_bd_from_scg(&scg);
+
+        // All nodes should have BDs
+        assert_eq!(bd_map.len(), 5);
+
+        // Allocation should have RepD with size 8
+        assert_eq!(bd_map[&alloc].repd.size(), 8);
+
+        // Allocation should have Read+Write (base allocation)
+        assert!(bd_map[&alloc].capd.caps.contains(&Capability::Read));
+        assert!(bd_map[&alloc].capd.caps.contains(&Capability::Write));
+
+        // Effect should have Persist
+        assert!(bd_map[&effect].capd.caps.contains(&Capability::Persist));
+
+        // Allocation reaches Effect, so should also have Persist
+        assert!(bd_map[&alloc].capd.caps.contains(&Capability::Persist));
+
+        // Deallocation should have Liveness relation
+        assert!(bd_map[&dealloc].reld.relations.contains(&Relation::Liveness));
+
+        // Deallocation should NOT have Read or Write
+        assert!(!bd_map[&dealloc].capd.caps.contains(&Capability::Read));
+        assert!(!bd_map[&dealloc].capd.caps.contains(&Capability::Write));
+
+        // Check consistency
+        let inconsistencies = check_bd_consistency(&bd_map, &scg);
+        // Should have no SizeMismatch or CapabilityViolation
+        assert!(
+            !inconsistencies.iter().any(|i| i.kind == InconsistencyKind::SizeMismatch),
+            "Should not have SizeMismatch in correctly inferred BDs"
         );
     }
 }

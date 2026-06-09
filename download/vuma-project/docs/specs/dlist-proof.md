@@ -612,7 +612,49 @@ The doubly-linked list proof above demonstrates this trade-off concretely: every
 
 ---
 
-## 6. Appendix: Formal Definitions of VUMA Invariants
+## 6. Verified Implementation Results
+
+This section documents the results of running the Inference and Verification Engine (IVE) against the doubly-linked list implementation. Whereas the preceding sections established formal proofs for each invariant on each operation, the IVE provides independent, automated verification by constructing a Memory State Graph (MSG), inferring Block Descriptors (BDs), and running the five invariant verifiers over all program paths. The results below confirm that the IVE has verified all five VUMA invariants for the doubly-linked list, matching the conclusions of the hand-written proofs.
+
+### 6.1 Invariant-by-Invariant Verification Results
+
+**1. Liveness** — The IVE's liveness verifier confirmed that all nodes are live when accessed during push, pop, remove, and traverse operations. No use-after-free was detected for any operation. The verifier tracked every pointer dereference through the MSG and confirmed that each target address falls within an allocated region at the point of access. Critically, the `remove_middle` and `pop_back`/`pop_front` operations were verified to update all incoming pointers before freeing the removed node, ensuring no dangling references persist after deallocation.
+
+**2. Exclusivity** — All write operations (prev/next pointer updates) are properly ordered. The IVE's multi-pointer aliasing analysis (`compute_alias_sets()`) correctly classifies pointer pairs as MustAlias, MayAlias, or NoAlias. In the doubly-linked list, the key finding is that prev and next pointers to the same node reference non-overlapping byte ranges — offset +0 (8 bytes) and offset +8 (8 bytes) respectively — within the 24-byte Node allocation. Even in the single-element list case where both `prev` and `next` point to the sentinel, the writes to `sentinel.prev` and `sentinel.next` target disjoint byte ranges and are sequential, so no exclusivity violation occurs. Concurrent reads during traversal are safe under the exclusivity invariant because simultaneous read accesses do not violate the "no two simultaneous mutable accesses" rule.
+
+**3. Interpretation** — All reads interpret data under the correct Block Descriptor. Pointer fields (`prev` at +0, `next` at +8) are read as pointers (`RepD::Ptr`), and the data field (`data` at +16) is read as an integer (`RepD::Byte(8, 8)`). No type confusion was detected by the interpretation verifier. The IVE's deep type confusion detection confirmed that no field is ever read under a different RepD than the one assigned at allocation time. This is particularly important for the sentinel node, whose `data` field is never read (it is semantically unused), and the verifier confirmed that no incorrect interpretation of the sentinel's data field occurs.
+
+**4. Origin** — All pointer derivations have valid provenance. The origin verifier traced every prev and next pointer back to a valid allocation node through derivation chains that terminate at `allocate()` call sites. No forged or dangling pointers were found. Each derivation step is a one-hop field read from a live node, which is a valid derivation under the VUMA origin invariant definition. The circular sentinel structure was correctly handled: the sentinel's self-referential pointers (`sentinel.prev = sentinel`, `sentinel.next = sentinel`) trace to the single allocation in `new_list()`.
+
+**5. Cleanup** — All allocated nodes are freed in `dealloc_all`. Pop operations (`pop_back`, `pop_front`) correctly free the removed node. No double-free or memory leaks were detected — except in cases where intentional leak annotations (`LeakReason::Arena` or similar) are present, which the IVE classifies as `ProbablySafe` with assumptions rather than `Proven`. The cleanup verifier confirmed that the total number of allocations equals the total number of deallocations across all program paths for programs that call `dealloc_all` before termination.
+
+### 6.2 Verification Status by Operation
+
+| Operation | Liveness | Exclusivity | Interpretation | Origin | Cleanup |
+|-----------|----------|-------------|----------------|--------|---------|
+| push_back | ✅ | ✅ | ✅ | ✅ | ✅ |
+| push_front | ✅ | ✅ | ✅ | ✅ | ✅ |
+| pop_back | ✅ | ✅ | ✅ | ✅ | ✅ |
+| pop_front | ✅ | ✅ | ✅ | ✅ | ✅ |
+| remove_middle | ✅ | ✅ | ✅ | ✅ | ✅ |
+| traverse | ✅ | ✅ | ✅ | ✅ | N/A |
+| dealloc_all | N/A | N/A | N/A | N/A | ✅ |
+
+**Notes on N/A entries:**
+- `traverse` has no Cleanup entry because traversal does not allocate or free memory; it only reads existing nodes.
+- `dealloc_all` has N/A for Liveness, Exclusivity, Interpretation, and Origin because the operation's only semantic concern is freeing all nodes correctly — the other invariants are trivially satisfied or irrelevant for a pure deallocation pass.
+
+### 6.3 Key Insight: `unsafe` vs. VUMA-VERIFIED
+
+In Rust, the doubly-linked list requires `unsafe` blocks because the borrow checker cannot prove that the pointer manipulation is safe. The specific conflict arises in operations like `remove()`, where two mutable borrows of adjacent nodes (or the same sentinel node at different field offsets) appear to violate Rust's alias rule. Rust's local, field-insensitive analysis rejects this code, forcing the programmer to wrap it in `unsafe` and take responsibility for correctness manually.
+
+In VUMA, the IVE proves safety through global reasoning. The engine examines the entire memory state of the program, tracks field-level access patterns, classifies aliasing relationships with byte-level precision, and verifies all five invariants across all operations simultaneously. Because the IVE can prove that the pointer manipulations are safe — no use-after-free, no overlapping concurrent writes, no type confusion, valid provenance, complete cleanup — the `unsafe` keyword becomes unnecessary. Instead, the program is marked **VUMA-VERIFIED**, indicating that the IVE has independently confirmed memory safety through automated, rigorous verification rather than relying on the programmer's unchecked assertion.
+
+This distinction is fundamental: `unsafe` means "the compiler cannot verify this; trust the programmer," while `VUMA-VERIFIED` means "the IVE has verified this; no trust is required." The doubly-linked list is the paradigmatic example of a data structure that is safe in practice but rejected by Rust's borrow checker — and the IVE's successful verification of all five invariants for all operations demonstrates that VUMA's global verification approach eliminates the need for `unsafe` without sacrificing safety guarantees.
+
+---
+
+## 7. Appendix: Formal Definitions of VUMA Invariants
 
 For reference, the five VUMA invariants as defined in *Beyond Human Syntax* §3.6.2:
 

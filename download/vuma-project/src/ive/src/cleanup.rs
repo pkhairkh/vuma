@@ -26,7 +26,8 @@
 //! and tracked across all paths through the graph.
 
 use crate::result::{CounterExample, VerificationResult, VerificationStatus};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a tracked resource (allocation, lock, file handle, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResourceId(pub u64);
 
 impl fmt::Display for ResourceId {
@@ -357,6 +358,131 @@ impl CleanupGraph {
 }
 
 // ---------------------------------------------------------------------------
+// Leak annotations
+// ---------------------------------------------------------------------------
+
+/// The reason a resource leak is considered intentional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeakReason {
+    /// Arena allocator — freed all at once.
+    Arena,
+    /// Global cache — lives for program duration.
+    GlobalCache,
+    /// Singleton pattern — one instance, never freed.
+    Singleton,
+    /// Static storage duration.
+    StaticStorage,
+    /// Explicitly marked as intentional leak.
+    Intentional,
+    /// Custom reason.
+    Custom(String),
+}
+
+impl fmt::Display for LeakReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LeakReason::Arena => write!(f, "arena"),
+            LeakReason::GlobalCache => write!(f, "global_cache"),
+            LeakReason::Singleton => write!(f, "singleton"),
+            LeakReason::StaticStorage => write!(f, "static_storage"),
+            LeakReason::Intentional => write!(f, "intentional"),
+            LeakReason::Custom(reason) => write!(f, "custom({reason})"),
+        }
+    }
+}
+
+/// An annotation marking a resource leak as intentional.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeakAnnotation {
+    /// The resource that is intentionally leaked.
+    pub resource: ResourceId,
+    /// The reason the leak is intentional.
+    pub reason: LeakReason,
+    /// Source location or description of where the annotation was placed.
+    pub annotation_point: String,
+    /// Optional reviewer who approved the annotation.
+    pub reviewer: Option<String>,
+}
+
+impl fmt::Display for LeakAnnotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.reviewer {
+            Some(reviewer) => write!(
+                f,
+                "{}: {} (reason: {}, reviewer: {}) at {}",
+                self.resource, self.reason, self.reason, reviewer, self.annotation_point
+            ),
+            None => write!(
+                f,
+                "{}: {} (reason: {}) at {}",
+                self.resource, self.reason, self.reason, self.annotation_point
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Annotated Cleanup Graph
+// ---------------------------------------------------------------------------
+
+/// A [`CleanupGraph`] extended with intentional leak annotations.
+///
+/// Some resources are intentionally never freed (arenas, global caches,
+/// singletons, etc.). This wrapper allows such resources to be annotated
+/// so the verifier can distinguish intentional leaks from genuine bugs.
+#[derive(Debug, Clone)]
+pub struct AnnotatedCleanupGraph {
+    /// The underlying cleanup graph.
+    pub graph: CleanupGraph,
+    /// Leak annotations indexed by resource ID.
+    leak_annotations: HashMap<ResourceId, LeakAnnotation>,
+}
+
+impl AnnotatedCleanupGraph {
+    /// Create a new annotated graph wrapping the given cleanup graph.
+    pub fn new(graph: CleanupGraph) -> Self {
+        Self {
+            graph,
+            leak_annotations: HashMap::new(),
+        }
+    }
+
+    /// Add a leak annotation for a resource.
+    ///
+    /// Returns `Err` if the resource already has an annotation.
+    pub fn add_leak_annotation(&mut self, annotation: LeakAnnotation) -> Result<(), String> {
+        if self.leak_annotations.contains_key(&annotation.resource) {
+            return Err(format!(
+                "resource {} already has a leak annotation",
+                annotation.resource
+            ));
+        }
+        self.leak_annotations.insert(annotation.resource, annotation);
+        Ok(())
+    }
+
+    /// Check whether a resource has an intentional leak annotation.
+    pub fn is_annotated_leak(&self, resource: ResourceId) -> bool {
+        self.leak_annotations.contains_key(&resource)
+    }
+
+    /// Get the leak annotation for a resource, if any.
+    pub fn get_leak_annotation(&self, resource: ResourceId) -> Option<&LeakAnnotation> {
+        self.leak_annotations.get(&resource)
+    }
+
+    /// Iterate over all leak annotations.
+    pub fn leak_annotations(&self) -> impl Iterator<Item = &LeakAnnotation> {
+        self.leak_annotations.values()
+    }
+
+    /// Return the number of leak annotations.
+    pub fn annotation_count(&self) -> usize {
+        self.leak_annotations.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Violation types
 // ---------------------------------------------------------------------------
 
@@ -383,7 +509,7 @@ impl fmt::Display for ViolationKind {
 }
 
 /// A single cleanup invariant violation, with trace information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CleanupViolation {
     /// What kind of violation.
     pub kind: ViolationKind,
@@ -542,40 +668,101 @@ pub struct CleanupVerifier {
 /// The result of cleanup verification.
 #[derive(Debug, Clone)]
 pub struct CleanupReport {
-    /// All violations found.
+    /// All violations found (excluding annotated intentional leaks).
     pub violations: Vec<CleanupViolation>,
-    /// Whether the cleanup invariant holds (no violations).
+    /// Whether the cleanup invariant holds (no unannotated violations).
     pub clean: bool,
     /// Number of paths explored.
     pub paths_explored: usize,
     /// Number of acquire nodes checked.
     pub acquires_checked: usize,
+    /// Intentional leaks that were annotated and thus suppressed from violations.
+    pub intentional_leaks: Vec<LeakAnnotation>,
+    /// Leaks without annotations (genuine violations).
+    pub unannotated_leaks: Vec<CleanupViolation>,
+    /// Total number of leak annotations considered.
+    pub annotation_count: usize,
 }
 
 impl CleanupReport {
     /// Create a report from a list of violations.
     pub fn from_violations(violations: Vec<CleanupViolation>, paths_explored: usize, acquires_checked: usize) -> Self {
         let clean = violations.is_empty();
+        let unannotated_leaks = violations.iter()
+            .filter(|v| v.kind == ViolationKind::Leak)
+            .cloned()
+            .collect();
         Self {
             violations,
             clean,
             paths_explored,
             acquires_checked,
+            intentional_leaks: Vec::new(),
+            unannotated_leaks,
+            annotation_count: 0,
+        }
+    }
+
+    /// Create a report with annotation-aware results.
+    pub fn from_annotated(
+        violations: Vec<CleanupViolation>,
+        intentional_leaks: Vec<LeakAnnotation>,
+        unannotated_leaks: Vec<CleanupViolation>,
+        annotation_count: usize,
+        paths_explored: usize,
+        acquires_checked: usize,
+    ) -> Self {
+        // clean = no violations remain (all leaks are annotated, no other violations)
+        let clean = violations.is_empty();
+        Self {
+            violations,
+            clean,
+            paths_explored,
+            acquires_checked,
+            intentional_leaks,
+            unannotated_leaks,
+            annotation_count,
         }
     }
 
     /// Convert this report into a [`VerificationResult`] for integration
     /// with the IVE verification engine.
+    ///
+    /// The result considers annotation awareness:
+    /// - If only intentional (annotated) leaks exist → ProbablySafe
+    /// - If any unannotated leaks or other violations → Violated
+    /// - If completely clean → Proven
     pub fn to_verification_result(&self) -> VerificationResult {
         if self.clean {
-            VerificationResult::new(
-                "cleanup",
-                VerificationStatus::Proven,
-                format!(
-                    "cleanup invariant verified: {} acquire(s) checked across {} path(s)",
-                    self.acquires_checked, self.paths_explored
-                ),
-            )
+            // No violations at all — check if we had intentional leaks
+            if self.intentional_leaks.is_empty() {
+                VerificationResult::new(
+                    "cleanup",
+                    VerificationStatus::Proven,
+                    format!(
+                        "cleanup invariant verified: {} acquire(s) checked across {} path(s)",
+                        self.acquires_checked, self.paths_explored
+                    ),
+                )
+            } else {
+                // Only intentional leaks — probably safe under the assumption
+                // that annotations are correct
+                VerificationResult::new(
+                    "cleanup",
+                    VerificationStatus::ProbablySafe {
+                        assumptions: self.intentional_leaks.iter().map(|a| {
+                            format!(
+                                "resource {} is intentionally leaked (reason: {})",
+                                a.resource, a.reason
+                            )
+                        }).collect(),
+                    },
+                    format!(
+                        "cleanup invariant: {} intentional leak(s) annotated, {} acquire(s) checked across {} path(s)",
+                        self.intentional_leaks.len(), self.acquires_checked, self.paths_explored
+                    ),
+                )
+            }
         } else {
             let first = &self.violations[0];
             let path: Vec<String> = first.path.clone();
@@ -768,6 +955,175 @@ impl CleanupVerifier {
         }
 
         unreachable
+    }
+
+    /// Verify the cleanup invariant on the given annotated graph.
+    ///
+    /// This runs the standard verification, then:
+    /// - Filters out Leak violations where the resource has a `LeakAnnotation`
+    /// - Double-free and use-after-free violations are NEVER filtered
+    /// - Populates `intentional_leaks` and `unannotated_leaks` in the report
+    pub fn verify_annotated(&self, annotated: &AnnotatedCleanupGraph) -> CleanupReport {
+        // Run standard verification on the inner graph
+        let base_report = self.verify(&annotated.graph);
+
+        let mut intentional_leaks = Vec::new();
+        let mut unannotated_leaks = Vec::new();
+        let mut remaining_violations = Vec::new();
+
+        for violation in base_report.violations {
+            match violation.kind {
+                ViolationKind::Leak => {
+                    if annotated.is_annotated_leak(violation.resource) {
+                        // This leak is annotated — it's intentional
+                        if let Some(annotation) = annotated.get_leak_annotation(violation.resource) {
+                            intentional_leaks.push(annotation.clone());
+                        }
+                        // Do NOT add to remaining violations
+                    } else {
+                        // Unannotated leak — genuine violation
+                        unannotated_leaks.push(violation.clone());
+                        remaining_violations.push(violation);
+                    }
+                }
+                // Double-free and use-after-free are NEVER filtered
+                ViolationKind::DoubleFree | ViolationKind::UseAfterFree => {
+                    remaining_violations.push(violation);
+                }
+            }
+        }
+
+        CleanupReport::from_annotated(
+            remaining_violations,
+            intentional_leaks,
+            unannotated_leaks,
+            annotated.annotation_count(),
+            base_report.paths_explored,
+            base_report.acquires_checked,
+        )
+    }
+
+    /// Validate leak annotations for consistency with the graph.
+    ///
+    /// Checks for:
+    /// - `AnnotatedButFreed`: A resource marked as leaked but actually freed
+    /// - `AnnotatedButAccessedAfter`: A resource marked as leaked but accessed
+    ///   after its annotation point
+    /// - `MissingJustification`: No reviewer and no custom reason provided
+    pub fn validate_annotations(
+        &self,
+        annotated: &AnnotatedCleanupGraph,
+    ) -> Vec<AnnotationIssue> {
+        let mut issues = Vec::new();
+
+        for annotation in annotated.leak_annotations() {
+            let resource = annotation.resource;
+
+            // Check: AnnotatedButFreed — marked as leak but actually freed
+            let release_nodes = annotated.graph.release_nodes_for(resource);
+            if !release_nodes.is_empty() {
+                issues.push(AnnotationIssue {
+                    resource,
+                    issue: AnnotationIssueKind::AnnotatedButFreed,
+                });
+                continue; // No point checking further for this annotation
+            }
+
+            // Check: MissingJustification — no reviewer and no custom reason
+            if annotation.reviewer.is_none()
+                && !matches!(annotation.reason, LeakReason::Custom(_))
+            {
+                issues.push(AnnotationIssue {
+                    resource,
+                    issue: AnnotationIssueKind::MissingJustification,
+                });
+            }
+
+            // Check: AnnotatedButAccessedAfter — resource accessed after annotation point
+            // We check if there are access nodes for this resource that appear
+            // after the annotation point in the graph. For simplicity, we check
+            // if any access node is reachable from the acquire node. Since the
+            // annotation point is typically at the acquire site, any access
+            // after that is considered "accessed after annotation".
+            // A more precise check would require tracking node ordering.
+            // Here we use a simplified heuristic: if there are access nodes
+            // for the resource AND they are reachable from any acquire node
+            // for that resource, we flag it.
+            let access_nodes = annotated.graph.access_nodes_for(resource);
+            let acquire_nodes = annotated.graph.acquire_nodes_for(resource);
+
+            for &access_id in &access_nodes {
+                for &acquire_id in &acquire_nodes {
+                    if annotated.graph.has_path(acquire_id, access_id) {
+                        // The resource is accessed after being acquired.
+                        // Since it's annotated as a leak, this access is fine
+                        // (the resource is still live). But if the annotation
+                        // point is set *before* the access and the resource is
+                        // "leaked" (never freed), accessing it is expected.
+                        // We only flag if the annotation_point string matches
+                        // a node label that is before the access in the graph.
+                        // For simplicity, if the annotation_point exactly matches
+                        // an access node label, we flag AnnotatedButAccessedAfter.
+                        if let Some(node) = annotated.graph.get_node(access_id) {
+                            if node.label == annotation.annotation_point {
+                                issues.push(AnnotationIssue {
+                                    resource,
+                                    issue: AnnotationIssueKind::AnnotatedButAccessedAfter,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Annotation validation types
+// ---------------------------------------------------------------------------
+
+/// A kind of issue detected when validating leak annotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationIssueKind {
+    /// Resource marked as leaked but actually freed in the graph.
+    AnnotatedButFreed,
+    /// Resource marked as leaked but accessed after the "leak point".
+    AnnotatedButAccessedAfter,
+    /// No reviewer and no custom reason provided for the annotation.
+    MissingJustification,
+}
+
+impl fmt::Display for AnnotationIssueKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AnnotationIssueKind::AnnotatedButFreed => {
+                write!(f, "annotated as leak but actually freed")
+            }
+            AnnotationIssueKind::AnnotatedButAccessedAfter => {
+                write!(f, "annotated as leak but accessed after leak point")
+            }
+            AnnotationIssueKind::MissingJustification => {
+                write!(f, "missing justification (no reviewer or custom reason)")
+            }
+        }
+    }
+}
+
+/// An issue detected when validating a leak annotation.
+#[derive(Debug, Clone)]
+pub struct AnnotationIssue {
+    /// The resource with the problematic annotation.
+    pub resource: ResourceId,
+    /// The kind of issue detected.
+    pub issue: AnnotationIssueKind,
+}
+
+impl fmt::Display for AnnotationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.resource, self.issue)
     }
 }
 
@@ -1596,5 +1952,455 @@ mod tests {
         let s = format!("{v}");
         assert!(s.contains("resource leak"));
         assert!(s.contains("res42"));
+    }
+
+    // =======================================================================
+    // Leak Annotation Tests
+    // =======================================================================
+
+    /// Helper: build a simple graph with a leaked resource (no release).
+    fn build_leaky_graph() -> CleanupGraph {
+        let mut graph = CleanupGraph::new();
+        let res = ResourceId(1);
+
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
+        let alloc = graph.add_node(
+            OperationKind::Acquire {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 2),
+        );
+        let access = graph.add_node(
+            OperationKind::Access { resource: res },
+            pp("test.vu", 3),
+        );
+        let ret = graph.add_node(OperationKind::Return, pp("test.vu", 4));
+
+        graph.add_edge(entry, alloc).unwrap();
+        graph.add_edge(alloc, access).unwrap();
+        graph.add_edge(access, ret).unwrap();
+        graph.set_entry(entry).unwrap();
+
+        graph
+    }
+
+    /// Helper: build a double-free graph.
+    fn build_double_free_graph() -> CleanupGraph {
+        let mut graph = CleanupGraph::new();
+        let res = ResourceId(1);
+
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
+        let alloc = graph.add_node(
+            OperationKind::Acquire {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 2),
+        );
+        let dealloc1 = graph.add_node(
+            OperationKind::Release {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 3),
+        );
+        let dealloc2 = graph.add_node(
+            OperationKind::Release {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 4),
+        );
+        let ret = graph.add_node(OperationKind::Return, pp("test.vu", 5));
+
+        graph.add_edge(entry, alloc).unwrap();
+        graph.add_edge(alloc, dealloc1).unwrap();
+        graph.add_edge(dealloc1, dealloc2).unwrap();
+        graph.add_edge(dealloc2, ret).unwrap();
+        graph.set_entry(entry).unwrap();
+
+        graph
+    }
+
+    /// Helper: build a use-after-free graph.
+    fn build_use_after_free_graph() -> CleanupGraph {
+        let mut graph = CleanupGraph::new();
+        let res = ResourceId(1);
+
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
+        let alloc = graph.add_node(
+            OperationKind::Acquire {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 2),
+        );
+        let dealloc = graph.add_node(
+            OperationKind::Release {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 3),
+        );
+        let access = graph.add_node(
+            OperationKind::Access { resource: res },
+            pp("test.vu", 4),
+        );
+        let ret = graph.add_node(OperationKind::Return, pp("test.vu", 5));
+
+        graph.add_edge(entry, alloc).unwrap();
+        graph.add_edge(alloc, dealloc).unwrap();
+        graph.add_edge(dealloc, access).unwrap();
+        graph.add_edge(access, ret).unwrap();
+        graph.set_entry(entry).unwrap();
+
+        graph
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 1: Arena annotation suppresses leak warning
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_arena_annotation_suppresses_leak() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        // The report should be clean (leak suppressed by annotation)
+        assert!(report.clean, "Expected clean with arena annotation, got: {:?}", report.violations);
+        // There should be one intentional leak
+        assert_eq!(report.intentional_leaks.len(), 1);
+        assert_eq!(report.intentional_leaks[0].reason, LeakReason::Arena);
+        // No unannotated leaks
+        assert!(report.unannotated_leaks.is_empty());
+        // Result should be ProbablySafe
+        let result = report.to_verification_result();
+        assert!(matches!(result.status, VerificationStatus::ProbablySafe { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 2: Global cache annotation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_global_cache_annotation_suppresses_leak() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::GlobalCache,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("bob".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        assert!(report.clean, "Expected clean with global cache annotation");
+        assert_eq!(report.intentional_leaks.len(), 1);
+        assert_eq!(report.intentional_leaks[0].reason, LeakReason::GlobalCache);
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 3: Singleton annotation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_singleton_annotation_suppresses_leak() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Singleton,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("carol".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        assert!(report.clean, "Expected clean with singleton annotation");
+        assert_eq!(report.intentional_leaks.len(), 1);
+        assert_eq!(report.intentional_leaks[0].reason, LeakReason::Singleton);
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 4: Annotation doesn't suppress double-free
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_annotation_does_not_suppress_double_free() {
+        let graph = build_double_free_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        // Double-free should NOT be suppressed
+        assert!(!report.clean, "Expected violation: double-free must not be suppressed by annotation");
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.kind == ViolationKind::DoubleFree && v.resource == ResourceId(1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 5: Annotation doesn't suppress use-after-free
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_annotation_does_not_suppress_use_after_free() {
+        let graph = build_use_after_free_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        // Use-after-free should NOT be suppressed
+        assert!(!report.clean, "Expected violation: use-after-free must not be suppressed by annotation");
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.kind == ViolationKind::UseAfterFree && v.resource == ResourceId(1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 6: Missing annotation still reports leak
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_missing_annotation_still_reports_leak() {
+        let graph = build_leaky_graph();
+        let annotated = AnnotatedCleanupGraph::new(graph);
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        // Without any annotation, the leak should be reported
+        assert!(!report.clean, "Expected leak violation without annotation");
+        assert!(report.unannotated_leaks.iter().any(|v| v.kind == ViolationKind::Leak));
+        assert!(report.intentional_leaks.is_empty());
+        // Result should be Violated
+        let result = report.to_verification_result();
+        assert!(result.is_violated());
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 7: AnnotatedButFreed issue detected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_annotated_but_freed_issue() {
+        // Build a clean graph (resource IS freed)
+        let mut graph = CleanupGraph::new();
+        let res = ResourceId(1);
+
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
+        let alloc = graph.add_node(
+            OperationKind::Acquire {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 2),
+        );
+        let dealloc = graph.add_node(
+            OperationKind::Release {
+                resource: res,
+                kind: ResourceKind::Memory,
+            },
+            pp("test.vu", 3),
+        );
+        let ret = graph.add_node(OperationKind::Return, pp("test.vu", 4));
+
+        graph.add_edge(entry, alloc).unwrap();
+        graph.add_edge(alloc, dealloc).unwrap();
+        graph.add_edge(dealloc, ret).unwrap();
+        graph.set_entry(entry).unwrap();
+
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: res,
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let issues = verifier.validate_annotations(&annotated);
+
+        assert_eq!(issues.len(), 1, "Expected exactly one issue");
+        assert!(matches!(issues[0].issue, AnnotationIssueKind::AnnotatedButFreed));
+        assert_eq!(issues[0].resource, res);
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 8: Custom leak reason
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_custom_leak_reason() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Custom("performance-critical hot path".into()),
+                annotation_point: pp("test.vu", 2),
+                reviewer: None, // Custom reason doesn't require reviewer
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+
+        assert!(report.clean, "Expected clean with custom reason annotation");
+        assert_eq!(report.intentional_leaks.len(), 1);
+        assert!(matches!(
+            &report.intentional_leaks[0].reason,
+            LeakReason::Custom(s) if s == "performance-critical hot path"
+        ));
+
+        // Custom reason should NOT trigger MissingJustification
+        let issues = verifier.validate_annotations(&annotated);
+        let has_missing = issues.iter().any(|i| matches!(i.issue, AnnotationIssueKind::MissingJustification));
+        assert!(!has_missing, "Custom reason should not trigger MissingJustification");
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 9: Duplicate annotation rejected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_duplicate_annotation_rejected() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        // Second annotation for the same resource should fail
+        let result = annotated.add_leak_annotation(LeakAnnotation {
+            resource: ResourceId(1),
+            reason: LeakReason::GlobalCache,
+            annotation_point: pp("test.vu", 2),
+            reviewer: Some("bob".into()),
+        });
+        assert!(result.is_err(), "Expected error for duplicate annotation");
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 10: MissingJustification detected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_missing_justification_detected() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        // No reviewer and no Custom reason → MissingJustification
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Arena,
+                annotation_point: pp("test.vu", 2),
+                reviewer: None,
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let issues = verifier.validate_annotations(&annotated);
+
+        let has_missing = issues.iter().any(|i| matches!(i.issue, AnnotationIssueKind::MissingJustification));
+        assert!(has_missing, "Expected MissingJustification issue for no reviewer and no custom reason");
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 11: is_annotated_leak and annotation_count
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_annotated_graph_queries() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+
+        assert!(!annotated.is_annotated_leak(ResourceId(1)));
+        assert_eq!(annotated.annotation_count(), 0);
+
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::StaticStorage,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("alice".into()),
+            })
+            .unwrap();
+
+        assert!(annotated.is_annotated_leak(ResourceId(1)));
+        assert!(!annotated.is_annotated_leak(ResourceId(99)));
+        assert_eq!(annotated.annotation_count(), 1);
+
+        // Verify we can iterate over annotations
+        let annotations: Vec<&LeakAnnotation> = annotated.leak_annotations().collect();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].reason, LeakReason::StaticStorage);
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation Test 12: ProbablySafe result for annotated-only leaks
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_probably_safe_result_for_annotated_leaks() {
+        let graph = build_leaky_graph();
+        let mut annotated = AnnotatedCleanupGraph::new(graph);
+        annotated
+            .add_leak_annotation(LeakAnnotation {
+                resource: ResourceId(1),
+                reason: LeakReason::Intentional,
+                annotation_point: pp("test.vu", 2),
+                reviewer: Some("reviewer".into()),
+            })
+            .unwrap();
+
+        let verifier = CleanupVerifier::new();
+        let report = verifier.verify_annotated(&annotated);
+        let result = report.to_verification_result();
+
+        // Should be ProbablySafe, not Proven or Violated
+        assert!(matches!(result.status, VerificationStatus::ProbablySafe { .. }));
+        // Should have assumptions
+        if let VerificationStatus::ProbablySafe { assumptions } = &result.status {
+            assert_eq!(assumptions.len(), 1);
+            assert!(assumptions[0].contains("intentionally leaked"));
+        } else {
+            panic!("Expected ProbablySafe status");
+        }
     }
 }

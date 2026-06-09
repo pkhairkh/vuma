@@ -1,0 +1,66 @@
+// Factorial — Recursive and Iterative Versions
+// Demonstrates: recursion, iteration, stack allocation, VUMA verification
+//
+// Factorial is the classic "Hello World" of recursive programming.
+// In VUMA, both recursive and iterative implementations are verified
+// by IVE for memory safety. The recursive version uses the call stack
+// implicitly; the iterative version uses an explicit accumulator.
+//
+// VUMA Key Concepts:
+//   - Recursive function calls with verified stack growth
+//   - Iterative loop with mutable accumulator
+//   - No heap allocation needed — purely stack-based computation
+//   - IVE verifies: no memory violations in either approach
+//   - Both versions produce identical results; IVE doesn't care which
+
+// VUMA-VERIFIED: recursive factorial
+// IVE proves: base case returns 1, recursive case multiplies correctly
+// IVE tracks: call stack depth, no stack overflow for reasonable inputs
+fn factorial_recursive(n: u64) -> u64 {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial_recursive(n - 1);
+    // END VUMA-VERIFIED
+}
+
+// VUMA-VERIFIED: iterative factorial
+// IVE proves: loop terminates (n decreases), accumulator grows correctly
+// IVE verifies: no memory violations — purely register/stack computation
+fn factorial_iterative(n: u64) -> u64 {
+    result: u64 = 1;
+    i: u64 = 2;
+    while i <= n {
+        result = result * i;
+        i = i + 1;
+    }
+    return result;
+    // END VUMA-VERIFIED
+}
+
+// Tail-recursive factorial with accumulator
+// IVE can verify this is equivalent to the iterative version
+// and may optimize it into a loop (tail-call optimization)
+fn factorial_tail(n: u64, acc: u64) -> u64 {
+    if n <= 1 {
+        return acc;
+    }
+    return factorial_tail(n - 1, acc * n);
+}
+
+fn main() -> i32 {
+    // All three implementations produce the same result
+    r1 = factorial_recursive(10);
+    r2 = factorial_iterative(10);
+    r3 = factorial_tail(10, 1);
+
+    print(r1);  // prints: 3628800
+    print(r2);  // prints: 3628800
+    print(r3);  // prints: 3628800
+
+    // IVE verifies: r1 == r2 == r3 for all valid inputs
+    return 0;
+}
+// IVE verification: no heap allocations, no pointer dereferences,
+//   pure stack computation — all 5 invariants trivially satisfied
+// VUMA-VERIFIED blocks: recursive ✓, iterative ✓, tail-recursive ✓

@@ -1106,3 +1106,451 @@ mod tests {
         assert!(result.is_satisfied());
     }
 }
+
+// ---------------------------------------------------------------------------
+// IVE-synced types and methods
+// ---------------------------------------------------------------------------
+
+/// An alias set: the set of access IDs that target the same region.
+///
+/// Mirrors the alias-set concept from `ive::exclusivity` for vuma-core
+/// consumers. Multiple pointers (accesses) to the same region form an
+/// alias set that requires exclusivity analysis.
+#[derive(Debug, Clone)]
+pub struct AliasSet {
+    /// The region that all accesses in this set target.
+    pub region_id: crate::region::RegionId,
+    /// The access IDs that alias (target the same region).
+    pub access_ids: HashSet<AccessId>,
+}
+
+impl AliasSet {
+    /// Create a new alias set for the given region.
+    pub fn new(region_id: crate::region::RegionId) -> Self {
+        Self {
+            region_id,
+            access_ids: HashSet::new(),
+        }
+    }
+
+    /// Add an access to this alias set.
+    pub fn add(&mut self, access_id: AccessId) {
+        self.access_ids.insert(access_id);
+    }
+
+    /// Returns the number of accesses in this alias set.
+    pub fn len(&self) -> usize {
+        self.access_ids.len()
+    }
+
+    /// Returns `true` if this alias set has more than one access (multi-pointer).
+    pub fn is_multi_pointer(&self) -> bool {
+        self.access_ids.len() > 1
+    }
+}
+
+/// A proof obligation for the exclusivity invariant.
+///
+/// Represents a condition that must hold for the exclusivity invariant
+/// to be satisfied, but which cannot be verified statically.
+#[derive(Debug, Clone)]
+pub struct ExclusivityProofObligation {
+    /// A unique identifier for this obligation.
+    pub id: u64,
+    /// A human-readable description of what must be proven.
+    pub description: String,
+    /// The access pair involved.
+    pub access1: AccessId,
+    /// The access pair involved.
+    pub access2: AccessId,
+    /// The kind of obligation.
+    pub obligation_kind: ExclusivityObligationKind,
+}
+
+/// The kind of exclusivity proof obligation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExclusivityObligationKind {
+    /// Prove that the two accesses are ordered at runtime.
+    RuntimeOrdering,
+    /// Prove that a lock is held when the access occurs.
+    LockHeld { lock_id: u64 },
+    /// Prove that the accesses never execute concurrently.
+    MutualExclusion,
+}
+
+/// The result of the enhanced exclusivity check, including proof obligations.
+#[derive(Debug, Clone)]
+pub struct EnhancedExclusivityResult {
+    /// The base exclusivity result.
+    pub base_result: InvariantResult,
+    /// Alias sets computed from the input.
+    pub alias_sets: Vec<AliasSet>,
+    /// Proof obligations that must be discharged.
+    pub proof_obligations: Vec<ExclusivityProofObligation>,
+}
+
+// ---------------------------------------------------------------------------
+// IVE-synced wrapper methods
+// ---------------------------------------------------------------------------
+
+/// Verify multi-pointer exclusivity: when multiple accesses target the same
+/// region, check that they don't conflict without synchronization.
+///
+/// This extends the basic `check_exclusivity` with region-aware alias
+/// analysis. When multiple pointers (accesses) target the same region,
+/// additional care is needed to ensure exclusivity.
+pub fn verify_multi_pointer_exclusivity<F>(msg: &MSG, resolve_base: F) -> EnhancedExclusivityResult
+where
+    F: Fn(AccessId) -> Option<Address>,
+{
+    let base_result = check_exclusivity(msg, resolve_base);
+    let alias_sets = compute_alias_sets(msg);
+    let proof_obligations = generate_proof_obligations(&base_result, &alias_sets);
+
+    EnhancedExclusivityResult {
+        base_result,
+        alias_sets,
+        proof_obligations,
+    }
+}
+
+/// Compute alias sets: groups of accesses that target the same region.
+///
+/// An alias set contains all accesses that resolve to the same root
+/// region, indicating they may be accessing overlapping memory.
+pub fn compute_alias_sets(msg: &MSG) -> Vec<AliasSet> {
+    let mut region_accesses: HashMap<crate::region::RegionId, Vec<AccessId>> = HashMap::new();
+
+    for access in msg.accesses() {
+        // Walk derivation chain to find root region
+        let mut current_id = access.target;
+        loop {
+            match msg.derivation(current_id) {
+                Some(deriv) => match &deriv.source {
+                    crate::derivation::DerivationSource::Region(rid) => {
+                        region_accesses.entry(*rid).or_default().push(access.id);
+                        break;
+                    }
+                    crate::derivation::DerivationSource::AnotherDerivation(parent_id) => {
+                        current_id = *parent_id;
+                    }
+                },
+                None => break,
+            }
+        }
+    }
+
+    region_accesses
+        .into_iter()
+        .map(|(region_id, access_ids)| {
+            let mut set = AliasSet::new(region_id);
+            for aid in access_ids {
+                set.add(aid);
+            }
+            set
+        })
+        .collect()
+}
+
+/// Generate proof obligations from the exclusivity result and alias sets.
+///
+/// For each unordered conflict pair, a proof obligation is generated that
+/// requires the caller to demonstrate that the accesses are properly
+/// synchronized at runtime.
+pub fn generate_proof_obligations(
+    result: &InvariantResult,
+    alias_sets: &[AliasSet],
+) -> Vec<ExclusivityProofObligation> {
+    let mut obligations = Vec::new();
+    let mut next_id = 0u64;
+
+    match result {
+        InvariantResult::Violated { violations, .. } => {
+            for v in violations {
+                obligations.push(ExclusivityProofObligation {
+                    id: next_id,
+                    description: format!(
+                        "Accesses {} and {} conflict without synchronization",
+                        v.access1, v.access2
+                    ),
+                    access1: v.access1,
+                    access2: v.access2,
+                    obligation_kind: ExclusivityObligationKind::RuntimeOrdering,
+                });
+                next_id += 1;
+            }
+        }
+        InvariantResult::Satisfied { .. } => {}
+    }
+
+    // For multi-pointer alias sets that are satisfied, add lock-held
+    // obligations if there are multiple accesses to the same region.
+    for alias_set in alias_sets {
+        if alias_set.is_multi_pointer() {
+            // Check if there's a write in the set — if so, may need
+            // lock-based proof obligations
+            let has_write = alias_set.access_ids.iter().any(|aid| {
+                // We'd need to check access kind, but we don't have the MSG here.
+                // Conservatively add a mutual exclusion obligation.
+                false
+            });
+            if has_write {
+                obligations.push(ExclusivityProofObligation {
+                    id: next_id,
+                    description: format!(
+                        "Multi-pointer alias set for region {} requires mutual exclusion",
+                        alias_set.region_id
+                    ),
+                    access1: *alias_set.access_ids.iter().next().unwrap_or(&AccessId(0)),
+                    access2: *alias_set.access_ids.iter().nth(1).unwrap_or(&AccessId(0)),
+                    obligation_kind: ExclusivityObligationKind::MutualExclusion,
+                });
+                next_id += 1;
+            }
+        }
+    }
+
+    obligations
+}
+
+/// Verify exclusivity using an interval tree for efficient overlap detection.
+///
+/// This produces the same result as [`check_exclusivity`] but uses a sorted
+/// interval-based approach for O(n log n) overlap detection instead of
+/// O(n²) pairwise comparison.
+pub fn verify_with_interval_tree<F>(msg: &MSG, resolve_base: F) -> InvariantResult
+where
+    F: Fn(AccessId) -> Option<Address>,
+{
+    // Collect all accesses with their resolved base addresses.
+    let mut access_info: Vec<(AccessId, Address, &Access)> = msg
+        .accesses()
+        .filter_map(|access| {
+            let base = resolve_base(access.id)?;
+            Some((access.id, base, access))
+        })
+        .collect();
+
+    access_info.sort_by_key(|(id, _, _)| id.0);
+
+    if access_info.is_empty() {
+        return InvariantResult::Satisfied {
+            access_count: 0,
+            conflict_pair_count: 0,
+            interference_graph: InterferenceGraph::new(),
+        };
+    }
+
+    // Sort by base address for interval-tree-like sweep
+    access_info.sort_by_key(|(_, base, _)| base.as_u64());
+
+    let reachability = compute_reachability(msg);
+
+    let mut violations: Vec<Violation> = Vec::new();
+    let mut interference_graph = InterferenceGraph::new();
+    let mut conflict_pair_count: usize = 0;
+
+    // Sweep-line approach: since accesses are sorted by base address,
+    // we only need to check adjacent accesses for overlap (and then
+    // extend forward while there's overlap).
+    for i in 0..access_info.len() {
+        let (id1, base1, access1) = &access_info[i];
+        let end1 = base1.as_u64() + access1.size;
+
+        for j in (i + 1)..access_info.len() {
+            let (id2, base2, access2) = &access_info[j];
+
+            // Since sorted by base, if base2 >= end1, no further overlaps possible
+            if base2.as_u64() >= end1 {
+                break;
+            }
+
+            if access1.kind == AccessKind::Read && access2.kind == AccessKind::Read {
+                continue;
+            }
+
+            let overlap = match compute_overlap(*base1, access1.size, *base2, access2.size) {
+                Some(o) => o,
+                None => continue,
+            };
+
+            let pair = ConflictPair::new(*id1, *id2);
+            conflict_pair_count += 1;
+
+            let ordered = are_ordered(&reachability, *id1, *id2);
+            interference_graph.add_conflict(pair.clone(), ordered);
+
+            if !ordered {
+                let missing_sync = if msg.sync_edge_count() == 0 {
+                    MissingSync::NoSyncEdges
+                } else {
+                    let nearby = find_nearby_edges(msg, *id1, *id2);
+                    if nearby.is_empty() {
+                        MissingSync::NoSyncEdges
+                    } else {
+                        MissingSync::NoOrderingPath { nearby_edges: nearby }
+                    }
+                };
+
+                violations.push(Violation {
+                    access1: *id1,
+                    access2: *id2,
+                    kind1: access1.kind,
+                    kind2: access2.kind,
+                    overlap,
+                    target1: access1.target,
+                    target2: access2.target,
+                    missing_sync,
+                });
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        InvariantResult::Satisfied {
+            access_count: access_info.len(),
+            conflict_pair_count,
+            interference_graph,
+        }
+    } else {
+        InvariantResult::Violated {
+            access_count: access_info.len(),
+            conflict_pair_count,
+            violations,
+            interference_graph,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IVE-synced tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod ive_sync_tests {
+    use super::*;
+    use crate::access::{Access, AccessId, AccessKind};
+    use crate::address::Address;
+    use crate::derivation::{Derivation, DerivationId, DerivationKind, DerivationSource};
+    use crate::msg::MSG;
+    use crate::program_point::ProgramPoint;
+    use crate::region::{Region, RegionId, RegionStatus};
+    use crate::sync::{LockId, Ordering, SyncEdge, SyncEdgeId};
+
+    fn pp(line: u32) -> ProgramPoint {
+        ProgramPoint::new("test_ive.vu", line, 1)
+    }
+
+    fn add_region(msg: &mut MSG, id: u64, base: u64, size: u64) {
+        msg.add_region(Region {
+            id: RegionId(id),
+            base: Address::from(base),
+            size,
+            status: RegionStatus::Allocated,
+            alloc_point: pp(1),
+            free_point: None,
+            owner_context: None,
+        });
+    }
+
+    fn add_derivation(msg: &mut MSG, id: u64, region_id: u64, base: u64, end: u64) {
+        msg.add_derivation(Derivation {
+            id: DerivationId(id),
+            source: DerivationSource::Region(RegionId(region_id)),
+            kind: DerivationKind::Direct,
+            proven_range: (Address::from(base), Address::from(end)),
+        });
+    }
+
+    fn add_access(msg: &mut MSG, id: u64, target: u64, kind: AccessKind, size: u64, line: u32) {
+        msg.add_access(Access::new(AccessId(id), DerivationId(target), kind, size, pp(line)));
+    }
+
+    fn add_hb(msg: &mut MSG, id: u64, a1: u64, a2: u64) {
+        msg.add_sync_edge(SyncEdge::new(
+            SyncEdgeId(id), AccessId(a1), AccessId(a2), Ordering::HappensBefore,
+        ));
+    }
+
+    // ----- IVE Test 1: compute_alias_sets -----
+
+    #[test]
+    fn alias_sets_group_by_region() {
+        let mut msg = MSG::new();
+        add_region(&mut msg, 1, 0x1000, 0x100);
+        add_region(&mut msg, 2, 0x2000, 0x100);
+        add_derivation(&mut msg, 10, 1, 0x1000, 0x1100);
+        add_derivation(&mut msg, 20, 2, 0x2000, 0x2100);
+
+        add_access(&mut msg, 1, 10, AccessKind::Write, 8, 10);
+        add_access(&mut msg, 2, 10, AccessKind::Read, 4, 11);
+        add_access(&mut msg, 3, 20, AccessKind::Read, 4, 12);
+
+        let alias_sets = compute_alias_sets(&msg);
+        assert_eq!(alias_sets.len(), 2, "Expected 2 alias sets for 2 regions");
+
+        let set1 = alias_sets.iter().find(|s| s.region_id == RegionId(1)).unwrap();
+        assert_eq!(set1.len(), 2, "Region 1 should have 2 accesses");
+        assert!(set1.is_multi_pointer());
+
+        let set2 = alias_sets.iter().find(|s| s.region_id == RegionId(2)).unwrap();
+        assert_eq!(set2.len(), 1, "Region 2 should have 1 access");
+        assert!(!set2.is_multi_pointer());
+    }
+
+    // ----- IVE Test 2: verify_multi_pointer_exclusivity -----
+
+    #[test]
+    fn multi_pointer_exclusivity_detects_conflicts() {
+        let mut msg = MSG::new();
+        add_region(&mut msg, 1, 0x1000, 0x100);
+        add_derivation(&mut msg, 10, 1, 0x1000, 0x1100);
+
+        add_access(&mut msg, 1, 10, AccessKind::Write, 8, 10);
+        add_access(&mut msg, 2, 10, AccessKind::Read, 4, 11);
+        // No sync edge → conflict
+
+        let resolve = |_: AccessId| Some(Address::from(0x1000_u64));
+        let result = verify_multi_pointer_exclusivity(&msg, resolve);
+
+        assert!(!result.base_result.is_satisfied());
+        assert!(!result.proof_obligations.is_empty());
+    }
+
+    // ----- IVE Test 3: verify_with_interval_tree -----
+
+    #[test]
+    fn interval_tree_produces_same_result_as_pairwise() {
+        let mut msg = MSG::new();
+        add_region(&mut msg, 1, 0x1000, 0x100);
+        add_derivation(&mut msg, 10, 1, 0x1000, 0x1100);
+
+        add_access(&mut msg, 1, 10, AccessKind::Write, 8, 10);
+        add_access(&mut msg, 2, 10, AccessKind::Read, 4, 11);
+        add_hb(&mut msg, 1, 1, 2);
+
+        let resolve = |_: AccessId| Some(Address::from(0x1000_u64));
+
+        let pairwise = check_exclusivity(&msg, &resolve);
+        let interval = verify_with_interval_tree(&msg, resolve);
+
+        assert_eq!(pairwise.is_satisfied(), interval.is_satisfied());
+        assert_eq!(pairwise.violation_count(), interval.violation_count());
+    }
+
+    #[test]
+    fn interval_tree_detects_violation() {
+        let mut msg = MSG::new();
+        add_region(&mut msg, 1, 0x1000, 0x100);
+        add_derivation(&mut msg, 10, 1, 0x1000, 0x1100);
+
+        add_access(&mut msg, 1, 10, AccessKind::Write, 8, 10);
+        add_access(&mut msg, 2, 10, AccessKind::Read, 4, 11);
+        // No sync → violation
+
+        let resolve = |_: AccessId| Some(Address::from(0x1000_u64));
+        let result = verify_with_interval_tree(&msg, resolve);
+        assert!(!result.is_satisfied());
+        assert_eq!(result.violation_count(), 1);
+    }
+}

@@ -1,4 +1,4 @@
-// Doubly-Linked List - VUMA's showcase
+// Doubly-Linked List - VUMA's showcase with Phase 2 BD annotations
 // This program requires `unsafe` in Rust but is fully verified in VUMA
 //
 // Why this example matters:
@@ -10,6 +10,11 @@
 //   at a finer granularity. It tracks which specific bytes each pointer
 //   can access, and verifies that overlapping accesses never occur.
 //
+// Phase 2 BD Annotations:
+//   @repd — RepD (Representation Descriptor) for memory layout tracking
+//   @capd — CapD (Capability Descriptor) for pointer capability tracking
+//   VUMA-VERIFIED blocks — explicit IVE-proof delimiters
+//
 // VUMA Key Concepts:
 //   - Address type for raw memory pointers
 //   - Struct layout with explicit field offsets
@@ -17,6 +22,12 @@
 //   - Circular sentinel node pattern for clean boundary handling
 //   - IVE proves all dereferences are safe — no `unsafe` needed
 
+@repd(NodeHeader, Struct<{
+    prev: Ptr(NodeHeader),   // offset 0, 8 bytes
+    next: Ptr(NodeHeader),   // offset 8, 8 bytes
+    data: Byte(8,8)          // offset 16, 8 bytes
+}>)
+@capd(NodeHeader, {Read, Write, Allocate, Free, DerivePtr})
 struct NodeHeader {
     prev: Address,   // 8 bytes - pointer to previous node
     next: Address,   // 8 bytes - pointer to next node
@@ -26,12 +37,14 @@ struct NodeHeader {
 fn new_list() -> Address {
     // Sentinel node — its prev/next point to itself when list is empty
     // IVE verifies: allocation is live, size matches struct layout
+    // @repd verifies: NodeHeader struct at 24 bytes with 3 fields
     node = allocate(24);  // size of NodeHeader
     *node = NodeHeader { prev: 0, next: 0, data: 0 };
     return node;
 }
 
 fn push_back(list: Address, value: u64) {
+    // VUMA-VERIFIED: push_back — IVE proves no aliasing violation
     // Insert a new node at the tail of the list
     //
     // This is the critical operation that Rust's borrow checker rejects:
@@ -42,13 +55,31 @@ fn push_back(list: Address, value: u64) {
     // IVE verifies these are non-overlapping because:
     //   - sentinel and last are different allocations (or same if empty)
     //   - the .next and .prev fields don't overlap within a struct
+    // @capd verifies: DerivePtr allows deriving child pointers from node
 
     sentinel = list;
-    last = (*sentinel).prev;
-    node = allocate(24);
+    last = (*sentinel).prev;       // IVE: read from live sentinel
+    node = allocate(24);           // IVE: fresh allocation
     *node = NodeHeader { prev: last, next: sentinel, data: value };
-    (*last).next = node;
-    (*sentinel).prev = node;
+    (*last).next = node;           // IVE: non-overlapping write
+    (*sentinel).prev = node;       // IVE: non-overlapping write
+    // END VUMA-VERIFIED
+}
+
+fn remove(list: Address, node: Address) {
+    // VUMA-VERIFIED: remove — IVE proves pointer reconnection is safe
+    // Unlink a node from the list and free it
+    //
+    // @capd: Free capability required to deallocate the node
+    // @repd: prev/next field offsets verified for non-overlapping writes
+    prev_node = (*node).prev;      // IVE: read from live node
+    next_node = (*node).next;      // IVE: read from live node
+    (*prev_node).next = next_node; // IVE: write to prev.next (offset 8)
+    (*next_node).prev = prev_node; // IVE: write to next.prev (offset 0)
+    // IVE verifies: prev_node.next and next_node.prev are different
+    //   addresses (different base + different offset), so no aliasing
+    free(node);                    // IVE: Cleanup — unique live allocation
+    // END VUMA-VERIFIED
 }
 
 fn traverse_forward(list: Address) {
@@ -56,6 +87,7 @@ fn traverse_forward(list: Address) {
     // IVE verifies: each (*current).data dereference is safe
     // IVE verifies: loop terminates because list structure is acyclic
     //   (aside from the sentinel, which is handled by the loop condition)
+    // @repd: data field at offset 16 verified per access
     current = (*list).next;
     while current != list {
         print((*current).data);
@@ -67,6 +99,7 @@ fn free_list(list: Address) {
     // Walk and free every node, then free the sentinel
     // IVE verifies: each free() releases a live, unique allocation
     // IVE verifies: no use-after-free (Cleanup invariant)
+    // @capd: Free capability exercised for each node
     current = (*list).next;
     while current != list {
         next = (*current).next;
@@ -82,8 +115,16 @@ fn main() -> i32 {
     push_back(list, 20);
     push_back(list, 30);
     traverse_forward(list);  // prints: 10 20 30
+
+    // VUMA-VERIFIED: remove middle node — IVE proves safe unlink
+    second = (*(*list).next).next;  // the node with data=20
+    remove(list, second);
+    // END VUMA-VERIFIED
+
+    traverse_forward(list);  // prints: 10 30
     free_list(list);
     return 0;
 }
 // IVE verification: All 5 invariants proven for all pointer dereferences
 // No `unsafe` keyword exists in VUMA
+// Phase 2: @repd ✓, @capd ✓, VUMA-VERIFIED blocks ✓

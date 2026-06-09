@@ -21,9 +21,9 @@
 //! | **HW Mapping**        | [`Arm64SecurityMapping`] | CapD → PAC/BTI/MTE for Pi 5                   |
 //! | **Verifier**          | [`SecurityVerifier`]     | Whole-program invariant checker                |
 
-use crate::derivation::{Derivation, DerivationId};
+use crate::derivation::{Derivation, DerivationId, DerivationKind};
 use crate::program_point::{NodeId, ProgramPoint};
-use crate::region::RegionId;
+use crate::region::{Region, RegionId};
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1205,6 +1205,306 @@ impl fmt::Display for Arm64Feature {
 }
 
 // ---------------------------------------------------------------------------
+// CapD Info (for IVE integration)
+// ---------------------------------------------------------------------------
+
+/// Capability Descriptor information for a memory region.
+///
+/// This struct captures the VUMA-level capability set for a region,
+/// enabling mapping to ARM64 hardware features (PAC/BTI/MTE) and
+/// Page Table Entry (PTE) attributes for the Pi 5.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapDInfo {
+    /// Capabilities granted for this region.
+    pub capabilities: HashSet<SecurityCapability>,
+    /// The security level of this region.
+    pub security_level: SecurityLevel,
+    /// Whether the region is executable.
+    pub executable: bool,
+    /// Whether the region is writable.
+    pub writable: bool,
+    /// Whether the region is readable.
+    pub readable: bool,
+}
+
+impl CapDInfo {
+    /// Create a read-only CapD at the given security level.
+    pub fn read_only(security_level: SecurityLevel) -> Self {
+        Self {
+            capabilities: [SecurityCapability::Read].into_iter().collect(),
+            security_level,
+            executable: false,
+            writable: false,
+            readable: true,
+        }
+    }
+
+    /// Create a read-write CapD at the given security level.
+    pub fn read_write(security_level: SecurityLevel) -> Self {
+        Self {
+            capabilities: [SecurityCapability::Read, SecurityCapability::Write]
+                .into_iter()
+                .collect(),
+            security_level,
+            executable: false,
+            writable: true,
+            readable: true,
+        }
+    }
+
+    /// Create an executable CapD at the given security level.
+    pub fn executable(security_level: SecurityLevel) -> Self {
+        Self {
+            capabilities: [SecurityCapability::Read, SecurityCapability::Execute]
+                .into_iter()
+                .collect(),
+            security_level,
+            executable: true,
+            writable: false,
+            readable: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security Verification (IVE Integration)
+// ---------------------------------------------------------------------------
+
+/// A PAC (Pointer Authentication Code) compliance violation.
+///
+/// Detected when a pointer derivation is incompatible with PAC signing,
+/// e.g. a pointer that was derived without the `DerivePtr` capability or
+/// a cast that would corrupt the PAC code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PACViolation {
+    /// The address of the pointer that violates PAC.
+    pub pointer_address: u64,
+    /// The expected PAC code.
+    pub expected_code: u64,
+    /// The actual PAC code found (`None` if missing).
+    pub actual_code: Option<u64>,
+    /// Human-readable description of the violation.
+    pub description: String,
+}
+
+/// An MTE (Memory Tagging Extension) compliance violation.
+///
+/// Detected when a memory access has a mismatched allocation tag,
+/// indicating a potential spatial or temporal safety violation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MTEViolation {
+    /// The address with the tag mismatch.
+    pub address: u64,
+    /// The expected MTE tag.
+    pub expected_tag: u8,
+    /// The actual MTE tag found (`None` if untagged).
+    pub actual_tag: Option<u8>,
+    /// Human-readable description of the violation.
+    pub description: String,
+}
+
+/// A BTI (Branch Target Identification) compliance violation.
+///
+/// Detected when an indirect branch targets a location without a
+/// valid BTI landing pad instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BTIViolation {
+    /// The source address of the indirect branch.
+    pub branch_source: u64,
+    /// The target address of the indirect branch.
+    pub branch_target: u64,
+    /// Human-readable description of the violation.
+    pub description: String,
+}
+
+/// A CapD security violation detected during IVE integration.
+///
+/// Represents a mismatch between the declared capabilities for a region
+/// and the actual access patterns or hardware enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapDSecurityViolation {
+    /// The region where the violation was detected.
+    pub region: u64,
+    /// The capability that was violated.
+    pub violated_capability: SecurityCapability,
+    /// Human-readable description.
+    pub description: String,
+}
+
+/// The overall security verdict from IVE-integrated verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecurityVerdict {
+    /// All security properties verified — no violations.
+    Secure,
+    /// Some weaknesses found but no critical violations.
+    PartiallySecure {
+        /// Descriptions of the weaknesses found.
+        weaknesses: Vec<String>,
+    },
+    /// Critical violations found — the configuration is insecure.
+    Insecure {
+        /// Descriptions of the critical violations.
+        critical_violations: Vec<String>,
+    },
+}
+
+impl fmt::Display for SecurityVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecurityVerdict::Secure => write!(f, "Secure"),
+            SecurityVerdict::PartiallySecure { weaknesses } => {
+                write!(f, "PartiallySecure({} weaknesses)", weaknesses.len())
+            }
+            SecurityVerdict::Insecure { critical_violations } => {
+                write!(f, "Insecure({} critical)", critical_violations.len())
+            }
+        }
+    }
+}
+
+/// Context for security verification, integrating IVE results with
+/// hardware security feature configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityVerificationContext {
+    /// CapD assignments per region (region_id → CapD info).
+    pub capd_assignments: HashMap<u64, CapDInfo>,
+    /// Whether PAC is enabled.
+    pub pointer_auth_enabled: bool,
+    /// Whether MTE is enabled.
+    pub mte_enabled: bool,
+    /// Whether BTI is enabled.
+    pub bti_enabled: bool,
+    /// The security level being verified.
+    pub security_level: SecurityLevel,
+}
+
+impl SecurityVerificationContext {
+    /// Create a new context with all hardware features enabled at the given level.
+    pub fn new(security_level: SecurityLevel) -> Self {
+        Self {
+            capd_assignments: HashMap::new(),
+            pointer_auth_enabled: true,
+            mte_enabled: true,
+            bti_enabled: true,
+            security_level,
+        }
+    }
+
+    /// Create a context with all hardware features disabled.
+    pub fn disabled(security_level: SecurityLevel) -> Self {
+        Self {
+            capd_assignments: HashMap::new(),
+            pointer_auth_enabled: false,
+            mte_enabled: false,
+            bti_enabled: false,
+            security_level,
+        }
+    }
+
+    /// Add a CapD assignment for a region.
+    pub fn add_capd(&mut self, region: u64, capd: CapDInfo) {
+        self.capd_assignments.insert(region, capd);
+    }
+}
+
+/// Result of security verification against IVE integration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityVerificationResult {
+    /// PAC compliance violations found.
+    pub pac_violations: Vec<PACViolation>,
+    /// MTE compliance violations found.
+    pub mte_violations: Vec<MTEViolation>,
+    /// BTI compliance violations found.
+    pub bti_violations: Vec<BTIViolation>,
+    /// CapD security violations found.
+    pub capd_violations: Vec<CapDSecurityViolation>,
+    /// The overall security verdict.
+    pub overall: SecurityVerdict,
+}
+
+impl SecurityVerificationResult {
+    /// Returns `true` if the verification found no violations at all.
+    pub fn is_secure(&self) -> bool {
+        matches!(self.overall, SecurityVerdict::Secure)
+    }
+
+    /// Returns the total number of violations across all categories.
+    pub fn total_violations(&self) -> usize {
+        self.pac_violations.len()
+            + self.mte_violations.len()
+            + self.bti_violations.len()
+            + self.capd_violations.len()
+    }
+}
+
+impl fmt::Display for SecurityVerificationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SecurityVerificationResult(verdict={}, pac={}, mte={}, bti={}, capd={})",
+            self.overall,
+            self.pac_violations.len(),
+            self.mte_violations.len(),
+            self.bti_violations.len(),
+            self.capd_violations.len()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CapD → ARM64 PTE Attribute Mapping
+// ---------------------------------------------------------------------------
+
+/// ARM64 Page Table Entry attributes derived from a VUMA CapD.
+///
+/// Maps the VUMA capability set to the ARMv8-A PTE attribute fields
+/// used by the Pi 5's MMU for access control enforcement.
+///
+/// | Field | ARM64 Register | Description                              |
+/// |-------|----------------|------------------------------------------|
+/// | AP    | PTE.AP[2:1]    | Access Permissions                       |
+/// | SH    | PTE.SH[1:0]    | Shareability (Inner/Outer/None)          |
+/// | AF    | PTE.AF         | Access Flag (hardware-managed)           |
+/// | nG    | PTE.nG         | non-Global (ASID-tagged)                 |
+/// | PXN   | PTE.PXN        | Privileged Execute Never                 |
+/// | UXN   | PTE.UXN        | Unprivileged Execute Never               |
+/// | DBM   | PTE.DBM        | Dirty Bit Modifier (hardware-managed)    |
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PTEAttributes {
+    /// Access Permissions (AP[2:1]).
+    /// - `0b00`: RW at EL1, no access at EL0
+    /// - `0b01`: RW at both EL1 and EL0
+    /// - `0b10`: RO at EL1, no access at EL0
+    /// - `0b11`: RO at both EL1 and EL0
+    pub ap: u8,
+    /// Shareability (SH[1:0]).
+    /// - `0b00`: Non-shareable
+    /// - `0b10`: Inner Shareable
+    /// - `0b11`: Outer Shareable
+    pub sh: u8,
+    /// Access Flag — set when the page is accessed.
+    pub af: bool,
+    /// non-Global — if `true`, TLB entry is ASID-tagged.
+    pub nG: bool,
+    /// Privileged Execute Never.
+    pub pxn: bool,
+    /// Unprivileged Execute Never.
+    pub uxn: bool,
+    /// Dirty Bit Modifier — hardware tracks writes.
+    pub dbm: bool,
+}
+
+impl fmt::Display for PTEAttributes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PTEAttributes(ap=0b{:02b}, sh=0b{:02b}, af={}, nG={}, pxn={}, uxn={}, dbm={})",
+            self.ap, self.sh, self.af, self.nG, self.pxn, self.uxn, self.dbm
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Taint Tracking Through Derivation Chains
 // ---------------------------------------------------------------------------
 
@@ -1577,6 +1877,332 @@ impl SecurityVerifier {
                     });
                 }
             }
+        }
+    }
+
+    // ── IVE Integration Methods ────────────────────────────────────────
+
+    /// Verify security properties integrating IVE verification results
+    /// with the enhanced CapD/PAC/BTI/MTE features for Pi 5.
+    ///
+    /// This method examines the full security context — including CapD
+    /// assignments, hardware feature enablement, and IVE verification
+    /// results — and produces a comprehensive security verdict.
+    pub fn verify_security_properties(
+        &self,
+        context: &SecurityVerificationContext,
+    ) -> SecurityVerificationResult {
+        let mut pac_violations = Vec::new();
+        let mut mte_violations = Vec::new();
+        let mut bti_violations = Vec::new();
+        let mut capd_violations = Vec::new();
+
+        // Check CapD security: node capabilities vs declared CapD
+        for node in self.nodes.values() {
+            if let Some(region_id) = node.region {
+                if let Some(capd) = context.capd_assignments.get(&region_id.0) {
+                    // Check for capability violations: node uses caps not in CapD
+                    for cap in &node.capabilities {
+                        if !capd.capabilities.contains(cap) {
+                            capd_violations.push(CapDSecurityViolation {
+                                region: region_id.0,
+                                violated_capability: *cap,
+                                description: format!(
+                                    "Node in region {} has {} capability not declared in CapD",
+                                    region_id, cap
+                                ),
+                            });
+                        }
+                    }
+                    // Executable region with tainted data is a critical violation
+                    if capd.executable && node.security.taint.is_tainted() {
+                        capd_violations.push(CapDSecurityViolation {
+                            region: region_id.0,
+                            violated_capability: SecurityCapability::Execute,
+                            description: format!(
+                                "Region {} is executable but contains tainted data",
+                                region_id
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check PAC compliance if enabled
+        if context.pointer_auth_enabled {
+            for edge in &self.edges {
+                let from_node = match self.nodes.get(&edge.from) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // If a node has DerivePtr, its target region must also declare DerivePtr
+                if from_node.capabilities.contains(&SecurityCapability::DerivePtr) {
+                    if let Some(region_id) = from_node.region {
+                        if let Some(capd) = context.capd_assignments.get(&region_id.0) {
+                            if !capd.capabilities.contains(&SecurityCapability::DerivePtr) {
+                                pac_violations.push(PACViolation {
+                                    pointer_address: edge.from.0 as u64,
+                                    expected_code: 0,
+                                    actual_code: None,
+                                    description: format!(
+                                        "Pointer derivation at node {} requires DerivePtr in CapD for region {}",
+                                        edge.from, region_id
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check MTE compliance if enabled
+        if context.mte_enabled {
+            for (&region, capd) in &context.capd_assignments {
+                // Write-only region without read is suspicious for MTE
+                if capd.writable && !capd.readable {
+                    mte_violations.push(MTEViolation {
+                        address: region,
+                        expected_tag: 0,
+                        actual_tag: None,
+                        description: format!(
+                            "Region {} is writable but not readable — potential MTE tag mismatch",
+                            region
+                        ),
+                    });
+                }
+                // Non-readable, non-writable region should not exist
+                if !capd.readable && !capd.writable && !capd.executable {
+                    mte_violations.push(MTEViolation {
+                        address: region,
+                        expected_tag: 0,
+                        actual_tag: None,
+                        description: format!(
+                            "Region {} has no access capabilities — dead allocation MTE concern",
+                            region
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Check BTI compliance if enabled
+        if context.bti_enabled {
+            for edge in &self.edges {
+                let to_node = match self.nodes.get(&edge.to) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // If target has Execute capability, its region must declare executable
+                if to_node.capabilities.contains(&SecurityCapability::Execute) {
+                    if let Some(region_id) = to_node.region {
+                        if let Some(capd) = context.capd_assignments.get(&region_id.0) {
+                            if !capd.executable {
+                                bti_violations.push(BTIViolation {
+                                    branch_source: edge.from.0 as u64,
+                                    branch_target: edge.to.0 as u64,
+                                    description: format!(
+                                        "Indirect branch to node {} targets executable code in region {} without BTI landing pad",
+                                        edge.to, region_id
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute overall verdict
+        let has_critical = !pac_violations.is_empty() || !bti_violations.is_empty();
+        let has_weakness = !mte_violations.is_empty() || !capd_violations.is_empty();
+
+        let overall = if !has_critical && !has_weakness {
+            SecurityVerdict::Secure
+        } else if has_critical {
+            let mut critical = Vec::new();
+            for v in &pac_violations {
+                critical.push(format!("PAC violation: {}", v.description));
+            }
+            for v in &bti_violations {
+                critical.push(format!("BTI violation: {}", v.description));
+            }
+            // Include CapD execute-on-tainted as critical
+            for v in &capd_violations {
+                if v.violated_capability == SecurityCapability::Execute {
+                    critical.push(format!("CapD violation: {}", v.description));
+                }
+            }
+            // Include MTE and non-critical CapD as weaknesses
+            for v in &mte_violations {
+                critical.push(format!("MTE violation: {}", v.description));
+            }
+            for v in &capd_violations {
+                if v.violated_capability != SecurityCapability::Execute {
+                    critical.push(format!("CapD violation: {}", v.description));
+                }
+            }
+            SecurityVerdict::Insecure {
+                critical_violations: critical,
+            }
+        } else {
+            let mut weaknesses = Vec::new();
+            for v in &mte_violations {
+                weaknesses.push(format!("MTE violation: {}", v.description));
+            }
+            for v in &capd_violations {
+                weaknesses.push(format!("CapD violation: {}", v.description));
+            }
+            SecurityVerdict::PartiallySecure { weaknesses }
+        };
+
+        SecurityVerificationResult {
+            pac_violations,
+            mte_violations,
+            bti_violations,
+            capd_violations,
+            overall,
+        }
+    }
+
+    /// Check PAC compliance for all pointer derivations.
+    ///
+    /// Returns a list of violations where derivations are incompatible
+    /// with PAC signing requirements. A derivation is PAC-incompatible if:
+    /// - It performs a size-changing cast that would corrupt the PAC code.
+    /// - It uses complex arithmetic that may produce out-of-range pointers.
+    pub fn check_pac_compliance(&self, derivations: &[Derivation]) -> Vec<PACViolation> {
+        let mut violations = Vec::new();
+
+        for deriv in derivations {
+            match &deriv.kind {
+                DerivationKind::Cast { from, to } => {
+                    // Casting between different-sized representations corrupts PAC
+                    if from.size != to.size {
+                        violations.push(PACViolation {
+                            pointer_address: deriv.proven_range.0.into(),
+                            expected_code: 0,
+                            actual_code: None,
+                            description: format!(
+                                "Pointer cast from {} ({} bytes) to {} ({} bytes) corrupts PAC code",
+                                from.name, from.size, to.name, to.size
+                            ),
+                        });
+                    }
+                }
+                DerivationKind::Arithmetic { .. } => {
+                    // Complex arithmetic may produce out-of-bounds pointers
+                    // that, when PAC-verified, will fail authentication.
+                    violations.push(PACViolation {
+                        pointer_address: deriv.proven_range.0.into(),
+                        expected_code: 0,
+                        actual_code: None,
+                        description: format!(
+                            "Pointer arithmetic on derivation {} may produce PAC-incompatible pointer",
+                            deriv.id
+                        ),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        violations
+    }
+
+    /// Check MTE compliance for all memory regions.
+    ///
+    /// Returns a list of violations where regions have tag mismatches
+    /// or configuration issues that would cause MTE faults.
+    pub fn check_mte_compliance(&self, regions: &[Region]) -> Vec<MTEViolation> {
+        let mut violations = Vec::new();
+
+        for region in regions {
+            // Freed regions should have been retagged — stale tags indicate UAF
+            if region.status == crate::region::RegionStatus::Freed {
+                violations.push(MTEViolation {
+                    address: region.base.into(),
+                    expected_tag: 0, // retagged on free
+                    actual_tag: None, // stale tag still accessible
+                    description: format!(
+                        "Region {} is freed but may still have stale MTE tags",
+                        region.id
+                    ),
+                });
+            }
+
+            // Leaked regions have no deallocation, so MTE retagging never happens
+            if region.status == crate::region::RegionStatus::Leaked {
+                violations.push(MTEViolation {
+                    address: region.base.into(),
+                    expected_tag: 0,
+                    actual_tag: None,
+                    description: format!(
+                        "Region {} is leaked — MTE cannot retag on deallocation",
+                        region.id
+                    ),
+                });
+            }
+        }
+
+        violations
+    }
+
+    /// Map a CapD to ARM64 Page Table Entry attributes.
+    ///
+    /// Translates VUMA capability semantics into the ARMv8-A PTE fields
+    /// used by the Pi 5's Cortex-A76 MMU for hardware-enforced access
+    /// control.
+    ///
+    /// # AP[2:1] Encoding
+    ///
+    /// | AP | EL1 Access | EL0 Access |
+    /// |----|------------|------------|
+    /// | 00 | RW         | None       |
+    /// | 01 | RW         | RW         |
+    /// | 10 | RO         | None       |
+    /// | 11 | RO         | RO         |
+    pub fn capd_to_pte_attributes(&self, capd: &CapDInfo) -> PTEAttributes {
+        // AP[2:1] encoding
+        let ap = match (capd.readable, capd.writable) {
+            (true, true) => 0b01,   // RW at both ELs
+            (true, false) => 0b11,  // RO at both ELs
+            (false, true) => 0b00,  // RW @ EL1 only (unusual)
+            (false, false) => 0b00, // No access
+        };
+
+        // Shareability: Inner Shareable for Confidential+,
+        // Outer Shareable for lower levels.
+        let sh = if capd.security_level >= SecurityLevel::Confidential {
+            0b10 // Inner Shareable
+        } else {
+            0b11 // Outer Shareable
+        };
+
+        // Access Flag: always set for active regions
+        let af = true;
+
+        // non-Global: regions at Confidential+ are ASID-tagged
+        let nG = capd.security_level >= SecurityLevel::Confidential;
+
+        // Privileged Execute Never: set unless executable AND below Secret
+        let pxn = !capd.executable || capd.security_level >= SecurityLevel::Secret;
+
+        // Unprivileged Execute Never: set unless executable AND Public/Internal
+        let uxn = !capd.executable || capd.security_level > SecurityLevel::Internal;
+
+        // Dirty Bit Modifier: enabled for writable regions
+        let dbm = capd.writable;
+
+        PTEAttributes {
+            ap,
+            sh,
+            af,
+            nG,
+            pxn,
+            uxn,
+            dbm,
         }
     }
 }
@@ -2441,5 +3067,482 @@ mod tests {
 
         let result = TaintTracker::propagate_chain(&d2, &taint_map, lookup);
         assert!(result.contains(&TaintSource::UntrustedFile));
+    }
+
+    // ── IVE Integration Tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_pac_compliance_detects_size_changing_cast() {
+        use crate::address::Address;
+        use crate::derivation::{DerivationKind, DerivationSource, RepD};
+
+        let verifier = SecurityVerifier::new();
+
+        let deriv = Derivation {
+            id: DerivationId(1),
+            source: DerivationSource::Region(RegionId(1)),
+            kind: DerivationKind::Cast {
+                from: RepD { name: "*mut u8".into(), size: 1 },
+                to: RepD { name: "*mut u64".into(), size: 8 },
+            },
+            proven_range: (Address::from(0x1000_u64), Address::from(0x2000_u64)),
+        };
+
+        let violations = verifier.check_pac_compliance(&[deriv]);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("corrupts PAC code"));
+        assert_eq!(violations[0].pointer_address, 0x1000);
+    }
+
+    #[test]
+    fn test_pac_compliance_allows_same_size_cast() {
+        use crate::address::Address;
+        use crate::derivation::{DerivationKind, DerivationSource, RepD};
+
+        let verifier = SecurityVerifier::new();
+
+        let deriv = Derivation {
+            id: DerivationId(1),
+            source: DerivationSource::Region(RegionId(1)),
+            kind: DerivationKind::Cast {
+                from: RepD { name: "*mut i32".into(), size: 4 },
+                to: RepD { name: "*mut u32".into(), size: 4 },
+            },
+            proven_range: (Address::from(0x1000_u64), Address::from(0x2000_u64)),
+        };
+
+        let violations = verifier.check_pac_compliance(&[deriv]);
+        assert!(violations.is_empty(), "Same-size cast should not produce PAC violations");
+    }
+
+    #[test]
+    fn test_pac_compliance_detects_arithmetic() {
+        use crate::address::Address;
+        use crate::derivation::{DerivationExpr, DerivationKind, DerivationSource};
+
+        let verifier = SecurityVerifier::new();
+
+        let deriv = Derivation {
+            id: DerivationId(1),
+            source: DerivationSource::Region(RegionId(1)),
+            kind: DerivationKind::Arithmetic {
+                expr: DerivationExpr::Add(
+                    Box::new(DerivationExpr::Constant(16)),
+                    Box::new(DerivationExpr::Scaled { factor: 2, stride: 8 }),
+                ),
+            },
+            proven_range: (Address::from(0x1000_u64), Address::from(0x2000_u64)),
+        };
+
+        let violations = verifier.check_pac_compliance(&[deriv]);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("PAC-incompatible"));
+    }
+
+    #[test]
+    fn test_mte_compliance_detects_freed_region() {
+        use crate::address::Address;
+        use crate::region::RegionStatus;
+
+        let verifier = SecurityVerifier::new();
+
+        let region = Region {
+            id: RegionId(1),
+            base: Address::from(0x1000_u64),
+            size: 0x100,
+            status: RegionStatus::Freed,
+            alloc_point: pp(1),
+            free_point: Some(pp(2)),
+            owner_context: None,
+        };
+
+        let violations = verifier.check_mte_compliance(&[region]);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("stale MTE tags"));
+        assert_eq!(violations[0].address, 0x1000);
+    }
+
+    #[test]
+    fn test_mte_compliance_detects_leaked_region() {
+        use crate::address::Address;
+        use crate::region::RegionStatus;
+
+        let verifier = SecurityVerifier::new();
+
+        let region = Region {
+            id: RegionId(1),
+            base: Address::from(0x2000_u64),
+            size: 0x200,
+            status: RegionStatus::Leaked,
+            alloc_point: pp(1),
+            free_point: None,
+            owner_context: None,
+        };
+
+        let violations = verifier.check_mte_compliance(&[region]);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("leaked"));
+    }
+
+    #[test]
+    fn test_mte_compliance_clean_for_live_region() {
+        use crate::address::Address;
+        use crate::region::RegionStatus;
+
+        let verifier = SecurityVerifier::new();
+
+        let region = Region {
+            id: RegionId(1),
+            base: Address::from(0x3000_u64),
+            size: 0x100,
+            status: RegionStatus::Allocated,
+            alloc_point: pp(1),
+            free_point: None,
+            owner_context: None,
+        };
+
+        let violations = verifier.check_mte_compliance(&[region]);
+        assert!(violations.is_empty(), "Live region should not produce MTE violations");
+    }
+
+    #[test]
+    fn test_bti_compliance_detects_missing_landing_pad() {
+        let mut verifier = SecurityVerifier::new();
+
+        // Node with Execute capability in region 1
+        let from_node = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Read].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        let to_node = SecNode {
+            id: NodeId(2),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Execute].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+
+        verifier.add_node(from_node);
+        verifier.add_node(to_node);
+        verifier.add_edge(SecEdge {
+            from: NodeId(1),
+            to: NodeId(2),
+            implicit: false,
+            boundary: None,
+        });
+
+        // Context: region 1 is NOT declared as executable
+        let mut ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        ctx.add_capd(1, CapDInfo::read_only(SecurityLevel::Public));
+
+        let result = verifier.verify_security_properties(&ctx);
+        assert_eq!(result.bti_violations.len(), 1);
+        assert!(result.bti_violations[0].description.contains("BTI landing pad"));
+    }
+
+    #[test]
+    fn test_bti_compliance_passes_with_executable_capd() {
+        let mut verifier = SecurityVerifier::new();
+
+        let from_node = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Read].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        let to_node = SecNode {
+            id: NodeId(2),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Execute].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+
+        verifier.add_node(from_node);
+        verifier.add_node(to_node);
+        verifier.add_edge(SecEdge {
+            from: NodeId(1),
+            to: NodeId(2),
+            implicit: false,
+            boundary: None,
+        });
+
+        // Context: region 1 IS declared as executable
+        let mut ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        ctx.add_capd(1, CapDInfo::executable(SecurityLevel::Public));
+
+        let result = verifier.verify_security_properties(&ctx);
+        assert!(result.bti_violations.is_empty());
+    }
+
+    #[test]
+    fn test_capd_to_pte_read_only() {
+        let verifier = SecurityVerifier::new();
+        let capd = CapDInfo::read_only(SecurityLevel::Public);
+        let pte = verifier.capd_to_pte_attributes(&capd);
+
+        assert_eq!(pte.ap, 0b11); // RO at both ELs
+        assert!(pte.af);
+        assert!(!pte.nG); // Public → not ASID-tagged
+        assert!(pte.pxn); // Not executable → PXN set
+        assert!(pte.uxn); // Not executable → UXN set
+        assert!(!pte.dbm); // Not writable → no DBM
+        assert_eq!(pte.sh, 0b11); // Public → Outer Shareable
+    }
+
+    #[test]
+    fn test_capd_to_pte_read_write() {
+        let verifier = SecurityVerifier::new();
+        let capd = CapDInfo::read_write(SecurityLevel::Internal);
+        let pte = verifier.capd_to_pte_attributes(&capd);
+
+        assert_eq!(pte.ap, 0b01); // RW at both ELs
+        assert!(pte.af);
+        assert!(!pte.nG); // Internal < Confidential → not ASID-tagged
+        assert!(pte.pxn); // Not executable → PXN set
+        assert!(pte.uxn); // Not executable → UXN set
+        assert!(pte.dbm); // Writable → DBM set
+        assert_eq!(pte.sh, 0b11); // Internal → Outer Shareable
+    }
+
+    #[test]
+    fn test_capd_to_pte_executable() {
+        let verifier = SecurityVerifier::new();
+        let capd = CapDInfo::executable(SecurityLevel::Public);
+        let pte = verifier.capd_to_pte_attributes(&capd);
+
+        assert_eq!(pte.ap, 0b11); // RO at both ELs (readable, not writable)
+        assert!(pte.af);
+        assert!(!pte.nG); // Public → not ASID-tagged
+        assert!(!pte.pxn); // Executable + Public < Secret → PXN clear
+        assert!(!pte.uxn); // Executable + Public ≤ Internal → UXN clear
+        assert!(!pte.dbm); // Not writable
+    }
+
+    #[test]
+    fn test_capd_to_pte_confidential_is_nG() {
+        let verifier = SecurityVerifier::new();
+        let capd = CapDInfo::read_write(SecurityLevel::Confidential);
+        let pte = verifier.capd_to_pte_attributes(&capd);
+
+        assert!(pte.nG); // Confidential ≥ Confidential → ASID-tagged
+        assert_eq!(pte.sh, 0b10); // Confidential → Inner Shareable
+    }
+
+    #[test]
+    fn test_capd_to_pte_secret_executable_pxn() {
+        let verifier = SecurityVerifier::new();
+        let capd = CapDInfo::executable(SecurityLevel::Secret);
+        let pte = verifier.capd_to_pte_attributes(&capd);
+
+        assert!(pte.pxn); // Secret level → PXN even if executable
+        assert!(pte.uxn); // Secret > Internal → UXN set
+    }
+
+    #[test]
+    fn test_security_verdict_secure() {
+        let verifier = SecurityVerifier::new();
+        let ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        let result = verifier.verify_security_properties(&ctx);
+
+        assert!(result.is_secure());
+        assert_eq!(result.total_violations(), 0);
+        assert!(matches!(result.overall, SecurityVerdict::Secure));
+    }
+
+    #[test]
+    fn test_security_verdict_partially_secure() {
+        let mut verifier = SecurityVerifier::new();
+
+        // Add a node that will trigger MTE violation (write-only CapD)
+        let node = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Read].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        verifier.add_node(node);
+
+        let mut ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        // Add a write-only (no read) CapD → triggers MTE violation
+        ctx.add_capd(1, CapDInfo {
+            capabilities: [SecurityCapability::Write].into_iter().collect(),
+            security_level: SecurityLevel::Public,
+            executable: false,
+            writable: true,
+            readable: false,
+        });
+
+        let result = verifier.verify_security_properties(&ctx);
+        assert!(!result.is_secure());
+        assert!(!result.mte_violations.is_empty());
+        assert!(matches!(result.overall, SecurityVerdict::PartiallySecure { .. }));
+    }
+
+    #[test]
+    fn test_security_verdict_insecure() {
+        let mut verifier = SecurityVerifier::new();
+
+        // Node with DerivePtr in a region without DerivePtr in CapD → PAC violation
+        let node = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::DerivePtr].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        let node2 = SecNode {
+            id: NodeId(2),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Read].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        verifier.add_node(node);
+        verifier.add_node(node2);
+        verifier.add_edge(SecEdge {
+            from: NodeId(1),
+            to: NodeId(2),
+            implicit: false,
+            boundary: None,
+        });
+
+        let mut ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        // CapD for region 1 does NOT include DerivePtr → PAC violation
+        ctx.add_capd(1, CapDInfo::read_only(SecurityLevel::Public));
+
+        let result = verifier.verify_security_properties(&ctx);
+        assert!(!result.is_secure());
+        assert!(!result.pac_violations.is_empty());
+        assert!(matches!(result.overall, SecurityVerdict::Insecure { .. }));
+    }
+
+    #[test]
+    fn test_mixed_security_violations() {
+        let mut verifier = SecurityVerifier::new();
+
+        // Node with DerivePtr → PAC violation (CapD lacks DerivePtr)
+        let node1 = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::DerivePtr].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        // Node with Execute → BTI violation (CapD not executable)
+        let node2 = SecNode {
+            id: NodeId(2),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::Execute].into_iter().collect(),
+            taint_sources: HashSet::new(),
+        };
+        verifier.add_node(node1);
+        verifier.add_node(node2);
+        verifier.add_edge(SecEdge {
+            from: NodeId(1),
+            to: NodeId(2),
+            implicit: false,
+            boundary: None,
+        });
+
+        let mut ctx = SecurityVerificationContext::new(SecurityLevel::Public);
+        // Region 1: read-only, no DerivePtr, no Execute → multiple violations
+        ctx.add_capd(1, CapDInfo::read_only(SecurityLevel::Public));
+
+        let result = verifier.verify_security_properties(&ctx);
+        assert!(!result.pac_violations.is_empty(), "Expected PAC violations");
+        assert!(!result.bti_violations.is_empty(), "Expected BTI violations");
+        assert!(result.total_violations() >= 2);
+        assert!(matches!(result.overall, SecurityVerdict::Insecure { .. }));
+    }
+
+    #[test]
+    fn test_verification_context_disabled_no_violations() {
+        let mut verifier = SecurityVerifier::new();
+
+        let node = SecNode {
+            id: NodeId(1),
+            security: SecurityRel::at(SecurityLevel::Public),
+            region: Some(RegionId(1)),
+            capabilities: [SecurityCapability::DerivePtr, SecurityCapability::Execute]
+                .into_iter()
+                .collect(),
+            taint_sources: HashSet::new(),
+        };
+        verifier.add_node(node);
+
+        let mut ctx = SecurityVerificationContext::disabled(SecurityLevel::Public);
+        ctx.add_capd(1, CapDInfo::read_only(SecurityLevel::Public));
+
+        let result = verifier.verify_security_properties(&ctx);
+        // PAC and BTI checks are skipped when disabled
+        assert!(result.pac_violations.is_empty());
+        assert!(result.bti_violations.is_empty());
+        // But CapD violations still checked
+        assert!(!result.capd_violations.is_empty());
+    }
+
+    #[test]
+    fn test_security_verification_result_display() {
+        let result = SecurityVerificationResult {
+            pac_violations: vec![PACViolation {
+                pointer_address: 0x1000,
+                expected_code: 42,
+                actual_code: None,
+                description: "test PAC violation".into(),
+            }],
+            mte_violations: vec![],
+            bti_violations: vec![],
+            capd_violations: vec![],
+            overall: SecurityVerdict::Insecure {
+                critical_violations: vec!["PAC violation: test PAC violation".into()],
+            },
+        };
+
+        let display = format!("{}", result);
+        assert!(display.contains("pac=1"));
+        assert!(display.contains("Insecure"));
+    }
+
+    #[test]
+    fn test_pte_attributes_display() {
+        let pte = PTEAttributes {
+            ap: 0b11,
+            sh: 0b10,
+            af: true,
+            nG: true,
+            pxn: false,
+            uxn: false,
+            dbm: true,
+        };
+        let display = format!("{}", pte);
+        assert!(display.contains("ap=0b11"));
+        assert!(display.contains("nG=true"));
+    }
+
+    #[test]
+    fn test_capd_info_convenience_constructors() {
+        let ro = CapDInfo::read_only(SecurityLevel::Public);
+        assert!(ro.readable);
+        assert!(!ro.writable);
+        assert!(!ro.executable);
+        assert!(ro.capabilities.contains(&SecurityCapability::Read));
+
+        let rw = CapDInfo::read_write(SecurityLevel::Internal);
+        assert!(rw.readable);
+        assert!(rw.writable);
+        assert!(!rw.executable);
+
+        let ex = CapDInfo::executable(SecurityLevel::Confidential);
+        assert!(ex.readable);
+        assert!(!ex.writable);
+        assert!(ex.executable);
+        assert!(ex.capabilities.contains(&SecurityCapability::Execute));
     }
 }

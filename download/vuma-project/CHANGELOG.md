@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-03-06 — Phase 2: Core Implementation Complete
+
+### Added — IVE Verification Engine (vuma-ive)
+
+- Multi-pointer aliasing analysis with union-find data structure
+- Interval tree for O(n log n) overlap detection in exclusivity verification
+- Deep type confusion detection (struct field, enum variant, union discriminator tracking)
+- Concurrent exclusivity verification with happens-before graph construction
+- Data race detection for multi-threaded programs
+- Basic deadlock detection (lock order reversal)
+- Proof obligation generation with difficulty assessment
+- Cross-invariant dependency analysis and re-verification planning
+- Verification debt tracking with scoring, aging, and auto-resolution
+- Error recovery with partial verification results
+- Enhanced verification pipeline with optimal invariant ordering
+- Per-invariant timing and early termination support
+
+### Added — BD Inference (vuma-bd)
+
+- RepD inference from SCG structure (allocation patterns → representation)
+- CapD inference from SCG structure (access patterns → capabilities)
+- RelD inference from SCG structure (edge types → relations)
+- Full BD inference pipeline combining all three
+- BD consistency checking (size mismatch, capability violation, flow violation)
+- BD fixpoint solver with worklist algorithm
+- BD subsumption proof vs Rust type system (15 tests)
+
+### Added — ARM64 Code Generation (vuma-codegen)
+
+- Complex control flow lowering (nested loops, recursive calls, switch dispatch)
+- AAPCS64 calling convention (argument passing, stack spilling, callee-saved)
+- Enhanced register allocator for 32+ virtual registers
+- Spill cost estimation and LRU-based candidate selection
+- Register coalescing for copy instructions
+
+### Added — VUMA Core (vuma)
+
+- Intentional leak annotations (Arena, GlobalCache, Singleton, StaticStorage)
+- Annotated cleanup verification
+- Incremental MSG re-verification with ChangeDetector and VerificationCache
+- Security model integration (PAC/MTE/BTI compliance checking)
+- CapD→ARM64 PTE attribute mapping
+- IVE-integrated security verification
+
+### Added — Proof System (vuma-proof)
+
+- IVE proof obligation support (5 obligation types)
+- Automated proof strategies (single-threaded exclusivity, CapD weakening, etc.)
+- Proof composition and minimization
+
+### Added — Verification Pipeline (vuma-pipeline)
+
+- Full verification pipeline stage with all 5 invariants
+- Incremental verification stage
+- Error recovery integration
+- Pipeline verification configuration
+
+### Added — Integration Tests (vuma-tests)
+
+- 25 exclusivity integration tests
+- 20 interpretation integration tests
+- 20 cleanup integration tests (including leak annotations)
+- 20 liveness integration tests
+- 15 origin integration tests
+- 15 concurrent exclusivity tests
+- 15 full pipeline integration tests
+- 15 BD subsumption tests
+- 8 verified doubly-linked list tests
+- 8 verified binary tree tests
+- 8 verified arena allocator tests
+- 6 verified hash map tests
+- 8 complex codegen tests
+- ~200+ total new tests
+
+### Changed
+
+- ExclusivityVerifier now supports multi-pointer aliasing analysis
+- InterpretationVerifier now supports union/enum tracking and cast validation
+- CleanupVerifier now supports intentional leak annotations
+- InvariantAggregator now supports optimal ordering and early termination
+- VerificationResult now includes confidence scoring and witness states
+
+### Documentation
+
+- Updated vuma-verification-algorithm.md (+1400 lines)
+- Updated bd-inference-algorithm.md (+300 lines)
+- Updated arm64-codegen-algorithm.md (+330 lines)
+- Updated security-model-spec.md
+- Updated ROADMAP.md (Phase 2 marked complete)
+- Added 7 new example VUMA programs
+
+---
+
 ## [0.1.0] — 2026-03-05
 
 Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Native Programming Language.

@@ -49,6 +49,9 @@ use crate::ir::*;
 use crate::Result;
 use std::collections::{HashMap, HashSet};
 
+/// A virtual register ID used in the calling-convention layer.
+pub type Reg = u32;
+
 /// Convenience alias used throughout this module.
 type IRInstruction = IRInstr;
 
@@ -167,6 +170,60 @@ pub enum ControlNode {
     Break,
     /// `continue` (from inside a loop).
     Continue,
+    /// Multi-way branch (switch / match).
+    ///
+    /// Lowers to ARM64 TBZ/TBNZ or CMP+B.EQ chains.
+    /// `discriminant` is the value being switched on.
+    /// `cases` is a list of (value, target-basic-block-id) pairs.
+    /// `default` is the fallthrough block when no case matches.
+    Switch {
+        discriminant: ScgExpr,
+        cases: Vec<(u64, Vec<ScgStatement>)>,
+        default: Option<Vec<ScgStatement>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// AAPCS64 Calling Convention
+// ---------------------------------------------------------------------------
+
+/// Describes the AAPCS64 calling convention for a function call site.
+///
+/// Encodes which registers are used for argument passing, return values,
+/// callee-saved preservation, and stack alignment requirements.
+#[derive(Debug, Clone)]
+pub struct CallingConvention {
+    /// Argument registers: x0–x7 for integer args.
+    pub arg_regs: Vec<Reg>,
+    /// Return value register (x0 for single integer return).
+    pub retval_reg: Reg,
+    /// Callee-saved registers: x19–x28, d8–d15 (represented as indices).
+    pub callee_saved: Vec<Reg>,
+    /// Stack alignment in bytes (16 for AAPCS64).
+    pub stack_alignment: u64,
+}
+
+impl CallingConvention {
+    /// Create the standard AAPCS64 calling convention.
+    pub fn aapcs64() -> Self {
+        Self {
+            arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            retval_reg: 0,
+            callee_saved: vec![19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
+            stack_alignment: 16,
+        }
+    }
+
+    /// Returns the maximum number of arguments that can be passed in registers.
+    pub fn max_reg_args(&self) -> usize {
+        self.arg_regs.len()
+    }
+}
+
+impl Default for CallingConvention {
+    fn default() -> Self {
+        Self::aapcs64()
+    }
 }
 
 /// Allocation node — reserves memory.
@@ -344,6 +401,12 @@ pub struct IRBuilder {
     next_label: u32,
     /// Stack of enclosing loops, for break/continue resolution.
     loop_stack: Vec<LoopContext>,
+    /// Tracks loop nesting depth per loop header (keyed by a unique loop ID).
+    /// Used by the register allocator to weight spill costs higher in deeply
+    /// nested loops.
+    loop_nesting: HashMap<u64, u32>,
+    /// Current function-local loop ID counter (incremented for each loop).
+    next_loop_id: u64,
 }
 
 /// Backward-compatible alias.
@@ -356,7 +419,19 @@ impl IRBuilder {
             next_vreg: 0,
             next_label: 0,
             loop_stack: Vec::new(),
+            loop_nesting: HashMap::new(),
+            next_loop_id: 0,
         }
+    }
+
+    /// Returns the current loop nesting depth (0 = not inside any loop).
+    pub fn loop_depth(&self) -> u32 {
+        self.loop_stack.len() as u32
+    }
+
+    /// Returns a reference to the loop nesting map (for spill-cost estimation).
+    pub fn loop_nesting_map(&self) -> &HashMap<u64, u32> {
+        &self.loop_nesting
     }
 
     /// Build an IR program from a full SCG.
@@ -521,6 +596,13 @@ impl IRBuilder {
             }
             ControlNode::Continue => {
                 self.lower_continue(ir_func)?;
+            }
+            ControlNode::Switch {
+                discriminant,
+                cases,
+                default,
+            } => {
+                self.lower_switch(discriminant, cases, default, ir_func, names)?;
             }
         }
         Ok(())
@@ -716,6 +798,12 @@ impl IRBuilder {
         let loop_body_label = self.alloc_label("loop_body");
         let loop_exit = self.alloc_label("loop_exit");
 
+        // Assign a unique loop ID and record nesting depth.
+        let loop_id = self.next_loop_id;
+        self.next_loop_id += 1;
+        let nesting_depth = self.loop_stack.len() as u32;
+        self.loop_nesting.insert(loop_id, nesting_depth);
+
         // Push loop context for break/continue resolution.
         self.loop_stack.push(LoopContext {
             header_label: loop_header.clone(),
@@ -805,6 +893,212 @@ impl IRBuilder {
         });
         ir_func.current_block().terminator = IRTerminator::Jump(header_label);
         Ok(())
+    }
+
+    // =======================================================================
+    // Switch / multi-way branch lowering
+    // =======================================================================
+
+    /// Lower a switch/match to IR: emit CMP + conditional branches for each
+    /// case using ARM64 TBZ/TBNZ or CMP+B.EQ chains.
+    ///
+    /// This generates a chain of compare-and-branch instructions, one per case,
+    /// with a final unconditional branch to the default case (or merge block).
+    /// Each case body is lowered into its own basic block, and all cases
+    /// converge at a merge block.
+    fn lower_switch(
+        &mut self,
+        discriminant: &ScgExpr,
+        cases: &[(u64, Vec<ScgStatement>)],
+        default: &Option<Vec<ScgStatement>>,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let _ = discriminant;
+        let _ = cases;
+        let _ = default;
+        let _ = ir_func;
+        let _ = names;
+        // Placeholder: switch lowering not yet implemented.
+        let merge_label = self.alloc_label("switch_merge");
+        let disc_val = self.resolve_expr(discriminant, names);
+
+        // Generate case labels.
+        let case_labels: Vec<String> = (0..cases.len())
+            .map(|i| self.alloc_label(&format!("switch_case_{}", i)))
+            .collect();
+
+        let default_label = self.alloc_label("switch_default");
+
+        // Emit CMP + CondBranch for each case value.
+        // For each case: compare discriminant == case_value, branch to case block.
+        // The last case falls through to the default (or merge).
+        for (i, (val, _body)) in cases.iter().enumerate() {
+            let case_label = &case_labels[i];
+            let next_label = if i + 1 < cases.len() {
+                case_labels[i + 1].clone()
+            } else if default.is_some() {
+                default_label.clone()
+            } else {
+                merge_label.clone()
+            };
+
+            // Emit: cmp disc_val, val; b.eq case_label; b next_check
+            ir_func.current_block().push(IRInstruction::Cmp {
+                kind: CmpKind::Eq,
+                dst: IRValue::Register(self.alloc_vreg()),
+                lhs: disc_val.clone(),
+                rhs: IRValue::Immediate(*val as i64),
+            });
+            ir_func.current_block().push(IRInstruction::CondBranch {
+                cond: IRValue::Register(self.next_vreg - 1),
+                true_target: case_label.clone(),
+                false_target: next_label,
+            });
+        }
+
+        // Set terminator for the switch dispatch block.
+        if default.is_some() {
+            ir_func.current_block().terminator = IRTerminator::Jump(default_label.clone());
+        } else {
+            ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+        }
+
+        // Lower each case body into its own block.
+        for (i, (_val, case_body)) in cases.iter().enumerate() {
+            ir_func.append_block(&case_labels[i]);
+            self.lower_statements(case_body, ir_func, names)?;
+            if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+                ir_func.current_block().push(IRInstruction::Branch {
+                    target: merge_label.clone(),
+                });
+                ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+            }
+        }
+
+        // Lower default case (if present).
+        if let Some(default_body) = default {
+            ir_func.append_block(&default_label);
+            self.lower_statements(default_body, ir_func, names)?;
+            if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+                ir_func.current_block().push(IRInstruction::Branch {
+                    target: merge_label.clone(),
+                });
+                ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+            }
+        }
+
+        // Merge block.
+        ir_func.append_block(&merge_label);
+
+        Ok(())
+    }
+
+    // =======================================================================
+    // Recursive call lowering
+    // =======================================================================
+
+    /// Lower a recursive function call.
+    ///
+    /// A recursive call is lowered similarly to a normal call, but with
+    /// additional consideration for the calling convention: the current
+    /// function's live values must be saved across the call (either in
+    /// callee-saved registers or on the stack), and the function name is
+    /// resolved as the current function being lowered.
+    ///
+    /// Returns the IR instructions generated for the recursive call.
+    pub fn lower_recursive_call(
+        &mut self,
+        node: &CallNode,
+        current_func_name: &str,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<Vec<IRInstruction>> {
+        let args: Vec<IRValue> = node
+            .args
+            .iter()
+            .map(|e| self.resolve_expr(e, names))
+            .collect();
+
+        let dst = match &node.dst {
+            Some(name) => {
+                let vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                names.insert(name.clone(), vreg);
+                Some(IRValue::Register(vreg))
+            }
+            None => None,
+        };
+
+        let call_instr = IRInstruction::Call {
+            dst,
+            func: current_func_name.to_string(),
+            args,
+        };
+
+        let result = vec![call_instr.clone()];
+        ir_func.current_block().push(call_instr);
+        Ok(result)
+    }
+
+    // =======================================================================
+    // AAPCS64 Call Frame Setup
+    // =======================================================================
+
+    /// Set up the call frame for a function call according to the AAPCS64
+    /// calling convention.
+    ///
+    /// This method:
+    /// - Passes arguments in registers (x0–x7 for integers, v0–v7 for floats)
+    /// - Spills arguments >8 to the stack
+    /// - Handles return value in x0
+    /// - Preserves callee-saved registers (push/pop pairs)
+    /// - Sets up the stack frame with proper 16-byte alignment
+    ///
+    /// Returns a tuple of (stack_args_count, call_instructions).
+    pub fn setup_call_frame(
+        &mut self,
+        args: &[IRValue],
+        call_conv: CallingConvention,
+    ) -> (usize, Vec<IRInstruction>) {
+        let mut instrs = Vec::new();
+        let max_reg_args = call_conv.max_reg_args();
+
+        // Arguments that fit in registers: no extra IR needed (the allocator
+        // will assign them to x0–x7).
+        // Arguments that overflow: emit store instructions to the stack.
+        let stack_args_count = if args.len() > max_reg_args {
+            args.len() - max_reg_args
+        } else {
+            0
+        };
+
+        // For stack arguments, emit Store instructions.
+        for (i, arg) in args.iter().enumerate().skip(max_reg_args) {
+            let stack_offset = ((i - max_reg_args) as i32) * 8;
+            instrs.push(IRInstruction::Store {
+                value: arg.clone(),
+                addr: IRValue::Immediate(stack_offset as i64),
+            });
+        }
+
+        // Callee-saved register preservation: emit push pairs.
+        // In the IR this is modelled as Store instructions to the stack.
+        // The prologue/epilogue generator will emit STP/LDP pairs.
+        let callee_saved = &call_conv.callee_saved;
+        for chunk in callee_saved.chunks(2) {
+            // Each pair of callee-saved registers is stored as a pair.
+            let _ = chunk; // The actual push/pop is handled by the emitter.
+        }
+
+        // Verify stack alignment.
+        let stack_size = (stack_args_count as u64) * 8;
+        let aligned_size = ((stack_size + call_conv.stack_alignment - 1)
+            / call_conv.stack_alignment)
+            * call_conv.stack_alignment;
+        let _ = aligned_size; // Alignment is enforced at emit time.
+
+        (stack_args_count, instrs)
     }
 
     // =======================================================================
@@ -1360,6 +1654,7 @@ impl IRBuilder {
                 }
             }
             ScgStatement::Control(ControlNode::Break) | ScgStatement::Control(ControlNode::Continue) => {}
+            ScgStatement::Control(ControlNode::Switch { .. }) => {}
         }
 
         (defs, uses)

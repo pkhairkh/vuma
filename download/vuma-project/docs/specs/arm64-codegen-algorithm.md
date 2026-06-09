@@ -1179,4 +1179,336 @@ The combined effect of all five optimization passes — constant folding, dead c
 
 ---
 
-*End of ARM64 Code Generation Algorithm Specification — VUMA Project W1-28*
+## 8. Complex Control Flow Lowering (M2.5 Enhancement)
+
+The M2.5 milestone extends the VUMA code generator to handle complex control flow patterns beyond the simple conditional branches and function calls described in Section 1. Real-world programs require nested loops, recursive invocations, multi-way dispatch (switch/match), and the correct mapping of SCG ControlNode graphs to ARM64 basic blocks. This section documents the lowering strategies for each of these advanced control flow constructs, including the metadata tracking required for correct code generation and the instruction sequences emitted for the Cortex-A76.
+
+### Nested Loop Handling with Loop Nesting Tracking
+
+When the SCG contains nested ControlNode loops, the code generator must maintain a `loop_nesting` counter that tracks the current nesting depth. Each loop entry increments the counter, and each loop exit decrements it. The nesting depth determines which callee-saved registers are allocated to loop induction variables — deeper loops receive higher-priority register assignments since their variables are accessed more frequently. The code generator also uses the nesting depth to decide on loop unrolling aggressiveness: innermost loops (highest nesting depth) are candidates for full unrolling when the trip count is small, while outer loops are only partially unrolled or left intact.
+
+For nested loops, the code generator emits distinct loop labels that encode the nesting level, preventing label collisions. The innermost loop counter typically resides in a callee-saved register (e.g., `x19` for the outer loop, `x20` for the inner loop), while the outer loop counter must be preserved across inner loop iterations. If the inner loop contains function calls, the outer loop counter must be in a callee-saved register or spilled to the stack:
+
+```asm
+; Nested loop: outer (x19 = i), inner (x20 = j)
+mov x19, #0                ; i = 0
+.outer_loop:
+  mov x20, #0              ; j = 0
+  .inner_loop:
+    ldr x0, [x_base, x20, lsl #3]
+    add x0, x0, x19        ; use outer variable
+    str x0, [x_base, x20, lsl #3]
+    add x20, x20, #1
+    cmp x20, #16
+    b.lt .inner_loop
+  add x19, x19, #1
+  cmp x19, #8
+  b.lt .outer_loop
+```
+
+The `loop_nesting` metadata is attached to each loop's ControlNode in the SCG and propagated to the IR during the SCG-to-IR lowering pass. This metadata also informs the register allocator's spill cost estimation — variables in deeper loops have higher spill costs because a spill inside a deeply nested loop executes far more frequently than one in an outer scope.
+
+### Recursive Function Call Lowering
+
+Recursive calls are lowered using the standard `bl` instruction, but the code generator must ensure that the stack frame is properly set up to support arbitrary recursion depth. Each recursive invocation requires a full prologue/epilogue pair that saves the link register (`x30`) and the frame pointer (`x29`), allocates space for local variables, and preserves any callee-saved registers used by the function. The code generator marks recursive functions with a `is_recursive` flag during SCG analysis, which forces the emission of a complete frame pointer chain even in cases where a leaf function optimization would otherwise omit it.
+
+For tail-recursive functions, the code generator performs tail-call optimization by replacing the `bl` + `ret` sequence with a direct `b` (unconditional branch) to the function entry, reusing the current stack frame. This transforms stack-consuming recursion into constant-stack iteration:
+
+```asm
+; Tail-recursive: factorial accumulator
+; int fac(int n, int acc) { return n == 0 ? acc : fac(n-1, acc*n); }
+fac:
+  cmp x0, #0
+  b.eq .base_case
+  mul x1, x1, x0           ; acc *= n
+  sub x0, x0, #1           ; n -= 1
+  b fac                     ; tail call: reuse stack frame
+.base_case:
+  mov x0, x1               ; return acc
+  ret
+```
+
+### Switch/Match Dispatch
+
+Multi-way dispatch (switch/match) is lowered using a combination of test-bit-and-branch instructions (`TBZ`/`TBNZ`) for sparse boolean tests, compare-and-branch chains (`CMP` + `B.EQ`) for small case sets, and jump tables for dense case ranges. The code generator selects the lowering strategy based on the number and distribution of case values:
+
+**Small switch (≤4 cases):** Emit a linear chain of `CMP` + `B.EQ` pairs. This is the most efficient strategy for small case counts, as each comparison takes a single cycle on the Cortex-A76 when the branch is correctly predicted:
+
+```asm
+; Switch on x0 with cases 1, 3, 5, 7
+cmp x0, #1
+b.eq .case_1
+cmp x0, #3
+b.eq .case_3
+cmp x0, #5
+b.eq .case_5
+cmp x0, #7
+b.eq .case_7
+b .default_case
+```
+
+**Medium switch (5–15 cases):** Use `TBZ`/`TBNZ` for bit-pattern matching when cases map to power-of-two values, otherwise use a binary search tree of `CMP` + `B.LT`/`B.GT` pairs to achieve O(log n) dispatch time:
+
+```asm
+; Binary search dispatch for cases 0-15
+cmp x0, #8
+b.ge .upper_half
+cmp x0, #4
+b.ge .upper_quarter
+cmp x0, #2
+b.ge .check_2_3
+cmp x0, #0
+b.eq .case_0
+cmp x0, #1
+b.eq .case_1
+b .default
+```
+
+**Large switch (>15 cases, dense):** Emit a jump table in `.rodata` with a bounds-checked index. The discriminant is used as an index into the table after subtracting the minimum case value:
+
+```asm
+; Jump table dispatch for dense cases 0-63
+sub x1, x0, #0             ; offset by minimum case value
+cmp x1, #63                ; bounds check
+b.hi .default_case
+adrp x2, .jump_table
+add  x2, x2, :lo12:.jump_table
+ldr x2, [x2, x1, lsl #3]  ; load target address from table
+br x2                       ; indirect branch to case
+```
+
+### SCG ControlNode → IR BasicBlock Mapping
+
+The SCG-to-IR lowering pass maps each SCG ControlNode to one or more IR BasicBlocks. A simple branch ControlNode maps to a single BasicBlock with a conditional terminator. A switch ControlNode maps to a header BasicBlock (containing the dispatch logic) plus one BasicBlock per case arm. Loop ControlNodes map to a pre-header BasicBlock (for loop-invariant code motion), a header BasicBlock (containing the loop condition), a body BasicBlock, and an exit BasicBlock. The pre-header is crucial for the register allocator because it provides a single entry point where loop-invariant values can be hoisted and spilled registers can be restored. The mapping preserves the SCG's ControlFlow edge annotations in the IR's successor/predecessor lists, enabling later optimization passes to reconstruct the original control flow structure.
+
+---
+
+## 9. AAPCS64 Calling Convention — M2.5 Enhanced Details (M2.5 Enhancement)
+
+Section 2 described the foundational AAPCS64 calling convention as implemented by VUMA's code generator. The M2.5 milestone extends this with precise specifications for argument passing edge cases, stack spilling protocols for functions exceeding the register argument capacity, return value handling for complex types, callee-saved register preservation requirements, stack frame layout rules, and frame pointer conventions. This section provides the complete, implementation-ready specification that the code generator must follow when emitting function prologues, epilogues, and call sites.
+
+### Argument Passing: Integer Registers x0–x7
+
+The first eight integer or pointer arguments are passed in registers `x0` through `x7` in left-to-right order. Each argument consumes exactly one register regardless of its size — a `u8` argument passed in `x0` occupies the full 64-bit register, with the value zero-extended to 64 bits by the caller. Arguments smaller than 8 bytes are not packed into a single register; each argument gets its own register. This simplification avoids the complexity of bit-field packing and is consistent with how mainstream ARM64 compilers (GCC, Clang) handle sub-register arguments.
+
+### Argument Passing: Floating-Point Registers v0–v7
+
+Floating-point arguments in single-precision (`f32`) or double-precision (`f64`) format are passed in registers `v0` through `v7`. Each SIMD/floating-point register is 128 bits wide, but only the relevant portion is used: the bottom 32 bits for `f32` (register name `s0`–`s7`) and the bottom 64 bits for `f64` (register name `d0`–`d7`). Half-precision (`f16`) arguments use the bottom 16 bits of `v0`–`v7`. The integer and floating-point register assignment counters are independent: a function signature `(int, float, int, float)` maps to `(x0, s0, x1, s1)`, not `(x0, s0, x2, s2)`.
+
+### Stack Spilling for >8 Arguments
+
+When a function takes more than eight integer arguments or more than eight floating-point arguments, the excess arguments are passed on the stack. The caller must reserve space for these stack arguments before the `bl` instruction. Stack arguments are placed at ascending addresses from the stack pointer, with each argument occupying 8 bytes (naturally aligned). The ninth integer argument resides at `[sp, #0]`, the tenth at `[sp, #8]`, and so on. The caller must allocate at least enough stack space for all stack arguments, rounded up to 16-byte alignment:
+
+```asm
+; Function call with 10 integer arguments
+; x0-x7: args 1-8
+; Stack:  args 9-10
+sub sp, sp, #16            ; allocate 16 bytes for 2 stack args (16-byte aligned)
+mov x0, x_a1               ; arg 1
+mov x1, x_a2               ; arg 2
+; ... x2-x7 for args 3-8 ...
+str x_a9, [sp, #0]         ; arg 9 at [sp]
+str x_a10, [sp, #8]        ; arg 10 at [sp, #8]
+bl function_with_many_args
+add sp, sp, #16            ; clean up stack args
+```
+
+The callee accesses stack arguments via fixed offsets from the frame pointer or stack pointer, depending on the prologue structure. When the frame pointer is established, stack arguments are at `[x29, #16]`, `[x29, #24]`, etc. (offset by 16 to account for the saved `x29`/`x30` pair).
+
+### Return Value Handling
+
+Integer and pointer return values are placed in `x0`. Floating-point returns use `v0` (as `s0` for `f32`, `d0` for `f64`). For 128-bit integer returns, the value is split across `x0` (low 64 bits) and `x1` (high 64 bits). Composite structs returned by value follow the AAPCS64 Homogeneous Floating-point Aggregate (HFA) and Homogeneous Vector Aggregate (HVA) rules: if a struct consists entirely of up to four floating-point members, the members are returned in `v0`–`v3`. All other composites larger than 16 bytes are returned via the indirect return mechanism using `x8` as the caller-provided buffer pointer.
+
+### Callee-Saved Register Preservation: x19–x28, d8–d15
+
+The full set of callee-saved registers is: `x19` through `x28` (integer), `x29` (frame pointer), `x30` (link register), and `d8` through `d15` (floating-point). A function that modifies any of these registers must save and restore them. The code generator tracks which callee-saved registers are actually used by each function and only emits save/restore pairs for the registers that are actually clobbered. This minimizes prologue/epilogue overhead. The save order follows the AAPCS64 recommendation: registers are saved in ascending numerical order using `stp` pairs:
+
+```asm
+; Prologue: save x19-x22 and d8-d9 (only the ones we use)
+stp x29, x30, [sp, #-32]!   ; always save fp + lr
+mov x29, sp
+stp x19, x20, [sp, #16]     ; save callee-saved x19, x20
+stp x21, x22, [sp, #32]     ; save callee-saved x21, x22 (if needed)
+stp d8, d9, [sp, #48]       ; save callee-saved d8, d9
+```
+
+Floating-point callee-saved registers `d8`–`d15` are often overlooked in code generators that primarily target integer workloads. The VUMA code generator correctly handles these when the function uses floating-point operations that clobber `d8`–`d15`.
+
+### Stack Frame Layout: 16-Byte Alignment
+
+The stack frame layout follows a strict 16-byte alignment rule at all times. The total frame size (including saved registers, local variables, spill slots, and stack arguments for called functions) must be a multiple of 16 bytes. The layout from high address to low address is:
+
+```
+Higher Address
+  ┌──────────────────────────┐
+  │ Stack arguments to callees│  (if any)
+  ├──────────────────────────┤
+  │ Spill slots               │  8 bytes each
+  ├──────────────────────────┤
+  │ Local variables           │  8 bytes each, naturally aligned
+  ├──────────────────────────┤
+  │ Saved d8-d15              │  8 bytes each
+  ├──────────────────────────┤
+  │ Saved x19-x28             │  8 bytes each
+  ├──────────────────────────┤
+  │ Saved x29, x30            │  16 bytes (stp pair)
+  └──────────────────────────┘ ← x29 = sp after prologue
+Lower Address
+```
+
+The frame pointer `x29` points to the bottom of the saved register area, providing a stable reference for accessing locals, spill slots, and incoming stack arguments regardless of dynamic stack adjustments.
+
+### Frame Pointer Convention: x29
+
+The frame pointer `x29` is always established in non-leaf functions and in any function that has variadic arguments, uses `alloca`, or has dynamic stack allocation. Leaf functions (those that make no calls) may omit the frame pointer and use `sp`-relative addressing exclusively, which frees up `x29` as an additional general-purpose register. When the frame pointer is omitted, the compiler must ensure that all `sp`-relative references are recalculated whenever the stack pointer changes (e.g., when pushing arguments for a call). The VUMA code generator defaults to always using a frame pointer for correctness and debuggability, with an optimization flag to omit it in verified leaf functions.
+
+---
+
+## 10. Register Allocator Enhancement (M2.5 Enhancement)
+
+The M2.5 milestone significantly enhances the register allocator beyond the basic linear-scan strategy described in Section 3. The enhanced allocator supports 32 or more virtual registers, implements spill slot allocation with frame-pointer-relative addressing, employs a spill cost estimation heuristic, uses an LRU-based spill candidate selection algorithm, and performs register coalescing for copy instructions. These enhancements are essential for compiling the complex SCG graphs produced by VUMA's front end, where a single function may have dozens of simultaneously live values including BD metadata, IVE guard results, and bounds check temporaries.
+
+### Linear-Scan with 32+ Virtual Register Support
+
+The enhanced linear-scan allocator processes virtual registers in order of their live range start positions. Each virtual register is assigned a unique index, and the allocator supports up to 256 virtual registers per function (limited by a compile-time constant). When a virtual register becomes live, the allocator searches for an available physical register in the preferred class (argument, temporary, or callee-saved) based on the register partitioning described in Section 3. If no physical register is available, the allocator invokes the spill heuristic to free a register.
+
+The live range computation has been enhanced to handle the complex control flow patterns introduced in Section 8. For nested loops, the live range of a loop variable is extended to cover the entire loop body, including all nested sub-loops. For switch/match dispatch, the live range of a value defined before the switch and used after it is extended across all case arms. The allocator uses the SCG's ControlFlow edge annotations to compute precise live ranges that account for all possible execution paths.
+
+### Spill Slot Allocation
+
+Spill slots are pre-allocated in the function prologue at fixed offsets from the frame pointer. The number of spill slots is determined by the allocator's first pass, which counts the maximum number of simultaneously spilled virtual registers at any program point. Each spill slot is 8 bytes wide (sufficient for any general-purpose register value) and is accessed using `str`/`ldr` with the `[x29, #offset]` addressing mode:
+
+```asm
+; Prologue with 4 spill slots
+stp x29, x30, [sp, #-48]!   ; save fp, lr; 16 bytes
+mov x29, sp
+; Spill slot 0: [x29, #16]
+; Spill slot 1: [x29, #24]
+; Spill slot 2: [x29, #32]
+; Spill slot 3: [x29, #40]
+```
+
+For floating-point values that must be spilled, the allocator uses `str d0, [x29, #offset]` and `ldr d0, [x29, #offset]`, which also use 8-byte slots. SIMD values wider than 64 bits (e.g., 128-bit `q` registers) use 16-byte spill slots, requiring double-width alignment.
+
+### Spill Cost Estimation Heuristic
+
+The spill cost for a virtual register is estimated as the product of three factors: (1) the estimated execution frequency of each instruction that references the register (with loop nesting depth as a proxy, so references in a doubly-nested loop have 10x the cost of references in a single loop), (2) the number of distinct references to the register within its live range, and (3) a penalty factor for registers that are involved in memory access address computations (spilling such a register would require a reload before every load/store that uses it as a base or index register). The formula is:
+
+```
+spill_cost(vreg) = Σ (frequency(ref) × 1.0) + (address_use_count(vreg) × 5.0)
+```
+
+where `frequency(ref)` is the estimated execution frequency of the instruction containing the reference, and `address_use_count` counts the number of times the register appears as a base or index in a load/store instruction.
+
+### LRU-Based Spill Candidate Selection
+
+When a physical register must be freed, the allocator selects the spill candidate using a Least Recently Used (LRU) policy. Each physical register tracks the program counter position of its last definition or use. The register with the oldest last-use position is selected for spilling, on the assumption that its value is least likely to be needed again soon. This is similar to the page replacement algorithm in virtual memory systems and works well in practice because program execution tends to exhibit locality — recently used values are more likely to be used again.
+
+The LRU policy is modified by the spill cost heuristic: if the register with the oldest last-use position has a very high spill cost (e.g., it is a loop induction variable in a deeply nested loop), the allocator instead considers the next-oldest candidate. This prevents the catastrophic performance degradation that would result from spilling a hot loop variable to make room for a cold temporary. The threshold for "very high" spill cost is determined dynamically as 2× the median spill cost of all currently allocated registers.
+
+### Register Coalescing for Copy Instructions
+
+The allocator performs register coalescing to eliminate unnecessary `mov` instructions that copy values between registers. When the SCG contains a data-flow edge that maps to a register-to-register copy (e.g., `mov x0, x1`), the allocator attempts to assign the source and destination virtual registers to the same physical register, making the copy instruction a no-op that can be removed by the dead code elimination pass. Coalescing is attempted after the initial allocation pass and is governed by the following rules:
+
+1. **Same class coalescing:** Virtual registers in the same partition class (argument, temporary, callee-saved) can always be coalesced if neither register interferes with the other's live range.
+2. **Cross-class coalescing:** Virtual registers in different classes can be coalesced only if the resulting physical register is in a class that is valid for both uses (e.g., coalescing a temporary-class source with a callee-saved-class destination is allowed, since the callee-saved register is a superset of the temporary register's properties).
+3. **Conflict avoidance:** Coalescing is not performed if it would increase the spill cost of either register or if it would create a live range that spans a call site in a caller-saved register.
+
+The coalescing pass runs iteratively until no further copies can be eliminated, typically converging in 2–3 iterations. On the Cortex-A76, eliminating a `mov` instruction saves 1 cycle of execution time and reduces pressure on the issue slots, making coalescing particularly valuable in tight loops.
+
+---
+
+## 11. VUMA→ARM64 Instruction Mapping Table (M2.5 Enhancement)
+
+This section provides a consolidated reference table mapping each SCG node type to its ARM64 instruction sequence. While Sections 1–7 described each mapping in prose with examples, this table serves as a quick-reference for code generator implementers. The M2.5 enhancements add mappings for the complex control flow patterns described in Section 8 and include the enhanced register allocator's interaction with each node type.
+
+### SCG Node → ARM64 Instruction Mapping
+
+| SCG Node Type | ARM64 Instruction(s) | Notes |
+|---|---|---|
+| **AllocationNode** (Stack) | `sub sp, sp, #size` + `mov x0, sp` | Size rounded up to 16-byte alignment. For stack probing, insert `str xzr, [sp]` every 4096 bytes. |
+| **AllocationNode** (Heap) | `mov x0, #size` + `bl malloc` + `cbz x0, .fail` | NULL check required by VUMA safety profile. |
+| **AllocationNode** (Arena) | `add x0, x19, x20` + `add x20, x20, #size` | x19=arena_base, x20=arena_offset (callee-saved). |
+| **DeallocationNode** (Stack) | `add sp, sp, #size` | Size must match the corresponding AllocationNode. |
+| **DeallocationNode** (Heap) | `bl free` | Pointer in x0. |
+| **DeallocationNode** (Arena) | *(no code emitted)* | Bulk deallocation via `arena_destroy`. |
+| **AccessNode** (Read, fixed) | `ldr Xt, [Xn, #offset]` | Size suffix: `x` for 64-bit, `w` for 32-bit, `h` for 16-bit, `b` for 8-bit. |
+| **AccessNode** (Read, indexed) | `ldr Xt, [Xn, Xm, lsl #shift]` | Shift = log2(element_size). |
+| **AccessNode** (Write, fixed) | `str Xt, [Xn, #offset]` | Same size suffix rules as Read. |
+| **AccessNode** (Write, indexed) | `str Xt, [Xn, Xm, lsl #shift]` | Same shift rules as indexed Read. |
+| **CastNode** (same-size, same-domain) | *(no-op)* | Bits are reinterpreted in-place. |
+| **CastNode** (int↔float, same-size) | `fmov Dt, Xt` or `fmov Xt, Dt` | Cross-register-bank move. |
+| **CastNode** (widen int) | `sxtw Xt, Wt` (signed) or `mov Wt, Wt` (unsigned zero-extend) | Sign/zero extension. |
+| **CastNode** (int→float, convert) | `scvtf Dt, Xt` (signed) or `ucvtf Dt, Xt` (unsigned) | Numeric conversion, not bit reinterpret. |
+| **CastNode** (float→int, convert) | `fcvtzs Xt, Dt` (signed) or `fcvtzu Xt, Dt` (unsigned) | Truncates toward zero. |
+| **ControlNode** (Branch, zero/non-zero) | `cbz Xt, .label` / `cbnz Xt, .label` | Single-instruction conditional branch. |
+| **ControlNode** (Branch, comparison) | `cmp Xt, Xm` + `b.cc .label` | cc = eq/ne/lt/ge/lo/hs/etc. |
+| **ControlNode** (Call) | `bl target` | Return address in x30. |
+| **ControlNode** (Return) | `mov x0, Xt` + `ret` | Or just `ret` for void returns. |
+| **ControlNode** (Switch, ≤4 cases) | Chain of `cmp` + `b.eq` | Linear scan dispatch. |
+| **ControlNode** (Switch, 5–15 cases) | Binary search: `cmp` + `b.lt`/`b.ge` tree | O(log n) dispatch. |
+| **ControlNode** (Switch, >15 dense) | Jump table: `sub` + `cmp` + `adrp` + `ldr` + `br` | Bounds-checked indirect branch. |
+| **ControlNode** (Loop) | `cmp` + `b.cc` (back-edge) | loop_nesting metadata attached. |
+| **ComputationNode** (Add) | `add Xt, Xn, Xm` | Immediate form: `add Xt, Xn, #imm` |
+| **ComputationNode** (Sub) | `sub Xt, Xn, Xm` | Immediate form: `sub Xt, Xn, #imm` |
+| **ComputationNode** (Mul) | `mul Xt, Xn, Xm` | 3-cycle latency on Cortex-A76. |
+| **ComputationNode** (SDiv) | `sdiv Xt, Xn, Xm` | 4–12 cycle latency on Cortex-A76. |
+| **ComputationNode** (UDiv) | `udiv Xt, Xn, Xm` | 4–12 cycle latency on Cortex-A76. |
+| **ComputationNode** (And/Orr/Eor) | `and`/`orr`/`eor Xt, Xn, Xm` | 1-cycle latency, 4 per cycle throughput. |
+
+### SCG Node → MRS/MSR Mapping for Special Operations
+
+| SCG Node Type | Special Instruction | Purpose |
+|---|---|---|
+| **AllocationNode** (Stack probe) | `mrs Xt, sp` / `msr sp, Xt` | Read/write stack pointer for stack probing on large allocations. |
+| **AllocationNode** (Arena init) | `msr Xt, <system_reg>` | Initialize arena from system register (bare metal). |
+| **AccessNode** (BD metadata) | `mrs Xt, tpidr_el0` | Read thread pointer for thread-local BD metadata access. |
+| **ControlNode** (Tail call) | `b target` | Unconditional branch replaces `bl`+`ret` for tail calls. |
+| **ControlNode** (TBZ/TBNZ) | `tbz Xt, #bit, .label` / `tbnz Xt, #bit, .label` | Test single bit and branch — used for boolean switch discriminants. |
+
+---
+
+## 12. Pi 5 Specific Considerations (M2.5 Enhancement)
+
+The Raspberry Pi 5's BCM2712 SoC features four Cortex-A76 cores clocked at 2.4 GHz. The Cortex-A76 implements the ARMv8.2-A architecture with specific microarchitectural characteristics that the VUMA code generator must account for to achieve optimal performance. This section documents the pipeline considerations, instruction scheduling hints, cache geometry, and branch predictor behavior that are specific to the Pi 5 platform.
+
+### Cortex-A76 Pipeline Considerations
+
+The Cortex-A76 is a 4-wide out-of-order superscalar processor with an 11-stage integer pipeline and a 13–15-stage floating-point/SIMD pipeline. The out-of-order engine has a 128-entry reorder buffer (ROB) and can rename up to 4 micro-ops per cycle. The pipeline is divided into three clusters: ALU cluster (2 ALU pipes + 1 multiply pipe + 1 divide pipe), load/store cluster (2 load/store pipes with address generation), and the floating-point/SIMD cluster (1 FP multiply/add pipe + 1 FP miscellaneous pipe).
+
+Key pipeline characteristics that affect code generation:
+
+- **Multiply latency is 3 cycles** with 1-per-cycle throughput. Back-to-back multiplies create a bottleneck on the single multiply pipe. The scheduler should interleave multiplies with independent ALU operations.
+- **Division is not pipelined** and takes 4–12 cycles depending on operand magnitude. Division should be avoided in hot loops; the compiler should replace division by constants with multiply-by-reciprocal sequences.
+- **Load-use latency is 4 cycles** from the L1 data cache. The scheduler must fill at least 3 independent instruction slots between a load and the first use of the loaded value to avoid stalls.
+- **Store-to-load forwarding** works when a load follows a store to the same address with no size mismatch, with a 4-cycle forwarding latency. Mismatched sizes (e.g., store 64-bit, load 32-bit from the same address) incur a 9-cycle penalty on the Cortex-A76 because the store must complete to the L1 cache before the load can be satisfied.
+
+### Instruction Scheduling Hints
+
+The VUMA code generator emits scheduling hints using instruction ordering and alignment directives. While the Cortex-A76's out-of-order engine dynamically schedules instructions, the compiler's static scheduling can reduce pressure on the ROB and improve instruction cache utilization:
+
+- **Align loop entries to 16 bytes:** The Cortex-A76's fetch unit fetches 4 instructions per cycle from a 16-byte aligned boundary. Loop entries aligned to 16 bytes ensure that the first fetch of each loop iteration captures the maximum number of instructions, reducing fetch stalls.
+- **Avoid more than 3 consecutive branches:** The Cortex-A76 can predict up to 2 branches per cycle. Sequences of 3+ consecutive conditional branches create prediction bottlenecks. When possible, replace branch chains with `tbz`/`tbnz` or compute a branch target address.
+- **Schedule `adrp` early:** The `adrp` instruction has a 2-cycle latency on the Cortex-A76 because it computes a PC-relative page address. Place `adrp` instructions at least 2 instructions before the `add` or `ldr` that uses the result.
+- **Pair loads with independent ALU ops:** After each `ldr`, schedule 3–4 independent ALU instructions before using the loaded value. This fills the load-use latency bubble and keeps all 4 issue slots busy.
+
+### Cache Line Size: 64 Bytes
+
+The Cortex-A76's L1 data cache and L2 cache both use 64-byte cache lines. This has several implications for VUMA code generation:
+
+- **Structure padding:** Structures should be laid out to minimize cache line crossings for frequently accessed fields. The "hot" fields of a struct should be grouped together at the beginning, within a single 64-byte cache line if possible.
+- **Alignment of frequently accessed data:** Global variables and arena allocations that are accessed from hot loops should be 64-byte aligned to ensure they start at a cache line boundary, preventing false sharing between cores.
+- **Stack frame sizing:** The frame pointer and frequently accessed local variables should be placed within the first 64 bytes of the stack frame, as the L1 cache's spatial prefetcher is optimized for sequential access within a cache line.
+- **BD metadata layout:** When passing BD metadata through memory (for functions with many BD descriptors), the descriptors should be packed into 64-byte aligned blocks so that a single cache line fill satisfies multiple bounds checks.
+
+### Branch Predictor Behavior
+
+The Cortex-A76 uses a two-level adaptive branch predictor with a 4K-entry Branch Target Buffer (BTB) and a 4K-entry Global History Buffer (GHB). The predictor can predict up to 2 branches per cycle and maintains accuracy above 95% for most workloads. Key behaviors that affect code generation:
+
+- **Indirect branch prediction:** Indirect branches (used in jump-table switch dispatch) are predicted using a 256-entry indirect branch target cache. For switch statements with more than 256 distinct targets, the predictor may mispredict. The code generator should prefer direct branch chains for switches with 4 or fewer cases to avoid indirect branch misprediction penalties (~12 cycles on the Cortex-A76).
+- **Loop branch prediction:** The predictor correctly predicts loops with trip counts up to approximately 256 iterations without misprediction. For very short loops (1–3 iterations), the predictor may mispredict the loop exit. The code generator should fully unroll loops with known trip counts ≤4 to avoid branch misprediction overhead.
+- **Return prediction:** The Cortex-A76 has a 16-entry Return Stack Buffer (RSB) that predicts return addresses. Functions with call depth exceeding 16 levels may experience RSB overflow and return misprediction. The code generator does not need to emit `bti` instructions for return targets on the Cortex-A76 when BTI is disabled, but must insert `bti c` (Branch Target Identification, compatible) at indirect branch targets when BTI is enabled for security hardening.
+
+---
+
+*End of ARM64 Code Generation Algorithm Specification — VUMA Project W2-A8 (M2.5 Enhanced)*

@@ -78,6 +78,9 @@ pub use msg_incremental::{
     MSGDelta, DeltaResult, DeltaError, VerificationStatus,
     apply_delta, compute_delta, compute_scg_delta,
     SCGSnapshot, SCGNode, EntityDelta,
+    ChangeSet, ChangeDetector,
+    IncrementalVerificationResult, VerificationCache,
+    IncrementalMetrics, IncrementalVerifier,
 };
 pub use repl::{VumaRepl, ReplError, ReplResult, ReplProfile};
 pub use security::{
@@ -86,5 +89,8 @@ pub use security::{
     DeclassificationRecord, DeclassificationProof, GateFunctionId,
     SecurityViolation, Arm64SecurityMapping, Arm64Feature, PacKey, MteMode, BtiType,
     SecNode, SecEdge, SecurityVerifier, VerificationResult,
+    CapDInfo, PACViolation, MTEViolation, BTIViolation, CapDSecurityViolation,
+    SecurityVerdict, SecurityVerificationContext, SecurityVerificationResult,
+    PTEAttributes,
     propagate_taint_through_chain,
 };

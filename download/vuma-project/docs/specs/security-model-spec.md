@@ -1,10 +1,10 @@
 # VUMA Security Model Specification
 
 **Document ID:** VUMA-SPEC-SEC-001
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Formal Specification
 **Authors:** Agent W1-30, VUMA Core Team
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-03-06
 
 ---
 
@@ -16,6 +16,12 @@
 4. [Security Boundary Enforcement](#4-security-boundary-enforcement)
 5. [Attack Surface Reduction](#5-attack-surface-reduction)
 6. [Pi 5 Specific Security](#6-pi-5-specific-security)
+7. [IVE-Integrated Security Verification](#7-ive-integrated-security-verification)
+8. [PAC Compliance Checking](#8-pac-compliance-checking)
+9. [MTE Compliance Checking](#9-mte-compliance-checking)
+10. [BTI Compliance Checking](#10-bti-compliance-checking)
+11. [CapD→ARM64 PTE Mapping](#11-capdarm64-pte-mapping)
+12. [Graduated Security Verdict](#12-graduated-security-verdict)
 
 ---
 
@@ -603,4 +609,484 @@ The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on
 
 ---
 
-*End of VUMA Security Model Specification v1.0.0*
+## 7. IVE-Integrated Security Verification
+
+### 7.1 Overview
+
+The IVE-Integrated Security Verification subsystem unifies VUMA's static invariant checking with the ARM64 hardware security features (PAC, MTE, BTI) into a single, coherent verification pass. While Sections 1–6 of this specification define the individual security mechanisms in isolation, this section describes how the IVE orchestrates them jointly through the `verify_security_properties()` function. This function is the top-level entry point invoked by the VUMA compiler after the SCG has been constructed and all individual BD inference passes have completed. It performs a whole-program security analysis that checks not only that each individual invariant holds, but also that the invariants are mutually consistent with the hardware enforcement mechanisms that will be applied at runtime. This cross-layer consistency check is essential because a program could, in principle, satisfy each invariant individually while still creating situations where the hardware enforcement conflicts with the software-level expectations — for example, a CapD that permits Execute but a PTE configuration that marks the corresponding page as non-executable.
+
+### 7.2 `verify_security_properties()` Function
+
+The `verify_security_properties()` function takes the fully constructed SCG, the inferred BD assignments for all nodes, and the target platform descriptor as inputs. It returns a `SecurityVerificationResult` that encapsulates the comprehensive security posture of the program:
+
+```
+struct SecurityVerificationResult {
+    verdict: SecurityVerdict,               // See Section 12
+    pac_result: PACComplianceResult,        // See Section 8
+    mte_result: MTEComplianceResult,        // See Section 9
+    bti_result: BTIComplianceResult,        // See Section 10
+    pte_mapping_result: PTEMappingResult,   // See Section 11
+    cross_layer_violations: Vec<CrossLayerViolation>,
+    verified_properties: Vec<SecurityProperty>,
+}
+```
+
+The function executes the following algorithm:
+
+1. **Individual compliance checks:** Invoke `check_pac_compliance()`, `check_mte_compliance()`, and the BTI compliance checker on the entire SCG. Collect all violations from each checker.
+2. **Cross-layer consistency analysis:** For each SCG node that involves both a capability-level and a hardware-level concern (e.g., a pointer dereference that must satisfy both CapD and PAC), verify that the CapD-derived expectations are consistent with the hardware enforcement that will be applied. Flag any `CrossLayerViolation` where the software model and hardware model disagree.
+3. **PTE attribute synthesis:** Compute the ARM64 Page Table Entry attributes for each memory region using `capd_to_pte_attributes()` (see Section 11). Verify that the synthesized PTE attributes are consistent with the CapD assignments.
+4. **Verdict computation:** Compute the overall `SecurityVerdict` based on the collected violations and the decision logic described in Section 12.
+5. **Property cataloguing:** Enumerate the security properties that have been verified (e.g., "all pointers are PAC-signed", "all executable pages have BTI landing pads").
+
+### 7.3 IVE–Hardware Integration Model
+
+The integration between the IVE's invariant checking and the hardware security features operates on a principle of **defense-in-depth consistency**: the IVE's static guarantees must be a superset of the hardware's runtime guarantees. If the IVE proves that a pointer is never corrupted, the hardware PAC check must not contradict this by allowing an unsigned pointer to be used. Conversely, if the hardware provides a fallback (e.g., MTE detecting a buffer overflow that the IVE missed), the IVE's verdict should reflect that the program is partially but not fully secure.
+
+The integration model defines three levels of consistency:
+
+- **Strict consistency:** The IVE proof and the hardware enforcement agree exactly. The IVE proves that a property holds, and the hardware enforces it at runtime. Any runtime violation indicates an IVE bug.
+- **Relaxed consistency:** The IVE cannot fully prove a property statically, so it inserts a runtime check that the hardware enforces. The hardware provides the primary defense, and the IVE's role is to minimize the number of such checks.
+- **Inconsistency:** The IVE's static model and the hardware's enforcement model disagree. This is always a bug in VUMA itself and triggers a compiler-internal error.
+
+---
+
+## 8. PAC Compliance Checking
+
+### 8.1 Overview
+
+PAC Compliance Checking is the process by which the IVE verifies that every pointer derivation and usage in a VUMA program is compatible with the ARM64 Pointer Authentication mechanism. While Section 6.2 describes the PAC mechanism and its high-level mapping to VUMA's DerivePtr capability, this section provides the detailed compliance rules, the `check_pac_compliance()` function specification, and the `PACViolation` taxonomy. PAC compliance is critical because a pointer that bypasses PAC signing creates a gap in the defense-in-depth model: the IVE may believe the pointer is safe (based on CapD analysis), but the hardware cannot detect corruption of that pointer at runtime.
+
+### 8.2 `check_pac_compliance()` Function
+
+The `check_pac_compliance()` function traverses all pointer-related SCG nodes and edges, checking each one against the PAC compliance rules. Its signature is:
+
+```
+fn check_pac_compliance(
+    scg: &SemanticConnectivityGraph,
+    bd_assignments: &HashMap<NodeId, BD>,
+    platform: &PlatformDescriptor,
+) -> PACComplianceResult
+```
+
+The `PACComplianceResult` contains:
+
+```
+struct PACComplianceResult {
+    is_compliant: bool,
+    violations: Vec<PACViolation>,
+    signed_pointers: Vec<NodeId>,      // pointers that are correctly PAC-signed
+    unsigned_pointers: Vec<NodeId>,    // pointers that intentionally lack PAC (e.g., immediate offsets)
+}
+```
+
+The algorithm processes each SCG node that involves a pointer value. For each such node, it checks whether the pointer's CapD includes DerivePtr (which triggers PAC signing at code generation time) and whether the pointer is used in a way that is consistent with PAC's constraints.
+
+### 8.3 PAC Violation Taxonomy
+
+A `PACViolation` represents a specific way in which a pointer derivation or usage is incompatible with PAC enforcement. The violation kinds are:
+
+```
+enum PACViolationKind {
+    // A pointer was derived through arithmetic on a signed pointer without
+    // first stripping the PAC. This produces an invalid PAC on the result.
+    ArithmeticOnSignedPointer,
+
+    // A pointer with DerivePtr in its CapD was not signed at creation.
+    // This means the hardware cannot detect corruption of this pointer.
+    MissingSignature,
+
+    // A signed pointer was used without verification before dereference.
+    // This means the hardware check is bypassed.
+    MissingVerification,
+
+    // A pointer's PAC context does not match the usage context.
+    // E.g., a pointer signed with one function's FP is used in another function.
+    ContextMismatch,
+
+    // A signed pointer was stored to or loaded from a location that
+    // does not preserve PAC bits (e.g., a truncated 32-bit store).
+    PACBitTruncation,
+}
+
+struct PACViolation {
+    kind: PACViolationKind,
+    node_id: NodeId,
+    pointer_bd: BD,
+    description: String,
+}
+```
+
+### 8.4 PAC Compliance Rules
+
+The IVE enforces the following PAC compliance rules. Each rule corresponds to a specific violation kind:
+
+**Rule PAC-1 (DerivePtr → Sign):** If a pointer node has `DerivePtr in CapD(node)`, then the code generator must emit a PAC signing instruction (`PACIx` or `PACDx`) at the point of pointer creation. If the IVE cannot confirm that the code generator will emit this instruction (e.g., because the pointer is created through a code path that the IVE cannot analyze), the IVE flags a `MissingSignature` violation.
+
+**Rule PAC-2 (Dereference → Verify):** If a pointer is dereferenced, the code generator must emit a PAC verification instruction (`AUTIx` or `AUTDx`) before the load or store. If the IVE cannot confirm this, it flags a `MissingVerification` violation. The only exception is for pointers that are known to be immediately derived (e.g., `sp + offset` for stack locals), which are exempt from PAC signing and verification by construction.
+
+**Rule PAC-3 (No arithmetic on signed pointers):** If a pointer is signed (i.e., it has a PAC embedded in its upper bits), then no arithmetic operation may be performed on the pointer value without first stripping the PAC. Performing arithmetic on a signed pointer corrupts the PAC, making the signature invalid. If the IVE detects such an operation, it flags an `ArithmeticOnSignedPointer` violation. The correct pattern is to strip the PAC (`XPACI`/`XPACD`), perform the arithmetic, and re-sign the result.
+
+**Rule PAC-4 (Context consistency):** A pointer signed with context C must be verified with the same context C. If the IVE detects that a pointer is signed in one function (context = FP of function A) but verified in another function (context = FP of function B), it flags a `ContextMismatch` violation. Cross-function pointer passing requires using a stable context (e.g., the pointer's own address, or a dedicated context value agreed upon by the caller and callee).
+
+**Rule PAC-5 (PAC bit preservation):** When a signed pointer is stored to memory or copied to another register, the full 64-bit value must be preserved. Storing only the lower 32 bits of a signed pointer truncates the PAC and renders it useless. The IVE flags a `PACBitTruncation` violation if it detects a 32-bit store of a signed 64-bit pointer.
+
+---
+
+## 9. MTE Compliance Checking
+
+### 9.1 Overview
+
+MTE Compliance Checking verifies that VUMA's memory operations are compatible with the ARM64 Memory Tagging Extension. While Section 6.4 describes the MTE mechanism and its mapping to VUMA's bounds and liveness invariants, this section provides the detailed compliance rules, the `check_mte_compliance()` function specification, and the `MTEViolation` taxonomy. MTE compliance ensures that every pointer carries a valid tag, that tags are correctly propagated through pointer arithmetic, and that tag changes during deallocation are properly sequenced relative to subsequent accesses. Without MTE compliance checking, a program could create pointers that lack tags (bypassing the hardware check) or could access memory after a tag change without observing the new tag (a TOCTOU vulnerability in the tagging mechanism).
+
+### 9.2 `check_mte_compliance()` Function
+
+The `check_mte_compliance()` function traverses all memory-related SCG nodes and checks each against the MTE compliance rules. Its signature is:
+
+```
+fn check_mte_compliance(
+    scg: &SemanticConnectivityGraph,
+    bd_assignments: &HashMap<NodeId, BD>,
+    platform: &PlatformDescriptor,
+) -> MTEComplianceResult
+```
+
+The `MTEComplianceResult` contains:
+
+```
+struct MTEComplianceResult {
+    is_compliant: bool,
+    violations: Vec<MTEViolation>,
+    tagged_allocations: Vec<NodeId>,      // allocations with valid MTE tags
+    untagged_allocations: Vec<NodeId>,    // allocations intentionally exempt from MTE
+}
+```
+
+### 9.3 MTE Violation Taxonomy
+
+An `MTEViolation` represents a specific way in which a memory operation is incompatible with MTE enforcement:
+
+```
+enum MTEViolationKind {
+    // A pointer was created for an MTE-tagged allocation but the
+    // pointer does not carry the allocation's tag. This means the
+    // hardware cannot detect misuse of this pointer.
+    MissingTag,
+
+    // Pointer arithmetic produced an address that crosses a tag
+    // granule boundary. The resulting pointer's tag applies to a
+    // different 16-byte granule than intended, causing a false
+    // positive or false negative tag check.
+    CrossGranuleArithmetic,
+
+    // A memory access occurs after the allocation's tag has been
+    // changed (e.g., after deallocation and retagging), but the
+    // access uses the old tag. This is the MTE-specific form of
+    // use-after-free.
+    StaleTag,
+
+    // An allocation was created without a tag on a platform that
+    // requires MTE. This means the allocation has no hardware
+    // memory safety protection.
+    UntaggedAllocation,
+
+    // A deallocation did not change the memory's tag, meaning
+    // stale pointers can still pass the tag check (a 1/16 chance
+    // per allocation that the old and new tags collide).
+    MissingRetag,
+}
+
+struct MTEViolation {
+    kind: MTEViolationKind,
+    node_id: NodeId,
+    allocation_id: AllocationId,
+    description: String,
+}
+```
+
+### 9.4 MTE Compliance Rules
+
+**Rule MTE-1 (Allocation → Tag):** Every heap allocation on an MTE-capable platform must be assigned a random 4-bit tag. The tag must be embedded in every pointer derived from the allocation's base address. If the IVE detects an allocation without a tag assignment, it flags an `UntaggedAllocation` violation.
+
+**Rule MTE-2 (Pointer derivation → Tag propagation):** When a pointer is derived from a tagged base pointer through offset addition (e.g., `base + 8` for a field access), the derived pointer must carry the same tag as the base pointer, provided the offset does not cross a 16-byte granule boundary. If the offset does cross a boundary, the derived pointer's tag may differ from the base's tag, which is correct behavior — but the IVE must verify that the derived pointer is used only to access the granule it actually addresses. If the IVE cannot verify this, it flags a `CrossGranuleArithmetic` violation.
+
+**Rule MTE-3 (Deallocation → Retag):** When a heap allocation is freed, the VUMA runtime must assign a new random tag to the deallocated memory granules. If the IVE detects a deallocation path that does not include a retagging step, it flags a `MissingRetag` violation. The retagging is the primary defense against use-after-free under MTE: without it, the stale pointer's tag would still match the memory's tag, and the hardware would not detect the illegal access.
+
+**Rule MTE-4 (Access ordering):** All memory accesses to a given allocation must occur before the deallocation's retagging step. If the IVE detects a memory access that may occur after retagging (i.e., there exists a control-flow path from the retagging to the access), it flags a `StaleTag` violation. This is analogous to the Liveness Invariant (Section 5.3) but is specific to the MTE tag lifecycle.
+
+**Rule MTE-5 (Tag consistency):** Every pointer that is stored to memory or passed across a function call must carry the correct tag for its target allocation. If the IVE detects a pointer that has been stripped of its tag (e.g., by a bit manipulation that clears the upper nibble), it flags a `MissingTag` violation. Stripping a tag is only permissible for immediate offset calculations that re-add the tag before use.
+
+---
+
+## 10. BTI Compliance Checking
+
+### 10.1 Overview
+
+BTI Compliance Checking verifies that VUMA's control-flow graph is compatible with the ARM64 Branch Target Identification mechanism. While Section 6.3 describes the BTI mechanism and its mapping to VUMA's Execute capability, this section provides the detailed compliance rules and the `BTIViolation` taxonomy. BTI compliance ensures that every indirect branch target has a valid BTI landing pad, that the BTI instruction type matches the branch type (call vs. jump), and that no executable page lacks BTI protection. Without BTI compliance checking, a program could contain indirect branch targets that lack BTI instructions, creating gadgets that an attacker could chain in a ROP or JOP attack.
+
+### 10.2 BTI Compliance Checking Algorithm
+
+The BTI compliance checker traverses all control-flow edges in the SCG, identifying every indirect branch (i.e., every edge whose source is a ControlNode with an indirect target). For each such edge, the checker verifies that the target node's generated code will begin with a BTI instruction of the appropriate type. The checker also verifies that no executable page is populated with code that lacks BTI landing pads at all indirect branch targets.
+
+```
+struct BTIComplianceResult {
+    is_compliant: bool,
+    violations: Vec<BTIViolation>,
+    protected_targets: Vec<NodeId>,      // indirect branch targets with correct BTI
+    unprotected_targets: Vec<NodeId>,    // indirect branch targets without BTI
+}
+```
+
+### 10.3 BTI Violation Taxonomy
+
+A `BTIViolation` represents a specific way in which the control-flow structure is incompatible with BTI enforcement:
+
+```
+enum BTIViolationKind {
+    // An indirect call target does not begin with a BTI instruction.
+    // This means the target is a potential ROP/JOP gadget.
+    MissingBTIAtCallTarget,
+
+    // An indirect jump target does not begin with a BTI instruction.
+    MissingBTIAtJumpTarget,
+
+    // An indirect call targets a BTI instruction of type 'j' (jump),
+    // but the branch is a call (BLR), which requires type 'c' or 'jc'.
+    BTITypeMismatch { expected: &'static str, found: &'static str },
+
+    // A function with Execute in its CapD does not have a BTI
+    // landing pad at its entry point. This means the function
+    // cannot be safely called through a function pointer.
+    ExecutableWithoutBTI,
+
+    // A code page contains executable code but does not have
+    // the PROT_BTI guardian bit set in its page flags.
+    UnprotectedCodePage,
+}
+
+struct BTIViolation {
+    kind: BTIViolationKind,
+    source_node: NodeId,        // the indirect branch source
+    target_node: Option<NodeId>, // the branch target (None if unknown)
+    description: String,
+}
+```
+
+### 10.4 BTI Compliance Rules
+
+**Rule BTI-1 (Call targets → `bti c` or `bti jc`):** Every indirect call (BLR instruction) must target an instruction that begins with `bti c` or `bti jc`. If the target lacks a BTI instruction, the IVE flags a `MissingBTIAtCallTarget` violation. If the target has `bti j` (which permits jumps but not calls), the IVE flags a `BTITypeMismatch` violation with `expected = "c or jc"` and `found = "j"`.
+
+**Rule BTI-2 (Jump targets → `bti j` or `bti jc`):** Every indirect jump (BR instruction, including return dispatch in some ABI conventions) must target an instruction that begins with `bti j` or `bti jc`. If the target lacks a BTI instruction, the IVE flags a `MissingBTIAtJumpTarget` violation.
+
+**Rule BTI-3 (Execute → BTI):** If a function has `Execute in CapD(f)`, its entry point must begin with a BTI instruction. This is because Execute permits the function to be called through a function pointer (an indirect call), and BTI is the hardware mechanism that validates indirect call targets. A function with Execute that lacks BTI creates a window for ROP/JOP exploitation. The IVE flags an `ExecutableWithoutBTI` violation for such functions.
+
+**Rule BTI-4 (Code page protection):** Every memory page that contains executable code must have the `PROT_BTI` guardian bit set in its page protection flags. This bit tells the hardware that BTI enforcement is required for that page. If a page contains executable code but lacks `PROT_BTI`, the IVE flags an `UnprotectedCodePage` violation.
+
+**Rule BTI-5 (Non-executable pages):** Memory pages that do not contain any executable code must not have the execute permission bit set in their PTEs (see Section 11). This is enforced at the PTE level and is a fundamental prerequisite for BTI: if data pages are executable, an attacker can branch to any location in data without triggering a BTI fault.
+
+---
+
+## 11. CapD→ARM64 PTE Mapping
+
+### 11.1 Overview
+
+The CapD→ARM64 PTE Mapping translates VUMA's Capability Descriptor (CapD) assignments into ARM64 Page Table Entry (PTE) attributes that are enforced by the Memory Management Unit (MMU) at runtime. While Sections 6.2–6.4 describe the high-level mappings from CapD to individual hardware features, this section documents the complete, precise mapping from CapD permissions to PTE attribute fields. This mapping is implemented by the `capd_to_pte_attributes()` function, which is invoked by the VUMA code generator for each memory region to compute the PTE attributes that the runtime must install. The PTE mapping is the final step in VUMA's defense-in-depth chain: the IVE verifies the program's security properties at the software level, the code generator emits the appropriate PAC/BTI/MTE instructions, and the PTE attributes ensure that the MMU enforces the same restrictions at the hardware level.
+
+### 11.2 `PTEAttributes` Structure
+
+The `PTEAttributes` structure captures all ARM64 PTE fields that are relevant to VUMA's security model:
+
+```
+struct PTEAttributes {
+    // Access Permissions (AP) field — controls read/write at EL0 and EL1
+    // Encoding (2 bits):
+    //   0b00 = EL1 read-write, EL0 no access
+    //   0b01 = EL1 read-write, EL0 read-write
+    //   0b10 = EL1 read-write, EL0 read-only
+    //   0b11 = EL1 read-only, EL0 read-only
+    ap: u8,
+
+    // Privileged Execute-Never (PXN) — if 1, execution is never
+    // permitted at EL1
+    pxn: bool,
+
+    // Unprivileged Execute-Never (UXN) — if 1, execution is never
+    // permitted at EL0
+    uxn: bool,
+
+    // Execute-Never for both EL0 and EL1 (computed from PXN + UXN)
+    xne: bool,  // true when both PXN and UXN are set
+
+    // nG (non-Global) bit — if 1, TLB entries are ASID-tagged
+    ng: bool,
+
+    // AF (Access Flag) — must be set to 1 for valid PTEs
+    af: bool,
+
+    // MTE tag allocation control
+    // If MTE is enabled, this field controls whether tag checks
+    // are synchronous or asynchronous for this page
+    mte_sync: bool,
+}
+```
+
+### 11.3 `capd_to_pte_attributes()` Function
+
+The `capd_to_pte_attributes()` function takes a CapD and the target exception level, and produces the corresponding `PTEAttributes`:
+
+```
+fn capd_to_pte_attributes(
+    capd: &CapD,
+    target_el: ExceptionLevel,
+) -> PTEAttributes
+```
+
+The function implements the following decision logic:
+
+1. **Determine AP from Read/Write capabilities:**
+   - If `Read in CapD` and `Write in CapD`: the region is read-write.
+   - If `Read in CapD` and `Write not in CapD`: the region is read-only.
+   - If `Read not in CapD`: the region has no access (this should not occur in a valid VUMA program, but is handled defensively).
+
+2. **Determine PXN/UXN from Execute capability:**
+   - If `Execute in CapD`: PXN and UXN depend on the target exception level (see mapping table below).
+   - If `Execute not in CapD`: both PXN=1 and UXN=1, making the page non-executable at all levels.
+
+3. **Set nG=1 for all user-accessible pages** (VUMA always uses ASID-tagged TLB entries for isolation).
+
+4. **Set AF=1** (VUMA pre-sets the access flag; hardware access flag faults are not used).
+
+5. **Set mte_sync** based on the deployment MTE mode (synchronous during development, asynchronous in production).
+
+### 11.4 Complete CapD→PTE Field Mapping Table
+
+| CapD Configuration                     | AP    | PXN | UXN | Description                                                                 |
+|----------------------------------------|-------|-----|-----|-----------------------------------------------------------------------------|
+| Read-only CapD = {Read}               | 0b11  |  1  |  1  | EL0 read-only; no execution at any level                                    |
+| Read-Write CapD = {Read, Write}       | 0b01  |  1  |  1  | EL0 read-write; no execution at any level                                   |
+| Read-Write-DerivePtr = {Read, Write, DerivePtr} | 0b01 | 1 | 1  | EL0 read-write; PAC-signed pointers permitted; no execution                  |
+| Execute CapD (EL0) = {Read, Execute}  | 0b00  |  1  |  0  | EL0 executable; PXN prevents EL1 execution (EL0 code page)                  |
+| Execute CapD (EL1) = {Read, Execute}  | 0b00  |  0  |  1  | EL1 executable; UXN prevents EL0 execution (kernel code page)               |
+| Execute CapD (both EL) = {Read, Execute} | 0b00 | 0  |  0  | Executable at both EL0 and EL1 (rare; only for shared trampolines)         |
+| No capabilities (empty CapD)          | —     |  1  |  1  | No access; PTE marked invalid                                              |
+| Send CapD = {Read, Send}              | 0b11  |  1  |  1  | Read-only like {Read}, but IVE additionally permits network serialization    |
+
+**Key interpretation of the mapping table:**
+
+- **Read-only CapD → AP=0b11:** This encodes read-only access at EL0 (and read-only at EL1). Combined with PXN=1 and UXN=1, the page is non-executable at all levels. This is the most restrictive data-only permission, used for constants, configuration data, and values that should never be modified or executed.
+
+- **Read-Write CapD → AP=0b01:** This encodes read-write access at EL0. Combined with PXN=1 and UXN=1, the page is writable but non-executable. This is the default for mutable data: the program can read and write the data, but it can never be executed as code. The DerivePtr capability does not change the PTE attributes — it affects only whether PAC signing instructions are emitted (see Section 8).
+
+- **Execute CapD → AP=0b00, PXN/UXN depends on EL:** This encodes executable access. The AP field is set to 0b00 (EL1 read-write, EL0 no access by default), but the key difference is in the PXN and UXN bits. For EL0 code pages, PXN=1 (no EL1 execution) and UXN=0 (EL0 execution permitted). For EL1 code pages, PXN=0 (EL1 execution permitted) and UXN=1 (no EL0 execution). The IVE determines the target EL from the function's security classification and the SCG region's level.
+
+### 11.5 PTE Mapping Consistency Check
+
+After computing PTE attributes for all memory regions, the IVE performs a consistency check: for each pair of adjacent pages, verify that no page's PTE attributes create a security hole that an adjacent page can exploit. Specifically:
+
+1. **No writable+executable pages:** A page must never have both write permission (AP in {0b01, 0b10}) and execute permission (PXN=0 or UXN=0). This is the W^X (Write XOR Execute) policy, enforced at the PTE level. If the IVE detects a CapD that would produce such a PTE, it flags a `CrossLayerViolation`.
+
+2. **No executable pages without BTI:** A page with execute permission must have `PROT_BTI` set (see Section 10). The IVE verifies this by checking that every page with `UXN=0 or PXN=0` has a corresponding BTI compliance result.
+
+3. **No untagged writable pages on MTE platforms:** On platforms with MTE enabled, every writable page must have MTE tag checking enabled. The IVE verifies this by checking that `mte_sync` is set for all writable pages.
+
+---
+
+## 12. Graduated Security Verdict
+
+### 12.1 Overview
+
+The Graduated Security Verdict is the IVE's final assessment of a VUMA program's security posture. Rather than a binary pass/fail, the verdict provides a three-level classification — Secure, PartiallySecure, and Insecure — that reflects the degree to which the program's security properties are verified and enforced. This graduated approach is essential because real-world programs may have regions that are fully verified alongside regions that rely on runtime checks or hardware fallbacks. A binary verdict would either reject useful programs (false negatives) or accept programs with significant gaps (false positives). The graduated verdict enables developers to make informed decisions about whether to deploy a program, to request additional verification effort, or to accept residual risk.
+
+### 12.2 `SecurityVerdict` Definition
+
+The `SecurityVerdict` is a three-valued classification:
+
+```
+enum SecurityVerdict {
+    // All security properties are statically verified by the IVE.
+    // No runtime checks are needed. The program is secure by construction.
+    Secure,
+
+    // Most security properties are verified, but some rely on runtime
+    // checks (PAC, MTE, BTI) or on assumptions that have not been
+    // formally verified. The program is secure if the runtime checks
+    // are not bypassed and the assumptions hold.
+    PartiallySecure {
+        unverified_properties: Vec<String>,
+        runtime_checks: Vec<RuntimeCheckKind>,
+        assumptions: Vec<Assumption>,
+    },
+
+    // One or more security properties are violated. The program
+    // has known vulnerabilities and should not be deployed.
+    Insecure {
+        violations: Vec<SecurityViolation>,
+        critical_count: usize,
+        high_count: usize,
+    },
+}
+```
+
+### 12.3 Decision Logic
+
+The decision logic for computing the `SecurityVerdict` is as follows:
+
+**Step 1: Collect all violations.** Gather violations from all compliance checkers: PAC violations (Section 8), MTE violations (Section 9), BTI violations (Section 10), PTE mapping inconsistencies (Section 11), and any IVE invariant violations from Sections 1–5.
+
+**Step 2: Classify violation severity.** Each violation is classified into one of three severity levels:
+
+- **Critical:** A violation that enables arbitrary code execution, memory corruption, or information leakage. Examples: `MissingSignature` on a function pointer, `MissingBTIAtCallTarget` on an externally reachable function, `MissingRetag` on a deallocation of security-critical data.
+- **High:** A violation that weakens a security mechanism but does not directly enable an attack. Examples: `CrossGranuleArithmetic` where the granule boundary crossing is provably safe, `BTITypeMismatch` where the mismatch is between `c` and `jc` (both permit calls).
+- **Low:** A violation that is informational or that has a negligible impact on security. Examples: `UntaggedAllocation` on a read-only page, `PACBitTruncation` on a pointer that is never dereferenced.
+
+**Step 3: Apply the decision rules.**
+
+```
+if any violation has severity == Critical:
+    verdict = Insecure { violations, critical_count, high_count }
+
+else if any violation has severity == High:
+    verdict = PartiallySecure { unverified_properties, runtime_checks, assumptions }
+
+else if all violations have severity == Low:
+    verdict = PartiallySecure { unverified_properties, runtime_checks, assumptions }
+
+else if no violations exist:
+    verdict = Secure
+```
+
+**Step 4: Refine the verdict.** The initial verdict is refined based on additional context:
+
+- **Secure → PartiallySecure downgrade:** If the program contains any region that relies on runtime checks (e.g., bounds checks inserted because the IVE could not statically prove safety), the verdict is downgraded from Secure to PartiallySecure, with the runtime checks enumerated in the `runtime_checks` field.
+- **PartiallySecure → Insecure downgrade:** If the sum of high-severity and low-severity violations exceeds a configurable threshold (default: 10), the verdict is upgraded to Insecure, on the principle that a large number of minor violations indicates a systematic security problem.
+- **Assumption validation:** If any assumption in the `PartiallySecure` verdict can be validated by an external tool (e.g., a model checker or a fuzzer), the validation result is recorded. If all assumptions are validated, the verdict may be upgraded to Secure.
+
+### 12.4 Verdict Propagation
+
+The `SecurityVerdict` is computed for the whole program, but it is also computed per-SCG-region and per-invariant. This enables fine-grained reporting:
+
+```
+struct PerRegionVerdict {
+    region_id: RegionId,
+    verdict: SecurityVerdict,
+    invariant_verdicts: HashMap<InvariantKind, SecurityVerdict>,
+}
+```
+
+Per-region verdicts allow developers to identify exactly which parts of the program need additional verification effort. For example, a program might be Secure in its cryptographic module but PartiallySecure in its networking module due to runtime checks on packet lengths. The per-invariant verdicts within each region provide even finer granularity: the networking module might be Secure for the Bounds Invariant (all packet lengths are checked) but PartiallySecure for the Information-Flow Invariant (some data flows depend on runtime checks).
+
+### 12.5 Verdict and Deployment Policy
+
+The deployment policy determines which verdicts are acceptable for deployment:
+
+| Verdict          | Development | Staging | Production |
+|------------------|-------------|---------|------------|
+| Secure           | ✅ Allow    | ✅ Allow | ✅ Allow   |
+| PartiallySecure  | ✅ Allow    | ⚠️ Allow with review | ❌ Deny (default) |
+| Insecure         | ❌ Deny     | ❌ Deny  | ❌ Deny    |
+
+The production policy for `PartiallySecure` can be overridden by a security review that examines the `unverified_properties`, `runtime_checks`, and `assumptions` fields. If the review determines that the residual risk is acceptable (e.g., the only runtime checks are bounds checks on network input, which are standard practice), the program may be allowed in production with a documented exception.
+
+---
+
+*End of VUMA Security Model Specification v1.1.0*

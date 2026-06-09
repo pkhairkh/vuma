@@ -1,0 +1,92 @@
+// Verified Arena Allocator — Phase 2 Leak-Annotated Example
+// Demonstrates intentional leak annotations for arena pattern
+//
+// Arena allocators intentionally "leak" individual allocations because
+// they are freed all at once via arena_destroy(). VUMA's @leak_annotated
+// attribute tells IVE that this is intentional and not a bug.
+//
+// Without @leak_annotated, IVE would flag each arena_alloc() call as
+// a Leak violation (Cleanup invariant). With the annotation, IVE marks
+// these as ProbablySafe — safe under the assumption that arena_destroy()
+// will eventually be called.
+//
+// Phase 2 Features Demonstrated:
+//   @leak_annotated — marks intentional leaks with a reason
+//   @repd — RepD annotations for arena struct layout
+//   @capd — CapD annotations for arena capabilities
+//   VUMA-VERIFIED — proof blocks for alloc and destroy operations
+
+@leak_annotated(Arena, "Arena allocator - freed all at once via arena_destroy")
+@repd(Arena, Struct<{
+    base: Ptr(Byte(8,8)),    // offset 0, 8 bytes
+    offset: Byte(8,8),       // offset 8, 8 bytes
+    capacity: Byte(8,8)      // offset 16, 8 bytes
+}>)
+@capd(Arena, {Read, Write, Allocate, DerivePtr})
+struct Arena {
+    base: *u8,       // Start of the arena's memory block
+    offset: usize,   // Current allocation offset within block
+    capacity: usize, // Total size of the arena in bytes
+}
+
+fn arena_create(capacity: usize) -> *Arena {
+    // Allocate one contiguous block for the entire arena
+    // IVE verifies: allocation succeeds, size is recorded
+    // @capd: Allocate for the block, Write for Arena struct fields
+    base = allocate(capacity);
+    arena = allocate(24);
+    *arena = Arena { base, offset: 0, capacity };
+    return arena;
+}
+
+fn arena_alloc(arena: *Arena, size: usize, align: usize) -> *u8 {
+    // VUMA-VERIFIED: bump-allocate within arena bounds
+    // IVE verifies: aligned offset + size <= capacity (no OOB write)
+    // IVE verifies: returned pointer is derived from arena.base
+    // @leak_annotated: individual allocs not freed; arena_destroy frees all
+    // @capd: DerivePtr — result derived from arena.base
+    current = (*arena).base + (*arena).offset;
+    aligned = current.align_to(align);
+    new_offset = (aligned - (*arena).base) + size;
+    // IVE verifies: new_offset <= (*arena).capacity
+    (*arena).offset = new_offset;
+    return aligned;
+    // END VUMA-VERIFIED
+}
+
+fn arena_destroy(arena: *Arena) {
+    // VUMA-VERIFIED: bulk invalidation of all derived pointers
+    // IVE verifies: free(arena.base) invalidates all pointers
+    //   returned by arena_alloc() — prevents use-after-arena-free
+    // @capd: Free on arena.base + arena struct
+    // @leak_annotated resolution: destroying arena clears all annotations
+    free((*arena).base);   // Frees the entire memory block
+    free(arena);           // Frees the Arena struct itself
+    // END VUMA-VERIFIED
+    // After this: any access to pointers from arena_alloc() is
+    // a compile-time error: "use of dead pointer"
+}
+
+fn main() -> i32 {
+    arena = arena_create(4096);
+
+    // Both a and b are derived from arena.base
+    // @leak_annotated suppresses Cleanup violation for these
+    a = arena_alloc(arena, 64, 8);
+    b = arena_alloc(arena, 128, 16);
+
+    *a = 42;
+    *b = 99;
+    print(*a);  // prints: 42
+    print(*b);  // prints: 99
+
+    // All allocations freed in one call
+    arena_destroy(arena);
+    // IVE flags any access to a or b after this point:
+    //   x = *a;  // ERROR: use of dead pointer `a`
+
+    return 0;
+}
+// IVE verification: Liveness ✓, Exclusivity ✓, Interpretation ✓,
+//                    Origin ✓, Cleanup ✓ (with @leak_annotated)
+// Phase 2: @leak_annotated ✓, @repd ✓, @capd ✓

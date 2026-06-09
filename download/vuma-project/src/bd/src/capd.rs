@@ -66,6 +66,8 @@ pub enum Capability {
     Deserialize,
     /// Permission to compute a hash of the value.
     Hash,
+    /// Permission to perform computation on the value.
+    Compute,
     /// Permission to compare the value for equality/ordering.
     Compare,
     /// Permission to derive a pointer from the value.
@@ -96,6 +98,7 @@ impl fmt::Display for Capability {
             Capability::Serialize => write!(f, "Serialize"),
             Capability::Deserialize => write!(f, "Deserialize"),
             Capability::Hash => write!(f, "Hash"),
+            Capability::Compute => write!(f, "Compute"),
             Capability::Compare => write!(f, "Compare"),
             Capability::DerivePtr => write!(f, "DerivePtr"),
             Capability::Cast => write!(f, "Cast"),

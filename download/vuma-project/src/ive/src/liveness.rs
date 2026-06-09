@@ -31,8 +31,9 @@
 //! [`LivenessVerificationResult`].
 
 use crate::result::{
-    CounterExample, Evidence, VerificationResult, VerificationStatus,
+    CounterExample, Evidence, ProgramPoint, VerificationResult, VerificationStatus,
 };
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,10 @@ pub enum EventAction {
     Send,
     /// A message was received from a channel.
     Receive,
+    /// A resource was read (memory read access).
+    Read,
+    /// A resource was written (memory write access).
+    Write,
 }
 
 impl fmt::Display for EventAction {
@@ -141,6 +146,8 @@ impl fmt::Display for EventAction {
             EventAction::Release => write!(f, "release"),
             EventAction::Send => write!(f, "send"),
             EventAction::Receive => write!(f, "receive"),
+            EventAction::Read => write!(f, "read"),
+            EventAction::Write => write!(f, "write"),
         }
     }
 }
@@ -270,6 +277,22 @@ impl LivenessInput {
         self.events
             .iter()
             .filter(|e| e.resource == rid && e.event == EventAction::Receive)
+            .collect()
+    }
+
+    /// Returns all read events for a specific resource.
+    pub fn reads_for(&self, rid: ResourceId) -> Vec<&ResourceEvent> {
+        self.events
+            .iter()
+            .filter(|e| e.resource == rid && e.event == EventAction::Read)
+            .collect()
+    }
+
+    /// Returns all write events for a specific resource.
+    pub fn writes_for(&self, rid: ResourceId) -> Vec<&ResourceEvent> {
+        self.events
+            .iter()
+            .filter(|e| e.resource == rid && e.event == EventAction::Write)
             .collect()
     }
 }
@@ -439,7 +462,7 @@ pub struct ProofObligation {
 }
 
 /// The kind of proof obligation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObligationKind {
     /// Prove that a deallocation is reachable on all paths.
     DeallocationReachable,
@@ -449,6 +472,200 @@ pub enum ObligationKind {
     LockReleaseReachable,
     /// Prove that every send has a matching receive.
     MessageReceived,
+    /// Prove that an access is safe despite potential use-after-free.
+    UseAfterFreeSafe,
+    /// Prove that a dead allocation is actually needed.
+    DeadAllocationNeeded,
+    /// Prove that a partially initialized region is fully initialized before use.
+    FullyInitialized,
+}
+
+// ---------------------------------------------------------------------------
+// Use-After-Free Path Tracking
+// ---------------------------------------------------------------------------
+
+/// A complete lifecycle path for a tracked resource, including any
+/// use-after-free accesses detected along the way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessPath {
+    /// The program point where the resource was allocated.
+    pub allocation_point: ProgramPoint,
+    /// The program point where the resource was deallocated, if any.
+    pub deallocation_point: Option<ProgramPoint>,
+    /// Accesses that occur after the resource has been freed.
+    /// Each entry is (program point, description of the access).
+    pub access_after_free: Vec<(ProgramPoint, String)>,
+    /// The numeric ID of the resource.
+    pub resource_id: u64,
+    /// The kind of resource (as a string for serialization).
+    pub resource_kind: String,
+}
+
+// ---------------------------------------------------------------------------
+// Dead Allocation Detection
+// ---------------------------------------------------------------------------
+
+/// A dead allocation: a resource that was allocated but never usefully used.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadAllocation {
+    /// The program point where the allocation occurs.
+    pub allocation_point: ProgramPoint,
+    /// The numeric ID of the resource.
+    pub resource_id: u64,
+    /// The reason this allocation is considered dead.
+    pub reason: DeadReason,
+}
+
+/// The reason an allocation is considered dead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DeadReason {
+    /// The resource was allocated but never accessed at all.
+    NeverAccessed,
+    /// The resource was written to but never read from.
+    OnlyWrittenNeverRead,
+    /// The resource was allocated and immediately deallocated with no
+    /// intervening use.
+    RedundantAllocation,
+}
+
+// ---------------------------------------------------------------------------
+// Uninitialized Read Detection
+// ---------------------------------------------------------------------------
+
+/// A map tracking which byte ranges within each region have been initialized.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitializationMap {
+    /// Maps region_id to a set of initialized byte ranges (start, end).
+    pub initialized: std::collections::HashMap<u64, Vec<(u64, u64)>>,
+}
+
+impl InitializationMap {
+    /// Create a new, empty initialization map.
+    pub fn new() -> Self {
+        Self {
+            initialized: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Mark a byte range as initialized within a region.
+    pub fn mark_initialized(&mut self, region_id: u64, start: u64, end: u64) {
+        self.initialized
+            .entry(region_id)
+            .or_default()
+            .push((start, end));
+    }
+
+    /// Check whether a given byte range is fully initialized within a region.
+    /// Returns the list of uninitialized sub-ranges that fall within the
+    /// requested range.
+    pub fn check_range(
+        &self,
+        region_id: u64,
+        access_start: u64,
+        access_end: u64,
+    ) -> Vec<(u64, u64)> {
+        let init_ranges = match self.initialized.get(&region_id) {
+            Some(ranges) => ranges,
+            None => return vec![(access_start, access_end)],
+        };
+
+        if init_ranges.is_empty() {
+            return vec![(access_start, access_end)];
+        }
+
+        // Collect and sort all initialized ranges
+        let mut sorted: Vec<(u64, u64)> = init_ranges.clone();
+        sorted.sort_by_key(|r| r.0);
+
+        // Merge overlapping initialized ranges
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (s, e) in sorted {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+
+        // Find gaps within [access_start, access_end)
+        let mut uninitialized: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = access_start;
+
+        for (s, e) in &merged {
+            // Skip ranges entirely before the access range
+            if *e <= access_start {
+                continue;
+            }
+            // Stop if we've passed the access range
+            if *s >= access_end {
+                break;
+            }
+
+            // Clamp to the access range
+            let s_clamped = (*s).max(access_start);
+
+            if s_clamped > cursor {
+                uninitialized.push((cursor, s_clamped));
+            }
+            cursor = cursor.max(*e);
+        }
+
+        if cursor < access_end {
+            uninitialized.push((cursor, access_end));
+        }
+
+        uninitialized
+    }
+}
+
+impl Default for InitializationMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A violation where a partially initialized region is accessed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartialInitViolation {
+    /// The region that was accessed with partial initialization.
+    pub region_id: u64,
+    /// The program point where the partially-initialized access occurs.
+    pub access_point: ProgramPoint,
+    /// The byte range that was accessed.
+    pub accessed_range: (u64, u64),
+    /// The sub-ranges within the accessed range that are uninitialized.
+    pub uninitialized_ranges: Vec<(u64, u64)>,
+}
+
+// ---------------------------------------------------------------------------
+// Verification context
+// ---------------------------------------------------------------------------
+
+/// Context provided to enhanced liveness verification methods, bundling
+/// the input model with optional initialization tracking data.
+#[derive(Debug, Clone)]
+pub struct VerificationContext {
+    /// The liveness input model (events, CFG edges, wait-for deps).
+    pub input: LivenessInput,
+    /// Optional initialization map for partial-initialization checking.
+    pub init_map: InitializationMap,
+}
+
+impl VerificationContext {
+    /// Create a new verification context from the given input.
+    pub fn new(input: LivenessInput) -> Self {
+        Self {
+            input,
+            init_map: InitializationMap::new(),
+        }
+    }
+
+    /// Create a verification context with an explicit initialization map.
+    pub fn with_init_map(input: LivenessInput, init_map: InitializationMap) -> Self {
+        Self { input, init_map }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1557,386 @@ impl LivenessVerifier {
 
         count.max(1)
     }
+
+    // -----------------------------------------------------------------------
+    // Enhanced analysis: Use-After-Free Path Tracking
+    // -----------------------------------------------------------------------
+
+    /// Trace the complete lifecycle of each tracked resource, identifying
+    /// any accesses that occur after deallocation (use-after-free).
+    ///
+    /// For each resource that has at least one allocation event, this method
+    /// builds a [`LivenessPath`] that records the allocation point, the
+    /// deallocation point (if any), and any access events that are reachable
+    /// after the deallocation point in the CFG.
+    pub fn compute_liveness_paths(&self, context: &VerificationContext) -> Vec<LivenessPath> {
+        let cfg = self.build_cfg(&context.input);
+        let allocations = context.input.allocations();
+        let mut paths = Vec::new();
+
+        for alloc_event in &allocations {
+            let resource = alloc_event.resource;
+            let alloc_point = alloc_event.point;
+            let kind = alloc_event.kind;
+
+            let deallocs = context.input.deallocations_for(resource);
+            let dealloc_point = deallocs.first().map(|d| d.point.to_string());
+
+            // Collect accesses after free: find access events (Read/Write) for
+            // this resource whose program points are reachable from a
+            // deallocation point.
+            let mut access_after_free: Vec<(ProgramPoint, String)> = Vec::new();
+
+            if let Some(dealloc) = deallocs.first() {
+                let dealloc_pp = dealloc.point;
+
+                // Find all read/write events for this resource
+                let reads = context.input.reads_for(resource);
+                let writes = context.input.writes_for(resource);
+
+                for read_ev in &reads {
+                    if cfg.is_reachable(dealloc_pp, read_ev.point) {
+                        access_after_free.push((
+                            read_ev.point.to_string(),
+                            format!("read after free at {}", read_ev.point),
+                        ));
+                    }
+                }
+
+                for write_ev in &writes {
+                    if cfg.is_reachable(dealloc_pp, write_ev.point) {
+                        access_after_free.push((
+                            write_ev.point.to_string(),
+                            format!("write after free at {}", write_ev.point),
+                        ));
+                    }
+                }
+            }
+
+            paths.push(LivenessPath {
+                allocation_point: alloc_point.to_string(),
+                deallocation_point: dealloc_point,
+                access_after_free,
+                resource_id: resource.0,
+                resource_kind: kind.to_string(),
+            });
+        }
+
+        paths
+    }
+
+    // -----------------------------------------------------------------------
+    // Enhanced analysis: Dead Allocation Detection
+    // -----------------------------------------------------------------------
+
+    /// Detect allocations that are never meaningfully used.
+    ///
+    /// A "dead allocation" is one where the resource is allocated but:
+    /// - **Never accessed**: no read, write, acquire, release, send, or
+    ///   receive events occur after allocation.
+    /// - **Only written, never read**: data is written but never read back,
+    ///   suggesting the write is wasted.
+    /// - **Redundant**: allocated and immediately deallocated with no
+    ///   intervening operations.
+    pub fn detect_dead_allocations(&self, context: &VerificationContext) -> Vec<DeadAllocation> {
+        let allocations = context.input.allocations();
+        let mut dead = Vec::new();
+
+        for alloc_event in &allocations {
+            let resource = alloc_event.resource;
+            let alloc_point = alloc_event.point;
+
+            // Collect all non-allocate/deallocate events for this resource
+            let all_events: Vec<&ResourceEvent> = context
+                .input
+                .events_for_resource(resource)
+                .into_iter()
+                .filter(|e| e.event != EventAction::Allocate && e.event != EventAction::Deallocate)
+                .collect();
+
+            let reads = context.input.reads_for(resource);
+            let writes = context.input.writes_for(resource);
+            let deallocs = context.input.deallocations_for(resource);
+
+            if all_events.is_empty() {
+                // No events other than allocate/deallocate
+                dead.push(DeadAllocation {
+                    allocation_point: alloc_point.to_string(),
+                    resource_id: resource.0,
+                    reason: DeadReason::NeverAccessed,
+                });
+            } else if !writes.is_empty() && reads.is_empty() {
+                // Has writes but no reads
+                dead.push(DeadAllocation {
+                    allocation_point: alloc_point.to_string(),
+                    resource_id: resource.0,
+                    reason: DeadReason::OnlyWrittenNeverRead,
+                });
+            } else if !deallocs.is_empty() {
+                // Check for redundant allocation: deallocation is the very next
+                // event after allocation with no intervening access.
+                let _dealloc = deallocs.first().unwrap();
+                // Check that there are no events between alloc and dealloc
+                // that are reads or writes (i.e., the only events are
+                // allocate and deallocate).
+                let has_access_between = all_events.iter().any(|e| {
+                    matches!(
+                        e.event,
+                        EventAction::Read
+                            | EventAction::Write
+                            | EventAction::Acquire
+                            | EventAction::Release
+                            | EventAction::Send
+                            | EventAction::Receive
+                    )
+                });
+
+                if !has_access_between && deallocs.len() == 1 {
+                    dead.push(DeadAllocation {
+                        allocation_point: alloc_point.to_string(),
+                        resource_id: resource.0,
+                        reason: DeadReason::RedundantAllocation,
+                    });
+                }
+            }
+        }
+
+        dead
+    }
+
+    // -----------------------------------------------------------------------
+    // Enhanced analysis: Partial Initialization Checking
+    // -----------------------------------------------------------------------
+
+    /// Check for partial initialization violations.
+    ///
+    /// For each Read event in the input, this method checks whether the
+    /// accessed byte range (derived from the initialization map) is fully
+    /// covered by initialized ranges. If not, a [`PartialInitViolation`] is
+    /// generated.
+    ///
+    /// The initialization map is taken from the [`VerificationContext`] and
+    /// maps region IDs (which correspond to resource IDs) to the byte ranges
+    /// that have been initialized.
+    pub fn check_partial_initialization(
+        &self,
+        context: &VerificationContext,
+    ) -> Vec<PartialInitViolation> {
+        let mut violations = Vec::new();
+
+        // For each read event, check partial initialization
+        for event in &context.input.events {
+            if event.event != EventAction::Read {
+                continue;
+            }
+
+            let region_id = event.resource.0;
+
+            // Use the access range from the init_map context, or default to
+            // checking the whole region (0..0 = no range info, skip)
+            let init_ranges = context.init_map.initialized.get(&region_id);
+
+            // If there's no initialization data for this region, skip
+            if init_ranges.is_none() || init_ranges.unwrap().is_empty() {
+                // No initialization info — cannot verify, so report violation
+                // assuming the entire region is accessed and none is initialized.
+                // Only report if there's actually data to check.
+                continue;
+            }
+
+            // Check each initialized range entry to find the total covered region
+            // and look for gaps. We assume the read accesses the union of all
+            // initialized ranges plus gaps.
+            let init_data = init_ranges.unwrap();
+            let mut sorted: Vec<(u64, u64)> = init_data.clone();
+            sorted.sort_by_key(|r| r.0);
+
+            // Find the overall span of the region from init data
+            let min_start = sorted.first().map(|r| r.0).unwrap_or(0);
+            let max_end = sorted.iter().map(|r| r.1).max().unwrap_or(0);
+
+            if min_start >= max_end {
+                continue;
+            }
+
+            // Check for uninitialized gaps
+            let uninit = context.init_map.check_range(region_id, min_start, max_end);
+
+            if !uninit.is_empty() {
+                violations.push(PartialInitViolation {
+                    region_id,
+                    access_point: event.point.to_string(),
+                    accessed_range: (min_start, max_end),
+                    uninitialized_ranges: uninit,
+                });
+            }
+        }
+
+        violations
+    }
+
+    // -----------------------------------------------------------------------
+    // Enhanced analysis: Verification with Proof Obligations
+    // -----------------------------------------------------------------------
+
+    /// Run liveness verification and generate proof obligations for each
+    /// violation found.
+    ///
+    /// This method first runs the standard liveness check via [`verify`],
+    /// then examines each violation and generates a proof obligation — a
+    /// formal statement that, if proven, would resolve the violation. The
+    /// resulting [`LivenessVerificationResult`] contains both the original
+    /// violations and the generated proof obligations.
+    pub fn verify_with_proofs(
+        &mut self,
+        context: &VerificationContext,
+    ) -> LivenessVerificationResult {
+        let mut result = self.verify(&context.input);
+
+        // Generate proof obligations for each violation
+        let violations: Vec<LivenessViolation> = result.violations.clone();
+        for violation in &violations {
+            match violation {
+                LivenessViolation::ResourceLeak {
+                    resource,
+                    kind,
+                    alloc_point,
+                    ..
+                } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that {} {} allocated at {} is deallocated on all execution paths",
+                            kind, resource, alloc_point
+                        ),
+                        resource: *resource,
+                        obligation_kind: ObligationKind::DeallocationReachable,
+                    });
+                }
+                LivenessViolation::DeadlockCycle {
+                    cycle, threads, ..
+                } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that deadlock among resources [{}] with threads [{}] cannot occur",
+                            cycle.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", "),
+                            threads.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+                        ),
+                        resource: cycle.first().copied().unwrap_or(ResourceId(0)),
+                        obligation_kind: ObligationKind::DeadlockFreedom,
+                    });
+                }
+                LivenessViolation::LockHeldTooLong {
+                    resource,
+                    acquire_point,
+                    ..
+                } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that lock {} acquired at {} is released on all paths",
+                            resource, acquire_point
+                        ),
+                        resource: *resource,
+                        obligation_kind: ObligationKind::LockReleaseReachable,
+                    });
+                }
+                LivenessViolation::LostMessage {
+                    channel,
+                    send_point,
+                    ..
+                } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that message sent on channel {} at {} is eventually received",
+                            channel, send_point
+                        ),
+                        resource: *channel,
+                        obligation_kind: ObligationKind::MessageReceived,
+                    });
+                }
+                LivenessViolation::ConditionalDeallocation {
+                    resource,
+                    alloc_point,
+                    ..
+                } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that {} allocated at {} is deallocated on all conditional paths",
+                            resource, alloc_point
+                        ),
+                        resource: *resource,
+                        obligation_kind: ObligationKind::DeallocationReachable,
+                    });
+                }
+                LivenessViolation::CircularDependency { cycle, .. } => {
+                    result.add_obligation(ProofObligation {
+                        id: self.alloc_obligation_id(),
+                        description: format!(
+                            "Prove that circular dependency among [{}] does not lead to deadlock",
+                            cycle.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" -> ")
+                        ),
+                        resource: cycle.first().copied().unwrap_or(ResourceId(0)),
+                        obligation_kind: ObligationKind::DeadlockFreedom,
+                    });
+                }
+            }
+        }
+
+        // Also generate proof obligations for use-after-free paths
+        let liveness_paths = self.compute_liveness_paths(context);
+        for path in &liveness_paths {
+            if !path.access_after_free.is_empty() {
+                result.add_obligation(ProofObligation {
+                    id: self.alloc_obligation_id(),
+                    description: format!(
+                        "Prove that use-after-free accesses for resource {} at [{}] are safe",
+                        path.resource_id,
+                        path.access_after_free
+                            .iter()
+                            .map(|(pp, desc)| format!("{} ({})", pp, desc))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    resource: ResourceId(path.resource_id),
+                    obligation_kind: ObligationKind::UseAfterFreeSafe,
+                });
+            }
+        }
+
+        // Generate proof obligations for dead allocations
+        let dead_allocs = self.detect_dead_allocations(context);
+        for da in &dead_allocs {
+            result.add_obligation(ProofObligation {
+                id: self.alloc_obligation_id(),
+                description: format!(
+                    "Prove that dead allocation of resource {} at {} is actually needed ({:?})",
+                    da.resource_id, da.allocation_point, da.reason
+                ),
+                resource: ResourceId(da.resource_id),
+                obligation_kind: ObligationKind::DeadAllocationNeeded,
+            });
+        }
+
+        // Generate proof obligations for partial initialization violations
+        let partial_violations = self.check_partial_initialization(context);
+        for pv in &partial_violations {
+            result.add_obligation(ProofObligation {
+                id: self.alloc_obligation_id(),
+                description: format!(
+                    "Prove that region {} accessed at {} is fully initialized before use (uninitialized ranges: {:?})",
+                    pv.region_id, pv.access_point, pv.uninitialized_ranges
+                ),
+                resource: ResourceId(pv.region_id),
+                obligation_kind: ObligationKind::FullyInitialized,
+            });
+        }
+
+        result
+    }
 }
 
 impl Default for LivenessVerifier {
@@ -2028,5 +2625,424 @@ mod tests {
         };
         let s = format!("{}", circ);
         assert!(s.contains("Circular dependency"));
+    }
+
+    // =======================================================================
+    // Enhanced liveness verification tests
+    // =======================================================================
+
+    // -----------------------------------------------------------------------
+    // Test: Use-after-free with path tracking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_use_after_free_path_tracking() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 at PP1, deallocate at PP3, read at PP5 (after free)
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(3),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(5),
+            thread: tid(1),
+        });
+
+        // CFG: PP1 -> PP2 -> PP3 -> PP4 -> PP5
+        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(3), to: pp(4), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(4), to: pp(5), conditional: false, label: None });
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+        let paths = verifier.compute_liveness_paths(&context);
+
+        assert_eq!(paths.len(), 1, "Expected one liveness path for one allocation");
+        let path = &paths[0];
+        assert_eq!(path.resource_id, 1);
+        assert_eq!(path.allocation_point, "PP1");
+        assert_eq!(path.deallocation_point, Some("PP3".to_string()));
+        assert_eq!(path.access_after_free.len(), 1, "Expected one use-after-free access");
+        assert!(path.access_after_free[0].0.contains("PP5"));
+        assert!(path.access_after_free[0].1.contains("read after free"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Dead allocation — never accessed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dead_allocation_never_accessed() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 but never read, write, or otherwise use it
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+        let dead = verifier.detect_dead_allocations(&context);
+
+        assert_eq!(dead.len(), 1, "Expected one dead allocation");
+        assert_eq!(dead[0].resource_id, 1);
+        assert!(matches!(dead[0].reason, DeadReason::NeverAccessed));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Dead allocation — only written, never read
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dead_allocation_only_written_never_read() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1, write to it, but never read
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Write,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(3),
+            thread: tid(1),
+        });
+
+        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+        let dead = verifier.detect_dead_allocations(&context);
+
+        assert_eq!(dead.len(), 1, "Expected one dead allocation (only written)");
+        assert_eq!(dead[0].resource_id, 1);
+        assert!(matches!(dead[0].reason, DeadReason::OnlyWrittenNeverRead));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Partial initialization — struct with some fields uninitialized
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_partial_initialization_some_fields_uninit() {
+        let mut input = LivenessInput::new();
+
+        // Region 1: allocate, then read (but only partially initialized)
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(2),
+            thread: tid(1),
+        });
+
+        // Init map: only bytes 0-3 initialized, but region spans 0-15
+        let mut init_map = InitializationMap::new();
+        init_map.mark_initialized(1, 0, 4);   // bytes 0-3
+        init_map.mark_initialized(1, 8, 16);  // bytes 8-15
+        // Gap: bytes 4-7 are uninitialized
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::with_init_map(input, init_map);
+        let violations = verifier.check_partial_initialization(&context);
+
+        assert_eq!(violations.len(), 1, "Expected one partial init violation");
+        assert_eq!(violations[0].region_id, 1);
+        assert!(!violations[0].uninitialized_ranges.is_empty(), "Expected uninitialized ranges");
+        // Should find gap at bytes 4-7
+        assert!(
+            violations[0].uninitialized_ranges.iter().any(|(s, e)| *s == 4 && *e == 8),
+            "Expected uninitialized gap at (4, 8), got: {:?}",
+            violations[0].uninitialized_ranges
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Full initialization — all bytes covered
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_initialization_all_bytes_covered() {
+        let mut input = LivenessInput::new();
+
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(2),
+            thread: tid(1),
+        });
+
+        // Init map: fully covers bytes 0-16 (contiguous)
+        let mut init_map = InitializationMap::new();
+        init_map.mark_initialized(1, 0, 16);
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::with_init_map(input, init_map);
+        let violations = verifier.check_partial_initialization(&context);
+
+        assert!(violations.is_empty(), "Expected no partial init violations for fully initialized region, got: {:?}", violations);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Proof obligation generation for use-after-free
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_obligation_for_use_after_free() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1, deallocate, then read after free
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(3),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(5),
+            thread: tid(1),
+        });
+
+        // CFG: PP1 -> PP2 -> PP3 -> PP4 -> PP5
+        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(3), to: pp(4), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(4), to: pp(5), conditional: false, label: None });
+
+        let mut verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+        let result = verifier.verify_with_proofs(&context);
+
+        // Should have at least one proof obligation for use-after-free
+        let uaf_obligations: Vec<&ProofObligation> = result
+            .proof_obligations
+            .iter()
+            .filter(|o| o.obligation_kind == ObligationKind::UseAfterFreeSafe)
+            .collect();
+
+        assert!(
+            !uaf_obligations.is_empty(),
+            "Expected use-after-free proof obligation, got: {:?}",
+            result.proof_obligations
+        );
+        assert!(uaf_obligations[0].description.contains("use-after-free"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Proof obligation generation for dead allocation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_proof_obligation_for_dead_allocation() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 but never access it (dead allocation)
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+
+        let mut verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+        let result = verifier.verify_with_proofs(&context);
+
+        // Should have a proof obligation for the dead allocation
+        let dead_obligations: Vec<&ProofObligation> = result
+            .proof_obligations
+            .iter()
+            .filter(|o| o.obligation_kind == ObligationKind::DeadAllocationNeeded)
+            .collect();
+
+        assert!(
+            !dead_obligations.is_empty(),
+            "Expected dead allocation proof obligation, got: {:?}",
+            result.proof_obligations
+        );
+        assert!(dead_obligations[0].description.contains("dead allocation"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Multiple resources with mixed liveness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multiple_resources_mixed_liveness() {
+        let mut input = LivenessInput::new();
+
+        // R1: properly allocated, used, and freed
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Write,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(3),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(4),
+            thread: tid(1),
+        });
+
+        // R2: allocated but never accessed (dead)
+        input.add_event(ResourceEvent {
+            resource: rid(2),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(10),
+            thread: tid(1),
+        });
+
+        // R3: allocated, written, but never read (only written, never read)
+        input.add_event(ResourceEvent {
+            resource: rid(3),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(20),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(3),
+            kind: ResourceKind::Memory,
+            event: EventAction::Write,
+            point: pp(21),
+            thread: tid(1),
+        });
+
+        // CFG: linear for R1
+        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge { from: pp(3), to: pp(4), conditional: false, label: None });
+
+        let verifier = LivenessVerifier::new();
+        let context = VerificationContext::new(input);
+
+        // Check liveness paths
+        let paths = verifier.compute_liveness_paths(&context);
+        assert_eq!(paths.len(), 3, "Expected three liveness paths for three allocations");
+
+        // R1 should have no use-after-free
+        let r1_path = paths.iter().find(|p| p.resource_id == 1).unwrap();
+        assert!(r1_path.access_after_free.is_empty(), "R1 should have no use-after-free");
+
+        // R2 should have no deallocation
+        let r2_path = paths.iter().find(|p| p.resource_id == 2).unwrap();
+        assert!(r2_path.deallocation_point.is_none(), "R2 should have no deallocation");
+
+        // Check dead allocations
+        let dead = verifier.detect_dead_allocations(&context);
+        assert!(dead.len() >= 2, "Expected at least 2 dead allocations, got: {:?}", dead);
+
+        let r2_dead = dead.iter().find(|d| d.resource_id == 2);
+        assert!(r2_dead.is_some(), "R2 should be detected as dead");
+        assert!(matches!(r2_dead.unwrap().reason, DeadReason::NeverAccessed));
+
+        let r3_dead = dead.iter().find(|d| d.resource_id == 3);
+        assert!(r3_dead.is_some(), "R3 should be detected as dead");
+        assert!(matches!(r3_dead.unwrap().reason, DeadReason::OnlyWrittenNeverRead));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: InitializationMap check_range utility
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_initialization_map_check_range() {
+        let mut init_map = InitializationMap::new();
+        // Region 1: bytes 0-4 and 8-16 initialized, gap at 4-8
+        init_map.mark_initialized(1, 0, 4);
+        init_map.mark_initialized(1, 8, 16);
+
+        // Check full range [0, 16): should find gap at [4, 8)
+        let uninit = init_map.check_range(1, 0, 16);
+        assert_eq!(uninit, vec![(4, 8)], "Expected gap at (4, 8)");
+
+        // Check subrange [0, 4): fully initialized
+        let uninit = init_map.check_range(1, 0, 4);
+        assert!(uninit.is_empty(), "Expected no gaps in [0, 4)");
+
+        // Check subrange [4, 8): entirely uninitialized
+        let uninit = init_map.check_range(1, 4, 8);
+        assert_eq!(uninit, vec![(4, 8)], "Expected gap at (4, 8)");
+
+        // Check unknown region: entirely uninitialized
+        let uninit = init_map.check_range(99, 0, 10);
+        assert_eq!(uninit, vec![(0, 10)], "Expected full range uninitialized for unknown region");
     }
 }

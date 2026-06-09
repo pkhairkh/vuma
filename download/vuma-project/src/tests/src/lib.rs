@@ -64,6 +64,19 @@ pub mod benchmarks;
 pub mod pi5_hardware;
 pub mod codegen;
 pub mod full_pipeline;
+pub mod ive_exclusivity;
+pub mod ive_interpretation;
+pub mod ive_liveness;
+pub mod ive_pipeline;
+pub mod ive_origin;
+pub mod ive_cleanup;
+pub mod ive_concurrent;
+pub mod bd_subsumption;
+pub mod codegen_complex;
+pub mod hashmap_verified;
+pub mod arena_verified;
+pub mod btree_verified;
+pub mod dlist_verified;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

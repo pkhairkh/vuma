@@ -1232,6 +1232,640 @@ pub fn verify_access(msg: &MSG, aid: AccessId) -> VerificationStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Change Detection — Phase 2 incremental verification
+// ---------------------------------------------------------------------------
+
+/// A set of changes between two SCG snapshots.
+///
+/// Captures which nodes and edges were added, removed, or modified,
+/// and which regions and derivations are affected by those changes.
+#[derive(Debug, Clone, Default)]
+pub struct ChangeSet {
+    /// Node IDs that were added in the new snapshot.
+    pub added_nodes: HashSet<u64>,
+    /// Node IDs that were removed from the old snapshot.
+    pub removed_nodes: HashSet<u64>,
+    /// Node IDs whose content changed between snapshots.
+    pub modified_nodes: HashSet<u64>,
+    /// Edge pairs (source_node_id, target_node_id) that were added.
+    pub added_edges: HashSet<(u64, u64)>,
+    /// Edge pairs (source_node_id, target_node_id) that were removed.
+    pub removed_edges: HashSet<(u64, u64)>,
+    /// Region IDs affected by any change.
+    pub affected_regions: HashSet<u64>,
+    /// Derivation IDs affected by any change.
+    pub affected_derivations: HashSet<u64>,
+}
+
+impl ChangeSet {
+    /// Create an empty change set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` if there are no changes at all.
+    pub fn is_empty(&self) -> bool {
+        self.added_nodes.is_empty()
+            && self.removed_nodes.is_empty()
+            && self.modified_nodes.is_empty()
+            && self.added_edges.is_empty()
+            && self.removed_edges.is_empty()
+            && self.affected_regions.is_empty()
+            && self.affected_derivations.is_empty()
+    }
+
+    /// Total number of changes (nodes + edges).
+    pub fn change_count(&self) -> usize {
+        self.added_nodes.len()
+            + self.removed_nodes.len()
+            + self.modified_nodes.len()
+            + self.added_edges.len()
+            + self.removed_edges.len()
+    }
+}
+
+/// Detects changes between two SCG snapshots.
+///
+/// Efficiently computes the delta between the old and new snapshots,
+/// identifying which nodes, edges, regions, and derivations are affected.
+/// This enables the incremental verifier to skip unchanged subgraphs.
+pub struct ChangeDetector {
+    old_snapshot: SCGSnapshot,
+    new_snapshot: SCGSnapshot,
+}
+
+impl ChangeDetector {
+    /// Create a new change detector with the given old and new snapshots.
+    pub fn new(old_snapshot: SCGSnapshot, new_snapshot: SCGSnapshot) -> Self {
+        Self {
+            old_snapshot,
+            new_snapshot,
+        }
+    }
+
+    /// Detect all changes between the old and new snapshots.
+    ///
+    /// Returns a [`ChangeSet`] containing all added, removed, and modified
+    /// nodes and edges, as well as the sets of affected regions and
+    /// derivations.
+    pub fn detect(&self) -> ChangeSet {
+        let mut changes = ChangeSet::new();
+
+        let old_ids: HashSet<u64> = self.old_snapshot.nodes.keys().copied().collect();
+        let new_ids: HashSet<u64> = self.new_snapshot.nodes.keys().copied().collect();
+
+        // Added nodes: in new but not in old.
+        for id in new_ids.difference(&old_ids) {
+            changes.added_nodes.insert(*id);
+            if let Some(node) = self.new_snapshot.get_node(*id) {
+                extract_affected_entities(
+                    node,
+                    &mut changes.affected_regions,
+                    &mut changes.affected_derivations,
+                    &mut changes.added_edges,
+                );
+            }
+        }
+
+        // Removed nodes: in old but not in new.
+        for id in old_ids.difference(&new_ids) {
+            changes.removed_nodes.insert(*id);
+            if let Some(node) = self.old_snapshot.get_node(*id) {
+                extract_affected_entities(
+                    node,
+                    &mut changes.affected_regions,
+                    &mut changes.affected_derivations,
+                    &mut changes.removed_edges,
+                );
+            }
+        }
+
+        // Modified nodes: same ID but different content.
+        for id in old_ids.intersection(&new_ids) {
+            let old_node = self.old_snapshot.get_node(*id).unwrap();
+            let new_node = self.new_snapshot.get_node(*id).unwrap();
+            if nodes_differ(old_node, new_node) {
+                changes.modified_nodes.insert(*id);
+                extract_affected_entities(
+                    new_node,
+                    &mut changes.affected_regions,
+                    &mut changes.affected_derivations,
+                    &mut changes.added_edges,
+                );
+            }
+        }
+
+        changes
+    }
+
+    /// Compute which invariants are affected by the given changes.
+    ///
+    /// Returns a list of invariant names that need to be re-verified.
+    /// Invariants not in this list can be skipped during incremental
+    /// verification.
+    ///
+    /// The invariant names are: `"liveness"`, `"origin"`, `"bounds"`,
+    /// `"exclusivity"`, `"cleanup"`.
+    pub fn compute_affected_invariants(changes: &ChangeSet) -> Vec<String> {
+        let mut affected: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let add = |name: &str, seen: &mut HashSet<String>, list: &mut Vec<String>| {
+            if seen.insert(name.to_string()) {
+                list.push(name.to_string());
+            }
+        };
+
+        // Liveness: affected if regions or accesses changed.
+        if !changes.affected_regions.is_empty()
+            || !changes.added_nodes.is_empty()
+            || !changes.removed_nodes.is_empty()
+        {
+            add("liveness", &mut seen, &mut affected);
+        }
+
+        // Origin: affected if derivations changed.
+        if !changes.affected_derivations.is_empty() {
+            add("origin", &mut seen, &mut affected);
+        }
+
+        // Bounds: affected if derivations or regions changed.
+        if !changes.affected_derivations.is_empty() || !changes.affected_regions.is_empty() {
+            add("bounds", &mut seen, &mut affected);
+        }
+
+        // Exclusivity: affected if edges changed (sync edges, concurrent accesses).
+        if !changes.added_edges.is_empty() || !changes.removed_edges.is_empty() {
+            add("exclusivity", &mut seen, &mut affected);
+        }
+
+        // Cleanup: affected if regions were removed.
+        if !changes.removed_nodes.is_empty() || !changes.affected_regions.is_empty() {
+            add("cleanup", &mut seen, &mut affected);
+        }
+
+        affected
+    }
+}
+
+/// Extract affected region IDs, derivation IDs, and edge pairs from an SCG node.
+fn extract_affected_entities(
+    node: &SCGNode,
+    regions: &mut HashSet<u64>,
+    derivations: &mut HashSet<u64>,
+    edges: &mut HashSet<(u64, u64)>,
+) {
+    match node {
+        SCGNode::Alloc { region_id, .. } => {
+            regions.insert(region_id.0);
+        }
+        SCGNode::Dealloc { region_id, .. } => {
+            regions.insert(region_id.0);
+        }
+        SCGNode::Access {
+            region_id,
+            target_derivation,
+            ..
+        } => {
+            regions.insert(region_id.0);
+            derivations.insert(target_derivation.0);
+        }
+        SCGNode::Arithmetic {
+            derivation_id,
+            source_derivation,
+            ..
+        } => {
+            derivations.insert(derivation_id.0);
+            derivations.insert(source_derivation.0);
+            edges.insert((source_derivation.0, derivation_id.0));
+        }
+        SCGNode::Cast {
+            derivation_id,
+            source_derivation,
+            ..
+        } => {
+            derivations.insert(derivation_id.0);
+            derivations.insert(source_derivation.0);
+            edges.insert((source_derivation.0, derivation_id.0));
+        }
+        SCGNode::Sync { access1, access2, .. } => {
+            edges.insert((access1.0, access2.0));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Re-verification — Phase 2
+// ---------------------------------------------------------------------------
+
+/// The result of incremental re-verification.
+///
+/// Only invariants affected by the changes are re-verified; unaffected
+/// invariants are skipped. The `savings_ratio` indicates how much work
+/// was avoided: `0.0` means everything was re-verified, `1.0` means
+/// everything was skipped.
+#[derive(Debug, Clone)]
+pub struct IncrementalVerificationResult {
+    /// The overall verification result.
+    pub result: VerificationStatus,
+    /// Names of invariants that were re-verified.
+    pub re_verified_invariants: Vec<String>,
+    /// Names of invariants that were skipped (unchanged).
+    pub skipped_invariants: Vec<String>,
+    /// Number of nodes that needed to be re-checked.
+    pub nodes_re_checked: usize,
+    /// Total number of nodes in the graph.
+    pub total_nodes: usize,
+    /// Fraction of work saved by incremental verification.
+    /// `0.0` = no savings, `1.0` = everything skipped.
+    pub savings_ratio: f64,
+}
+
+impl IncrementalVerificationResult {
+    /// Create a result where all invariants were skipped (no changes).
+    pub fn all_skipped(total_nodes: usize) -> Self {
+        Self {
+            result: VerificationStatus::Safe,
+            re_verified_invariants: Vec::new(),
+            skipped_invariants: vec![
+                "liveness".into(),
+                "origin".into(),
+                "bounds".into(),
+                "exclusivity".into(),
+                "cleanup".into(),
+            ],
+            nodes_re_checked: 0,
+            total_nodes,
+            savings_ratio: 1.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verification Cache
+// ---------------------------------------------------------------------------
+
+/// Cache of verification results for subgraphs (regions).
+///
+/// When a subgraph hasn't changed, the previous verification result can
+/// be reused, avoiding expensive re-verification. Tracks cache hits and
+/// misses for monitoring effectiveness.
+#[derive(Debug, Clone)]
+pub struct VerificationCache {
+    /// Cached verification results keyed by region ID (u64).
+    verified_subgraphs: HashMap<u64, VerificationStatus>,
+    /// Number of cache hits (unchanged subgraph reused).
+    cache_hits: usize,
+    /// Number of cache misses (new or changed subgraph verified).
+    cache_misses: usize,
+}
+
+impl VerificationCache {
+    /// Create an empty verification cache.
+    pub fn new() -> Self {
+        Self {
+            verified_subgraphs: HashMap::new(),
+            cache_hits: 0,
+            cache_misses: 0,
+        }
+    }
+
+    /// Look up a cached result for the given region.
+    ///
+    /// Returns `Some(result)` on a cache hit, `None` on a miss.
+    /// Increments the appropriate counter.
+    pub fn lookup(&mut self, region_id: RegionId) -> Option<VerificationStatus> {
+        if let Some(&result) = self.verified_subgraphs.get(&region_id.0) {
+            self.cache_hits += 1;
+            Some(result)
+        } else {
+            self.cache_misses += 1;
+            None
+        }
+    }
+
+    /// Update the cache with a new verification result for the given region.
+    pub fn update(&mut self, region_id: RegionId, result: VerificationStatus) {
+        self.verified_subgraphs.insert(region_id.0, result);
+    }
+
+    /// Check if the cache contains a result for the given region
+    /// without incrementing hit/miss counters.
+    pub fn contains(&self, region_id: RegionId) -> bool {
+        self.verified_subgraphs.contains_key(&region_id.0)
+    }
+
+    /// Invalidate the cache entry for the given region.
+    pub fn invalidate(&mut self, region_id: RegionId) {
+        self.verified_subgraphs.remove(&region_id.0);
+    }
+
+    /// Clear the entire cache and reset counters.
+    pub fn clear(&mut self) {
+        self.verified_subgraphs.clear();
+        self.cache_hits = 0;
+        self.cache_misses = 0;
+    }
+
+    /// Number of cache hits.
+    pub fn hits(&self) -> usize {
+        self.cache_hits
+    }
+
+    /// Number of cache misses.
+    pub fn misses(&self) -> usize {
+        self.cache_misses
+    }
+
+    /// Hit rate as a fraction (`0.0` to `1.0`).
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / total as f64
+        }
+    }
+
+    /// Number of cached entries.
+    pub fn len(&self) -> usize {
+        self.verified_subgraphs.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.verified_subgraphs.is_empty()
+    }
+}
+
+impl Default for VerificationCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Metrics
+// ---------------------------------------------------------------------------
+
+/// Performance metrics for incremental verification.
+///
+/// Tracks the time spent in each phase and whether the Phase 2 target
+/// of sub-1-second re-verification was met.
+#[derive(Debug, Clone)]
+pub struct IncrementalMetrics {
+    /// Time spent detecting changes between snapshots.
+    pub change_detection_time: std::time::Duration,
+    /// Time spent computing the delta.
+    pub delta_computation_time: std::time::Duration,
+    /// Time spent re-verifying affected invariants.
+    pub re_verification_time: std::time::Duration,
+    /// Total wall-clock time for the incremental verification.
+    pub total_time: std::time::Duration,
+    /// Whether the verification met the Phase 2 target (< 1 second).
+    pub meets_target: bool,
+}
+
+impl IncrementalMetrics {
+    /// Create metrics with the given timings.
+    pub fn new(
+        change_detection_time: std::time::Duration,
+        delta_computation_time: std::time::Duration,
+        re_verification_time: std::time::Duration,
+        total_time: std::time::Duration,
+    ) -> Self {
+        let meets_target = total_time < std::time::Duration::from_secs(1);
+        Self {
+            change_detection_time,
+            delta_computation_time,
+            re_verification_time,
+            total_time,
+            meets_target,
+        }
+    }
+
+    /// Create zero-valued metrics (all durations zero, meets_target true).
+    pub fn zero() -> Self {
+        Self {
+            change_detection_time: std::time::Duration::ZERO,
+            delta_computation_time: std::time::Duration::ZERO,
+            re_verification_time: std::time::Duration::ZERO,
+            total_time: std::time::Duration::ZERO,
+            meets_target: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Verifier — ties together change detection, caching, and
+// incremental re-verification
+// ---------------------------------------------------------------------------
+
+/// The full set of VUMA invariant names in optimal verification order.
+const ALL_INVARIANTS: &[&str] = &["liveness", "origin", "bounds", "exclusivity", "cleanup"];
+
+/// Incremental MSG verifier with caching.
+///
+/// Maintains a cache of verification results per region so that unchanged
+/// subgraphs don't need to be re-verified. Only invariants affected by
+/// the detected changes are re-verified.
+pub struct IncrementalVerifier {
+    cache: VerificationCache,
+    all_invariants: Vec<String>,
+}
+
+impl IncrementalVerifier {
+    /// Create a new incremental verifier with an empty cache.
+    pub fn new() -> Self {
+        Self {
+            cache: VerificationCache::new(),
+            all_invariants: ALL_INVARIANTS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Get a reference to the verification cache.
+    pub fn cache(&self) -> &VerificationCache {
+        &self.cache
+    }
+
+    /// Get a mutable reference to the verification cache.
+    pub fn cache_mut(&mut self) -> &mut VerificationCache {
+        &mut self.cache
+    }
+
+    /// Perform incremental re-verification based on the given delta and changes.
+    ///
+    /// Only re-verifies invariants that are affected by the changes.
+    /// Unchanged subgraphs reuse their cached verification results.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` — The current Memory State Graph.
+    /// * `delta` — The delta to apply (used for context, not applied here).
+    /// * `changes` — The detected changes that drive incremental verification.
+    pub fn incremental_verify(
+        &mut self,
+        msg: &MSG,
+        _delta: &MSGDelta,
+        changes: &ChangeSet,
+    ) -> IncrementalVerificationResult {
+        let total_nodes = msg.region_count() + msg.derivation_count() + msg.access_count();
+
+        // If there are no changes, everything can be skipped.
+        if changes.is_empty() {
+            return IncrementalVerificationResult::all_skipped(total_nodes);
+        }
+
+        // Determine which invariants need re-verification.
+        let affected_invariants = ChangeDetector::compute_affected_invariants(changes);
+
+        let re_verified: Vec<String> = affected_invariants.clone();
+        let skipped: Vec<String> = self
+            .all_invariants
+            .iter()
+            .filter(|inv| !affected_invariants.contains(inv))
+            .cloned()
+            .collect();
+
+        let mut overall_result = VerificationStatus::Safe;
+        let mut nodes_re_checked = 0;
+
+        // Invalidate cache entries for affected regions (they changed).
+        for &region_id_u64 in &changes.affected_regions {
+            self.cache.invalidate(RegionId(region_id_u64));
+        }
+
+        // Re-verify affected regions.
+        for &region_id_u64 in &changes.affected_regions {
+            let rid = RegionId(region_id_u64);
+            if msg.region(rid).is_some() {
+                let result = self.verify_region(msg, rid);
+                self.cache.update(rid, result);
+                overall_result = overall_result.meet(result);
+                nodes_re_checked += 1;
+            }
+        }
+
+        // Re-verify affected derivations.
+        for &deriv_id_u64 in &changes.affected_derivations {
+            let did = DerivationId(deriv_id_u64);
+            if msg.derivation(did).is_some() {
+                nodes_re_checked += 1;
+                let accesses = find_accesses_via_derivation(msg, did);
+                for aid in accesses {
+                    let status = verify_access(msg, aid);
+                    overall_result = overall_result.meet(status);
+                }
+            }
+        }
+
+        // Process edge changes (affect exclusivity).
+        if affected_invariants.contains(&"exclusivity".to_string()) {
+            for &(a, b) in &changes.added_edges {
+                let aid1 = AccessId(a);
+                let aid2 = AccessId(b);
+                let s1 = verify_access(msg, aid1);
+                let s2 = verify_access(msg, aid2);
+                overall_result = overall_result.meet(s1).meet(s2);
+                nodes_re_checked += 2;
+            }
+        }
+
+        // Combine with cached results for unaffected regions.
+        for (&_region_id_u64, &cached_result) in &self.cache.verified_subgraphs {
+            overall_result = overall_result.meet(cached_result);
+        }
+
+        let savings_ratio = if total_nodes > 0 {
+            1.0 - (nodes_re_checked as f64 / total_nodes as f64)
+        } else {
+            1.0
+        };
+
+        IncrementalVerificationResult {
+            result: overall_result,
+            re_verified_invariants: re_verified,
+            skipped_invariants: skipped,
+            nodes_re_checked,
+            total_nodes,
+            savings_ratio,
+        }
+    }
+
+    /// Verify a single region's subgraph and return the verification status.
+    fn verify_region(&mut self, msg: &MSG, rid: RegionId) -> VerificationStatus {
+        let mut result = VerificationStatus::Safe;
+
+        // Check region itself.
+        match msg.region(rid) {
+            Some(region) => {
+                if !region.is_live() {
+                    result = result.meet(VerificationStatus::Unsafe);
+                }
+            }
+            None => {
+                result = result.meet(VerificationStatus::Unsafe);
+            }
+        }
+
+        // Check all accesses to this region.
+        let accesses = find_accesses_to_region(msg, rid);
+        for aid in accesses {
+            let status = verify_access(msg, aid);
+            result = result.meet(status);
+        }
+
+        result
+    }
+
+    /// Full incremental verification with metrics.
+    ///
+    /// Performs the complete pipeline: change detection, delta computation,
+    /// and incremental re-verification, returning both the result and
+    /// detailed timing metrics.
+    pub fn incremental_verify_with_metrics(
+        &mut self,
+        msg: &MSG,
+        old_scg: &SCGSnapshot,
+        new_scg: &SCGSnapshot,
+    ) -> (IncrementalVerificationResult, IncrementalMetrics) {
+        let total_start = std::time::Instant::now();
+
+        // Phase 1: Change detection.
+        let cd_start = std::time::Instant::now();
+        let detector = ChangeDetector::new(old_scg.clone(), new_scg.clone());
+        let changes = detector.detect();
+        let change_detection_time = cd_start.elapsed();
+
+        // Phase 2: Delta computation.
+        let dc_start = std::time::Instant::now();
+        let delta = compute_scg_delta(old_scg, new_scg);
+        let delta_computation_time = dc_start.elapsed();
+
+        // Phase 3: Incremental re-verification.
+        let rv_start = std::time::Instant::now();
+        let result = self.incremental_verify(msg, &delta, &changes);
+        let re_verification_time = rv_start.elapsed();
+
+        let total_time = total_start.elapsed();
+        let metrics = IncrementalMetrics::new(
+            change_detection_time,
+            delta_computation_time,
+            re_verification_time,
+            total_time,
+        );
+
+        (result, metrics)
+    }
+}
+
+impl Default for IncrementalVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1903,5 +2537,348 @@ mod tests {
         assert_eq!(old.access_count(), 1);
         assert_eq!(old.region_count(), 1);
         assert_eq!(old.derivation_count(), 1);
+    }
+
+    // =======================================================================
+    // Phase 2 incremental verification tests
+    // =======================================================================
+
+    // Test 28: No changes → all invariants skipped
+    #[test]
+    fn no_changes_all_invariants_skipped() {
+        let mut verifier = IncrementalVerifier::new();
+        let msg = MSG::new();
+        let delta = MSGDelta::new();
+        let changes = ChangeSet::new();
+
+        let result = verifier.incremental_verify(&msg, &delta, &changes);
+        assert!(result.re_verified_invariants.is_empty());
+        assert_eq!(result.skipped_invariants.len(), 5);
+        assert!(result.skipped_invariants.contains(&"liveness".to_string()));
+        assert!(result.skipped_invariants.contains(&"origin".to_string()));
+        assert!(result.skipped_invariants.contains(&"bounds".to_string()));
+        assert!(result.skipped_invariants.contains(&"exclusivity".to_string()));
+        assert!(result.skipped_invariants.contains(&"cleanup".to_string()));
+        assert_eq!(result.savings_ratio, 1.0);
+        assert_eq!(result.nodes_re_checked, 0);
+    }
+
+    // Test 29: Single node change → only affected invariants re-verified
+    #[test]
+    fn single_node_change_affected_invariants_only() {
+        let mut changes = ChangeSet::new();
+        // A single Alloc node was added — affects its region.
+        changes.added_nodes.insert(1);
+        changes.affected_regions.insert(10);
+
+        let affected = ChangeDetector::compute_affected_invariants(&changes);
+        // Should include liveness, bounds, cleanup (all region-related).
+        assert!(affected.contains(&"liveness".to_string()));
+        assert!(affected.contains(&"bounds".to_string()));
+        assert!(affected.contains(&"cleanup".to_string()));
+        // Should NOT include exclusivity (no edge changes).
+        assert!(!affected.contains(&"exclusivity".to_string()));
+    }
+
+    // Test 30: Edge addition triggers exclusivity re-check
+    #[test]
+    fn edge_addition_triggers_exclusivity_recheck() {
+        let mut changes = ChangeSet::new();
+        // A Sync edge was added.
+        changes.added_edges.insert((1, 2));
+
+        let affected = ChangeDetector::compute_affected_invariants(&changes);
+        assert!(affected.contains(&"exclusivity".to_string()));
+    }
+
+    // Test 31: Region deletion triggers cleanup re-check
+    #[test]
+    fn region_deletion_triggers_cleanup_recheck() {
+        let mut changes = ChangeSet::new();
+        // A region node was removed.
+        changes.removed_nodes.insert(1);
+        changes.affected_regions.insert(10);
+
+        let affected = ChangeDetector::compute_affected_invariants(&changes);
+        assert!(affected.contains(&"cleanup".to_string()));
+        assert!(affected.contains(&"liveness".to_string()));
+    }
+
+    // Test 32: Cache hit for unchanged subgraph
+    #[test]
+    fn cache_hit_for_unchanged_subgraph() {
+        let mut cache = VerificationCache::new();
+        let rid = RegionId(1);
+
+        // First lookup: miss (cache is empty).
+        let result = cache.lookup(rid);
+        assert!(result.is_none());
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.hits(), 0);
+
+        // Populate cache.
+        cache.update(rid, VerificationStatus::Safe);
+
+        // Second lookup: hit.
+        let result = cache.lookup(rid);
+        assert_eq!(result, Some(VerificationStatus::Safe));
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert!((cache.hit_rate() - 0.5).abs() < 0.001);
+    }
+
+    // Test 33: Cache miss for changed subgraph
+    #[test]
+    fn cache_miss_for_changed_subgraph() {
+        let mut cache = VerificationCache::new();
+        let rid = RegionId(1);
+
+        // Populate cache.
+        cache.update(rid, VerificationStatus::Safe);
+        assert!(cache.contains(rid));
+
+        // Invalidate the cache (simulating a change to this region).
+        cache.invalidate(rid);
+        assert!(!cache.contains(rid));
+
+        // Lookup now is a miss.
+        let result = cache.lookup(rid);
+        assert!(result.is_none());
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.hits(), 0);
+    }
+
+    // Test 34: Savings ratio computation
+    #[test]
+    fn savings_ratio_computation() {
+        let mut verifier = IncrementalVerifier::new();
+
+        // Build an MSG with 3 regions + 3 derivations + 3 accesses = 9 total nodes.
+        let mut msg = MSG::new();
+        for i in 1..=3 {
+            msg.add_region(make_region(i, 0x1000 * i, 0x100));
+            msg.add_derivation(make_direct_derivation(i * 10, i));
+            msg.add_access(Access::new(
+                AccessId(i * 100),
+                DerivationId(i * 10),
+                AccessKind::Read,
+                4,
+                dummy_pp(i as u32),
+            ));
+        }
+
+        // Only region 1 changed.
+        let mut changes = ChangeSet::new();
+        changes.added_nodes.insert(1);
+        changes.affected_regions.insert(1);
+
+        let delta = MSGDelta::new();
+        let result = verifier.incremental_verify(&msg, &delta, &changes);
+
+        // Total nodes = 3 regions + 3 derivations + 3 accesses = 9.
+        assert_eq!(result.total_nodes, 9);
+        // Only region 1 was re-checked (1 node), plus derivation + access edges.
+        assert!(result.nodes_re_checked > 0);
+        assert!(result.savings_ratio > 0.0);
+        assert!(result.savings_ratio < 1.0);
+    }
+
+    // Test 35: Performance target check (< 1 second for small edit)
+    #[test]
+    fn performance_target_under_one_second() {
+        let mut verifier = IncrementalVerifier::new();
+
+        // Build a small MSG.
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, 0x1000, 0x200));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        msg.add_access(Access::new(AccessId(100), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+
+        // Build old and new SCG snapshots (small change: add an access node).
+        let mut old_scg = SCGSnapshot::new();
+        old_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(1),
+            base: Address::from(0x1000_u64),
+            size: 0x200,
+            alloc_point: dummy_pp(1),
+        });
+        old_scg.add_node(SCGNode::Arithmetic {
+            node_id: 2,
+            derivation_id: DerivationId(10),
+            source_derivation: DerivationId(10),
+            offset: 0,
+            proven_range: (Address::from(0x1000_u64), Address::from(0x1200_u64)),
+        });
+
+        let mut new_scg = old_scg.clone();
+        new_scg.add_node(SCGNode::Access {
+            node_id: 3,
+            access_id: AccessId(100),
+            target_derivation: DerivationId(10),
+            region_id: RegionId(1),
+            is_write: false,
+            size: 4,
+            program_point: dummy_pp(5),
+        });
+
+        let (result, metrics) = verifier.incremental_verify_with_metrics(&msg, &old_scg, &new_scg);
+
+        // Must meet the Phase 2 target of < 1 second.
+        assert!(metrics.meets_target, "Incremental verification took too long: {:?}", metrics.total_time);
+        assert!(metrics.total_time < std::time::Duration::from_secs(1));
+        assert!(metrics.change_detection_time < std::time::Duration::from_secs(1));
+        assert!(metrics.delta_computation_time < std::time::Duration::from_secs(1));
+        assert!(metrics.re_verification_time < std::time::Duration::from_secs(1));
+
+        // The result should have some re-verified invariants since we added a node.
+        assert!(!result.re_verified_invariants.is_empty());
+    }
+
+    // Test 36: ChangeDetector detects added/removed/modified nodes
+    #[test]
+    fn change_detector_detects_all_changes() {
+        let mut old = SCGSnapshot::new();
+        old.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(1),
+            base: Address::from(0x1000_u64),
+            size: 0x100,
+            alloc_point: dummy_pp(1),
+        });
+        old.add_node(SCGNode::Arithmetic {
+            node_id: 2,
+            derivation_id: DerivationId(10),
+            source_derivation: DerivationId(10),
+            offset: 0x40,
+            proven_range: (Address::from(0x1040_u64), Address::from(0x1100_u64)),
+        });
+
+        let mut new = SCGSnapshot::new();
+        // Node 1 stays the same, node 2 is removed, nodes 3 & 4 are added.
+        new.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(1),
+            base: Address::from(0x1000_u64),
+            size: 0x100,
+            alloc_point: dummy_pp(1),
+        });
+        new.add_node(SCGNode::Access {
+            node_id: 3,
+            access_id: AccessId(100),
+            target_derivation: DerivationId(10),
+            region_id: RegionId(1),
+            is_write: false,
+            size: 4,
+            program_point: dummy_pp(5),
+        });
+        // Add a Sync node to test added_edges.
+        new.add_node(SCGNode::Sync {
+            node_id: 4,
+            edge_id: SyncEdgeId(1),
+            access1: AccessId(100),
+            access2: AccessId(200),
+            ordering: Ordering::HappensBefore,
+        });
+
+        let detector = ChangeDetector::new(old, new);
+        let changes = detector.detect();
+
+        assert!(changes.added_nodes.contains(&3));
+        assert!(changes.added_nodes.contains(&4));
+        assert!(changes.removed_nodes.contains(&2));
+        assert!(changes.affected_regions.contains(&1)); // Region 1 affected by both nodes.
+        assert!(changes.affected_derivations.contains(&10)); // D10 from Arithmetic and Access.
+        // Arithmetic node removed adds an edge to removed_edges.
+        assert!(!changes.removed_edges.is_empty());
+        // Sync node added adds an edge to added_edges.
+        assert!(!changes.added_edges.is_empty());
+    }
+
+    // Test 37: IncrementalMetrics meets_target logic
+    #[test]
+    fn incremental_metrics_meets_target() {
+        let under = IncrementalMetrics::new(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(500),
+        );
+        assert!(under.meets_target);
+        assert!(under.total_time < std::time::Duration::from_secs(1));
+
+        let over = IncrementalMetrics::new(
+            std::time::Duration::from_millis(400),
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(400),
+            std::time::Duration::from_millis(1100),
+        );
+        assert!(!over.meets_target);
+    }
+
+    // Test 38: VerificationCache clear resets counters
+    #[test]
+    fn verification_cache_clear_resets_counters() {
+        let mut cache = VerificationCache::new();
+        cache.update(RegionId(1), VerificationStatus::Safe);
+        cache.lookup(RegionId(1)); // hit
+        cache.lookup(RegionId(2)); // miss
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.len(), 1);
+
+        cache.clear();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 0);
+        assert!(cache.is_empty());
+    }
+
+    // Test 39: ChangeSet is_empty and change_count
+    #[test]
+    fn changeset_empty_and_count() {
+        let empty = ChangeSet::new();
+        assert!(empty.is_empty());
+        assert_eq!(empty.change_count(), 0);
+
+        let mut cs = ChangeSet::new();
+        cs.added_nodes.insert(1);
+        cs.removed_nodes.insert(2);
+        cs.modified_nodes.insert(3);
+        cs.added_edges.insert((4, 5));
+        cs.removed_edges.insert((6, 7));
+        assert!(!cs.is_empty());
+        assert_eq!(cs.change_count(), 5);
+    }
+
+    // Test 40: IncrementalVerifier with real MSG data
+    #[test]
+    fn incremental_verifier_with_msg_data() {
+        let mut verifier = IncrementalVerifier::new();
+
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, 0x1000, 0x200));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        msg.add_access(Access::new(AccessId(100), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+
+        // Add a second region with access.
+        msg.add_region(make_region(2, 0x2000, 0x200));
+        msg.add_derivation(make_direct_derivation(20, 2));
+        msg.add_access(Access::new(AccessId(200), DerivationId(20), AccessKind::Write, 4, dummy_pp(10)));
+
+        // Only region 1 changed.
+        let mut changes = ChangeSet::new();
+        changes.affected_regions.insert(1);
+        changes.added_nodes.insert(1);
+
+        let delta = MSGDelta::new();
+        let result = verifier.incremental_verify(&msg, &delta, &changes);
+
+        // Liveness, bounds, cleanup should be re-verified.
+        assert!(result.re_verified_invariants.contains(&"liveness".to_string()));
+        assert!(result.re_verified_invariants.contains(&"bounds".to_string()));
+        // Exclusivity should be skipped (no edge changes).
+        assert!(result.skipped_invariants.contains(&"exclusivity".to_string()));
+        // Overall should be Safe since both regions are live and accessible.
+        assert_eq!(result.result, VerificationStatus::Safe);
     }
 }

@@ -1020,3 +1020,431 @@ mod tests {
         assert!(result.satisfied, "Empty MSG should satisfy liveness invariant");
     }
 }
+
+// ---------------------------------------------------------------------------
+// IVE-synced types and methods
+// ---------------------------------------------------------------------------
+
+/// A complete lifecycle path for a tracked resource, including any
+/// use-after-free accesses detected along the way.
+///
+/// Mirrors `ive::liveness::LivenessPath` for vuma-core consumers.
+#[derive(Debug, Clone)]
+pub struct LivenessPath {
+    /// The program point where the resource was allocated.
+    pub allocation_point: ProgramPoint,
+    /// The program point where the resource was deallocated, if any.
+    pub deallocation_point: Option<ProgramPoint>,
+    /// Accesses that occur after the resource has been freed.
+    /// Each entry is (program point, description of the access).
+    pub access_after_free: Vec<(ProgramPoint, String)>,
+    /// The numeric ID of the resource (region).
+    pub resource_id: u64,
+    /// The kind of resource (as a string).
+    pub resource_kind: String,
+}
+
+/// A dead allocation: a resource that was allocated but never usefully used.
+///
+/// Mirrors `ive::liveness::DeadAllocation` for vuma-core consumers.
+#[derive(Debug, Clone)]
+pub struct DeadAllocation {
+    /// The program point where the allocation occurs.
+    pub allocation_point: ProgramPoint,
+    /// The numeric ID of the resource (region).
+    pub resource_id: u64,
+    /// The reason this allocation is considered dead.
+    pub reason: DeadReason,
+}
+
+/// The reason an allocation is considered dead.
+///
+/// Mirrors `ive::liveness::DeadReason` for vuma-core consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeadReason {
+    /// The resource was allocated but never accessed at all.
+    NeverAccessed,
+    /// The resource was written to but never read from.
+    OnlyWrittenNeverRead,
+    /// The resource was allocated and immediately deallocated with no
+    /// intervening use.
+    RedundantAllocation,
+}
+
+impl fmt::Display for DeadReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeadReason::NeverAccessed => write!(f, "never accessed"),
+            DeadReason::OnlyWrittenNeverRead => write!(f, "only written, never read"),
+            DeadReason::RedundantAllocation => write!(f, "redundant allocation"),
+        }
+    }
+}
+
+/// A map tracking which byte ranges within each region have been initialized.
+///
+/// Mirrors `ive::liveness::InitializationMap` for vuma-core consumers.
+#[derive(Debug, Clone)]
+pub struct InitializationMap {
+    /// Maps region_id to a set of initialized byte ranges (start, end).
+    initialized: hashbrown::HashMap<u64, Vec<(u64, u64)>>,
+}
+
+impl InitializationMap {
+    /// Create a new, empty initialization map.
+    pub fn new() -> Self {
+        Self {
+            initialized: hashbrown::HashMap::new(),
+        }
+    }
+
+    /// Mark a byte range as initialized within a region.
+    pub fn mark_initialized(&mut self, region_id: u64, start: u64, end: u64) {
+        self.initialized
+            .entry(region_id)
+            .or_default()
+            .push((start, end));
+    }
+
+    /// Check whether a given byte range is fully initialized within a region.
+    /// Returns the list of uninitialized sub-ranges that fall within the
+    /// requested range.
+    pub fn check_range(&self, region_id: u64, access_start: u64, access_end: u64) -> Vec<(u64, u64)> {
+        let init_ranges = match self.initialized.get(&region_id) {
+            Some(ranges) => ranges,
+            None => return vec![(access_start, access_end)],
+        };
+
+        if init_ranges.is_empty() {
+            return vec![(access_start, access_end)];
+        }
+
+        let mut sorted: Vec<(u64, u64)> = init_ranges.clone();
+        sorted.sort_by_key(|r| r.0);
+
+        // Merge overlapping initialized ranges
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (s, e) in sorted {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+
+        // Find gaps within [access_start, access_end)
+        let mut uninitialized: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = access_start;
+
+        for (s, e) in &merged {
+            if *e <= access_start {
+                continue;
+            }
+            if *s >= access_end {
+                break;
+            }
+            let s_clamped = (*s).max(access_start);
+            if s_clamped > cursor {
+                uninitialized.push((cursor, s_clamped));
+            }
+            cursor = cursor.max(*e);
+        }
+
+        if cursor < access_end {
+            uninitialized.push((cursor, access_end));
+        }
+
+        uninitialized
+    }
+}
+
+impl Default for InitializationMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A violation where a partially initialized region is accessed.
+///
+/// Mirrors `ive::liveness::PartialInitViolation` for vuma-core consumers.
+#[derive(Debug, Clone)]
+pub struct PartialInitViolation {
+    /// The region that was accessed with partial initialization.
+    pub region_id: u64,
+    /// The program point where the partially-initialized access occurs.
+    pub access_point: ProgramPoint,
+    /// The byte range that was accessed.
+    pub accessed_range: (u64, u64),
+    /// The sub-ranges within the accessed range that are uninitialized.
+    pub uninitialized_ranges: Vec<(u64, u64)>,
+}
+
+// ---------------------------------------------------------------------------
+// IVE-synced wrapper methods
+// ---------------------------------------------------------------------------
+
+/// Compute liveness paths for all regions in the MSG.
+///
+/// For each region, this produces a [`LivenessPath`] that tracks the
+/// allocation/deallocation points and any use-after-free accesses.
+/// Delegates to the IVE liveness infrastructure.
+pub fn compute_liveness_paths(msg: &MSG) -> Vec<LivenessPath> {
+    let mut paths = Vec::new();
+
+    for region in msg.regions() {
+        let mut path = LivenessPath {
+            allocation_point: region.alloc_point.clone(),
+            deallocation_point: region.free_point.clone(),
+            access_after_free: Vec::new(),
+            resource_id: region.id.0,
+            resource_kind: "memory".to_string(),
+        };
+
+        // Collect use-after-free accesses for this region
+        if let Some(ref free_point) = region.free_point {
+            for access in msg.accesses() {
+                if let Some(access_region) = region_of_access(msg, access) {
+                    if access_region == region.id && &access.program_point >= free_point {
+                        path.access_after_free.push((
+                            access.program_point.clone(),
+                            format!("{:?} access {} of {} bytes", access.kind, access.id, access.size),
+                        ));
+                    }
+                }
+            }
+        }
+
+        paths.push(path);
+    }
+
+    paths
+}
+
+/// Detect dead allocations in the MSG.
+///
+/// A dead allocation is a region that was allocated but never usefully used:
+/// - Never accessed at all
+/// - Only written to but never read from
+/// - Allocated and immediately deallocated
+pub fn detect_dead_allocations(msg: &MSG) -> Vec<DeadAllocation> {
+    let mut dead = Vec::new();
+
+    for region in msg.regions() {
+        // Collect all accesses for this region
+        let mut has_read = false;
+        let mut has_write = false;
+        let mut access_count = 0u64;
+
+        for access in msg.accesses() {
+            if let Some(access_region) = region_of_access(msg, access) {
+                if access_region == region.id {
+                    access_count += 1;
+                    match access.kind {
+                        crate::access::AccessKind::Read => has_read = true,
+                        crate::access::AccessKind::Write => has_write = true,
+                    }
+                }
+            }
+        }
+
+        let reason = if access_count == 0 {
+            Some(DeadReason::NeverAccessed)
+        } else if has_write && !has_read {
+            Some(DeadReason::OnlyWrittenNeverRead)
+        } else if access_count == 0 && region.free_point.is_some() {
+            // Allocated and freed with no accesses at all
+            Some(DeadReason::RedundantAllocation)
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            dead.push(DeadAllocation {
+                allocation_point: region.alloc_point.clone(),
+                resource_id: region.id.0,
+                reason,
+            });
+        }
+    }
+
+    dead
+}
+
+/// Check for partial initialization violations in the MSG.
+///
+/// Given an [`InitializationMap`] (which tracks which byte ranges have been
+/// written), this function checks every read access to ensure it only reads
+/// from initialized bytes.
+pub fn check_partial_initialization(msg: &MSG, init_map: &InitializationMap) -> Vec<PartialInitViolation> {
+    let mut violations = Vec::new();
+
+    for access in msg.accesses() {
+        if access.kind != crate::access::AccessKind::Read {
+            continue;
+        }
+
+        // Resolve the region targeted by this access
+        let region_id = match region_of_access(msg, access) {
+            Some(rid) => rid,
+            None => continue,
+        };
+
+        let region = match msg.region(region_id) {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let deriv = match msg.derivation(access.target) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let access_start = deriv.proven_range.0;
+        let access_end = access_start + access.size;
+
+        let uninit = init_map.check_range(
+            region_id.0,
+            access_start.as_u64(),
+            access_end.as_u64(),
+        );
+
+        if !uninit.is_empty() {
+            violations.push(PartialInitViolation {
+                region_id: region_id.0,
+                access_point: access.program_point.clone(),
+                accessed_range: (access_start.as_u64(), access_end.as_u64()),
+                uninitialized_ranges: uninit,
+            });
+        }
+    }
+
+    violations
+}
+
+// ---------------------------------------------------------------------------
+// IVE-synced tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod ive_sync_tests {
+    use super::*;
+    use crate::access::{Access, AccessId, AccessKind};
+    use crate::address::Address;
+    use crate::derivation::{Derivation, DerivationId, DerivationKind, DerivationSource};
+    use crate::program_point::ProgramPoint;
+    use crate::region::{Region, RegionId, RegionStatus};
+
+    fn dummy_pp(line: u32) -> ProgramPoint {
+        ProgramPoint::new("test.vu", line, 1)
+    }
+
+    fn make_region(id: u64, status: RegionStatus, free_line: Option<u32>) -> Region {
+        Region {
+            id: RegionId(id),
+            base: Address::from(0x1000_u64 + (id as u64) * 0x1000),
+            size: 0x200,
+            status,
+            alloc_point: dummy_pp(1),
+            free_point: free_line.map(dummy_pp),
+            owner_context: None,
+        }
+    }
+
+    fn make_direct_derivation(id: u64, region_id: u64) -> Derivation {
+        let base = Address::from(0x1000_u64 + (region_id as u64) * 0x1000);
+        Derivation {
+            id: DerivationId(id),
+            source: DerivationSource::Region(RegionId(region_id)),
+            kind: DerivationKind::Direct,
+            proven_range: (base, base + 0x200),
+        }
+    }
+
+    fn make_read_access(id: u64, target: DerivationId, line: u32, size: u64) -> Access {
+        Access::new(AccessId(id), target, AccessKind::Read, size, dummy_pp(line))
+    }
+
+    fn make_write_access(id: u64, target: DerivationId, line: u32, size: u64) -> Access {
+        Access::new(AccessId(id), target, AccessKind::Write, size, dummy_pp(line))
+    }
+
+    // ----- IVE Test 1: compute_liveness_paths -----
+
+    #[test]
+    fn compute_liveness_paths_basic() {
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, RegionStatus::Freed, Some(30)));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        // Access after free at line 40
+        msg.add_access(make_read_access(100, DerivationId(10), 40, 4));
+
+        let paths = compute_liveness_paths(&msg);
+        assert_eq!(paths.len(), 1, "Expected one liveness path for one region");
+        let path = &paths[0];
+        assert_eq!(path.resource_id, 1);
+        assert!(path.deallocation_point.is_some());
+        assert_eq!(path.access_after_free.len(), 1, "Expected one use-after-free in path");
+        assert!(path.access_after_free[0].0 >= path.deallocation_point.clone().unwrap());
+    }
+
+    // ----- IVE Test 2: detect_deadAllocations -----
+
+    #[test]
+    fn detect_dead_allocations_never_accessed() {
+        let mut msg = MSG::new();
+        // Region allocated but never accessed
+        msg.add_region(make_region(1, RegionStatus::Allocated, None));
+
+        let dead = detect_dead_allocations(&msg);
+        assert_eq!(dead.len(), 1, "Expected one dead allocation");
+        assert_eq!(dead[0].resource_id, 1);
+        assert_eq!(dead[0].reason, DeadReason::NeverAccessed);
+    }
+
+    #[test]
+    fn detect_dead_allocations_only_written() {
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, RegionStatus::Allocated, None));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        // Only a write, no reads
+        msg.add_access(make_write_access(100, DerivationId(10), 10, 4));
+
+        let dead = detect_dead_allocations(&msg);
+        assert_eq!(dead.len(), 1, "Expected one dead allocation");
+        assert_eq!(dead[0].reason, DeadReason::OnlyWrittenNeverRead);
+    }
+
+    // ----- IVE Test 3: check_partial_initialization -----
+
+    #[test]
+    fn check_partial_initialization_detects_uninit_read() {
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, RegionStatus::Allocated, None));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        msg.add_access(make_read_access(100, DerivationId(10), 10, 4));
+
+        let init_map = InitializationMap::new(); // Empty — nothing initialized
+
+        let violations = check_partial_initialization(&msg, &init_map);
+        assert_eq!(violations.len(), 1, "Expected one partial init violation");
+        assert_eq!(violations[0].region_id, 1);
+        assert!(!violations[0].uninitialized_ranges.is_empty());
+    }
+
+    #[test]
+    fn check_partial_initialization_passes_when_initialized() {
+        let mut msg = MSG::new();
+        msg.add_region(make_region(1, RegionStatus::Allocated, None));
+        msg.add_derivation(make_direct_derivation(10, 1));
+        msg.add_access(make_read_access(100, DerivationId(10), 10, 4));
+
+        let mut init_map = InitializationMap::new();
+        // Mark the entire range as initialized
+        init_map.mark_initialized(1, 0x1000, 0x1200);
+
+        let violations = check_partial_initialization(&msg, &init_map);
+        assert!(violations.is_empty(), "No violations expected when fully initialized");
+    }
+}
