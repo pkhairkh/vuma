@@ -64,6 +64,7 @@ pub mod benchmarks;
 pub mod pi5_hardware;
 pub mod codegen;
 pub mod full_pipeline;
+pub mod e2e_cor;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

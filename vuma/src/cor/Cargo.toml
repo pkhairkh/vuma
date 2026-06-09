@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+vuma-scg = { path = "../scg" }
+vuma-codegen = { path = "../codegen" }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 thiserror = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

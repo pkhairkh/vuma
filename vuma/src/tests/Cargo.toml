@@ -11,5 +11,7 @@ vuma-bd = { path = "../bd" }
 vuma-proof = { path = "../proof" }
 vuma-parser = { path = "../parser" }
 vuma-codegen = { path = "../codegen" }
+vuma-cor = { path = "../cor" }
+vuma = { path = "../.." }
 anyhow = "1"
 log = "0.4"

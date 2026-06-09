@@ -49,6 +49,7 @@
 //! // rt.optimize();
 //! ```
 
+pub mod bridge;
 pub mod config;
 pub mod deployment;
 pub mod optimization;

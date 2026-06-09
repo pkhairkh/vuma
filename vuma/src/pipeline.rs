@@ -53,6 +53,7 @@ use vuma_ive::{
     InvariantDelta, InvariantKind,
 };
 use vuma_bd::BD;
+use vuma_cor::{CORuntime, Config as CorConfig};
 use vuma_core::{
     MSG,
     scg_to_msg::{scg_to_msg, ConversionError},
@@ -291,6 +292,10 @@ pub enum VumaError {
     Emission {
         message: String,
     },
+    /// COR initialization failure.
+    CorInit {
+        message: String,
+    },
     /// A collection of errors accumulated across stages.
     Multi {
         errors: Vec<VumaError>,
@@ -311,6 +316,7 @@ impl VumaError {
             VumaError::Codegen { .. } => "codegen",
             VumaError::RegisterAlloc { .. } => "register-alloc",
             VumaError::Emission { .. } => "elf-emission",
+            VumaError::CorInit { .. } => "cor-init",
             VumaError::Multi { .. } => "multi",
         }
     }
@@ -351,6 +357,7 @@ impl fmt::Display for VumaError {
             VumaError::Codegen { error } => write!(f, "[codegen] {}", error),
             VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
             VumaError::Emission { message } => write!(f, "[elf-emission] {}", message),
+            VumaError::CorInit { message } => write!(f, "[cor-init] {}", message),
             VumaError::Multi { errors } => {
                 write!(f, "multiple errors ({}):", errors.len())?;
                 for (i, e) in errors.iter().enumerate() {
@@ -369,7 +376,7 @@ impl std::error::Error for VumaError {}
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The output of a successful compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CompilationOutput {
     /// The emitted binary (ELF or raw, depending on target).
     pub binary: Vec<u8>,
@@ -389,6 +396,9 @@ pub struct CompilationOutput {
     pub code_words: usize,
     /// Debug information (if requested).
     pub debug_info: Option<DebugInfo>,
+    /// The Continuous Optimization Runtime, initialized from the compiled SCG.
+    /// Present when COR initialization succeeds (after the CorInit stage).
+    pub cor_runtime: Option<CORuntime>,
 }
 
 /// Debug information captured during compilation.
@@ -477,11 +487,13 @@ pub enum PipelineStage {
     RegisterAlloc,
     /// ARM64 code emission.
     CodeEmission,
+    /// COR (Continuous Optimization Runtime) initialization.
+    CorInit,
 }
 
 impl PipelineStage {
     /// All stages in order.
-    pub fn all() -> &'static [PipelineStage; 10] {
+    pub fn all() -> &'static [PipelineStage; 11] {
         &[
             PipelineStage::Parse,
             PipelineStage::AstToScg,
@@ -493,6 +505,7 @@ impl PipelineStage {
             PipelineStage::IrLowering,
             PipelineStage::RegisterAlloc,
             PipelineStage::CodeEmission,
+            PipelineStage::CorInit,
         ]
     }
 
@@ -519,6 +532,7 @@ impl fmt::Display for PipelineStage {
             PipelineStage::IrLowering => write!(f, "ir-lowering"),
             PipelineStage::RegisterAlloc => write!(f, "register-alloc"),
             PipelineStage::CodeEmission => write!(f, "code-emission"),
+            PipelineStage::CorInit => write!(f, "cor-init"),
         }
     }
 }
@@ -851,6 +865,36 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     let code_words = binary.len() / 4; // approximate
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
 
+    // ── Stage 11: COR Initialization ──────────────────────────────────
+    let t = Instant::now();
+    let cor_runtime = {
+        // Bridge the vuma_scg::SCG to the COR-internal SCG representation
+        // using CORuntime::from_vuma_scg(), then compile all regions
+        // incrementally with a Delta containing every node ID.
+        let scg_arc = std::sync::Arc::new(scg.clone());
+        let cor_config = CorConfig::default();
+        let mut rt = CORuntime::from_vuma_scg(scg_arc, cor_config);
+
+        // Build a Delta with all node IDs from the SCG so every region
+        // is compiled incrementally, establishing the always-compiled
+        // invariant from the start.
+        let all_node_ids: Vec<u64> = scg.node_ids().map(|id| id.as_u64()).collect();
+        let delta = vuma_cor::types::Delta {
+            added_nodes: all_node_ids,
+            removed_nodes: Vec::new(),
+            added_edges: Vec::new(),
+            removed_edges: Vec::new(),
+        };
+        let recompiled = rt.compile_incremental(&delta);
+        log::info!(
+            "cor-init: compiled {} regions incrementally from SCG ({} nodes)",
+            recompiled.len(),
+            scg.node_count(),
+        );
+        Some(rt)
+    };
+    timings.push(("cor-init".to_string(), t.elapsed().as_millis() as u64));
+
     // If we accumulated errors but still produced a binary, report them.
     if !errors.is_empty() {
         return Err(errors);
@@ -875,6 +919,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
         } else {
             None
         },
+        cor_runtime,
     })
 }
 
@@ -1005,7 +1050,8 @@ mod tests {
         assert!(!output.binary.is_empty(), "Should produce binary output");
         assert!(output.scg.node_count() > 0, "SCG should have nodes");
         assert!(output.verification.is_some(), "Verification should run at Normal level");
-        assert_eq!(output.stage_timings.len(), 10, "All 10 stages should report timing");
+        assert_eq!(output.stage_timings.len(), 11, "All 11 stages should report timing");
+        assert!(output.cor_runtime.is_some(), "COR runtime should be initialized");
     }
 
     /// Test 2: Compile with O0 (no optimisation).
@@ -1150,15 +1196,17 @@ mod tests {
     #[test]
     fn test_pipeline_stage_ordering() {
         let stages = PipelineStage::all();
-        assert_eq!(stages.len(), 10);
+        assert_eq!(stages.len(), 11);
         assert_eq!(stages[0], PipelineStage::Parse);
         assert_eq!(stages[9], PipelineStage::CodeEmission);
+        assert_eq!(stages[10], PipelineStage::CorInit);
 
         // from() should return all stages from the given one onwards.
         let from_msg = PipelineStage::from(PipelineStage::MsgConstruction);
-        assert_eq!(from_msg.len(), 6);
+        assert_eq!(from_msg.len(), 7);
         assert_eq!(from_msg[0], PipelineStage::MsgConstruction);
         assert_eq!(from_msg[5], PipelineStage::CodeEmission);
+        assert_eq!(from_msg[6], PipelineStage::CorInit);
     }
 
     /// Test 11: CompileConfig defaults are reasonable.
