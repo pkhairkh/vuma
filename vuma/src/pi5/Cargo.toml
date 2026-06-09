@@ -1,0 +1,8 @@
+[package]
+name = "vuma-pi5"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+log = "0.4"

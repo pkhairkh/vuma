@@ -1,0 +1,13 @@
+default: build
+
+build:
+    cargo build --workspace
+
+test:
+    cargo test --workspace
+
+pi5:
+    cargo build --target aarch64-unknown-linux-gnu --release
+
+clean:
+    cargo clean

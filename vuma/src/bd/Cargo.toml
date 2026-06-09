@@ -1,0 +1,9 @@
+[package]
+name = "vuma-bd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+indexmap = "2"
+hashbrown = { version = "0.14", features = ["serde"] }
