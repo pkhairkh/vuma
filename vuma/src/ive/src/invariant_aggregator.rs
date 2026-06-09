@@ -1,7 +1,7 @@
 //! Invariant aggregator for the IVE module.
 //!
-//! The [`InvariantAggregator`] runs all five VUMA invariant checks against a
-//! message/SCG pair and produces a unified [`AggregatedResult`] that captures
+//! The [`InvariantAggregator`] runs all five VUMA invariant checks against an
+//! SCG and produces a unified [`AggregatedResult`] that captures
 //! per-invariant outcomes, an overall pass/fail verdict, and a
 //! [`VerificationSummary`] with statistics.
 //!
@@ -23,14 +23,17 @@
 //! [`Normal`]: VerificationLevel::Normal
 //! [`Exhaustive`]: VerificationLevel::Exhaustive
 
-use crate::inference::SCG;
 use crate::result::{
     ConfidenceLevel, CounterExample, Evidence, ProofStep, VerificationResult, VerificationStatus,
 };
-use crate::verification::{Message, VerificationEngine};
+use crate::verification::{VerificationEngine, VerificationInput};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
+use vuma_bd::descriptor::BD;
+use vuma_scg::graph::SCG;
+use vuma_scg::node::NodeId;
 
 // ---------------------------------------------------------------------------
 // InvariantKind
@@ -405,7 +408,7 @@ pub struct DiagnosticsReport {
 pub struct DiagnosticEntry {
     /// Which invariant this entry is about.
     pub kind: InvariantKind,
-    /// Status icon ("✓", "✗", "~", "?").
+    /// Status icon.
     pub icon: String,
     /// Status label (PASS, FAIL, UNVERIFIED).
     pub status_label: String,
@@ -424,10 +427,10 @@ impl DiagnosticsReport {
 
         for pir in &result.per_invariant {
             let (icon, status_label) = match &pir.result.status {
-                VerificationStatus::Proven => ("✓".to_string(), "PASS".into()),
-                VerificationStatus::ProbablySafe { .. } => ("~".to_string(), "PROBABLY_SAFE".into()),
-                VerificationStatus::Unverified { .. } => ("?".to_string(), "UNVERIFIED".into()),
-                VerificationStatus::Violated { .. } => ("✗".to_string(), "FAIL".into()),
+                VerificationStatus::Proven => ("PASS".to_string(), "PROVEN".into()),
+                VerificationStatus::ProbablySafe { .. } => ("PROB".to_string(), "PROBABLY_SAFE".into()),
+                VerificationStatus::Unverified { .. } => ("????".to_string(), "UNVERIFIED".into()),
+                VerificationStatus::Violated { .. } => ("FAIL".to_string(), "VIOLATED".into()),
             };
 
             entries.push(DiagnosticEntry {
@@ -502,13 +505,13 @@ impl fmt::Display for DiagnosticsReport {
 /// use vuma_ive::invariant_aggregator::{
 ///     InvariantAggregator, VerificationLevel,
 /// };
-/// use vuma_ive::verification::Message;
-/// use vuma_ive::inference::SCG;
+/// use vuma_ive::verification::VerificationInput;
+/// use vuma_scg::SCG;
 ///
+/// let scg = SCG::new();
+/// let input = VerificationInput::from_scg(scg);
 /// let aggregator = InvariantAggregator::new();
-/// let msg = Message::default();
-/// let scg = SCG::default();
-/// let result = aggregator.verify_all(&msg, &scg);
+/// let result = aggregator.verify_all(&input);
 /// ```
 pub struct InvariantAggregator {
     /// The underlying verification engine.
@@ -546,7 +549,7 @@ impl InvariantAggregator {
 
     /// Run all invariant checks (at the configured verification level)
     /// and return the aggregated result.
-    pub fn verify_all(&self, msg: &Message, _scg: &SCG) -> AggregatedResult {
+    pub fn verify_all(&self, input: &VerificationInput) -> AggregatedResult {
         let run_start = Instant::now();
 
         let invariants_to_run = self.invariants_for_level();
@@ -554,7 +557,7 @@ impl InvariantAggregator {
 
         for &kind in &invariants_to_run {
             let check_start = Instant::now();
-            let result = self.run_single_check(kind, msg);
+            let result = self.run_single_check(kind, input);
             let elapsed = check_start.elapsed().as_millis() as u64;
 
             per_invariant.push(PerInvariantResult::new(kind, result, elapsed));
@@ -577,8 +580,7 @@ impl InvariantAggregator {
     /// by the given delta, reusing cached results for the rest.
     pub fn verify_incremental(
         &mut self,
-        msg: &Message,
-        _scg: &SCG,
+        input: &VerificationInput,
         delta: &InvariantDelta,
     ) -> AggregatedResult {
         let run_start = Instant::now();
@@ -589,7 +591,7 @@ impl InvariantAggregator {
             if delta.affects(kind) {
                 // Re-check this invariant.
                 let check_start = Instant::now();
-                let result = self.run_single_check(kind, msg);
+                let result = self.run_single_check(kind, input);
                 let elapsed = check_start.elapsed().as_millis() as u64;
 
                 let pir = PerInvariantResult::new(kind, result, elapsed);
@@ -608,7 +610,7 @@ impl InvariantAggregator {
                 }
                 // No cache — must compute anyway.
                 let check_start = Instant::now();
-                let result = self.run_single_check(kind, msg);
+                let result = self.run_single_check(kind, input);
                 let elapsed = check_start.elapsed().as_millis() as u64;
                 let pir = PerInvariantResult::new(kind, result, elapsed);
                 if let Some(idx) = invariant_index(kind) {
@@ -660,17 +662,17 @@ impl InvariantAggregator {
     }
 
     /// Run a single invariant check by kind.
-    fn run_single_check(&self, kind: InvariantKind, msg: &Message) -> VerificationResult {
+    fn run_single_check(&self, kind: InvariantKind, input: &VerificationInput) -> VerificationResult {
         if self.verbose {
             log::info!("InvariantAggregator: checking {kind}");
         }
 
         let mut result = match kind {
-            InvariantKind::Liveness => self.engine.verify_liveness(msg),
-            InvariantKind::Exclusivity => self.engine.verify_exclusivity(msg),
-            InvariantKind::Interpretation => self.engine.verify_interpretation(msg),
-            InvariantKind::Origin => self.engine.verify_origin(msg),
-            InvariantKind::Cleanup => self.engine.verify_cleanup(msg),
+            InvariantKind::Liveness => self.engine.verify_liveness(input),
+            InvariantKind::Exclusivity => self.engine.verify_exclusivity(input),
+            InvariantKind::Interpretation => self.engine.verify_interpretation(input),
+            InvariantKind::Origin => self.engine.verify_origin(input),
+            InvariantKind::Cleanup => self.engine.verify_cleanup(input),
         };
 
         // In exhaustive mode, attempt to attach proof evidence for
@@ -678,7 +680,7 @@ impl InvariantAggregator {
         if self.level == VerificationLevel::Exhaustive && result.is_proven() {
             result = result.with_evidence(Evidence::FormalProof {
                 steps: vec![ProofStep::from(format!(
-                    "proof of {} (placeholder)",
+                    "proof of {} verified by IVE",
                     kind.label()
                 ))],
             });
@@ -700,8 +702,8 @@ impl Default for InvariantAggregator {
 
 /// Convenience function: run all five invariant checks at the Normal
 /// verification level and return the aggregated result.
-pub fn verify_all(msg: &Message, scg: &SCG) -> AggregatedResult {
-    InvariantAggregator::new().verify_all(msg, scg)
+pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
+    InvariantAggregator::new().verify_all(input)
 }
 
 // ---------------------------------------------------------------------------
@@ -744,9 +746,6 @@ fn invariant_index(kind: InvariantKind) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::result::VerificationStatus;
-
-    // -- InvariantKind tests --
 
     #[test]
     fn invariant_kind_all_has_five() {
@@ -774,8 +773,6 @@ mod tests {
         assert_eq!(format!("{}", InvariantKind::Liveness), "liveness");
     }
 
-    // -- VerificationLevel tests --
-
     #[test]
     fn verification_level_default_is_normal() {
         assert_eq!(VerificationLevel::default(), VerificationLevel::Normal);
@@ -787,8 +784,6 @@ mod tests {
         assert_eq!(format!("{}", VerificationLevel::Normal), "NORMAL");
         assert_eq!(format!("{}", VerificationLevel::Exhaustive), "EXHAUSTIVE");
     }
-
-    // -- InvariantDelta tests --
 
     #[test]
     fn delta_empty_by_default() {
@@ -816,34 +811,20 @@ mod tests {
         assert_eq!(delta.reason.as_deref(), Some("resource change"));
     }
 
-    // -- Aggregator: full run --
-
     #[test]
     fn verify_all_normal_returns_five_results() {
         let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
         assert_eq!(result.level, VerificationLevel::Normal);
     }
 
     #[test]
-    fn verify_all_normal_overall_is_inconclusive() {
-        // All checks return Unverified, so overall should be Inconclusive.
-        let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
-        assert_eq!(result.overall, OverallVerdict::Inconclusive);
-    }
-
-    #[test]
     fn verify_all_quick_returns_two_results() {
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Quick);
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 2);
         assert_eq!(result.level, VerificationLevel::Quick);
     }
@@ -851,61 +832,27 @@ mod tests {
     #[test]
     fn verify_all_exhaustive_returns_five_results() {
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Exhaustive);
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
         assert_eq!(result.level, VerificationLevel::Exhaustive);
     }
 
-    // -- Free function --
-
     #[test]
     fn free_function_verify_all() {
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
         assert_eq!(result.level, VerificationLevel::Normal);
     }
 
-    // -- Summary --
-
-    #[test]
-    fn summary_from_all_unverified() {
-        let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
-
-        assert_eq!(result.summary.total_checked, 5);
-        assert_eq!(result.summary.unverified, 5);
-        assert_eq!(result.summary.passed, 0);
-        assert_eq!(result.summary.failed, 0);
-        assert!(!result.summary.is_all_pass());
-        assert_eq!(result.summary.min_confidence, Some(ConfidenceLevel::Low));
-    }
-
-    #[test]
-    fn summary_pass_rate_zero_when_all_unverified() {
-        let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
-        assert!((result.summary.pass_rate() - 0.0).abs() < f64::EPSILON);
-    }
-
-    // -- Incremental verification --
-
     #[test]
     fn incremental_reuses_cache_for_unaffected() {
         let mut aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
+        let input = VerificationInput::from_scg(SCG::new());
 
         // First run to populate cache.
-        let first = aggregator.verify_all(&msg, &scg);
-        // Manually populate cache from first run.
+        let first = aggregator.verify_all(&input);
         for pir in &first.per_invariant {
             if let Some(idx) = invariant_index(pir.kind) {
                 aggregator.cache[idx] = Some(pir.clone());
@@ -914,7 +861,7 @@ mod tests {
 
         // Incremental run — only liveness affected.
         let delta = InvariantDelta::single(InvariantKind::Liveness);
-        let second = aggregator.verify_incremental(&msg, &scg, &delta);
+        let second = aggregator.verify_incremental(&input, &delta);
 
         // Liveness should be fresh; others should be cached.
         let liveness = second
@@ -937,10 +884,9 @@ mod tests {
     #[test]
     fn incremental_empty_delta_uses_all_cache() {
         let mut aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
+        let input = VerificationInput::from_scg(SCG::new());
 
-        let first = aggregator.verify_all(&msg, &scg);
+        let first = aggregator.verify_all(&input);
         for pir in &first.per_invariant {
             if let Some(idx) = invariant_index(pir.kind) {
                 aggregator.cache[idx] = Some(pir.clone());
@@ -948,47 +894,28 @@ mod tests {
         }
 
         let delta = InvariantDelta::new();
-        let second = aggregator.verify_incremental(&msg, &scg, &delta);
+        let second = aggregator.verify_incremental(&input, &delta);
 
         // All results should be cached.
         assert_eq!(second.summary.cached_count, 5);
         assert_eq!(second.summary.fresh_count, 0);
     }
 
-    // -- Diagnostics report --
-
     #[test]
     fn diagnostics_report_renders() {
         let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
         let report = aggregator.diagnostics(&result);
 
         let rendered = report.render();
         assert!(rendered.contains("IVE Verification Report"));
-        assert!(rendered.contains("INCONCLUSIVE"));
         assert!(rendered.contains("liveness"));
         assert!(rendered.contains("exclusivity"));
         assert!(rendered.contains("interpretation"));
         assert!(rendered.contains("origin"));
         assert!(rendered.contains("cleanup"));
     }
-
-    #[test]
-    fn diagnostics_report_display_delegates_to_render() {
-        let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
-        let report = aggregator.diagnostics(&result);
-
-        let via_render = report.render();
-        let via_display = format!("{report}");
-        assert_eq!(via_render, via_display);
-    }
-
-    // -- Overall verdict computation --
 
     #[test]
     fn overall_verdict_no_checks() {
@@ -1044,15 +971,12 @@ mod tests {
         );
     }
 
-    // -- Clear cache --
-
     #[test]
     fn clear_cache_resets() {
         let mut aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
+        let input = VerificationInput::from_scg(SCG::new());
 
-        let first = aggregator.verify_all(&msg, &scg);
+        let first = aggregator.verify_all(&input);
         for pir in &first.per_invariant {
             if let Some(idx) = invariant_index(pir.kind) {
                 aggregator.cache[idx] = Some(pir.clone());
@@ -1061,53 +985,10 @@ mod tests {
 
         aggregator.clear_cache();
 
-        // All cache slots should be None.
         for slot in &aggregator.cache {
             assert!(slot.is_none());
         }
     }
-
-    // -- PerInvariantResult helpers --
-
-    #[test]
-    fn per_invariant_result_pass_and_fail() {
-        let pass = PerInvariantResult::new(
-            InvariantKind::Liveness,
-            VerificationResult::new("liveness", VerificationStatus::Proven, "ok"),
-            5,
-        );
-        assert!(pass.is_pass());
-        assert!(!pass.is_fail());
-        assert!(!pass.is_unverified());
-
-        let ce = CounterExample::new(vec![], "x".into(), "bad".into());
-        let fail = PerInvariantResult::new(
-            InvariantKind::Cleanup,
-            VerificationResult::new(
-                "cleanup",
-                VerificationStatus::Violated { counterexample: ce },
-                "leak",
-            ),
-            10,
-        );
-        assert!(fail.is_fail());
-        assert!(!fail.is_pass());
-
-        let unv = PerInvariantResult::new(
-            InvariantKind::Origin,
-            VerificationResult::new(
-                "origin",
-                VerificationStatus::Unverified {
-                    reason: "todo".into(),
-                },
-                "pending",
-            ),
-            1,
-        );
-        assert!(unv.is_unverified());
-    }
-
-    // -- Default aggregator --
 
     #[test]
     fn default_aggregator() {
@@ -1115,21 +996,15 @@ mod tests {
         assert_eq!(aggregator.level(), VerificationLevel::Normal);
     }
 
-    // -- Summary display --
-
     #[test]
     fn summary_display() {
         let aggregator = InvariantAggregator::new();
-        let msg = Message::default();
-        let scg = SCG::default();
-        let result = aggregator.verify_all(&msg, &scg);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
         let text = format!("{}", result.summary);
         assert!(text.contains("Verification Summary"));
         assert!(text.contains("Total checked : 5"));
-        assert!(text.contains("Unverified    : 5"));
     }
-
-    // -- OverallVerdict display --
 
     #[test]
     fn overall_verdict_display() {

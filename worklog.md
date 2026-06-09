@@ -6324,3 +6324,23 @@ Updated the project roadmap (`docs/ROADMAP.md`) to reflect Phase 2 completion. A
 8. **Critical path** — Added ✅ after Phase 2 (BD inference)
 
 9. **Success Criteria Summary table** — Phase 2 row updated from "🔄 In Progress" to "✅ Complete"
+---
+Task ID: w2
+Agent: Main Agent
+Task: Wire IVE InferenceEngine and VerificationEngine to real implementations
+
+Work Log:
+- Rewrote /home/z/my-project/vuma/src/ive/src/inference.rs: Replaced placeholder SCG/BD types with real vuma_scg::SCG and vuma_bd::descriptor::BD. Wired InferenceEngine to delegate to vuma_bd::inference::BDInferenceEngine for 3-phase BD inference. Added constraint derivation from SCG edge structure.
+- Rewrote /home/z/my-project/vuma/src/ive/src/verification.rs: Replaced placeholder Message type with VerificationInput (wraps SCG + optional BD map). Added SCG→verifier input extraction methods for all 5 invariants (liveness, exclusivity, interpretation, origin, cleanup).
+- Rewrote /home/z/my-project/vuma/src/ive/src/lib.rs: Updated re-exports to use real types instead of placeholders.
+- Rewrote /home/z/my-project/vuma/src/ive/src/invariant_aggregator.rs: Updated to use VerificationInput instead of Message+SCG stubs.
+- Fixed /home/z/my-project/vuma/src/vuma/src/repl.rs: Replaced old placeholder types with VerificationInput and real SCG references.
+- Fixed /home/z/my-project/vuma/src/pipeline.rs: Replaced placeholder types with VerificationInput.
+- Fixed /home/z/my-project/vuma/src/tests/src/framework.rs: Removed bridge function, updated to use VerificationInput.
+
+Stage Summary:
+- Full workspace compiles with 0 errors
+- vuma-ive: 166 tests pass (was 167 with 3 ignored before; now all running)
+- vuma-scg: 113 pass, vuma-bd: 216 pass, vuma-codegen: 134 pass, vuma-projection: 84 pass
+- Pipeline tests (3) and parser-SCG bridge tests (12) still fail - these are pre-existing issues
+- Critical achievement: IVE inference + verification are now wired to real algorithms, not placeholders

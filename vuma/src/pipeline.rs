@@ -729,9 +729,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     let t = Instant::now();
     let inference_engine = InferenceEngine::new();
     // Inference is currently placeholder; log but don't fail.
-    let _bd_results = inference_engine.infer_types(&vuma_ive::inference::SCG {
-        node_count: scg.node_count(),
-    });
+    let _bd_results = inference_engine.infer_types(&scg);
     timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 5: MSG Construction ─────────────────────────────────────
@@ -758,11 +756,8 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
-        let msg_stub = vuma_ive::verification::Message::default();
-        let scg_stub = vuma_ive::inference::SCG {
-            node_count: scg.node_count(),
-        };
-        let result = aggregator.verify_all(&msg_stub, &scg_stub);
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let result = aggregator.verify_all(&input);
         Some(result)
     } else {
         None

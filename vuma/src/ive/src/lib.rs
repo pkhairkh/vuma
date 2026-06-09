@@ -18,19 +18,29 @@
 //! - [`result`]              — Verification result and status types.
 //! - [`debt`]                — Verification debt tracking.
 //! - [`constraint`]          — Constraint types (temporal, resource flow, security, …).
+//! - [`liveness`]            — Liveness invariant verifier.
+//! - [`exclusivity`]         — Exclusivity invariant verifier.
+//! - [`interpretation`]      — Interpretation invariant verifier.
+//! - [`origin`]              — Origin invariant verifier.
+//! - [`cleanup`]             — Cleanup invariant verifier.
+//! - [`bd_solver`]           — BD fixpoint constraint solver.
 //!
 //! # Example
 //!
 //! ```rust
-//! use vuma_ive::{InferenceEngine, VerificationEngine, VerificationDebt, InvariantAggregator};
+//! use vuma_ive::{InferenceEngine, VerificationEngine, VerificationInput};
+//! use vuma_scg::SCG;
 //!
+//! let scg = SCG::new();
+//!
+//! // Run BD inference
 //! let inference = InferenceEngine::new();
-//! let verification = VerificationEngine::new();
-//! let debt = VerificationDebt::new();
-//! let aggregator = InvariantAggregator::new();
+//! let inference_result = inference.infer(&scg);
 //!
-//! // Placeholder — these will operate on real SCG / message types
-//! // once the vuma-scg and vuma-bd crates are integrated.
+//! // Run verification using the inferred BDs
+//! let verification = VerificationEngine::new();
+//! let input = VerificationInput::with_bd_map(scg, inference_result.bd_map);
+//! let results = verification.verify_all(&input);
 //! ```
 
 pub mod bd_solver;
@@ -49,7 +59,7 @@ pub mod verification;
 // Re-export the primary public API.
 pub use constraint::{Constraint, ConstraintId};
 pub use debt::{DebtItem, DebtStatus, Priority, VerificationDebt};
-pub use inference::{BD, InferenceEngine, InferenceError, NodeId, SCG};
+pub use inference::{InferenceEngine, InferenceError, InferenceResult};
 pub use result::{
     Assumption, ConfidenceLevel, CounterExample, Evidence, InvariantName, ProgramPoint, ProofStep,
     VerificationResult, VerificationStatus,
@@ -58,7 +68,7 @@ pub use invariant_aggregator::{
     AggregatedResult, DiagnosticsReport, InvariantAggregator, InvariantDelta, InvariantKind,
     OverallVerdict, VerificationLevel, VerificationSummary,
 };
-pub use verification::VerificationEngine;
+pub use verification::{VerificationEngine, VerificationInput};
 pub use interpretation::{
     AccessEvent, CapDTransitionResult, InterpretationVerifier, InterpretationViolation,
     LocationId, ProgramPointId, SafetyProof, WriteReadPair,

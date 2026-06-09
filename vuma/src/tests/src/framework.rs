@@ -61,8 +61,7 @@ use vuma_ive::{
     AggregatedResult, InvariantAggregator, InvariantKind, OverallVerdict,
     VerificationLevel,
 };
-use vuma_ive::inference::SCG as IveScg;
-use vuma_ive::verification::Message;
+use vuma_ive::verification::VerificationInput;
 use vuma_parser::{
     Parser, ParseError,
     to_scg::AstToScg,
@@ -653,15 +652,12 @@ pub fn verify_program(source: &str) -> AggregatedResult {
     // Build the vuma_scg::SCG (silently treating parse errors as empty programs).
     let scg = build_scg_from_source(source).unwrap_or_default();
 
-    // Bridge vuma_scg::SCG -> IVE placeholder types.
-    let msg = bridge_scg_to_ive_message(&scg);
-    let ive_scg = IveScg {
-        node_count: scg.node_count(),
-    };
+    // Build verification input from the SCG.
+    let input = VerificationInput::from_scg(scg);
 
     // Run all five invariant checks at Normal level.
     let aggregator = InvariantAggregator::new();
-    aggregator.verify_all(&msg, &ive_scg)
+    aggregator.verify_all(&input)
 }
 
 /// Parse VUMA source, build an SCG, and run IVE checks at a specific
@@ -679,13 +675,10 @@ pub fn verify_program(source: &str) -> AggregatedResult {
 /// ```
 pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
     let scg = build_scg_from_source(source).unwrap_or_default();
-    let msg = bridge_scg_to_ive_message(&scg);
-    let ive_scg = IveScg {
-        node_count: scg.node_count(),
-    };
+    let input = VerificationInput::from_scg(scg);
 
     let aggregator = InvariantAggregator::new().with_level(level);
-    aggregator.verify_all(&msg, &ive_scg)
+    aggregator.verify_all(&input)
 }
 
 /// Run the full pipeline with stage-by-stage tracking.
@@ -760,12 +753,9 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
     }
 
     // Stage 5: IVE verification.
-    let msg = bridge_scg_to_ive_message(&scg);
-    let ive_scg = IveScg {
-        node_count: scg.node_count(),
-    };
+    let input = VerificationInput::from_scg(scg);
     let aggregator = InvariantAggregator::new();
-    let aggregated = aggregator.verify_all(&msg, &ive_scg);
+    let aggregated = aggregator.verify_all(&input);
     stages.push((PipelineStage::IveVerification, StageOutcome::Passed));
     verification_result = Some(aggregated);
 
@@ -917,15 +907,7 @@ pub fn assert_violation(source: &str, invariant: InvariantKind) {
 // SCG Bridges
 // ===========================================================================
 
-/// Bridge from `vuma_scg::SCG` to the IVE `Message` placeholder type.
-///
-/// Since the IVE verification engine currently uses placeholder types,
-/// we create a minimal `Message` with a descriptive label.
-fn bridge_scg_to_ive_message(scg: &SCG) -> Message {
-    Message {
-        label: format!("vuma_test_program ({} nodes, {} edges)", scg.node_count(), scg.edge_count()),
-    }
-}
+// bridge_scg_to_ive_message removed — verification now uses VerificationInput::from_scg()
 
 // ===========================================================================
 // Utility Helpers

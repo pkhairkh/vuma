@@ -52,8 +52,7 @@ use vuma_ive::{
     AggregatedResult, DiagnosticsReport,
 };
 use vuma_ive::verification::VerificationEngine;
-use vuma_ive::verification::Message;
-use vuma_ive::inference::SCG as IveScg;
+use vuma_ive::verification::VerificationInput;
 
 use crate::msg::MSG;
 use crate::scg_to_msg;
@@ -441,7 +440,6 @@ fn format_scg_summary(scg: &SCG) -> String {
 
 /// Generate a BD (Behavioural Descriptor) display for all nodes in the SCG.
 fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
-    let ive_scg = IveScg { node_count: scg.node_count() };
     let mut result = String::new();
     result.push_str("Behavioural Descriptors:\n");
 
@@ -451,8 +449,12 @@ fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
     }
 
     for node in scg.nodes() {
-        let bd = inference_engine.infer_bd(&ive_scg, node.id.as_u64())
-            .unwrap_or_else(|_| vuma_ive::inference::BD { label: "unknown".into() });
+        let bd = inference_engine.infer_bd(scg, node.id)
+            .unwrap_or_else(|_| vuma_bd::descriptor::BD::new(
+                vuma_bd::repd::RepD::Byte(vuma_bd::repd::ByteRep { size: 0, align: 0 }),
+                vuma_bd::capd::CapD::empty(),
+                vuma_bd::reld::RelD::empty(),
+            ));
         result.push_str(&format!("  Node {} ({:?}): {}\n",
             node.id, node.node_type, bd));
     }
@@ -804,13 +806,10 @@ Expressions:
     fn cmd_verify(&mut self) -> Result<ReplResult, ReplError> {
         let verify_start = Instant::now();
 
-        // Create IVE-compatible placeholder types from the real SCG.
-        let ive_scg = IveScg { node_count: self.scg.node_count() };
-        let msg = Message {
-            label: self.loaded_file.clone().unwrap_or_else(|| "<repl>".to_string()),
-        };
+        // Create verification input from the current SCG.
+        let input = VerificationInput::from_scg(self.scg.clone());
 
-        let result = self.aggregator.verify_all(&msg, &ive_scg);
+        let result = self.aggregator.verify_all(&input);
         self.profile.verify_time_ms += verify_start.elapsed().as_millis() as u64;
         self.profile.verification_runs += 1;
 
@@ -883,11 +882,8 @@ Expressions:
 
         // Step 4: Verify.
         let verify_start = Instant::now();
-        let ive_scg = IveScg { node_count: self.scg.node_count() };
-        let msg = Message {
-            label: self.loaded_file.clone().unwrap_or_else(|| "<repl>".to_string()),
-        };
-        let result = self.aggregator.verify_all(&msg, &ive_scg);
+        let input = VerificationInput::from_scg(self.scg.clone());
+        let result = self.aggregator.verify_all(&input);
         self.profile.verify_time_ms += verify_start.elapsed().as_millis() as u64;
         self.profile.verification_runs += 1;
         self.last_verification = Some(result.clone());
