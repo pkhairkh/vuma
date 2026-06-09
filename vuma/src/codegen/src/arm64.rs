@@ -726,6 +726,22 @@ pub enum Instruction {
     /// Conditional select: `CSEL Rd, Rn, Rm, cond`
     CSEL { rd: Register, rn: Register, rm: Register, cond: Condition },
 
+    // ---- Conditional Set ----
+    /// Conditional set: `CSET Rd, cond` (alias for CSINC Rd, XZR, XZR, invert(cond))
+    CSET { rd: Register, cond: Condition },
+
+    // ---- Multiply-Subtract ----
+    /// Multiply-subtract: `MSUB Rd, Rn, Rm, Ra` — computes `Ra - Rn * Rm`
+    MSUB { rd: Register, rn: Register, rm: Register, ra: Register },
+
+    // ---- Bitfield Move ----
+    /// Unsigned bitfield move: `UBFM Rd, Rn, #immr, #imms`
+    /// Used for zero-extension (e.g. UBFM Xd, Xn, #0, #31 = UXTW/Xd)
+    UBFM { rd: Register, rn: Register, immr: u32, imms: u32 },
+    /// Signed bitfield move: `SBFM Rd, Rn, #immr, #imms`
+    /// Used for sign-extension (e.g. SBFM Xd, Xn, #0, #31 = SXTW)
+    SBFM { rd: Register, rn: Register, immr: u32, imms: u32 },
+
     // ---- Cast / Convert ----
     /// Sign-extend word to doubleword: `SXTW Xd, Wn` (alias for SBFM Xd, Xn, #0, #31)
     SXTW { rd: Register, rn: Register },
@@ -1227,6 +1243,47 @@ impl Instruction {
                     | rd.encoding() as u64) as u32)
             }
 
+            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
+            // CSINC: 1 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
+            // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
+            Instruction::CSET { rd, cond } => {
+                Ok(0x1A800000u32
+                    | (Register::XZR.encoding() << 16)  // Rm = XZR
+                    | (cond.invert().encoding() << 12)    // invert(cond)
+                    | (Register::XZR.encoding() << 5)     // Rn = XZR
+                    | rd.encoding())
+            }
+
+            // ---- MSUB: Rd = Ra - Rn * Rm ----
+            // MSUB: 1 0 0 1 1 0 1 1 0 0 0 Rm 0 Ra Rn Rd
+            Instruction::MSUB { rd, rn, rm, ra } => {
+                Ok(0x1B000000u32
+                    | (rm.encoding() << 16)
+                    | (ra.encoding() << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
+            // ---- UBFM (unsigned bitfield move) ----
+            // UBFM: 1 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+            Instruction::UBFM { rd, rn, immr, imms } => {
+                Ok(0x53000000u32
+                    | ((*immr & 0x3F) << 16)
+                    | ((*imms & 0x3F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
+            // ---- SBFM (signed bitfield move) ----
+            // SBFM: 0 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+            Instruction::SBFM { rd, rn, immr, imms } => {
+                Ok(0x13000000u32
+                    | ((*immr & 0x3F) << 16)
+                    | ((*imms & 0x3F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
             // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
             // SBFM: 1 0 0 1 1 0 1 1 0 0 N immr imms Rn Rd
             // For SXTW: N=1, immr=0, imms=31
@@ -1376,6 +1433,18 @@ impl std::fmt::Display for Instruction {
             Instruction::TST { rn, rm } => write!(f, "tst {}, {}", rn, rm),
             Instruction::CSEL { rd, rn, rm, cond } => {
                 write!(f, "csel {}, {}, {}, {}", rd, rn, rm, cond.asm_suffix())
+            }
+            Instruction::CSET { rd, cond } => {
+                write!(f, "cset {}, {}", rd, cond.asm_suffix())
+            }
+            Instruction::MSUB { rd, rn, rm, ra } => {
+                write!(f, "msub {}, {}, {}, {}", rd, rn, rm, ra)
+            }
+            Instruction::UBFM { rd, rn, immr, imms } => {
+                write!(f, "ubfm {}, {}, #{}, #{}", rd, rn, immr, imms)
+            }
+            Instruction::SBFM { rd, rn, immr, imms } => {
+                write!(f, "sbfm {}, {}, #{}, #{}", rd, rn, immr, imms)
             }
             Instruction::SXTW { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
             Instruction::SCVTF { rd, rn } => write!(f, "scvtf {}, {}", rd, rn),

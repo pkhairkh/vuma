@@ -26,8 +26,8 @@ pub type RegionId = u64;
 /// Classification of a node in the SCG.
 ///
 /// The node kind determines which optimization passes are applicable.
-/// For example, only `Loop` nodes are candidates for loop unrolling, and
-/// only `Call` nodes are candidates for inlining.
+/// For example, only `Loop` / `LoopHeader` nodes are candidates for loop
+/// unrolling, and only `Call` nodes are candidates for inlining.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     /// A function call site — candidate for inlining / outlining.
@@ -42,6 +42,19 @@ pub enum NodeKind {
     Compute,
     /// An entry or exit node for a region.
     Entry,
+    // Fine-grained control flow kinds (from vuma_scg::ControlKind):
+    /// A loop header — identifies loop entry point for unrolling.
+    LoopHeader,
+    /// A loop exit — identifies loop termination.
+    LoopExit,
+    /// A join point — where control flow merges after branch/match.
+    Join,
+    /// A function entry — identifies function boundary.
+    FunctionEntry,
+    /// A function return — identifies function exit.
+    FunctionReturn,
+    /// A break/continue jump.
+    Jump,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +93,9 @@ pub struct SCGNode {
     pub alignment: usize,
     /// Whether prefetch instructions have been inserted for this node.
     pub has_prefetch: bool,
+    /// For control nodes, stores the label from the SCG (e.g., "then",
+    /// "else", "loop_header").
+    pub control_label: Option<String>,
 }
 
 impl SCGNode {
@@ -98,6 +114,7 @@ impl SCGNode {
             is_vectorized: false,
             alignment: 0,
             has_prefetch: false,
+            control_label: None,
         }
     }
 }

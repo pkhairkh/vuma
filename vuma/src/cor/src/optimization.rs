@@ -616,7 +616,7 @@ impl OptimizationPass for LoopOptimization {
                 Some(n) => n,
                 None => continue,
             };
-            if node.kind == NodeKind::Loop {
+            if node.kind == NodeKind::Loop || node.kind == NodeKind::LoopHeader {
                 let entry = loop_trip_counts.entry(node_id).or_insert(0);
                 *entry = (*entry).max(call_count);
             }
@@ -635,7 +635,7 @@ impl OptimizationPass for LoopOptimization {
                 None => continue,
             };
 
-            if node.kind != NodeKind::Loop {
+            if node.kind != NodeKind::Loop && node.kind != NodeKind::LoopHeader {
                 continue;
             }
 

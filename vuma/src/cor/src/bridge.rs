@@ -6,13 +6,19 @@
 //!
 //! ## Node Kind Mapping
 //!
-//! | `vuma_scg::NodeType` | `vuma_cor::types::NodeKind` | Rationale |
-//! |----------------------|-----------------------------|-----------|
-//! | Allocation, Deallocation, Access | Memory | Memory operations |
-//! | Computation, Cast | Compute | Pure computation |
-//! | Control (FunctionEntry, Branch, Join, …) | Entry | Control flow entry/exit |
-//! | Effect | Call | Side-effecting, like calls |
-//! | Phantom | Entry | Structural / analysis marker |
+//! | `vuma_scg::NodeType` | `vuma_scg::ControlKind` | `vuma_cor::types::NodeKind` | Rationale |
+//! |----------------------|-------------------------|-----------------------------|----------|
+//! | Allocation, Deallocation, Access | — | Memory | Memory operations |
+//! | Computation, Cast | — | Compute | Pure computation |
+//! | Control | Branch | Branch | Conditional branch |
+//! | Control | LoopHeader | LoopHeader | Loop entry point |
+//! | Control | LoopExit | LoopExit | Loop termination |
+//! | Control | Join | Join | Control flow merge |
+//! | Control | FunctionEntry | FunctionEntry | Function boundary |
+//! | Control | FunctionReturn | FunctionReturn | Function exit |
+//! | Control | Jump | Jump | Unconditional jump |
+//! | Effect | — | Call | Side-effecting, like calls |
+//! | Phantom | — | Entry | Structural / analysis marker |
 //!
 //! ## Edge Weight Mapping
 //!
@@ -26,11 +32,17 @@
 use crate::types::{EdgeId, NodeId, NodeKind, SCG, SCGEdge, SCGNode};
 use std::collections::HashMap;
 
-/// Maps a `vuma_scg::NodeType` to the COR-internal `NodeKind`.
+/// Maps a `vuma_scg::NodeType` (with optional payload) to the COR-internal
+/// `NodeKind`.
 ///
-/// The mapping collapses the finer-grained SCG node types into the
-/// coarser categories used by the optimization engine.
-fn map_node_type(node_type: &vuma_scg::NodeType) -> NodeKind {
+/// For `Control` nodes, the payload is inspected to determine the
+/// fine-grained `ControlKind` (Branch, LoopHeader, LoopExit, Join,
+/// FunctionEntry, FunctionReturn, Jump). If the payload is missing, the
+/// node falls back to `NodeKind::Entry`.
+fn map_node_type(
+    node_type: &vuma_scg::NodeType,
+    payload: &Option<vuma_scg::node::NodePayload>,
+) -> NodeKind {
     match node_type {
         vuma_scg::NodeType::Allocation
         | vuma_scg::NodeType::Deallocation
@@ -39,10 +51,35 @@ fn map_node_type(node_type: &vuma_scg::NodeType) -> NodeKind {
         vuma_scg::NodeType::Computation
         | vuma_scg::NodeType::Cast => NodeKind::Compute,
 
-        vuma_scg::NodeType::Control
-        | vuma_scg::NodeType::Phantom => NodeKind::Entry,
+        vuma_scg::NodeType::Control => {
+            // Inspect payload to determine fine-grained kind
+            if let Some(vuma_scg::node::NodePayload::Control(ctrl)) = payload {
+                match ctrl.kind {
+                    vuma_scg::node::ControlKind::LoopHeader => NodeKind::LoopHeader,
+                    vuma_scg::node::ControlKind::LoopExit => NodeKind::LoopExit,
+                    vuma_scg::node::ControlKind::Branch => NodeKind::Branch,
+                    vuma_scg::node::ControlKind::Join => NodeKind::Join,
+                    vuma_scg::node::ControlKind::FunctionEntry => NodeKind::FunctionEntry,
+                    vuma_scg::node::ControlKind::FunctionReturn => NodeKind::FunctionReturn,
+                    vuma_scg::node::ControlKind::Jump => NodeKind::Jump,
+                }
+            } else {
+                NodeKind::Entry
+            }
+        }
+
+        vuma_scg::NodeType::Phantom => NodeKind::Entry,
 
         vuma_scg::NodeType::Effect => NodeKind::Call,
+    }
+}
+
+/// Extracts the control label from a Control payload, if present.
+fn extract_control_label(payload: &Option<vuma_scg::node::NodePayload>) -> Option<String> {
+    if let Some(vuma_scg::node::NodePayload::Control(ctrl)) = payload {
+        ctrl.label.clone()
+    } else {
+        None
     }
 }
 
@@ -75,8 +112,11 @@ impl From<vuma_scg::SCG> for SCG {
         // Phase 1: Insert all nodes.
         for node_data in scg.nodes() {
             let id: NodeId = node_data.id.as_u64();
-            let kind = map_node_type(&node_data.node_type);
-            let node = SCGNode::new(id, kind);
+            let payload = Some(node_data.payload.clone());
+            let kind = map_node_type(&node_data.node_type, &payload);
+            let control_label = extract_control_label(&payload);
+            let mut node = SCGNode::new(id, kind);
+            node.control_label = control_label;
             cor_scg.insert_node(node);
         }
 
@@ -154,22 +194,100 @@ mod tests {
 
     #[test]
     fn node_type_mapping() {
+        let none: Option<vuma_scg::node::NodePayload> = None;
         // Computation → Compute
-        assert_eq!(map_node_type(&NodeType::Computation), NodeKind::Compute);
+        assert_eq!(map_node_type(&NodeType::Computation, &none), NodeKind::Compute);
         // Cast → Compute
-        assert_eq!(map_node_type(&NodeType::Cast), NodeKind::Compute);
+        assert_eq!(map_node_type(&NodeType::Cast, &none), NodeKind::Compute);
         // Allocation → Memory
-        assert_eq!(map_node_type(&NodeType::Allocation), NodeKind::Memory);
+        assert_eq!(map_node_type(&NodeType::Allocation, &none), NodeKind::Memory);
         // Deallocation → Memory
-        assert_eq!(map_node_type(&NodeType::Deallocation), NodeKind::Memory);
+        assert_eq!(map_node_type(&NodeType::Deallocation, &none), NodeKind::Memory);
         // Access → Memory
-        assert_eq!(map_node_type(&NodeType::Access), NodeKind::Memory);
-        // Control → Entry
-        assert_eq!(map_node_type(&NodeType::Control), NodeKind::Entry);
+        assert_eq!(map_node_type(&NodeType::Access, &none), NodeKind::Memory);
+        // Control with no payload → Entry
+        assert_eq!(map_node_type(&NodeType::Control, &none), NodeKind::Entry);
+        // Control with Branch → Branch
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::Branch,
+                    label: None,
+                }))
+            ),
+            NodeKind::Branch,
+        );
+        // Control with LoopHeader → LoopHeader
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::LoopHeader,
+                    label: Some("loop".to_string()),
+                }))
+            ),
+            NodeKind::LoopHeader,
+        );
+        // Control with LoopExit → LoopExit
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::LoopExit,
+                    label: None,
+                }))
+            ),
+            NodeKind::LoopExit,
+        );
+        // Control with Join → Join
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::Join,
+                    label: None,
+                }))
+            ),
+            NodeKind::Join,
+        );
+        // Control with FunctionEntry → FunctionEntry
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::FunctionEntry,
+                    label: Some("main".to_string()),
+                }))
+            ),
+            NodeKind::FunctionEntry,
+        );
+        // Control with FunctionReturn → FunctionReturn
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::FunctionReturn,
+                    label: None,
+                }))
+            ),
+            NodeKind::FunctionReturn,
+        );
+        // Control with Jump → Jump
+        assert_eq!(
+            map_node_type(
+                &NodeType::Control,
+                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
+                    kind: vuma_scg::ControlKind::Jump,
+                    label: None,
+                }))
+            ),
+            NodeKind::Jump,
+        );
         // Phantom → Entry
-        assert_eq!(map_node_type(&NodeType::Phantom), NodeKind::Entry);
+        assert_eq!(map_node_type(&NodeType::Phantom, &none), NodeKind::Entry);
         // Effect → Call
-        assert_eq!(map_node_type(&NodeType::Effect), NodeKind::Call);
+        assert_eq!(map_node_type(&NodeType::Effect, &none), NodeKind::Call);
     }
 
     #[test]
@@ -251,5 +369,12 @@ mod tests {
         let cor_scg: SCG = scg.into();
         let edge = cor_scg.edges.values().next().unwrap();
         assert_eq!(edge.weight, 10); // ControlFlow → weight 10
+
+        // Verify that the Control node with LoopHeader was mapped to
+        // NodeKind::LoopHeader (not NodeKind::Entry as before).
+        let ctrl_node = cor_scg.get_node(n1.as_u64()).unwrap();
+        assert_eq!(ctrl_node.kind, NodeKind::LoopHeader);
+        // Verify that the control label was preserved.
+        assert_eq!(ctrl_node.control_label, Some("loop".to_string()));
     }
 }

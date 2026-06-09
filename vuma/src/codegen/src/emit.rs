@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 
-use crate::arm64::{Instruction, Operand, Register};
+use crate::arm64::{Condition, Instruction, Operand, Register};
 use crate::ir::*;
 use crate::regalloc::RegAllocator;
 use crate::CodegenError;
@@ -297,6 +297,8 @@ pub struct Emitter {
     current_func_name: String,
     /// Byte offset of the current function within the text section (set externally).
     func_text_offset: u64,
+    /// Computed stack frame size (in bytes) for the current function.
+    frame_size: u16,
 }
 
 impl Emitter {
@@ -310,6 +312,7 @@ impl Emitter {
             call_relocs: Vec::new(),
             current_func_name: String::new(),
             func_text_offset: 0,
+            frame_size: 0,
         }
     }
 
@@ -351,8 +354,9 @@ impl Emitter {
             rm: Register::SP,
         })?;
 
-        // Fixed 64-byte frame.  TODO: compute from register allocator spill count.
-        let aligned_stack = 64u16;
+        // Compute frame size from the function's Alloc instructions.
+        let aligned_stack = compute_frame_size(func);
+        self.frame_size = aligned_stack;
         self.emit_instruction(Instruction::SUB {
             rd: Register::SP,
             rn: Register::SP,
@@ -469,26 +473,66 @@ impl Emitter {
                 })?;
             }
 
-            IRInstr::Free { ptr: _ } => {
-                log::warn!("IRInstr::Free not yet implemented");
+            IRInstr::Free { ptr } => {
+                let rt = self.resolve_reg(ptr)?;
+                // Move ptr to X0 (first argument)
+                if rt != Register::X0 {
+                    self.emit_instruction(Instruction::MOV { rd: Register::X0, rm: rt })?;
+                }
+                // BL __vuma_free
+                let bl_word_idx = self.code.len();
+                self.call_relocs.push(CallRelocation {
+                    text_byte_offset: self.func_text_offset + (bl_word_idx as u64) * 4,
+                    target_func: "__vuma_free".to_string(),
+                });
+                self.emit_instruction(Instruction::BL { offset: 0 })?;
             }
 
             IRInstr::Cast { kind, dst, src } => {
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(src)?;
-                if rd != rn {
-                    self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
+                match kind {
+                    CastKind::ZExt => {
+                        // Zero-extend 32-bit to 64-bit using UBFM
+                        if rd != rn {
+                            self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
+                        } else {
+                            self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
+                        }
+                    }
+                    CastKind::SExt => {
+                        // Sign-extend 32-bit to 64-bit using SBFM
+                        self.emit_instruction(Instruction::SBFM { rd, rn, immr: 0, imms: 31 })?;
+                    }
+                    CastKind::Trunc | CastKind::BitCast => {
+                        // Trunc: upper bits discarded on write — just MOV
+                        // BitCast: no data change — just MOV
+                        if rd != rn {
+                            self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
+                        }
+                    }
                 }
-                let _ = kind; // TODO: proper UBFM/SBFM for zext/sext/trunc
             }
 
             IRInstr::Phi { .. } => {
                 log::warn!("IRInstr::Phi encountered during emission — should be resolved by SSA pass");
             }
 
-            IRInstr::GetAddress { dst, name: _ } => {
+            IRInstr::GetAddress { dst, name } => {
                 let rd = self.resolve_reg(dst)?;
-                self.emit_instruction(Instruction::MOVZ { rd, imm16: 0, shift: 0 })?;
+                // Emit a call to __vuma_getaddr to resolve the symbol at runtime.
+                // Move name hash to X0 as the argument.
+                let name_hash = name.chars().fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
+                self.emit_load_immediate(Register::X0, name_hash as i64)?;
+                let bl_word_idx = self.code.len();
+                self.call_relocs.push(CallRelocation {
+                    text_byte_offset: self.func_text_offset + (bl_word_idx as u64) * 4,
+                    target_func: "__vuma_getaddr".to_string(),
+                });
+                self.emit_instruction(Instruction::BL { offset: 0 })?;
+                if rd != Register::X0 {
+                    self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
+                }
             }
 
             IRInstr::Offset { dst, base, offset } => {
@@ -524,7 +568,7 @@ impl Emitter {
             }
 
             // ── Comparison instruction ──
-            IRInstr::Cmp { kind: _, dst, lhs, rhs } => {
+            IRInstr::Cmp { kind, dst, lhs, rhs } => {
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(lhs)?;
                 let rm = self.resolve_reg(rhs)?;
@@ -532,8 +576,8 @@ impl Emitter {
                     rn,
                     rm: Operand::Reg { reg: rm, shift: None },
                 })?;
-                // TODO: CSET Rd, cond.  Placeholder MOV for now.
-                self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
+                let cond = cmp_kind_to_condition(kind);
+                self.emit_instruction(Instruction::CSET { rd, cond })?;
             }
 
             // ── Instruction-level control flow ──
@@ -628,7 +672,13 @@ impl Emitter {
                     Instruction::UDIV { rd, rn, rm: rm_reg }
                 };
                 self.emit_instruction(div_instr)?;
-                // TODO: MSUB for remainder.
+                // MSUB rd, rd, rm, rn  =>  rd = rn - rd * rm  =  dividend - quotient * divisor
+                self.emit_instruction(Instruction::MSUB {
+                    rd,
+                    rn: rd,      // quotient (result of DIV)
+                    rm: rm_reg,  // divisor
+                    ra: rn,      // dividend
+                })?;
             }
             BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
             | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
@@ -638,9 +688,8 @@ impl Emitter {
                     rn,
                     rm: Operand::Reg { reg: rm_reg, shift: None },
                 })?;
-                // TODO: CSET using condition code.  Placeholder for now.
-                log::warn!("comparison BinOp {:?} not fully lowered, emitting placeholder", op);
-                self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
+                let cond = binop_kind_to_condition(&op);
+                self.emit_instruction(Instruction::CSET { rd, cond })?;
             }
         }
         Ok(())
@@ -678,8 +727,10 @@ impl Emitter {
                         self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
                     }
                 }
+                // Use the same frame size computed in the prologue
+                let frame_size = self.frame_size;
                 self.emit_instruction(Instruction::ADD {
-                    rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(64),
+                    rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(frame_size),
                 })?;
                 self.emit_instruction(Instruction::LDP {
                     rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 16,
@@ -781,6 +832,65 @@ impl Emitter {
 
 impl Default for Emitter {
     fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Condition-code mapping helpers
+// ---------------------------------------------------------------------------
+
+/// Map an IR [`CmpKind`] to the corresponding ARM64 [`Condition`] code.
+fn cmp_kind_to_condition(kind: &CmpKind) -> Condition {
+    match kind {
+        CmpKind::Eq  => Condition::EQ,
+        CmpKind::Ne  => Condition::NE,
+        CmpKind::SLt => Condition::LT,
+        CmpKind::SLe => Condition::LE,
+        CmpKind::SGt => Condition::GT,
+        CmpKind::SGe => Condition::GE,
+        CmpKind::ULt => Condition::CC,  // Carry clear = unsigned lower
+        CmpKind::ULe => Condition::LS,  // Unsigned lower or same
+        CmpKind::UGt => Condition::HI,  // Unsigned higher
+        CmpKind::UGe => Condition::CS,  // Carry set = unsigned higher or same
+    }
+}
+
+/// Map a comparison [`BinOpKind`] to the corresponding ARM64 [`Condition`] code.
+fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
+    match op {
+        BinOpKind::SLt => Condition::LT,
+        BinOpKind::SLe => Condition::LE,
+        BinOpKind::SGt => Condition::GT,
+        BinOpKind::SGe => Condition::GE,
+        BinOpKind::ULt => Condition::CC,
+        BinOpKind::ULe => Condition::LS,
+        BinOpKind::UGt => Condition::HI,
+        BinOpKind::UGe => Condition::CS,
+        BinOpKind::Eq  => Condition::EQ,
+        BinOpKind::Ne  => Condition::NE,
+        _ => Condition::EQ, // fallback — should not be reached
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame-size computation
+// ---------------------------------------------------------------------------
+
+/// Compute the stack frame size for a function by summing its `Alloc`
+/// instructions, adding 16 bytes for the FP/LR save pair, and rounding up
+/// to 16-byte alignment.
+fn compute_frame_size(func: &IRFunction) -> u16 {
+    let mut total: u32 = 16; // FP/LR save pair
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::Alloc { size, .. } = instr {
+                let aligned = ((*size as u32 + 15) / 16) * 16;
+                total += aligned;
+            }
+        }
+    }
+    // Round up to 16-byte alignment (should already be, but be safe).
+    total = (total + 15) & !15;
+    total as u16
 }
 
 // ---------------------------------------------------------------------------

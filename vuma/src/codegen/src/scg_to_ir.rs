@@ -167,6 +167,27 @@ pub enum ControlNode {
     Break,
     /// `continue` (from inside a loop).
     Continue,
+    /// `switch discriminant { case value => body, .. default => body }`
+    ///
+    /// Lowers to a sequence of compare-and-branch instructions for small
+    /// switch ranges, or a jump table for dense contiguous ranges.
+    Switch {
+        /// The discriminant expression being switched on.
+        discriminant: ScgExpr,
+        /// The switch arms: each arm has a value and a body.
+        arms: Vec<SwitchArm>,
+        /// The default arm (always present — like a match expression).
+        default_body: Vec<ScgStatement>,
+    },
+}
+
+/// A single arm of a switch expression.
+#[derive(Debug, Clone)]
+pub struct SwitchArm {
+    /// The integer value this arm matches.
+    pub value: i64,
+    /// The body statements for this arm.
+    pub body: Vec<ScgStatement>,
 }
 
 /// Allocation node — reserves memory.
@@ -522,6 +543,9 @@ impl IRBuilder {
             ControlNode::Continue => {
                 self.lower_continue(ir_func)?;
             }
+            ControlNode::Switch { discriminant, arms, default_body } => {
+                self.lower_switch(discriminant, arms, default_body, ir_func, names)?;
+            }
         }
         Ok(())
     }
@@ -804,6 +828,161 @@ impl IRBuilder {
             target: header_label.clone(),
         });
         ir_func.current_block().terminator = IRTerminator::Jump(header_label);
+        Ok(())
+    }
+
+    /// Lower a switch/match to IR: cascading compare-and-branch for each arm,
+    /// with a merge block at the end.
+    ///
+    /// For small switch statements (≤8 arms), we emit a linear chain of
+    /// `CMP` + `B.EQ` for each case value. For larger switches with dense
+    /// contiguous values, a jump table would be more efficient, but that
+    /// requires data-section support that isn't fully wired yet.
+    ///
+    /// Structure:
+    /// ```text
+    ///   entry:  CMP disc, arm0_val → B.EQ arm0_label
+    ///           CMP disc, arm1_val → B.EQ arm1_label
+    ///           …
+    ///           B default_label
+    ///   arm0:   [arm0_body] → B merge
+    ///   arm1:   [arm1_body] → B merge
+    ///   …
+    ///   default: [default_body] → B merge
+    ///   merge:  [phi nodes for vars modified in any arm]
+    /// ```
+    fn lower_switch(
+        &mut self,
+        discriminant: &ScgExpr,
+        arms: &[SwitchArm],
+        default_body: &[ScgStatement],
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let disc_val = self.resolve_expr(discriminant, names);
+        let merge_label = self.alloc_label("switch_merge");
+
+        // Snapshot names before the switch for phi insertion later.
+        let names_before = names.clone();
+
+        // Generate labels for each arm and the default case.
+        let arm_labels: Vec<String> = arms.iter()
+            .enumerate()
+            .map(|(i, _)| self.alloc_label(&format!("case_{}", i)))
+            .collect();
+        let default_label = self.alloc_label("default");
+
+        // Emit cascading compare-and-branch in the current block.
+        // Each case: CMP disc, value → CSET cond → CondBranch to arm label.
+        // After all cases, fall through to default.
+        for (i, arm) in arms.iter().enumerate() {
+            let cond_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::anonymous(cond_vreg));
+            ir_func.current_block().push(IRInstruction::Cmp {
+                kind: CmpKind::Eq,
+                dst: IRValue::Register(cond_vreg),
+                lhs: disc_val.clone(),
+                rhs: IRValue::Immediate(arm.value),
+            });
+            ir_func.current_block().push(IRInstruction::CondBranch {
+                cond: IRValue::Register(cond_vreg),
+                true_target: arm_labels[i].clone(),
+                false_target: if i + 1 < arms.len() {
+                    arm_labels[i + 1].clone()
+                } else {
+                    default_label.clone()
+                },
+            });
+        }
+
+        // Unconditional branch to default (if no case matched).
+        ir_func.current_block().push(IRInstruction::Branch {
+            target: default_label.clone(),
+        });
+        ir_func.current_block().terminator = IRTerminator::Jump(default_label.clone());
+
+        // Track all variable definitions across arms for phi insertion.
+        let mut all_arm_defs: Vec<VarDefs> = Vec::new();
+        let mut arm_exit_labels: Vec<String> = Vec::new();
+
+        // Lower each arm body.
+        for (i, arm) in arms.iter().enumerate() {
+            *names = names_before.clone();
+            ir_func.append_block(&arm_labels[i]);
+            self.lower_statements(&arm.body, ir_func, names)?;
+
+            let mut arm_defs = VarDefs::new();
+            for (name, &vreg) in names.iter() {
+                if names_before.get(name) != Some(&vreg) {
+                    arm_defs.define(name, vreg);
+                }
+            }
+            all_arm_defs.push(arm_defs);
+
+            if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+                ir_func.current_block().push(IRInstruction::Branch {
+                    target: merge_label.clone(),
+                });
+                ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+            }
+            arm_exit_labels.push(ir_func.current_block().label.clone());
+        }
+
+        // Lower default arm.
+        *names = names_before.clone();
+        ir_func.append_block(&default_label);
+        self.lower_statements(default_body, ir_func, names)?;
+
+        let mut default_defs = VarDefs::new();
+        for (name, &vreg) in names.iter() {
+            if names_before.get(name) != Some(&vreg) {
+                default_defs.define(name, vreg);
+            }
+        }
+
+        if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+            ir_func.current_block().push(IRInstruction::Branch {
+                target: merge_label.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+        }
+        let default_exit_label = ir_func.current_block().label.clone();
+
+        // Compute all modified variable names across all arms + default.
+        let all_modified: HashSet<String> = all_arm_defs.iter()
+            .chain(std::iter::once(&default_defs))
+            .flat_map(|defs| defs.defined_names())
+            .collect();
+
+        // Merge block with phi nodes for variables modified in multiple arms.
+        ir_func.append_block(&merge_label);
+
+        for name in &all_modified {
+            // Collect the vregs from each arm that defines this variable.
+            let mut incoming: Vec<(IRValue, String)> = Vec::new();
+
+            for (i, arm_defs) in all_arm_defs.iter().enumerate() {
+                let vreg = arm_defs.get(name)
+                    .or_else(|| names_before.get(name).copied())
+                    .unwrap_or(0);
+                incoming.push((IRValue::Register(vreg), arm_exit_labels[i].clone()));
+            }
+
+            // Add the default arm's value.
+            let default_vreg = default_defs.get(name)
+                .or_else(|| names_before.get(name).copied())
+                .unwrap_or(0);
+            incoming.push((IRValue::Register(default_vreg), default_exit_label.clone()));
+
+            let phi_dst = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(phi_dst, name));
+            ir_func.current_block().push(IRInstruction::Phi {
+                dst: IRValue::Register(phi_dst),
+                incoming,
+            });
+            names.insert(name.clone(), phi_dst);
+        }
+
         Ok(())
     }
 
@@ -1360,6 +1539,22 @@ impl IRBuilder {
                 }
             }
             ScgStatement::Control(ControlNode::Break) | ScgStatement::Control(ControlNode::Continue) => {}
+            ScgStatement::Control(ControlNode::Switch { discriminant, arms, default_body }) => {
+                Self::expr_uses(discriminant, &mut uses);
+                for arm in arms {
+                    Self::expr_uses(&ScgExpr::Int(arm.value), &mut uses);
+                    for s in &arm.body {
+                        let (d, u) = Self::stmt_def_use(s);
+                        defs.extend(d);
+                        uses.extend(u);
+                    }
+                }
+                for s in default_body {
+                    let (d, u) = Self::stmt_def_use(s);
+                    defs.extend(d);
+                    uses.extend(u);
+                }
+            }
         }
 
         (defs, uses)

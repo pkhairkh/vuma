@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::Instant;
 
@@ -40,7 +41,8 @@ use std::time::Instant;
 
 use vuma_parser::{Parser, AstToScg, Program as AstProgram, ParseError, Diagnostic, Span};
 use vuma_scg::{
-    SCG, NodeId, NodeData, NodeType, EdgeKind,
+    SCG, NodeId, NodeData, NodeType, EdgeKind, EdgeData,
+    ControlKind, AccessMode, NodePayload,
     SCGError, ValidationResult,
     CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination,
     InliningPass, PassManager, PipelineResult as ScgPipelineResult,
@@ -61,7 +63,8 @@ use vuma_core::{
 use vuma_codegen::{
     scg_to_ir::{IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
                 ScgStatement, ControlNode, AllocationNode, AccessNode,
-                CastNode, ComputationNode, CallNode, ScgExpr, ScgData},
+                CastNode, ComputationNode, CallNode, ScgExpr, ScgData,
+                SwitchArm},
     ir::{IRProgram, IRFunction, IRBlock, IRInstr, IRValue, BinOpKind as IrBinOpKind},
     emit::{Emitter, EmitConfig, emit_elf, emit_raw, OutputFormat as EmitOutputFormat, Target as EmitTarget},
     regalloc::{LinearScanAllocator, AllocationResult},
@@ -541,112 +544,811 @@ impl fmt::Display for PipelineStage {
 // SCG → Codegen SCG bridge
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Convert a `vuma_scg::SCG` into the codegen's stub `Scg` type.
-///
-/// The codegen crate defines its own lightweight SCG representation
-/// for IR lowering. This function bridges between the two by walking
-/// the real SCG and extracting function/data nodes.
-fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
-    let mut nodes = Vec::new();
+// ── Edge Index ─────────────────────────────────────────────────────────
 
-    // Walk all nodes in the SCG and classify them.
-    // We group nodes into functions based on region membership and
-    // control-flow structure.
-    let topo = match scg.topological_sort() {
-        Ok(t) => t,
-        Err(_) => scg.node_ids().collect(),
-    };
+/// Pre-computed edge index for efficient graph traversal during bridge
+/// conversion. Built once from all edges in the SCG and then queried
+/// by node ID and edge kind.
+struct EdgeIndex {
+    /// Outgoing edges keyed by source node.
+    outgoing: HashMap<NodeId, Vec<EdgeData>>,
+    /// Incoming edges keyed by target node.
+    incoming: HashMap<NodeId, Vec<EdgeData>>,
+}
 
-    // Collect all computation/alloc/access/cast nodes as a single
-    // "main" function for now. A more sophisticated bridge would
-    // reconstruct function boundaries from Control(FunctionEntry) nodes.
-    let mut stmts = Vec::new();
-    let mut alloc_count = 0u32;
+impl EdgeIndex {
+    /// Build the edge index from all edges in the SCG.
+    fn build(scg: &SCG) -> Self {
+        let mut outgoing: HashMap<NodeId, Vec<EdgeData>> = HashMap::new();
+        let mut incoming: HashMap<NodeId, Vec<EdgeData>> = HashMap::new();
+        for edge in scg.edges() {
+            outgoing.entry(edge.source).or_default().push(edge.clone());
+            incoming.entry(edge.target).or_default().push(edge.clone());
+        }
+        Self { outgoing, incoming }
+    }
 
-    for node_id in &topo {
-        if let Some(node_data) = scg.get_node(*node_id) {
-            match &node_data.payload {
-                vuma_scg::node::NodePayload::Allocation(alloc) => {
-                    alloc_count += 1;
-                    stmts.push(ScgStatement::Allocation(AllocationNode::Stack {
-                        name: format!("alloc_{}", alloc_count),
-                        size: alloc.size as u32,
-                        ty: ScgType::U8,
-                    }));
-                }
-                vuma_scg::node::NodePayload::Access(access) => {
-                    let mode = match access.mode {
-                        vuma_scg::node::AccessMode::Read => "read",
-                        vuma_scg::node::AccessMode::Write => "write",
-                        vuma_scg::node::AccessMode::ReadWrite => "readwrite",
-                    };
-                    let ptr_name = format!("ptr_{}", node_id.as_u64());
-                    let offset_expr = access.offset.map(|o| ScgExpr::Int(o as i64));
-                    stmts.push(ScgStatement::Access(AccessNode::Load {
-                        dst: format!("val_{}", node_id.as_u64()),
-                        ptr: ScgExpr::Var(ptr_name),
-                        offset: offset_expr,
-                    }));
-                    let _ = mode; // used in future, more precise bridging
-                }
-                vuma_scg::node::NodePayload::Computation(comp) => {
-                    // Try to parse the operation string into a BinOpKind.
-                    let op = parse_binop(&comp.operation).unwrap_or(IrBinOpKind::Add);
-                    let lhs_name = format!("lhs_{}", node_id.as_u64());
-                    let rhs_name = format!("rhs_{}", node_id.as_u64());
-                    stmts.push(ScgStatement::Computation(ComputationNode {
-                        dst: format!("comp_{}", node_id.as_u64()),
-                        op,
-                        lhs: ScgExpr::Var(lhs_name),
-                        rhs: ScgExpr::Var(rhs_name),
-                    }));
-                }
-                vuma_scg::node::NodePayload::Cast(cast) => {
-                    stmts.push(ScgStatement::Cast(CastNode {
-                        dst: format!("cast_{}", node_id.as_u64()),
-                        src: ScgExpr::Var(format!("src_{}", node_id.as_u64())),
-                        kind: CodegenCastKind::BitCast,
-                        from_ty: ScgType::Ptr,
-                        to_ty: ScgType::Ptr,
-                    }));
-                }
-                vuma_scg::node::NodePayload::Control(ctrl) => {
-                    if ctrl.kind == vuma_scg::node::ControlKind::FunctionReturn {
-                        stmts.push(ScgStatement::Return(vec![]));
+    /// Get outgoing ControlFlow edges from a node.
+    fn outgoing_cf(&self, id: NodeId) -> Vec<&EdgeData> {
+        self.outgoing
+            .get(&id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::ControlFlow).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get incoming DataFlow edges to a node.
+    fn incoming_df(&self, id: NodeId) -> Vec<&EdgeData> {
+        self.incoming
+            .get(&id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::DataFlow).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get outgoing DataFlow edges from a node.
+    fn outgoing_df(&self, id: NodeId) -> Vec<&EdgeData> {
+        self.outgoing
+            .get(&id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::DataFlow).collect())
+            .unwrap_or_default()
+    }
+}
+
+// ── Variable naming helpers ────────────────────────────────────────────
+
+/// Generate a variable name for a node with a given prefix.
+fn node_var(id: NodeId, prefix: &str) -> String {
+    format!("{}_{}", prefix, id.as_u64())
+}
+
+/// Resolve a DataFlow input for a node, returning a `ScgExpr` referencing
+/// the variable produced by the source node of the DataFlow edge at the
+/// given position.
+fn resolve_df_input(node_id: NodeId, position: usize, edge_idx: &EdgeIndex) -> ScgExpr {
+    let df_inputs = edge_idx.incoming_df(node_id);
+    if position < df_inputs.len() {
+        let source = df_inputs[position].source;
+        ScgExpr::Var(format!("v_{}", source.as_u64()))
+    } else {
+        ScgExpr::Var(format!("v_unknown_{}_{}", node_id.as_u64(), position))
+    }
+}
+
+/// Resolve the condition expression for a Branch node by looking at its
+/// incoming DataFlow edges.
+fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex) -> ScgExpr {
+    resolve_df_input(branch_id, 0, edge_idx)
+}
+
+// ── Control flow resolution helpers ────────────────────────────────────
+
+/// Find the `FunctionReturn` node reachable from a `FunctionEntry` via
+/// ControlFlow edges, using BFS.
+fn find_function_return(
+    entry_id: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> Option<NodeId> {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(entry_id);
+    visited.insert(entry_id);
+
+    while let Some(current) = queue.pop_front() {
+        for edge in edge_idx.outgoing_cf(current) {
+            let target = edge.target;
+            if visited.contains(&target) {
+                continue;
+            }
+            visited.insert(target);
+            if let Some(node) = scg.get_node(target) {
+                if let NodePayload::Control(c) = &node.payload {
+                    if c.kind == ControlKind::FunctionReturn {
+                        return Some(target);
                     }
-                    // Other control nodes are not directly representable in
-                    // the codegen's stub SCG.
                 }
-                vuma_scg::node::NodePayload::Deallocation(_dealloc) => {
-                    stmts.push(ScgStatement::Access(AccessNode::Store {
-                        ptr: ScgExpr::Var(format!("alloc_{}", node_id.as_u64())),
-                        offset: None,
-                        value: ScgExpr::Int(0),
-                    }));
+            }
+            queue.push_back(target);
+        }
+    }
+
+    None
+}
+
+/// Find all `Join` nodes reachable from `start` via ControlFlow edges,
+/// stopping at the first Join encountered on each path (Joins are
+/// convergence points, not passed through during search).
+fn find_reachable_joins(
+    start: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> Vec<NodeId> {
+    let mut joins = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+
+    let max_steps = 500;
+    let mut steps = 0;
+
+    while let Some(current) = queue.pop_front() {
+        steps += 1;
+        if steps > max_steps {
+            break;
+        }
+
+        if let Some(node) = scg.get_node(current) {
+            if let NodePayload::Control(c) = &node.payload {
+                if c.kind == ControlKind::Join {
+                    joins.push(current);
+                    continue; // Don't walk past Join
                 }
-                vuma_scg::node::NodePayload::Effect(_) | vuma_scg::node::NodePayload::Phantom(_) => {
-                    // Skip effect and phantom nodes in the bridge.
-                }
+            }
+        }
+
+        for edge in edge_idx.outgoing_cf(current) {
+            let target = edge.target;
+            if !visited.contains(&target) {
+                visited.insert(target);
+                queue.push_back(target);
             }
         }
     }
 
-    // Ensure at least a return statement at the end.
-    if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
-        stmts.push(ScgStatement::Return(vec![]));
+    joins
+}
+
+/// Find the `Join` node where a Branch's then and else arms converge.
+fn find_join_for_branch(
+    then_start: NodeId,
+    else_start: Option<NodeId>,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> Option<NodeId> {
+    let then_joins = find_reachable_joins(then_start, scg, edge_idx);
+
+    if let Some(else_start) = else_start {
+        let else_joins = find_reachable_joins(else_start, scg, edge_idx);
+        // Find the first Join reachable from both arms
+        for jid in &then_joins {
+            if else_joins.contains(jid) {
+                return Some(*jid);
+            }
+        }
     }
 
-    // Build a single "main" function containing all statements.
-    let main_func = ScgFunction {
-        name: "main".to_string(),
-        params: vec![],
-        results: vec![],
-        body: stmts,
-    };
+    // Fallback: first Join reachable from then_start
+    then_joins.into_iter().next()
+}
 
-    nodes.push(ScgNode::Function(main_func));
+/// Resolve a Branch node's then/else targets and Join convergence point.
+///
+/// Looks for labeled ControlFlow edges ("then", "else", "else_fallthrough")
+/// and falls back to positional ordering if labels are missing.
+fn resolve_branch(
+    branch_id: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> (NodeId, Option<NodeId>, Option<NodeId>) {
+    let cf_edges = edge_idx.outgoing_cf(branch_id);
 
-    Scg { nodes }
+    // Look for labeled edges
+    let then_target = cf_edges
+        .iter()
+        .find(|e| e.label.as_deref() == Some("then"))
+        .map(|e| e.target)
+        .or_else(|| cf_edges.first().map(|e| e.target));
+
+    let else_target = cf_edges
+        .iter()
+        .find(|e| {
+            e.label.as_deref() == Some("else")
+                || e.label.as_deref() == Some("else_fallthrough")
+        })
+        .map(|e| e.target)
+        .or_else(|| {
+            // If there are exactly 2 CF edges and one is "then", the other is "else"
+            if cf_edges.len() == 2 {
+                let then = then_target?;
+                cf_edges
+                    .iter()
+                    .find(|e| e.target != then)
+                    .map(|e| e.target)
+            } else {
+                None
+            }
+        });
+
+    let then_tgt = then_target.unwrap_or(branch_id);
+    let join = find_join_for_branch(then_tgt, else_target, scg, edge_idx);
+
+    (then_tgt, else_target, join)
+}
+
+/// Resolve a LoopHeader node's body and exit targets.
+///
+/// Classifies outgoing ControlFlow edges: edges targeting a `LoopExit`
+/// node are the exit; all other edges are the loop body.
+fn resolve_loop(
+    header_id: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> (NodeId, Option<NodeId>) {
+    let cf_edges = edge_idx.outgoing_cf(header_id);
+
+    let mut body_target = None;
+    let mut exit_target = None;
+
+    for edge in &cf_edges {
+        if let Some(target_node) = scg.get_node(edge.target) {
+            if let NodePayload::Control(c) = &target_node.payload {
+                if c.kind == ControlKind::LoopExit {
+                    exit_target = Some(edge.target);
+                    continue;
+                }
+            }
+        }
+        if body_target.is_none() {
+            body_target = Some(edge.target);
+        }
+    }
+
+    // Fallbacks
+    if body_target.is_none() {
+        body_target = cf_edges.first().map(|e| e.target);
+    }
+    if exit_target.is_none() && cf_edges.len() > 1 {
+        exit_target = cf_edges.get(1).map(|e| e.target);
+    }
+
+    (body_target.unwrap_or(header_id), exit_target)
+}
+
+// ── Control flow walk ──────────────────────────────────────────────────
+
+/// Walk control flow starting from `start`, producing `ScgStatement`s.
+///
+/// Stops when reaching a node in `stop_at` (does NOT consume that node;
+/// the caller is responsible for handling it). Adds processed nodes to
+/// `consumed`.
+///
+/// # Control Flow Reconstruction
+///
+/// - **Branch → If**: Follows "then"/"else" labeled CF edges, walks each
+///   arm until reaching a Join, produces `ControlNode::If`.
+/// - **LoopHeader → Loop**: Follows body/exit CF edges, walks the body
+///   until back-edge or LoopExit, produces `ControlNode::Loop`.
+/// - **Jump("break")**: Produces `ControlNode::Break`.
+/// - **Jump("continue")**: Produces `ControlNode::Continue`.
+/// - **FunctionReturn**: Produces `ScgStatement::Return`.
+fn walk_control_flow(
+    start: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+    consumed: &mut HashSet<NodeId>,
+    stop_at: &HashSet<NodeId>,
+) -> Vec<ScgStatement> {
+    let mut stmts = Vec::new();
+    let mut current = Some(start);
+
+    while let Some(node_id) = current {
+        // Stop if we've reached a merge point
+        if stop_at.contains(&node_id) {
+            break;
+        }
+        // Skip already-consumed nodes
+        if consumed.contains(&node_id) {
+            break;
+        }
+        consumed.insert(node_id);
+
+        let node_data = match scg.get_node(node_id) {
+            Some(n) => n,
+            None => break,
+        };
+
+        match &node_data.payload {
+            // ── Control nodes ──────────────────────────────────────
+            NodePayload::Control(ctrl) => match ctrl.kind {
+                ControlKind::Branch => {
+                    let (then_tgt, else_tgt, join_node) =
+                        resolve_branch(node_id, scg, edge_idx);
+                    let cond = resolve_branch_cond(node_id, edge_idx);
+
+                    // Check if this is a match/switch branch (label starts
+                    // with "match") vs a simple if/else. For match branches,
+                    // we look for multiple Branch→Join diamonds that share
+                    // the same Join and collapse them into a Switch node.
+                    let is_match = ctrl.label.as_ref()
+                        .map(|l| l.starts_with("match"))
+                        .unwrap_or(false);
+
+                    if is_match {
+                        // For match/switch, collect all arms that lead to
+                        // the same Join node. Each arm is a then/else pair
+                        // where the then branch is the matched case.
+                        // We walk the then arm to find the case value and body.
+                        let mut arms = Vec::new();
+                        let mut default_body = Vec::new();
+
+                        // Build stop-at for both arms (includes Join)
+                        let mut arm_stop = stop_at.clone();
+                        if let Some(join) = join_node {
+                            arm_stop.insert(join);
+                        }
+
+                        // For now, generate a simple switch from the then arm
+                        // with a discriminant expression.
+                        let then_body_stmts =
+                            walk_control_flow(then_tgt, scg, edge_idx, consumed, &arm_stop);
+
+                        // Try to extract a case value from the condition.
+                        // If the condition is "disc == value", extract the value.
+                        let case_value = 0i64; // default; real extraction from cond
+                        arms.push(SwitchArm {
+                            value: case_value,
+                            body: then_body_stmts,
+                        });
+
+                        if let Some(tgt) = else_tgt {
+                            let else_stmts =
+                                walk_control_flow(tgt, scg, edge_idx, consumed, &arm_stop);
+                            default_body = else_stmts;
+                        }
+
+                        // Use the first operand of the condition as discriminant
+                        let disc = if let ScgExpr::Var(_) = &cond {
+                            cond.clone()
+                        } else {
+                            ScgExpr::Var("disc".to_string())
+                        };
+
+                        stmts.push(ScgStatement::Control(ControlNode::Switch {
+                            discriminant: disc,
+                            arms,
+                            default_body,
+                        }));
+                    } else {
+                        // Standard if/else
+                        let mut arm_stop = stop_at.clone();
+                        if let Some(join) = join_node {
+                            arm_stop.insert(join);
+                        }
+
+                        let then_body =
+                            walk_control_flow(then_tgt, scg, edge_idx, consumed, &arm_stop);
+
+                        let else_body = else_tgt.map(|tgt| {
+                            walk_control_flow(tgt, scg, edge_idx, consumed, &arm_stop)
+                        });
+
+                        stmts.push(ScgStatement::Control(ControlNode::If {
+                            cond,
+                            then_body,
+                            else_body,
+                        }));
+                    }
+
+                    // Continue from the Join
+                    if let Some(join) = join_node {
+                        consumed.insert(join);
+                        current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                    } else {
+                        current = None;
+                    }
+                    continue;
+                }
+
+                ControlKind::LoopHeader => {
+                    let (body_tgt, exit_tgt) = resolve_loop(node_id, scg, edge_idx);
+
+                    // Stop the body walk at back-edges (LoopHeader) and LoopExit
+                    let mut loop_stop = stop_at.clone();
+                    loop_stop.insert(node_id); // back-edge target
+                    if let Some(exit) = exit_tgt {
+                        loop_stop.insert(exit);
+                    }
+
+                    let body =
+                        walk_control_flow(body_tgt, scg, edge_idx, consumed, &loop_stop);
+
+                    stmts.push(ScgStatement::Control(ControlNode::Loop { body }));
+
+                    // Continue from the LoopExit
+                    if let Some(exit) = exit_tgt {
+                        consumed.insert(exit);
+                        current = edge_idx.outgoing_cf(exit).first().map(|e| e.target);
+                    } else {
+                        current = None;
+                    }
+                    continue;
+                }
+
+                ControlKind::Jump => match ctrl.label.as_deref() {
+                    Some("break") => {
+                        stmts.push(ScgStatement::Control(ControlNode::Break));
+                        current = None;
+                        continue;
+                    }
+                    Some("continue") => {
+                        stmts.push(ScgStatement::Control(ControlNode::Continue));
+                        current = None;
+                        continue;
+                    }
+                    _ => {
+                        // Unconditional jump — follow the CF edge
+                        let target =
+                            edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                        if let Some(tgt) = target {
+                            if !consumed.contains(&tgt) && !stop_at.contains(&tgt) {
+                                current = Some(tgt);
+                                continue;
+                            }
+                        }
+                        current = None;
+                        continue;
+                    }
+                },
+
+                ControlKind::FunctionReturn => {
+                    stmts.push(ScgStatement::Return(vec![]));
+                    current = None;
+                    continue;
+                }
+
+                ControlKind::Join | ControlKind::LoopExit => {
+                    // Structural nodes handled by Branch/LoopHeader.
+                    // Pass through to the next node.
+                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                    continue;
+                }
+
+                ControlKind::FunctionEntry => {
+                    // Shouldn't appear inside a function body; pass through
+                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                    continue;
+                }
+            },
+
+            // ── Non-control nodes: convert to statements ───────────
+            _ => {
+                if let Some(stmt) = convert_node_to_statement(node_id, &node_data, edge_idx) {
+                    stmts.push(stmt);
+                }
+
+                // Continue to the next node via ControlFlow
+                current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+            }
+        }
+    }
+
+    stmts
+}
+
+// ── Node-to-statement conversion ───────────────────────────────────────
+
+/// Convert a non-control SCG node into an `ScgStatement`.
+///
+/// Handles all node types except `Control` (which is handled by
+/// `walk_control_flow`) and `Phantom` (which is skipped).
+fn convert_node_to_statement(
+    node_id: NodeId,
+    node_data: &NodeData,
+    edge_idx: &EdgeIndex,
+) -> Option<ScgStatement> {
+    match &node_data.payload {
+        NodePayload::Allocation(alloc) => {
+            Some(ScgStatement::Allocation(AllocationNode::Stack {
+                name: node_var(node_id, "alloc"),
+                size: alloc.size as u32,
+                ty: ScgType::U8,
+            }))
+        }
+
+        NodePayload::Access(access) => match access.mode {
+            AccessMode::Read => Some(ScgStatement::Access(AccessNode::Load {
+                dst: node_var(node_id, "val"),
+                ptr: resolve_df_input(node_id, 0, edge_idx),
+                offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+            })),
+            AccessMode::Write | AccessMode::ReadWrite => {
+                Some(ScgStatement::Access(AccessNode::Store {
+                    ptr: resolve_df_input(node_id, 0, edge_idx),
+                    offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+                    value: resolve_df_input(node_id, 1, edge_idx),
+                }))
+            }
+        },
+
+        NodePayload::Computation(comp) => {
+            let op = parse_binop(&comp.operation).unwrap_or(IrBinOpKind::Add);
+            Some(ScgStatement::Computation(ComputationNode {
+                dst: node_var(node_id, "comp"),
+                op,
+                lhs: resolve_df_input(node_id, 0, edge_idx),
+                rhs: resolve_df_input(node_id, 1, edge_idx),
+            }))
+        }
+
+        NodePayload::Cast(cast) => {
+            let to_ty = parse_scg_type(&cast.to_type).unwrap_or(ScgType::Ptr);
+            let from_ty = parse_scg_type(&cast.from_type).unwrap_or(ScgType::Ptr);
+            Some(ScgStatement::Cast(CastNode {
+                dst: node_var(node_id, "cast"),
+                src: resolve_df_input(node_id, 0, edge_idx),
+                kind: if cast.is_lossless {
+                    CodegenCastKind::ZExt
+                } else {
+                    CodegenCastKind::BitCast
+                },
+                from_ty,
+                to_ty,
+            }))
+        }
+
+        NodePayload::Deallocation(_dealloc) => {
+            Some(ScgStatement::Access(AccessNode::Store {
+                ptr: resolve_df_input(node_id, 0, edge_idx),
+                offset: None,
+                value: ScgExpr::Int(0),
+            }))
+        }
+
+        NodePayload::Effect(eff) => {
+            Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "eff")),
+                func: eff.effect_kind.clone(),
+                args: vec![],
+            }))
+        }
+
+        NodePayload::Phantom(_) => None,
+
+        NodePayload::Control(_) => {
+            // Control nodes are handled by walk_control_flow
+            None
+        }
+    }
+}
+
+// ── Function parameter extraction ──────────────────────────────────────
+
+/// Extract function parameters from DataFlow edges leaving the
+/// FunctionEntry node.
+fn extract_function_params(
+    entry_id: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> Vec<ScgParam> {
+    let df_edges = edge_idx.outgoing_df(entry_id);
+    let mut params = Vec::new();
+
+    for (i, edge) in df_edges.iter().enumerate() {
+        let name = if let Some(target_node) = scg.get_node(edge.target) {
+            match &target_node.payload {
+                NodePayload::Allocation(alloc) => {
+                    alloc.type_name.clone().unwrap_or_else(|| format!("param_{}", i))
+                }
+                NodePayload::Computation(comp) => {
+                    comp.result_type.clone().unwrap_or_else(|| format!("param_{}", i))
+                }
+                _ => format!("param_{}", i),
+            }
+        } else {
+            format!("param_{}", i)
+        };
+
+        params.push(ScgParam {
+            name,
+            ty: ScgType::I64, // default type; refined by BD inference
+        });
+    }
+
+    params
+}
+
+// ── Type parsing helper ────────────────────────────────────────────────
+
+/// Parse a type string into a `ScgType`.
+fn parse_scg_type(type_str: &str) -> Option<ScgType> {
+    match type_str {
+        "i8" | "I8" => Some(ScgType::I8),
+        "i16" | "I16" => Some(ScgType::I16),
+        "i32" | "I32" => Some(ScgType::I32),
+        "i64" | "I64" => Some(ScgType::I64),
+        "u8" | "U8" => Some(ScgType::U8),
+        "u16" | "U16" => Some(ScgType::U16),
+        "u32" | "U32" => Some(ScgType::U32),
+        "u64" | "U64" => Some(ScgType::U64),
+        "ptr" | "*void" | "*u8" | "*i8" => Some(ScgType::Ptr),
+        "void" => Some(ScgType::Void),
+        _ => None,
+    }
+}
+
+// ── Entry-point detection ──────────────────────────────────────────────
+
+/// Find entry-point nodes (no incoming ControlFlow edges) for a function
+/// that lacks an explicit FunctionEntry node.
+fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
+    let mut entry_points = Vec::new();
+
+    for node_id in scg.node_ids() {
+        let has_incoming_cf = edge_idx
+            .incoming
+            .get(&node_id)
+            .map(|edges| edges.iter().any(|e| e.kind == EdgeKind::ControlFlow))
+            .unwrap_or(false);
+
+        if !has_incoming_cf {
+            if let Some(node_data) = scg.get_node(node_id) {
+                // Skip Phantom nodes
+                if matches!(node_data.node_type, NodeType::Phantom) {
+                    continue;
+                }
+                entry_points.push(node_id);
+            }
+        }
+    }
+
+    // If no entry points found, use the first node
+    if entry_points.is_empty() {
+        if let Some(first_id) = scg.node_ids().next() {
+            entry_points.push(first_id);
+        }
+    }
+
+    entry_points
+}
+
+// ── Main bridge function ───────────────────────────────────────────────
+
+/// Convert a `vuma_scg::SCG` into the codegen's stub `Scg` type.
+///
+/// This function reconstructs real control flow (if/else, loops, function
+/// boundaries, break/continue) from the SCG's graph structure, instead of
+/// just flattening everything into a single linear "main" function.
+///
+/// # Algorithm
+///
+/// 1. **Phase 1: Function boundary detection** — Group nodes by
+///    FunctionEntry→FunctionReturn regions.
+/// 2. **Phase 2: Control flow reconstruction** — Within each function,
+///    detect Branch+Join diamonds (if/else) and LoopHeader+LoopExit
+///    patterns (loops).
+/// 3. **Phase 3: Statement generation** — Convert non-control nodes into
+///    ScgStatements with DataFlow-based variable naming.
+fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
+    let edge_idx = EdgeIndex::build(scg);
+    let mut consumed: HashSet<NodeId> = HashSet::new();
+    let mut scg_nodes: Vec<ScgNode> = Vec::new();
+
+    // ── Phase 1: Function boundary detection ─────────────────────
+    let function_entries: Vec<(NodeId, String)> = scg
+        .nodes()
+        .filter_map(|n| {
+            if let NodePayload::Control(c) = &n.payload {
+                if c.kind == ControlKind::FunctionEntry {
+                    let name = c.label.clone().unwrap_or_else(|| "unknown".to_string());
+                    return Some((n.id, name));
+                }
+            }
+            None
+        })
+        .collect();
+
+    if !function_entries.is_empty() {
+        // Process each function defined by a FunctionEntry node
+        for (entry_id, func_name) in &function_entries {
+            consumed.insert(*entry_id);
+
+            let return_node = find_function_return(*entry_id, scg, &edge_idx);
+            let params = extract_function_params(*entry_id, scg, &edge_idx);
+
+            let mut body = if let Some(first_cf) = edge_idx.outgoing_cf(*entry_id).first() {
+                let mut stop_at = HashSet::new();
+                if let Some(ret) = return_node {
+                    stop_at.insert(ret);
+                }
+                walk_control_flow(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at)
+            } else {
+                vec![]
+            };
+
+            // Add return statement if the function has a FunctionReturn
+            if let Some(ret) = return_node {
+                consumed.insert(ret);
+            }
+            if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+                body.push(ScgStatement::Return(vec![]));
+            }
+
+            scg_nodes.push(ScgNode::Function(ScgFunction {
+                name: func_name.clone(),
+                params,
+                results: vec![],
+                body,
+            }));
+        }
+    } else {
+        // No FunctionEntry nodes — find entry points and walk control flow
+        let entry_points = find_entry_points(scg, &edge_idx);
+
+        let mut body = Vec::new();
+        for start in &entry_points {
+            let stop_at = HashSet::new();
+            let mut partial =
+                walk_control_flow(*start, scg, &edge_idx, &mut consumed, &stop_at);
+            body.append(&mut partial);
+        }
+
+        // Process any remaining unconsumed nodes (connected only via DataFlow)
+        let remaining: Vec<NodeId> =
+            scg.node_ids().filter(|id| !consumed.contains(id)).collect();
+        for nid in &remaining {
+            if consumed.contains(nid) {
+                continue;
+            }
+            consumed.insert(*nid);
+            if let Some(node_data) = scg.get_node(*nid) {
+                if let Some(stmt) = convert_node_to_statement(*nid, node_data, &edge_idx) {
+                    body.push(stmt);
+                }
+            }
+        }
+
+        if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+            body.push(ScgStatement::Return(vec![]));
+        }
+
+        scg_nodes.push(ScgNode::Function(ScgFunction {
+            name: "main".to_string(),
+            params: vec![],
+            results: vec![],
+            body,
+        }));
+    }
+
+    // Handle remaining nodes not consumed by any function (multi-function case)
+    let remaining: Vec<NodeId> =
+        scg.node_ids().filter(|id| !consumed.contains(id)).collect();
+    if !remaining.is_empty() {
+        let mut stmts = Vec::new();
+        for nid in &remaining {
+            if consumed.contains(nid) {
+                continue;
+            }
+            consumed.insert(*nid);
+            if let Some(node_data) = scg.get_node(*nid) {
+                if let Some(stmt) = convert_node_to_statement(*nid, node_data, &edge_idx) {
+                    stmts.push(stmt);
+                }
+            }
+        }
+        if !stmts.is_empty() {
+            if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+                stmts.push(ScgStatement::Return(vec![]));
+            }
+            scg_nodes.push(ScgNode::Function(ScgFunction {
+                name: "__remaining".to_string(),
+                params: vec![],
+                results: vec![],
+                body: stmts,
+            }));
+        }
+    }
+
+    // Ensure at least one function exists
+    if scg_nodes.is_empty() {
+        scg_nodes.push(ScgNode::Function(ScgFunction {
+            name: "main".to_string(),
+            params: vec![],
+            results: vec![],
+            body: vec![ScgStatement::Return(vec![])],
+        }));
+    }
+
+    Scg { nodes: scg_nodes }
 }
 
 /// Try to parse an operation string into a BinOpKind.
@@ -665,6 +1367,16 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
         "shl" | "<<" => Some(IrBinOpKind::Shl),
         "shr.l" | ">>" => Some(IrBinOpKind::ShrL),
         "shr.a" => Some(IrBinOpKind::ShrA),
+        "slt" | "<" => Some(IrBinOpKind::SLt),
+        "sle" | "<=" => Some(IrBinOpKind::SLe),
+        "sgt" | ">" => Some(IrBinOpKind::SGt),
+        "sge" | ">=" => Some(IrBinOpKind::SGe),
+        "ult" => Some(IrBinOpKind::ULt),
+        "ule" => Some(IrBinOpKind::ULe),
+        "ugt" => Some(IrBinOpKind::UGt),
+        "uge" => Some(IrBinOpKind::UGe),
+        "eq" | "==" => Some(IrBinOpKind::Eq),
+        "ne" | "!=" => Some(IrBinOpKind::Ne),
         _ => None,
     }
 }
