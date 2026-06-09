@@ -1,17 +1,85 @@
-# VUMA x86_64 Mitigation Plan — 32 Waves
+# VUMA Multi-Architecture Plan — 32 Waves
 
-> **Goal**: Make VUMA fully functional on x86_64 (my sandbox) while preserving ARM64 as a cross-compilation target. No shortcuts. No simplifications. Every line of code must be real, tested, and correct.
+> **Goal**: Make VUMA a true multi-target compiler supporting 8 ISAs natively. Every ISA gets a first-class backend with correct instruction encoding, register allocation, calling convention, ELF emission, and test suite. Adding a new ISA should be a well-defined process, not a hack.
 
-> **Constraints**: 
-> - Host: x86_64 Intel Xeon, Linux
-> - Target: ARM64 (Pi 5) + x86_64 (native sandbox)
+> **The 8 Targets** (ordered by implementation complexity, easiest first):
+>
+> | # | ISA | Complexity | ELF Machine | Registers | Calling Conv | Status |
+> |---|-----|-----------|-------------|-----------|--------------|--------|
+> | 1 | AArch64 | 4/10 | EM_AARCH64=183 | 31 GP, 32 FP | AAPCS64 | ✅ Done |
+> | 2 | RISC-V64 | 3/10 | EM_RISCV=243 | 32 GP, 32 FP | LP64D | 🎯 Next |
+> | 3 | Wasm32 | 2/10 | N/A (binary format) | Stack machine | Stack-based | 🎯 Next |
+> | 4 | LoongArch64 | 3/10 | EM_LOONGARCH=258 | 32 GP, 32 FP | LP64 | 🎯 Next |
+> | 5 | x86_64 | 8/10 | EM_X86_64=62 | 16 GP, 16 XMM | SystemV | 🎯 Next |
+> | 6 | ARM32 | 6/10 | EM_ARM=40 | 16 GP, 32 FP | AAPCS | 🎯 Next |
+> | 7 | MIPS64 | 5/10 | EM_MIPS=8 | 32 GP, 32 FP | N64 | 🎯 Next |
+> | 8 | PowerPC64 | 7/10 | EM_PPC64=21 | 32 GP, 64 VSX | ELFv2 | 🎯 Next |
+
+> **Constraints**:
+> - Host: x86_64 Intel Xeon, Linux — ALL backends must compile and test here
+> - ARM64 backend already exists — must NOT regress
+> - x86_64 backend must produce EXECUTABLE code (we can run it natively)
+> - Other backends produce ELF/binary that can be validated structurally + via QEMU
 > - Max 32 subagents per wave
-> - Every wave must produce `cargo check` + `cargo test` green before the next dependent wave starts
+> - Zero tolerance for stubs, TODOs, or "looks about right" encodings
 > - If a subagent produces code that doesn't compile, it is REJECTED and must be redone
 
 ---
 
-## Dependency DAG — Which Waves Can Run in Parallel
+## Architecture: The Multi-Backend System
+
+```
+                        ┌─────────────┐
+                        │ VUMA Source │
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │    Parser   │
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │     SCG     │  (target-independent)
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │  BD Infer   │  (target-independent)
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │  IVE Verify │  (target-independent)
+                        └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │     IR      │  (target-parameterized via TargetInfo)
+                        └──────┬──────┘
+                               │
+                  ┌────────────┼────────────┐
+                  │     Backend trait       │
+                  └────────────┼────────────┘
+                               │
+        ┌──────────┬───────────┼───────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+        │  AArch64 │  RISC-V64 │  Wasm32   │ LoongArch│  x86_64  │  ARM32   │  MIPS64  │  PPC64   │
+        │  Backend │  Backend  │  Backend  │   64     │  Backend │  Backend │  Backend │  Backend │
+        └────┬─────┴─────┬─────┴─────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┘
+             │           │           │          │          │          │          │          │
+        ┌────▼────┐┌─────▼────┐┌────▼────┐┌────▼────┐┌────▼────┐┌────▼────┐┌────▼────┐┌────▼────┐
+        │ARM64 ELF││RV64 ELF  ││.wasm    ││LA64 ELF ││x86 ELF  ││ARM ELF  ││MIPS ELF ││PPC ELF  │
+        └─────────┘└──────────┘└─────────┘└─────────┘└─────────┘└─────────┘└─────────┘└─────────┘
+```
+
+**Key Design Principles**:
+1. `TargetInfo` trait — describes an ISA's properties (register counts, type sizes, calling conv, ELF type)
+2. `Backend` trait — code generation interface (regalloc, encode, disassemble, emit)
+3. `ControlFlow` module — target-agnostic lowering (switch, exception, tailcall, coroutine, loop)
+4. `TargetDesc` — machine-readable target description that can generate test scaffolding
+5. Each backend lives in its own file: `arm64.rs`, `riscv64.rs`, `wasm32.rs`, etc.
+6. `BackendKind` enum with 8 variants + `create_backend()` factory
+7. Cross-compilation: any host → any target
+8. Native execution: x86_64 host can run x86_64 output directly; QEMU for others
+
+---
+
+## Dependency DAG — Maximum Parallelism
 
 ```
 Time ──►
@@ -19,37 +87,39 @@ Time ──►
 T0:  [W1]
 T1:  [W2]
 T2:  [W3]
-T3:  [W4] [W5] [W16] [W23]
-T4:  [W6] [W7] [W8] [W17] [W24]
-T5:  [W9] [W18_p1] [W25]
-T6:  [W10] [W11] [W18_p2]
-T7:  [W12] [W13] [W19_p1] [W26]
-T8:  [W14] [W19_p2] [W27]
-T9:  [W15] [W20] [W28]
-T10: [W21] [W22] [W29]
-T11: [W30] [W31]
-T12: [W32]
+T3:  [W4] [W5]
+T4:  [W6-RV64] [W7-Wasm] [W8-LA64] [W9-x86] [W23]            ← 5 parallel waves
+T5:  [W10-RV64] [W11-Wasm] [W12-LA64] [W13-x86] [W24]         ← 5 parallel waves
+T6:  [W14-RV64] [W15-x86-exec] [W16-ARM32] [W25]               ← 4 parallel waves
+T7:  [W17-MIPS64] [W18-PPC64] [W26]                             ← 3 parallel waves
+T8:  [W19-multi-integration] [W27]                               ← 2 parallel waves
+T9:  [W20-QEMU] [W28]                                           ← 2 parallel waves
+T10: [W21- audit] [W29]                                         ← 2 parallel waves
+T11: [W22-release] [W30]                                        ← 2 parallel waves
+T12: [W31]
+T13: [W32]
 ```
 
 **Parallel group summary:**
 
 | Group | Time Slot | Waves (parallel) | Total Subagents |
 |-------|-----------|-------------------|-----------------|
-| G0 | T0 | W1 | 8 |
-| G1 | T1 | W2 | 12 |
-| G2 | T2 | W3 | 16 |
-| G3 | T3 | W4, W5, W16, W23 | 28 |
-| G4 | T4 | W6, W7, W8, W17, W24 | 32 |
-| G5 | T5 | W9, W18, W25 | 20 |
-| G6 | T6 | W10, W11, W18-p2 | 24 |
-| G7 | T7 | W12, W13, W19, W26 | 28 |
-| G8 | T8 | W14, W19-p2, W27 | 20 |
-| G9 | T9 | W15, W20, W28 | 24 |
-| G10 | T10 | W21, W22, W29 | 24 |
-| G11 | T11 | W30, W31 | 20 |
-| G12 | T12 | W32 | 12 |
+| G0  | T0  | W1 | 8 |
+| G1  | T1  | W2 | 12 |
+| G2  | T2  | W3 | 16 |
+| G3  | T3  | W4, W5 | 16 |
+| G4  | T4  | W6, W7, W8, W9, W23 | 32 |
+| G5  | T5  | W10, W11, W12, W13, W24 | 32 |
+| G6  | T6  | W14, W15, W16, W25 | 28 |
+| G7  | T7  | W17, W18, W26 | 24 |
+| G8  | T8  | W19, W27 | 20 |
+| G9  | T9  | W20, W28 | 20 |
+| G10 | T10 | W21, W29 | 24 |
+| G11 | T11 | W22, W30 | 24 |
+| G12 | T12 | W31 | 16 |
+| G13 | T13 | W32 | 12 |
 
-**Maximum parallelism: 5 waves simultaneously, up to 32 subagents per wave-group.**
+**Peak parallelism: 5 waves simultaneously, 32 subagents.**
 
 ---
 
@@ -83,11 +153,11 @@ HARSH RULES:
 **W1-S2: Fix root Cargo.toml invalid key**
 ```
 The root Cargo.toml at /home/z/my-project/vuma/Cargo.toml has an invalid manifest key:
-`profile.release.target-cpu` is NOT a valid Cargo.toml key. This causes a warning.
+`profile.release.target-cpu` is NOT a valid Cargo.toml key.
 
 YOUR TASK:
-1. REMOVE `target-cpu = "native"` from the [profile.release] section in Cargo.toml
-2. Create or edit /home/z/my-project/vuma/.cargo/config.toml to add:
+1. REMOVE `target-cpu = "native"` from [profile.release]
+2. Create/edit /home/z/my-project/vuma/.cargo/config.toml:
    ```toml
    [build]
    rustflags = ["-C", "target-cpu=native"]
@@ -98,16 +168,15 @@ YOUR TASK:
    [target.aarch64-unknown-none]
    rustflags = []
    ```
-   The x86_64 host gets -C target-cpu=native. ARM64 targets do NOT get it (cross-compile).
-3. Run: export PATH="/home/z/.cargo/bin:$PATH" && cd /home/z/my-project/vuma && cargo check --workspace 2>&1 | head -5
-   Verify the "unused manifest key" warning is GONE.
+3. Verify the warning is gone with cargo check.
 
 HARSH RULES:
 - If the warning persists, you have FAILED.
 - If you break any existing build, you have FAILED.
 ```
 
-**W1-S3 through W1-S8: Fix compilation errors in each remaining crate**
+**W1-S3 through W1-S8: Fix compilation errors in each crate**
+
 ```
 You are assigned to crate CRATE_NAME in the VUMA project at /home/z/my-project/vuma.
 
@@ -139,7 +208,6 @@ HARSH RULES:
 
 ### Success Criteria:
 - `cargo check --workspace` passes with ZERO errors
-- `cargo check --workspace 2>&1 | grep "^error" | wc -l` returns 0
 
 ---
 
@@ -160,2026 +228,1322 @@ YOUR TASK:
 2. For EACH warning, determine the correct fix:
    - unused_imports → REMOVE the unused import
    - unused_variables → either use the variable or prefix with _
-   - dead_code → if truly unused, REMOVE the dead code. If it's part of a public API, add #[allow(dead_code)] with a comment explaining why.
+   - dead_code → if truly unused, REMOVE it. If part of a public API, add #[allow(dead_code)] with justification comment.
    - unused_mut → remove the mut if not needed
-   - static_mut_refs (Rust 2024) → replace &mut STATIC with &raw mut STATIC or refactor to use UnsafeCell
+   - static_mut_refs (Rust 2024) → replace with &raw mut or refactor to UnsafeCell
 3. After fixing, run cargo check -p CRATE_NAME again. REPEAT until zero warnings.
-4. Run the FULL test suite for the crate: cargo test -p CRATE_NAME
+4. Run the FULL test suite: cargo test -p CRATE_NAME
    If any test breaks, your fix was WRONG. Revert and fix properly.
 
 CRATE ASSIGNMENTS:
-- W2-S1: vuma-ive (11 warnings — unused imports, unused mut, unused variables)
-- W2-S2: vuma-scg (2 warnings — dead_code: remaining, write_u8)
-- W2-S3: vuma-codegen (5 warnings — unused variables, dead_code)
-- W2-S4: vuma-parser (1 warning — dead_code: expect_ident)
-- W2-S5: vuma-pi5 (6 warnings — static_mut_refs in uart.rs)
-- W2-S6: vuma-proof (3 warnings — unused imports, unused variables, unused assignments)
-- W2-S7: vuma-std (11 warnings — dead_code fields, methods, constants)
+- W2-S1: vuma-ive (11 warnings)
+- W2-S2: vuma-scg (2 warnings)
+- W2-S3: vuma-codegen (5 warnings)
+- W2-S4: vuma-parser (1 warning)
+- W2-S5: vuma-pi5 (6 warnings — Rust 2024 static_mut_refs)
+- W2-S6: vuma-proof (3 warnings)
+- W2-S7: vuma-std (11 warnings)
 
 HARSH RULES:
 - If ANY warning remains, you have FAILED.
 - If you break any existing test, you have FAILED.
 - If you add #[allow(dead_code)] without a justification comment, you have FAILED.
-- You are NOT allowed to add #[allow(warnings)] or #[allow(unused)] at the crate level.
+- You are NOT allowed to add #[allow(warnings)] at the crate level.
 - Every fix must be surgical — do not refactor unrelated code.
 ```
 
 **W2-S8 through W2-S12: Deep dead code analysis**
 
 ```
-You are performing a DEAD CODE AUDIT on CRATE_NAME at /home/z/my-project/vuma.
-
-YOUR TASK:
-1. Identify ALL functions, methods, structs, enums, and traits that are defined but NEVER USED
-   outside of their own module. Use:
-   export PATH="/home/z/.cargo/bin:$PATH" && cd /home/z/my-project/vuma && RUSTFLAGS="-W dead_code" cargo check -p CRATE_NAME 2>&1 | grep "never used\|never read\|never constructed"
-2. For each dead code item, determine:
-   - Is it part of a PUBLIC API that will be needed later? → Add `#[allow(dead_code)]` with a comment: "// TODO: needed for <specific future use>"
-   - Is it truly dead (leftover from refactoring, abandoned approach)? → DELETE it entirely
-   - Is it only used in tests? → Gate it with `#[cfg(test)]`
-3. DO NOT delete anything that might be needed by other crates. Check cross-crate usage first.
+You are performing a DEAD CODE AUDIT on CRATE_NAME.
 
 CRATE ASSIGNMENTS:
 - W2-S8: vuma-core
-- W2-S9: vuma-codegen (deeper analysis of arm64.rs unused encodings)
-- W2-S10: vuma-std (alloc.rs has 3 dead items, io.rs has 6 dead items)
+- W2-S9: vuma-codegen
+- W2-S10: vuma-std
 - W2-S11: vuma-projection
 - W2-S12: vuma-tests
 
 HARSH RULES:
 - If you delete code that IS used somewhere else, you have FAILED CATASTROPHICALLY.
-- If you leave code that is truly dead without marking it, you have FAILED.
-- You MUST verify cargo check still passes after your changes.
-- You MUST verify cargo test still passes after your changes.
+- If you leave truly dead code without marking it, you have FAILED.
+- You MUST verify cargo check + cargo test still pass.
 ```
 
 ### Success Criteria:
 - `cargo check --workspace 2>&1 | grep "warning" | wc -l` returns 0
-- `cargo test --workspace` still passes (no regressions)
-
----
-
-## Wave 3: Codegen Backend Trait Architecture
-
-**Dependencies**: W2
-**Estimated subagents**: 16
-
-This is the CRITICAL wave — defining the abstraction layer that allows multiple backends.
-
-### Subagent Tasks:
-
-**W3-S1: Define the Backend trait**
-
-```
-You are designing the core abstraction that makes VUMA's codegen target-agnostic.
-
-YOUR TASK: Create /home/z/my-project/vuma/src/codegen/src/backend.rs with the following:
-
-```rust
-use crate::ir::{IRProgram, IRFunction, IRBlock, IRValue, IRType, IRTerminator, BinOpKind, CmpKind, FenceKind};
-use crate::regalloc::RegAlloc;
-
-/// Target-specific information needed during code generation.
-pub trait TargetInfo: Send + Sync {
-    /// Pointer width in bytes (8 for 64-bit targets).
-    fn pointer_width(&self) -> usize;
-    
-    /// Size of a type in bytes on this target.
-    fn size_of(&self, ty: &IRType) -> usize;
-    
-    /// Alignment of a type in bytes on this target.
-    fn alignment_of(&self, ty: &IRType) -> usize;
-    
-    /// Number of general-purpose registers available for allocation.
-    fn num_gp_regs(&self) -> usize;
-    
-    /// Number of SIMD/floating-point registers available for allocation.
-    fn num_simd_fp_regs(&self) -> usize;
-    
-    /// Does this target use a link register (ARM64) or pushes return address (x86_64)?
-    fn has_link_register(&self) -> bool;
-    
-    /// Name of the calling convention used (e.g., "aapcs64", "systemv").
-    fn calling_convention_name(&self) -> &'static str;
-    
-    /// Returns the ELF machine type for this target (e.g., EM_AARCH64=183, EM_X86_64=62).
-    fn elf_machine_type(&self) -> u16;
-    
-    /// Default base address for ELF loading.
-    fn default_base_address(&self) -> u64;
-    
-    /// Target triple string (e.g., "aarch64-unknown-linux-gnu").
-    fn target_triple(&self) -> &'static str;
-}
-
-/// A code generation backend. Implement this for each target architecture.
-pub trait Backend: Send + Sync {
-    /// The target info for this backend.
-    type Target: TargetInfo;
-    
-    /// Get the target info.
-    fn target_info(&self) -> &Self::Target;
-    
-    /// Allocate registers for a function. Returns (allocated_function, stack_slots).
-    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError>;
-    
-    /// Encode a single function into machine code bytes.
-    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError>;
-    
-    /// Generate a return-from-function stub (e.g., RET for ARM64, ret for x86_64).
-    fn return_stub(&self) -> Vec<u8>;
-    
-    /// Generate a trampoline for calling into compiled code from the runtime.
-    fn trampoline(&self, entry_addr: u64) -> Vec<u8>;
-    
-    /// Disassemble the given bytes for debugging.
-    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String>;
-    
-    /// Name of this backend (e.g., "arm64", "x86_64").
-    fn name(&self) -> &'static str;
-}
-
-/// A function after register allocation.
-pub struct AllocatedFunction {
-    pub name: String,
-    pub blocks: Vec<AllocatedBlock>,
-    pub stack_size: usize,
-    pub callee_saved_regs: Vec<PhysicalReg>,
-    pub frame_type: FrameType,
-}
-
-pub struct AllocatedBlock {
-    pub label: String,
-    pub instructions: Vec<AllocatedInstruction>,
-    pub terminator: AllocatedTerminator,
-}
-
-pub struct AllocatedInstruction {
-    pub opcode: String,  // For debugging
-    pub physical_regs: Vec<PhysicalReg>,
-    pub encoded: Option<Vec<u8>>,  // Pre-encoded bytes if available
-}
-
-pub enum AllocatedTerminator {
-    Fallthrough(String),
-    Branch { cond: Option<PhysicalReg>, target: String },
-    Return,
-    Call { target: String, ret_addr: PhysicalReg },
-}
-
-pub struct PhysicalReg {
-    pub name: String,
-    pub index: usize,
-    pub class: RegClass,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RegClass {
-    General,
-    SimdFp,
-    Special,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum FrameType {
-    /// Uses link register (ARM64) — no frame pointer needed for leaf functions
-    LinkRegister,
-    /// Pushes return address (x86_64) — always needs frame setup
-    PushReturnAddress,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BackendError {
-    #[error("register allocation failed: {0}")]
-    RegAllocFailed(String),
-    #[error("encoding failed: {0}")]
-    EncodingFailed(String),
-    #[error("unsupported instruction: {0}")]
-    UnsupportedInstruction(String),
-    #[error("invalid function: {0}")]
-    InvalidFunction(String),
-}
-```
-
-DESIGN REQUIREMENTS:
-- The trait must be object-safe (no generic methods, no Self returns except Target)
-- It must support both ARM64 and x86_64 without any target-specific assumptions in the trait itself
-- All target-specific details (register counts, sizes, conventions) go in TargetInfo
-- The trait must be testable in isolation without any actual backend implementation
-
-HARSH RULES:
-- If the trait is not object-safe, you have FAILED.
-- If the trait has ANY ARM64-specific or x86_64-specific concepts in it, you have FAILED.
-- If you cannot write a mock implementation for testing, the design is WRONG.
-- You MUST compile the new file: cargo check -p vuma-codegen
-- You MUST write at least 5 unit tests for the trait and types.
-```
-
-**W3-S2: Make IR types target-agnostic**
-
-```
-You are refactoring /home/z/my-project/vuma/src/codegen/src/ir.rs to remove ARM64-specific assumptions.
-
-CURRENT PROBLEMS:
-- `size_of()` and `alignment_of()` hardcode ARM64 LP64 model (i64=8, pointer=8)
-- `compute_calling_conv()` implements AAPCS64 only
-- `compute_stack_layout()` assumes ARM64 conventions
-
-YOUR TASK:
-1. Add a `TargetInfo` parameter to all functions that currently hardcode target assumptions:
-   - `size_of(ty: &IRType) -> usize` → `size_of(ty: &IRType, target: &dyn TargetInfo) -> usize`
-   - `alignment_of(ty: &IRType) -> usize` → `alignment_of(ty: &IRType, target: &dyn TargetInfo) -> usize`
-   - `compute_calling_conv(func: &mut IRFunction)` → `compute_calling_conv(func: &mut IRFunction, target: &dyn TargetInfo)`
-   - `compute_stack_layout(func: &mut IRFunction)` → `compute_stack_layout(func: &mut IRFunction, target: &dyn TargetInfo)`
-2. Import the TargetInfo trait from the new backend module.
-3. For NOW, provide a simple `Arm64Target` struct that implements TargetInfo with the current hardcoded values.
-4. Update ALL call sites throughout the codegen crate.
-5. Make sure `cargo check -p vuma-codegen` passes.
-6. Make sure `cargo test -p vuma-codegen` passes.
-
-HARSH RULES:
-- If you break any existing test, you have FAILED.
-- If you leave any hardcoded ARM64 assumptions in ir.rs, you have FAILED.
-- If cargo check or cargo test fails, you have FAILED.
-- Do NOT take shortcuts — update EVERY call site, not just some.
-```
-
-**W3-S3 through W3-S8: Update all codegen modules for Backend trait**
-
-```
-You are updating MODULE in /home/z/my-project/vuma/src/codegen/src/ to work with the new Backend trait.
-
-MODULE ASSIGNMENTS:
-- W3-S3: arm64.rs — Implement Backend trait for ARM64, implement TargetInfo for Arm64Target
-- W3-S4: emit.rs — Refactor to use Backend trait instead of hardcoding ARM64 emission
-- W3-S5: regalloc.rs — Refactor to use TargetInfo for register pool configuration
-- W3-S6: scg_to_ir.rs — Pass TargetInfo through for any target-dependent decisions
-- W3-S7: lib.rs — Add mod backend, re-export Backend/TargetInfo, add Backend selection API
-- W3-S8: Write comprehensive tests for the Backend trait dispatch mechanism
-
-YOUR TASK (W3-S3 — arm64.rs Backend impl):
-1. Create Arm64Target struct implementing TargetInfo with:
-   - pointer_width: 8
-   - size_of: ARM64 LP64 model (same as current hardcoded values)
-   - alignment_of: ARM64 alignment rules
-   - num_gp_regs: 29 (X0-X28, excluding FP=X29 and LR=X30)
-   - num_simd_fp_regs: 32 (V0-V31)
-   - has_link_register: true
-   - calling_convention_name: "aapcs64"
-   - elf_machine_type: 183 (EM_AARCH64)
-   - default_base_address: 0x400000
-   - target_triple: "aarch64-unknown-linux-gnu"
-2. Create Arm64Backend struct implementing Backend<Target=Arm64Target>.
-3. Implement all Backend methods by wrapping the existing ARM64 code.
-4. Do NOT delete any existing ARM64-specific code — wrap it behind the trait.
-5. All existing ARM64 tests must still pass.
-
-YOUR TASK (W3-S4 — emit.rs refactor):
-1. The Emitter struct currently hardcodes ARM64 ELF emission.
-2. Add a `target: &'static dyn TargetInfo` field to Emitter.
-3. Use target.elf_machine_type() instead of hardcoded EM_AARCH64.
-4. Use target.default_base_address() instead of hardcoded BASE_ADDR.
-5. The actual instruction encoding stays in the Backend impl — Emitter calls Backend.encode_function().
-6. All existing emit tests must still pass.
-
-YOUR TASK (W3-S5 — regalloc.rs refactor):
-1. The register allocator currently hardcodes ARM64 register pools.
-2. Make the physical register pool configurable via TargetInfo.
-3. Arm64Target provides the ARM64 register pool (current behavior).
-4. Future X86_64Target will provide x86_64 register pool.
-5. All existing regalloc tests must still pass.
-
-YOUR TASK (W3-S6 — scg_to_ir update):
-1. Pass TargetInfo through SCG-to-IR translation where needed.
-2. This module should be mostly target-independent already (IR is the abstraction).
-3. Fix any remaining hardcoded assumptions.
-4. All existing scg_to_ir tests must still pass.
-
-YOUR TASK (W3-S7 — lib.rs):
-1. Add `pub mod backend;` to lib.rs
-2. Re-export: `pub use backend::{Backend, TargetInfo, AllocatedFunction, BackendError};`
-3. Add a `BackendKind` enum: `enum BackendKind { Arm64, X86_64 }`
-4. Add a `fn create_backend(kind: BackendKind) -> Box<dyn Backend<Target=...>>` factory function.
-5. This factory is how the pipeline selects the target.
-
-YOUR TASK (W3-S8 — trait dispatch tests):
-1. Write tests in src/codegen/src/backend.rs (or a new tests/ directory):
-   - test_arm64_target_info_values: Verify all Arm64Target values match expected
-   - test_backend_factory: Verify create_backend(BackendKind::Arm64) returns a working backend
-   - test_trait_object_dispatch: Verify Box<dyn Backend> works for dynamic dispatch
-   - test_target_info_sizes: Verify size_of/alignment_of produce correct results for all IRTypes
-   - test_elf_machine_type: Verify ARM64 returns 183
-2. All tests must pass.
-
-HARSH RULES FOR ALL:
-- If any existing test breaks, you have FAILED.
-- If you introduce any regression in ARM64 codegen output, you have FAILED.
-- If cargo check -p vuma-codegen fails, you have FAILED.
-- If cargo test -p vuma-codegen fails, you have FAILED.
-- You MUST NOT change the actual ARM64 machine code output — this is a refactoring, not a rewrite.
-```
-
-**W3-S9 through W3-S16: Update all dependent crates for TargetInfo propagation**
-
-```
-You are updating CRATE_NAME to pass TargetInfo through the pipeline where needed.
-
-CRATE ASSIGNMENTS:
-- W3-S9:  vuma-core — Update pipeline.rs to create and pass TargetInfo/Backend
-- W3-S10: vuma-cor — Update runtime.rs to use Backend instead of hardcoded ARM64 emission
-- W3-S11: vuma-cor — Update compile_region to use Backend trait
-- W3-S12: vuma-tests — Update all codegen tests to use Backend trait
-- W3-S13: vuma-ive — Check if IVE needs TargetInfo for any codegen-related operations
-- W3-S14: vuma-bd — Check if BD inference needs any target-dependent parameters
-- W3-S15: vuma-scg — Check if SCG construction needs any target-dependent parameters
-- W3-S16: Write integration test: parse→SCG→BD→IVE→IR→ARM64 Backend→ELF (end-to-end ARM64 via trait)
-
-YOUR TASK:
-1. For each crate, identify all places where ARM64 is hardcoded.
-2. Replace with Backend/TargetInfo dispatch.
-3. Ensure `cargo check -p CRATE_NAME` passes.
-4. Ensure `cargo test -p CRATE_NAME` passes.
-
-HARSH RULES:
-- If you break any existing test, you have FAILED.
-- If you leave any ARM64 hardcoded assumption, you have FAILED.
-- If you introduce a new compilation error, you have FAILED.
-- The ARM64 codegen output must be BIT-FOR-BIT identical after refactoring.
-```
-
-### Success Criteria:
-- `cargo check --workspace` passes with zero errors
-- `cargo test --workspace` passes with zero failures
-- Backend trait is object-safe and supports dynamic dispatch
-- ARM64 codegen output is unchanged from pre-refactoring
-- `Box<dyn Backend>` works for ARM64 backend
-
----
-
-## Wave 4: ARM64 Backend Validation — Ensure Zero Regressions
-
-**Dependencies**: W3
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W4-S1: ARM64 codegen regression test suite**
-
-```
-You are creating a COMPREHENSIVE regression test suite for ARM64 codegen at /home/z/my-project/vuma.
-
-YOUR TASK:
-1. For EVERY function in src/codegen/src/arm64.rs, write a test that:
-   - Creates the instruction
-   - Encodes it to bytes
-   - Verifies the bytes match the expected ARM64 encoding (from ARM Architecture Reference Manual)
-   - Decodes it back and verifies it matches the original
-2. For EVERY instruction in emit.rs, write a test that:
-   - Creates the IR instruction
-   - Emits it through the Backend trait
-   - Verifies the ARM64 bytes match expected encoding
-3. Test the full pipeline: IRProgram → Backend.encode_function() → Vec<u8>
-4. Run ALL tests and ensure they pass.
-
-HARSH RULES:
-- If any ARM64 encoding is wrong, you have FAILED.
-- If you skip any instruction, you have FAILED.
-- You must test BOTH encode and decode for every instruction.
-- Cross-reference encodings with the ARM Architecture Reference Manual.
-```
-
-**W4-S2 through W4-S8: Per-module ARM64 validation**
-
-```
-You are validating MODULE in vuma-codegen for ARM64 regression after the Backend trait refactor.
-
-MODULE ASSIGNMENTS:
-- W4-S2: ir.rs — Verify all IR types produce correct ARM64 sizes/alignments via TargetInfo
-- W4-S3: regalloc.rs — Verify register allocation produces identical results to pre-refactor
-- W4-S4: scg_to_ir.rs — Verify SCG→IR translation is unchanged
-- W4-S5: emit.rs — Verify ELF emission is bit-for-bit identical
-- W4-S6: arm64.rs — Verify all ARM64 instruction encodings are correct
-- W4-S7: control_flow — Verify switch/match/exception/tailcall/coroutine lowering still works
-- W4-S8: Full pipeline — Parse VUMA source → SCG → BD inference → IVE verification → IR → ARM64 emission → disassemble → verify
-
-HARSH RULES:
-- If any test fails, you have FAILED.
-- If you find a regression, FIX IT. Do not just report it.
-- All tests must pass with cargo test -p vuma-codegen.
-```
-
-### Success Criteria:
-- All ARM64 tests pass with zero failures
-- ARM64 codegen output is verified identical to pre-refactoring
-- Backend trait dispatch produces correct results for ARM64
-
----
-
-## Wave 5: Extract Target-Agnostic Control Flow Module
-
-**Dependencies**: W3
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W5-S1: Create control_flow.rs module**
-
-```
-You are creating /home/z/my-project/vuma/src/codegen/src/control_flow.rs — a TARGET-AGNOSTIC
-control flow analysis and lowering module.
-
-This module extracts control-flow logic currently inlined in scg_to_ir.rs into
-a separate, well-structured module that works for ANY backend.
-
-YOUR TASK: Create the module with these components:
-
-1. SwitchLowerer — target-agnostic switch lowering
-   - Input: switch value, cases (value→label), default label
-   - Output: IR blocks implementing the switch
-   - Strategy selection: jump_table vs binary_search vs if_else_chain
-   - Strategy decision is parameterized by TargetInfo:
-     - jump_table: dense cases, target supports jump tables
-     - binary_search: sparse cases
-     - if_else_chain: < 4 cases
-
-2. ExceptionLowerer — target-agnostic exception handling
-   - Input: try body, catch handlers, cleanup
-   - Output: invoke/landing-pad IR structure
-   - Landing pad layout is parameterized by TargetInfo
-
-3. TailCallLowerer — target-agnostic tail call optimization
-   - Input: call instruction with tail call annotation
-   - Output: arg shuffle + jump (or fall back to regular call)
-   - Eligibility analysis is parameterized by TargetInfo (calling convention)
-
-4. CoroutineLowerer — target-agnostic coroutine transformation
-   - Input: coroutine body with yield/resume points
-   - Output: state machine IR
-   - Frame layout is parameterized by TargetInfo
-
-5. LoopOptimizer — target-agnostic loop optimization
-   - Input: loop body with known trip count
-   - Output: unrolled loop IR (if profitable)
-   - Profitability analysis uses TargetInfo for cost model
-
-DESIGN REQUIREMENTS:
-- ALL functions take a &dyn TargetInfo parameter
-- ZERO target-specific code in this module
-- Each component has its own unit tests
-- The module is imported via mod control_flow in lib.rs
-
-HARSH RULES:
-- If any function in this module references ARM64 or x86_64 specifically, you have FAILED.
-- If the module cannot work with both ARM64 and x86_64 TargetInfo, you have FAILED.
-- You must have at least 10 unit tests per component (50+ total).
-- cargo check and cargo test must pass.
-```
-
-**W5-S2 through W5-S5: Migrate control flow logic from scg_to_ir.rs**
-
-```
-You are migrating control flow logic from scg_to_ir.rs to control_flow.rs.
-
-SUBAGENT ASSIGNMENTS:
-- W5-S2: Migrate switch/match lowering (lower_switch and related methods)
-- W5-S3: Migrate try/catch/exception handling (lower_try and related methods)
-- W5-S4: Migrate tail call optimization (lower_tailcall and related methods)
-- W5-S5: Migrate loop optimization (lower_loop, unroll analysis and related methods)
-
-YOUR TASK:
-1. Identify all control-flow-related code in scg_to_ir.rs
-2. Move it to the appropriate component in control_flow.rs
-3. Update scg_to_ir.rs to call control_flow.rs functions
-4. Verify all existing tests still pass
-5. Add NEW tests for the extracted functions in control_flow.rs
-
-HARSH RULES:
-- If any existing test breaks, you have FAILED.
-- If you leave dead code in scg_to_ir.rs after extraction, you have FAILED.
-- If you duplicate code between scg_to_ir.rs and control_flow.rs, you have FAILED.
-- cargo test -p vuma-codegen must pass.
-```
-
-**W5-S6 through W5-S8: Integration tests for control flow**
-
-```
-You are writing integration tests for the target-agnostic control flow module.
-
-SUBAGENT ASSIGNMENTS:
-- W5-S6: Test SwitchLowerer with ARM64 TargetInfo — verify identical output to previous
-- W5-S7: Test all components with a MockTargetInfo (8-bit, 16-bit, 32-bit configurations)
-- W5-S8: Test all components with x86_64 TargetInfo (even though x86_64 backend doesn't exist yet,
-  use a mock X86_64Target that implements TargetInfo with x86_64 values: pointer_width=8,
-  num_gp_regs=16, num_simd_fp_regs=16, has_link_register=false, etc.)
-
-HARSH RULES:
-- If any test fails, you have FAILED.
-- If any test is trivial (e.g., always true), you have FAILED.
-- Each test must verify CORRECT BEHAVIOR, not just "doesn't crash".
-```
-
-### Success Criteria:
-- `control_flow.rs` exists as a separate, well-structured module
-- All control flow logic is target-agnostic (takes &dyn TargetInfo)
-- `cargo test -p vuma-codegen` passes with all new + existing tests
-- ARM64 behavior is unchanged
-
----
-
-## Wave 6: x86_64 Instruction Definitions & Encoding
-
-**Dependencies**: W4 (ARM64 validated)
-**Estimated subagents**: 12
-
-### Subagent Tasks:
-
-**W6-S1: Create x86_64 module structure**
-
-```
-You are creating /home/z/my-project/vuma/src/codegen/src/x86_64.rs — the x86_64 backend.
-
-YOUR TASK: Create the file with the following structure:
-
-```rust
-/// x86_64 register definitions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum GpReg {
-    Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi,
-    R8, R9, R10, R11, R12, R13, R14, R15,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SimdFpReg {
-    Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7,
-    Xmm8, Xmm9, Xmm10, Xmm11, Xmm12, Xmm13, Xmm14, Xmm15,
-}
-
-/// REX prefix flags.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RexFlags {
-    pub w: bool,  // REX.W — 64-bit operand size
-    pub r: bool,  // Extension of ModRM.reg
-    pub x: bool,  // Extension of SIB.index
-    pub b: bool,  // Extension of ModRM.rm or SIB.base
-}
-
-/// x86_64 condition codes (based on EFLAGS).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cond {
-    O, No, B, Nb, Z, Nz, Be, Nbe,
-    S, Ns, P, Np, L, Nl, Le, Nle,
-}
-
-/// x86_64 instructions.
-#[derive(Clone, Debug)]
-pub enum Inst {
-    // Arithmetic
-    Add { dst: GpReg, src: Operand },
-    Sub { dst: GpReg, src: Operand },
-    Imul { dst: GpReg, src: Operand },
-    Idiv { src: Operand },
-    // ... (FULL instruction set — see below)
-}
-
-/// Operand for instructions.
-#[derive(Clone, Debug)]
-pub enum Operand {
-    Reg(GpReg),
-    Mem(MemoryOperand),
-    Imm(i32),
-    Imm64(i64),
-}
-
-#[derive(Clone, Debug)]
-pub struct MemoryOperand {
-    pub base: Option<GpReg>,
-    pub index: Option<GpReg>,
-    pub scale: u8,  // 1, 2, 4, or 8
-    pub disp: i32,
-}
-
-/// Encoding result.
-pub struct EncodedInst {
-    pub bytes: Vec<u8>,
-    pub relocs: Vec<Reloc>,
-}
-
-pub struct Reloc {
-    pub offset: usize,
-    pub kind: RelocKind,
-    pub target: String,
-}
-
-#[derive(Clone, Copy)]
-pub enum RelocKind {
-    Rel32,
-    Abs64,
-}
-```
-
-You must define the COMPLETE x86_64 instruction set needed for VUMA:
-- Data movement: MOV, MOVZX, MOVSX, LEA, XCHG
-- Arithmetic: ADD, SUB, IMUL, IDIV, INC, DEC, NEG, NOT
-- Logical: AND, OR, XOR, SHL, SHR, SAR, ROL, ROR
-- Comparison: CMP, TEST
-- Conditional: SETcc, CMOVcc
-- Control flow: JMP, Jcc, CALL, RET, NOP
-- Stack: PUSH, POP
-- System: SYSCALL, INT3
-- SSE2: MOVSD, ADDSD, SUBSD, MULSD, DIVSD, UCOMISD, CVTSI2SD, CVTTSD2SI
-- Memory fences: MFENCE, LFENCE, SFENCE
-
-HARSH RULES:
-- If you miss any instruction that IR maps to, the backend will FAIL later.
-- Every instruction must have correct operand types.
-- The encoding function (Inst::encode) MUST be implemented — not a stub!
-- You MUST reference the Intel x86-64 Software Developer's Manual for encoding rules.
-```
-
-**W6-S2 through W6-S8: Implement x86_64 instruction encoding**
-
-```
-You are implementing the encode() method for x86_64 instructions.
-
-SUBAGENT ASSIGNMENTS:
-- W6-S2: Data movement encoding (MOV reg/mem, MOVZX, MOVSX, LEA, XCHG)
-- W6-S3: Arithmetic encoding (ADD, SUB, IMUL, IDIV, INC, DEC, NEG, NOT)
-- W6-S4: Logical + shift encoding (AND, OR, XOR, SHL, SHR, SAR, ROL, ROR)
-- W6-S5: Comparison + conditional encoding (CMP, TEST, SETcc, CMOVcc, Jcc)
-- W6-S6: Control flow encoding (JMP, CALL, RET, NOP, INT3)
-- W6-S7: Stack + system encoding (PUSH, POP, SYSCALL)
-- W6-S8: SSE2 encoding (MOVSD, ADDSD, SUBSD, MULSD, DIVSD, UCOMISD, CVTSI2SD, CVTTSD2SI, fences)
-
-YOUR TASK:
-1. Implement `fn encode(&self) -> EncodedInst` for each instruction variant.
-2. Follow the Intel x86-64 encoding rules EXACTLY:
-   - Legacy prefixes
-   - REX prefix (0x40-0x4F) with W/R/X/B bits
-   - Opcode byte(s)
-   - ModR/M byte (mod, reg, rm fields)
-   - SIB byte (scale, index, base) when needed
-   - Displacement (1, 2, or 4 bytes)
-   - Immediate (1, 2, 4, or 8 bytes)
-3. Handle ALL addressing modes for each instruction.
-4. Write at least 5 test cases per instruction variant encoding.
-5. Verify encoding correctness by comparing with known-good encodings
-   (use `objdump -d` or xed decode as reference).
-
-HARSH RULES:
-- If ANY encoding is wrong, the ENTIRE BACKEND IS BROKEN.
-- You MUST test every encoding. "Looks right" is NOT acceptable.
-- You MUST handle REX prefix correctly for all register combinations.
-- You MUST handle ModR/M + SIB encoding for all memory addressing modes.
-- If you produce a stub or TODO, you have FAILED.
-- Every encode() must return the EXACT bytes that a real x86_64 CPU would execute.
-```
-
-**W6-S9: x86_64 disassembler**
-
-```
-You are implementing the x86_64 disassembler for VUMA at /home/z/my-project/vuma/src/codegen/src/x86_64.rs.
-
-YOUR TASK:
-1. Implement `fn decode(bytes: &[u8], addr: u64) -> Result<(Inst, usize), DecodeError>`
-2. This must be the INVERSE of encode(): decode(encode(inst)) == inst
-3. Handle all instruction types defined in the Inst enum.
-4. Write comprehensive tests: for every instruction, encode it, then decode it, verify round-trip.
-5. Also implement the Backend::disassemble() method using this decoder.
-
-HARSH RULES:
-- If decode(encode(inst)) != inst for ANY instruction, you have FAILED.
-- If you cannot disassemble any valid x86_64 encoding, you have FAILED.
-- You must handle variable-length instructions correctly.
-```
-
-**W6-S10 through W6-S12: x86_64 TargetInfo implementation**
-
-```
-You are implementing the TargetInfo and Backend traits for x86_64.
-
-SUBAGENT ASSIGNMENTS:
-- W6-S10: X86_64Target struct implementing TargetInfo:
-  - pointer_width: 8
-  - size_of: x86_64 LP64 model (same as ARM64 for basic types)
-  - alignment_of: x86_64 alignment rules (differences: __int128 is 16-byte aligned)
-  - num_gp_regs: 14 (RAX, RCX, RDX, RSI, RDI, R8-R15 — excluding RSP, RBP)
-  - num_simd_fp_regs: 16 (XMM0-XMM15)
-  - has_link_register: false
-  - calling_convention_name: "systemv"
-  - elf_machine_type: 62 (EM_X86_64)
-  - default_base_address: 0x400000
-  - target_triple: "x86_64-unknown-linux-gnu"
-
-- W6-S11: X86_64Backend struct implementing Backend:
-  - Use the encoding/decoding from W6-S2 through W6-S9
-  - Implement allocate_registers using TargetInfo register pool
-  - Implement encode_function to emit x86_64 machine code
-  - Implement return_stub (0xC3 = RET)
-  - Implement trampoline
-  - Implement disassemble
-
-- W6-S12: Integration — Add X86_64 variant to BackendKind and create_backend() factory
-
-HARSH RULES:
-- If TargetInfo returns wrong values for x86_64, you have FAILED.
-- If Backend methods produce incorrect machine code, you have FAILED.
-- If create_backend(BackendKind::X86_64) doesn't work, you have FAILED.
-- cargo check -p vuma-codegen must pass.
-- All existing ARM64 tests must still pass.
-```
-
-### Success Criteria:
-- `x86_64.rs` exists with complete instruction definitions
-- All instruction encodings are correct (verified against Intel SDM)
-- Round-trip encode→decode works for all instructions
-- X86_64Target implements TargetInfo correctly
-- X86_64Backend implements Backend correctly
-- `cargo test -p vuma-codegen` passes (all ARM64 + new x86_64 tests)
-
----
-
-## Wave 7: x86_64 Register Allocator
-
-**Dependencies**: W4, W6
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W7-S1: x86_64 register pool definition**
-
-```
-You are defining the x86_64 register allocation pool for VUMA.
-
-YOUR TASK:
-1. In /home/z/my-project/vuma/src/codegen/src/x86_64.rs (or a new regalloc_x86_64.rs):
-2. Define the caller-saved registers (available for allocation without saving):
-   - GP: RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11
-   - XMM: XMM0-XMM15
-3. Define the callee-saved registers (must be preserved):
-   - GP: RBX, R12, R13, R14, R15
-   - (RBP is frame pointer, RSP is stack pointer — NOT allocatable)
-4. SystemV ABI calling convention:
-   - Integer args: RDI, RSI, RDX, RCX, R8, R9
-   - Float args: XMM0-XMM7
-   - Return value: RAX (integer), XMM0 (float)
-   - Caller-saved: RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11
-   - Callee-saved: RBX, R12, R13, R14, R15, RBP
-5. Implement the register allocator for x86_64 using the same algorithm as ARM64
-   but with x86_64's register pool and calling convention.
-
-HARSH RULES:
-- If you allocate RSP or RBP as a general register, you have FAILED CATASTROPHICALLY.
-- If you violate SystemV calling convention, you have FAILED.
-- You must handle the 6-argument limit (spill to stack for args > 6).
-- cargo test -p vuma-codegen must pass.
-```
-
-**W7-S2 through W7-S8: Implement and test x86_64 register allocation**
-
-```
-You are implementing the x86_64 register allocator for VUMA.
-
-SUBAGENT ASSIGNMENTS:
-- W7-S2: Graph coloring allocator adapted for x86_64 register pool
-- W7-S3: Spill code generation for x86_64 (MOV to/from stack slots)
-- W7-S4: Caller-saved/callee-saved register save/restore prologue/epilogue
-- W7-S5: Argument passing (RDI, RSI, RDX, RCX, R8, R9 → stack for 7th+ args)
-- W7-S6: Return value handling (RAX for integer, XMM0 for float, RDX:RAX for i128)
-- W7-S7: Register coalescing for x86_64 (same as ARM64 but different register names)
-- W7-S8: Comprehensive test suite for x86_64 register allocation
-
-HARSH RULES:
-- If any register is used incorrectly, you have FAILED.
-- If callee-saved registers are not preserved, you have FAILED.
-- If the stack frame layout is wrong, you have FAILED.
-- You must test with functions that have 0, 1, 6, 7, 10, and 20 arguments.
-- You must test with functions that spill (more live values than registers).
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- x86_64 register allocator works correctly for all test cases
-- SystemV ABI calling convention is correctly implemented
-- `cargo test -p vuma-codegen` passes
-
----
-
-## Wave 8: x86_64 Calling Convention & Type Layout
-
-**Dependencies**: W4, W6
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W8-S1: SystemV ABI implementation**
-
-```
-You are implementing the SystemV AMD64 ABI calling convention for VUMA.
-
-YOUR TASK:
-1. Implement classification of function arguments per SystemV ABI:
-   - INTEGER class: passes in GP register (RDI, RSI, RDX, RCX, R8, R9)
-   - SSE class: passes in XMM register (XMM0-XMM7)
-   - SSEUP class: upper half of SSE value
-   - X87 class: passes on x87 stack (long double) — we can STUB this
-   - MEMORY class: passes by reference on stack
-2. Implement return value classification:
-   - INTEGER class: RAX (and RDX for 128-bit)
-   - SSE class: XMM0 (and XMM1 for 128-bit)
-   - MEMORY class: caller allocates, passes pointer in RDI (hidden first arg)
-3. Implement struct passing rules:
-   - Small structs (≤16 bytes) split into 8-byte chunks, each classified independently
-   - Large structs passed by hidden pointer
-4. Implement stack alignment: 16-byte aligned before CALL instruction.
-
-HARSH RULES:
-- If you violate ANY SystemV ABI rule, you have FAILED.
-- You must test with C interop: compile a C function, call it from VUMA x86_64 code, verify result.
-- If stack is not 16-byte aligned at function entry, you have FAILED.
-- You MUST reference the SystemV AMD64 ABI specification.
-```
-
-**W8-S2 through W8-S6: Type layout, stack frames, varargs, struct layout, tests**
-
-```
-You are implementing type layout and stack frame handling for x86_64.
-
-SUBAGENT ASSIGNMENTS:
-- W8-S2: Type sizes and alignments for x86_64 (i8=1, i16=2, i32=4, i64=8, f64=8, ptr=8, i128=16)
-- W8-S3: Stack frame layout: return address at [RSP], saved RBP at [RSP+8], locals at [RBP-8], [RBP-16], etc.
-         Prologue: PUSH RBP; MOV RBP,RSP; SUB RSP,frame_size
-         Epilogue: MOV RSP,RBP; POP RBP; RET
-- W8-S4: Variadic function handling (AL register = number of XMM args)
-- W8-S5: Struct layout and passing (≤16 bytes in registers, >16 bytes by reference)
-- W8-S6: Comprehensive test suite: 50+ test cases covering all ABI scenarios
-
-HARSH RULES:
-- If any type size or alignment is wrong, you have FAILED.
-- If the stack frame is not properly aligned, you have FAILED.
-- If struct passing doesn't match SystemV ABI, you have FAILED.
-- You MUST verify against a C compiler (gcc/clang) for correctness.
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- SystemV ABI is fully implemented for x86_64
-- Type sizes, alignments, and struct layouts are correct
-- Stack frame layout matches SystemV ABI specification
-- `cargo test -p vuma-codegen` passes
-
----
-
-## Wave 9: x86_64 Instruction Emission (IR → x86_64)
-
-**Dependencies**: W7, W8
-**Estimated subagents**: 12
-
-### Subagent Tasks:
-
-**W9-S1: Create x86_64 emitter module**
-
-```
-You are creating /home/z/my-project/vuma/src/codegen/src/emit_x86_64.rs — the x86_64 IR→machine code emitter.
-
-YOUR TASK:
-1. Create X86_64Emitter struct that implements the Backend::encode_function trait method.
-2. Map each IR instruction to x86_64 instructions:
-   - IR Add → x86_64 ADD
-   - IR Sub → x86_64 SUB
-   - IR Mul → x86_64 IMUL
-   - IR Div → x86_64 IDIV (with RDX:RAX handling)
-   - IR Rem → x86_64 IDIV + MOV RAX,RDX
-   - IR And → x86_64 AND
-   - IR Or → x86_64 OR
-   - IR Xor → x86_64 XOR
-   - IR Shl → x86_64 SHL
-   - IR Shr → x86_64 SHR
-   - IR Sar → x86_64 SAR
-   - IR Cmp → x86_64 CMP + SETcc
-   - IR Select → x86_64 CMOVcc
-   - IR Load → x86_64 MOV (from memory)
-   - IR Store → x86_64 MOV (to memory)
-   - IR Call → x86_64 CALL
-   - IR Ret → x86_64 RET
-   - IR Jump → x86_64 JMP
-   - IR Branch → x86_64 Jcc
-   - IR Fence → x86_64 MFENCE/LFENCE/SFENCE
-   - IR Nop → x86_64 NOP
-3. Handle each mapping with correct register allocation integration.
-4. Each mapping must produce CORRECT x86_64 machine code.
-
-HARSH RULES:
-- If any IR instruction is mapped incorrectly, you have FAILED.
-- If any emitted x86_64 instruction is malformed, you have FAILED.
-- You MUST NOT leave any TODO or stub mappings.
-- Every mapping must be tested.
-- cargo check -p vuma-codegen must pass.
-```
-
-**W9-S2 through W9-S12: Implement emission for each IR instruction category**
-
-```
-You are implementing IR→x86_64 emission for a specific category.
-
-SUBAGENT ASSIGNMENTS:
-- W9-S2: Arithmetic instructions (Add, Sub, Mul, Div, Rem, Neg, Not)
-- W9-S3: Bitwise instructions (And, Or, Xor, Shl, Shr, Sar)
-- W9-S4: Comparison and conditional (Cmp with all CmpKind variants, Select, Setcc)
-- W9-S5: Memory instructions (Load, Store, StackSlot access, LEA for addresses)
-- W9-S6: Control flow (Jump, Branch, Call, Ret)
-- W9-S7: Function call emission (SystemV ABI arg passing, return value handling)
-- W9-S8: Switch/match lowering to x86_64 (jump table, binary search, if-else chain)
-- W9-S9: Exception handling (invoke/landing pad for x86_64)
-- W9-S10: Tail call optimization for x86_64
-- W9-S11: Coroutine state machine emission for x86_64
-- W9-S12: ELF64 emission for x86_64 (EM_X86_64, proper section headers, etc.)
-
-YOUR TASK:
-For each assigned category:
-1. Implement the emission from IR to x86_64 Inst enum values.
-2. Write 10+ test cases per instruction.
-3. Verify the emitted bytes are correct x86_64 machine code.
-4. Where possible, write a C test program that calls the emitted code and verifies the result.
-
-HARSH RULES:
-- If any emitted instruction crashes on a real x86_64 CPU, you have FAILED.
-- If the calling convention is wrong, you have FAILED.
-- If stack alignment is violated, you have FAILED.
-- You MUST test every path, including edge cases (zero, MAX, MIN, negative numbers).
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- Every IR instruction can be emitted to x86_64 machine code
-- Emitted code follows SystemV ABI
-- `cargo test -p vuma-codegen` passes with all new + existing tests
-
----
-
-## Wave 10: x86_64 ELF Emission
-
-**Dependencies**: W9
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W10-S1: x86_64 ELF64 writer**
-
-```
-You are implementing ELF64 file emission for x86_64 in VUMA.
-
-YOUR TASK:
-1. Create or extend the ELF emission to support x86_64:
-   - ELF header: e_machine = EM_X86_64 (62)
-   - Program headers: PT_LOAD for .text, PT_LOAD for .data
-   - Section headers: .text, .data, .symtab, .strtab, .shstrtab
-2. The emitted ELF must be a valid Linux x86_64 executable that can run natively.
-3. Test by emitting a simple "return 42" program, writing to /tmp/vuma_test.elf,
-   chmod +x, and executing it. The exit code should be 42.
-
-HARSH RULES:
-- If the emitted ELF doesn't pass `readelf -h` validation, you have FAILED.
-- If the emitted ELF doesn't execute on x86_64 Linux, you have FAILED.
-- If section headers are malformed, you have FAILED.
-- You MUST test with actual execution, not just "looks correct".
-```
-
-**W10-S2 through W10-S6: ELF sections, relocations, symbols, debugging, tests**
-
-```
-You are implementing ELF features for x86_64 VUMA.
-
-SUBAGENT ASSIGNMENTS:
-- W10-S2: Relocations (R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64, R_X86_64_GOTPCRELX)
-- W10-S3: Symbol table and string table generation
-- W10-S4: DWARF debug info generation (minimal: .debug_info, .debug_abbrev, .debug_line)
-- W10-S5: Multi-object linking (emit .o files that can be linked with ld)
-- W10-S6: End-to-end test: emit ELF, execute, verify exit code matches expected
-
-HARSH RULES:
-- If relocations are wrong, linking will FAIL on real Linux.
-- If the emitted binary crashes (segfault), you have FAILED.
-- You MUST test with actual execution on this x86_64 machine.
-- readelf, objdump, and file must all report correct format.
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- Valid x86_64 ELF files can be emitted
-- Emitted executables run natively on this x86_64 Linux machine
-- `cargo test -p vuma-codegen` passes
-
----
-
-## Wave 11: x86_64 Control Flow Lowering
-
-**Dependencies**: W5, W9
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W11-S1: Switch lowering for x86_64**
-
-```
-You are implementing switch lowering for x86_64 in VUMA.
-
-YOUR TASK:
-1. Use the target-agnostic SwitchLowerer from control_flow.rs
-2. Implement x86_64-specific lowering strategies:
-   - Jump table: CMP + JE for bounds check + LEA for table base + JMP [table + index*8]
-   - Binary search: CMP + JE/JNE tree
-   - If-else chain: CMP + JE for each case
-3. Generate correct relocations for jump table entries.
-4. Test with 0, 1, 5, 50, and 256 cases.
-5. Test with dense cases (0,1,2,3,4) and sparse cases (0, 1000, 2000).
-
-HARSH RULES:
-- If the jump table indexing is wrong, you have FAILED.
-- If the bounds check is missing, you have FAILED.
-- Every switch must handle the default case.
-- cargo test -p vuma-codegen must pass.
-```
-
-**W11-S2 through W11-S8: Exception, tailcall, coroutine, loop unrolling, tests**
-
-```
-You are implementing control flow lowering for x86_64.
-
-SUBAGENT ASSIGNMENTS:
-- W11-S2: Exception handling (landing pads, exception tables for x86_64)
-- W11-S3: Tail call optimization for x86_64 (arg shuffle + JMP instead of CALL)
-- W11-S4: Coroutine state machine for x86_64 (yield/resume)
-- W11-S5: Loop unrolling for x86_64
-- W11-S6: Nested control flow (switch inside loop, exception inside switch)
-- W11-S7: Integration tests: compile and EXECUTE each control flow construct
-- W11-S8: Comparison tests: same IR compiled for both ARM64 and x86_64, verify both produce correct results
-
-HARSH RULES:
-- If any control flow construct produces incorrect behavior, you have FAILED.
-- If tail call doesn't actually prevent stack growth, you have FAILED.
-- If coroutine yield/resume loses state, you have FAILED.
-- You MUST test by executing the emitted x86_64 code on this machine.
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- All control flow constructs work correctly on x86_64
-- Emitted x86_64 code can be executed natively
-- `cargo test -p vuma-codegen` passes
-
----
-
-## Wave 12: x86_64 Backend Integration Test
-
-**Dependencies**: W10, W11
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W12-S1 through W12-S8: Full integration tests per feature area**
-
-```
-You are writing comprehensive integration tests for the x86_64 backend.
-
-SUBAGENT ASSIGNMENTS:
-- W12-S1: Arithmetic functions (add, sub, mul, div, rem, neg, not)
-- W12-S2: Bitwise functions (and, or, xor, shl, shr, sar)
-- W12-S3: Control flow (if/else, loops, switch, nested control flow)
-- W12-S4: Functions with 0-20 arguments, 0-5 return values
-- W12-S5: Recursive functions (factorial, fibonacci, tree traversal)
-- W12-S6: Memory operations (load, store, stack allocation, heap allocation)
-- W12-S7: Exception handling and coroutines
-- W12-S8: Cross-backend validation (same source → ARM64 + x86_64 → both correct)
-
-FOR EACH TEST:
-1. Write the VUMA source (or construct the IR directly)
-2. Compile to x86_64 via the Backend trait
-3. Write the emitted code to /tmp/vuma_test_N.elf
-4. Execute the ELF on this x86_64 machine
-5. Verify the exit code matches the expected result
-6. If the result is wrong, DEBUG the emitted code using objdump -d
-
-HARSH RULES:
-- If ANY test produces incorrect results, you have FAILED.
-- If the emitted binary crashes, you have FAILED.
-- You must test with ACTUAL EXECUTION, not just "compiles without errors".
-- If you find a bug in the backend, FIX IT, don't just report it.
-- cargo test -p vuma-codegen must pass.
-```
-
-### Success Criteria:
-- All x86_64 integration tests pass with actual execution
 - `cargo test --workspace` passes
 
 ---
 
-## Wave 13: COR x86_64 Execution
+## Wave 3: Multi-Backend Trait Architecture
 
-**Dependencies**: W12
-**Estimated subagents**: 6
+**Dependencies**: W2
+**Estimated subagents**: 16
 
-### Subagent Tasks:
-
-**W13-S1: COR execute_code for x86_64**
-
-```
-You are implementing the COR runtime's execute_code function for x86_64 at /home/z/my-project/vuma/src/cor/src/runtime.rs.
-
-CURRENT STATE:
-- On ARM64: mmap + copy + mprotect(PROT_READ|PROT_EXEC) + transmute to fn pointer + call
-- On x86_64: Returns Ok(0) (STUB!)
-
-YOUR TASK:
-1. Add a new `#[cfg(all(unix, target_arch = "x86_64"))]` implementation of execute_code:
-   ```rust
-   #[cfg(all(unix, target_arch = "x86_64"))]
-   fn execute_code_x86_64(code: &[u8], arg: usize) -> Result<usize, CorError> {
-       use libc::{mmap, mprotect, munmap, PROT_READ, PROT_EXEC, PROT_WRITE, MAP_ANON, MAP_PRIVATE};
-       let page_size = 4096;
-       let alloc_size = ((code.len() + page_size - 1) / page_size) * page_size;
-       unsafe {
-           let mem = mmap(std::ptr::null_mut(), alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-           if mem == libc::MAP_FAILED { return Err(CorError::MmapFailed); }
-           std::ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, code.len());
-           let result = mprotect(mem, alloc_size, PROT_READ | PROT_EXEC);
-           if result != 0 { munmap(mem, alloc_size); return Err(CorError::MprotectFailed); }
-           let func: fn(usize) -> usize = std::mem::transmute(mem);
-           let ret = func(arg);
-           munmap(mem, alloc_size);
-           Ok(ret)
-       }
-   }
-   ```
-2. Update the dispatch in execute_code to call the correct implementation.
-3. Test: compile a simple "return arg*2" function, execute via COR, verify result.
-
-HARSH RULES:
-- If the mmap/mprotect/execute cycle doesn't work, you have FAILED.
-- If you don't munmap after execution (memory leak), you have FAILED.
-- If the function doesn't actually execute the compiled code, you have FAILED.
-- You MUST test with actual execution on this x86_64 machine.
-- You MUST handle the case where code is not page-aligned.
-```
-
-**W13-S2 through W13-S6: COR x86_64 integration**
-
-```
-You are integrating x86_64 execution into the COR runtime.
-
-SUBAGENT ASSIGNMENTS:
-- W13-S2: Update compile_region to use x86_64 backend when target is x86_64
-- W13-S3: Update return_zero_stub to emit x86_64 RET (0xC3) instead of ARM64 RET
-- W13-S4: Wire Config::TargetArch::X86_64 to select the x86_64 Backend
-- W13-S5: Test COR compile→execute cycle on x86_64 with 10+ functions
-- W13-S6: Test COR incremental compilation on x86_64
-
-HARSH RULES:
-- If COR still returns 0 on x86_64, you have FAILED.
-- If compiled code doesn't execute correctly, you have FAILED.
-- You MUST test with actual mmap/mprotect/execute on this x86_64 machine.
-- cargo test -p vuma-cor must pass.
-```
-
-### Success Criteria:
-- COR runtime can compile and execute x86_64 code on this machine
-- `cargo test -p vuma-cor` passes
-
----
-
-## Wave 14: COR x86_64 Profiling & Optimization
-
-**Dependencies**: W13
-**Estimated subagents**: 6
+This is the MOST CRITICAL wave — defining the abstraction that scales to 8+ ISAs.
 
 ### Subagent Tasks:
 
-**W14-S1: COR profiling on x86_64**
+**W3-S1: Define the Backend trait for 8+ targets**
 
 ```
-You are implementing COR profiling for x86_64.
+You are designing the core multi-architecture abstraction for VUMA's codegen.
+
+The trait must support ALL of these ISAs without any ISA-specific assumptions:
+- AArch64: 31 GP regs, 32 FP regs, link register, AAPCS64, fixed 32-bit encoding
+- RISC-V64: 32 GP regs (x0=zero), 32 FP regs, link register, LP64D, variable 16/32-bit encoding
+- Wasm32: STACK MACHINE (no registers!), stack-based calling, LEB128 encoding, binary format (not ELF)
+- LoongArch64: 32 GP regs (r0=zero), 32 FP regs, link register, LP64, fixed 32-bit encoding
+- x86_64: 16 GP regs, 16 XMM regs, NO link register (push return addr), SystemV, variable-length encoding
+- ARM32: 16 GP regs (PC=R15), 32 FP regs, link register, AAPCS, variable 16/32-bit encoding
+- MIPS64: 32 GP regs (r0=zero), 32 FP regs, link register, N64 ABI, fixed 32-bit, BRANCH DELAY SLOTS
+- PowerPC64: 32 GP regs, 64 VSX regs, link register, ELFv2, fixed 32-bit, TOC pointer
+
+YOUR TASK: Create /home/z/my-project/vuma/src/codegen/src/backend.rs with:
+
+```rust
+/// Target-specific information needed during code generation.
+/// This trait describes WHAT a target looks like, not HOW to generate code for it.
+pub trait TargetInfo: Send + Sync + 'static {
+    // === Identity ===
+    fn isa_name(&self) -> &'static str;           // "aarch64", "riscv64", "wasm32", etc.
+    fn target_triple(&self) -> &'static str;       // "aarch64-unknown-linux-gnu"
+    fn elf_machine_type(&self) -> u16;             // EM_AARCH64=183, or 0 for non-ELF (Wasm)
+    fn default_base_address(&self) -> u64;         // 0x400000 for ARM64/x86_64, 0x10000 for RV64
+
+    // === Data model ===
+    fn pointer_width(&self) -> usize;              // 4 or 8 bytes
+    fn size_of(&self, ty: &IRType) -> usize;
+    fn alignment_of(&self, ty: &IRType) -> usize;
+    fn endianness(&self) -> Endianness;            // Little, Big, or Bi (PPC64)
+
+    // === Register architecture ===
+    fn has_registers(&self) -> bool;               // false for Wasm (stack machine)
+    fn num_gp_regs(&self) -> usize;                // 0 for Wasm
+    fn num_simd_fp_regs(&self) -> usize;           // 0 for Wasm
+    fn has_hardwired_zero(&self) -> bool;          // true for RISC-V, LoongArch
+    fn has_link_register(&self) -> bool;           // true for ARM/RISC-V/MIPS/PPC, false for x86_64
+    fn has_branch_delay_slots(&self) -> bool;      // true for MIPS
+    fn has_toc_pointer(&self) -> bool;             // true for PPC64
+    fn has_condition_registers(&self) -> bool;      // true for PPC64 (8 CR fields)
+
+    // === Calling convention ===
+    fn calling_convention_name(&self) -> &'static str;  // "aapcs64", "lp64d", "stack", "systemv"
+    fn num_int_arg_regs(&self) -> usize;           // 8 for ARM64, 6 for x86_64, 8 for RV64, 0 for Wasm
+    fn num_fp_arg_regs(&self) -> usize;            // 8 for ARM64, 8 for x86_64, 8 for RV64, 0 for Wasm
+    fn stack_alignment(&self) -> usize;            // 16 for most, 8 for MIPS
+
+    // === Instruction encoding ===
+    fn instruction_alignment(&self) -> usize;       // 4 for fixed-width RISCs, 1 for x86_64/Wasm
+    fn instruction_width_range(&self) -> (usize, usize);  // (min, max) bytes: (4,4) for ARM64, (1,15) for x86_64
+
+    // === Output format ===
+    fn output_format(&self) -> OutputFormat;       // Elf64, Elf32, WasmBinary, RawBinary
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Endianness { Little, Big, Bi }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat { Elf64, Elf32, WasmBinary, RawBinary }
+
+/// A code generation backend. Implement this for each target architecture.
+pub trait Backend: Send + Sync + 'static {
+    fn target_info(&self) -> &dyn TargetInfo;
+    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError>;
+    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError>;
+    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError>;
+    fn return_stub(&self) -> Vec<u8>;
+    fn trampoline(&self, entry_addr: u64) -> Vec<u8>;
+    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String>;
+    fn name(&self) -> &'static str;
+}
+
+/// The 8 supported backends.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BackendKind {
+    AArch64,
+    RiscV64,
+    Wasm32,
+    LoongArch64,
+    X86_64,
+    Arm32,
+    Mips64,
+    PowerPC64,
+}
+
+/// Factory: create a backend by kind.
+pub fn create_backend(kind: BackendKind) -> Box<dyn Backend> {
+    match kind {
+        BackendKind::AArch64 => Box::new(Arm64Backend::new()),
+        BackendKind::RiscV64 => Box::new(RiscV64Backend::new()),
+        BackendKind::Wasm32 => Box::new(Wasm32Backend::new()),
+        BackendKind::LoongArch64 => Box::new(LoongArch64Backend::new()),
+        BackendKind::X86_64 => Box::new(X86_64Backend::new()),
+        BackendKind::Arm32 => Box::new(Arm32Backend::new()),
+        BackendKind::Mips64 => Box::new(Mips64Backend::new()),
+        BackendKind::PowerPC64 => Box::new(PowerPC64Backend::new()),
+    }
+}
+
+// ... AllocatedFunction, AllocatedBlock, PhysicalReg, BackendError, etc.
+```
+
+DESIGN REQUIREMENTS:
+- The trait must handle Wasm's stack machine (has_registers() = false)
+- The trait must handle MIPS delay slots (has_branch_delay_slots())
+- The trait must handle PPC64 TOC pointer and condition registers
+- The trait must handle x86_64's variable-length encoding
+- The trait must be object-safe
+- OutputFormat must support non-ELF targets (Wasm, raw binary for bare-metal)
+- Backend::encode_program handles the full output: ELF for register machines, .wasm for Wasm
+
+HARSH RULES:
+- If the trait has ANY ISA-specific concept that doesn't generalize, you have FAILED.
+- If Wasm can't implement this trait, you have FAILED.
+- If the trait is not object-safe, you have FAILED.
+- You MUST write 8 mock TargetInfo implementations (one per ISA) to prove the trait works.
+- You MUST write unit tests verifying each mock returns correct values.
+- cargo check -p vuma-codegen must pass.
+```
+
+**W3-S2: Make IR types multi-target**
+
+```
+You are refactoring /home/z/my-project/vuma/src/codegen/src/ir.rs to support 8 ISAs.
+
+CURRENT PROBLEMS:
+- size_of/alignment_of hardcode ARM64 LP64
+- compute_calling_conv implements AAPCS64 only
+- compute_stack_layout assumes ARM64 conventions
 
 YOUR TASK:
-1. Implement perf_counters for x86_64 using rdpmc or Linux perf_event_open.
-2. Profile hot paths: function call counts, basic block execution frequencies.
-3. Feed profiling data back to the optimization engine.
-4. Test: compile a function, run it 10000 times, verify profiling data is collected.
+1. All functions that hardcode target assumptions get a &dyn TargetInfo parameter.
+2. Import TargetInfo from backend module.
+3. Provide Arm64Target implementing TargetInfo with current hardcoded values.
+4. Update ALL call sites in the entire codegen crate.
+5. Ensure cargo check -p vuma-codegen passes.
+6. Ensure cargo test -p vuma-codegen passes.
 
 HARSH RULES:
-- If profiling data is incorrect, you have FAILED.
-- If profiling adds >5% overhead, you have FAILED.
-- You MUST test on this x86_64 machine with actual execution.
+- If you break any existing test, you have FAILED.
+- If you leave any hardcoded ARM64 assumptions, you have FAILED.
+- If cargo check or cargo test fails, you have FAILED.
 ```
 
-**W14-S2 through W14-S6: COR optimization passes on x86_64**
+**W3-S3 through W3-S8: Refactor existing codegen modules**
 
 ```
-You are implementing COR optimization passes for x86_64.
+You are updating MODULE in /home/z/my-project/vuma/src/codegen/src/ to work with the new multi-backend trait.
 
-SUBAGENT ASSIGNMENTS:
-- W14-S2: Hot path detection and recompilation
-- W14-S3: Inlining optimization for x86_64
-- W14-S4: Loop optimization (unrolling, strength reduction) for x86_64
-- W14-S5: Dead code elimination for x86_64
-- W14-S6: Full COR cycle test: compile → execute → profile → optimize → re-execute → verify improvement
+MODULE ASSIGNMENTS:
+- W3-S3: arm64.rs — Implement TargetInfo + Backend for AArch64 (wrap existing code)
+- W3-S4: emit.rs — Refactor to use TargetInfo for ELF headers, base addresses
+- W3-S5: regalloc.rs — Make register pool configurable via TargetInfo
+- W3-S6: scg_to_ir.rs — Pass TargetInfo through for target-dependent decisions
+- W3-S7: lib.rs — Add mod backend, re-export, BackendKind enum with 8 variants, create_backend factory
+- W3-S8: Comprehensive tests for Backend trait dispatch with all 8 mock TargetInfo impls
+
+HARSH RULES FOR ALL:
+- ARM64 codegen output must be BIT-FOR-BIT IDENTICAL after refactoring.
+- If any existing test breaks, you have FAILED.
+- If cargo check -p vuma-codegen fails, you have FAILED.
+```
+
+**W3-S9 through W3-S16: Update all dependent crates**
+
+```
+You are updating CRATE_NAME to pass TargetInfo/Backend through the pipeline.
+
+CRATE ASSIGNMENTS:
+- W3-S9:  vuma-core — Pipeline uses Backend trait, selects target via BackendKind
+- W3-S10: vuma-cor — Runtime uses Backend trait for code generation + execution
+- W3-S11: vuma-cor — compile_region uses Backend::encode_function
+- W3-S12: vuma-tests — All codegen tests use Backend trait
+- W3-S13: vuma-ive — Check if IVE needs TargetInfo
+- W3-S14: vuma-bd — Check if BD needs any target params
+- W3-S15: vuma-scg — Check if SCG needs any target params
+- W3-S16: End-to-end ARM64 integration test via Backend trait
 
 HARSH RULES:
-- If optimization produces incorrect code, you have FAILED.
-- If the optimized code doesn't execute correctly, you have FAILED.
-- You MUST verify correctness after every optimization pass.
-- cargo test -p vuma-cor must pass.
+- If you leave any ARM64 hardcoded assumption, you have FAILED.
+- The ARM64 codegen output must be BIT-FOR-BIT identical after refactoring.
 ```
 
 ### Success Criteria:
-- COR profiling works on x86_64
-- COR optimization produces correct, faster code
-- `cargo test -p vuma-cor` passes
+- Backend trait handles all 8 ISAs (proven by 8 mock TargetInfo implementations)
+- `cargo check --workspace` passes
+- `cargo test --workspace` passes
+- ARM64 output is unchanged
 
 ---
 
-## Wave 15: COR Full Cycle on x86_64
+## Wave 4: ARM64 Regression + Target-Agnostic Control Flow
 
-**Dependencies**: W14
+**Dependencies**: W3
 **Estimated subagents**: 8
 
 ### Subagent Tasks:
 
-**W15-S1 through W15-S8: End-to-end COR tests**
+**W4-S1 through W4-S4: ARM64 regression validation**
 
 ```
-You are testing the complete COR cycle on x86_64.
+You are validating that the ARM64 backend produces IDENTICAL output after the multi-backend refactor.
 
 SUBAGENT ASSIGNMENTS:
-- W15-S1: Simple function: compile → execute → verify result
-- W15-S2: Recursive function: factorial → compile → execute → verify
-- W15-S3: Loop: sum 1..100 → compile → execute → verify
-- W15-S4: Memory: allocate → write → read → verify
-- W15-S5: Multi-function: compile 5 functions → call them all → verify all results
-- W15-S6: Profile-guided: compile → execute (cold) → profile → recompile → execute (hot) → verify faster
-- W15-S7: Incremental compilation: add function → recompile → execute → verify
-- W15-S8: Stress test: compile 100 functions, execute each 1000 times, no crashes
-
-FOR EACH TEST:
-1. Use the VUMA pipeline (parse → SCG → BD → IVE → IR → x86_64 backend → COR execute)
-2. Verify the result matches expected output.
-3. Verify no memory leaks (check via /proc/self/status or valgrind).
-4. Verify no segfaults.
+- W4-S1: ARM64 encoding round-trip tests (every instruction → encode → decode → match)
+- W4-S2: ARM64 calling convention tests via Backend trait
+- W4-S3: ARM64 ELF emission tests via Backend trait
+- W4-S4: Full ARM64 pipeline test (source → parse → SCG → BD → IVE → IR → Backend → ELF)
 
 HARSH RULES:
-- If ANY test produces incorrect results, you have FAILED.
-- If ANY test crashes, you have FAILED.
+- If any ARM64 encoding changes, you have FAILED.
+- If any test fails, FIX IT before reporting.
+```
+
+**W4-S5 through W4-S8: Extract target-agnostic control flow module**
+
+```
+You are creating /home/z/my-project/vuma/src/codegen/src/control_flow.rs — a TARGET-AGNOSTIC
+control flow module that works for ALL 8 ISAs.
+
+COMPONENTS:
+1. SwitchLowerer — jump_table/binary_search/if_else_chain, parameterized by TargetInfo
+2. ExceptionLowerer — invoke/landing-pad, parameterized by TargetInfo
+3. TailCallLowerer — eligibility + arg shuffle, parameterized by TargetInfo
+4. CoroutineLowerer — state machine + frame layout, parameterized by TargetInfo
+5. LoopOptimizer — unrolling + cost model, parameterized by TargetInfo
+
+KEY CONSIDERATIONS for multi-ISA:
+- MIPS has branch delay slots: the instruction AFTER a branch ALWAYS executes.
+  SwitchLowerer must insert NOPs or useful instructions in delay slots.
+- Wasm has br_table instead of jump tables — different encoding, same concept.
+- x86_64 jump tables use 32-bit relative offsets (PC-relative).
+- ARM64 uses ADRP+ADD for 64-bit absolute addresses in jump tables.
+- PPC64 uses TOC-relative addressing for jump tables.
+
+SUBAGENT ASSIGNMENTS:
+- W4-S5: SwitchLowerer with multi-ISA support (delay slots, br_table, PC-relative)
+- W4-S6: ExceptionLowerer + TailCallLowerer
+- W4-S7: CoroutineLowerer + LoopOptimizer
+- W4-S8: Integration tests with all 8 mock TargetInfo implementations
+
+HARSH RULES:
+- If any function references a specific ISA by name, you have FAILED.
+- If MIPS delay slots are not handled, you have FAILED.
+- If Wasm br_table is not handled, you have FAILED.
+- Each component must have 10+ tests.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- ARM64 backend produces identical output
+- Control flow module is fully target-agnostic
+- Tests pass for all 8 ISA mocks
+
+---
+
+## Wave 5: Target Description System
+
+**Dependencies**: W3
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W5-S1: Create TargetDesc — machine-readable ISA specification**
+
+```
+You are creating /home/z/my-project/vuma/src/codegen/src/target_desc.rs — a machine-readable
+target description system that makes adding new ISAs a DATA-DRIVEN process.
+
+The idea: instead of writing thousands of lines of Rust for each backend, describe the ISA
+in a structured format and generate boilerplate automatically.
+
+```rust
+/// Machine-readable description of an ISA.
+pub struct TargetDesc {
+    pub name: &'static str,
+    pub triple: &'static str,
+    pub elf_machine: u16,
+    pub base_addr: u64,
+    pub pointer_width: usize,
+    pub endianness: Endianness,
+    pub output_format: OutputFormat,
+
+    // Register descriptions
+    pub registers: Vec<RegDesc>,
+    pub calling_convention: CallingConventionDesc,
+    pub instruction_set: Vec<InstDesc>,
+}
+
+pub struct RegDesc {
+    pub name: &'static str,
+    pub class: RegClass,
+    pub index: usize,
+    pub is_allocatable: bool,
+    pub is_hardwired_zero: bool,
+    pub is_stack_pointer: bool,
+    pub is_frame_pointer: bool,
+    pub is_link_register: bool,
+    pub is_toc_pointer: bool,
+    pub is_callee_saved: bool,
+    pub is_arg_reg: bool,
+    pub arg_position: Option<usize>,
+    pub is_return_reg: bool,
+}
+
+pub struct CallingConventionDesc {
+    pub name: &'static str,
+    pub int_arg_regs: Vec<usize>,    // indices into registers[]
+    pub fp_arg_regs: Vec<usize>,
+    pub int_return_regs: Vec<usize>,
+    pub fp_return_regs: Vec<usize>,
+    pub callee_saved: Vec<usize>,
+    pub stack_alignment: usize,
+    pub has_link_register: bool,
+    pub has_branch_delay_slots: bool,
+    pub has_toc_pointer: bool,
+}
+
+pub struct InstDesc {
+    pub mnemonic: &'static str,
+    pub operands: Vec<OperandDesc>,
+    pub encoding: EncodingDesc,
+    pub semantic: InstSemantic,
+}
+```
+
+Also create a `TargetDescRegistry` that holds all 8 ISA descriptions and can be queried.
+
+HARSH RULES:
+- Every field in TargetDesc must be populated for all 8 ISAs.
+- The registry must be testable.
+- This is NOT a replacement for the Backend trait — it's supplementary metadata.
+- cargo check -p vuma-codegen must pass.
+```
+
+**W5-S2 through W5-S8: Define TargetDesc for all 8 ISAs**
+
+```
+You are defining the TargetDesc for ISA_NAME.
+
+SUBAGENT ASSIGNMENTS:
+- W5-S2: AArch64 TargetDesc
+- W5-S3: RISC-V64 TargetDesc
+- W5-S4: Wasm32 TargetDesc
+- W5-S5: LoongArch64 TargetDesc
+- W5-S6: x86_64 TargetDesc
+- W5-S7: ARM32 TargetDesc
+- W5-S8: MIPS64 + PowerPC64 TargetDesc
+
+YOUR TASK:
+1. Define ALL registers with their properties (allocatable, callee-saved, arg, return, special).
+2. Define the calling convention in full detail.
+3. Define instruction categories (not every instruction — just the categories needed for codegen).
+4. Verify against the ISA's official specification.
+5. Write tests that validate TargetDesc consistency (e.g., no register is both arg and callee-saved).
+
+HARSH RULES:
+- If any register property is wrong, you have FAILED.
+- If the calling convention doesn't match the ABI specification, you have FAILED.
+- You MUST cross-reference with official ISA/ABI documentation.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- TargetDesc system works for all 8 ISAs
+- All descriptions validated against official specs
+- `cargo test -p vuma-codegen` passes
+
+---
+
+## Wave 6: RISC-V64 Backend (Easiest New Target)
+
+**Dependencies**: W4, W5
+**Estimated subagents**: 12
+
+RISC-V64 is the cleanest RISC ISA (3/10 complexity). Same family as ARM64 (fixed 32-bit encoding, link register, clean register file) but with hardwired zero register and compressed instructions (RVC).
+
+### Subagent Tasks:
+
+**W6-S1: Create riscv64.rs — register definitions + instruction types**
+
+```
+You are creating /home/z/my-project/vuma/src/codegen/src/riscv64.rs — the RISC-V64 backend.
+
+YOUR TASK: Define the complete RISC-V64 register and instruction model:
+
+Registers:
+- x0 (zero, hardwired to 0), x1 (ra, return address), x2 (sp), x3 (gp), x4 (tp),
+  x5-x7 (t0-t2, temporaries), x8 (s0/fp), x9 (s1), x10-x17 (a0-a7, arguments),
+  x18-x27 (s2-s11, callee-saved), x28-x31 (t3-t6, temporaries)
+- f0-f31 (fa0-fa7 for args, ft0-ft11 for temps, fs0-fs11 callee-saved)
+
+Instruction formats (ALL 6):
+- R-type: funct7[31:25] rs2[24:20] rs1[19:15] funct3[14:12] rd[11:7] opcode[6:0]
+- I-type: imm[31:20] rs1[19:15] funct3[14:12] rd[11:7] opcode[6:0]
+- S-type: imm[31:25] rs2[24:20] rs1[19:15] funct3[14:12] imm[11:7] opcode[6:0]
+- B-type: imm[12|10:5] rs2[24:20] rs1[19:15] funct3[14:12] imm[4:1|11] opcode[6:0]
+- U-type: imm[31:12] rd[11:7] opcode[6:0]
+- J-type: imm[20|10:1|11|19:12] rd[11:7] opcode[6:0]
+
+Required instructions (RV64IMAFD = RV64GC):
+- RV64I: LUI, AUIPC, JAL, JALR, BEQ, BNE, BLT, BGE, BLTU, BGEU,
+  LB, LH, LW, LD, LBU, LHU, LWU, SB, SH, SW, SD,
+  ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI,
+  ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
+  ADDIW, SLLIW, SRLIW, SRAIW, ADDW, SUBW, SLLW, SRLW, SRAW,
+  FENCE, FENCE.I, ECALL, EBREAK
+- M extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU,
+  MULW, DIVW, REMW, DIVUW, REMUW
+- F/D extensions: FLW, FLD, FSW, FSD, FMADD.S, FMSUB.S, FNMSUB.S, FNMADD.S,
+  FMADD.D, FMSUB.D, FNMSUB.D, FNMADD.D,
+  FADD.S, FSUB.S, FMUL.S, FDIV.S, FSQRT.S,
+  FADD.D, FSUB.D, FMUL.D, FDIV.D, FSQRT.D,
+  FSGNJ.S, FSGNJN.S, FSGNJX.S, FMIN.S, FMAX.S,
+  FSGNJ.D, FSGNJN.D, FSGNJX.D, FMIN.D, FMAX.D,
+  FCVT.W.S, FCVT.WU.S, FCVT.L.S, FCVT.LU.S, FCVT.S.W, FCVT.S.WU, FCVT.S.L, FCVT.S.LU,
+  FCVT.W.D, FCVT.WU.D, FCVT.L.D, FCVT.LU.D, FCVT.D.W, FCVT.D.WU, FCVT.D.L, FCVT.D.LU,
+  FEQ.S, FLT.S, FLE.S, FEQ.D, FLT.D, FLE.D,
+  FCLASS.S, FCLASS.D
+- RVC (compressed): C.ADDI4SPN, C.LW, C.LD, C.SW, C.SD, C.ADDI, C.ADDIW,
+  C.LI, C.LUI, C.SRLI, C.SRAI, C.ANDI, C.SUB, C.XOR, C.OR, C.AND,
+  C.SUBW, C.ADDW, C.J, C.BEQZ, C.BNEZ, C.LI, C.LUI, C.SLLI,
+  C.LDSP, C.LWSP, C.LD, C.JR, C.MV, C.EBREAK, C.JALR, C.ADD,
+  C.SWSP, C.SDSP
+
+HARSH RULES:
+- If you miss ANY instruction from RV64GC, you have FAILED.
+- Every encoding MUST be correct per the RISC-V ISA Specification (Volume 1, 20191213).
+- No TODOs. No stubs. Every instruction must have a working encode() and decode().
+- cargo check -p vuma-codegen must pass.
+```
+
+**W6-S2 through W6-S7: RISC-V64 encoding implementation**
+
+```
+You are implementing the encode/decode for RISC-V64 instructions.
+
+SUBAGENT ASSIGNMENTS:
+- W6-S2: RV64I base integer instructions (R-type + I-type: arithmetic, logical, compare)
+- W6-S3: RV64I load/store + branch + jump instructions (S-type, B-type, U-type, J-type)
+- W6-S4: M extension (multiply/divide) + Zicsr/Zifencei
+- W6-S5: F/D extensions (floating-point, all formats)
+- W6-S6: RVC compressed instructions (16-bit encodings)
+- W6-S7: Disassembler (decode bytes → Inst, round-trip with encode)
+
+HARSH RULES:
+- If encode→decode round-trip fails for ANY instruction, you have FAILED.
+- If branch offset calculation is wrong, you have FAILED.
+- If RVC compression/decompression is incorrect, you have FAILED.
+- You MUST verify encodings against the RISC-V ISA Spec.
+- 5+ test cases per instruction variant.
+```
+
+**W6-S8 through W6-S12: RISC-V64 Backend trait implementation + ELF**
+
+```
+You are implementing the Backend trait for RISC-V64.
+
+SUBAGENT ASSIGNMENTS:
+- W6-S8: RiscV64Target implementing TargetInfo
+- W6-S9: RiscV64Backend implementing Backend (regalloc + encode_function)
+- W6-S10: RISC-V64 register allocator (LP64D ABI: a0-a7 int args, fa0-fa7 FP args, s2-s11 callee-saved)
+- W6-S11: RISC-V64 ELF64 emission (EM_RISCV=243, proper program headers, relocations)
+- W6-S12: RISC-V64 test suite (50+ tests: encoding, calling conv, ELF, full pipeline)
+
+HARSH RULES:
+- If LP64D ABI is violated, you have FAILED.
+- If ELF headers are malformed, you have FAILED.
+- If register allocation is wrong, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+- ALL ARM64 tests must still pass (no regressions).
+```
+
+### Success Criteria:
+- Complete RISC-V64 backend with all RV64GC instructions
+- Encoding/decoding round-trip works
+- LP64D ABI implemented
+- ELF64 emission works
+- 50+ new tests pass
+- No ARM64 regressions
+
+---
+
+## Wave 7: Wasm32 Backend (Stack Machine — Fundamentally Different)
+
+**Dependencies**: W4, W5
+**Estimated subagents**: 12
+
+Wasm is the most unique target: no registers, stack machine, binary format instead of ELF, LEB128 encoding, and it runs in browsers. This proves the Backend trait truly generalizes.
+
+### Subagent Tasks:
+
+**W7-S1: Create wasm32.rs — Wasm types and instructions**
+
+```
+You are creating /home/z/my-project/vuma/src/codegen/src/wasm32.rs — the WebAssembly backend.
+
+Wasm is fundamentally different from register machines:
+- Stack-based: instructions push/pop values on an implicit stack
+- No registers: has_registers() = false, all computation is stack-based
+- Local variables instead of registers: each function has a list of typed locals
+- Structured control flow: blocks, loops, ifs — NO arbitrary jumps
+- Binary format: .wasm, not ELF
+- LEB128 encoding for integers
+
+YOUR TASK: Define the complete Wasm instruction set:
+
+Value types: i32, i32, f32, f64
+Control: block, loop, if, else, end, br, br_if, br_table, return, call, call_indirect
+Parametric: select, drop
+Variable: local.get, local.set, local.tee, global.get, global.set
+Memory: i32.load, i64.load, f32.load, f64.load, i32.store, i64.store, f32.store, f64.store,
+        memory.size, memory.grow
+Numeric (i32): i32.const, i32.eqz, i32.eq, i32.ne, i32.lt_s, i32.lt_u, i32.gt_s, i32.gt_u,
+               i32.le_s, i32.le_u, i32.ge_s, i32.ge_u, i32.clz, i32.ctz, i32.popcnt,
+               i32.add, i32.sub, i32.mul, i32.div_s, i32.div_u, i32.rem_s, i32.rem_u,
+               i32.and, i32.or, i32.xor, i32.shl, i32.shr_s, i32.shr_u, i32.rotl, i32.rotr
+Numeric (i64): same operations as i32
+Numeric (f32/f64): f32.const, f64.const, f32.eq, ..., f32.add, ..., f64.add, ...,
+                   f32.convert_i32_s, f64.convert_i32_s, i32.trunc_f32_s, i32.trunc_f64_s, ...
+Conversions: i32.wrap_i64, i64.extend_i32_s, i64.extend_i32_u,
+             f32.convert_i32_s, f32.convert_i64_s, f64.convert_i32_s, f64.convert_i64_s,
+             i32.trunc_f32_s, i32.trunc_f64_s, i64.trunc_f32_s, i64.trunc_f64_s,
+             f32.demote_f64, f64.promote_f32, f32.reinterpret_i32, f64.reinterpret_i64,
+             i32.reinterpret_f32, i64.reinterpret_f64
+
+HARSH RULES:
+- If you miss ANY Wasm instruction needed for the VUMA IR, you have FAILED.
+- Wasm encoding uses LEB128 — implement it correctly (both unsigned and signed).
+- Section encoding must follow the Wasm binary format spec.
+- cargo check -p vuma-codegen must pass.
+```
+
+**W7-S2 through W7-S7: Wasm32 encoding + module generation**
+
+```
+You are implementing Wasm32 encoding and module generation.
+
+SUBAGENT ASSIGNMENTS:
+- W7-S2: LEB128 encoding/decoding + Wasm section structure (type, import, function, table, memory, global, export, start, element, code, data sections)
+- W7-S3: Wasm binary format encoder (module → bytes)
+- W7-S4: Wasm control flow lowering (IR structured control flow → Wasm block/loop/if)
+- W7-S5: Wasm function code generation (IR → Wasm bytecode with stack discipline)
+- W7-S6: Wasm32Target implementing TargetInfo (has_registers=false, output_format=WasmBinary)
+- W7-S7: Wasm32Backend implementing Backend (encode_program produces .wasm bytes)
+
+HARSH RULES:
+- If the .wasm output doesn't validate with `wasm-validate`, you have FAILED.
+- If the .wasm output can't run in wasmtime or wasmer, you have FAILED.
+- Stack balance must be correct: every code path must leave the stack in the right state.
+- Structured control flow must be correct (no dangling blocks).
+- cargo test -p vuma-codegen must pass.
+```
+
+**W7-S8 through W7-S12: Wasm32 testing**
+
+```
+You are testing the Wasm32 backend.
+
+SUBAGENT ASSIGNMENTS:
+- W7-S8: Wasm encoding round-trip tests (encode → decode → verify)
+- W7-S9: Wasm validation tests (every emitted .wasm must pass wasm-validate)
+- W7-S10: Wasm execution tests (emit .wasm → run in wasmtime → verify result)
+- W7-S11: Wasm calling convention tests (function import/export)
+- W7-S12: Wasm memory model tests (linear memory load/store)
+
+HARSH RULES:
+- You MUST install wasmtime: curl https://wasmtime.dev/install.sh -sSf | bash
+- You MUST test with actual Wasm execution, not just "produces bytes."
+- If any .wasm fails validation, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- Wasm32 backend produces valid .wasm files
+- Emitted .wasm passes validation and executes correctly in wasmtime
+- Proves the Backend trait works for non-register, non-ELF targets
+- No regressions in other backends
+
+---
+
+## Wave 8: LoongArch64 Backend (Chinese Domestic ISA)
+
+**Dependencies**: W4, W5
+**Estimated subagents**: 12
+
+LoongArch64 is architecturally similar to RISC-V (fixed 32-bit encoding, hardwired zero, link register) but for the Chinese domestic market. Implementing it alongside RISC-V validates the codebase handles similar-but-different ISAs cleanly.
+
+### Subagent Tasks:
+
+**W8-S1 through W8-S12: Full LoongArch64 backend**
+
+```
+You are implementing the LoongArch64 backend for VUMA.
+
+LoongArch64 spec: 32 GP regs (r0=zero, r1=ra, r3=sp, r22=fp), 32 FP regs (f0-f31)
+LP64 calling convention: a0-a7 (r4-r11) for int args, fa0-fa7 for FP args
+Fixed 32-bit encoding, 9 instruction formats (2R, 3R, 4R, 2RI8, 2RI12, 2RI14, 2RI16, 1RI21, I26)
+No branch delay slots.
+
+SUBAGENT ASSIGNMENTS:
+- W8-S1: LoongArch64 register + instruction type definitions
+- W8-S2: Arithmetic + logical instruction encoding (3R format: ADD.W, SUB.W, AND, OR, XOR, etc.)
+- W8-S3: Memory + branch instruction encoding (2RI12 format: LD.W, ST.W, BEQ, BNE, etc.)
+- W8-S4: Jump + constant instruction encoding (1RI21, I26, 2RI16 formats: LU12I.W, JIRL, B, BL)
+- W8-S5: Floating-point instruction encoding
+- W8-S6: Disassembler (round-trip encode→decode)
+- W8-S7: LoongArch64Target implementing TargetInfo
+- W8-S8: LoongArch64Backend implementing Backend (regalloc, encode_function)
+- W8-S9: LoongArch64 register allocator (LP64 ABI)
+- W8-S10: LoongArch64 ELF64 emission (EM_LOONGARCH=258)
+- W8-S11: LoongArch64 test suite (50+ tests)
+- W8-S12: Cross-verification with RISC-V64 backend (same IR → both → verify semantic equivalence)
+
+HARSH RULES:
+- If encoding doesn't match the LoongArch Architecture Reference Manual, you have FAILED.
+- If LP64 calling convention is violated, you have FAILED.
+- If ELF headers are malformed, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+- ALL other backend tests must still pass.
+```
+
+### Success Criteria:
+- Complete LoongArch64 backend
+- 50+ new tests
+- No regressions
+
+---
+
+## Wave 9: x86_64 Backend (The Hard One)
+
+**Dependencies**: W4, W5
+**Estimated subagents**: 16
+
+x86_64 is the most complex ISA (8/10) but the most important for us — it's our sandbox's native ISA and we can EXECUTE the output.
+
+### Subagent Tasks:
+
+**W9-S1: Create x86_64.rs — register + instruction model**
+
+```
+You are creating /home/z/my-project/vuma/src/codegen/src/x86_64.rs — the x86_64 backend.
+
+x86_64 is the MOST COMPLEX ISA: variable-length encoding (1-15 bytes), REX prefixes,
+ModR/M + SIB addressing, SystemV ABI with 6 int arg registers.
+
+Registers:
+- GP: RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8-R15
+- XMM: XMM0-XMM15
+- RSP = stack pointer (NOT allocatable), RBP = frame pointer (NOT allocatable)
+
+SystemV ABI:
+- Int args: RDI, RSI, RDX, RCX, R8, R9 (6 regs, then stack)
+- FP args: XMM0-XMM7 (8 regs, then stack)
+- Return: RAX (int), XMM0 (FP), RDX:RAX (128-bit)
+- Callee-saved: RBX, R12-R15, RBP
+- Stack must be 16-byte aligned before CALL
+
+Required instructions:
+- Data: MOV, MOVZX, MOVSX, LEA, XCHG, PUSH, POP
+- Arithmetic: ADD, SUB, IMUL, IDIV, INC, DEC, NEG, NOT
+- Logical: AND, OR, XOR, SHL, SHR, SAR, ROL, ROR
+- Compare: CMP, TEST
+- Conditional: SETcc, CMOVcc, Jcc
+- Control: JMP, CALL, RET, NOP, INT3
+- System: SYSCALL
+- SSE2: MOVSD, ADDSD, SUBSD, MULSD, DIVSD, UCOMISD, CVTSI2SD, CVTTSD2SI
+- Fences: MFENCE, LFENCE, SFENCE
+
+HARSH RULES:
+- Every instruction must have correct operand types.
+- encode() MUST produce EXACT bytes that a real x86_64 CPU executes.
+- You MUST handle REX prefix (0x40-0x4F) for 64-bit ops and extended registers.
+- You MUST handle ModR/M + SIB for all memory addressing modes.
+- No TODOs. No stubs.
+```
+
+**W9-S2 through W9-S9: x86_64 instruction encoding**
+
+```
+You are implementing x86_64 instruction encoding.
+
+SUBAGENT ASSIGNMENTS:
+- W9-S2: Data movement encoding (MOV, MOVZX, MOVSX, LEA, XCHG)
+- W9-S3: Arithmetic encoding (ADD, SUB, IMUL, IDIV, INC, DEC, NEG, NOT)
+- W9-S4: Logical + shift encoding (AND, OR, XOR, SHL, SHR, SAR, ROL, ROR)
+- W9-S5: Compare + conditional (CMP, TEST, SETcc, CMOVcc, Jcc)
+- W9-S6: Control flow + stack (JMP, CALL, RET, NOP, PUSH, POP, INT3, SYSCALL)
+- W9-S7: SSE2 encoding (MOVSD, ADDSD, SUBSD, MULSD, DIVSD, UCOMISD, CVTSI2SD, CVTTSD2SI, fences)
+- W9-S8: Disassembler (decode → Inst, round-trip with encode)
+- W9-S9: Comprehensive encoding tests (5+ per instruction, verify against objdump)
+
+HARSH RULES:
+- If ANY encoding is wrong, the ENTIRE BACKEND IS BROKEN.
+- You MUST test with objdump -d to verify emitted bytes are correct.
+- If REX prefix handling is wrong, you have FAILED.
+- If ModR/M + SIB is wrong, you have FAILED.
+- Every encode() must return EXACT bytes that a real x86_64 CPU would execute.
+```
+
+**W9-S10 through W9-S16: x86_64 Backend trait + ELF + execution**
+
+```
+You are implementing the Backend trait for x86_64 and making it EXECUTABLE.
+
+SUBAGENT ASSIGNMENTS:
+- W9-S10: X86_64Target implementing TargetInfo
+- W9-S11: X86_64Backend implementing Backend
+- W9-S12: x86_64 register allocator (SystemV ABI, 14 allocatable GP + 16 XMM)
+- W9-S13: SystemV ABI calling convention (arg classification, struct passing, stack alignment)
+- W9-S14: x86_64 IR emission (IR → x86_64 Inst)
+- W9-S15: x86_64 ELF64 emission (EM_X86_64=62, valid executable)
+- W9-S16: EXECUTION TEST: emit "return 42" program, chmod +x, run it, verify exit code 42
+
+HARSH RULES:
+- If the emitted binary doesn't execute on this x86_64 machine, you have FAILED.
+- If SystemV ABI is violated, you have FAILED.
+- If stack alignment is wrong (must be 16-byte before CALL), you have FAILED.
+- You MUST test with actual execution.
+- If callee-saved regs aren't preserved, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- x86_64 backend produces NATIVE EXECUTABLE code on this machine
+- "return 42" program runs and returns 42
+- SystemV ABI correctly implemented
+- All other backends still pass
+
+---
+
+## Wave 10: RISC-V64 Emission + QEMU Validation
+
+**Dependencies**: W6
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W10-S1 through W10-S8: RISC-V64 IR emission + QEMU execution**
+
+```
+You are implementing RISC-V64 IR emission and validating with QEMU.
+
+SUBAGENT ASSIGNMENTS:
+- W10-S1: IR → RISC-V64 instruction emission (every IR instruction mapped)
+- W10-S2: RISC-V64 calling convention tests (LP64D ABI compliance)
+- W10-S3: RISC-V64 switch/match lowering (using target-agnostic control_flow.rs)
+- W10-S4: RISC-V64 exception handling lowering
+- W10-S5: RISC-V64 tail call optimization
+- W10-S6: Install QEMU RISC-V64: apt install qemu-user-static
+          Test: emit RV64 ELF → run with qemu-riscv64-static → verify result
+- W10-S7: RISC-V64 QEMU execution tests (20+ programs: arithmetic, loops, recursion, memory)
+- W10-S8: RISC-V64 ELF validation (readelf, objdump)
+
+HARSH RULES:
+- If QEMU can't execute the emitted RISC-V64 code, you have FAILED.
+- If any test produces wrong results in QEMU, you have FAILED.
+- You MUST use qemu-riscv64-static to actually run the emitted code.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- RISC-V64 code executes correctly in QEMU
+- 20+ QEMU execution tests pass
+
+---
+
+## Wave 11: Wasm32 Emission + Runtime Validation
+
+**Dependencies**: W7
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W11-S1 through W11-S8: Wasm32 full emission + wasmtime validation**
+
+```
+You are implementing Wasm32 full emission and validating with wasmtime.
+
+SUBAGENT ASSIGNMENTS:
+- W11-S1: Full Wasm module generation (type section, import section, function section, export section, code section, data section)
+- W11-S2: Wasm memory model (linear memory, data segments)
+- W11-S3: Wasm WASI integration (fd_write for stdout, args_get for CLI args)
+- W11-S4: Wasm execution in wasmtime (compile .wasm → instantiate → call → verify)
+- W11-S5: Wasm execution in wasmer (same tests, different runtime)
+- W11-S6: Wasm browser test (generate HTML+JS that loads and runs .wasm)
+- W11-S7: Wasm control flow tests (block, loop, if, br_table)
+- W11-S8: Wasm multi-function programs
+
+HARSH RULES:
+- If .wasm doesn't validate with `wasm-validate`, you have FAILED.
+- If .wasm doesn't execute in wasmtime, you have FAILED.
+- If stack balance is wrong, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- Wasm32 code validates and executes in wasmtime
+- 20+ wasmtime execution tests pass
+
+---
+
+## Wave 12: LoongArch64 Emission + QEMU Validation
+
+**Dependencies**: W8
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W12-S1 through W12-S8: LoongArch64 emission + QEMU execution**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W12-S1: IR → LoongArch64 instruction emission
+- W12-S2: LoongArch64 calling convention tests
+- W12-S3: LoongArch64 control flow lowering
+- W12-S4: Install QEMU LoongArch64: build from source (QEMU 7.2+)
+- W12-S5: LoongArch64 QEMU execution tests (20+ programs)
+- W12-S6: LoongArch64 ELF validation
+- W12-S7: Cross-verification: same IR → RV64 + LA64 → both produce correct results
+- W12-S8: LoongArch64 regression tests
+
+HARSH RULES:
+- If QEMU can't execute the emitted LoongArch64 code, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- LoongArch64 code executes in QEMU
+- Cross-verification with RISC-V64 passes
+
+---
+
+## Wave 13: x86_64 Emission + Native Execution
+
+**Dependencies**: W9
+**Estimated subagents**: 12
+
+### Subagent Tasks:
+
+**W13-S1 through W13-S12: x86_64 full emission + native execution**
+
+```
+You are implementing x86_64 full emission and EXECUTING IT NATIVELY on this machine.
+
+SUBAGENT ASSIGNMENTS:
+- W13-S1: IR → x86_64 emission (every IR instruction category)
+- W13-S2: Arithmetic functions (add, sub, mul, div, rem, neg, not)
+- W13-S3: Bitwise functions (and, or, xor, shl, shr, sar)
+- W13-S4: Control flow (if/else, loops, switch, nested control flow)
+- W13-S5: Functions with 0-20 arguments
+- W13-S6: Recursive functions (factorial, fibonacci, tree)
+- W13-S7: Memory operations (load, store, stack, heap)
+- W13-S8: Exception handling and coroutines
+- W13-S9: Full pipeline: source → parse → SCG → BD → IVE → IR → x86_64 → ELF → EXECUTE
+- W13-S10: Cross-backend: same source → ARM64 + x86_64 → both produce correct results
+- W13-S11: Performance: compile 100+ function program, execute, verify
+- W13-S12: x86_64 ELF validation (readelf, objdump, file)
+
+FOR EACH EXECUTION TEST:
+1. Emit x86_64 ELF to /tmp/vuma_test_N.elf
+2. chmod +x
+3. Execute: /tmp/vuma_test_N.elf
+4. Verify exit code = expected result
+5. If wrong, objdump -d the ELF and debug the emitted code
+
+HARSH RULES:
+- If the emitted binary crashes (segfault), you have FAILED.
+- If the emitted binary returns wrong result, you have FAILED.
+- You MUST test with actual execution on THIS x86_64 machine.
+- If stack is misaligned, you have FAILED.
+- If calling convention is wrong, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+```
+
+### Success Criteria:
+- x86_64 code executes natively with correct results
+- 50+ native execution tests pass
+- Cross-backend parity with ARM64 verified
+
+---
+
+## Wave 14: RISC-V64 + LoongArch64 Integration
+
+**Dependencies**: W10, W12
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W14-S1 through W14-S8: RISC-V64 + LoongArch64 full pipeline integration**
+
+```
+You are testing full pipeline integration for RISC-V64 and LoongArch64.
+
+SUBAGENT ASSIGNMENTS:
+- W14-S1: Full RISC-V64 pipeline (source → SCG → BD → IVE → IR → RV64 → QEMU)
+- W14-S2: Full LoongArch64 pipeline (source → SCG → BD → IVE → IR → LA64 → QEMU)
+- W14-S3: Cross-ISA parity: 20 programs → ARM64 + RV64 + LA64 + x86_64 → all correct
+- W14-S4: RISC-V64 COR execution (compile → QEMU execute → profile → optimize → re-execute)
+- W14-S5: LoongArch64 COR execution
+- W14-S6: RISC-V64 + LoongArch64 REPL (compile → disassemble → verify)
+- W14-S7: RISC-V64 edge cases (compressed instructions, misaligned access)
+- W14-S8: LoongArch64 edge cases
+
+HARSH RULES:
+- If any ISA produces incorrect results, you have FAILED.
+- Cross-ISA parity must hold: same source → same semantic result on all 4 ISAs.
+- cargo test --workspace must pass.
+```
+
+### Success Criteria:
+- 4 ISA backends (ARM64, RV64, LA64, x86_64) all produce correct results
+- Cross-ISA parity verified
+
+---
+
+## Wave 15: COR x86_64 Native Execution
+
+**Dependencies**: W13
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W15-S1: COR execute_code for x86_64**
+
+```
+You are implementing COR runtime code execution on x86_64.
+
+CURRENT STATE:
+- ARM64: mmap + mprotect(PROT_READ|PROT_EXEC) + transmute to fn pointer + call
+- x86_64: Returns Ok(0) (STUB!)
+
+YOUR TASK:
+1. Add #[cfg(all(unix, target_arch = "x86_64"))] implementation:
+   - mmap code region with PROT_READ|PROT_WRITE
+   - copy compiled x86_64 code
+   - mprotect(PROT_READ|PROT_EXEC)
+   - transmute to fn pointer
+   - call it
+   - munmap
+2. Wire Backend selection: Config::TargetArch::X86_64 → X86_64Backend
+3. Update return_zero_stub: x86_64 returns MOV RAX,0 + RET (0xC3)
+4. Test: compile "return arg*2" → execute via COR → verify result
+
+HARSH RULES:
+- If COR still returns 0 on x86_64, you have FAILED.
+- If compiled code doesn't execute correctly, you have FAILED.
+- You MUST test with actual mmap/mprotect/execute.
+- cargo test -p vuma-cor must pass.
+```
+
+**W15-S2 through W15-S8: COR full cycle on x86_64**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W15-S2: COR compile → execute for simple functions (10+ tests)
+- W15-S3: COR recursive functions (factorial, fibonacci)
+- W15-S4: COR profiling on x86_64 (perf counters)
+- W15-S5: COR optimization passes on x86_64
+- W15-S6: COR full cycle: compile → execute → profile → optimize → re-execute → verify improvement
+- W15-S7: COR incremental compilation on x86_64
+- W15-S8: COR stress test (100 functions, 1000 executions each)
+
+HARSH RULES:
+- If COR optimization produces incorrect code, you have FAILED.
 - If there are memory leaks, you have FAILED.
 - cargo test -p vuma-cor must pass.
 ```
 
 ### Success Criteria:
-- Full COR cycle works on x86_64
-- All tests pass with correct results
-- No memory leaks or crashes
+- COR works fully on x86_64 (compile, execute, profile, optimize, re-execute)
+- All COR tests pass
 
 ---
 
-## Wave 16: Test Framework Expansion
+## Wave 16: ARM32 Backend (Legacy + Embedded)
 
-**Dependencies**: W2
-**Estimated subagents**: 8
+**Dependencies**: W13 (Backend pattern established)
+**Estimated subagents**: 16
+
+ARM32 is important for the embedded market. It's harder than ARM64 (variable-length Thumb, conditional execution, PC as R15) but follows the established backend pattern.
 
 ### Subagent Tasks:
 
-**W16-S1: Create test harness for x86_64 execution**
+**W16-S1 through W16-S16: Full ARM32 backend**
 
 ```
-You are creating a test harness at /home/z/my-project/vuma/src/tests/src/x86_64_harness.rs
-that compiles and executes VUMA code on x86_64.
+You are implementing the ARM32 backend for VUMA.
 
-YOUR TASK:
-1. Create a VumaTestHarness struct:
-   - compile(source: &str) -> CompiledTest — compiles VUMA source to x86_64 ELF
-   - compile_ir(ir: &IRProgram) -> CompiledTest — compiles IR to x86_64 ELF
-   - execute(compiled: &CompiledTest, arg: usize) -> usize — runs the ELF
-   - execute_with_args(compiled: &CompiledTest, args: &[usize]) -> usize — runs with multiple args
-2. CompiledTest holds the ELF bytes and provides:
-   - save_to_file(path: &str) — write ELF to disk
-   - disassemble() -> String — disassemble the .text section
-   - verify_elf() -> Result<()> — check ELF headers are valid
-3. Create assertion macros:
-   - assert_vuma_eq!(source, arg, expected) — compile, execute, assert result
-   - assert_vuma_panics!(source, arg) — compile, execute, assert it crashes
-4. Support both ARM64 (cross-compile, no execution) and x86_64 (native execution) modes.
-
-HARSH RULES:
-- If the harness can't compile and execute VUMA code, you have FAILED.
-- If assertion macros don't provide useful error messages, you have FAILED.
-- cargo test -p vuma-tests must pass.
-```
-
-**W16-S2 through W16-S8: Expand test coverage per crate**
-
-```
-You are expanding test coverage for CRATE_NAME.
+ARM32 is 6/10 complexity. Key challenges:
+- Two instruction sets: ARM (32-bit) and Thumb/Thumb-2 (16/32-bit mixed)
+- Conditional execution: most ARM instructions can be conditional (EQ, NE, LT, etc.)
+- PC is R15 — visible to programmers, causes pipeline complications
+- AAPCS calling convention: 4 int args (R0-R3), 16 FP args (S0-S15), stack for overflow
+- 16 GP regs (R0-R15), 32 FP/SIMD (D0-D31, S0-S31)
 
 SUBAGENT ASSIGNMENTS:
-- W16-S2: vuma-parser tests (50+ new tests for edge cases)
-- W16-S3: vuma-scg tests (SCG construction, dominance, liveness)
-- W16-S4: vuma-bd tests (BD inference, unification, lattice operations)
-- W16-S5: vuma-ive tests (five invariants, verification, constraint solving)
-- W16-S6: vuma-codegen tests (ARM64 + x86_64 encoding round-trips)
-- W16-S7: vuma-cor tests (compile→execute→profile→optimize cycle)
-- W16-S8: vuma-std tests (collections, alloc, sync, io)
+- W16-S1: ARM32 register + instruction type definitions (ARM + Thumb)
+- W16-S2: ARM encoding (data processing, load/store, branch)
+- W16-S3: Thumb encoding (16-bit + 32-bit Thumb-2)
+- W16-S4: ARM conditional instruction encoding
+- W16-S5: ARM multiply, divide, DSP instructions
+- W16-S6: VFP/NEON FP instruction encoding
+- W16-S7: ARM32 disassembler (round-trip encode→decode)
+- W16-S8: ARM32Target implementing TargetInfo
+- W16-S9: ARM32Backend implementing Backend
+- W16-S10: ARM32 register allocator (AAPCS)
+- W16-S11: ARM32 calling convention (AAPCS)
+- W16-S12: ARM32 ELF32 emission (EM_ARM=40)
+- W16-S13: ARM32 IR emission (IR → ARM/Thumb instructions)
+- W16-S14: ARM32 QEMU execution tests (qemu-arm-static)
+- W16-S15: ARM32 control flow lowering (switch, exception, tailcall)
+- W16-S16: ARM32 test suite (50+ tests)
 
 HARSH RULES:
-- Each subagent must add at least 30 NEW non-trivial tests.
-- Tests must cover edge cases, not just happy paths.
-- Tests must test BEHAVIOR, not just "doesn't crash".
-- cargo test --workspace must pass.
+- If ARM32 encoding doesn't match ARM Architecture Reference Manual, you have FAILED.
+- If AAPCS calling convention is violated, you have FAILED.
+- If conditional execution is not supported, you have FAILED.
+- You MUST test with qemu-arm-static.
+- If Thumb interworking is wrong, you have FAILED.
+- cargo test -p vuma-codegen must pass.
+- ALL other backend tests must still pass.
 ```
 
 ### Success Criteria:
-- Test harness works for both ARM64 and x86_64
-- 200+ new tests added across all crates
-- `cargo test --workspace` passes
+- Complete ARM32 backend with ARM + Thumb support
+- AAPCS calling convention implemented
+- Code executes in QEMU
+- 50+ new tests
 
 ---
 
-## Wave 17: ARM64 Regression Test Suite
+## Wave 17: MIPS64 Backend (Branch Delay Slots)
 
-**Dependencies**: W4
-**Estimated subagents**: 6
+**Dependencies**: W13
+**Estimated subagents**: 16
+
+MIPS64 is unique for its branch delay slots — the instruction AFTER a branch ALWAYS executes. This requires special handling in the code generator.
 
 ### Subagent Tasks:
 
-**W17-S1 through W17-S6: ARM64 cross-compilation validation**
+**W17-S1 through W17-S16: Full MIPS64 backend**
 
 ```
-You are creating a comprehensive ARM64 regression test suite that verifies ARM64
-codegen correctness WITHOUT needing an ARM64 CPU.
+You are implementing the MIPS64 backend for VUMA.
+
+MIPS64 is 5/10 complexity. Key challenges:
+- BRANCH DELAY SLOTS: instruction after branch always executes. Must insert NOP or useful instr.
+- HI/LO registers for multiply/divide results
+- N64 ABI: 4 int args ($a0-$a3), 4 FP args ($f12-$f15), more on stack
+- 32 GP regs ($zero=0, $at, $v0-$v1, $a0-$a3, $t0-$t9, $s0-$s7, $k0-$k1, $gp, $sp, $fp, $ra)
+- 32 FP regs ($f0-$f31)
 
 SUBAGENT ASSIGNMENTS:
-- W17-S1: ARM64 encoding golden files — compile programs, save ARM64 bytes as golden files, compare future runs
-- W17-S2: ARM64 disassembly verification — encode → disassemble → verify human-readable output matches ARM syntax
-- W17-S3: ARM64 calling convention tests — verify AAPCS64 compliance in emitted code
-- W17-S4: ARM64 ELF validation — verify ARM64 ELF headers, sections, relocations
-- W17-S5: ARM64 register allocation tests — verify correct register usage in emitted code
-- W17-S6: ARM64 vs x86_64 parity tests — same source → both backends → verify same semantic result
+- W17-S1: MIPS64 register + instruction type definitions (R, I, J formats)
+- W17-S2: R-type encoding (arithmetic, logical, shift, multiply, divide)
+- W17-S3: I-type encoding (immediate, load/store, branch)
+- W17-S4: J-type encoding (jump, jal)
+- W17-S5: FP instruction encoding
+- W17-S6: Branch delay slot handling (insert NOPs or reorder instructions)
+- W17-S7: MIPS64 disassembler (round-trip)
+- W17-S8: MIPS64Target implementing TargetInfo (has_branch_delay_slots=true!)
+- W17-S9: MIPS64Backend implementing Backend
+- W17-S10: MIPS64 register allocator (N64 ABI)
+- W17-S11: MIPS64 calling convention (N64 ABI)
+- W17-S12: MIPS64 ELF64 emission (EM_MIPS=8, big-endian by default)
+- W17-S13: MIPS64 IR emission with delay slot insertion
+- W17-S14: MIPS64 QEMU execution tests (qemu-mips64-static)
+- W17-S15: MIPS64 control flow lowering (switch with delay slots)
+- W17-S16: MIPS64 test suite (50+ tests)
 
 HARSH RULES:
-- If ANY ARM64 encoding changes unexpectedly, you have FAILED.
-- If ARM64 golden file tests don't catch regressions, you have FAILED.
-- These tests must work on x86_64 (they test the COMPILER, not the EXECUTION).
-- cargo test -p vuma-tests must pass.
+- If branch delay slots are not handled correctly, you have FAILED CATASTROPHICALLY.
+- If HI/LO register usage is wrong for multiply/divide, you have FAILED.
+- If N64 ABI is violated, you have FAILED.
+- You MUST test with qemu-mips64-static.
+- cargo test -p vuma-codegen must pass.
 ```
 
 ### Success Criteria:
-- ARM64 regression tests cover all instructions and calling conventions
-- Golden file comparison catches any encoding changes
-- `cargo test --workspace` passes
+- Complete MIPS64 backend with branch delay slot handling
+- N64 ABI implemented
+- Code executes in QEMU
+- 50+ new tests
 
 ---
 
-## Wave 18: x86_64 Unit Tests
+## Wave 18: PowerPC64 Backend (TOC + Condition Registers)
 
-**Dependencies**: W9 (part 1), W12 (part 2)
-**Estimated subagents**: 8
+**Dependencies**: W13
+**Estimated subagents**: 16
+
+PowerPC64 is the most complex RISC ISA (7/10). TOC pointer, 8 condition register fields, VSX overlapping register file, rlwinm bit-field operations, and ELFv2 ABI.
 
 ### Subagent Tasks:
 
-**W18-S1 through W18-S8: x86_64 unit tests by category**
+**W18-S1 through W18-S16: Full PowerPC64 backend**
 
 ```
-You are writing unit tests for the x86_64 backend.
+You are implementing the PowerPC64 backend for VUMA.
+
+PowerPC64 is 7/10 complexity. Key challenges:
+- TOC pointer (r2): all function calls and global variable access go through TOC
+- 8 condition register fields (CR0-CR7), each with 4 bits (LT, GT, EQ, SO)
+- VSX registers: 64 registers overlapping FPRs and VMXs
+- rlwinm family: rotate-left-then-mask-insert — used for ALL bit-field operations
+- ELFv2 ABI: 8 int args (R3-R10), 13 FP args (F1-F13), TOC in R2, R12 is entry point
 
 SUBAGENT ASSIGNMENTS:
-- W18-S1: Instruction encoding tests (every x86_64 instruction, every addressing mode)
-- W18-S2: Disassembly round-trip tests (encode → decode → encode matches)
-- W18-S3: Register allocation tests (spilling, coalescing, callee-saved)
-- W18-S4: Calling convention tests (SystemV ABI compliance)
-- W18-S5: ELF emission tests (valid headers, sections, relocations)
-- W18-S6: Control flow tests (switch, exception, tailcall, coroutine)
-- W18-S7: Memory operation tests (load, store, stack, heap)
-- W18-S8: Execution tests (compile → execute → verify result on THIS x86_64 machine)
+- W18-S1: PPC64 register definitions (GP, FPR, VMX, VSX, CR fields)
+- W18-S2: PPC64 instruction format encoding (all 6 formats)
+- W18-S3: Integer arithmetic + logical + shift + rotate encoding
+- W18-S4: Load/store encoding (indexed, update, string)
+- W18-S5: Branch + CR manipulation encoding
+- W18-S6: FP + VSX instruction encoding
+- W18-S7: PPC64 disassembler (round-trip)
+- W18-S8: PPC64Target implementing TargetInfo (has_toc_pointer=true, has_condition_registers=true)
+- W18-S9: PPC64Backend implementing Backend
+- W18-S10: PPC64 register allocator (ELFv2 ABI)
+- W18-S11: PPC64 calling convention (ELFv2, TOC handling, function descriptors)
+- W18-S12: PPC64 ELF64 emission (EM_PPC64=21, big-endian by default)
+- W18-S13: PPC64 IR emission (including rlwinm generation for bit-field ops)
+- W18-S14: PPC64 QEMU execution tests (qemu-ppc64-static or qemu-system-ppc64)
+- W18-S15: PPC64 control flow lowering (CR-based conditional branches)
+- W18-S16: PPC64 test suite (50+ tests)
 
 HARSH RULES:
-- You MUST test with ACTUAL EXECUTION where possible.
-- "Compiles without errors" is NOT sufficient — the emitted code must be CORRECT.
-- If you skip any instruction or addressing mode, you have FAILED.
-- Each subagent must write at least 50 tests.
-- cargo test -p vuma-codegen and cargo test -p vuma-tests must pass.
+- If TOC handling is wrong, you have FAILED.
+- If CR field manipulation is incorrect, you have FAILED.
+- If ELFv2 ABI is violated, you have FAILED.
+- If rlwinm encoding is wrong, you have FAILED.
+- You MUST test with QEMU.
+- cargo test -p vuma-codegen must pass.
 ```
 
 ### Success Criteria:
-- 400+ new x86_64 unit tests
-- All tests pass with actual execution
-- `cargo test --workspace` passes
+- Complete PowerPC64 backend with TOC and CR handling
+- ELFv2 ABI implemented
+- Code executes in QEMU
+- 50+ new tests
 
 ---
 
-## Wave 19: Integration Tests
+## Wave 19: Multi-Backend Integration Test
 
-**Dependencies**: W15 (part 1), W18 (part 2)
+**Dependencies**: W14, W15
 **Estimated subagents**: 12
 
 ### Subagent Tasks:
 
-**W19-S1 through W19-S12: Full pipeline integration tests**
+**W19-S1 through W19-S12: Cross-ISA integration testing**
 
 ```
-You are writing integration tests that exercise the ENTIRE VUMA pipeline on x86_64.
+You are writing integration tests that verify ALL backends work together.
 
 SUBAGENT ASSIGNMENTS:
-- W19-S1: Parse → SCG → BD inference → verify BD triples
-- W19-S2: SCG → IVE verification → verify all five invariants pass
-- W19-S3: IVE → IR → x86_64 emission → execute → verify result
-- W19-S4: Full pipeline: source → parse → SCG → BD → IVE → IR → x86_64 → ELF → execute
-- W19-S5: Error handling: malformed source → parse error → verify error message
-- W19-S6: Error handling: type mismatch → IVE error → verify error message
-- W19-S7: Error handling: invariant violation → IVE rejection → verify error message
-- W19-S8: REPL: enter expression → evaluate → result
-- W19-S9: Multi-file programs: import → compile → execute
-- W19-S10: COR integration: compile → execute → profile → optimize → re-execute
-- W19-S11: Cross-compilation: x86_64 host → ARM64 target → verify ARM64 ELF
-- W19-S12: Stress test: 100+ function program → compile → execute → verify
-
-FOR EACH TEST:
-1. Test the COMPLETE pipeline, not just individual stages.
-2. Verify every intermediate result (SCG, BD, IVE, IR, machine code).
-3. For execution tests, verify the result on this x86_64 machine.
+- W19-S1: Cross-ISA parity test: 30 programs → ARM64 + RV64 + x86_64 + Wasm → all correct
+- W19-S2: Cross-ISA parity: add LA64, ARM32 → 30 programs → 5 ISAs → all correct
+- W19-S3: Cross-ISA parity: add MIPS64, PPC64 → 30 programs → ALL 8 ISAs → all correct
+- W19-S4: Backend factory test: create_backend for each of 8 kinds → all work
+- W19-S5: Pipeline with target selection: --target riscv64 → produces RV64 ELF
+- W19-S6: Full pipeline: source → all 8 backends → 8 outputs → all semantically correct
+- W19-S7: COR with multi-backend: compile for x86_64 → execute natively
+- W19-S8: COR with multi-backend: compile for RV64 → execute in QEMU
+- W19-S9: Cross-compilation: x86_64 host → ARM64 target → valid ARM64 ELF
+- W19-S10: Error handling: invalid target → error message
+- W19-S11: REPL with multi-backend: :target riscv64 → switch backend
+- W19-S12: Performance benchmark: compile same program for all 8 ISAs, measure compile time
 
 HARSH RULES:
-- If any pipeline stage produces incorrect output, you have FAILED.
-- If error handling doesn't work correctly, you have FAILED.
-- If the REPL doesn't work, you have FAILED.
-- Each test must be INDEPENDENT (no shared mutable state).
-- cargo test -p vuma-tests must pass.
-```
-
-### Success Criteria:
-- Full pipeline integration tests pass
-- Error handling works correctly
-- `cargo test --workspace` passes
-
----
-
-## Wave 20: Full Pipeline x86_64
-
-**Dependencies**: W15
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W20-S1: Pipeline orchestration for x86_64**
-
-```
-You are updating the main VUMA pipeline at /home/z/my-project/vuma/src/vuma/src/pipeline.rs
-to support x86_64 as a native target.
-
-YOUR TASK:
-1. Update PipelineConfig to include a target field (BackendKind).
-2. Update Pipeline::run() to:
-   - Detect x86_64 host and select X86_64 backend automatically
-   - Allow explicit target override (--target arm64 for cross-compilation)
-3. Update all pipeline stages to pass TargetInfo through.
-4. Test: run the full pipeline on this x86_64 machine with a simple program.
-5. Verify the output ELF runs correctly.
-
-HARSH RULES:
-- If the pipeline still hardcodes ARM64, you have FAILED.
-- If x86_64 execution doesn't work end-to-end, you have FAILED.
-- You MUST test with actual execution on this machine.
-- cargo test -p vuma-core must pass.
-```
-
-**W20-S2 through W20-S8: Pipeline stage updates for x86_64**
-
-```
-You are updating specific pipeline stages for x86_64 support.
-
-SUBAGENT ASSIGNMENTS:
-- W20-S2: Parse stage (target-independent, verify no ARM64 assumptions)
-- W20-S3: SCG construction (target-independent, verify)
-- W20-S4: BD inference (target-independent, verify)
-- W20-S5: IVE verification (verify TargetInfo propagation)
-- W20-S6: IR generation (verify TargetInfo propagation)
-- W20-S7: Code generation (x86_64 backend selection)
-- W20-S8: COR initialization (x86_64 execution setup)
-
-HARSH RULES:
-- If any stage still has ARM64-only code paths, you have FAILED.
-- If the pipeline doesn't work on x86_64, you have FAILED.
-- cargo test -p vuma-core must pass.
-```
-
-### Success Criteria:
-- Full pipeline works on x86_64 from source to execution
-- `cargo test --workspace` passes
-
----
-
-## Wave 21: Cross-Compilation Workflow
-
-**Dependencies**: W20
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W21-S1: Cross-compilation support**
-
-```
-You are implementing cross-compilation from x86_64 host to ARM64 target.
-
-YOUR TASK:
-1. Add --target flag to VUMA CLI:
-   - `vuma build --target x86_64` (native)
-   - `vuma build --target arm64` (cross-compile to ARM64)
-2. When cross-compiling to ARM64:
-   - Use ARM64 backend for code generation
-   - Emit ARM64 ELF
-   - Do NOT attempt to execute the output (can't run on x86_64)
-3. When targeting x86_64:
-   - Use x86_64 backend
-   - Emit x86_64 ELF
-   - CAN execute the output
-4. Add validation: verify the emitted ARM64 ELF has correct headers (EM_AARCH64).
-5. Add validation: verify the emitted x86_64 ELF has correct headers (EM_X86_64).
-
-HARSH RULES:
-- If cross-compilation produces invalid ARM64 ELF, you have FAILED.
-- If native x86_64 compilation doesn't work, you have FAILED.
-- You MUST test both targets.
-- cargo test must pass.
-```
-
-**W21-S2 through W21-S6: Cross-compilation testing**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W21-S2: ARM64 cross-compilation golden file tests
-- W21-S3: x86_64 native compilation + execution tests
-- W21-S4: Target selection CLI tests
-- W21-S5: Multi-target build (compile same source for both targets)
-- W21-S6: Cross-compilation error handling (invalid target, missing tools)
-
-HARSH RULES:
-- If any target produces invalid output, you have FAILED.
+- If ANY backend produces incorrect results, you have FAILED.
+- If cross-ISA parity doesn't hold, you have FAILED.
+- You MUST test with actual execution where possible (x86_64 native, RV64/LA64/ARM32/MIPS/PPC in QEMU, Wasm in wasmtime).
 - cargo test --workspace must pass.
 ```
 
 ### Success Criteria:
-- Cross-compilation from x86_64 to ARM64 works
-- Native x86_64 compilation works
-- `cargo test --workspace` passes
+- All 8 backends produce correct results
+- Cross-ISA parity verified for 30+ programs
+- Full pipeline works with any target selection
 
 ---
 
-## Wave 22: REPL on x86_64
-
-**Dependencies**: W20
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W22-S1: REPL with x86_64 execution**
-
-```
-You are making the VUMA REPL work on x86_64 with actual code execution.
-
-YOUR TASK:
-1. Update /home/z/my-project/vuma/src/vuma/src/repl.rs to use the x86_64 backend.
-2. The REPL must:
-   - Parse input line by line
-   - Build SCG incrementally
-   - Run BD inference and IVE verification
-   - Compile to x86_64 via Backend trait
-   - Execute the compiled code via COR
-   - Print the result
-3. Support multi-line input (blocks, function definitions).
-4. Support :help, :quit, :type (show BD), :scg (show graph), :ir (show IR), :asm (disassemble).
-
-HARSH RULES:
-- If the REPL can't execute code on x86_64, you have FAILED.
-- If the REPL crashes on invalid input, you have FAILED.
-- You MUST test with actual REPL interaction.
-- cargo test -p vuma-core must pass.
-```
-
-**W22-S2 through W22-S6: REPL features**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W22-S2: Incremental compilation in REPL (add function, call it)
-- W22-S3: REPL error recovery (bad input → error → continue)
-- W22-S4: REPL debugging (:ir, :asm, :scg commands)
-- W22-S5: REPL history and completion
-- W22-S6: REPL integration tests
-
-HARSH RULES:
-- If the REPL doesn't handle errors gracefully, you have FAILED.
-- cargo test --workspace must pass.
-```
-
-### Success Criteria:
-- VUMA REPL works on x86_64 with actual execution
-- `cargo test --workspace` passes
-
----
-
-## Wave 23: Pi5 Platform Abstraction
-
-**Dependencies**: W2
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W23-S1: Abstract Pi5 platform for testability**
-
-```
-You are refactoring vuma-pi5 to support testing on x86_64.
-
-CURRENT STATE:
-- boot.rs, smp.rs, timer.rs are gated behind #[cfg(target_arch = "aarch64")]
-- uart.rs and gpio.rs use #[cfg(test)] for mock implementations
-- mmio.rs uses ARM64 dmb/dsb barriers
-
-YOUR TASK:
-1. Create a Pi5Backend trait in platform.rs:
-   ```rust
-   pub trait Pi5Backend: Send + Sync {
-       fn mmio_read(&self, addr: u64) -> u32;
-       fn mmio_write(&self, addr: u64, val: u32);
-       fn barrier_dmb(&self);
-       fn barrier_dsb(&self);
-       fn timer_read(&self) -> u64;
-       fn timer_frequency(&self) -> u64;
-   }
-   ```
-2. Implement RealPi5Backend (ARM64 only, uses inline asm for barriers)
-3. Implement MockPi5Backend (x86_64 + test, uses simulated state)
-4. Refactor mmio.rs, uart.rs, gpio.rs to use Pi5Backend instead of direct hardware access.
-5. All existing tests must still pass.
-
-HARSH RULES:
-- If you break any ARM64 functionality, you have FAILED.
-- If tests can't run on x86_64, you have FAILED.
-- You MUST NOT use conditional compilation inside functions — use the trait instead.
-- cargo test -p vuma-pi5 must pass on x86_64.
-```
-
-**W23-S2 through W23-S6: Per-module abstraction**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W23-S2: Abstract uart.rs to use Pi5Backend
-- W23-S3: Abstract gpio.rs to use Pi5Backend
-- W23-S4: Abstract mmio.rs to use Pi5Backend
-- W23-S5: Create MockPi5Backend with simulated UART/GPIO state
-- W23-S6: Write comprehensive tests using MockPi5Backend
-
-HARSH RULES:
-- If any module still uses direct hardware access without going through Pi5Backend, you have FAILED.
-- cargo test -p vuma-pi5 must pass on x86_64.
-```
-
-### Success Criteria:
-- vuma-pi5 can be fully tested on x86_64 using MockPi5Backend
-- All ARM64 functionality preserved
-- `cargo test --workspace` passes
-
----
-
-## Wave 24: MMIO Emulation Layer
-
-**Dependencies**: W23
-**Estimated subagents**: 4
-
-### Subagent Tasks:
-
-**W24-S1: Full MMIO emulator for x86_64 testing**
-
-```
-You are creating a full MMIO emulator that simulates Pi 5 hardware on x86_64.
-
-YOUR TASK:
-1. Create /home/z/my-project/vuma/src/pi5/src/emulator.rs:
-   - MmioBus struct that maps addresses to simulated devices
-   - Simulated PL011 UART (with TX/RX buffers)
-   - Simulated RP1 GPIO (with pin state)
-   - Simulated BCM2712 system timer
-   - Simulated BCM2712 interrupt controller
-2. Implement Pi5Backend using MmioBus for full simulation.
-3. Test: run UART driver against emulator → verify TX/RX works.
-4. Test: run GPIO driver against emulator → verify pin read/write works.
-
-HARSH RULES:
-- If the emulator doesn't accurately simulate Pi 5 hardware, you have FAILED.
-- You MUST test with the actual vuma-pi5 drivers.
-- cargo test -p vuma-pi5 must pass on x86_64.
-```
-
-**W24-S2 through W24-S4: Emulator tests**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W24-S2: UART emulator tests (send/receive bytes, interrupts)
-- W24-S3: GPIO emulator tests (pin modes, pull-up/down, interrupts)
-- W24-S4: Timer + interrupt controller emulator tests
-
-HARSH RULES:
-- If any emulator test fails, you have FAILED.
-- cargo test -p vuma-pi5 must pass.
-```
-
-### Success Criteria:
-- Full Pi 5 MMIO emulation on x86_64
-- All vuma-pi5 drivers can be tested against the emulator
-- `cargo test --workspace` passes
-
----
-
-## Wave 25: UART/GPIO Simulation
-
-**Dependencies**: W24
-**Estimated subagents**: 4
-
-### Subagent Tasks:
-
-**W25-S1: Advanced UART simulation**
-
-```
-You are enhancing the UART emulator for realistic Pi 5 testing.
-
-YOUR TASK:
-1. Simulate UART FIFO with configurable depth
-2. Simulate baud rate timing (not real-time, but logical)
-3. Simulate framing errors, parity errors, overrun errors
-4. Test all UART driver features against the enhanced emulator
-5. Add loopback test: TX → emulator → RX
-
-HARSH RULES:
-- If the UART emulator doesn't accurately model PL011 behavior, you have FAILED.
-- You must test error conditions, not just happy paths.
-- cargo test -p vuma-pi5 must pass.
-```
-
-**W25-S2 through W25-S4: GPIO, timer, and integration**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W25-S2: Advanced GPIO simulation (interrupts, debounce, PWM)
-- W25-S3: Timer simulation (match registers, interrupts)
-- W25-S4: Full Pi 5 simulation integration test
-
-HARSH RULES:
-- cargo test -p vuma-pi5 must pass on x86_64.
-```
-
-### Success Criteria:
-- Advanced hardware simulation for Pi 5 peripherals
-- All vuma-pi5 tests pass on x86_64
-
----
-
-## Wave 26: Error Handling Audit
+## Wave 20: QEMU Test Infrastructure
 
 **Dependencies**: W19
 **Estimated subagents**: 8
 
 ### Subagent Tasks:
 
-**W26-S1 through W26-S8: Per-crate error handling audit**
+**W20-S1 through W20-S8: Automated QEMU testing for all ISAs**
 
 ```
-You are auditing and improving error handling in CRATE_NAME.
-
-AUDIT CRITERIA:
-1. Every public function that can fail MUST return Result<T, E>
-2. Error types must be specific (not just String or anyhow)
-3. Error messages must include:
-   - What operation failed
-   - Why it failed
-   - Where it failed (source location)
-   - What the user can do to fix it
-4. No unwrap() in non-test code
-5. No panic!() in non-test code (except for truly impossible states)
-6. No expect() without a meaningful message
-7. All errors must propagate correctly (no silent swallowing)
-
-CRATE ASSIGNMENTS:
-- W26-S1: vuma-parser
-- W26-S2: vuma-scg
-- W26-S3: vuma-bd
-- W26-S4: vuma-ive
-- W26-S5: vuma-codegen
-- W26-S6: vuma-cor
-- W26-S7: vuma-core
-- W26-S8: vuma-std, vuma-pi5, vuma-proof, vuma-projection
-
-YOUR TASK:
-1. Find all unwrap(), expect(), panic!() in non-test code.
-2. Replace with proper error propagation using Result.
-3. Find all places where errors are silently ignored (let _ = ...).
-4. Add proper error handling.
-5. Ensure all error types implement std::error::Error and Display.
-6. Write tests for error conditions.
-
-HARSH RULES:
-- If you leave ANY unwrap() in non-test code, you have FAILED.
-- If you leave ANY panic!() in non-test code (except for impossible states), you have FAILED.
-- If error messages don't help the user diagnose the problem, you have FAILED.
-- If you break any existing test, you have FAILED.
-- cargo test --workspace must pass.
-```
-
-### Success Criteria:
-- Zero unwrap/panic in non-test code
-- All errors properly typed and propagated
-- `cargo test --workspace` passes
-
----
-
-## Wave 27: Memory Safety Audit
-
-**Dependencies**: W19
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W27-S1 through W27-S8: Per-crate memory safety audit**
-
-```
-You are auditing memory safety in CRATE_NAME.
-
-AUDIT CRITERIA:
-1. All unsafe blocks must have a SAFETY comment explaining why the operation is safe.
-2. All transmute calls must be justified.
-3. All raw pointer dereferences must be validated.
-4. No use-after-free possible.
-5. No double-free possible.
-6. No buffer overflow possible.
-7. No integer overflow in size calculations (use checked arithmetic).
-8. All FFI calls must have correct type signatures.
-9. All static mut must be replaced with safe alternatives (AtomicX, OnceCell, etc.)
-
-CRATE ASSIGNMENTS:
-- W27-S1: vuma-codegen (unsafe in encode/decode, ELF emission)
-- W27-S2: vuma-cor (unsafe in mmap/mprotect/transmute/execute)
-- W27-S3: vuma-pi5 (unsafe in MMIO, UART, GPIO)
-- W27-S4: vuma-std (unsafe in alloc, collections)
-- W27-S5: vuma-core (unsafe in pipeline, security)
-- W27-S6: vuma-ive (check for unsafe)
-- W27-S7: vuma-bd, vuma-scg, vuma-parser (check for unsafe)
-- W27-S8: vuma-proof, vuma-projection, vuma-tests (check for unsafe)
-
-YOUR TASK:
-1. Find ALL unsafe blocks.
-2. For each one, add a SAFETY comment or refactor to eliminate the unsafe.
-3. Find all static mut and replace with safe alternatives.
-4. Find all integer arithmetic that could overflow and use checked/saturating ops.
-5. Verify no memory leaks in COR execution paths.
-6. Write tests for edge cases (zero-size allocations, max-size allocations, etc.).
-
-HARSH RULES:
-- If any unsafe block lacks a SAFETY comment, you have FAILED.
-- If any unsafe can be replaced with safe code and you didn't, you have FAILED.
-- If any static mut can be replaced with a safe alternative and you didn't, you have FAILED.
-- cargo test --workspace must pass.
-```
-
-### Success Criteria:
-- All unsafe blocks have SAFETY comments
-- No unnecessary unsafe
-- No static mut without justification
-- `cargo test --workspace` passes
-
----
-
-## Wave 28: UB Sanitization (Miri, ASAN, TSAN)
-
-**Dependencies**: W27
-**Estimated subagents**: 6
-
-### Subagent Tasks:
-
-**W28-S1: Run Miri on all crates**
-
-```
-You are running Miri (MIR Interpreter) to detect undefined behavior.
-
-YOUR TASK:
-1. Install Miri: rustup +nightly component add miri
-2. Run: cargo miri test --workspace 2>&1
-3. If Miri finds ANY undefined behavior, FIX IT.
-4. Common Miri findings:
-   - Out-of-bounds access
-   - Use of uninitialized memory
-   - Invalid pointer arithmetic
-   - Data races (use -Zmiri-track-raw-pointers)
-5. Document all Miri issues found and fixed.
-
-HARSH RULES:
-- If Miri finds UB and you don't fix it, you have FAILED.
-- If you suppress Miri errors instead of fixing the root cause, you have FAILED.
-- cargo miri test --workspace must pass with zero errors.
-```
-
-**W28-S2: Run AddressSanitizer (ASAN)**
-
-```
-You are running ASAN to detect memory errors.
-
-YOUR TASK:
-1. Compile with: RUSTFLAGS="-Zsanitizer=address" cargo test --workspace --target x86_64-unknown-linux-gnu
-2. Fix any ASAN errors (heap-buffer-overflow, use-after-free, memory leaks).
-3. Document all issues found and fixed.
-
-HARSH RULES:
-- If ASAN finds errors and you don't fix them, you have FAILED.
-```
-
-**W28-S3: Run ThreadSanitizer (TSAN)**
-
-```
-You are running TSAN to detect data races.
-
-YOUR TASK:
-1. Compile with: RUSTFLAGS="-Zsanitizer=thread" cargo test --workspace --target x86_64-unknown-linux-gnu
-2. Fix any data races found.
-3. Document all issues found and fixed.
-
-HARSH RULES:
-- If TSAN finds data races and you don't fix them, you have FAILED.
-```
-
-**W28-S4 through W28-S6: Fix all sanitizer findings**
-
-```
-You are fixing sanitizer findings across the workspace.
+You are building automated QEMU-based testing infrastructure for VUMA.
 
 SUBAGENT ASSIGNMENTS:
-- W28-S4: Fix Miri findings
-- W28-S5: Fix ASAN findings
-- W28-S6: Fix TSAN findings
+- W20-S1: Install all QEMU variants: qemu-{arm,aarch64,riscv64,mips64,ppc64}-static
+- W20-S2: Create QemuTestHarness struct: compile → emit ELF → run in QEMU → capture exit code
+- W20-S3: RISC-V64 QEMU test suite (30+ programs)
+- W20-S4: LoongArch64 QEMU test suite (30+ programs)
+- W20-S5: ARM32 QEMU test suite (30+ programs)
+- W20-S6: MIPS64 QEMU test suite (30+ programs)
+- W20-S7: PowerPC64 QEMU test suite (30+ programs)
+- W20-S8: Wasm wasmtime test suite (30+ programs)
+
+FOR EACH QEMU TEST:
+1. Compile VUMA source to target ISA
+2. Emit ELF (or .wasm for Wasm)
+3. Run in QEMU (or wasmtime for Wasm)
+4. Capture exit code / output
+5. Verify against expected result
 
 HARSH RULES:
-- ALL sanitizer tests must pass with zero errors.
+- If QEMU can't run any emitted binary, you have FAILED.
+- If any test produces wrong results, you have FAILED.
 - cargo test --workspace must pass.
 ```
 
 ### Success Criteria:
-- Miri passes with zero UB findings
-- ASAN passes with zero memory errors
-- TSAN passes with zero data races
-- `cargo test --workspace` passes
+- All 8 ISAs have 30+ QEMU/wasmtime execution tests
+- All tests pass
 
 ---
 
-## Wave 29: Full Codebase Audit
+## Wave 21: Full Codebase Audit
 
-**Dependencies**: W28
+**Dependencies**: W20
 **Estimated subagents**: 12
 
 ### Subagent Tasks:
 
-**W29-S1 through W29-S12: Comprehensive audit by area**
+**W21-S1 through W21-S12: Per-crate comprehensive audit**
 
 ```
-You are performing a FINAL comprehensive audit of CRATE_NAME.
-
-AUDIT CHECKLIST:
-1. API consistency: Do all public APIs follow the same naming conventions?
-2. Documentation: Does every public function/struct/enum have a doc comment?
-3. Test coverage: Are all public functions tested? What's the coverage percentage?
-4. Error handling: Are all errors properly typed and propagated?
-5. Performance: Are there any obvious performance bottlenecks?
-6. Correctness: Are there any logical bugs?
-7. Security: Are there any security vulnerabilities?
-8. Code style: Does the code follow Rust conventions (cargo fmt, cargo clippy)?
-9. Dependencies: Are all dependencies necessary and up-to-date?
-10. Concurrency: Are all concurrent operations safe?
+You are auditing CRATE_NAME for quality, correctness, and consistency across all 8 backends.
 
 CRATE ASSIGNMENTS:
-- W29-S1: vuma-parser
-- W29-S2: vuma-scg
-- W29-S3: vuma-bd
-- W29-S4: vuma-ive
-- W29-S5: vuma-codegen
-- W29-S6: vuma-cor
-- W29-S7: vuma-core
-- W29-S8: vuma-std
-- W29-S9: vuma-pi5
-- W29-S10: vuma-proof
-- W29-S11: vuma-projection
-- W29-S12: vuma-tests
+- W21-S1: vuma-parser
+- W21-S2: vuma-scg
+- W21-S3: vuma-bd
+- W21-S4: vuma-ive
+- W21-S5: vuma-codegen (CRITICAL — audit all 8 backends for consistency)
+- W21-S6: vuma-cor
+- W21-S7: vuma-core
+- W21-S8: vuma-std
+- W21-S9: vuma-pi5
+- W21-S10: vuma-proof
+- W21-S11: vuma-projection
+- W21-S12: vuma-tests
 
 FOR EACH CRATE:
-1. Run: cargo clippy -p CRATE_NAME -- -D warnings
-2. Fix ALL clippy warnings.
-3. Run: cargo fmt -p CRATE_NAME -- --check
-4. Fix ALL formatting issues.
-5. Generate a report with:
-   - Total lines of code
-   - Number of public APIs
-   - Number of tests
-   - Number of unsafe blocks
-   - Number of TODO/FIXME/HACK comments
-   - Test coverage estimate
+1. cargo clippy -p CRATE_NAME -- -D warnings → fix ALL warnings
+2. cargo fmt -p CRATE_NAME -- --check → fix ALL formatting
+3. Check for: unwrap() in non-test, panic!() in non-test, unsafe without SAFETY comment
+4. Check for: hardcoded ISA assumptions (only ARM64 is acceptable in arm64.rs)
+5. Generate audit report: lines, public APIs, tests, unsafe blocks, TODOs
 
 HARSH RULES:
 - If clippy has ANY warnings, you have FAILED.
@@ -2191,220 +1555,37 @@ HARSH RULES:
 ### Success Criteria:
 - `cargo clippy --workspace -- -D warnings` passes
 - `cargo fmt -- --check` passes
-- Zero TODO/FIXME/HACK comments without associated issues
-- All crates audited with reports
+- All crates audited
 
 ---
 
-## Wave 30: Documentation
+## Wave 22: Cross-Compilation + Release
 
-**Dependencies**: W29
-**Estimated subagents**: 10
-
-### Subagent Tasks:
-
-**W30-S1: Architecture documentation**
-
-```
-You are writing architecture documentation for VUMA at /home/z/my-project/vuma/docs/.
-
-YOUR TASK: Write docs/architecture.md covering:
-1. System overview (BD reasoning, five invariants, SCG, COR)
-2. 12-crate architecture diagram
-3. Pipeline stages (parse → SCG → BD → IVE → IR → codegen → COR)
-4. Backend abstraction (Backend trait, TargetInfo, ARM64 vs x86_64)
-5. Cross-compilation model
-6. Data flow between crates
-7. Extension points
-
-Minimum 2000 words. No filler. Every paragraph must convey information.
-
-HARSH RULES:
-- If the documentation is inaccurate, you have FAILED.
-- If the documentation is incomplete, you have FAILED.
-- If a new contributor couldn't understand the architecture from this doc, you have FAILED.
-```
-
-**W30-S2 through W30-S10: Documentation per crate**
-
-```
-You are writing crate-level documentation for CRATE_NAME.
-
-CRATE ASSIGNMENTS:
-- W30-S2: vuma-parser docs
-- W30-S3: vuma-scg docs
-- W30-S4: vuma-bd docs
-- W30-S5: vuma-ive docs
-- W30-S6: vuma-codegen docs (CRITICAL — document Backend trait, ARM64, x86_64)
-- W30-S7: vuma-cor docs
-- W30-S8: vuma-core docs
-- W30-S9: vuma-std docs
-- W30-S10: vuma-pi5 docs
-
-FOR EACH CRATE:
-1. Add rustdoc comments to ALL public APIs (functions, structs, enums, traits).
-2. Add module-level doc comments explaining the crate's purpose and design.
-3. Add code examples in doc comments where appropriate.
-4. Run: cargo doc -p CRATE_NAME --no-deps — verify no doc warnings.
-5. Write a docs/CRATE_NAME.md with usage guide and examples.
-
-HARSH RULES:
-- If any public API lacks documentation, you have FAILED.
-- If doc tests fail, you have FAILED.
-- cargo doc --workspace must pass with zero warnings.
-- cargo test --doc must pass.
-```
-
-### Success Criteria:
-- All public APIs have rustdoc
-- `cargo doc --workspace` passes with zero warnings
-- Architecture documentation is comprehensive
-- `cargo test --workspace` passes
-
----
-
-## Wave 31: CI/CD Pipeline
-
-**Dependencies**: W29
-**Estimated subagents**: 8
-
-### Subagent Tasks:
-
-**W31-S1: GitHub Actions CI**
-
-```
-You are creating a GitHub Actions CI pipeline at /home/z/my-project/vuma/.github/workflows/ci.yml.
-
-YOUR TASK: Create a CI workflow that runs on every push and PR:
-
-```yaml
-name: CI
-on: [push, pull_request]
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo check --workspace
-  
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo test --workspace
-  
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: clippy }
-      - run: cargo clippy --workspace -- -D warnings
-  
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with: { components: rustfmt }
-      - run: cargo fmt -- --check
-  
-  doc:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo doc --workspace --no-deps
-  
-  miri:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: rustup +nightly component add miri
-      - run: cargo miri test --workspace
-```
-
-HARSH RULES:
-- If the CI doesn't catch a failing test, you have FAILED.
-- If the CI doesn't run on PRs, you have FAILED.
-```
-
-**W31-S2 through W31-S8: Additional CI jobs and release automation**
-
-```
-SUBAGENT ASSIGNMENTS:
-- W31-S2: Cross-compilation CI (ARM64 target on x86_64 host)
-- W31-S3: Benchmark CI (run benchmarks, track performance over time)
-- W31-S4: Security audit CI (cargo audit for dependencies)
-- W31-S5: Coverage CI (cargo tarpaulin or cargo-llvm-cov)
-- W31-S6: Release automation (tag → build → publish)
-- W31-S7: Nightly Miri CI (run Miri every night)
-- W31-S8: README badge generation
-
-HARSH RULES:
-- All CI workflows must pass on the current codebase.
-- cargo test --workspace must pass.
-```
-
-### Success Criteria:
-- Full CI/CD pipeline in GitHub Actions
-- All CI jobs pass
-- `cargo test --workspace` passes
-
----
-
-## Wave 32: Release Preparation
-
-**Dependencies**: W30, W31
+**Dependencies**: W21
 **Estimated subagents**: 12
 
 ### Subagent Tasks:
 
-**W32-S1: Version bump and changelog**
+**W22-S1 through W22-S12: Final validation + release**
 
 ```
-You are preparing VUMA for release.
-
-YOUR TASK:
-1. Update version in all Cargo.toml files to 0.2.0 (first x86_64-capable release).
-2. Update CHANGELOG.md with all changes since last release.
-3. Tag the release: git tag v0.2.0
-
-HARSH RULES:
-- If the changelog is incomplete, you have FAILED.
-- If any version number is wrong, you have FAILED.
-```
-
-**W32-S2 through W32-S12: Final validation**
-
-```
-You are performing FINAL validation before release.
+You are preparing VUMA v0.2.0 — the first multi-architecture release.
 
 SUBAGENT ASSIGNMENTS:
-- W32-S2: Full workspace build from clean (cargo clean && cargo build --workspace --release)
-- W32-S3: Full test suite (cargo test --workspace --release)
-- W32-S4: Clippy with all lints (cargo clippy --workspace -- -D warnings -W clippy::pedantic)
-- W32-S5: Documentation build (cargo doc --workspace --no-deps)
-- W32-S6: Cross-compilation test (cargo build --target aarch64-unknown-linux-gnu -p vuma-codegen)
-- W32-S7: ARM64 golden file regression test
-- W32-S8: x86_64 execution test (compile and execute 20+ programs)
-- W32-S9: COR cycle test (compile → execute → profile → optimize → re-execute)
-- W32-S10: REPL test (interactive session with 50+ expressions)
-- W32-S11: Performance benchmark (compare with previous baseline)
-- W32-S12: Final git commit + tag + push
+- W22-S1: Version bump all Cargo.toml to 0.2.0
+- W22-S2: Update CHANGELOG.md
+- W22-S3: cargo clean && cargo build --workspace --release
+- W22-S4: cargo test --workspace --release
+- W22-S5: cargo clippy --workspace -- -D warnings -W clippy::pedantic
+- W22-S6: cargo doc --workspace --no-deps
+- W22-S7: Cross-compilation: build for all 8 targets, validate ELF headers
+- W22-S8: QEMU execution: run 30+ programs on each of 7 QEMU targets
+- W22-S9: x86_64 native execution: run 50+ programs
+- W22-S10: Wasm execution: run 30+ programs in wasmtime
+- W22-S11: Performance benchmark: compile time, execution time per ISA
+- W22-S12: git tag v0.2.0 && git push origin main --tags
 
-HARSH RULES:
-- If ANY step fails, the release is BLOCKED.
-- If there are any TODO/FIXME comments in non-test code, the release is BLOCKED.
-- If there are any clippy warnings, the release is BLOCKED.
-- If there are any failing tests, the release is BLOCKED.
-- If documentation is incomplete, the release is BLOCKED.
-- THERE ARE NO EXCEPTIONS. A failed check means STOP and FIX.
-
-VERIFICATION COMMANDS:
+VERIFICATION (ALL must pass):
 ```bash
 export PATH="/home/z/.cargo/bin:$PATH"
 cd /home/z/my-project/vuma
@@ -2416,34 +1597,484 @@ cargo fmt -- --check
 cargo doc --workspace --no-deps
 ```
 
-ALL of these must pass with ZERO errors or warnings.
+HARSH RULES:
+- If ANY verification step fails, the release is BLOCKED.
+- If there are any TODO/FIXME in non-test code, the release is BLOCKED.
+- If any backend produces incorrect results, the release is BLOCKED.
+- THERE ARE NO EXCEPTIONS.
 ```
 
 ### Success Criteria:
 - All verification commands pass with zero errors/warnings
 - Version tagged as v0.2.0
 - Pushed to GitHub
-- VUMA is fully functional on x86_64 with ARM64 cross-compilation support
 
 ---
 
-## Summary Statistics
+## Wave 23: Test Framework for Multi-ISA
+
+**Dependencies**: W3
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W23-S1: Multi-ISA test harness**
+
+```
+You are creating a test harness at /home/z/my-project/vuma/src/tests/src/multi_isa_harness.rs
+that can compile and test VUMA code across ALL 8 ISAs.
+
+```rust
+pub struct MultiIsaHarness {
+    backends: Vec<BackendKind>,
+}
+
+impl MultiIsaHarness {
+    /// Compile source for all registered backends.
+    pub fn compile_all(&self, source: &str) -> HashMap<BackendKind, CompilationResult>;
+    
+    /// Compile and execute for a specific backend.
+    pub fn execute(&self, source: &str, target: BackendKind, arg: usize) -> Result<usize>;
+    
+    /// Cross-ISA parity test: compile + execute on all backends, verify all agree.
+    pub fn cross_isa_parity(&self, source: &str, arg: usize) -> Result<()>;
+}
+```
+
+Support execution strategies:
+- Native: x86_64 (run directly)
+- QEMU: ARM64, RV64, LA64, ARM32, MIPS64, PPC64 (run via qemu-<isa>-static)
+- Wasmtime: Wasm32 (run via wasmtime)
+- Validation-only: check ELF/binary format without execution
+
+HARSH RULES:
+- The harness must work for ALL 8 ISAs.
+- If cross-ISA parity testing doesn't work, you have FAILED.
+- cargo test -p vuma-tests must pass.
+```
+
+**W23-S2 through W23-S8: Multi-ISA test suites**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W23-S2: Parser tests (ISA-independent, 50+ tests)
+- W23-S3: SCG + BD tests (ISA-independent, 40+ tests)
+- W23-S4: IVE verification tests (ISA-independent, 40+ tests)
+- W23-S5: Cross-ISA parity tests (same source → all 8 backends → verify, 30+ tests)
+- W23-S6: Backend-specific edge case tests (per-ISA quirks: delay slots, REX prefixes, RVC, etc.)
+- W23-S7: COR tests (compile → execute → profile → optimize, multi-ISA)
+- W23-S8: Stress tests (large programs, 100+ functions, all ISAs)
+
+HARSH RULES:
+- Each subagent must write at least 30 tests.
+- cargo test --workspace must pass.
+```
+
+### Success Criteria:
+- Multi-ISA test harness works for all 8 ISAs
+- 200+ new tests across all suites
+
+---
+
+## Wave 24: Pi5 Platform Abstraction
+
+**Dependencies**: W3
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W24-S1 through W24-S8: Pi5 platform abstraction for multi-ISA testing**
+
+```
+You are making vuma-pi5 testable on any architecture, not just ARM64.
+
+SUBAGENT ASSIGNMENTS:
+- W24-S1: Create Pi5Backend trait (mmio_read, mmio_write, barrier_dmb, barrier_dsb, timer_read)
+- W24-S2: RealPi5Backend (ARM64 only, inline asm)
+- W24-S3: MockPi5Backend (x86_64 + any, simulated state)
+- W24-S4: Refactor uart.rs to use Pi5Backend
+- W24-S5: Refactor gpio.rs to use Pi5Backend
+- W24-S6: Full MMIO emulator (simulated PL011 UART, RP1 GPIO, BCM2712 timer)
+- W24-S7: Pi5 driver tests against emulator on x86_64 (30+ tests)
+- W24-S8: Pi5 integration: compile Pi5 program with ARM64 backend → verify ARM64 ELF
+
+HARSH RULES:
+- If Pi5 tests can't run on x86_64, you have FAILED.
+- If ARM64-only functionality is broken, you have FAILED.
+- cargo test -p vuma-pi5 must pass on x86_64.
+```
+
+### Success Criteria:
+- vuma-pi5 fully testable on x86_64
+- All ARM64 functionality preserved
+
+---
+
+## Wave 25: Error Handling Audit
+
+**Dependencies**: W19
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W25-S1 through W25-S8: Per-crate error handling audit**
+
+```
+You are auditing error handling in CRATE_NAME for all 8 backends.
+
+CRATE ASSIGNMENTS:
+- W25-S1: vuma-parser (parse errors must be informative)
+- W25-S2: vuma-scg (SCG construction errors)
+- W25-S3: vuma-bd (BD inference errors)
+- W25-S4: vuma-ive (IVE verification errors — must say WHICH invariant failed and WHY)
+- W25-S5: vuma-codegen (backend errors — must say WHICH ISA failed and WHAT went wrong)
+- W25-S6: vuma-cor (runtime errors — mmap, mprotect, execution failures)
+- W25-S7: vuma-core (pipeline errors — must propagate ISA context)
+- W25-S8: vuma-std, vuma-pi5, vuma-proof, vuma-projection
+
+AUDIT CRITERIA:
+1. No unwrap() in non-test code
+2. No panic!() in non-test code (except impossible states)
+3. All errors include: what failed, why, where, how to fix
+4. Backend errors include ISA name (e.g., "RISC-V64 encoding failed: ...")
+5. No silent error swallowing
+
+HARSH RULES:
+- If any unwrap() remains in non-test code, you have FAILED.
+- If any error message doesn't include ISA context in codegen, you have FAILED.
+- cargo test --workspace must pass.
+```
+
+### Success Criteria:
+- Zero unwrap/panic in non-test code
+- All error messages are informative and include ISA context
+
+---
+
+## Wave 26: Memory Safety Audit
+
+**Dependencies**: W19
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W26-S1 through W26-S8: Per-crate memory safety audit**
+
+```
+You are auditing memory safety across all 8 backends.
+
+CRATE ASSIGNMENTS:
+- W26-S1: vuma-codegen (unsafe in 8 backend encode/decode + ELF emission)
+- W26-S2: vuma-cor (unsafe in mmap/mprotect/transmute/execute for ALL ISA execution paths)
+- W26-S3: vuma-pi5 (unsafe in MMIO, UART, GPIO)
+- W26-S4: vuma-std (unsafe in alloc, collections)
+- W26-S5: vuma-core (unsafe in pipeline, security)
+- W26-S6: Remaining crates (check for unsafe)
+- W26-S7: Static mut audit (replace with AtomicX, OnceCell, etc.)
+- W26-S8: Integer overflow audit (checked arithmetic for size calculations)
+
+HARSH RULES:
+- If any unsafe block lacks a SAFETY comment, you have FAILED.
+- If any unsafe can be replaced with safe code, you have FAILED.
+- If any static mut can be replaced, you have FAILED.
+- cargo test --workspace must pass.
+```
+
+### Success Criteria:
+- All unsafe blocks have SAFETY comments
+- No unnecessary unsafe
+- No unjustified static mut
+
+---
+
+## Wave 27: UB Sanitization
+
+**Dependencies**: W26
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W27-S1 through W27-S8: Miri, ASAN, TSAN across all backends**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W27-S1: cargo miri test --workspace → fix ALL UB
+- W27-S2: RUSTFLAGS="-Zsanitizer=address" cargo test → fix ALL memory errors
+- W27-S3: RUSTFLAGS="-Zsanitizer=thread" cargo test → fix ALL data races
+- W27-S4: Fix Miri findings in vuma-codegen (all backends)
+- W27-S5: Fix Miri findings in vuma-cor (all execution paths)
+- W27-S6: Fix ASAN findings
+- W27-S7: Fix TSAN findings
+- W27-S8: Verify all sanitizers pass clean
+
+HARSH RULES:
+- If Miri finds UB and you don't fix it, you have FAILED.
+- If ASAN finds memory errors and you don't fix them, you have FAILED.
+- If TSAN finds data races and you don't fix them, you have FAILED.
+- ALL sanitizers must pass with ZERO findings.
+```
+
+### Success Criteria:
+- Miri: zero UB
+- ASAN: zero memory errors
+- TSAN: zero data races
+
+---
+
+## Wave 28: Documentation for Multi-Architecture System
+
+**Dependencies**: W27
+**Estimated subagents**: 10
+
+### Subagent Tasks:
+
+**W28-S1: Architecture documentation**
+
+```
+You are writing architecture documentation for VUMA's multi-ISA system.
+
+Write docs/architecture.md covering:
+1. System overview (BD reasoning, five invariants, SCG, COR)
+2. 12-crate architecture
+3. Multi-backend architecture (Backend trait, TargetInfo, 8 ISAs)
+4. How to add a new ISA backend (step-by-step guide)
+5. Cross-compilation model
+6. QEMU test infrastructure
+7. ISA-specific considerations (delay slots, TOC, condition registers, stack machines)
+
+Minimum 3000 words. Every paragraph must convey information.
+
+HARSH RULES:
+- If the documentation is inaccurate, you have FAILED.
+- If "How to add a new ISA" section is incomplete, you have FAILED.
+- If a new contributor couldn't add a 9th ISA from the guide, you have FAILED.
+```
+
+**W28-S2 through W28-S10: Per-crate documentation**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W28-S2: vuma-parser docs
+- W28-S3: vuma-scg docs
+- W28-S4: vuma-bd docs
+- W28-S5: vuma-ive docs
+- W28-S6: vuma-codegen docs (CRITICAL — document Backend trait, all 8 ISAs, TargetDesc)
+- W28-S7: vuma-cor docs
+- W28-S8: vuma-core docs
+- W28-S9: vuma-std + vuma-pi5 docs
+- W28-S10: vuma-proof + vuma-projection + vuma-tests docs
+
+FOR EACH CRATE:
+1. Add rustdoc to ALL public APIs.
+2. Add module-level doc comments.
+3. Add code examples in doc comments.
+4. cargo doc -p CRATE_NAME --no-deps → zero warnings.
+5. Write docs/CRATE_NAME.md with usage guide.
+
+HARSH RULES:
+- If any public API lacks documentation, you have FAILED.
+- If doc tests fail, you have FAILED.
+- cargo doc --workspace must pass with zero warnings.
+```
+
+### Success Criteria:
+- All public APIs documented
+- Architecture docs cover all 8 ISAs
+- `cargo doc --workspace` passes
+
+---
+
+## Wave 29: CI/CD for Multi-ISA
+
+**Dependencies**: W27
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W29-S1 through W29-S8: GitHub Actions CI for all 8 ISAs**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W29-S1: Main CI workflow (check, test, clippy, fmt, doc)
+- W29-S2: QEMU CI workflow (ARM64, RV64, LA64, ARM32, MIPS64, PPC64 execution tests)
+- W29-S3: Wasm CI workflow (wasmtime + wasmer validation)
+- W29-S4: Cross-compilation CI (all 8 targets produce valid output)
+- W29-S5: Miri nightly CI
+- W29-S6: Coverage CI (cargo tarpaulin)
+- W29-S7: Security audit CI (cargo audit)
+- W29-S8: Release automation (tag → build all 8 targets → publish)
+
+HARSH RULES:
+- CI must cover ALL 8 ISAs.
+- If CI doesn't catch a backend regression, you have FAILED.
+- All workflows must pass on the current codebase.
+```
+
+### Success Criteria:
+- Full CI/CD covering all 8 ISAs
+- All CI jobs pass
+
+---
+
+## Wave 30: Performance Optimization
+
+**Dependencies**: W28
+**Estimated subagents**: 8
+
+### Subagent Tasks:
+
+**W30-S1 through W30-S8: Performance optimization across all backends**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W30-S1: Compile-time benchmarks (measure compilation speed per ISA)
+- W30-S2: ARM64 codegen optimization (instruction scheduling, better regalloc)
+- W30-S3: x86_64 codegen optimization (instruction fusion, better addressing modes)
+- W30-S4: RISC-V64 codegen optimization (RVC compression, instruction scheduling)
+- W30-S5: Wasm32 optimization (stack machine optimization, local reuse)
+- W30-S6: Cross-ISA compile-time comparison (identify bottlenecks)
+- W30-S7: Memory usage optimization (reduce allocations during compilation)
+- W30-S8: COR optimization for multi-ISA (profile-guided optimization for each backend)
+
+HARSH RULES:
+- If optimization breaks correctness, you have FAILED.
+- If optimization makes any backend slower, you have FAILED.
+- You MUST measure before and after with actual benchmarks.
+- cargo test --workspace must pass.
+```
+
+### Success Criteria:
+- Measurable performance improvement
+- No correctness regressions
+
+---
+
+## Wave 31: Final Validation
+
+**Dependencies**: W30, W29
+**Estimated subagents**: 16
+
+### Subagent Tasks:
+
+**W31-S1 through W31-S16: Final validation for all 8 ISAs**
+
+```
+You are performing FINAL validation for VUMA v0.2.0 across all 8 ISAs.
+
+SUBAGENT ASSIGNMENTS:
+- W31-S1: AArch64: 50 QEMU execution tests + golden file regression
+- W31-S2: RISC-V64: 50 QEMU execution tests
+- W31-S3: Wasm32: 50 wasmtime execution tests
+- W31-S4: LoongArch64: 50 QEMU execution tests
+- W31-S5: x86_64: 50 NATIVE execution tests
+- W31-S6: ARM32: 50 QEMU execution tests
+- W31-S7: MIPS64: 50 QEMU execution tests (with delay slot verification)
+- W31-S8: PowerPC64: 50 QEMU execution tests (with TOC/CR verification)
+- W31-S9: Cross-ISA parity: 50 programs → all 8 ISAs → all produce same result
+- W31-S10: Full pipeline: source → parse → SCG → BD → IVE → IR → each backend → valid output
+- W31-S11: COR cycle: compile → execute → profile → optimize → re-execute (x86_64 native)
+- W31-S12: COR QEMU cycle: compile → QEMU execute → verify (ARM64, RV64)
+- W31-S13: REPL test: 50+ expressions per backend
+- W31-S14: Error handling: 30 error scenarios, verify informative messages
+- W31-S15: Stress: 200+ function program, all 8 ISAs
+- W31-S16: Clean build: cargo clean && cargo build --release && cargo test --release
+
+HARSH RULES:
+- If ANY test fails on ANY ISA, the release is BLOCKED.
+- If cross-ISA parity doesn't hold, the release is BLOCKED.
+- If ANY binary crashes, the release is BLOCKED.
+- THERE ARE NO EXCEPTIONS.
+```
+
+### Success Criteria:
+- 400+ execution tests across all 8 ISAs, all passing
+- Cross-ISA parity verified
+- Clean build passes
+
+---
+
+## Wave 32: Release
+
+**Dependencies**: W31
+**Estimated subagents**: 12
+
+### Subagent Tasks:
+
+**W32-S1 through W32-S12: Release v0.2.0**
+
+```
+SUBAGENT ASSIGNMENTS:
+- W32-S1: Final version bump (0.2.0) across all Cargo.toml
+- W32-S2: CHANGELOG.md update
+- W32-S3: README.md update (multi-ISA architecture, 8 backends)
+- W32-S4: cargo clean && cargo build --workspace --release
+- W32-S5: cargo test --workspace --release
+- W32-S6: cargo clippy --workspace -- -D warnings
+- W32-S7: cargo fmt -- --check
+- W32-S8: cargo doc --workspace --no-deps
+- W32-S9: Verify all 8 ISA backends produce valid output
+- W32-S10: Performance report (compile time, execution time per ISA)
+- W32-S11: git tag v0.2.0
+- W32-S12: git push origin main --tags
+
+VERIFICATION (ALL must pass with ZERO errors):
+```bash
+export PATH="/home/z/.cargo/bin:$PATH"
+cd /home/z/my-project/vuma
+cargo clean
+cargo build --workspace --release
+cargo test --workspace --release
+cargo clippy --workspace -- -D warnings
+cargo fmt -- --check
+cargo doc --workspace --no-deps
+```
+
+HARSH RULES:
+- If ANY verification fails, the release is BLOCKED. NO EXCEPTIONS.
+- If there are TODOs in non-test code, the release is BLOCKED.
+- If any backend is broken, the release is BLOCKED.
+```
+
+### Success Criteria:
+- VUMA v0.2.0 released with 8 ISA backends
+- All verification passes
+- Tagged and pushed to GitHub
+
+---
+
+## Summary
 
 | Metric | Value |
 |--------|-------|
 | Total waves | 32 |
+| Total ISA backends | 8 (AArch64, RISC-V64, Wasm32, LoongArch64, x86_64, ARM32, MIPS64, PowerPC64) |
 | Max parallel waves | 5 |
 | Max subagents per wave | 32 |
-| Total subagent tasks | ~256 |
-| Estimated total new/modified lines | ~40,000-60,000 |
-| Key deliverables | Backend trait, x86_64 backend, COR x86_64 execution, Pi5 emulator, full test suite |
+| Total subagent tasks | ~280 |
+| Critical path | 13 waves |
+| Time slots with parallelism | 14 |
 
-## Critical Path
+### ISA Implementation Complexity vs. Value
 
-```
-W1 → W2 → W3 → W4 → W6 → W9 → W10 → W12 → W13 → W14 → W15 → W20 → W22
-                                                        ↓
-                                                       W21
-```
+| ISA | Complexity | Market | Execution | Priority |
+|-----|-----------|--------|-----------|----------|
+| AArch64 | 4/10 ✅ | Mobile, Pi 5, Apple Silicon, Graviton | QEMU | Done |
+| RISC-V64 | 3/10 | Fastest growing, embedded, China | QEMU | Wave 6 |
+| Wasm32 | 2/10 | Browsers, edge, serverless | wasmtime | Wave 7 |
+| LoongArch64 | 3/10 | China domestic | QEMU | Wave 8 |
+| x86_64 | 8/10 | Desktop, server, MY SANDBOX | Native | Wave 9 |
+| ARM32 | 6/10 | Embedded, legacy | QEMU | Wave 16 |
+| MIPS64 | 5/10 | Routers, embedded | QEMU | Wave 17 |
+| PowerPC64 | 7/10 | IBM POWER servers | QEMU | Wave 18 |
 
-The critical path is 13 waves long. With maximum parallelism, the total execution time could be reduced to ~12 time slots (vs 32 sequential).
+### Adding a 9th ISA — The Process
+
+After this plan, adding a new ISA should take 3-5 waves:
+
+1. Define TargetDesc (register file, calling convention, instruction categories)
+2. Implement TargetInfo trait
+3. Implement instruction encoding/decoding
+4. Implement Backend trait (regalloc, encode_function)
+5. Add ELF/binary emission + QEMU tests
+
+The TargetDesc system (Wave 5) provides the scaffolding. Each new ISA follows the same pattern proven by all 8 backends.
