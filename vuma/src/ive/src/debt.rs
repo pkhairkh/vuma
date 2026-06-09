@@ -109,9 +109,15 @@ impl DebtItem {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VerificationDebt
-// ---------------------------------------------------------------------------
+impl fmt::Display for DebtItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{}] {} ({})",
+            self.priority, self.property, self.status
+        )
+    }
+}
 
 /// A collection of verification debt items, ordered by priority.
 ///
@@ -232,6 +238,30 @@ mod tests {
         assert_eq!(debt.total_debt(), 1);
         assert!(debt.resolve(idx));
         assert_eq!(debt.total_debt(), 0);
+    }
+
+    #[test]
+    fn start_debt_item() {
+        let mut item = DebtItem::new("test_prop", Priority::High, 50);
+        assert!(item.is_pending());
+        item.start();
+        assert_eq!(item.status, DebtStatus::InProgress);
+        assert!(!item.is_pending());
+        assert!(!item.is_resolved());
+    }
+
+    #[test]
+    fn resolve_nonexistent_returns_false() {
+        let mut debt = VerificationDebt::new();
+        assert!(!debt.resolve(999));
+    }
+
+    #[test]
+    fn debt_item_display() {
+        let item = DebtItem::new("liveness", Priority::Critical, 0);
+        let s = format!("{}", item);
+        assert!(s.contains("CRITICAL"));
+        assert!(s.contains("liveness"));
     }
 
     #[test]

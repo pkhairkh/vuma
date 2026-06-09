@@ -113,9 +113,17 @@ pub enum Evidence {
     StatisticalAnalysis,
 }
 
-// ---------------------------------------------------------------------------
-// VerificationResult
-// ---------------------------------------------------------------------------
+impl fmt::Display for Evidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FormalProof { steps } => {
+                write!(f, "FormalProof ({} step(s))", steps.len())
+            }
+            Self::ExhaustiveAnalysis => write!(f, "ExhaustiveAnalysis"),
+            Self::StatisticalAnalysis => write!(f, "StatisticalAnalysis"),
+        }
+    }
+}
 
 /// The result of verifying a single invariant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -242,5 +250,17 @@ mod tests {
     fn display_formats() {
         let r = VerificationResult::new("test", VerificationStatus::Proven, "all good");
         assert_eq!(format!("{r}"), "[PROVEN] test — all good");
+    }
+
+    #[test]
+    fn evidence_display() {
+        let e = Evidence::FormalProof {
+            steps: vec!["step1".into(), "step2".into()],
+        };
+        let s = format!("{}", e);
+        assert!(s.contains("2 step(s)"));
+
+        let s2 = format!("{}", Evidence::ExhaustiveAnalysis);
+        assert_eq!(s2, "ExhaustiveAnalysis");
     }
 }

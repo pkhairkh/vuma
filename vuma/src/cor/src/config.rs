@@ -112,7 +112,12 @@ impl Config {
     }
 
     /// Creates a new configuration with the given verification time budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ms` is 0, which would mean no verification time is allowed.
     pub fn with_max_verification_time_ms(mut self, ms: u64) -> Self {
+        assert!(ms > 0, "max_verification_time_ms must be > 0");
         self.max_verification_time_ms = ms;
         self
     }

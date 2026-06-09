@@ -34,6 +34,12 @@ impl From<&str> for ConstraintId {
     }
 }
 
+impl From<String> for ConstraintId {
+    fn from(s: String) -> Self {
+        ConstraintId::new(s)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TemporalConstraint
 // ---------------------------------------------------------------------------
@@ -112,10 +118,19 @@ pub enum Constraint {
 
 impl Constraint {
     /// Returns the unique identifier for this constraint.
+    ///
+    /// The ID is constructed from the constraint kind and its full
+    /// description, making it unique among constraints (assuming
+    /// descriptions are unique within each kind).
     pub fn id(&self) -> ConstraintId {
-        let desc = self.description();
-        // Use a simple hash of the description as the ID.
-        ConstraintId::new(format!("{:x}", desc.len()))
+        let kind = match self {
+            Self::Temporal(_) => "temporal",
+            Self::ResourceFlow(_) => "resource_flow",
+            Self::Security(_) => "security",
+            Self::Complexity(_) => "complexity",
+            Self::Liveness(_) => "liveness",
+        };
+        ConstraintId::new(format!("{}:{}", kind, self.description()))
     }
 
     /// Returns a human-readable description of this constraint.
@@ -240,5 +255,36 @@ mod tests {
         });
         assert!(c.is_security());
         assert!(!c.is_temporal());
+    }
+
+    #[test]
+    fn constraint_id_is_unique_per_kind_and_description() {
+        let c1 = Constraint::Temporal(TemporalConstraint {
+            description: "A before B".into(),
+        });
+        let c2 = Constraint::Liveness(LivenessConstraint {
+            description: "A before B".into(),
+        });
+        // Same description, different kind → different IDs
+        assert_ne!(c1.id(), c2.id());
+
+        // Same kind, different description → different IDs
+        let c3 = Constraint::Temporal(TemporalConstraint {
+            description: "C before D".into(),
+        });
+        assert_ne!(c1.id(), c3.id());
+
+        // Same kind, same description → same ID (idempotent)
+        let c4 = Constraint::Temporal(TemporalConstraint {
+            description: "A before B".into(),
+        });
+        assert_eq!(c1.id(), c4.id());
+    }
+
+    #[test]
+    fn constraint_id_from_string() {
+        let id1 = ConstraintId::from("test");
+        let id2 = ConstraintId::from(String::from("test"));
+        assert_eq!(id1, id2);
     }
 }

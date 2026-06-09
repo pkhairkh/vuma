@@ -263,6 +263,21 @@ impl CORuntime {
             self.compiled_state.remove(region_id);
         }
 
+        // Edge changes may require recompilation of affected regions.
+        // When an edge is added or removed, the regions connected by
+        // that edge may have different control/data flow and must be
+        // recompiled. Without a proper SCG lookup we log and skip.
+        if !delta.added_edges.is_empty() || !delta.removed_edges.is_empty() {
+            log::warn!(
+                "compile_incremental: {} added edges, {} removed edges — \
+                 edge-driven recompilation not yet implemented",
+                delta.added_edges.len(),
+                delta.removed_edges.len(),
+            );
+            // TODO: Look up which regions each edge belongs to and
+            // invalidate + recompile them.
+        }
+
         recompiled
     }
 
@@ -283,8 +298,9 @@ impl CORuntime {
             .ok_or(RuntimeError::NotCompiled(region))?;
 
         // Record profile data for this execution.
+        // Only record_access — record_call is a separate API for explicit
+        // call-graph tracking and must not double-count with record_access.
         self.profile_data.record_access(region as crate::types::NodeId);
-        self.profile_data.record_call(region as crate::types::NodeId);
 
         log::trace!("execute: region {} ({} code bytes)", region, compiled.code.len());
 
@@ -320,6 +336,14 @@ impl CORuntime {
         );
 
         // Step 2: Validate speculative assumptions.
+        //
+        // TODO: Pass actual per-region edge observations and contention
+        // data once the runtime tracks them. Currently we have no edge
+        // observation or contention information, so we can only check
+        // assumptions that don't require runtime data (HotPath stays valid
+        // by default). LikelyBranch and NoContention assumptions require
+        // real data to invalidate; passing None/[] means they always pass
+        // the check, which is safe but conservative.
         let deopts = self.speculative_optimizer.validate_all(None, &[]);
         if deopts > 0 {
             log::warn!("optimize: {} speculative deoptimizations", deopts);
