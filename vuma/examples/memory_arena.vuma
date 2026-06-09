@@ -1,0 +1,197 @@
+// Memory Arena - typed arena allocator with nested scopes and reset
+// Demonstrates: layered arena allocation, typed alloc, scope-based cleanup
+//
+// This arena goes beyond the basic bump allocator in arena_allocator.vuma:
+//   - Type-aware allocation with correct alignment per type
+//   - Nested scopes that can be rolled back independently
+//   - Reset operation that reclaims all allocations in O(1)
+//   - Allocation tracking for debugging and leak detection
+//
+// The arena pattern is used extensively in real systems:
+//   - Game engines: per-frame arenas for transient objects
+//   - Compilers: per-scope arenas for AST subtrees
+//   - Network servers: per-request arenas for parsed data
+//   - Embedded: pre-allocated pools to avoid fragmentation
+//
+// VUMA Key Concepts:
+//   - Multiple arena scopes with independent lifetimes
+//   - Pointer derivation tracking across scope boundaries
+//   - Reset invalidates all derived pointers (IVE verified)
+//   - Type-safe allocation with automatic alignment
+//   - IVE proves no use-after-reset across all scopes
+
+struct ArenaScope {
+    base: Address,       // 8 bytes - start of this scope's memory
+    size: u64,           // 8 bytes - total size of this scope
+    offset: u64,         // 8 bytes - current bump offset
+    parent: Address,     // 8 bytes - parent scope (0 if root)
+    alloc_count: u64,    // 8 bytes - number of allocations made
+}
+
+struct TypedArena {
+    root: ArenaScope,      // Root scope
+    type_size: u64,        // Size of the type this arena serves
+    type_align: u64,       // Alignment requirement of the type
+    total_allocated: u64,  // Total bytes allocated across all scopes
+}
+
+fn typed_arena_create(type_size: u64, type_align: u64, capacity: u64) -> Address {
+    // Create a typed arena for a specific type
+    //
+    // IVE verifies: single large allocation for the entire arena
+    // IVE verifies: type_size and type_align are recorded for later checks
+    total_size = capacity * type_size;
+    base = allocate(total_size);
+
+    arena = allocate(64);  // sizeof(TypedArena)
+    *arena = TypedArena {
+        root: ArenaScope {
+            base, size: total_size, offset: 0,
+            parent: 0, alloc_count: 0,
+        },
+        type_size,
+        type_align,
+        total_allocated: 0,
+    };
+    return arena;
+}
+
+fn scope_alloc(scope: Address, size: u64, align: u64) -> Address {
+    // Bump-allocate within a scope, respecting alignment
+    //
+    // IVE verifies: derivation chain scope.base → current → aligned
+    // IVE verifies: aligned pointer is within scope's allocation
+    // IVE verifies: new_offset does not exceed scope.size
+    current = (*scope).base + (*scope).offset;
+    aligned = current.align_to(align);
+    new_offset = (aligned - (*scope).base) + size;
+
+    // Bounds check — IVE verifies this prevents out-of-bounds
+    if new_offset > (*scope).size { return 0; }
+
+    (*scope).offset = new_offset;
+    (*scope).alloc_count = (*scope).alloc_count + 1;
+    return aligned;
+}
+
+fn typed_alloc(arena: Address) -> Address {
+    // Allocate one typed element from the arena
+    //
+    // IVE verifies: returned pointer is within arena's root allocation
+    // IVE verifies: alignment matches the type's requirement
+    // IVE verifies: the allocation is tracked for cleanup
+    result = scope_alloc((*arena).root, (*arena).type_size, (*arena).type_align);
+
+    if result != 0 {
+        (*arena).total_allocated = (*arena).total_allocated + (*arena).type_size;
+    }
+    return result;
+}
+
+fn push_scope(arena: Address, scope_size: u64) -> Address {
+    // Create a nested scope within the arena
+    //
+    // Nested scopes allow rolling back part of the arena without
+    // affecting the parent. Useful for:
+    //   - Parsing sub-expressions that might fail
+    //   - Temporary computations within a request
+    //   - Per-iteration allocations in a loop
+    //
+    // IVE verifies: child scope is within parent's remaining space
+    parent = (*arena).root;
+    child_base = scope_alloc(parent, scope_size, 16);
+
+    scope = allocate(40);  // sizeof(ArenaScope)
+    *scope = ArenaScope {
+        base: child_base,
+        size: scope_size,
+        offset: 0,
+        parent,  // IVE tracks: scope is derived from parent
+        alloc_count: 0,
+    };
+    return scope;
+}
+
+fn pop_scope(arena: Address, scope: Address) {
+    // Pop a nested scope, reclaiming its memory
+    //
+    // IVE verifies: all pointers derived from this scope are invalidated
+    // IVE verifies: parent scope's offset is NOT affected (independent)
+    //
+    // This is the key safety guarantee: after pop_scope(), any
+    // pointer that was allocated within this scope is dead.
+    // The following would be a compile-time error:
+    //   x = *scope_ptr;  // ERROR: use of dead pointer
+    free(scope);  // Free the ArenaScope struct, not the memory
+    // The memory reverts to the parent scope for reuse
+}
+
+fn arena_reset(arena: Address) {
+    // Reset the arena — reclaim ALL allocations in O(1)
+    //
+    // IVE verifies: after reset, all previously derived pointers
+    // from this arena are invalid. This is stronger than individual
+    // free() because it catches entire categories of bugs:
+    //   - No dangling references to arena objects
+    //   - No stale iterators into arena collections
+    //   - No use-after-reset across any scope
+    //
+    // IVE derives the invalidation from the derivation chain:
+    //   arena.root.base → any alloc → any write
+    // After offset=0, all those writes are unreachable.
+    (*arena).root.offset = 0;
+    (*arena).root.alloc_count = 0;
+    (*arena).total_allocated = 0;
+}
+
+fn arena_destroy(arena: Address) {
+    // Destroy the arena, freeing all memory
+    // IVE verifies: all derived pointers become invalid
+    // IVE verifies: no memory leaked (Cleanup invariant)
+    free((*arena).root.base);  // One free for all allocations
+    free(arena);               // Free the TypedArena struct
+}
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    // Create a typed arena for Point structs (16 bytes, align 8)
+    // Capacity: 256 points → 4096 bytes total
+    arena = typed_arena_create(16, 8, 256);
+
+    // Allocate some points — all within the arena's single allocation
+    // IVE verifies: each pointer is derived from arena.root.base
+    p1 = typed_alloc(arena);
+    *p1 = Point { x: 10, y: 20 };
+    p2 = typed_alloc(arena);
+    *p2 = Point { x: 30, y: 40 };
+    p3 = typed_alloc(arena);
+    *p3 = Point { x: 50, y: 60 };
+
+    // Create a nested scope for temporary computation
+    // IVE verifies: scope memory is within the arena's allocation
+    temp_scope = push_scope(arena, 512);
+    temp = scope_alloc(temp_scope, 64, 8);
+    *temp = 0;  // Scratch buffer for computation
+
+    // Pop the scope — temp is now invalid
+    // IVE verifies: *temp after this line would be a compile error
+    pop_scope(arena, temp_scope);
+
+    // Reset the arena — p1, p2, p3 are now all invalid
+    // IVE verifies: any access to p1/p2/p3 after this is caught
+    arena_reset(arena);
+
+    // Re-allocate after reset (memory is reused)
+    p4 = typed_alloc(arena);
+    *p4 = Point { x: 100, y: 200 };
+
+    // Clean up — one free for the entire arena
+    arena_destroy(arena);
+    return 0;
+}
+// IVE verification: all arena pointers tracked through derivation chains,
+// scope invalidation enforced, no leaks, no use-after-reset

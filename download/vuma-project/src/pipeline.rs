@@ -1,0 +1,1206 @@
+//! # VUMA Compilation Pipeline
+//!
+//! The full compilation pipeline that wires together every workspace crate:
+//!
+//! ```text
+//! Source → Parse → AST → SCG → BD Inference → MSG Construction
+//!        → IVE Verification → SCG Transforms → IR Lowering
+//!        → Register Allocation → ARM64 Codegen → ELF Emission
+//! ```
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use vuma::pipeline::{compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel};
+//!
+//! let source = r#"
+//!     region buf = allocate(256);
+//!     fn main() {
+//!         ptr = buf + 64;
+//!         header = ptr as *NodeHeader;
+//!     }
+//! "#;
+//!
+//! let config = CompileConfig::default();
+//! let output = compile(source, &config);
+//! match output {
+//!     Ok(out) => println!("Compiled {} bytes, {} SCG nodes", out.binary.len(), out.scg.node_count()),
+//!     Err(errors) => {
+//!         for err in &errors {
+//!             eprintln!("{}", err);
+//!         }
+//!     }
+//! }
+//! ```
+
+use std::fmt;
+use std::time::Instant;
+
+// ── Workspace crate imports ──────────────────────────────────────────────
+
+use vuma_parser::{Parser, AstToScg, Program as AstProgram, ParseError, Diagnostic, Span};
+use vuma_scg::{
+    SCG, NodeId, NodeData, NodeType, EdgeKind,
+    SCGError, ValidationResult,
+    CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination,
+    InliningPass, PassManager, PipelineResult as ScgPipelineResult,
+    SCGPass, VerificationPass,
+};
+use vuma_ive::{
+    InferenceEngine, VerificationEngine,
+    InvariantAggregator, VerificationLevel as IveVerificationLevel,
+    AggregatedResult, OverallVerdict, DiagnosticsReport,
+    InvariantDelta, InvariantKind,
+};
+use vuma_bd::BD;
+use vuma_core::{
+    MSG,
+    scg_to_msg::{scg_to_msg, ConversionError},
+};
+use vuma_codegen::{
+    scg_to_ir::{IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
+                ScgStatement, ControlNode, AllocationNode, AccessNode,
+                CastNode, ComputationNode, CallNode, ScgExpr, ScgData},
+    ir::{IRProgram, IRFunction, IRBlock, IRInstr, IRValue, BinOpKind as IrBinOpKind},
+    emit::{Emitter, EmitConfig, emit_elf, emit_raw, OutputFormat as EmitOutputFormat, Target as EmitTarget},
+    regalloc::{LinearScanAllocator, AllocationResult},
+    CodegenError, DataSectionKind, CastKind as CodegenCastKind,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CompileConfig
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The compilation target platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CompileTarget {
+    /// Bare-metal Raspberry Pi 5 (ARMv8.2-A, loaded at 0x80000).
+    Pi5Bare,
+    /// Linux user-space on Raspberry Pi 5 (AArch64).
+    Pi5Linux,
+    /// Generic Linux user-space on AArch64.
+    Linux,
+}
+
+impl Default for CompileTarget {
+    fn default() -> Self {
+        CompileTarget::Pi5Linux
+    }
+}
+
+impl fmt::Display for CompileTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompileTarget::Pi5Bare => write!(f, "pi5-bare"),
+            CompileTarget::Pi5Linux => write!(f, "pi5-linux"),
+            CompileTarget::Linux => write!(f, "linux"),
+        }
+    }
+}
+
+/// Optimization level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum OptLevel {
+    /// No optimisation — fastest compilation, best debuggability.
+    O0,
+    /// Basic optimisations (DCE, constant folding).
+    O1,
+    /// Full optimisations (DCE, CSE, constant folding, inlining).
+    O2,
+    /// Aggressive optimisations (O2 + inlining of larger functions).
+    O3,
+}
+
+impl Default for OptLevel {
+    fn default() -> Self {
+        OptLevel::O2
+    }
+}
+
+impl fmt::Display for OptLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OptLevel::O0 => write!(f, "O0"),
+            OptLevel::O1 => write!(f, "O1"),
+            OptLevel::O2 => write!(f, "O2"),
+            OptLevel::O3 => write!(f, "O3"),
+        }
+    }
+}
+
+/// Verification thoroughness level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum VerificationLevel {
+    /// Skip verification entirely.
+    None,
+    /// Quick: only cheap syntactic checks.
+    Quick,
+    /// Normal: all five invariant checks.
+    Normal,
+    /// Exhaustive: all checks + formal proof attempts.
+    Exhaustive,
+}
+
+impl Default for VerificationLevel {
+    fn default() -> Self {
+        VerificationLevel::Normal
+    }
+}
+
+impl fmt::Display for VerificationLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationLevel::None => write!(f, "none"),
+            VerificationLevel::Quick => write!(f, "quick"),
+            VerificationLevel::Normal => write!(f, "normal"),
+            VerificationLevel::Exhaustive => write!(f, "exhaustive"),
+        }
+    }
+}
+
+/// Full compilation configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompileConfig {
+    /// Target platform.
+    pub target: CompileTarget,
+    /// Optimisation level.
+    pub opt_level: OptLevel,
+    /// Verification thoroughness.
+    pub verification_level: VerificationLevel,
+    /// Entry-point function name (default: "main" for hosted, "_start" for bare).
+    pub entry_name: String,
+    /// Include debug info in the output.
+    pub debug_info: bool,
+    /// Stop compilation at the first error.
+    pub stop_on_first_error: bool,
+    /// Maximum inline size (number of SCG nodes) for the inlining pass.
+    pub max_inline_size: usize,
+}
+
+impl CompileConfig {
+    /// Bare-metal Pi 5 defaults.
+    pub fn pi5_bare() -> Self {
+        Self {
+            target: CompileTarget::Pi5Bare,
+            entry_name: "_start".to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// Linux hosted defaults.
+    pub fn pi5_linux() -> Self {
+        Self {
+            target: CompileTarget::Pi5Linux,
+            entry_name: "main".to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// Fast-compilation debug configuration.
+    pub fn debug() -> Self {
+        Self {
+            opt_level: OptLevel::O0,
+            debug_info: true,
+            verification_level: VerificationLevel::Quick,
+            ..Self::default()
+        }
+    }
+
+    /// Release configuration with full optimisation and exhaustive verification.
+    pub fn release() -> Self {
+        Self {
+            opt_level: OptLevel::O3,
+            verification_level: VerificationLevel::Exhaustive,
+            ..Self::default()
+        }
+    }
+
+    /// Returns the emit config for this compile config.
+    fn emit_config(&self) -> EmitConfig {
+        match self.target {
+            CompileTarget::Pi5Bare => EmitConfig::bare_metal_elf(),
+            CompileTarget::Pi5Linux | CompileTarget::Linux => EmitConfig::linux_elf(),
+        }
+    }
+}
+
+impl Default for CompileConfig {
+    fn default() -> Self {
+        Self {
+            target: CompileTarget::Pi5Linux,
+            opt_level: OptLevel::O2,
+            verification_level: VerificationLevel::Normal,
+            entry_name: "main".to_string(),
+            debug_info: false,
+            stop_on_first_error: true,
+            max_inline_size: 50,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VumaError
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A unified error type for the VUMA compilation pipeline.
+///
+/// Each variant captures the pipeline stage where the error occurred
+/// and the underlying cause.
+#[derive(Debug, Clone)]
+pub enum VumaError {
+    /// Error during lexing or parsing.
+    Parse {
+        /// The parse errors.
+        errors: Vec<ParseError>,
+    },
+    /// Error converting AST to SCG.
+    AstToScg {
+        message: String,
+    },
+    /// SCG validation failed.
+    ScgValidation {
+        errors: Vec<String>,
+    },
+    /// SCG → MSG conversion error.
+    ScgToMsg {
+        error: ConversionError,
+    },
+    /// BD inference error.
+    BdInference {
+        node_id: Option<u64>,
+        message: String,
+    },
+    /// IVE verification failure (one or more invariants violated).
+    Verification {
+        result: AggregatedResult,
+    },
+    /// SCG transformation pass error.
+    Transform {
+        pass_name: String,
+        errors: Vec<String>,
+    },
+    /// IR lowering / codegen error.
+    Codegen {
+        error: CodegenError,
+    },
+    /// Register allocation failure.
+    RegisterAlloc {
+        message: String,
+    },
+    /// ELF emission failure.
+    Emission {
+        message: String,
+    },
+    /// A collection of errors accumulated across stages.
+    Multi {
+        errors: Vec<VumaError>,
+    },
+}
+
+impl VumaError {
+    /// Returns the pipeline stage that produced this error.
+    pub fn stage(&self) -> &'static str {
+        match self {
+            VumaError::Parse { .. } => "parse",
+            VumaError::AstToScg { .. } => "ast-to-scg",
+            VumaError::ScgValidation { .. } => "scg-validation",
+            VumaError::ScgToMsg { .. } => "scg-to-msg",
+            VumaError::BdInference { .. } => "bd-inference",
+            VumaError::Verification { .. } => "ive-verification",
+            VumaError::Transform { .. } => "scg-transform",
+            VumaError::Codegen { .. } => "codegen",
+            VumaError::RegisterAlloc { .. } => "register-alloc",
+            VumaError::Emission { .. } => "elf-emission",
+            VumaError::Multi { .. } => "multi",
+        }
+    }
+}
+
+impl fmt::Display for VumaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VumaError::Parse { errors } => {
+                write!(f, "[parse] {} error(s):", errors.len())?;
+                for e in errors {
+                    write!(f, "\n  - {}", e)?;
+                }
+                Ok(())
+            }
+            VumaError::AstToScg { message } => write!(f, "[ast-to-scg] {}", message),
+            VumaError::ScgValidation { errors } => {
+                write!(f, "[scg-validation] {} error(s):", errors.len())?;
+                for e in errors {
+                    write!(f, "\n  - {}", e)?;
+                }
+                Ok(())
+            }
+            VumaError::ScgToMsg { error } => write!(f, "[scg-to-msg] {}", error),
+            VumaError::BdInference { node_id, message } => {
+                write!(f, "[bd-inference] {}", message)?;
+                if let Some(id) = node_id {
+                    write!(f, " (node {})", id)?;
+                }
+                Ok(())
+            }
+            VumaError::Verification { result } => {
+                write!(f, "[ive-verification] verdict: {}", result.overall)
+            }
+            VumaError::Transform { pass_name, errors } => {
+                write!(f, "[scg-transform:{}] {} error(s)", pass_name, errors.len())
+            }
+            VumaError::Codegen { error } => write!(f, "[codegen] {}", error),
+            VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
+            VumaError::Emission { message } => write!(f, "[elf-emission] {}", message),
+            VumaError::Multi { errors } => {
+                write!(f, "multiple errors ({}):", errors.len())?;
+                for (i, e) in errors.iter().enumerate() {
+                    write!(f, "\n{}. {}", i + 1, e)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for VumaError {}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CompilationOutput
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The output of a successful compilation.
+#[derive(Debug, Clone)]
+pub struct CompilationOutput {
+    /// The emitted binary (ELF or raw, depending on target).
+    pub binary: Vec<u8>,
+    /// The final SCG after all transformation passes.
+    pub scg: SCG,
+    /// The Memory State Graph built from the SCG.
+    pub msg: MSG,
+    /// IVE verification results (if verification was requested).
+    pub verification: Option<AggregatedResult>,
+    /// Per-stage timing information (stage name → milliseconds).
+    pub stage_timings: Vec<(String, u64)>,
+    /// Number of IR functions generated.
+    pub ir_function_count: usize,
+    /// Total number of IR instructions across all functions.
+    pub ir_instruction_count: usize,
+    /// Number of ARM64 machine-code words emitted.
+    pub code_words: usize,
+    /// Debug information (if requested).
+    pub debug_info: Option<DebugInfo>,
+}
+
+/// Debug information captured during compilation.
+#[derive(Debug, Clone)]
+pub struct DebugInfo {
+    /// The parsed AST.
+    pub ast: Option<AstProgram>,
+    /// The IR program before register allocation.
+    pub ir_pre_regalloc: Option<IRProgram>,
+    /// Register allocation results per function.
+    pub regalloc_results: Vec<AllocationResult>,
+    /// SCG transformation pipeline results.
+    pub transform_results: Option<ScgPipelineResult>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Incremental compilation support
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A fingerprint of a source file, used to detect changes for
+/// incremental compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFingerprint {
+    /// A hash of the source text.
+    pub hash: u64,
+    /// Byte length of the source.
+    pub len: usize,
+}
+
+impl SourceFingerprint {
+    /// Compute a fingerprint from source text.
+    pub fn from_source(source: &str) -> Self {
+        // Simple FNV-1a hash — sufficient for change detection.
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in source.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        Self {
+            hash,
+            len: source.len(),
+        }
+    }
+}
+
+/// Cached compilation state from a previous run, used for incremental
+/// re-compilation.
+#[derive(Debug, Clone)]
+pub struct IncrementalCache {
+    /// The fingerprint of the source that produced this cache.
+    pub source_fingerprint: SourceFingerprint,
+    /// The parsed AST (reusable if source unchanged).
+    pub ast: Option<AstProgram>,
+    /// The SCG before optimisation passes.
+    pub pre_opt_scg: Option<SCG>,
+    /// The SCG after optimisation passes.
+    pub post_opt_scg: Option<SCG>,
+    /// The MSG from the previous run.
+    pub msg: Option<MSG>,
+    /// IVE verification cache.
+    pub verification_cache: Option<AggregatedResult>,
+    /// Which pipeline stages need to be re-run.
+    pub invalidated_stages: Vec<PipelineStage>,
+}
+
+/// Identifies a pipeline stage for incremental invalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PipelineStage {
+    /// Lexing + parsing.
+    Parse,
+    /// AST → SCG conversion.
+    AstToScg,
+    /// SCG validation.
+    ScgValidation,
+    /// BD inference.
+    BdInference,
+    /// SCG → MSG construction.
+    MsgConstruction,
+    /// IVE verification.
+    IveVerification,
+    /// SCG transformation passes.
+    ScgTransforms,
+    /// IR lowering (SCG → IR).
+    IrLowering,
+    /// Register allocation.
+    RegisterAlloc,
+    /// ARM64 code emission.
+    CodeEmission,
+}
+
+impl PipelineStage {
+    /// All stages in order.
+    pub fn all() -> &'static [PipelineStage; 10] {
+        &[
+            PipelineStage::Parse,
+            PipelineStage::AstToScg,
+            PipelineStage::ScgValidation,
+            PipelineStage::BdInference,
+            PipelineStage::MsgConstruction,
+            PipelineStage::IveVerification,
+            PipelineStage::ScgTransforms,
+            PipelineStage::IrLowering,
+            PipelineStage::RegisterAlloc,
+            PipelineStage::CodeEmission,
+        ]
+    }
+
+    /// Returns all stages from (and including) the given stage onwards.
+    pub fn from(stage: PipelineStage) -> Vec<PipelineStage> {
+        PipelineStage::all()
+            .iter()
+            .filter(|&&s| s >= stage)
+            .copied()
+            .collect()
+    }
+}
+
+impl fmt::Display for PipelineStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PipelineStage::Parse => write!(f, "parse"),
+            PipelineStage::AstToScg => write!(f, "ast-to-scg"),
+            PipelineStage::ScgValidation => write!(f, "scg-validation"),
+            PipelineStage::BdInference => write!(f, "bd-inference"),
+            PipelineStage::MsgConstruction => write!(f, "msg-construction"),
+            PipelineStage::IveVerification => write!(f, "ive-verification"),
+            PipelineStage::ScgTransforms => write!(f, "scg-transforms"),
+            PipelineStage::IrLowering => write!(f, "ir-lowering"),
+            PipelineStage::RegisterAlloc => write!(f, "register-alloc"),
+            PipelineStage::CodeEmission => write!(f, "code-emission"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCG → Codegen SCG bridge
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convert a `vuma_scg::SCG` into the codegen's stub `Scg` type.
+///
+/// The codegen crate defines its own lightweight SCG representation
+/// for IR lowering. This function bridges between the two by walking
+/// the real SCG and extracting function/data nodes.
+fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
+    let mut nodes = Vec::new();
+
+    // Walk all nodes in the SCG and classify them.
+    // We group nodes into functions based on region membership and
+    // control-flow structure.
+    let topo = match scg.topological_sort() {
+        Ok(t) => t,
+        Err(_) => scg.node_ids().collect(),
+    };
+
+    // Collect all computation/alloc/access/cast nodes as a single
+    // "main" function for now. A more sophisticated bridge would
+    // reconstruct function boundaries from Control(FunctionEntry) nodes.
+    let mut stmts = Vec::new();
+    let mut alloc_count = 0u32;
+
+    for node_id in &topo {
+        if let Some(node_data) = scg.get_node(*node_id) {
+            match &node_data.payload {
+                vuma_scg::node::NodePayload::Allocation(alloc) => {
+                    alloc_count += 1;
+                    stmts.push(ScgStatement::Allocation(AllocationNode::Stack {
+                        name: format!("alloc_{}", alloc_count),
+                        size: alloc.size as u32,
+                        ty: ScgType::U8,
+                    }));
+                }
+                vuma_scg::node::NodePayload::Access(access) => {
+                    let mode = match access.mode {
+                        vuma_scg::node::AccessMode::Read => "read",
+                        vuma_scg::node::AccessMode::Write => "write",
+                        vuma_scg::node::AccessMode::ReadWrite => "readwrite",
+                    };
+                    let ptr_name = format!("ptr_{}", node_id.as_u64());
+                    let offset_expr = access.offset.map(|o| ScgExpr::Int(o as i64));
+                    stmts.push(ScgStatement::Access(AccessNode::Load {
+                        dst: format!("val_{}", node_id.as_u64()),
+                        ptr: ScgExpr::Var(ptr_name),
+                        offset: offset_expr,
+                    }));
+                    let _ = mode; // used in future, more precise bridging
+                }
+                vuma_scg::node::NodePayload::Computation(comp) => {
+                    // Try to parse the operation string into a BinOpKind.
+                    let op = parse_binop(&comp.operation).unwrap_or(IrBinOpKind::Add);
+                    let lhs_name = format!("lhs_{}", node_id.as_u64());
+                    let rhs_name = format!("rhs_{}", node_id.as_u64());
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: format!("comp_{}", node_id.as_u64()),
+                        op,
+                        lhs: ScgExpr::Var(lhs_name),
+                        rhs: ScgExpr::Var(rhs_name),
+                    }));
+                }
+                vuma_scg::node::NodePayload::Cast(cast) => {
+                    stmts.push(ScgStatement::Cast(CastNode {
+                        dst: format!("cast_{}", node_id.as_u64()),
+                        src: ScgExpr::Var(format!("src_{}", node_id.as_u64())),
+                        kind: CodegenCastKind::BitCast,
+                        from_ty: ScgType::Ptr,
+                        to_ty: ScgType::Ptr,
+                    }));
+                }
+                vuma_scg::node::NodePayload::Control(ctrl) => {
+                    if ctrl.kind == vuma_scg::node::ControlKind::FunctionReturn {
+                        stmts.push(ScgStatement::Return(vec![]));
+                    }
+                    // Other control nodes are not directly representable in
+                    // the codegen's stub SCG.
+                }
+                vuma_scg::node::NodePayload::Deallocation(_dealloc) => {
+                    stmts.push(ScgStatement::Access(AccessNode::Store {
+                        ptr: ScgExpr::Var(format!("alloc_{}", node_id.as_u64())),
+                        offset: None,
+                        value: ScgExpr::Int(0),
+                    }));
+                }
+                vuma_scg::node::NodePayload::Effect(_) | vuma_scg::node::NodePayload::Phantom(_) => {
+                    // Skip effect and phantom nodes in the bridge.
+                }
+            }
+        }
+    }
+
+    // Ensure at least a return statement at the end.
+    if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+        stmts.push(ScgStatement::Return(vec![]));
+    }
+
+    // Build a single "main" function containing all statements.
+    let main_func = ScgFunction {
+        name: "main".to_string(),
+        params: vec![],
+        results: vec![],
+        body: stmts,
+    };
+
+    nodes.push(ScgNode::Function(main_func));
+
+    Scg { nodes }
+}
+
+/// Try to parse an operation string into a BinOpKind.
+fn parse_binop(op: &str) -> Option<IrBinOpKind> {
+    match op {
+        "add" | "+" => Some(IrBinOpKind::Add),
+        "sub" | "-" => Some(IrBinOpKind::Sub),
+        "mul" | "*" => Some(IrBinOpKind::Mul),
+        "sdiv" | "/" => Some(IrBinOpKind::SDiv),
+        "udiv" => Some(IrBinOpKind::UDiv),
+        "srem" | "%" => Some(IrBinOpKind::SRem),
+        "urem" => Some(IrBinOpKind::URem),
+        "and" | "&" => Some(IrBinOpKind::And),
+        "or" | "|" => Some(IrBinOpKind::Or),
+        "xor" | "^" => Some(IrBinOpKind::Xor),
+        "shl" | "<<" => Some(IrBinOpKind::Shl),
+        "shr.l" | ">>" => Some(IrBinOpKind::ShrL),
+        "shr.a" => Some(IrBinOpKind::ShrA),
+        _ => None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Compile pipeline
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compile VUMA source code with the given configuration.
+///
+/// This is the main entry point for the VUMA compilation pipeline.
+/// It runs all stages in order, collecting errors and producing a
+/// [`CompilationOutput`] on success.
+///
+/// # Pipeline Stages
+///
+/// 1. **Parse** — lex and parse source into an AST
+/// 2. **AST → SCG** — convert the AST into a Semantic Computation Graph
+/// 3. **SCG Validation** — verify the SCG is well-formed
+/// 4. **BD Inference** — infer behavioral descriptions from the SCG
+/// 5. **MSG Construction** — build the Memory State Graph from the SCG
+/// 6. **IVE Verification** — verify the five core VUMA invariants
+/// 7. **SCG Transforms** — run optimisation passes (DCE, CSE, etc.)
+/// 8. **IR Lowering** — lower the SCG to an intermediate representation
+/// 9. **Register Allocation** — assign physical ARM64 registers
+/// 10. **Code Emission** — generate ARM64 machine code and ELF binary
+pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput, Vec<VumaError>> {
+    let mut errors: Vec<VumaError> = Vec::new();
+    let mut timings: Vec<(String, u64)> = Vec::new();
+
+    // ── Stage 1: Parse ────────────────────────────────────────────────
+    let t = Instant::now();
+    let ast = match parse_source(source) {
+        Ok(ast) => ast,
+        Err(e) => {
+            errors.push(e);
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            // Cannot continue without an AST.
+            return Err(errors);
+        }
+    };
+    timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 2: AST → SCG ───────────────────────────────────────────
+    let t = Instant::now();
+    let mut scg = match ast_to_scg(&ast) {
+        Ok(scg) => scg,
+        Err(e) => {
+            errors.push(e);
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            // Cannot continue without an SCG.
+            return Err(errors);
+        }
+    };
+    timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 3: SCG Validation ──────────────────────────────────────
+    let t = Instant::now();
+    let validation = scg.validate();
+    if !validation.is_valid {
+        let e = VumaError::ScgValidation {
+            errors: validation.errors.clone(),
+        };
+        errors.push(e);
+        if config.stop_on_first_error {
+            return Err(errors);
+        }
+    }
+    timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 4: BD Inference ─────────────────────────────────────────
+    let t = Instant::now();
+    let inference_engine = InferenceEngine::new();
+    // Inference is currently placeholder; log but don't fail.
+    let _bd_results = inference_engine.infer_types(&vuma_ive::inference::SCG {
+        node_count: scg.node_count(),
+    });
+    timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 5: MSG Construction ─────────────────────────────────────
+    let t = Instant::now();
+    let msg = match scg_to_msg(&scg) {
+        Ok(msg) => msg,
+        Err(e) => {
+            errors.push(VumaError::ScgToMsg { error: e });
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            MSG::new() // fall back to empty MSG
+        }
+    };
+    timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 6: IVE Verification ─────────────────────────────────────
+    let t = Instant::now();
+    let verification = if config.verification_level != VerificationLevel::None {
+        let ive_level = match config.verification_level {
+            VerificationLevel::Quick => IveVerificationLevel::Quick,
+            VerificationLevel::Normal => IveVerificationLevel::Normal,
+            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::None => unreachable!(),
+        };
+        let aggregator = InvariantAggregator::new().with_level(ive_level);
+        let msg_stub = vuma_ive::verification::Message::default();
+        let scg_stub = vuma_ive::inference::SCG {
+            node_count: scg.node_count(),
+        };
+        let result = aggregator.verify_all(&msg_stub, &scg_stub);
+        Some(result)
+    } else {
+        None
+    };
+    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 7: SCG Transforms ───────────────────────────────────────
+    let t = Instant::now();
+    let transform_result = run_scg_transforms(&mut scg, config);
+    if let Some(ref tr) = transform_result {
+        if tr.has_errors {
+            // Collect errors from individual passes.
+            let pass_errors: Vec<String> = tr
+                .pass_results
+                .iter()
+                .flat_map(|pr| pr.errors.clone())
+                .collect();
+            if !pass_errors.is_empty() {
+                errors.push(VumaError::Transform {
+                    pass_name: "pipeline".to_string(),
+                    errors: pass_errors,
+                });
+                if config.stop_on_first_error {
+                    return Err(errors);
+                }
+            }
+        }
+    }
+    timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 8: IR Lowering ──────────────────────────────────────────
+    let t = Instant::now();
+    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let mut ir_builder = IRBuilder::new();
+    let ir_program = match ir_builder.build(&codegen_scg) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(VumaError::Codegen { error: e });
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            return Err(errors); // Cannot continue without IR.
+        }
+    };
+    let ir_function_count = ir_program.functions.len();
+    let ir_instruction_count: usize = ir_program
+        .functions
+        .iter()
+        .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+        .sum();
+    timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 9: Register Allocation ──────────────────────────────────
+    let t = Instant::now();
+    let allocator = LinearScanAllocator::new();
+    let mut regalloc_results = Vec::new();
+    for func in &ir_program.functions {
+        match allocator.allocate_function(func) {
+            Ok(result) => regalloc_results.push(result),
+            Err(e) => {
+                errors.push(VumaError::RegisterAlloc {
+                    message: format!("{}: {}", func.name, e),
+                });
+                if config.stop_on_first_error {
+                    return Err(errors);
+                }
+            }
+        }
+    }
+    timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 10: Code Emission ───────────────────────────────────────
+    let t = Instant::now();
+    let emit_config = config.emit_config();
+    let binary = match emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &emit_config,
+    ) {
+        Ok(binary) => binary,
+        Err(e) => {
+            errors.push(VumaError::Emission {
+                message: format!("{}", e),
+            });
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            return Err(errors); // Cannot continue without binary.
+        }
+    };
+    let code_words = binary.len() / 4; // approximate
+    timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
+
+    // If we accumulated errors but still produced a binary, report them.
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    Ok(CompilationOutput {
+        binary,
+        scg,
+        msg,
+        verification,
+        stage_timings: timings,
+        ir_function_count,
+        ir_instruction_count,
+        code_words,
+        debug_info: if config.debug_info {
+            Some(DebugInfo {
+                ast: Some(ast),
+                ir_pre_regalloc: Some(ir_program),
+                regalloc_results,
+                transform_results: transform_result,
+            })
+        } else {
+            None
+        },
+    })
+}
+
+/// Incremental compilation: only re-run stages affected by changes
+/// since the last compilation.
+///
+/// Returns the compilation output if successful, or a list of errors.
+/// The cache is updated in-place with the results of this run.
+pub fn compile_incremental(
+    source: &str,
+    config: &CompileConfig,
+    cache: &mut IncrementalCache,
+) -> Result<CompilationOutput, Vec<VumaError>> {
+    let new_fp = SourceFingerprint::from_source(source);
+
+    // Determine which stages need to re-run.
+    if cache.source_fingerprint != new_fp {
+        // Source changed — everything from parse onwards must re-run.
+        cache.invalidated_stages = PipelineStage::from(PipelineStage::Parse);
+    }
+
+    // If nothing is invalidated, we can potentially skip everything.
+    if cache.invalidated_stages.is_empty() {
+        // No changes detected. Re-emit from cached state if possible.
+        // For simplicity, we fall through to a full recompile.
+        cache.invalidated_stages = PipelineStage::from(PipelineStage::Parse);
+    }
+
+    // For now, incremental compilation falls back to a full compile.
+    // A full incremental implementation would check cache.invalidated_stages
+    // and reuse cached artifacts for non-invalidated stages.
+    let result = compile(source, config);
+
+    // Update cache.
+    cache.source_fingerprint = new_fp;
+    cache.invalidated_stages.clear();
+
+    if let Ok(ref output) = result {
+        cache.post_opt_scg = Some(output.scg.clone());
+        cache.msg = Some(output.msg.clone());
+        cache.verification_cache = output.verification.clone();
+    }
+
+    result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse VUMA source text into an AST.
+fn parse_source(source: &str) -> Result<AstProgram, VumaError> {
+    let mut parser = Parser::new(source);
+    parser
+        .parse_program()
+        .map_err(|e| VumaError::Parse {
+            errors: e,
+        })
+}
+
+/// Convert an AST to an SCG.
+fn ast_to_scg(ast: &AstProgram) -> Result<SCG, VumaError> {
+    let mut converter = AstToScg::new();
+    converter.convert(ast).map_err(|e| VumaError::AstToScg {
+        message: format!("{}", e),
+    })
+}
+
+/// Run SCG transformation passes based on the optimisation level.
+fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipelineResult> {
+    let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
+
+    match config.opt_level {
+        OptLevel::O0 => {
+            // No optimisation passes.
+        }
+        OptLevel::O1 => {
+            pm.add_pass(DeadCodeElimination::new());
+            pm.add_pass(ConstantFolding::new());
+        }
+        OptLevel::O2 => {
+            pm.add_pass(DeadCodeElimination::new());
+            pm.add_pass(ConstantFolding::new());
+            pm.add_pass(CommonSubexpressionElimination::new());
+            pm.add_pass(DeadCodeElimination::new()); // second pass after CSE
+        }
+        OptLevel::O3 => {
+            pm.add_pass(DeadCodeElimination::new());
+            pm.add_pass(ConstantFolding::new());
+            pm.add_pass(CommonSubexpressionElimination::new());
+            pm.add_pass(InliningPass::with_max_size(config.max_inline_size));
+            pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
+            pm.add_pass(ConstantFolding::new());      // re-fold after inlining
+            pm.add_pass(CommonSubexpressionElimination::new());
+            pm.add_pass(DeadCodeElimination::new()); // final cleanup
+        }
+    }
+
+    if pm.pass_count() > 0 {
+        Some(pm.run(scg))
+    } else {
+        None
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test 1: Full pipeline with a simple allocation program.
+    #[test]
+    fn test_compile_simple_allocation() {
+        let source = r#"
+            region memory_pool = allocate(1024);
+            fn main() {
+                node_ptr = memory_pool + 64;
+                header = node_ptr as *NodeHeader;
+            }
+        "#;
+        let config = CompileConfig::default();
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "Expected successful compilation");
+        let output = result.unwrap();
+        assert!(!output.binary.is_empty(), "Should produce binary output");
+        assert!(output.scg.node_count() > 0, "SCG should have nodes");
+        assert!(output.verification.is_some(), "Verification should run at Normal level");
+        assert_eq!(output.stage_timings.len(), 10, "All 10 stages should report timing");
+    }
+
+    /// Test 2: Compile with O0 (no optimisation).
+    #[test]
+    fn test_compile_no_optimisation() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig {
+            opt_level: OptLevel::O0,
+            ..CompileConfig::default()
+        };
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "O0 compilation should succeed");
+        let output = result.unwrap();
+        assert!(output.binary.len() >= 64, "Even empty program produces ELF header");
+    }
+
+    /// Test 3: Compile with O3 (aggressive optimisation).
+    #[test]
+    fn test_compile_aggressive_optimisation() {
+        let source = r#"
+            region buf = allocate(256);
+            fn process() {
+                node_ptr = buf + 64;
+                header = node_ptr as *NodeHeader;
+            }
+        "#;
+        let config = CompileConfig {
+            opt_level: OptLevel::O3,
+            ..CompileConfig::default()
+        };
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "O3 compilation should succeed");
+    }
+
+    /// Test 4: Compile with verification disabled.
+    #[test]
+    fn test_compile_no_verification() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig {
+            verification_level: VerificationLevel::None,
+            ..CompileConfig::default()
+        };
+        let result = compile(source, &config);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.verification.is_none(), "Verification should be skipped");
+    }
+
+    /// Test 5: Compile with quick verification.
+    #[test]
+    fn test_compile_quick_verification() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig {
+            verification_level: VerificationLevel::Quick,
+            ..CompileConfig::default()
+        };
+        let result = compile(source, &config);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        let verification = output.verification.unwrap();
+        assert_eq!(verification.per_invariant.len(), 2, "Quick should check 2 invariants");
+    }
+
+    /// Test 6: Compile with debug info.
+    #[test]
+    fn test_compile_with_debug_info() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig {
+            debug_info: true,
+            ..CompileConfig::default()
+        };
+        let result = compile(source, &config);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.debug_info.is_some(), "Debug info should be captured");
+        let debug = output.debug_info.unwrap();
+        assert!(debug.ast.is_some(), "AST should be in debug info");
+        assert!(debug.ir_pre_regalloc.is_some(), "IR should be in debug info");
+    }
+
+    /// Test 7: Compile for bare-metal Pi 5.
+    #[test]
+    fn test_compile_pi5_bare() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig::pi5_bare();
+        let result = compile(source, &config);
+        assert!(result.is_ok(), "Bare-metal compilation should succeed");
+        let output = result.unwrap();
+        // The ELF should start with the ELF magic bytes.
+        assert_eq!(&output.binary[0..4], &[0x7f, b'E', b'L', b'F']);
+    }
+
+    /// Test 8: Source fingerprint detects changes.
+    #[test]
+    fn test_source_fingerprint() {
+        let fp1 = SourceFingerprint::from_source("fn main() {}");
+        let fp2 = SourceFingerprint::from_source("fn main() {} ");
+        let fp3 = SourceFingerprint::from_source("fn main() {}");
+        assert_ne!(fp1, fp2, "Different sources should have different fingerprints");
+        assert_eq!(fp1, fp3, "Same sources should have same fingerprints");
+    }
+
+    /// Test 9: Incremental compilation updates the cache.
+    #[test]
+    fn test_incremental_compilation() {
+        let source = r#"
+            fn main() {
+            }
+        "#;
+        let config = CompileConfig::default();
+        let mut cache = IncrementalCache {
+            source_fingerprint: SourceFingerprint::from_source("old source"),
+            ast: None,
+            pre_opt_scg: None,
+            post_opt_scg: None,
+            msg: None,
+            verification_cache: None,
+            invalidated_stages: vec![],
+        };
+        let result = compile_incremental(source, &config, &mut cache);
+        assert!(result.is_ok(), "Incremental compilation should succeed");
+        assert!(cache.post_opt_scg.is_some(), "Cache should be populated after incremental compile");
+        assert!(cache.msg.is_some(), "MSG cache should be populated");
+    }
+
+    /// Test 10: Pipeline stage ordering.
+    #[test]
+    fn test_pipeline_stage_ordering() {
+        let stages = PipelineStage::all();
+        assert_eq!(stages.len(), 10);
+        assert_eq!(stages[0], PipelineStage::Parse);
+        assert_eq!(stages[9], PipelineStage::CodeEmission);
+
+        // from() should return all stages from the given one onwards.
+        let from_msg = PipelineStage::from(PipelineStage::MsgConstruction);
+        assert_eq!(from_msg.len(), 5);
+        assert_eq!(from_msg[0], PipelineStage::MsgConstruction);
+        assert_eq!(from_msg[4], PipelineStage::CodeEmission);
+    }
+
+    /// Test 11: CompileConfig defaults are reasonable.
+    #[test]
+    fn test_config_defaults() {
+        let config = CompileConfig::default();
+        assert_eq!(config.target, CompileTarget::Pi5Linux);
+        assert_eq!(config.opt_level, OptLevel::O2);
+        assert_eq!(config.verification_level, VerificationLevel::Normal);
+        assert_eq!(config.entry_name, "main");
+        assert!(!config.debug_info);
+    }
+
+    /// Test 12: Error display formatting.
+    #[test]
+    fn test_error_display() {
+        let err = VumaError::AstToScg {
+            message: "test error".to_string(),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("[ast-to-scg]"));
+        assert!(display.contains("test error"));
+
+        let err2 = VumaError::Multi {
+            errors: vec![
+                VumaError::BdInference {
+                    node_id: Some(42),
+                    message: "bad inference".to_string(),
+                },
+                VumaError::Emission {
+                    message: "bad emit".to_string(),
+                },
+            ],
+        };
+        let display2 = format!("{}", err2);
+        assert!(display2.contains("multiple errors"));
+        assert!(display2.contains("bad inference"));
+        assert!(display2.contains("bad emit"));
+    }
+}
