@@ -36,11 +36,13 @@
 //! // Run BD inference
 //! let inference = InferenceEngine::new();
 //! let inference_result = inference.infer(&scg);
+//! assert!(inference_result.bd_map.is_empty()); // empty SCG has no nodes
 //!
-//! // Run verification using the inferred BDs
+//! // Run verification — BD inference happens internally if not provided
 //! let verification = VerificationEngine::new();
-//! let input = VerificationInput::with_bd_map(scg, inference_result.bd_map);
+//! let input = VerificationInput::from_scg(scg);
 //! let results = verification.verify_all(&input);
+//! // results is a Vec<VerificationResult> — one per invariant
 //! ```
 
 pub mod bd_solver;

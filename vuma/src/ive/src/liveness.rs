@@ -985,38 +985,33 @@ impl LivenessVerifier {
                         .map(|de| de.point)
                         .collect();
 
-                    // Find points reachable from alloc but NOT reaching any dealloc
-                    // (simplified: check if every successor path leads to dealloc)
-                    let _dealloc_reachable_set: hashbrown::HashSet<PointId> = dealloc_points
-                        .iter()
-                        .flat_map(|&dp| cfg.reachable_set(dp))
-                        .collect();
-
-                    // A point is "after alloc but before dealloc" if it's reachable
-                    // from alloc but no dealloc point is reachable from it.
+                    // A point is a potential leak if it is reachable from alloc,
+                    // does not itself reach any dealloc, and has no successors
+                    // (i.e., it is a "dead end" in the CFG). Intermediate nodes
+                    // that have successors leading (transitively) to a dealloc
+                    // are safe. Only true dead-end nodes that don't reach a
+                    // dealloc represent a potential resource leak on some path.
                     let mut has_potential_leak_path = false;
                     for &point in &reachable_from_alloc {
                         if dealloc_points.contains(&point) {
                             continue; // This IS a dealloc point
                         }
-                        let point_reachable = cfg.reachable_set(point);
-                        let reaches_dealloc = dealloc_points
-                            .iter()
-                            .any(|&dp| point_reachable.contains(&dp));
-                        if !reaches_dealloc && point != alloc_point {
-                            // This point leads to a path with no dealloc
-                            // But we need to check that the point is actually
-                            // reachable without going through a dealloc first.
-                            // Simplified check: is this point reachable from alloc
-                            // without passing through dealloc?
-                            if let Some(path) = cfg.find_path(alloc_point, point) {
-                                let passes_through_dealloc = path
-                                    .iter()
-                                    .any(|p| dealloc_points.contains(p));
-                                if !passes_through_dealloc {
-                                    has_potential_leak_path = true;
-                                    break;
-                                }
+                        // Only consider dead-end nodes (no successors) as
+                        // potential leak endpoints. Nodes with successors that
+                        // eventually reach a dealloc are safe.
+                        if cfg.successors.contains_key(&point) {
+                            continue; // This node has successors; not a dead end
+                        }
+                        // This is a dead-end node. Check if there's a path
+                        // from alloc to this dead end that doesn't pass through
+                        // a dealloc.
+                        if let Some(path) = cfg.find_path(alloc_point, point) {
+                            let passes_through_dealloc = path
+                                .iter()
+                                .any(|p| dealloc_points.contains(p));
+                            if !passes_through_dealloc {
+                                has_potential_leak_path = true;
+                                break;
                             }
                         }
                     }

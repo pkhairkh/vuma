@@ -542,16 +542,16 @@ impl AllocationFreedProof {
                 // Region has been freed — find the free point.
                 let fp = region.free_point.unwrap_or(0);
 
-                // Step 1: Checked fact — free point is reachable.
+                // Step 1: Checked fact — region is freed at the free point.
                 proof.add_step(ProofStep::Assume {
-                    fact: Fact::checked(1, format!("free of region {} at PP {} is reachable on all paths", region.id, fp)),
+                    fact: Fact::checked(1, format!("region {} is freed at PP {}", region.id, fp)),
                 });
 
-                // Step 2: Infer — region is freed.
+                // Step 2: Infer — region is dead (LivenessElim: freed → dead).
                 proof.add_step(ProofStep::Infer {
-                    from: vec![0, 1],
+                    from: vec![1],
                     rule: InferenceRule::LivenessElim,
-                    conclusion: Fact::derived(2, format!("region {} is freed", region.id)),
+                    conclusion: Fact::derived(2, format!("region {} is dead at PP {}", region.id, fp)),
                 });
 
                 proof.conclude(Conclusion::Proven);
@@ -677,11 +677,24 @@ impl std::fmt::Display for LivenessProof {
 ///
 /// If any tactic succeeds, the resulting `LivenessProof` can be independently
 /// checked by calling [`LivenessProof::check`].
+
+/// Helper: returns `true` if the failure is a concrete program violation
+/// (use-after-free, out-of-bounds, deadlock) that no tactic can fix.
+fn is_concrete_violation(e: &ProofFailure) -> bool {
+    matches!(
+        e,
+        ProofFailure::UseAfterFree { .. }
+            | ProofFailure::OutOfBounds { .. }
+            | ProofFailure::DeadlockCycle { .. }
+    )
+}
+
 pub fn prove_liveness(msg: &MSG, scg: &SCG) -> Result<LivenessProof, ProofFailure> {
     // Try path enumeration first (works for acyclic programs).
     if !scg.has_cycle() {
         match prove_liveness_tactic(msg, scg, LivenessTactic::PathEnumeration) {
             Ok(proof) => return Ok(proof),
+            Err(e) if is_concrete_violation(&e) => return Err(e),
             Err(e) => log::debug!("path-enumeration failed: {}", e),
         }
     }
@@ -689,12 +702,14 @@ pub fn prove_liveness(msg: &MSG, scg: &SCG) -> Result<LivenessProof, ProofFailur
     // Try ranking function (handles loops via well-founded ordering).
     match prove_liveness_tactic(msg, scg, LivenessTactic::RankingFunction) {
         Ok(proof) => return Ok(proof),
+        Err(e) if is_concrete_violation(&e) => return Err(e),
         Err(e) => log::debug!("ranking-function failed: {}", e),
     }
 
     // Try structural induction as a last resort.
     match prove_liveness_tactic(msg, scg, LivenessTactic::StructuralInduction) {
         Ok(proof) => return Ok(proof),
+        Err(e) if is_concrete_violation(&e) => return Err(e),
         Err(e) => log::debug!("structural-induction failed: {}", e),
     }
 
@@ -754,7 +769,7 @@ fn prove_liveness_tactic(
         sub.add_step(ProofStep::Infer {
             from: vec![0],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived(1, format!("region {} is live", region.id)),
+            conclusion: Fact::derived(1, format!("region {} is live at PP {}", region.id, access.program_point)),
         });
 
         sub.add_step(ProofStep::Assume {

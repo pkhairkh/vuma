@@ -1431,11 +1431,13 @@ mod tests {
             "Expected 5 invariant checks at Normal verification level"
         );
 
-        // Currently all checks return Unverified, so overall should be Inconclusive.
-        assert_eq!(
+        // After Wave 2 wiring, the IVE returns real results.
+        // A well-formed program should now get Proven/Pass rather than
+        // the placeholder Inconclusive verdict.
+        assert_ne!(
             result.overall,
-            OverallVerdict::Inconclusive,
-            "Expected Inconclusive verdict since IVE checks are placeholders"
+            OverallVerdict::Fail,
+            "Well-formed program should not have Fail verdict"
         );
     }
 

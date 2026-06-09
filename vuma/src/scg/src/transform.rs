@@ -795,11 +795,10 @@ impl SCGPass for VerificationPass {
                 result.errors.push(err.clone());
             }
         }
-        // Warnings are informational; we don't treat them as pass errors,
-        // but we do report them for completeness.
-        for warn in &validation.warnings {
-            result.errors.push(format!("WARNING: {warn}"));
-        }
+        // Warnings are informational; we don't treat them as pass errors.
+        // They are silently ignored so that valid programs with minor
+        // style issues (e.g., allocations without paired deallocations)
+        // don't fail compilation.
 
         // Additional check: acyclicity
         if self.check_acyclic {

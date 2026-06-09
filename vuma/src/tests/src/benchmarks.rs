@@ -40,9 +40,8 @@ use vuma_scg::{
 };
 
 use vuma_ive::{
-    inference::SCG as IveScg,
-    verification::Message,
-    InferenceEngine, InvariantAggregator, InvariantKind, VerificationLevel,
+    InferenceEngine, InvariantAggregator, InvariantKind, VerificationInput,
+    VerificationLevel,
 };
 
 use vuma_core::scg_to_msg;
@@ -504,23 +503,18 @@ pub fn bd_inference_bench() -> Vec<BenchmarkResult> {
 
     for &n_chains in &[10, 100, 500] {
         let scg = build_rich_scg(n_chains);
-        let ive_scg = IveScg {
-            node_count: scg.node_count(),
-        };
-
         // Benchmark: infer_bd for a single node.
         let label = format!("bd_inference/infer_single/{}_nodes", scg.node_count());
         let result = bench(&label, |_iter| {
-            let bd = engine.infer_bd(&ive_scg, 0);
+            let bd = engine.infer_bd(&scg, vuma_scg::NodeId(0));
             std::hint::black_box(&bd);
         });
         results.push(result);
 
         // Benchmark: infer_constraints for entire graph.
         let label2 = format!("bd_inference/infer_constraints/{}_nodes", scg.node_count());
-        let scg_ref = &ive_scg;
         let result2 = bench(&label2, |_iter| {
-            let constraints = engine.infer_constraints(scg_ref);
+            let constraints = engine.infer_constraints(&scg);
             std::hint::black_box(&constraints);
         });
         results.push(result2);
@@ -528,7 +522,7 @@ pub fn bd_inference_bench() -> Vec<BenchmarkResult> {
         // Benchmark: infer_types for entire graph.
         let label3 = format!("bd_inference/infer_types/{}_nodes", scg.node_count());
         let result3 = bench(&label3, |_iter| {
-            let types = engine.infer_types(scg_ref);
+            let types = engine.infer_types(&scg);
             std::hint::black_box(&types);
         });
         results.push(result3);
@@ -576,10 +570,7 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
 
     for &n_chains in &[10, 100] {
         let scg = build_rich_scg(n_chains);
-        let msg = bridge_scg_for_ive(&scg);
-        let ive_scg = IveScg {
-            node_count: scg.node_count(),
-        };
+        let input = VerificationInput::from_scg(scg.clone());
 
         // Benchmark each invariant separately.
         for &kind in InvariantKind::all() {
@@ -590,11 +581,9 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
                 scg.node_count()
             );
             let aggregator = InvariantAggregator::new();
-            let msg_ref = &msg;
-            let ive_scg_ref = &ive_scg;
 
             let result = bench(&label, |_iter| {
-                let r = aggregator.verify_all(msg_ref, ive_scg_ref);
+                let r = aggregator.verify_all(&input);
                 std::hint::black_box(&r);
             });
             results.push(result);
@@ -612,11 +601,9 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
                 scg.node_count()
             );
             let aggregator = InvariantAggregator::new().with_level(level);
-            let msg_ref = &msg;
-            let ive_scg_ref = &ive_scg;
 
             let result = bench(&label, |_iter| {
-                let r = aggregator.verify_all(msg_ref, ive_scg_ref);
+                let r = aggregator.verify_all(&input);
                 std::hint::black_box(&r);
             });
             results.push(result);
@@ -630,7 +617,7 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
         // Populate cache by running incremental with a full delta first.
         let full_delta = vuma_ive::InvariantDelta::from_set(InvariantKind::all().to_vec());
         let mut aggregator = InvariantAggregator::new();
-        let _ = aggregator.verify_incremental(&msg, &ive_scg, &full_delta);
+        let _ = aggregator.verify_incremental(&input, &full_delta);
         // Now benchmark a targeted incremental run (only liveness re-checked).
         let delta = vuma_ive::InvariantDelta::single(InvariantKind::Liveness);
 
@@ -638,7 +625,7 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
         let aggregator_cell = std::cell::RefCell::new(aggregator);
         let result = bench(&label, |_iter| {
             let mut agg = aggregator_cell.borrow_mut();
-            let r = agg.verify_incremental(&msg, &ive_scg, &delta);
+            let r = agg.verify_incremental(&input, &delta);
             std::hint::black_box(&r);
         });
         results.push(result);
@@ -781,10 +768,7 @@ pub fn c_comparison_bench() -> Vec<BenchmarkResult> {
 
     let n_chains = 100;
     let scg = build_rich_scg(n_chains);
-    let msg_bridge = bridge_scg_for_ive(&scg);
-    let ive_scg = IveScg {
-        node_count: scg.node_count(),
-    };
+    let input = VerificationInput::from_scg(scg.clone());
 
     // VUMA full pipeline (SCG → MSG → verify).
     let label = format!("c_comparison/vuma_pipeline/{}_nodes", scg.node_count());
@@ -793,7 +777,7 @@ pub fn c_comparison_bench() -> Vec<BenchmarkResult> {
         std::hint::black_box(&msg);
 
         let aggregator = InvariantAggregator::new();
-        let r = aggregator.verify_all(&msg_bridge, &ive_scg);
+        let r = aggregator.verify_all(&input);
         std::hint::black_box(&r);
     });
     results.push(result);
@@ -836,17 +820,13 @@ pub fn memory_usage_bench() -> Vec<MemorySnapshot> {
         let after_msg = peak_rss_bytes();
 
         // Verify.
-        let msg_bridge = bridge_scg_for_ive(&scg);
-        let ive_scg = IveScg {
-            node_count: scg.node_count(),
-        };
+        let input = VerificationInput::from_scg(scg.clone());
         let aggregator = InvariantAggregator::new();
-        let _r = aggregator.verify_all(&msg_bridge, &ive_scg);
+        let _r = aggregator.verify_all(&input);
         let after_verify = peak_rss_bytes();
 
         // Drop everything.
         drop(scg);
-        drop(ive_scg);
         drop(aggregator);
         let after_drop = peak_rss_bytes();
 
@@ -896,14 +876,9 @@ pub fn e2e_pipeline_bench() -> Vec<BenchmarkResult> {
             let msg = scg_to_msg::scg_to_msg(scg_ref);
 
             // Step 2: Bridge to IVE types and verify.
-            let ive_msg = Message {
-                label: format!("e2e_bench ({} nodes)", scg_ref.node_count()),
-            };
-            let ive_scg = IveScg {
-                node_count: scg_ref.node_count(),
-            };
+            let input = VerificationInput::from_scg(scg_ref.clone());
             let aggregator = InvariantAggregator::new();
-            let r = aggregator.verify_all(&ive_msg, &ive_scg);
+            let r = aggregator.verify_all(&input);
 
             // Step 3: SCG validation.
             let validation = scg_ref.validate();
@@ -1017,13 +992,6 @@ impl fmt::Display for BenchmarkSuiteResult {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Bridge a `vuma_scg::SCG` to the IVE placeholder `Message` type.
-fn bridge_scg_for_ive(scg: &SCG) -> Message {
-    Message {
-        label: format!("bench_scg ({} nodes, {} edges)", scg.node_count(), scg.edge_count()),
-    }
-}
 
 /// Read peak RSS from `/proc/self/status` VmHWM field (Linux only).
 /// Returns 0 on non-Linux platforms.

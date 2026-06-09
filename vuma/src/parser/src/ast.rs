@@ -597,6 +597,12 @@ pub enum Expr {
     Allocate { size: Box<Expr>, span: Span },
     /// Null literal: `null`
     Null { span: Span },
+    /// Range expression: `start..end`
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

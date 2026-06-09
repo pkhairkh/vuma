@@ -36,6 +36,8 @@ pub struct Parser<'src> {
     current: Token,
     /// Accumulated parse errors (for error recovery).
     errors: Vec<ParseError>,
+    /// Pushback buffer for token rewinding (used in struct literal disambiguation).
+    pushback: std::collections::VecDeque<Token>,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -82,6 +84,7 @@ impl<'src> Parser<'src> {
             lexer,
             current,
             errors: Vec::new(),
+            pushback: std::collections::VecDeque::new(),
         }
     }
 
@@ -855,8 +858,12 @@ impl<'src> Parser<'src> {
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
         let span = self.current.span;
         match self.current.kind {
-            // `_` wildcard is tokenized as Ident with lexeme "_"
+            // `_` wildcard — tokenized as either Ident("_") or TokenKind::Underscore
             TokenKind::Ident if self.current.lexeme == "_" => {
+                self.advance();
+                Ok(MatchPattern::Wildcard(span))
+            }
+            TokenKind::Underscore => {
                 self.advance();
                 Ok(MatchPattern::Wildcard(span))
             }
@@ -1057,6 +1064,21 @@ impl<'src> Parser<'src> {
         let mut left = self.parse_unary()?;
 
         loop {
+            // Range expression: `start..end` — handled as a very low-precedence
+            // binary-like construct that produces Expr::Range instead of BinOp.
+            if self.current.kind == TokenKind::DotDot && min_prec <= 0 {
+                let start = left.span().start;
+                self.advance(); // consume '..'
+                let end_expr = self.parse_expr_with_precedence(1)?;
+                let end = end_expr.span().end;
+                left = Expr::Range {
+                    start: Box::new(left),
+                    end: Box::new(end_expr),
+                    span: Span::new(start, end),
+                };
+                continue;
+            }
+
             let (op, prec) = match self.current.kind {
                 // Logical
                 TokenKind::OrOr => (BinOp::Or, 0),
@@ -1224,11 +1246,35 @@ impl<'src> Parser<'src> {
                     };
                 }
                 TokenKind::LBrace => {
-                    // Struct literal (only if `expr` is an identifier-like name).
+                    // Struct literal (only if `expr` is an identifier-like name
+                    // and the brace is followed by `ident :` — otherwise the `{`
+                    // belongs to a block statement like `if cond { … }`).
                     let start = expr.span().start;
                     if let Expr::Var { name, .. } = &expr {
                         let name = name.clone();
+                        let saved_lbrace = self.current.clone();
                         self.advance(); // consume '{'
+
+                        // Disambiguation: if the first token inside the braces
+                        // is NOT `ident :`, this is not a struct literal.
+                        // Rewind and let the caller (if/while/for/match) handle the block.
+                        let is_struct_literal = if self.at(TokenKind::RBrace) {
+                            // Empty braces: `Foo {}` is a valid struct literal
+                            true
+                        } else if self.current.kind == TokenKind::Ident {
+                            // Peek at the token after the field name
+                            let after_field = self.peek_next();
+                            after_field.kind == TokenKind::Colon
+                        } else {
+                            false
+                        };
+
+                        if !is_struct_literal {
+                            // Rewind: put back the current token and the `{`
+                            self.push_back_current(saved_lbrace);
+                            break;
+                        }
+
                         let mut fields = Vec::new();
                         if !self.at(TokenKind::RBrace) {
                             let fname = self.expect_name()?;
@@ -1596,8 +1642,20 @@ impl<'src> Parser<'src> {
     /// Consume the current token and advance to the next one.
     fn advance(&mut self) -> Token {
         let prev = self.current.clone();
-        self.current = self.lexer.next_token();
+        self.current = if let Some(tok) = self.pushback.pop_front() {
+            tok
+        } else {
+            self.lexer.next_token()
+        };
         prev
+    }
+
+    /// Push a token back so it becomes the current token again.
+    /// The old current token is placed in the pushback buffer so that
+    /// the next `advance()` will return it.
+    fn push_back_current(&mut self, saved: Token) {
+        let old_current = std::mem::replace(&mut self.current, saved);
+        self.pushback.push_front(old_current);
     }
 
     /// Consume the current token, asserting its kind.
@@ -1772,6 +1830,7 @@ impl Expr {
             Expr::Spawn { span, .. } => *span,
             Expr::Allocate { span, .. } => *span,
             Expr::Null { span } => *span,
+            Expr::Range { span, .. } => *span,
         }
     }
 }

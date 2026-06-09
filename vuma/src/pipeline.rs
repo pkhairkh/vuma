@@ -1156,9 +1156,9 @@ mod tests {
 
         // from() should return all stages from the given one onwards.
         let from_msg = PipelineStage::from(PipelineStage::MsgConstruction);
-        assert_eq!(from_msg.len(), 5);
+        assert_eq!(from_msg.len(), 6);
         assert_eq!(from_msg[0], PipelineStage::MsgConstruction);
-        assert_eq!(from_msg[4], PipelineStage::CodeEmission);
+        assert_eq!(from_msg[5], PipelineStage::CodeEmission);
     }
 
     /// Test 11: CompileConfig defaults are reasonable.

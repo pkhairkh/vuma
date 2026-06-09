@@ -466,6 +466,30 @@ impl AstToScg {
                     )?;
                 }
 
+                // If the RHS is a cast expression → Cast node.
+                if let Expr::Cast { expr: inner, target_type, .. } = &l.value {
+                    let source_type = self.infer_expr_type(inner);
+                    let target_type_str = target_type.to_string();
+                    let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+                    let cast_id = scg.add_node(
+                        NodeType::Cast,
+                        NodePayload::Cast(CastNode {
+                            from_type: source_type,
+                            to_type: target_type_str,
+                            is_lossless,
+                        }),
+                        self.span_to_pp(&l.span),
+                    );
+                    region.add_node(cast_id);
+                    let _ = scg.add_edge(id, cast_id, EdgeKind::Derivation);
+                    self.add_data_flow_edges(inner, cast_id, scg);
+                    for var_name in &self.expr_uses(inner) {
+                        if let Some(source) = self.lookup_var(var_name) {
+                            let _ = scg.add_edge(source, cast_id, EdgeKind::Derivation);
+                        }
+                    }
+                }
+
                 Ok(id)
             }
 
@@ -519,6 +543,47 @@ impl AstToScg {
                 // Check if the RHS is a function call.
                 if let Expr::Call { callee, args, .. } = &a.value {
                     self.emit_call_nodes(callee, args, id, scg, region)?;
+                }
+
+                // Pointer offset via assignment: `ptr = base + offset`
+                // Create Derivation edge with offset label.
+                if let Expr::BinOp { op: BinOp::Add, lhs, rhs, .. } = &a.value {
+                    for var_name in &self.expr_uses(lhs) {
+                        if let Some(source) = self.lookup_var(var_name) {
+                            let eid = scg.add_edge(source, id, EdgeKind::Derivation);
+                            if let Ok(eid_val) = eid {
+                                if let Some(offset_val) = self.eval_const_int(rhs) {
+                                    if let Some(edge) = scg.get_edge_mut(eid_val) {
+                                        edge.label = Some(format!("offset={}", offset_val));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for var_name in &self.expr_uses(rhs) {
+                        if let Some(source) = self.lookup_var(var_name) {
+                            let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+                        }
+                    }
+                }
+
+                // Also handle Cast in assignment value
+                if let Expr::Cast { expr: inner, target_type, .. } = &a.value {
+                    let source_type = self.infer_expr_type(inner);
+                    let target_type_str = target_type.to_string();
+                    let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+                    let cast_id = scg.add_node(
+                        NodeType::Cast,
+                        NodePayload::Cast(CastNode {
+                            from_type: source_type,
+                            to_type: target_type_str,
+                            is_lossless,
+                        }),
+                        self.span_to_pp(&a.span),
+                    );
+                    region.add_node(cast_id);
+                    let _ = scg.add_edge(id, cast_id, EdgeKind::Derivation);
+                    self.add_data_flow_edges(inner, cast_id, scg);
                 }
 
                 Ok(id)
@@ -1545,6 +1610,10 @@ impl AstToScg {
                 self.collect_uses(size, uses);
             }
             Expr::Null { .. } => {}
+            Expr::Range { start, end, .. } => {
+                self.collect_uses(start, uses);
+                self.collect_uses(end, uses);
+            }
         }
     }
 
@@ -1675,6 +1744,7 @@ impl AstToScg {
             Expr::Spawn { .. } => "task".to_string(),
             Expr::Allocate { .. } => "ptr".to_string(),
             Expr::Null { .. } => "null".to_string(),
+            Expr::Range { .. } => "range".to_string(),
         }
     }
 
@@ -1806,6 +1876,9 @@ impl AstToScg {
             Expr::Spawn { expr, .. } => format!("spawn {}", self.expr_to_string(expr)),
             Expr::Allocate { size, .. } => format!("allocate({})", self.expr_to_string(size)),
             Expr::Null { .. } => "null".to_string(),
+            Expr::Range { start, end, .. } => {
+                format!("{}..{}", self.expr_to_string(start), self.expr_to_string(end))
+            }
         }
     }
 
@@ -2151,7 +2224,7 @@ mod tests {
     #[test]
     fn test_async_creates_parallel_region() {
         let scg = parse_and_convert(
-            "async { let x = 1; }",
+            "async { let x = 1; };",
         );
 
         let secure_regions = scg.regions().filter(|r| r.security_boundary).count();

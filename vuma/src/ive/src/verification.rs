@@ -196,13 +196,18 @@ impl VerificationEngine {
     fn extract_liveness_input(&self, scg: &SCG) -> LivenessInput {
         let mut input = LivenessInput::new();
         let mut next_resource_id: u64 = 1;
+        // Map from SCG allocation NodeId to the ResourceId assigned for
+        // liveness tracking, so that deallocations can reference the same
+        // resource ID as their corresponding allocation.
+        let mut alloc_node_to_rid: HashMap<NodeId, ResourceId> = HashMap::new();
 
         for node in scg.nodes() {
             match node.node_type {
                 NodeType::Allocation => {
-                    if let NodePayload::Allocation(alloc) = &node.payload {
+                    if let NodePayload::Allocation(_alloc) = &node.payload {
                         let rid = ResourceId(next_resource_id);
                         next_resource_id += 1;
+                        alloc_node_to_rid.insert(node.id, rid);
                         input.add_event(ResourceEvent {
                             resource: rid,
                             kind: ResourceKind::Memory,
@@ -214,14 +219,17 @@ impl VerificationEngine {
                 }
                 NodeType::Deallocation => {
                     if let NodePayload::Deallocation(dealloc) = &node.payload {
-                        let rid = ResourceId(dealloc.allocation_node.as_u64());
-                        input.add_event(ResourceEvent {
-                            resource: rid,
-                            kind: ResourceKind::Memory,
-                            event: EventAction::Deallocate,
-                            point: PointId(node.id.as_u64()),
-                            thread: ThreadId(0),
-                        });
+                        // Look up the ResourceId that was assigned to the
+                        // allocation node this deallocation refers to.
+                        if let Some(&rid) = alloc_node_to_rid.get(&dealloc.allocation_node) {
+                            input.add_event(ResourceEvent {
+                                resource: rid,
+                                kind: ResourceKind::Memory,
+                                event: EventAction::Deallocate,
+                                point: PointId(node.id.as_u64()),
+                                thread: ThreadId(0),
+                            });
+                        }
                     }
                 }
                 NodeType::Access => {
@@ -232,11 +240,49 @@ impl VerificationEngine {
             }
         }
 
-        // Add control flow edges as CFG edges for liveness analysis
+        // Add ControlFlow edges as CFG edges for liveness reachability analysis.
+        // Only ControlFlow edges represent actual execution ordering; Derivation
+        // and DataFlow edges represent logical relationships that can create
+        // spurious "shortcut" paths in the CFG, leading to false-positive
+        // leak reports for well-formed programs.
+        //
+        // Additionally, we skip ControlFlow edges whose source is a Control
+        // node (FunctionEntry / FunctionReturn). These represent
+        // interprocedural markers that create dangling branches in the CFG
+        // because the SCG does not currently model call-return edges. Including
+        // them would cause false-positive ConditionalDeallocation reports
+        // whenever a program contains a function call between an allocation
+        // and its deallocation.
+        let control_node_ids: std::collections::HashSet<vuma_scg::node::NodeId> = scg
+            .nodes()
+            .filter(|n| matches!(n.node_type, NodeType::Control))
+            .map(|n| n.id)
+            .collect();
+
         for edge in scg.edges() {
             if edge.kind == vuma_scg::edge::EdgeKind::ControlFlow {
-                // CFG edges help the liveness verifier reason about paths
+                // Skip edges involving Control nodes (FunctionEntry/Return, Branch, etc.)
+                // to avoid dangling branches in the liveness CFG. Control nodes
+                // represent interprocedural or conditional markers that create
+                // disconnected subgraphs because the SCG does not currently model
+                // call-return edges.
+                if control_node_ids.contains(&edge.source)
+                    || control_node_ids.contains(&edge.target)
+                {
+                    continue;
+                }
+                input.add_cfg_edge(crate::liveness::ControlFlowEdge {
+                    from: PointId(edge.source.as_u64()),
+                    to: PointId(edge.target.as_u64()),
+                    conditional: false,
+                    label: None,
+                });
             }
+        }
+
+        // Set entry point to the first node (if any)
+        if let Some(first_node) = scg.nodes().next() {
+            input.entry_point = Some(PointId(first_node.id.as_u64()));
         }
 
         input
@@ -408,6 +454,13 @@ impl VerificationEngine {
         let mut graph = CleanupGraph::new();
         let mut node_map: HashMap<NodeId, CleanupNodeId> = HashMap::new();
 
+        // Collect Control node IDs so we can skip edges involving them.
+        let control_node_ids: std::collections::HashSet<vuma_scg::node::NodeId> = scg
+            .nodes()
+            .filter(|n| matches!(n.node_type, NodeType::Control))
+            .map(|n| n.id)
+            .collect();
+
         // Add nodes for each SCG node
         for node in scg.nodes() {
             let op = match node.node_type {
@@ -461,8 +514,27 @@ impl VerificationEngine {
             }
         }
 
-        // Add edges from SCG edges
+        // Add edges from SCG edges. Only include ControlFlow edges because
+        // Derivation and DataFlow edges represent logical relationships
+        // (e.g., "deallocation is derived from allocation"), not execution
+        // ordering. Including them creates shortcut paths in the cleanup
+        // graph that bypass intermediate operations, leading to false-positive
+        // leak reports (e.g., a path from alloc_b → dealloc_b via Derivation
+        // that skips the deallocation of alloc_a).
+        //
+        // Additionally, skip ControlFlow edges involving Control nodes
+        // (FunctionEntry/Return) for the same reason as in the liveness
+        // CFG: they create dangling branches that lead to false-positive
+        // leak reports.
         for edge in scg.edges() {
+            if edge.kind != vuma_scg::edge::EdgeKind::ControlFlow {
+                continue;
+            }
+            if control_node_ids.contains(&edge.source)
+                || control_node_ids.contains(&edge.target)
+            {
+                continue;
+            }
             if let (Some(&src), Some(&dst)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
                 let _ = graph.add_edge(src, dst);
             }
@@ -540,6 +612,116 @@ mod tests {
         let scg = SCG::new();
         let input = VerificationInput::from_scg(scg);
         assert!(input.bd_map.is_none());
+    }
+
+    #[test]
+    fn verify_liveness_on_alloc_free_program() {
+        // Build an SCG manually: allocate -> free
+        use vuma_scg::node::{AllocationNode, DeallocationNode};
+        use vuma_scg::region::{RegionId, SCGRegion, DeploymentTarget};
+        use vuma_scg::edge::EdgeKind;
+        use vuma_scg::node::ProgramPoint;
+
+        let mut scg = SCG::new();
+        let region_id = RegionId::new(1);
+
+        let alloc_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 256, align: 16, region_id,
+                type_name: Some("Buf".to_string()),
+            }),
+            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+        );
+
+        let dealloc_id = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc_id,
+                region_id,
+            }),
+            ProgramPoint { file: None, line: Some(2), column: Some(1), offset: None },
+        );
+
+        let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+        region.add_node(alloc_id);
+        region.add_node(dealloc_id);
+        scg.add_region(region);
+
+        scg.add_edge(alloc_id, dealloc_id, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation).unwrap();
+
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(scg);
+        let result = engine.verify_liveness(&input);
+        // Well-formed program should have no liveness violations
+        assert!(!result.is_violated(), "Liveness check should pass for well-formed allocate/free program, but got: {} - {}", result.status, result.message);
+    }
+
+    #[test]
+    fn verify_liveness_on_multi_region_program() {
+        use vuma_scg::node::{AllocationNode, DeallocationNode};
+        use vuma_scg::region::{RegionId, SCGRegion, DeploymentTarget};
+        use vuma_scg::edge::EdgeKind;
+        use vuma_scg::node::ProgramPoint;
+
+        let mut scg = SCG::new();
+        let region_a = RegionId::new(1);
+        let region_b = RegionId::new(2);
+
+        let alloc_a = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region_a,
+                type_name: Some("A".to_string()),
+            }),
+            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+        );
+        let alloc_b = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 128, align: 8, region_id: region_b,
+                type_name: Some("B".to_string()),
+            }),
+            ProgramPoint { file: None, line: Some(2), column: Some(1), offset: None },
+        );
+        let dealloc_a = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc_a, region_id: region_a,
+            }),
+            ProgramPoint { file: None, line: Some(3), column: Some(1), offset: None },
+        );
+        let dealloc_b = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc_b, region_id: region_b,
+            }),
+            ProgramPoint { file: None, line: Some(4), column: Some(1), offset: None },
+        );
+
+        let mut ra = SCGRegion::new(region_a, DeploymentTarget::Heap);
+        ra.add_node(alloc_a);
+        ra.add_node(dealloc_a);
+        scg.add_region(ra);
+
+        let mut rb = SCGRegion::new(region_b, DeploymentTarget::Heap);
+        rb.add_node(alloc_b);
+        rb.add_node(dealloc_b);
+        scg.add_region(rb);
+
+        // Sequential control flow
+        scg.add_edge(alloc_a, alloc_b, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_b, dealloc_a, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(dealloc_a, dealloc_b, EdgeKind::ControlFlow).unwrap();
+        // Derivation edges
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
+
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(scg);
+        let result = engine.verify_liveness(&input);
+        assert!(!result.is_violated(), "Liveness check should pass for well-formed multi-region program, but got: {} - {}", result.status, result.message);
     }
 
     #[test]
