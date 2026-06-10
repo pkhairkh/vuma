@@ -46,6 +46,7 @@
 //! assert_eq!(result.node_ids.len(), 1);
 //! ```
 
+pub mod callgraph;
 pub mod dominance;
 pub mod diff;
 pub mod edge;
@@ -71,6 +72,9 @@ pub use edge::{EdgeData, EdgeId, EdgeKind};
 
 // -- Graph --
 pub use graph::{SCG, SCGError, ValidationResult};
+
+// -- Call Graph --
+pub use callgraph::{CallGraph, CallGraphEdge, FunctionId};
 
 // -- Region types --
 pub use region::{DeploymentTarget, RegionId, SCGRegion};

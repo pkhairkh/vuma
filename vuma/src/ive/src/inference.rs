@@ -350,6 +350,22 @@ impl InferenceEngine {
                     );
                     constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
                 }
+                EdgeKind::Call { from_node, to_node, caller_region } => {
+                    // Call edges impose interprocedural temporal constraints
+                    let desc = format!(
+                        "call: {} -> {} (caller_region: {})",
+                        from_node.as_u64(), to_node.as_u64(), caller_region.as_u64()
+                    );
+                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                }
+                EdgeKind::Return { from_node, to_node, .. } => {
+                    // Return edges impose interprocedural temporal constraints
+                    let desc = format!(
+                        "return: {} -> {}",
+                        from_node.as_u64(), to_node.as_u64()
+                    );
+                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                }
             }
         }
 

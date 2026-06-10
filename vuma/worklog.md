@@ -372,3 +372,70 @@ Existing VumaFile tests updated to use real temp files (via `std::env::temp_dir(
 - `cargo test -p vuma-std`: 255 tests pass, 0 failures (39 io tests)
 
 ---
+
+## Wave 11: Interprocedural IVE — 2026-03-05
+
+### Objective
+Add interprocedural analysis support to the VUMA IVE (Invariant Verification Engine). The key gap was that the SCG did not model call-return edges, so all verification was intra-procedural only.
+
+### Files Modified
+
+1. **`src/scg/src/edge.rs`** — Added `Call` and `Return` edge kinds to `EdgeKind` enum:
+   - `Call { from_node, to_node, caller_region }` — represents a call from caller to callee's FunctionEntry
+   - `Return { from_node, to_node, return_values }` — represents a return from callee's FunctionReturn back to caller
+   - Updated `Display` impl to handle new variants
+
+2. **`src/scg/src/graph.rs`** — Added interprocedural edge helper methods:
+   - `add_call_edge()` — creates a Call edge
+   - `add_return_edge()` — creates a Return edge
+   - `edges_of_kind()` — filter edges by kind
+   - `call_edges()` — returns all Call edges
+   - `return_edges()` — returns all Return edges
+   - `function_boundary_nodes()` — finds FunctionEntry/FunctionReturn nodes
+   - `find_function_return()` — finds the FunctionReturn reachable from a FunctionEntry
+
+3. **`src/scg/src/callgraph.rs`** — New module for call graph construction:
+   - `FunctionId` — identifies a function by its FunctionEntry NodeId
+   - `CallGraphEdge` — represents a caller→callee relationship
+   - `CallGraph` — the call graph data structure with:
+     - `build(scg)` — builds from SCG's Call edges
+     - `callees()`/`callers()` — query functions
+     - `is_recursive()` — detects recursive calls
+     - `bottom_up_order()` — topological order for summary computation
+   - 6 unit tests covering: empty CG, single function, caller-callee, bottom-up order, recursive detection, non-recursive
+
+4. **`src/scg/src/serialize.rs`** — Added serialization support for Call/Return edges:
+   - New tag constants `EDGE_KIND_CALL` (5) and `EDGE_KIND_RETURN` (6)
+   - Updated `edge_kind_to_tag`, `tag_to_edge_kind`, DOT export style/color
+
+5. **`src/scg/src/lib.rs`** — Added `callgraph` module and re-exports (`CallGraph`, `CallGraphEdge`, `FunctionId`)
+
+6. **`src/ive/src/verification.rs`** — Removed code that skips ControlFlow edges involving FunctionEntry/FunctionReturn:
+   - `extract_liveness_input()`: Now includes ALL ControlFlow edges (no longer skips edges involving Control nodes), plus adds CFG edges for Call and Return edges
+   - `extract_cleanup_graph()`: Same change — includes ControlFlow, Call, and Return edges (no longer skips Control node edges)
+
+7. **`src/ive/src/inference.rs`** — Added handling for `EdgeKind::Call` and `EdgeKind::Return` in constraint derivation
+
+8. **`src/ive/src/escape.rs`** — Added handling for `EdgeKind::Call`/`EdgeKind::Return` in escape analysis (pointers flowing to a callee's FunctionEntry are classified as `EscapesToCaller`)
+
+9. **`src/ive/src/interprocedural.rs`** — New module for summary-based interprocedural analysis:
+   - `FunctionSummary` — captures function effects (allocated/freed regions, written/read regions, locks, may-leak)
+   - `compute_summaries()` — computes summaries bottom-up through call graph, merging callee effects into callers
+   - `InterproceduralViolation` — enum of cross-function violations: `CrossFunctionLeak`, `CrossFunctionDataRace`, `CrossFunctionLockLeak`, `RecursiveLeak`
+   - `verify_interprocedural_invariants()` — verifies cross-function invariants using summaries
+   - 8 unit tests covering: clean call no leaks, cross-function leak detection, cross-function data race, recursive leak, summary merge, well-formed program, call edges in SCG, read-only callee no race
+
+10. **`src/ive/src/lib.rs`** — Added `interprocedural` module and re-exports (`FunctionSummary`, `InterproceduralViolation`, `compute_summaries`, `verify_interprocedural_invariants`)
+
+### Test Results
+- `cargo clippy -p vuma-ive -p vuma-scg -- -D warnings`: **0 warnings**
+- `cargo test -p vuma-scg`: **144 tests pass** (6 new callgraph tests)
+- `cargo test -p vuma-ive`: **211 tests pass** (8 new interprocedural tests)
+
+### Key Design Decisions
+- Call/Return edges carry metadata (`caller_region`, `return_values`) for rich interprocedural analysis
+- The call graph is built from Call edges, using BFS backward search to map nodes to their enclosing function
+- Summaries are computed bottom-up (callees first) and merged into callers
+- Cross-function data race detection compares write-regions between caller and callee
+- Recursive functions are detected and flagged if they may leak resources per recursion
+- The previous "skip ControlFlow edges involving Control nodes" workaround in verification.rs was replaced with proper interprocedural edge handling

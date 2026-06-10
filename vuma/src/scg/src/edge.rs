@@ -50,6 +50,26 @@ pub enum EdgeKind {
     Annotation,
     /// A dispatch edge: connects a switch/vtable to its dispatch targets.
     Dispatch,
+    /// A call edge: represents an interprocedural call from a caller node to a
+    /// callee's FunctionEntry node. Carries metadata about the caller's region.
+    Call {
+        /// The node in the caller where the call originates.
+        from_node: NodeId,
+        /// The FunctionEntry node of the callee.
+        to_node: NodeId,
+        /// The region in which the caller is executing.
+        caller_region: crate::region::RegionId,
+    },
+    /// A return edge: represents an interprocedural return from a callee's
+    /// FunctionReturn node back to the caller. Carries the return values.
+    Return {
+        /// The FunctionReturn node of the callee.
+        from_node: NodeId,
+        /// The node in the caller where execution resumes after the call.
+        to_node: NodeId,
+        /// The return values (node IDs of values being returned).
+        return_values: Vec<NodeId>,
+    },
 }
 
 impl std::fmt::Display for EdgeKind {
@@ -60,6 +80,12 @@ impl std::fmt::Display for EdgeKind {
             EdgeKind::Derivation => write!(f, "Derivation"),
             EdgeKind::Annotation => write!(f, "Annotation"),
             EdgeKind::Dispatch => write!(f, "Dispatch"),
+            EdgeKind::Call { from_node, to_node, .. } => {
+                write!(f, "Call({} -> {})", from_node, to_node)
+            }
+            EdgeKind::Return { from_node, to_node, .. } => {
+                write!(f, "Return({} -> {})", from_node, to_node)
+            }
         }
     }
 }

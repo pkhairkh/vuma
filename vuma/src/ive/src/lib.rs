@@ -53,6 +53,7 @@ pub mod debt;
 pub mod escape;
 pub mod exclusivity;
 pub mod inference;
+pub mod interprocedural;
 pub mod interpretation;
 pub mod invariant_aggregator;
 pub mod liveness;
@@ -93,4 +94,8 @@ pub use exclusivity::{
     AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord,
     CapDInfo, Conflict, ConflictKind, ExclusivityInput, ExclusivityOutput,
     ExclusivityVerifier, InterferenceGraph, SyncEdgeRecord, SyncOrdering,
+};
+pub use interprocedural::{
+    FunctionSummary, InterproceduralViolation,
+    compute_summaries, verify_interprocedural_invariants,
 };

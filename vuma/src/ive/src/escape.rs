@@ -161,6 +161,21 @@ fn compute_escape_kind(
                 EdgeKind::Annotation | EdgeKind::Dispatch => {
                     // These don't directly cause escape
                 }
+                EdgeKind::Call { .. } | EdgeKind::Return { .. } => {
+                    // Interprocedural edges: a call transfers control to a callee;
+                    // if the pointer is passed as an argument, it escapes to callee.
+                    // A return brings the pointer back. For now, we conservatively
+                    // treat Call edges from a pointer as escaping to the callee.
+                    if let Some(target_node) = scg.get_node(target) {
+                        if target_node.node_type == NodeType::Control {
+                            if let NodePayload::Control(ctrl) = &target_node.payload {
+                                if ctrl.kind == vuma_scg::node::ControlKind::FunctionEntry {
+                                    max_escape = worse_escape(max_escape, EscapeKind::EscapesToCaller);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

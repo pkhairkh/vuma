@@ -404,6 +404,124 @@ impl SCG {
         self.graph.edge_weights()
     }
 
+    // ── Interprocedural Edge Helpers ──────────────────────────────
+
+    /// Adds a Call edge from a caller node to a callee's FunctionEntry node.
+    ///
+    /// This creates an interprocedural call edge in the SCG, representing
+    /// a function call from the caller (at `from_node`) to the callee
+    /// (whose entry is `to_node`). The `caller_region` identifies the
+    /// region in which the caller is executing.
+    pub fn add_call_edge(
+        &mut self,
+        from_node: NodeId,
+        to_node: NodeId,
+        caller_region: RegionId,
+    ) -> Result<EdgeId, SCGError> {
+        self.add_edge(
+            from_node,
+            to_node,
+            EdgeKind::Call {
+                from_node,
+                to_node,
+                caller_region,
+            },
+        )
+    }
+
+    /// Adds a Return edge from a callee's FunctionReturn node back to the caller.
+    ///
+    /// This creates an interprocedural return edge in the SCG, representing
+    /// a function return from the callee (at `from_node`) back to the caller
+    /// (at `to_node`). The `return_values` lists the node IDs of the
+    /// values being returned.
+    pub fn add_return_edge(
+        &mut self,
+        from_node: NodeId,
+        to_node: NodeId,
+        return_values: Vec<NodeId>,
+    ) -> Result<EdgeId, SCGError> {
+        self.add_edge(
+            from_node,
+            to_node,
+            EdgeKind::Return {
+                from_node,
+                to_node,
+                return_values,
+            },
+        )
+    }
+
+    /// Returns all edges of the specified kind.
+    pub fn edges_of_kind(&self, kind: &EdgeKind) -> Vec<&EdgeData> {
+        self.edges().filter(|e| &e.kind == kind).collect()
+    }
+
+    /// Returns all Call edges in the graph.
+    pub fn call_edges(&self) -> Vec<&EdgeData> {
+        self.edges()
+            .filter(|e| matches!(e.kind, EdgeKind::Call { .. }))
+            .collect()
+    }
+
+    /// Returns all Return edges in the graph.
+    pub fn return_edges(&self) -> Vec<&EdgeData> {
+        self.edges()
+            .filter(|e| matches!(e.kind, EdgeKind::Return { .. }))
+            .collect()
+    }
+
+    /// Finds all FunctionEntry and FunctionReturn nodes in the graph.
+    ///
+    /// Returns a tuple of (entry_nodes, return_nodes).
+    pub fn function_boundary_nodes(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+        let mut entries = Vec::new();
+        let mut returns = Vec::new();
+        for node in self.nodes() {
+            if node.node_type == NodeType::Control {
+                if let NodePayload::Control(ctrl) = &node.payload {
+                    match ctrl.kind {
+                        crate::node::ControlKind::FunctionEntry => entries.push(node.id),
+                        crate::node::ControlKind::FunctionReturn => returns.push(node.id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        (entries, returns)
+    }
+
+    /// Given a FunctionEntry node, finds the corresponding FunctionReturn node
+    /// by looking for the FunctionReturn node reachable via ControlFlow edges
+    /// from the entry.
+    pub fn find_function_return(&self, entry: NodeId) -> Option<NodeId> {
+        let &entry_idx = self.node_id_to_index.get(&entry)?;
+        // BFS through ControlFlow edges to find a FunctionReturn node
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(entry_idx);
+        visited.insert(entry_idx);
+
+        while let Some(current_idx) = queue.pop_front() {
+            for edge_ref in self.graph.edges_directed(current_idx, Direction::Outgoing) {
+                let target_idx = edge_ref.target();
+                if visited.insert(target_idx) {
+                    if let Some(target_id) = self.node_index_to_id.get(&target_idx) {
+                        if let Some(node) = self.get_node(*target_id) {
+                            if let NodePayload::Control(ctrl) = &node.payload {
+                                if ctrl.kind == crate::node::ControlKind::FunctionReturn {
+                                    return Some(*target_id);
+                                }
+                            }
+                        }
+                    }
+                    queue.push_back(target_idx);
+                }
+            }
+        }
+        None
+    }
+
     // ── Traversal Operations ───────────────────────────────────────
 
     /// Returns the `NodeId`s of all direct successors of the given node.

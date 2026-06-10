@@ -33,6 +33,7 @@ pub mod emit;
 pub mod ir;
 pub mod loongarch64;
 pub mod mips64;
+pub mod opt;
 pub mod ppc64;
 pub mod regalloc;
 pub mod riscv64;

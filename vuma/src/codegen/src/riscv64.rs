@@ -34,7 +34,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, PhysicalReg, RiscV64TargetInfo, RegClass,
 };
-use crate::ir::{IRFunction, IRInstr};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
 
 // ===========================================================================
 // Opcodes
@@ -1245,10 +1245,171 @@ fn map_vreg_to_gpr(vreg_id: u32, arg_index: Option<usize>, vreg_map: &mut std::c
     Gpr::T6
 }
 
+/// Resolve an `IRValue` to a physical `Gpr`.
+///
+/// If the value is a virtual register, look it up in the register map.
+/// If it's an immediate that fits in 12 bits (sign-extended), load it into
+/// `scratch` using `ADDI`.  For larger immediates, use `LUI`+`ADDI`.
+///
+/// Returns `(Gpr, Vec<u8>)` where the Vec contains any pre-code needed
+/// to materialise the value (e.g. load-immediate sequences).
+fn resolve_gpr(
+    val: &IRValue,
+    vreg_map: &std::collections::HashMap<u32, Gpr>,
+    scratch: Gpr,
+) -> (Gpr, Vec<u8>) {
+    match val {
+        IRValue::Register(id) => {
+            if let Some(&gpr) = vreg_map.get(id) {
+                (gpr, Vec::new())
+            } else {
+                (scratch, Vec::new())
+            }
+        }
+        IRValue::Immediate(imm) => {
+            let mut code = Vec::new();
+            let i = *imm as i32;
+            if (-2048..=2047).contains(&i) {
+                // Fits in 12-bit signed immediate: ADDI scratch, x0, imm
+                code.extend(Instruction::Addi { rd: scratch, rs1: Gpr::Zero, imm: i }.encode());
+            } else {
+                // Use LUI + ADDI
+                let upper = (i as u32) & 0xFFFFF000;
+                let lower = ((i as u32) << 20) >> 20; // sign-extend lower 12 bits
+                code.extend(Instruction::Lui { rd: scratch, imm: upper }.encode());
+                if lower != 0 {
+                    code.extend(Instruction::Addi { rd: scratch, rs1: scratch, imm: lower as i32 }.encode());
+                }
+            }
+            (scratch, code)
+        }
+        _ => {
+            // Address / Label — fall back to loading 0 (placeholder)
+            let mut code = Vec::new();
+            code.extend(Instruction::Addi { rd: scratch, rs1: Gpr::Zero, imm: 0 }.encode());
+            (scratch, code)
+        }
+    }
+}
+
+/// Emit a RISC-V comparison pattern that produces 0 or 1 in `rd`.
+///
+/// This maps IR comparison kinds to the appropriate SLT/SLTU/XOR+SLTIU
+/// instruction sequences.
+fn emit_cmp_isel(
+    kind: &CmpKind,
+    rd: Gpr,
+    rs1: Gpr,
+    rs2: Gpr,
+    scratch: Gpr,
+) -> Vec<u8> {
+    let mut code = Vec::new();
+    match kind {
+        CmpKind::Eq => {
+            // XOR rd, rs1, rs2; SLTIU rd, rd, 1
+            code.extend(Instruction::Xor { rd, rs1, rs2 }.encode());
+            code.extend(Instruction::Sltiu { rd, rs1: rd, imm: 1 }.encode());
+        }
+        CmpKind::Ne => {
+            // XOR rd, rs1, rs2; SLTU rd, x0, rd  (rd = (xor != 0) ? 1 : 0)
+            code.extend(Instruction::Xor { rd, rs1, rs2 }.encode());
+            code.extend(Instruction::Sltu { rd, rs1: Gpr::Zero, rs2: rd }.encode());
+        }
+        CmpKind::SLt => {
+            code.extend(Instruction::Slt { rd, rs1, rs2 }.encode());
+        }
+        CmpKind::SLe => {
+            // a <= b  <=>  !(b < a)
+            code.extend(Instruction::Slt { rd: scratch, rs1: rs2, rs2: rs1 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        CmpKind::SGt => {
+            // a > b  <=>  b < a
+            code.extend(Instruction::Slt { rd, rs1: rs2, rs2: rs1 }.encode());
+        }
+        CmpKind::SGe => {
+            // a >= b  <=>  !(a < b)
+            code.extend(Instruction::Slt { rd: scratch, rs1, rs2 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        CmpKind::ULt => {
+            code.extend(Instruction::Sltu { rd, rs1, rs2 }.encode());
+        }
+        CmpKind::ULe => {
+            // a <= b (unsigned) <=> !(b < a) (unsigned)
+            code.extend(Instruction::Sltu { rd: scratch, rs1: rs2, rs2: rs1 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        CmpKind::UGt => {
+            // a > b (unsigned) <=> b < a (unsigned)
+            code.extend(Instruction::Sltu { rd, rs1: rs2, rs2: rs1 }.encode());
+        }
+        CmpKind::UGe => {
+            // a >= b (unsigned) <=> !(a < b) (unsigned)
+            code.extend(Instruction::Sltu { rd: scratch, rs1, rs2 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+    }
+    code
+}
+
+/// Emit a RISC-V BinOp comparison pattern that produces 0 or 1 in `rd`.
+///
+/// Similar to `emit_cmp_isel` but uses `BinOpKind`.
+fn emit_binop_cmp_isel(
+    op: &BinOpKind,
+    rd: Gpr,
+    rs1: Gpr,
+    rs2: Gpr,
+    scratch: Gpr,
+) -> Vec<u8> {
+    let mut code = Vec::new();
+    match op {
+        BinOpKind::SLt => {
+            code.extend(Instruction::Slt { rd, rs1, rs2 }.encode());
+        }
+        BinOpKind::SLe => {
+            // a <= b <=> !(b < a)
+            code.extend(Instruction::Slt { rd: scratch, rs1: rs2, rs2: rs1 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        BinOpKind::SGt => {
+            code.extend(Instruction::Slt { rd, rs1: rs2, rs2: rs1 }.encode());
+        }
+        BinOpKind::SGe => {
+            code.extend(Instruction::Slt { rd: scratch, rs1, rs2 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        BinOpKind::ULt => {
+            code.extend(Instruction::Sltu { rd, rs1, rs2 }.encode());
+        }
+        BinOpKind::ULe => {
+            code.extend(Instruction::Sltu { rd: scratch, rs1: rs2, rs2: rs1 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        BinOpKind::UGt => {
+            code.extend(Instruction::Sltu { rd, rs1: rs2, rs2: rs1 }.encode());
+        }
+        BinOpKind::UGe => {
+            code.extend(Instruction::Sltu { rd: scratch, rs1, rs2 }.encode());
+            code.extend(Instruction::Xori { rd, rs1: scratch, imm: 1 }.encode());
+        }
+        BinOpKind::Eq => {
+            code.extend(Instruction::Xor { rd, rs1, rs2 }.encode());
+            code.extend(Instruction::Sltiu { rd, rs1: rd, imm: 1 }.encode());
+        }
+        BinOpKind::Ne => {
+            code.extend(Instruction::Xor { rd, rs1, rs2 }.encode());
+            code.extend(Instruction::Sltu { rd, rs1: Gpr::Zero, rs2: rd }.encode());
+        }
+        _ => unreachable!(),
+    }
+    code
+}
+
 /// Collect all virtual register IDs from an IR function.
 #[allow(dead_code)]
 fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
-    use crate::ir::IRValue;
     let mut ids = std::collections::HashSet::new();
     for block in &func.blocks {
         for instr in &block.instructions {
@@ -1284,8 +1445,6 @@ impl Backend for RiscV64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        use crate::ir::IRValue;
-
         let func_name = func.name.clone();
         let frame_size = riscv64_compute_frame_size(func);
 
@@ -1376,63 +1535,423 @@ impl Backend for RiscV64Backend {
             encoded: Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: fs }.encode().to_vec(),
         });
 
-        // Body: emit a NOP for each IR instruction as a placeholder.
-        // A full instruction selector would translate IR instructions to
-        // RISC-V instructions here.
+        // Body: real instruction selection — translate each IR instruction
+        // into one or more RISC-V machine-code instructions.
         for block in &func.blocks {
             for instr in &block.instructions {
-                // For now, emit a placeholder NOP for non-trivial instructions.
-                // The actual instruction selection would map IR ops to RISC-V ops.
-                let opcode_name = match instr {
-                    IRInstr::BinOp { op, .. } => format!("{:?}_rv64", op),
-                    IRInstr::Add { .. } => "add_rv64".to_string(),
-                    IRInstr::Sub { .. } => "sub_rv64".to_string(),
-                    IRInstr::Mul { .. } => "mul_rv64".to_string(),
-                    IRInstr::Div { .. } => "div_rv64".to_string(),
-                    IRInstr::Load { .. } => "ld_rv64".to_string(),
-                    IRInstr::Store { .. } => "sd_rv64".to_string(),
-                    IRInstr::Alloc { .. } => "alloc_rv64".to_string(),
-                    IRInstr::Call { .. } => "call_rv64".to_string(),
-                    _ => format!("{:?}_rv64", instr),
-                };
-                let reads = match instr {
-                    IRInstr::BinOp { lhs, rhs, .. } => {
-                        let mut r = Vec::new();
-                        if let IRValue::Register(id) = lhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        if let IRValue::Register(id) = rhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        r
-                    }
-                    _ => vec![],
-                };
-                let writes = match instr {
-                    IRInstr::BinOp { dst, .. } | IRInstr::Add { dst, .. } | IRInstr::Sub { dst, .. } | IRInstr::Mul { dst, .. } | IRInstr::Div { dst, .. } => {
-                        if let IRValue::Register(id) = dst {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                vec![PhysicalReg::new(RegClass::Gpr, gpr.encoding())]
+                let encoded: Vec<u8> = match instr {
+                    // ── Dedicated Add/Sub/Mul/Div ──────────────────────────
+                    IRInstr::Add { dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        if let IRValue::Immediate(imm) = rhs {
+                            let i = *imm as i32;
+                            if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                            // ADDI d, l, imm  (if fits) else materialise + ADD
+                            if (-2048..=2047).contains(&i) {
+                                code.extend(Instruction::Addi { rd: d, rs1: if l != d { d } else { l }, imm: i }.encode());
                             } else {
-                                vec![]
+                                let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                                code.extend(pre);
+                                code.extend(Instruction::Add { rd: d, rs1: if l != d { d } else { l }, rs2: r }.encode());
                             }
                         } else {
-                            vec![]
+                            let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                            code.extend(pre);
+                            if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); code.extend(Instruction::Add { rd: d, rs1: d, rs2: r }.encode()); }
+                            else { code.extend(Instruction::Add { rd: d, rs1: l, rs2: r }.encode()); }
                         }
+                        code
                     }
-                    _ => vec![],
+                    IRInstr::Sub { dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+                        if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                        code.extend(Instruction::Sub { rd: d, rs1: d, rs2: r }.encode());
+                        code
+                    }
+                    IRInstr::Mul { dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+                        if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                        code.extend(Instruction::Mul { rd: d, rs1: d, rs2: r }.encode());
+                        code
+                    }
+                    IRInstr::Div { dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+                        if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                        code.extend(Instruction::Div { rd: d, rs1: d, rs2: r }.encode());
+                        code
+                    }
+
+                    // ── BinOp (generic) ──────────────────────────────────────
+                    IRInstr::BinOp { op, dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+
+                        match op {
+                            BinOpKind::Add => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Add { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::Sub => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Sub { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::Mul => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Mul { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::SDiv => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Div { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::UDiv => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Divu { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::SRem => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Rem { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::URem => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Remu { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::And => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::And { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::Or => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Or { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::Xor => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Xor { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::Shl => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Sll { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::ShrL => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Srl { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            BinOpKind::ShrA => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(Instruction::Sra { rd: d, rs1: d, rs2: r }.encode());
+                            }
+                            // Comparison BinOps: produce 0 or 1
+                            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+                            | BinOpKind::Eq | BinOpKind::Ne => {
+                                if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                                code.extend(emit_binop_cmp_isel(op, d, d, r, Gpr::T5));
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Unary operations ─────────────────────────────────────
+                    IRInstr::UnaryOp { op, dst, operand } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (s, mut code) = resolve_gpr(operand, &vreg_map, Gpr::T3);
+                        match op {
+                            UnaryOpKind::Neg => {
+                                // SUB d, x0, s
+                                code.extend(Instruction::Sub { rd: d, rs1: Gpr::Zero, rs2: s }.encode());
+                            }
+                            UnaryOpKind::Not => {
+                                // XORI d, s, -1
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                                code.extend(Instruction::Xori { rd: d, rs1: d, imm: -1 }.encode());
+                            }
+                            UnaryOpKind::Clz => {
+                                // RISC-V Zbb has CLZ; fallback: count via loop or use a sequence.
+                                // For now emit a placeholder NOP and a comment-style opcode.
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                                // Placeholder: not yet implemented
+                                code.extend(Instruction::Nop.encode());
+                            }
+                            UnaryOpKind::Ctz => {
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                                code.extend(Instruction::Nop.encode());
+                            }
+                            UnaryOpKind::Popcnt => {
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                                code.extend(Instruction::Nop.encode());
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Comparison (dedicated Cmp instruction) ───────────────
+                    IRInstr::Cmp { kind, dst, lhs, rhs } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (l, mut code) = resolve_gpr(lhs, &vreg_map, Gpr::T3);
+                        let (r, pre) = resolve_gpr(rhs, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+                        if l != d { code.extend(Instruction::Addi { rd: d, rs1: l, imm: 0 }.encode()); }
+                        code.extend(emit_cmp_isel(kind, d, d, r, Gpr::T5));
+                        code
+                    }
+
+                    // ── Memory: Load ─────────────────────────────────────────
+                    IRInstr::Load { dst, addr } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (a, mut code) = resolve_gpr(addr, &vreg_map, Gpr::T3);
+                        code.extend(Instruction::Ld { rd: d, rs1: a, imm: 0 }.encode());
+                        code
+                    }
+
+                    // ── Memory: Store ────────────────────────────────────────
+                    IRInstr::Store { value, addr } => {
+                        let (v, mut code) = resolve_gpr(value, &vreg_map, Gpr::T3);
+                        let (a, pre) = resolve_gpr(addr, &vreg_map, Gpr::T4);
+                        code.extend(pre);
+                        code.extend(Instruction::Sd { rs1: a, rs2: v, imm: 0 }.encode());
+                        code
+                    }
+
+                    // ── Alloc ────────────────────────────────────────────────
+                    IRInstr::Alloc { dst, size: _ } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        // Alloc is handled by the frame layout; point d to the
+                        // stack allocation area via ADDI d, s0, offset.
+                        // Use the frame pointer (s0) with a zero offset as a
+                        // placeholder — the real offset is computed by stack-layout.
+                        Instruction::Addi { rd: d, rs1: Gpr::S0, imm: 0 }.encode().to_vec()
+                    }
+
+                    // ── Free ─────────────────────────────────────────────────
+                    IRInstr::Free { ptr: _ } => {
+                        // Free is lowered to a runtime call; emit NOP
+                        Instruction::Nop.encode().to_vec()
+                    }
+
+                    // ── Cast / Conversion ────────────────────────────────────
+                    IRInstr::Cast { kind, dst, src } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (s, mut code) = resolve_gpr(src, &vreg_map, Gpr::T3);
+                        match kind {
+                            CastKind::BitCast | CastKind::Trunc => {
+                                // No data change, just a move
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                            }
+                            CastKind::ZExt => {
+                                // Zero-extend: on RV64, 32-bit ops already zero-extend.
+                                // For a full 64-bit zero-extend of a register, ANDI with -1
+                                // is a no-op; for smaller widths we'd need specific patterns.
+                                if s != d { code.extend(Instruction::Addi { rd: d, rs1: s, imm: 0 }.encode()); }
+                            }
+                            CastKind::SExt => {
+                                // Sign-extend: use ADDIW d, s, 0 (sign-extends bit 31)
+                                code.extend(Instruction::Addiw { rd: d, rs1: s, imm: 0 }.encode());
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Select ───────────────────────────────────────────────
+                    IRInstr::Select { dst, cond, true_val, false_val } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (c, mut code) = resolve_gpr(cond, &vreg_map, Gpr::T3);
+                        let (tv, pre_tv) = resolve_gpr(true_val, &vreg_map, Gpr::T4);
+                        let (fv, pre_fv) = resolve_gpr(false_val, &vreg_map, Gpr::T5);
+                        code.extend(pre_tv);
+                        code.extend(pre_fv);
+
+                        // Select pattern: mv d, fv; beq c, x0, +8; mv d, tv
+                        // If cond == 0 → false_val (already in d, skip true_val move)
+                        // If cond != 0 → true_val (overwrite d)
+                        if fv != d { code.extend(Instruction::Addi { rd: d, rs1: fv, imm: 0 }.encode()); }
+                        code.extend(Instruction::Beq { rs1: c, rs2: Gpr::Zero, offset: 8 }.encode());
+                        code.extend(Instruction::Addi { rd: d, rs1: tv, imm: 0 }.encode());
+                        code
+                    }
+
+                    // ── Offset (pointer arithmetic) ──────────────────────────
+                    IRInstr::Offset { dst, base, offset } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        let (b, mut code) = resolve_gpr(base, &vreg_map, Gpr::T3);
+                        match offset {
+                            IRValue::Immediate(imm) => {
+                                let off = *imm as i32;
+                                if (-2048..=2047).contains(&off) {
+                                    code.extend(Instruction::Addi { rd: d, rs1: b, imm: off }.encode());
+                                } else {
+                                    let (o, pre) = resolve_gpr(offset, &vreg_map, Gpr::T4);
+                                    code.extend(pre);
+                                    code.extend(Instruction::Add { rd: d, rs1: b, rs2: o }.encode());
+                                }
+                            }
+                            _ => {
+                                let (o, pre) = resolve_gpr(offset, &vreg_map, Gpr::T4);
+                                code.extend(pre);
+                                code.extend(Instruction::Add { rd: d, rs1: b, rs2: o }.encode());
+                            }
+                        }
+                        code
+                    }
+
+                    // ── GetAddress ───────────────────────────────────────────
+                    IRInstr::GetAddress { dst, name: _ } => {
+                        let d = vreg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::T0);
+                        // Placeholder: AUIPC + LD pattern (needs relocation at link time)
+                        Instruction::Addi { rd: d, rs1: Gpr::Zero, imm: 0 }.encode().to_vec()
+                    }
+
+                    // ── Control: Ret ─────────────────────────────────────────
+                    IRInstr::Ret { values } => {
+                        let mut code = Vec::new();
+                        // Move return value into a0 if present
+                        if let Some(val) = values.first() {
+                            let (v, pre) = resolve_gpr(val, &vreg_map, Gpr::T3);
+                            code.extend(pre);
+                            if v != Gpr::A0 {
+                                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: v, imm: 0 }.encode());
+                            }
+                        }
+                        // Epilogue: ld s0, fs-16(sp); ld ra, fs-8(sp); addi sp, sp, fs; jalr x0, ra, 0
+                        code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: fs - 16 }.encode());
+                        code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: fs - 8 }.encode());
+                        code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: fs }.encode());
+                        code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                        code
+                    }
+
+                    // ── Control: Branch (unconditional) ──────────────────────
+                    IRInstr::Branch { target: _ } => {
+                        // JAL x0, offset — placeholder offset (needs relocation)
+                        Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode().to_vec()
+                    }
+
+                    // ── Control: CondBranch ──────────────────────────────────
+                    IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+                        let (c, mut code) = resolve_gpr(cond, &vreg_map, Gpr::T3);
+                        // BNE c, x0, +8  (branch to true_target if cond != 0)
+                        // JAL x0, 0      (fall through to false_target)
+                        code.extend(Instruction::Bne { rs1: c, rs2: Gpr::Zero, offset: 8 }.encode());
+                        code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+                        code
+                    }
+
+                    // ── Call ─────────────────────────────────────────────────
+                    IRInstr::Call { dst, func: _, args } => {
+                        let mut code = Vec::new();
+
+                        // Move arguments into a0–a7
+                        for (i, arg) in args.iter().enumerate() {
+                            if let Some(arg_reg) = Gpr::arg_register(i) {
+                                let (a, pre) = resolve_gpr(arg, &vreg_map, Gpr::T3);
+                                code.extend(pre);
+                                if a != arg_reg {
+                                    code.extend(Instruction::Addi { rd: arg_reg, rs1: a, imm: 0 }.encode());
+                                }
+                            }
+                        }
+
+                        // JALR ra, x0, 0 — placeholder (needs relocation for target address)
+                        // We use JAL ra, 0 as a placeholder that the linker will patch.
+                        code.extend(Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
+
+                        // Move return value from a0 to dst if needed
+                        if let Some(d) = dst {
+                            let dd = vreg_map.get(&d.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::A0);
+                            if dd != Gpr::A0 {
+                                code.extend(Instruction::Addi { rd: dd, rs1: Gpr::A0, imm: 0 }.encode());
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Phi ──────────────────────────────────────────────────
+                    IRInstr::Phi { .. } => {
+                        // Phi nodes should be eliminated before codegen; emit NOP
+                        Instruction::Nop.encode().to_vec()
+                    }
                 };
 
-                instructions.push(AllocatedInstruction {
-                    opcode: opcode_name,
-                    reads,
-                    writes,
-                    encoded: Instruction::Nop.encode().to_vec(),
-                });
+                if !encoded.is_empty() {
+                    // Derive an opcode name for debugging / disassembly.
+                    let opcode_name = match instr {
+                        IRInstr::Add { .. } => "add",
+                        IRInstr::Sub { .. } => "sub",
+                        IRInstr::Mul { .. } => "mul",
+                        IRInstr::Div { .. } => "div",
+                        IRInstr::BinOp { op, .. } => match op {
+                            BinOpKind::Add => "add",
+                            BinOpKind::Sub => "sub",
+                            BinOpKind::Mul => "mul",
+                            BinOpKind::SDiv => "div",
+                            BinOpKind::UDiv => "divu",
+                            BinOpKind::SRem => "rem",
+                            BinOpKind::URem => "remu",
+                            BinOpKind::And => "and",
+                            BinOpKind::Or => "or",
+                            BinOpKind::Xor => "xor",
+                            BinOpKind::Shl => "sll",
+                            BinOpKind::ShrL => "srl",
+                            BinOpKind::ShrA => "sra",
+                            BinOpKind::SLt => "slt",
+                            BinOpKind::SLe => "sle",
+                            BinOpKind::SGt => "sgt",
+                            BinOpKind::SGe => "sge",
+                            BinOpKind::ULt => "sltu",
+                            BinOpKind::ULe => "sleu",
+                            BinOpKind::UGt => "sgtu",
+                            BinOpKind::UGe => "sgeu",
+                            BinOpKind::Eq => "seq",
+                            BinOpKind::Ne => "sne",
+                        },
+                        IRInstr::UnaryOp { op, .. } => match op {
+                            UnaryOpKind::Neg => "neg",
+                            UnaryOpKind::Not => "not",
+                            UnaryOpKind::Clz => "clz",
+                            UnaryOpKind::Ctz => "ctz",
+                            UnaryOpKind::Popcnt => "popcnt",
+                        },
+                        IRInstr::Cmp { .. } => "cmp",
+                        IRInstr::Load { .. } => "ld",
+                        IRInstr::Store { .. } => "sd",
+                        IRInstr::Alloc { .. } => "alloc",
+                        IRInstr::Free { .. } => "free",
+                        IRInstr::Cast { .. } => "cast",
+                        IRInstr::Select { .. } => "select",
+                        IRInstr::Offset { .. } => "addi",
+                        IRInstr::GetAddress { .. } => "getaddr",
+                        IRInstr::Ret { .. } => "ret",
+                        IRInstr::Branch { .. } => "j",
+                        IRInstr::CondBranch { .. } => "bnez",
+                        IRInstr::Call { .. } => "call",
+                        IRInstr::Phi { .. } => "nop",
+                    };
+
+                    // Compute reads/writes from the instruction's vreg operands.
+                    let reads: Vec<PhysicalReg> = instr.used_regs().iter().filter_map(|id| {
+                        vreg_map.get(id).map(|gpr| PhysicalReg::new(RegClass::Gpr, gpr.encoding()))
+                    }).collect();
+                    let writes: Vec<PhysicalReg> = instr.defined_regs().iter().filter_map(|id| {
+                        vreg_map.get(id).map(|gpr| PhysicalReg::new(RegClass::Gpr, gpr.encoding()))
+                    }).collect();
+
+                    instructions.push(AllocatedInstruction {
+                        opcode: opcode_name.to_string(),
+                        reads,
+                        writes,
+                        encoded,
+                    });
+                }
             }
         }
 
@@ -1462,7 +1981,7 @@ impl Backend for RiscV64Backend {
             encoded: Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode().to_vec(),
         });
 
-        let code_size = instructions.len() * 4;
+        let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
         Ok(AllocatedFunction {
             name: func_name,

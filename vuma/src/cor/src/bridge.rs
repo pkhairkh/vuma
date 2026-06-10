@@ -105,6 +105,8 @@ fn edge_weight(kind: &vuma_scg::EdgeKind) -> u64 {
         vuma_scg::EdgeKind::Derivation => 1,
         vuma_scg::EdgeKind::Annotation => 1,
         vuma_scg::EdgeKind::Dispatch => 10,
+        vuma_scg::EdgeKind::Call { .. } => 10,
+        vuma_scg::EdgeKind::Return { .. } => 10,
     }
 }
 

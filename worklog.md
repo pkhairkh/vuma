@@ -8457,3 +8457,130 @@ Files Modified:
 Verification:
 - `cargo clippy -p vuma-std -- -D warnings`: 0 warnings, 0 errors
 - `cargo clippy -p vuma-codegen -- -D warnings`: 0 warnings, 0 errors
+
+## Wave 3: Wasm32 Real ISel — 2026-03-05
+
+### Task
+Replace the NOP-emitting instruction selection in the Wasm32 backend with real Wasm instruction encoding.
+
+### File Changed
+- `src/codegen/src/wasm32.rs`
+
+### Changes Made
+
+1. **Added `WasmInstr::Unreachable` variant** (opcode 0x00):
+   - Previously `IRTerminator::Unreachable` emitted `WasmInstr::Nop` (0x01), which is semantically wrong. Now emits `Unreachable` (0x00), the correct Wasm `unreachable` trap instruction.
+
+2. **Added `WasmInstr::F32Neg` (0x8C) and `WasmInstr::F64Neg` (0x9A)**:
+   - Wasm has dedicated `f32.neg` and `f64.neg` instructions for floating-point negation. Previously, `UnaryOpKind::Neg` was handled by emitting `0 - x` for all types. Now:
+     - Float negation uses `F32Neg`/`F64Neg`
+     - Integer negation still uses `0 - x` (since Wasm has no `i32.neg`/`i64.neg`)
+
+3. **Fixed `CastKind::BitCast` to use proper reinterpret instructions**:
+   - Previously emitted `WasmInstr::Nop`, which is incorrect for bitcast operations that change the value's type interpretation. Now uses:
+     - `I32 → F32`: `F32ReinterpretI32`
+     - `I64 → F64`: `F64ReinterpretI64`
+     - `F32 → I32`: `I32ReinterpretF32`
+     - `F64 → I64`: `I64ReinterpretF64`
+
+4. **Added `infer_wasm_type()` helper**:
+   - Infers the Wasm type of an `IRValue` based on its representation (immediate value range, register, address). Used for type-aware lowering of UnaryOp::Neg and Cast::BitCast.
+
+5. **Replaced single "wasm_body" blob in `allocate_registers` with per-instruction entries**:
+   - Previously, `allocate_registers` bundled all body bytecode into one `AllocatedInstruction` with opcode "wasm_body". Now it uses the disassembler and a new `skip_one_instruction()` helper to split the body into individual instructions, each with its real mnemonic and encoded bytes.
+
+6. **Added `skip_one_instruction()` helper**:
+   - Walks a Wasm bytecode stream, advancing past one instruction at a time. Handles all Wasm opcode formats including LEB128 immediates, memory operands, SIMD prefix, and bulk memory prefix.
+
+7. **Expanded the disassembler with comprehensive opcode coverage**:
+   - Added mnemonic mappings for i32/i64 arithmetic (and/or/xor/shl/shr/rotl/rotr/clz/ctz/popcnt), i64 comparisons, f32/f64 neg/sqrt/div, and all conversion instructions. Previously many opcodes fell through to `op_0xNN` hex dumps.
+
+8. **Added 13 new ISel tests**:
+   - `test_isel_i32_add_produces_real_opcode` — verifies Add → i32.add with opcode byte 0x6A
+   - `test_isel_i32_sub_produces_real_opcode` — verifies Sub → i32.sub
+   - `test_isel_cmp_eq_produces_real_opcode` — verifies Cmp::Eq → i32.eq
+   - `test_isel_load_store_produces_real_opcodes` — verifies Load → i32.load, Store → i32.store
+   - `test_isel_return_produces_real_opcode` — verifies Return terminator → return
+   - `test_isel_binop_i32_mul_produces_real_opcode` — verifies BinOp::Mul → i32.mul with 0x6C
+   - `test_isel_binop_sdiv_produces_i32_div_s` — verifies BinOp::SDiv → i32.div_s
+   - `test_isel_unreachable_produces_unreachable_not_nop` — verifies no more Nop for unreachable
+   - `test_isel_f32_neg_encoding` — verifies F32Neg → 0x8C
+   - `test_isel_f64_neg_encoding` — verifies F64Neg → 0x9A
+   - `test_isel_unreachable_encoding` — verifies Unreachable → 0x00
+   - `test_isel_cast_bitcast_uses_reinterpret` — verifies BitCast uses reinterpret, not Nop
+   - `test_isel_allocate_registers_per_instruction_opcodes` — verifies no "wasm_body" blob
+
+### Verification
+- `cargo clippy -p vuma-codegen -- -D warnings` — clean
+- `cargo test -p vuma-codegen` — all 502 tests pass (13 new ISel tests included)
+
+## Task W13: Optimization Passes
+**Date:** 2026-03-06
+**Agent:** W13
+**Status:** ✅ Complete
+
+### Summary
+Implemented 5 optimization passes for the VUMA codegen IR: Constant Folding, Dead Code Elimination, Common Subexpression Elimination, Inlining of Small Functions, and Loop-Invariant Code Motion. Added a `run_optimizations` pipeline function that applies all passes in order. Created 20 tests covering each pass.
+
+### Files Created/Modified
+| File | Action | Description |
+|------|--------|-------------|
+| `src/codegen/src/opt.rs` | Created | 960+ lines: 5 optimization passes, pipeline function, helpers, 20 tests |
+| `src/codegen/src/lib.rs` | Modified | Added `pub mod opt;` |
+
+### Optimization Passes Implemented
+
+1. **`constant_fold(func) -> IRFunction`** — Evaluates BinOp/Add/Sub/Mul/Div/Cmp/UnaryOp where all operands are `Immediate`. Computes result at compile time, eliminates the instruction, and propagates the constant to subsequent uses within the same block. Handles Add, Sub, Mul, Div (with div-by-zero guard), And, Or, Xor, Shl, ShrL, ShrA, all comparisons, and Neg/Not/Clz/Ctz/Popcnt.
+
+2. **`dead_code_eliminate(func) -> IRFunction`** — Walks instructions in reverse, tracking which virtual registers are "used" (seeded from terminator operands). Removes instructions whose dst is never used and that have no side effects. Treats Store, Call, Free, Ret, Branch, CondBranch, and integer division as having side effects.
+
+3. **`cse(func) -> IRFunction`** — Intra-block value numbering using `ExprKey` (op + operands). When a duplicate BinOp/UnaryOp/Add/Sub/Mul/Div/Cmp is found, replaces the dst with the previously-computed result and eliminates the redundant instruction. Substitution map propagated to subsequent instructions and terminators.
+
+4. **`inline_small(func, program_funcs) -> IRFunction`** — For Call instructions to functions with ≤5 instructions, inlines the callee's body at the call site. Supports multi-block callees: splits the caller block at the call site, remaps callee vregs/labels/params, redirects Return terminators to the continuation block. Skips recursive calls.
+
+5. **`licm(func) -> IRFunction`** — Identifies natural loops via back-edge detection (successor with smaller block index). For each loop, finds loop-invariant instructions in the header (all operands defined outside the loop, no side effects, safe to speculate). Creates a preheader block, moves invariant instructions there, and redirects non-loop predecessors of the header to the preheader.
+
+6. **`run_optimizations(program) -> IRProgram`** — Applies all passes in order: `constant_fold → cse → dce → inline_small → licm → constant_fold → dce`
+
+### Helper Functions
+- `substitute_value`, `substitute_instr`, `substitute_terminator` — Apply register-to-value mapping
+- `try_fold_binop`, `try_fold_unaryop`, `try_fold_cmp` — Compile-time evaluation
+- `has_side_effects`, `is_safe_to_speculate` — Instruction classification for DCE and LICM
+- `get_defined_value`, `compute_expr_key` — CSE support
+- `max_vreg_id` — Compute max virtual register ID for fresh allocation
+- `redirect_terminator` — Update branch targets for LICM preheader insertion
+- `find_natural_loops` — Back-edge-based loop detection
+
+### Test Coverage (20 tests, all passing)
+| # | Test | Pass | Description |
+|---|------|------|-------------|
+| 1 | constant_fold_add | constant_fold | BinOp::Add of 3+4→7, instruction eliminated |
+| 2 | constant_fold_sub | constant_fold | BinOp::Sub of 10-3→7 |
+| 3 | constant_fold_mul | constant_fold | BinOp::Mul of 6*7→42 |
+| 4 | constant_fold_div_by_zero | constant_fold | SDiv by 0 not folded |
+| 5 | constant_fold_chain | constant_fold | x=3+4→7, y=x+5→12, both eliminated, Return uses Immediate(12) |
+| 6 | constant_fold_dedicated_add | constant_fold | Add variant of 5+8→13 |
+| 7 | constant_fold_and_or_xor | constant_fold | Bitwise And/Or/Xor folded correctly |
+| 8 | constant_fold_shift | constant_fold | Shl and ShrL folded |
+| 9 | constant_fold_unary_neg_not | constant_fold | Neg(42)→-42, Not(0)→-1 |
+| 10 | constant_fold_cmp | constant_fold | Cmp SLt of 3<5→1 |
+| 11 | dce_removes_dead_binop | dce | Unused BinOp removed |
+| 12 | dce_keeps_used_binop | dce | Used BinOp preserved |
+| 13 | dce_keeps_side_effects | dce | Store preserved |
+| 14 | dce_keeps_call | dce | Call preserved |
+| 15 | dce_removes_dead_alloc | dce | Unused Alloc removed |
+| 16 | cse_duplicate_binop | cse | Duplicate BinOp eliminated, return value substituted |
+| 17 | cse_duplicate_add | cse | Duplicate Add eliminated |
+| 18 | cse_does_not_eliminate_different_ops | cse | Add vs Sub not eliminated |
+| 19 | inline_small_fn | inline | 1-instruction callee inlined, call removed |
+| 20 | inline_skips_large | inline | 6-instruction callee not inlined |
+| 21 | inline_preserves_return_value | inline | Mul inlined body preserved |
+| 22 | licm_moves_invariant | licm | Loop-invariant Add moved to preheader |
+| 23 | licm_does_not_move_div | licm | Div not moved (trapping) |
+| 24 | run_optimizations_full | pipeline | Full pipeline eliminates dead constant add |
+
+### Build & Test Results
+```
+cargo clippy -p vuma-codegen -- -D warnings: 0 warnings, 0 errors
+cargo test -p vuma-codegen: 526 passed, 0 failed
+```

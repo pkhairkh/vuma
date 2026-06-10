@@ -799,7 +799,8 @@ impl MsgBuilder {
         for edge in edges {
             // Only consider edges that imply synchronization.
             match edge.kind {
-                ScgEdgeKind::ControlFlow | ScgEdgeKind::Annotation | ScgEdgeKind::Dispatch => {
+                ScgEdgeKind::ControlFlow | ScgEdgeKind::Annotation | ScgEdgeKind::Dispatch
+                | ScgEdgeKind::Call { .. } | ScgEdgeKind::Return { .. } => {
                     self.process_sync_edge(&edge)?;
                 }
                 ScgEdgeKind::DataFlow | ScgEdgeKind::Derivation => {

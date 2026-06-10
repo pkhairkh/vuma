@@ -64,6 +64,8 @@ const EDGE_KIND_CONTROL_FLOW: u32 = 1;
 const EDGE_KIND_DERIVATION: u32 = 2;
 const EDGE_KIND_ANNOTATION: u32 = 3;
 const EDGE_KIND_DISPATCH: u32 = 4;
+const EDGE_KIND_CALL: u32 = 5;
+const EDGE_KIND_RETURN: u32 = 6;
 
 const ACCESS_MODE_READ: u32 = 0;
 const ACCESS_MODE_WRITE: u32 = 1;
@@ -355,6 +357,8 @@ fn edge_kind_to_tag(ek: &EdgeKind) -> u32 {
         EdgeKind::Derivation => EDGE_KIND_DERIVATION,
         EdgeKind::Annotation => EDGE_KIND_ANNOTATION,
         EdgeKind::Dispatch => EDGE_KIND_DISPATCH,
+        EdgeKind::Call { .. } => EDGE_KIND_CALL,
+        EdgeKind::Return { .. } => EDGE_KIND_RETURN,
     }
 }
 
@@ -365,6 +369,20 @@ fn tag_to_edge_kind(tag: u32) -> Result<EdgeKind, DeserializeError> {
         EDGE_KIND_DERIVATION => Ok(EdgeKind::Derivation),
         EDGE_KIND_ANNOTATION => Ok(EdgeKind::Annotation),
         EDGE_KIND_DISPATCH => Ok(EdgeKind::Dispatch),
+        // Note: Call/Return edges carry extra data that cannot be fully
+        // round-tripped through the simple tag serialization. We deserialize
+        // them as best-effort with default inner NodeId values. For full
+        // fidelity, use the JSON/serde path instead.
+        EDGE_KIND_CALL => Ok(EdgeKind::Call {
+            from_node: crate::node::NodeId::new(0),
+            to_node: crate::node::NodeId::new(0),
+            caller_region: crate::region::RegionId::new(0),
+        }),
+        EDGE_KIND_RETURN => Ok(EdgeKind::Return {
+            from_node: crate::node::NodeId::new(0),
+            to_node: crate::node::NodeId::new(0),
+            return_values: vec![],
+        }),
         _ => Err(DeserializeError::InvalidValue {
             field: "EdgeKind".to_string(),
             value: format!("{}", tag),
@@ -1149,6 +1167,8 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::Derivation => "dotted",
             EdgeKind::Annotation => "bold",
             EdgeKind::Dispatch => "bold dashed",
+            EdgeKind::Call { .. } => "bold solid",
+            EdgeKind::Return { .. } => "bold dotted",
         };
         let color = match edge_data.kind {
             EdgeKind::DataFlow => "black",
@@ -1156,6 +1176,8 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::Derivation => "gray",
             EdgeKind::Annotation => "purple",
             EdgeKind::Dispatch => "red",
+            EdgeKind::Call { .. } => "green",
+            EdgeKind::Return { .. } => "orange",
         };
         let kind_str = format!("{}", edge_data.kind);
         let label = edge_data

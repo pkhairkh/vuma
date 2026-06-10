@@ -223,6 +223,7 @@ pub enum WasmInstr {
     F32Mul,
     F32Div,
     F32Sqrt,
+    F32Neg,
 
     // ── Numeric f64 ──────────────────────────────────────────────────
     F64Const(f64),
@@ -237,6 +238,7 @@ pub enum WasmInstr {
     F64Mul,
     F64Div,
     F64Sqrt,
+    F64Neg,
 
     // ── Conversions ──────────────────────────────────────────────────
     I32WrapI64,
@@ -259,6 +261,10 @@ pub enum WasmInstr {
 
     // ── Pseudo-instruction: no-op (used for IR ops that lower to nothing) ──
     Nop,
+
+    // ── Unreachable ───────────────────────────────────────────────────
+    /// unreachable: traps unconditionally (opcode 0x00)
+    Unreachable,
 
     // ── SIMD v128 instructions ────────────────────────────────────────
     /// v128.const: push a 128-bit vector constant
@@ -564,6 +570,7 @@ impl WasmInstr {
             WasmInstr::F32Mul => out.push(0x94),
             WasmInstr::F32Div => out.push(0x95),
             WasmInstr::F32Sqrt => out.push(0x91),
+            WasmInstr::F32Neg => out.push(0x8C),
 
             // ── Numeric f64 ─────────────────────────────────────────
             WasmInstr::F64Const(val) => {
@@ -581,6 +588,7 @@ impl WasmInstr {
             WasmInstr::F64Mul => out.push(0xA2),
             WasmInstr::F64Div => out.push(0xA3),
             WasmInstr::F64Sqrt => out.push(0x9F),
+            WasmInstr::F64Neg => out.push(0x9A),
 
             // ── Conversions ─────────────────────────────────────────
             WasmInstr::I32WrapI64 => out.push(0xA7),
@@ -603,6 +611,9 @@ impl WasmInstr {
 
             // ── Nop ─────────────────────────────────────────────────
             WasmInstr::Nop => out.push(0x01),
+
+            // ── Unreachable ──────────────────────────────────────────
+            WasmInstr::Unreachable => out.push(0x00),
 
             // ── SIMD v128 ──────────────────────────────────────────
             WasmInstr::V128Const(bytes) => {
@@ -1176,6 +1187,81 @@ fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
     skip_leb128(bytes, offset, count);
 }
 
+/// Skip a single Wasm instruction starting at `offset`, advancing past it.
+///
+/// This is used by `allocate_registers` to split the body bytecode into
+/// per-instruction `AllocatedInstruction` entries with real opcode names.
+fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
+    if *offset >= bytes.len() {
+        return;
+    }
+    let byte = bytes[*offset];
+    *offset += 1;
+
+    match byte {
+        // ── Multi-byte opcodes ────────────────────────────────────
+        0xFC => {
+            // Bulk memory / saturated arithmetic prefix
+            skip_leb128(bytes, offset, 1); // sub-opcode
+            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+            match subop {
+                0x08 => skip_leb128(bytes, offset, 2), // memory.init
+                0x0A => skip_leb128(bytes, offset, 2), // memory.copy
+                0x0B => skip_leb128(bytes, offset, 1), // memory.fill
+                _ => {} // other sub-ops may have 0 or more operands
+            }
+        }
+        0xFD => {
+            // SIMD prefix
+            skip_leb128(bytes, offset, 1); // sub-opcode
+            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+            if subop == 0x0C {
+                // v128.const: skip 16 bytes of payload
+                *offset += 16;
+            }
+        }
+
+        // ── Control flow ─────────────────────────────────────────
+        0x00 => {} // unreachable
+        0x01 => {} // nop
+        0x02..=0x04 => { *offset += 1; } // block/loop/if + blocktype
+        0x05 | 0x0B => {} // else, end
+        0x0C | 0x0D => { skip_leb128(bytes, offset, 1); } // br, br_if
+        0x0E => {
+            // br_table: count + labels + default
+            let (count, size) = decode_unsigned_leb128(&bytes[*offset..]);
+            *offset += size;
+            skip_leb128(bytes, offset, count as usize + 1);
+        }
+        0x0F => {} // return
+        0x10 => { skip_leb128(bytes, offset, 1); } // call
+        0x11 => { skip_leb128(bytes, offset, 2); } // call_indirect
+
+        // ── Parametric ───────────────────────────────────────────
+        0x1A | 0x1B => {} // drop, select
+
+        // ── Variable ─────────────────────────────────────────────
+        0x20..=0x24 => { skip_leb128(bytes, offset, 1); } // local.get/set/tee, global.get/set
+
+        // ── Memory ───────────────────────────────────────────────
+        0x28..=0x3E => { skip_leb128(bytes, offset, 2); } // loads/stores: align + offset
+        0x3F | 0x40 => { skip_leb128(bytes, offset, 1); } // memory.size, memory.grow
+
+        // ── Numeric ──────────────────────────────────────────────
+        0x41 => { skip_signed_leb128(bytes, offset, 1); } // i32.const
+        0x42 => { skip_signed_leb128(bytes, offset, 1); } // i64.const
+        0x43 => { *offset += 4; } // f32.const
+        0x44 => { *offset += 8; } // f64.const
+
+        // All other single-byte opcodes (comparisons, arithmetic, conversions)
+        0x45..=0x4F | 0x50..=0x5A | 0x5B..=0x66 | 0x67..=0x78
+        | 0x79..=0x8A | 0x8C | 0x91..=0x95 | 0x9A | 0x9F..=0xA3
+        | 0xA7..=0xBF => {}
+
+        _ => {} // Unknown opcode; nothing more to skip
+    }
+}
+
 // ===========================================================================
 // IR → Wasm lowering
 // ===========================================================================
@@ -1285,6 +1371,25 @@ fn wasm_type_for_binop(_op: &BinOpKind, lhs: &IRValue, rhs: &IRValue) -> WasmTyp
     }
     // Default to i32 for integer ops
     WasmType::I32
+}
+
+/// Infer the Wasm type of an IR value based on its representation.
+///
+/// For immediates, we check if the value fits in i32; for registers and
+/// addresses, we default to i32 (the Wasm32 pointer type).  This is a
+/// heuristic — the IR does not carry per-value type information — but it
+/// works for the common cases needed during instruction selection.
+fn infer_wasm_type(val: &IRValue) -> WasmType {
+    match val {
+        IRValue::Immediate(v) => {
+            if *v != (*v as i32 as i64) {
+                WasmType::I64
+            } else {
+                WasmType::I32
+            }
+        }
+        IRValue::Register(_) | IRValue::Address(_) | IRValue::Label(_) => WasmType::I32,
+    }
 }
 
 /// Lower an IR function to Wasm bytecode, returning the function body bytes
@@ -1460,59 +1565,78 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::UnaryOp { op, dst, operand } => {
-            // Assume i32 for unary ops unless we have type info
-            ctx.push_value(operand, None);
-            let wasm_op = match op {
+            // Determine the Wasm type of the operand for type-aware lowering.
+            // For register operands, we infer the type from context; for
+            // immediates, we check if the value fits in i32.
+            let ty = infer_wasm_type(operand);
+
+            match op {
                 UnaryOpKind::Neg => {
-                    // Wasm has no neg instruction; emit 0 - x
-                    // We'll handle this specially after the match
-                    WasmInstr::Nop
+                    // Float negation uses dedicated Wasm instructions;
+                    // integer negation is lowered as (0 - x).
+                    match ty {
+                        WasmType::F32 => {
+                            ctx.push_value(operand, Some(&IRType::F32));
+                            ctx.emit(WasmInstr::F32Neg);
+                        }
+                        WasmType::F64 => {
+                            ctx.push_value(operand, Some(&IRType::F64));
+                            ctx.emit(WasmInstr::F64Neg);
+                        }
+                        _ => {
+                            // Integer negation: 0 - x
+                            ctx.push_value(operand, None);
+                            // Store operand to a temp local, then compute 0 - operand
+                            if let IRValue::Register(id) = dst {
+                                let temp_local = if let Some(idx) = ctx.get_local(*id) {
+                                    idx
+                                } else {
+                                    ctx.alloc_local(*id, ty);
+                                    ctx.get_local(*id).unwrap()
+                                };
+                                ctx.emit(WasmInstr::LocalSet(temp_local));
+                                ctx.emit(WasmInstr::I32Const(0));
+                                ctx.emit(WasmInstr::LocalGet(temp_local));
+                                ctx.emit(WasmInstr::I32Sub);
+                                ctx.pop_to_vreg(*id, ty);
+                            } else {
+                                ctx.emit(WasmInstr::Drop);
+                                ctx.emit(WasmInstr::I32Const(0));
+                            }
+                            return Ok(());
+                        }
+                    }
+                    if let IRValue::Register(id) = dst {
+                        ctx.pop_to_vreg(*id, ty);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                    }
                 }
                 UnaryOpKind::Not => {
-                    // Wasm has no bitwise not; emit i32_eqz for logical not
-                    WasmInstr::I32Eqz
-                }
-                UnaryOpKind::Clz => WasmInstr::I32Clz,
-                UnaryOpKind::Ctz => WasmInstr::I32Ctz,
-                UnaryOpKind::Popcnt => WasmInstr::I32Popcnt,
-            };
-            if *op == UnaryOpKind::Neg {
-                // Push 0, then the operand, then sub
-                // We already pushed the operand, so: swap with 0 and sub
-                ctx.emit(WasmInstr::I32Const(0));
-                // Stack: operand, 0 — need: 0, operand
-                // Emit: local.get to a temp, i32.const 0, local.get, i32.sub
-                // Simpler approach: we already pushed operand, so store it, push 0, load it, sub
-                if let IRValue::Register(id) = dst {
-                    // Create temp local
-                    let temp_local = if let Some(idx) = ctx.get_local(*id) {
-                        idx
+                    // Logical not: i32.eqz (produces 1 if 0, 0 otherwise)
+                    ctx.push_value(operand, None);
+                    ctx.emit(WasmInstr::I32Eqz);
+                    if let IRValue::Register(id) = dst {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
                     } else {
-                        ctx.alloc_local(*id, WasmType::I32);
-                        ctx.get_local(*id).unwrap()
-                    };
-                    ctx.emit(WasmInstr::LocalSet(temp_local));
-                    ctx.emit(WasmInstr::I32Const(0));
-                    ctx.emit(WasmInstr::LocalGet(temp_local));
-                    ctx.emit(WasmInstr::I32Sub);
-                    // Result is already on stack; store to local
-                    ctx.emit(WasmInstr::LocalSet(temp_local));
-                    // Don't double-alloc below
-                    return Ok(());
-                } else {
-                    // Can't easily negate without a temp local; emit drop + 0
-                    ctx.emit(WasmInstr::Drop);
-                    ctx.emit(WasmInstr::I32Const(0));
-                    ctx.emit(WasmInstr::Drop);
-                    ctx.emit(WasmInstr::I32Const(0));
-                    return Ok(());
+                        ctx.emit(WasmInstr::Drop);
+                    }
                 }
-            }
-            ctx.emit(wasm_op);
-            if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
-            } else {
-                ctx.emit(WasmInstr::Drop);
+                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                    ctx.push_value(operand, None);
+                    let wasm_op = match op {
+                        UnaryOpKind::Clz => WasmInstr::I32Clz,
+                        UnaryOpKind::Ctz => WasmInstr::I32Ctz,
+                        UnaryOpKind::Popcnt => WasmInstr::I32Popcnt,
+                        _ => unreachable!(),
+                    };
+                    ctx.emit(wasm_op);
+                    if let IRValue::Register(id) = dst {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                    }
+                }
             }
         }
 
@@ -1571,19 +1695,26 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Cast { kind, dst, src } => {
+            // Infer source and destination types for proper bitcast lowering.
+            let src_ty = infer_wasm_type(src);
             ctx.push_value(src, None);
-            let wasm_op = match kind {
-                CastKind::Trunc => WasmInstr::I32WrapI64,
-                CastKind::SExt => WasmInstr::I64ExtendI32S,
-                CastKind::ZExt => WasmInstr::I64ExtendI32U,
-                CastKind::BitCast => WasmInstr::Nop, // No actual instruction needed for same-size bitcast
+            let (wasm_op, result_ty) = match kind {
+                CastKind::Trunc => (WasmInstr::I32WrapI64, WasmType::I32),
+                CastKind::SExt => (WasmInstr::I64ExtendI32S, WasmType::I64),
+                CastKind::ZExt => (WasmInstr::I64ExtendI32U, WasmType::I64),
+                CastKind::BitCast => {
+                    // BitCast reinterprets the bits of a value as a different
+                    // type of the same size.  Use the proper Wasm reinterpret
+                    // instructions; for same-type casts, no instruction needed.
+                    match src_ty {
+                        WasmType::I32 => (WasmInstr::F32ReinterpretI32, WasmType::F32),
+                        WasmType::I64 => (WasmInstr::F64ReinterpretI64, WasmType::F64),
+                        WasmType::F32 => (WasmInstr::I32ReinterpretF32, WasmType::I32),
+                        WasmType::F64 => (WasmInstr::I64ReinterpretF64, WasmType::I64),
+                    }
+                }
             };
             ctx.emit(wasm_op);
-            let result_ty = match kind {
-                CastKind::Trunc => WasmType::I32,
-                CastKind::SExt | CastKind::ZExt => WasmType::I64,
-                CastKind::BitCast => WasmType::I32,
-            };
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, result_ty);
             } else {
@@ -1754,8 +1885,7 @@ fn lower_terminator(
             }
         }
         IRTerminator::Unreachable => {
-            // Wasm has an unreachable instruction (0x00)
-            ctx.instrs.push(WasmInstr::Nop); // simplified; real impl would use 0x00 unreachable
+            ctx.emit(WasmInstr::Unreachable);
         }
         IRTerminator::Switch { discr, targets, default } => {
             ctx.push_value(discr, None);
@@ -1815,8 +1945,8 @@ impl Backend for Wasm32Backend {
             })?;
 
         // Build an AllocatedFunction from the lowered bytecode.
-        // Each Wasm "instruction" is represented as an AllocatedInstruction
-        // with its encoded bytes.
+        // Each Wasm instruction is represented as an AllocatedInstruction
+        // with its mnemonic and encoded bytes.
         let mut instructions = Vec::new();
 
         // Emit local declarations as pseudo-instructions
@@ -1832,15 +1962,24 @@ impl Backend for Wasm32Backend {
             });
         }
 
-        // Emit function body instructions
-        // We re-encode from the body bytes, splitting at instruction boundaries
-        // For simplicity, treat the entire body as one "instruction"
-        instructions.push(AllocatedInstruction {
-            opcode: "wasm_body".to_string(),
-            reads: vec![],
-            writes: vec![],
-            encoded: func_body.body.clone(),
-        });
+        // Disassemble the body bytes into per-instruction AllocatedInstructions
+        // by re-parsing the bytecode we just emitted.  This gives us real
+        // opcode mnemonics instead of a single opaque "wasm_body" blob.
+        let disasm = self.disassemble(&func_body.body, 0);
+        let mut offset = 0usize;
+        for mnemonic in &disasm {
+            // Determine how many bytes this instruction occupies by decoding
+            // forward from the current offset.
+            let start = offset;
+            skip_one_instruction(&func_body.body, &mut offset);
+            let instr_bytes = func_body.body[start..offset].to_vec();
+            instructions.push(AllocatedInstruction {
+                opcode: mnemonic.clone(),
+                reads: vec![],
+                writes: vec![],
+                encoded: instr_bytes,
+            });
+        }
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
@@ -2025,15 +2164,67 @@ impl Backend for Wasm32Backend {
                     0x6E => "i32.div_u".to_string(),
                     0x6F => "i32.rem_s".to_string(),
                     0x70 => "i32.rem_u".to_string(),
+                    0x71 => "i32.and".to_string(),
+                    0x72 => "i32.or".to_string(),
+                    0x73 => "i32.xor".to_string(),
+                    0x74 => "i32.shl".to_string(),
+                    0x75 => "i32.shr_s".to_string(),
+                    0x76 => "i32.shr_u".to_string(),
+                    0x77 => "i32.rotl".to_string(),
+                    0x78 => "i32.rotr".to_string(),
+                    0x67 => "i32.clz".to_string(),
+                    0x68 => "i32.ctz".to_string(),
+                    0x69 => "i32.popcnt".to_string(),
+                    0x50 => "i64.eqz".to_string(),
+                    0x51 => "i64.eq".to_string(),
+                    0x52 => "i64.ne".to_string(),
+                    0x53 => "i64.lt_s".to_string(),
+                    0x54 => "i64.lt_u".to_string(),
+                    0x55 => "i64.gt_s".to_string(),
+                    0x56 => "i64.gt_u".to_string(),
+                    0x57 => "i64.le_s".to_string(),
+                    0x58 => "i64.le_u".to_string(),
+                    0x59 => "i64.ge_s".to_string(),
+                    0x5A => "i64.ge_u".to_string(),
+                    0x79 => "i64.clz".to_string(),
+                    0x7A => "i64.ctz".to_string(),
+                    0x7B => "i64.popcnt".to_string(),
                     0x7C => "i64.add".to_string(),
                     0x7D => "i64.sub".to_string(),
                     0x7E => "i64.mul".to_string(),
+                    0x7F => "i64.div_s".to_string(),
+                    0x80 => "i64.div_u".to_string(),
+                    0x81 => "i64.rem_s".to_string(),
+                    0x82 => "i64.rem_u".to_string(),
+                    0x83 => "i64.and".to_string(),
+                    0x84 => "i64.or".to_string(),
+                    0x85 => "i64.xor".to_string(),
+                    0x86 => "i64.shl".to_string(),
+                    0x87 => "i64.shr_s".to_string(),
+                    0x88 => "i64.shr_u".to_string(),
+                    0x89 => "i64.rotl".to_string(),
+                    0x8A => "i64.rotr".to_string(),
+                    0x8C => "f32.neg".to_string(),
+                    0x91 => "f32.sqrt".to_string(),
                     0x92 => "f32.add".to_string(),
                     0x93 => "f32.sub".to_string(),
                     0x94 => "f32.mul".to_string(),
+                    0x95 => "f32.div".to_string(),
+                    0x9A => "f64.neg".to_string(),
+                    0x9F => "f64.sqrt".to_string(),
                     0xA0 => "f64.add".to_string(),
                     0xA1 => "f64.sub".to_string(),
                     0xA2 => "f64.mul".to_string(),
+                    0xA3 => "f64.div".to_string(),
+                    0xA7 => "i32.wrap_i64".to_string(),
+                    0xAC => "i64.extend_i32_s".to_string(),
+                    0xAD => "i64.extend_i32_u".to_string(),
+                    0xB6 => "f32.demote_f64".to_string(),
+                    0xBB => "f64.promote_f32".to_string(),
+                    0xBC => "i32.reinterpret_f32".to_string(),
+                    0xBD => "i64.reinterpret_f64".to_string(),
+                    0xBE => "f32.reinterpret_i32".to_string(),
+                    0xBF => "f64.reinterpret_i64".to_string(),
                     _ => format!("op_{:#04x}", byte),
                 };
                 offset += 1;
@@ -2602,5 +2793,274 @@ mod tests {
         let bytes = WasmInstr::MemoryCopy { src_mem: 0, dst_mem: 0 }.to_bytes();
         let lines = backend.disassemble(&bytes, 0);
         assert!(lines[0].contains("memory.copy"));
+    }
+
+    // ── Real Instruction Selection (ISel) Tests ───────────────────────
+
+    /// Helper: build a minimal IRFunction with a single block that contains
+    /// the given instructions and a Return terminator.
+    fn make_simple_func(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
+        let mut func = IRFunction::new(name);
+        func.blocks[0].instructions = instrs;
+        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+        func
+    }
+
+    #[test]
+    fn test_isel_i32_add_produces_real_opcode() {
+        // IR: %1 = add %0, 42
+        let mut func = make_simple_func("add_test", vec![
+            IRInstr::Add {
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(42),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let result = backend.allocate_registers(&func);
+        assert!(result.is_ok(), "allocate_registers failed: {:?}", result.err());
+        let alloc = result.unwrap();
+
+        // The allocated instructions must contain i32.add (opcode 0x6A),
+        // not a NOP (0x01) or a generic "wasm_body" opcode.
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("i32.add")),
+            "Expected i32.add in opcodes, got: {:?}", opcodes);
+        // Verify the encoded bytes for the add instruction contain 0x6A
+        let add_instr = alloc.blocks[0].instructions.iter()
+            .find(|i| i.opcode.contains("i32.add"))
+            .expect("should find i32.add instruction");
+        assert!(add_instr.encoded.contains(&0x6A),
+            "i32.add encoded bytes should contain 0x6A, got: {:02x?}", add_instr.encoded);
+    }
+
+    #[test]
+    fn test_isel_i32_sub_produces_real_opcode() {
+        // IR: %1 = sub %0, 10
+        let mut func = make_simple_func("sub_test", vec![
+            IRInstr::Sub {
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(10),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("i32.sub")),
+            "Expected i32.sub in opcodes, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_cmp_eq_produces_real_opcode() {
+        // IR: %1 = cmp.eq %0, %0
+        let mut func = make_simple_func("cmp_test", vec![
+            IRInstr::Cmp {
+                kind: crate::ir::CmpKind::Eq,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Register(0),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("i32.eq")),
+            "Expected i32.eq in opcodes, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_load_store_produces_real_opcodes() {
+        // IR: %1 = load %0; store %1, %0
+        let mut func = make_simple_func("ldst_test", vec![
+            IRInstr::Load {
+                dst: IRValue::Register(1),
+                addr: IRValue::Register(0),
+            },
+            IRInstr::Store {
+                value: IRValue::Register(1),
+                addr: IRValue::Register(0),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("i32.load")),
+            "Expected i32.load in opcodes, got: {:?}", opcodes);
+        assert!(opcodes.iter().any(|o| o.contains("i32.store")),
+            "Expected i32.store in opcodes, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_return_produces_real_opcode() {
+        // IR: just return
+        let func = make_simple_func("ret_test", vec![]);
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("return")),
+            "Expected return in opcodes, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_binop_i32_mul_produces_real_opcode() {
+        // IR: %1 = BinOp(Mul) %0, 3
+        let mut func = make_simple_func("mul_test", vec![
+            IRInstr::BinOp {
+                op: BinOpKind::Mul,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(3),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let mul_instr = alloc.blocks[0].instructions.iter()
+            .find(|i| i.opcode.contains("i32.mul"));
+        assert!(mul_instr.is_some(), "Expected i32.mul instruction");
+        let instr = mul_instr.unwrap();
+        assert!(instr.encoded.contains(&0x6C),
+            "i32.mul encoded bytes should contain 0x6C, got: {:02x?}", instr.encoded);
+    }
+
+    #[test]
+    fn test_isel_binop_sdiv_produces_i32_div_s() {
+        // IR: %1 = BinOp(SDiv) %0, 2
+        let mut func = make_simple_func("sdiv_test", vec![
+            IRInstr::BinOp {
+                op: BinOpKind::SDiv,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(2),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("i32.div_s")),
+            "Expected i32.div_s in opcodes, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_unreachable_produces_unreachable_not_nop() {
+        // IR: unreachable terminator
+        let mut func = IRFunction::new("unreachable_test");
+        func.blocks[0].terminator = IRTerminator::Unreachable;
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+
+        // Must contain "unreachable" (0x00), NOT "nop" (0x01)
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("unreachable")),
+            "Expected unreachable in opcodes, got: {:?}", opcodes);
+        assert!(!opcodes.iter().any(|o| *o == "nop"),
+            "Should not have nop opcode for unreachable terminator, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_f32_neg_encoding() {
+        // Verify the f32.neg instruction encodes to opcode 0x8C
+        let bytes = WasmInstr::F32Neg.to_bytes();
+        assert_eq!(bytes, vec![0x8C]);
+    }
+
+    #[test]
+    fn test_isel_f64_neg_encoding() {
+        // Verify the f64.neg instruction encodes to opcode 0x9A
+        let bytes = WasmInstr::F64Neg.to_bytes();
+        assert_eq!(bytes, vec![0x9A]);
+    }
+
+    #[test]
+    fn test_isel_unreachable_encoding() {
+        // Verify the unreachable instruction encodes to opcode 0x00
+        let bytes = WasmInstr::Unreachable.to_bytes();
+        assert_eq!(bytes, vec![0x00]);
+    }
+
+    #[test]
+    fn test_isel_cast_bitcast_uses_reinterpret() {
+        // BitCast of i32 → f32 should use f32.reinterpret_i32 (0xBE), not Nop (0x01)
+        let mut func = make_simple_func("bitcast_test", vec![
+            IRInstr::Cast {
+                kind: CastKind::BitCast,
+                dst: IRValue::Register(1),
+                src: IRValue::Register(0),
+            },
+        ]);
+        func.param_types.push(IRType::I32);
+        func.params.push(IRValue::Register(0));
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(opcodes.iter().any(|o| o.contains("reinterpret")),
+            "Expected reinterpret for BitCast, got: {:?}", opcodes);
+        assert!(!opcodes.iter().any(|o| *o == "nop"),
+            "BitCast should not produce nop, got: {:?}", opcodes);
+    }
+
+    #[test]
+    fn test_isel_allocate_registers_per_instruction_opcodes() {
+        // Verify that allocate_registers produces per-instruction entries
+        // with real opcode names (not a single "wasm_body" blob).
+        let func = make_simple_func("isel_test", vec![
+            IRInstr::Add {
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(10),
+                rhs: IRValue::Immediate(20),
+            },
+        ]);
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+
+        // Should NOT have a "wasm_body" opcode
+        let opcodes: Vec<&str> = alloc.blocks[0].instructions.iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        assert!(!opcodes.iter().any(|o| *o == "wasm_body"),
+            "Should not have wasm_body opcode, got: {:?}", opcodes);
+        // Should have specific instruction opcodes
+        assert!(opcodes.iter().any(|o| o.contains("i32.const")),
+            "Expected i32.const in opcodes, got: {:?}", opcodes);
+        assert!(opcodes.iter().any(|o| o.contains("i32.add")),
+            "Expected i32.add in opcodes, got: {:?}", opcodes);
     }
 }
