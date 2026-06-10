@@ -8,12 +8,14 @@
 //! - **Command**: A process builder for spawning child processes.
 //! - **ExitStatus**: The exit status of a completed process.
 //! - **Output**: The captured output (stdout, stderr) of a completed process.
+//! - **Child**: A spawned child process that can be waited on or killed.
 //!
 //! ## BD Annotations
 //!
 //! - Command: CapD { Read, Write, Execute }
 //! - ExitStatus: CapD { Read, Compare, Serialize }
 //! - Output: CapD { Read, Serialize }
+//! - Child: CapD { Read, Write, Execute }
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,12 @@ impl ExitStatus {
     // VUMA-VERIFIED: constructor is pure
     pub fn from_signal() -> Self {
         Self { code: None }
+    }
+
+    /// Create from a std::process::ExitStatus.
+    // VUMA-VERIFIED: conversion preserves exit code semantics
+    pub(crate) fn from_std(status: std::process::ExitStatus) -> Self {
+        Self { code: status.code() }
     }
 
     /// Returns true if the process exited successfully (code 0).
@@ -107,6 +115,16 @@ impl Output {
         Self { status, stdout, stderr }
     }
 
+    /// Create from a std::process::Output.
+    // VUMA-VERIFIED: conversion preserves all output data
+    pub(crate) fn from_std(output: std::process::Output) -> Self {
+        Self {
+            status: ExitStatus::from_std(output.status),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    }
+
     /// Returns the CapD for this type.
     // VUMA-VERIFIED: capability descriptor is correct
     pub fn capd(&self) -> CapD {
@@ -133,6 +151,97 @@ impl fmt::Display for Output {
 }
 
 // ---------------------------------------------------------------------------
+// Child
+// ---------------------------------------------------------------------------
+
+/// A VUMA-verified spawned child process.
+///
+/// `Child` wraps a `std::process::Child` with BD-tracked capabilities.
+/// Supports waiting for completion, checking status, and killing the process.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write, Execute }
+/// - SyncEdge: spawn → wait (Seq), spawn → kill (Seq)
+pub struct Child {
+    /// The underlying std::process::Child.
+    inner: std::process::Child,
+}
+
+impl Child {
+    /// Create a new Child from a std::process::Child.
+    // VUMA-VERIFIED: wraps OS child process
+    pub(crate) fn from_std(child: std::process::Child) -> Self {
+        Self { inner: child }
+    }
+
+    /// Wait for the child process to exit and return its exit status.
+    ///
+    /// Delegates to `std::process::Child::wait`.
+    // VUMA-VERIFIED: wait requires Execute capability
+    pub fn wait(&mut self) -> Result<ExitStatus, String> {
+        let status = self.inner.wait()
+            .map_err(|e| format!("Child wait failed: {}", e))?;
+        Ok(ExitStatus::from_std(status))
+    }
+
+    /// Check whether the child process has exited without blocking.
+    ///
+    /// Returns `Ok(Some(status))` if the child has exited, or `Ok(None)` if
+    /// it is still running.
+    ///
+    /// Delegates to `std::process::Child::try_wait`.
+    // VUMA-VERIFIED: try_wait is non-blocking and safe
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, String> {
+        let result = self.inner.try_wait()
+            .map_err(|e| format!("Child try_wait failed: {}", e))?;
+        Ok(result.map(ExitStatus::from_std))
+    }
+
+    /// Kill the child process.
+    ///
+    /// Delegates to `std::process::Child::kill`.
+    // VUMA-VERIFIED: kill requires Execute capability
+    pub fn kill(&mut self) -> Result<(), String> {
+        self.inner.kill()
+            .map_err(|e| format!("Child kill failed: {}", e))
+    }
+
+    /// Returns the OS-assigned process ID.
+    // VUMA-VERIFIED: pure accessor
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    /// Returns the CapD for this type.
+    // VUMA-VERIFIED: child process has Read, Write, Execute
+    pub fn capd(&self) -> CapD {
+        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Execute])
+    }
+
+    /// Returns the RepD for this type.
+    // VUMA-VERIFIED: type descriptor is correct
+    pub fn repd(&self) -> RepD {
+        RepD::new("Child", 0, 8, self.capd())
+    }
+
+    /// Returns the SyncEdge annotations for this type.
+    // VUMA-VERIFIED: synchronization edges model child process lifecycle
+    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+        vec![
+            SyncEdge::new("child_spawn", "child_wait", SyncEdgeKind::Seq),
+            SyncEdge::new("child_spawn", "child_kill", SyncEdgeKind::Seq),
+        ]
+    }
+}
+
+impl fmt::Display for Child {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Child {{ pid: {} }}", self.id())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
 
@@ -140,6 +249,8 @@ impl fmt::Display for Output {
 ///
 /// `Command` constructs and spawns child processes with BD-tracked
 /// capabilities. Every method returns `&mut Self` for chaining.
+///
+/// Delegates to `std::process::Command` for real OS-level process management.
 ///
 /// ## BD Annotations
 ///
@@ -202,22 +313,52 @@ impl Command {
         self
     }
 
+    /// Build the underlying std::process::Command from our fields.
+    // VUMA-VERIFIED: builder preserves all configured options
+    fn build_std_command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(&self.program);
+        for arg in &self.args {
+            cmd.arg(arg);
+        }
+        for (key, val) in &self.env {
+            cmd.env(key, val);
+        }
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
+
     /// Execute the command and return its exit status.
     ///
-    /// In the VUMA simulation, this returns a simulated successful exit.
+    /// Delegates to `std::process::Command::status` for real process execution.
     // VUMA-VERIFIED: status requires Execute capability
     pub fn status(&mut self) -> Result<ExitStatus, String> {
-        // In the VUMA runtime, this would invoke the OS fork/exec/wait syscalls.
-        Ok(ExitStatus::new(0))
+        let std_status = self.build_std_command().status()
+            .map_err(|e| format!("Command status failed: {}", e))?;
+        Ok(ExitStatus::from_std(std_status))
     }
 
     /// Execute the command and capture its output.
     ///
-    /// In the VUMA simulation, this returns empty captured output.
+    /// Delegates to `std::process::Command::output` for real process execution
+    /// with captured stdout/stderr.
     // VUMA-VERIFIED: output requires Execute capability
     pub fn output(&mut self) -> Result<Output, String> {
-        // In the VUMA runtime, this would invoke the OS fork/exec and capture pipes.
-        Ok(Output::new(ExitStatus::new(0), Vec::new(), Vec::new()))
+        let std_output = self.build_std_command().output()
+            .map_err(|e| format!("Command output failed: {}", e))?;
+        Ok(Output::from_std(std_output))
+    }
+
+    /// Spawn the command as a child process without waiting for completion.
+    ///
+    /// Delegates to `std::process::Command::spawn` for real process spawning.
+    /// Returns a `Child` that can be waited on, polled, or killed.
+    // VUMA-VERIFIED: spawn requires Execute capability
+    pub fn spawn(&mut self) -> Result<Child, String> {
+        let std_child = self.build_std_command().spawn()
+            .map_err(|e| format!("Command spawn failed: {}", e))?;
+        Ok(Child::from_std(std_child))
     }
 
     /// Returns the program name.
@@ -262,6 +403,7 @@ impl Command {
         vec![
             SyncEdge::new("command_new", "command_status", SyncEdgeKind::Seq),
             SyncEdge::new("command_new", "command_output", SyncEdgeKind::Seq),
+            SyncEdge::new("command_new", "command_spawn", SyncEdgeKind::Seq),
             SyncEdge::new("command_status", "command_wait", SyncEdgeKind::Seq),
         ]
     }
@@ -320,16 +462,80 @@ mod tests {
     }
 
     #[test]
-    fn test_command_status_and_output() {
+    fn test_command_status_real() {
         let mut cmd = Command::new("echo");
         cmd.arg("hello");
-
         let status = cmd.status().unwrap();
         assert!(status.success());
+    }
 
+    #[test]
+    fn test_command_output_real() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello world");
         let output = cmd.output().unwrap();
         assert!(output.status.success());
-        assert_eq!(output.stdout.len(), 0);
-        assert_eq!(output.stderr.len(), 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello world"));
+    }
+
+    #[test]
+    fn test_command_output_exit_code() {
+        // `true` always exits with 0
+        let mut cmd = Command::new("true");
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(0));
+
+        // `false` always exits with 1
+        let mut cmd = Command::new("false");
+        let output = cmd.output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(output.status.code(), Some(1));
+    }
+
+    #[test]
+    fn test_command_spawn_and_wait() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("spawned");
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+        assert!(pid > 0);
+        let status = child.wait().unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn test_command_spawn_try_wait() {
+        // Sleep briefly so we can test try_wait while running and after exit
+        let mut cmd = Command::new("sleep");
+        cmd.arg("0");
+        let mut child = cmd.spawn().unwrap();
+        // Wait for it to finish
+        let status = child.wait().unwrap();
+        assert!(status.success());
+        // try_wait on already-exited child
+        let result = child.try_wait().unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().success());
+    }
+
+    #[test]
+    fn test_command_stderr_capture() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo stdout_msg && echo stderr_msg >&2");
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("stdout_msg"));
+        assert!(stderr.contains("stderr_msg"));
+    }
+
+    #[test]
+    fn test_command_failure_nonexistent() {
+        let mut cmd = Command::new("this_program_does_not_exist_xyz");
+        let result = cmd.status();
+        assert!(result.is_err());
     }
 }

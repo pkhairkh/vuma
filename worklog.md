@@ -8323,3 +8323,137 @@ Files Modified:
 
 Verification:
 - `cargo clippy -p vuma-projection -- -D warnings`: 0 warnings, 0 errors
+
+---
+
+Task ID: w9
+Agent: Wave 9 ELF Relocations
+Task: Add ELF relocation entries to VUMA codegen emitter for ET_REL objects
+
+Work Log:
+- Read emit.rs and arm64.rs to understand the current CallRelocation system (patches BL offsets for inter-function calls)
+- Identified that ET_REL objects had no .rela.text sections and no ELF relocation entries
+- Added ELF constants: SHT_RELA (4), STT_NOTYPE (0), SHN_UNDEF (0)
+- Added AArch64 relocation type constants: R_AARCH64_CALL26 (283), R_AARCH64_JUMP26 (282), R_AARCH64_ADR_PREL_PG_HI21 (275), R_AARCH64_LDST64_ABS_LO12_NC (286)
+- Added RelaEntry struct with offset (u64), info (u64), addend (i64) and methods: new(), sym_idx(), r_type(), to_bytes()
+- Modified emit_elf() to handle ET_REL objects differently:
+  - For ET_REL: collect external symbols and skip resolve_call_relocs (leave BL offset as 0 for linker)
+  - For ET_EXEC: resolve call relocations in-place (same as before)
+  - Build R_AARCH64_CALL26 relocation entries for all BL instructions in ET_REL
+  - Write .rela.text section bytes between .text and .rodata
+  - Add .rela.text section header with sh_link to .symtab and sh_info to .text
+- Modified build_symbol_table() to accept external_symbols parameter and return name-to-index mapping
+- Added external symbols as STB_GLOBAL | STT_NOTYPE with SHN_UNDEF for undefined references
+- Modified build_shstrtab() to include .rela.text for Obj output format
+- Updated section header count from 8 to 9 for ET_REL (added .rela.text at section index 2)
+- Fixed symtab sh_info from 1 to 2 (correct value: one past last local symbol index)
+- Updated symtab sh_link to account for section index shift when .rela.text is present
+- Added 8 new tests: rela_text_section_in_obj, rela_call26_entry_for_bl, rela_external_symbol_undefined, rela_offset_matches_bl_location, rela_multiple_calls, rela_no_rela_in_exec, rela_entry_struct_encoding, rela_relocation_type_constants
+
+Files Modified:
+- src/codegen/src/emit.rs (major changes)
+
+Verification:
+- cargo check -p vuma-codegen: PASSED (0 errors, 3 warnings for unused constants R_AARCH64_JUMP26, R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_LDST64_ABS_LO12_NC which are defined for future use)
+- cargo test -p vuma-codegen: 474 passed, 0 failed (including all 8 new relocation tests and all 16 existing emit tests)
+
+---
+
+Task ID: w8
+Agent: Wave 8 Real Networking + Process
+Task: Replace simulated networking and process modules with real implementations
+
+Work Log:
+- Read net.rs, process.rs, time.rs to understand current simulated implementations
+- Read io.rs, primitives.rs, and lib.rs to understand dependencies and re-exports
+
+### net.rs Changes
+- TcpListener: replaced simulated bind (always Ok) with `std::net::TcpListener::bind`, stores real `inner: std::net::TcpListener`, derives `local_addr` from `inner.local_addr()`
+- TcpListener::accept: replaced fabricated connections with `self.inner.accept()`, creates real TcpStream from the accepted std stream
+- TcpStream: replaced simulated connect with `std::net::TcpStream::connect`, stores real `inner: std::net::TcpStream`
+- TcpStream::read: delegates to `std::io::Read::read` on inner stream
+- TcpStream::write: delegates to `std::io::Write::write` on inner stream
+- TcpStream::set_timeout: delegates to `inner.set_read_timeout()` and `inner.set_write_timeout()`
+- UdpSocket: replaced simulated bind with `std::net::UdpSocket::bind`, stores real `inner: std::net::UdpSocket`
+- UdpSocket::send_to: delegates to `self.inner.send_to()`
+- UdpSocket::recv_from: delegates to `self.inner.recv_from()`, returns real sender address
+- Added UdpSocket::connect(), send(), recv() for connected-mode operations
+- Added inner() accessor methods on TcpListener, TcpStream, UdpSocket
+- Added SocketAddr::from_std() and to_std() conversion helpers
+- Added IpAddr::to_std()/from_std() and Ipv4Addr::to_std()/Ipv6Addr::to_std()
+- Updated tests to use port 0 (OS picks free port) and threaded server/client patterns
+- 16 net tests pass (6 original preserved + 10 new/updated)
+
+### process.rs Changes
+- Command::status(): replaced `Ok(ExitStatus::new(0))` with `self.build_std_command().status()` mapped via `ExitStatus::from_std()`
+- Command::output(): replaced `Ok(Output::new(ExitStatus::new(0), Vec::new(), Vec::new()))` with `self.build_std_command().output()` mapped via `Output::from_std()`
+- Added Command::spawn() returning `Child` that wraps `std::process::Child`
+- Added Child type with wait(), try_wait(), kill(), id() methods
+- Added build_std_command() helper that converts Vuma Command fields to std::process::Command
+- Added ExitStatus::from_std() and Output::from_std() conversion helpers
+- Updated tests to verify real command output (echo, true, false, sh -c)
+- 11 process tests pass (4 original + 7 new)
+
+### time.rs Changes
+- Instant: added `inner: Option<std::time::Instant>` field with `#[serde(skip)]`
+- Instant::now(): stores both nanos (from global baseline) and real std instant
+- Instant::elapsed(): replaced `Duration::from_secs(0)` with `Duration::from_std(self.inner.unwrap().elapsed())` for real measurement; fallback for deserialized/from_nanos Instants
+- Added `INSTANT_BASELINE: OnceLock<std::time::Instant>` for monotonic nanos values
+- Removed automatic derives for PartialEq, Eq, PartialOrd, Ord, Hash (std::time::Instant doesn't support them); manually implemented comparing only `nanos` field
+- Added Duration::from_std(), to_std(), checked_sub(), Sub impl
+- 11 time tests pass (5 original + 6 new including elapsed_actually_advances, now_monotonic, duration_subtraction, std_roundtrip, system_time_advances)
+
+### io.rs Borrow Checker Fixes (pre-existing issues)
+- Fixed 4 borrow checker errors in VumaFile where `self.capd()` was called while `self.inner` was mutably borrowed
+- Solution: clone CapD before mutably borrowing self.inner
+- Added `#[derive(Debug)]` to VumaFile struct (required by test unwrap_err())
+
+Verification:
+- `cargo check -p vuma-std`: PASSED (0 errors)
+- `cargo test -p vuma-std -- net::tests`: 16 passed, 0 failed
+- `cargo test -p vuma-std -- process::tests`: 11 passed, 0 failed
+- `cargo test -p vuma-std -- time::tests`: 11 passed, 0 failed
+- `cargo test -p vuma-std -- io::tests`: 39 passed, 0 failed
+- `cargo test -p vuma-std -- collections::tests`: 51 passed, 0 failed
+- `cargo test -p vuma-std -- sync::tests`: 27 passed, 0 failed
+- `cargo test -p vuma-std -- primitives::tests`: 31 passed, 0 failed
+
+Files Modified:
+- src/std/src/net.rs (full rewrite of TcpListener, TcpStream, UdpSocket; added conversions; updated/added tests)
+- src/std/src/process.rs (real status/output/spawn; added Child type; added conversions; updated/added tests)
+- src/std/src/time.rs (real Instant::elapsed(); manual trait impls; added Duration ops; updated/added tests)
+- src/std/src/io.rs (fixed 4 borrow checker errors; added Debug derive to VumaFile)
+
+---
+Task ID: fix-clippy-wave7-9
+Agent: Clippy Fix Agent
+Task: Fix all clippy warnings in vuma-std and vuma-codegen after recent changes
+
+Work Log:
+- Ran `cargo clippy -p vuma-std -- -D warnings` and found 6 warnings
+- Fixed `wrong_self_convention` in net.rs — changed 5 `to_*(&self)` methods to take `self` by value on Copy types:
+  - IpAddr::to_std(&self) → to_std(self)
+  - Ipv4Addr::to_std(&self) → to_std(self)
+  - Ipv6Addr::to_std(&self) → to_std(self)
+  - SocketAddr::to_std(&self) → to_std(self)
+  - Duration::to_std(&self) → to_std(self)
+- Fixed `redundant_closure` in net.rs — replaced `.map(|addr| SocketAddr::from_std(addr))` with `.map(SocketAddr::from_std)`
+- Ran `cargo clippy -p vuma-codegen -- -D warnings` and found 6 warnings
+- Fixed `dead_code` in emit.rs — added `#[allow(dead_code)]` to 3 unused AArch64 relocation constants:
+  - R_AARCH64_JUMP26
+  - R_AARCH64_ADR_PREL_PG_HI21
+  - R_AARCH64_LDST64_ABS_LO12_NC
+- Fixed `let_and_return` in x86_64.rs — removed 3 unnecessary let bindings that immediately returned:
+  - GetAddress arm: `let code = encode_mov_reg_imm64(d, 0); code` → `encode_mov_reg_imm64(d, 0)`
+  - Alloc arm: `let code = encode_lea_reg_mem(d, Gpr::Rbp, -(frame_size as i32)); code` → `encode_lea_reg_mem(...)`
+  - Branch arm: `let code = encode_jmp_rel32(0); code` → `encode_jmp_rel32(0)`
+
+Files Modified:
+- src/std/src/net.rs (6 fixes: 5 wrong_self_convention, 1 redundant_closure)
+- src/std/src/time.rs (1 fix: wrong_self_convention)
+- src/codegen/src/emit.rs (3 fixes: dead_code on unused constants)
+- src/codegen/src/x86_64.rs (3 fixes: let_and_return)
+
+Verification:
+- `cargo clippy -p vuma-std -- -D warnings`: 0 warnings, 0 errors
+- `cargo clippy -p vuma-codegen -- -D warnings`: 0 warnings, 0 errors

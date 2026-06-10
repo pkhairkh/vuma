@@ -76,7 +76,7 @@ pub use io::{
     // Buffered I/O
     VumaBufReader, VumaBufWriter,
     // VUMA standard streams
-    VumaStdin, VumaStdout,
+    VumaStdin, VumaStdout, VumaStderr,
     // VUMA file I/O
     VumaFile,
     // VUMA error types

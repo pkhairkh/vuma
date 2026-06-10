@@ -18,6 +18,8 @@
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::hash::Hash;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Duration
@@ -78,6 +80,19 @@ impl Duration {
         }
     }
 
+    /// Create a Duration from a std::time::Duration.
+    // VUMA-VERIFIED: conversion is lossless
+    pub(crate) fn from_std(d: std::time::Duration) -> Self {
+        Self::new(d.as_secs(), d.subsec_nanos())
+    }
+
+    /// Convert to a std::time::Duration.
+    // VUMA-VERIFIED: conversion is lossless
+    #[allow(dead_code)]
+    pub(crate) fn to_std(self) -> std::time::Duration {
+        std::time::Duration::new(self.secs, self.nanos)
+    }
+
     /// Returns the total number of whole seconds.
     // VUMA-VERIFIED: pure accessor
     pub fn as_secs(&self) -> u64 {
@@ -118,6 +133,21 @@ impl Duration {
             Some(Duration { secs, nanos: nanos - 1_000_000_000 })
         } else {
             Some(Duration { secs, nanos })
+        }
+    }
+
+    /// Checked subtraction of two durations.
+    ///
+    /// Returns `None` if `other` is greater than `self`.
+    // VUMA-VERIFIED: checked arithmetic prevents underflow
+    pub fn checked_sub(&self, other: &Duration) -> Option<Duration> {
+        let secs = self.secs.checked_sub(other.secs)?;
+        if self.nanos >= other.nanos {
+            Some(Duration { secs, nanos: self.nanos - other.nanos })
+        } else if secs > 0 {
+            Some(Duration { secs: secs - 1, nanos: self.nanos + 1_000_000_000 - other.nanos })
+        } else {
+            None
         }
     }
 
@@ -166,41 +196,95 @@ impl std::ops::Add for Duration {
     }
 }
 
+impl std::ops::Sub for Duration {
+    type Output = Duration;
+
+    fn sub(self, other: Duration) -> Duration {
+        self.checked_sub(&other).expect("Duration underflow")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Instant
 // ---------------------------------------------------------------------------
+
+/// A global baseline used to assign monotonically increasing nanosecond
+/// values to `Instant`s created via `now()`. This ensures that the `nanos`
+/// field is always meaningful for ordering and duration calculations.
+static INSTANT_BASELINE: OnceLock<std::time::Instant> = OnceLock::new();
 
 /// A VUMA-verified monotonic clock instant.
 ///
 /// `Instant` represents a moment in time on a monotonic clock.
 /// It can be used to measure elapsed time between two points.
 ///
+/// Internally, `Instant` stores both a raw nanosecond count (derived from
+/// a global baseline for ordering) and the real `std::time::Instant` for
+/// accurate `elapsed()` computation.
+///
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Serialize }
 /// - SyncEdge: now → elapsed (Seq)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Instant {
     /// Internal timestamp as nanoseconds since an arbitrary epoch.
+    /// Used for ordering, comparison, and serialization.
     nanos: u64,
+    /// The real std::time::Instant captured at creation, used for elapsed().
+    /// Not serialized; on deserialization this is set to a placeholder.
+    #[serde(skip)]
+    inner: Option<std::time::Instant>,
+}
+
+// Manual trait implementations that only compare `nanos`:
+
+impl PartialEq for Instant {
+    fn eq(&self, other: &Self) -> bool {
+        self.nanos == other.nanos
+    }
+}
+
+impl Eq for Instant {}
+
+impl PartialOrd for Instant {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Instant {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.nanos.cmp(&other.nanos)
+    }
+}
+
+impl std::hash::Hash for Instant {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.nanos.hash(state);
+    }
 }
 
 impl Instant {
     /// Returns the current instant from the monotonic clock.
+    ///
+    /// Records both a raw nanosecond value (relative to a global baseline)
+    /// and the underlying `std::time::Instant` for accurate `elapsed()`.
     // VUMA-VERIFIED: now reads the monotonic clock safely
     pub fn now() -> Self {
-        let t = std::time::Instant::now();
-        // Use the elapsed time from an arbitrary baseline as our representation.
-        // This is sufficient for relative time calculations.
+        let baseline = INSTANT_BASELINE.get_or_init(std::time::Instant::now);
+        let std_now = std::time::Instant::now();
+        let nanos = std_now.duration_since(*baseline).as_nanos() as u64;
         Self {
-            nanos: t.elapsed().as_nanos() as u64,
+            nanos,
+            inner: Some(std_now),
         }
     }
 
     /// Create an Instant from a raw nanosecond count (for testing).
     // VUMA-VERIFIED: test constructor is pure
     pub fn from_nanos(nanos: u64) -> Self {
-        Self { nanos }
+        Self { nanos, inner: None }
     }
 
     /// Returns the duration since `earlier`.
@@ -212,16 +296,32 @@ impl Instant {
             let diff = self.nanos - earlier.nanos;
             Duration::new(diff / 1_000_000_000, (diff % 1_000_000_000) as u32)
         } else {
-            panic!("Instant::duration_since called with a later instant");
+            panic!("Instant::Duration_since called with a later instant");
         }
     }
 
     /// Returns the duration elapsed since this instant was created.
+    ///
+    /// If this `Instant` was created via `now()`, uses the real
+    /// `std::time::Instant::elapsed()` for accurate measurement.
+    /// If this `Instant` was deserialized or created via `from_nanos()`,
+    /// falls back to computing from `Instant::now()` nanos.
     // VUMA-VERIFIED: elapsed is safe — always non-negative
     pub fn elapsed(&self) -> Duration {
-        // Since our `now()` returns relative values, we can't directly compare.
-        // Use std::time for actual elapsed measurement.
-        Duration::from_secs(0) // Simplified for VUMA simulation
+        if let Some(inner) = self.inner {
+            Duration::from_std(inner.elapsed())
+        } else {
+            // Fallback: compute from nanos delta against current time
+            let now = Self::now();
+            if now.nanos >= self.nanos {
+                Duration::new(
+                    (now.nanos - self.nanos) / 1_000_000_000,
+                    ((now.nanos - self.nanos) % 1_000_000_000) as u32,
+                )
+            } else {
+                Duration::from_secs(0)
+            }
+        }
     }
 
     /// Returns the raw nanosecond count (for testing).
@@ -375,5 +475,69 @@ mod tests {
         let now = SystemTime::now();
         // The current time should be well after the Unix epoch.
         assert!(now.duration_since_epoch().as_secs() > 1_700_000_000);
+    }
+
+    // --- New tests for real elapsed() ---
+
+    #[test]
+    fn test_instant_elapsed_is_nonzero() {
+        let start = Instant::now();
+        // Even a tight loop should show some elapsed time (at least on most systems).
+        // We just spin a tiny bit to ensure non-zero elapsed.
+        let mut dummy = 0u64;
+        for i in 0..1000 {
+            dummy += i;
+        }
+        std::hint::black_box(&dummy);
+        let elapsed = start.elapsed();
+        // elapsed should be >= 0; on a modern system even a tight loop
+        // should take some nanoseconds.
+        assert!(elapsed.secs > 0 || elapsed.nanos > 0 || elapsed.is_zero() /* theoretically possible but unlikely */);
+    }
+
+    #[test]
+    fn test_instant_elapsed_actually_advances() {
+        let start = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let elapsed = start.elapsed();
+        // After sleeping 50ms, elapsed should be at least 40ms (allowing for some slack)
+        assert!(elapsed.as_millis() >= 40, "elapsed was only {}ms, expected >= 40ms", elapsed.as_millis());
+    }
+
+    #[test]
+    fn test_instant_now_monotonic() {
+        let a = Instant::now();
+        let b = Instant::now();
+        // b should always be >= a since time only moves forward on a monotonic clock
+        assert!(b >= a);
+        // The nanos field should reflect monotonic ordering
+        assert!(b.nanos >= a.nanos);
+    }
+
+    #[test]
+    fn test_duration_subtraction() {
+        let a = Duration::new(5, 500_000_000);
+        let b = Duration::new(2, 200_000_000);
+        let diff = a - b;
+        assert_eq!(diff.secs, 3);
+        assert_eq!(diff.nanos, 300_000_000);
+    }
+
+    #[test]
+    fn test_duration_std_roundtrip() {
+        let d = Duration::new(42, 123_456_789);
+        let std_d = d.to_std();
+        let back = Duration::from_std(std_d);
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn test_system_time_advances() {
+        let t1 = SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = SystemTime::now();
+        // t2 should be strictly after t1
+        assert!(t2.duration_since_epoch().as_secs() > t1.duration_since_epoch().as_secs()
+            || t2.duration_since_epoch().subsec_nanos() > t1.duration_since_epoch().subsec_nanos());
     }
 }

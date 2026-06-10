@@ -35,7 +35,8 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, PhysicalReg, RegClass, TargetInfo, X86_64TargetInfo,
 };
-use crate::ir::IRFunction;
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+use std::collections::HashMap;
 use std::fmt;
 
 // ===========================================================================
@@ -718,6 +719,22 @@ pub fn encode_movsx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
     code
 }
 
+/// Encode MOVSX r64, r16 (REX.W + 0F BF /r) — sign-extend word to 64 bits
+pub fn encode_movsx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = dst.needs_rex();
+    let b = src.needs_rex();
+    if let Some(rex) = rex_prefix(true, r, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0x0F);
+    code.push(0xBF);
+    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    code
+}
+
 /// Encode MOVSX r64, r32 (REX.W + 63 /r) — sign-extend dword to 64 bits
 pub fn encode_movsxd(dst: Gpr, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(3);
@@ -1058,6 +1075,82 @@ fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
     (total + 15) & !15
 }
 
+// ── ISel helpers ─────────────────────────────────────────────────────────
+
+/// Resolve an IRValue to a physical GPR.
+/// For registers, looks up in the reg_map. For immediates, loads the value
+/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
+fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+    match val {
+        IRValue::Register(id) => (
+            reg_map.get(id).copied().unwrap_or(Gpr::Rax),
+            Vec::new(),
+        ),
+        IRValue::Immediate(imm) => {
+            let imm = *imm;
+            let code = if (-2147483648..=2147483647).contains(&imm) {
+                encode_mov_reg_imm32(scratch, imm as i32)
+            } else {
+                encode_mov_reg_imm64(scratch, imm as u64)
+            };
+            (scratch, code)
+        }
+        IRValue::Address(addr) => {
+            let code = encode_mov_reg_imm64(scratch, *addr);
+            (scratch, code)
+        }
+        IRValue::Label(_) => {
+            // Labels need relocation; emit a placeholder mov for now
+            let code = encode_mov_reg_imm64(scratch, 0);
+            (scratch, code)
+        }
+    }
+}
+
+/// Map an IR CmpKind to an x86_64 condition code.
+fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
+    match kind {
+        CmpKind::Eq => Cc::Equal,
+        CmpKind::Ne => Cc::NotEqual,
+        CmpKind::SLt => Cc::Less,
+        CmpKind::SLe => Cc::LessEqual,
+        CmpKind::SGt => Cc::Greater,
+        CmpKind::SGe => Cc::GreaterEqual,
+        CmpKind::ULt => Cc::Below,
+        CmpKind::ULe => Cc::BelowEqual,
+        CmpKind::UGt => Cc::Above,
+        CmpKind::UGe => Cc::AboveEqual,
+    }
+}
+
+/// Map an IR BinOpKind comparison to an x86_64 condition code.
+fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
+    match op {
+        BinOpKind::Eq => Cc::Equal,
+        BinOpKind::Ne => Cc::NotEqual,
+        BinOpKind::SLt => Cc::Less,
+        BinOpKind::SLe => Cc::LessEqual,
+        BinOpKind::SGt => Cc::Greater,
+        BinOpKind::SGe => Cc::GreaterEqual,
+        BinOpKind::ULt => Cc::Below,
+        BinOpKind::ULe => Cc::BelowEqual,
+        BinOpKind::UGt => Cc::Above,
+        BinOpKind::UGe => Cc::AboveEqual,
+        _ => Cc::Equal, // fallback, shouldn't be reached
+    }
+}
+
+/// Emit a CMP + SETcc + zero-extend sequence for a comparison that produces
+/// a boolean (0 or 1) in the destination register.
+fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+    let mut code = Vec::new();
+    code.extend(encode_cmp_reg_reg(lhs, rhs));
+    code.extend(encode_setcc(cc, dst));
+    // Zero-extend the byte result to 64 bits to clear upper bits
+    code.extend(encode_movzx_reg8(dst, dst));
+    code
+}
+
 impl Backend for X86_64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
@@ -1090,7 +1183,7 @@ impl Backend for X86_64Backend {
         }
 
         // Map virtual registers to physical registers
-        let mut reg_map: std::collections::HashMap<u32, Gpr> = std::collections::HashMap::new();
+        let mut reg_map: HashMap<u32, Gpr> = HashMap::new();
         for (i, &id) in vreg_ids.iter().enumerate() {
             reg_map.insert(id, allocatable[i % allocatable.len()]);
         }
@@ -1135,40 +1228,404 @@ impl Backend for X86_64Backend {
         for block in &func.blocks {
             for instr in &block.instructions {
                 let encoded = match instr {
-                    crate::ir::IRInstr::Add { dst, lhs, rhs } => {
+                    // ── Dedicated Add/Sub/Mul (with immediate-form optimisations) ──
+                    IRInstr::Add { dst, lhs, rhs } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let r = reg_map.get(&rhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rcx);
-                        let mut code = Vec::new();
-                        if l != d {
-                            code.extend(encode_mov_reg_reg(d, l));
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if let IRValue::Immediate(imm) = rhs {
+                            if (-2147483648..=2147483647).contains(imm) {
+                                code.extend(encode_add_reg_imm32(d, *imm as i32));
+                            } else {
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                code.extend(pre);
+                                code.extend(encode_add_reg_reg(d, r));
+                            }
+                        } else {
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            code.extend(pre);
+                            code.extend(encode_add_reg_reg(d, r));
                         }
-                        code.extend(encode_add_reg_reg(d, r));
                         code
                     }
-                    crate::ir::IRInstr::Sub { dst, lhs, rhs } => {
+                    IRInstr::Sub { dst, lhs, rhs } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let r = reg_map.get(&rhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rcx);
-                        let mut code = Vec::new();
-                        if l != d {
-                            code.extend(encode_mov_reg_reg(d, l));
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if let IRValue::Immediate(imm) = rhs {
+                            if (-2147483648..=2147483647).contains(imm) {
+                                code.extend(encode_sub_reg_imm32(d, *imm as i32));
+                            } else {
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                code.extend(pre);
+                                code.extend(encode_sub_reg_reg(d, r));
+                            }
+                        } else {
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            code.extend(pre);
+                            code.extend(encode_sub_reg_reg(d, r));
                         }
-                        code.extend(encode_sub_reg_reg(d, r));
                         code
                     }
-                    crate::ir::IRInstr::Mul { dst, lhs, rhs } => {
+                    IRInstr::Mul { dst, lhs, rhs } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        let r = reg_map.get(&rhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rcx);
-                        let mut code = Vec::new();
-                        if l != d {
-                            code.extend(encode_mov_reg_reg(d, l));
-                        }
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        code.extend(pre);
+                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
                         code.extend(encode_imul_reg_reg(d, r));
                         code
                     }
-                    crate::ir::IRInstr::Ret { values } => {
+
+                    // ── Division: uses RAX/RDX implicitly ───────────────
+                    IRInstr::Div { dst, lhs, rhs } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        code.extend(pre);
+                        // Move lhs into RAX
+                        if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                        // Sign-extend RAX into RDX:RAX
+                        code.extend(encode_cqo());
+                        // IDIV r
+                        code.extend(encode_idiv_reg(r));
+                        // Quotient is in RAX, move to dst if different
+                        if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                        code
+                    }
+
+                    // ── BinOp (generic) ──────────────────────────────────
+                    IRInstr::BinOp { op, dst, lhs, rhs } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        code.extend(pre);
+
+                        match op {
+                            BinOpKind::Add => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if let IRValue::Immediate(imm) = rhs {
+                                    if (-2147483648..=2147483647).contains(imm) {
+                                        code.extend(encode_add_reg_imm32(d, *imm as i32));
+                                    } else {
+                                        code.extend(encode_add_reg_reg(d, r));
+                                    }
+                                } else {
+                                    code.extend(encode_add_reg_reg(d, r));
+                                }
+                            }
+                            BinOpKind::Sub => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if let IRValue::Immediate(imm) = rhs {
+                                    if (-2147483648..=2147483647).contains(imm) {
+                                        code.extend(encode_sub_reg_imm32(d, *imm as i32));
+                                    } else {
+                                        code.extend(encode_sub_reg_reg(d, r));
+                                    }
+                                } else {
+                                    code.extend(encode_sub_reg_reg(d, r));
+                                }
+                            }
+                            BinOpKind::Mul => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                code.extend(encode_imul_reg_reg(d, r));
+                            }
+                            BinOpKind::SDiv => {
+                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                code.extend(encode_cqo());
+                                code.extend(encode_idiv_reg(r));
+                                if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                            }
+                            BinOpKind::UDiv => {
+                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                // Zero-extend RAX into RDX for unsigned divide
+                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                code.extend(encode_div_reg(r));
+                                if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                            }
+                            BinOpKind::SRem => {
+                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                code.extend(encode_cqo());
+                                code.extend(encode_idiv_reg(r));
+                                // Remainder in RDX
+                                if d != Gpr::Rdx { code.extend(encode_mov_reg_reg(d, Gpr::Rdx)); }
+                            }
+                            BinOpKind::URem => {
+                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                code.extend(encode_div_reg(r));
+                                // Remainder in RDX
+                                if d != Gpr::Rdx { code.extend(encode_mov_reg_reg(d, Gpr::Rdx)); }
+                            }
+                            BinOpKind::And => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                code.extend(encode_and_reg_reg(d, r));
+                            }
+                            BinOpKind::Or => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                code.extend(encode_or_reg_reg(d, r));
+                            }
+                            BinOpKind::Xor => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                code.extend(encode_xor_reg_reg(d, r));
+                            }
+                            BinOpKind::Shl => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                // Shift amount must be in CL (RCX)
+                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                code.extend(encode_shl_reg_cl(d));
+                            }
+                            BinOpKind::ShrL => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                code.extend(encode_shr_reg_cl(d));
+                            }
+                            BinOpKind::ShrA => {
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                code.extend(encode_sar_reg_cl(d));
+                            }
+                            // Comparison BinOps: produce 0 or 1
+                            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+                            | BinOpKind::Eq | BinOpKind::Ne => {
+                                let cc = binop_cmp_to_cc(op);
+                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                code.extend(emit_cmp_setcc(d, d, r, cc));
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Unary operations ─────────────────────────────────
+                    IRInstr::UnaryOp { op, dst, operand } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (s, mut code) = resolve_gpr(operand, &reg_map, Gpr::R10);
+
+                        match op {
+                            UnaryOpKind::Neg => {
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                code.extend(encode_neg_reg(d));
+                            }
+                            UnaryOpKind::Not => {
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                code.extend(encode_not_reg(d));
+                            }
+                            UnaryOpKind::Clz => {
+                                // BSR finds highest set bit; result = 63 - BSR
+                                // BSR sets ZF if operand is 0
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                // BSR dst, dst  (0F BD /r)
+                                // We emit this manually since there's no helper
+                                let r = d.needs_rex();
+                                let b = d.needs_rex();
+                                if let Some(rex) = rex_prefix(true, r, false, b) {
+                                    code.push(rex);
+                                } else {
+                                    code.push(0x48);
+                                }
+                                code.push(0x0F);
+                                code.push(0xBD);
+                                code.push(modrm(3, d.encoding() & 7, d.encoding() & 7));
+                                // XOR temp, temp; then if ZF, result = 64
+                                // Simplified: result = 63 - BSR_result for non-zero
+                                code.extend(encode_mov_reg_imm32(Gpr::R11, 63));
+                                code.extend(encode_sub_reg_reg(Gpr::R11, d));
+                                code.extend(encode_mov_reg_reg(d, Gpr::R11));
+                            }
+                            UnaryOpKind::Ctz => {
+                                // BSF finds lowest set bit; result = BSF
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                // BSF dst, dst  (0F BC /r)
+                                let r = d.needs_rex();
+                                let b = d.needs_rex();
+                                if let Some(rex) = rex_prefix(true, r, false, b) {
+                                    code.push(rex);
+                                } else {
+                                    code.push(0x48);
+                                }
+                                code.push(0x0F);
+                                code.push(0xBC);
+                                code.push(modrm(3, d.encoding() & 7, d.encoding() & 7));
+                                // BSF result is already the count of trailing zeros
+                            }
+                            UnaryOpKind::Popcnt => {
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                // POPCNT dst, dst  (F3 0F B8 /r)
+                                // We need the F3 prefix
+                                code.push(0xF3);
+                                let r = d.needs_rex();
+                                let b = d.needs_rex();
+                                if let Some(rex) = rex_prefix(true, r, false, b) {
+                                    code.push(rex);
+                                } else {
+                                    code.push(0x48);
+                                }
+                                code.push(0x0F);
+                                code.push(0xB8);
+                                code.push(modrm(3, d.encoding() & 7, d.encoding() & 7));
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Comparison (dedicated Cmp instruction) ───────────
+                    IRInstr::Cmp { kind, dst, lhs, rhs } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let cc = cmp_kind_to_cc(kind);
+                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if let IRValue::Immediate(imm) = rhs {
+                            if (-2147483648..=2147483647).contains(imm) {
+                                code.extend(encode_cmp_reg_imm32(d, *imm as i32));
+                            } else {
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                code.extend(pre);
+                                code.extend(encode_cmp_reg_reg(d, r));
+                            }
+                            code.extend(encode_setcc(cc, d));
+                            code.extend(encode_movzx_reg8(d, d));
+                        } else {
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            code.extend(pre);
+                            code.extend(emit_cmp_setcc(d, d, r, cc));
+                        }
+                        code
+                    }
+
+                    // ── Conditional select (Cmov) ────────────────────────
+                    IRInstr::Select { dst, cond, true_val, false_val } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
+                        let (tv, pre_tv) = resolve_gpr(true_val, &reg_map, Gpr::R11);
+                        let (fv, pre_fv) = resolve_gpr(false_val, &reg_map, Gpr::R8);
+                        code.extend(pre_tv);
+                        code.extend(pre_fv);
+
+                        // Move false_val into dst first, then conditionally move true_val
+                        if fv != d { code.extend(encode_mov_reg_reg(d, fv)); }
+                        // Test cond != 0 (test sets ZF if cond == 0)
+                        code.extend(encode_test_reg_reg(c, c));
+                        // CMOVcc: if NOT zero (NZ = NotEqual), move true_val
+                        code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, d, tv));
+                        code
+                    }
+
+                    // ── Memory: Load ─────────────────────────────────────
+                    IRInstr::Load { dst, addr } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (a, mut code) = resolve_gpr(addr, &reg_map, Gpr::R10);
+                        code.extend(encode_mov_reg_mem(d, a, 0));
+                        code
+                    }
+
+                    // ── Memory: Store ────────────────────────────────────
+                    IRInstr::Store { value, addr } => {
+                        let (v, mut code) = resolve_gpr(value, &reg_map, Gpr::R10);
+                        let (a, pre) = resolve_gpr(addr, &reg_map, Gpr::R11);
+                        code.extend(pre);
+                        code.extend(encode_mov_mem_reg(a, 0, v));
+                        code
+                    }
+
+                    // ── Memory: Lea (Offset) ─────────────────────────────
+                    IRInstr::Offset { dst, base, offset } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (b, mut code) = resolve_gpr(base, &reg_map, Gpr::R10);
+                        // If offset is an immediate, use LEA
+                        match offset {
+                            IRValue::Immediate(imm) => {
+                                let off = *imm as i32;
+                                code.extend(encode_lea_reg_mem(d, b, off));
+                            }
+                            _ => {
+                                let (o, pre) = resolve_gpr(offset, &reg_map, Gpr::R11);
+                                code.extend(pre);
+                                if b != d { code.extend(encode_mov_reg_reg(d, b)); }
+                                code.extend(encode_add_reg_reg(d, o));
+                            }
+                        }
+                        code
+                    }
+
+                    // ── GetAddress ───────────────────────────────────────
+                    IRInstr::GetAddress { dst, name: _ } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        // Placeholder: load 0 as the address (relocation needed at link time)
+                        encode_mov_reg_imm64(d, 0)
+                    }
+
+                    // ── Alloc ────────────────────────────────────────────
+                    IRInstr::Alloc { dst, size: _ } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        // Alloc is handled by the frame layout; compute the address
+                        // using LEA from RBP at the appropriate offset
+                        encode_lea_reg_mem(d, Gpr::Rbp, -(frame_size as i32))
+                    }
+
+                    // ── Free ─────────────────────────────────────────────
+                    IRInstr::Free { ptr: _ } => {
+                        // Free is lowered to a runtime call; emit NOP for now
+                        encode_nop()
+                    }
+
+                    // ── Cast / Conversion ────────────────────────────────
+                    IRInstr::Cast { kind, dst, src } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let (s, mut code) = resolve_gpr(src, &reg_map, Gpr::R10);
+
+                        match kind {
+                            CastKind::ZExt => {
+                                // Zero-extend: pick the right extension based on
+                                // the source value width.  When the source is a
+                                // register, default to byte (8→64) extension; when
+                                // the source is an immediate that fits in 32 bits,
+                                // a simple 32-bit mov already zero-extends.
+                                if let IRValue::Immediate(imm) = src {
+                                    if (-2147483648..=2147483647).contains(imm) {
+                                        code.extend(encode_mov_reg_imm32(d, *imm as i32));
+                                    } else {
+                                        code.extend(encode_mov_reg_imm64(d, *imm as u64));
+                                    }
+                                } else {
+                                    // Default: zero-extend byte → 64 bits
+                                    code.extend(encode_movzx_reg8(d, s));
+                                }
+                            }
+                            CastKind::SExt => {
+                                // Sign-extend: use MOVSX from byte, word, or dword.
+                                // Default to byte sign-extension for register sources;
+                                // for immediates, a mov with sign-extension suffices.
+                                if let IRValue::Immediate(imm) = src {
+                                    if (-128..=127).contains(imm) {
+                                        // Sign-extend byte: MOVSX r64, r8
+                                        code.extend(encode_mov_reg_imm32(d, *imm as i32));
+                                    } else if (-32768..=32767).contains(imm) {
+                                        // Sign-extend word
+                                        code.extend(encode_mov_reg_imm32(d, *imm as i32));
+                                    } else {
+                                        code.extend(encode_mov_reg_imm32(d, *imm as i32));
+                                    }
+                                } else {
+                                    // Default: sign-extend byte → 64 bits
+                                    code.extend(encode_movsx_reg8(d, s));
+                                }
+                            }
+                            CastKind::Trunc => {
+                                // Truncation: just move the lower bits (on x86_64,
+                                // writing to a 32-bit register zero-extends to 64 bits)
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                            }
+                            CastKind::BitCast => {
+                                // No data change, just a type reinterpretation
+                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Control: Ret ─────────────────────────────────────
+                    IRInstr::Ret { values } => {
                         let mut code = Vec::new();
                         if let Some(val) = values.first() {
                             if let Some(id) = val.as_register() {
@@ -1177,6 +1634,8 @@ impl Backend for X86_64Backend {
                                         code.extend(encode_mov_reg_reg(Gpr::Rax, src));
                                     }
                                 }
+                            } else if let Some(imm) = val.as_immediate() {
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
                             }
                         }
                         // Epilogue: add rsp, frame_size; pop rbp; ret
@@ -1187,8 +1646,57 @@ impl Backend for X86_64Backend {
                         code.extend(encode_ret());
                         code
                     }
-                    _ => {
-                        // For unhandled instructions, emit a NOP
+
+                    // ── Control: Branch (unconditional) ──────────────────
+                    IRInstr::Branch { target: _ } => {
+                        // JMP rel32 — offset will need relocation at link time
+                        encode_jmp_rel32(0)
+                    }
+
+                    // ── Control: CondBranch ──────────────────────────────
+                    IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+                        let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
+                        // Test cond != 0; JNZ to true_target; JMP to false_target
+                        code.extend(encode_test_reg_reg(c, c));
+                        // JNZ rel32 — placeholder offset
+                        code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
+                        // JMP rel32 — placeholder offset for false target
+                        code.extend(encode_jmp_rel32(0));
+                        code
+                    }
+
+                    // ── Call ─────────────────────────────────────────────
+                    IRInstr::Call { dst, func: _, args } => {
+                        let mut code = Vec::new();
+
+                        // Move arguments into SystemV arg registers (RDI, RSI, RDX, RCX, R8, R9)
+                        let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+                        for (i, arg) in args.iter().enumerate() {
+                            if i < arg_regs.len() {
+                                let (a, pre) = resolve_gpr(arg, &reg_map, Gpr::R10);
+                                code.extend(pre);
+                                if a != arg_regs[i] {
+                                    code.extend(encode_mov_reg_reg(arg_regs[i], a));
+                                }
+                            }
+                        }
+
+                        // CALL rel32 — placeholder offset
+                        code.extend(encode_call_rel32(0));
+
+                        // Move return value from RAX to dst if needed
+                        if let Some(d) = dst {
+                            let dd = reg_map.get(&d.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                            if dd != Gpr::Rax {
+                                code.extend(encode_mov_reg_reg(dd, Gpr::Rax));
+                            }
+                        }
+                        code
+                    }
+
+                    // ── Phi ──────────────────────────────────────────────
+                    IRInstr::Phi { .. } => {
+                        // Phi nodes should be eliminated before codegen; emit NOP
                         encode_nop()
                     }
                 };
@@ -1860,5 +2368,199 @@ mod tests {
         assert!(!lines.is_empty());
         assert!(lines[0].contains("400000"));
         assert!(lines[0].contains("c3"));
+    }
+
+    // ── MOVSX r16 Test ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_movsx_reg16_rax_rcx() {
+        let code = encode_movsx_reg16(Gpr::Rax, Gpr::Rcx);
+        assert_eq!(code, vec![0x48, 0x0F, 0xBF, 0xC1]);
+    }
+
+    #[test]
+    fn test_movsx_reg16_r8_r9() {
+        let code = encode_movsx_reg16(Gpr::R8, Gpr::R9);
+        assert_eq!(code, vec![0x4D, 0x0F, 0xBF, 0xC1]);
+    }
+
+    // ── ISel Tests (full allocate_registers pipeline) ──────────────────
+
+    /// Helper: build a minimal IR function with a single instruction and
+    /// a Ret, then run allocate_registers and return the encoded bytes
+    /// for the instruction (skipping prologue).
+    fn isel_single_instr(instr: IRInstr) -> Vec<u8> {
+        let mut func = IRFunction::new("test");
+        // vreg 0 = dst, vreg 1 = lhs (if any), vreg 2 = rhs (if any)
+        func.current_block().instructions.push(instr);
+        func.current_block().instructions.push(IRInstr::Ret {
+            values: vec![IRValue::Register(0)],
+        });
+        let backend = X86_64Backend::new();
+        let allocated = backend.allocate_registers(&func).unwrap();
+        // The encoded bytes include prologue + instruction(s) + epilogue.
+        // Concatenate all instructions and return the full encoded output.
+        let mut bytes = Vec::new();
+        for block in &allocated.blocks {
+            for instr in &block.instructions {
+                bytes.extend_from_slice(&instr.encoded);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn test_isel_add_reg_reg() {
+        let code = isel_single_instr(IRInstr::Add {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        });
+        // Should contain an ADD r64, r64 instruction (opcode 0x01)
+        assert!(code.iter().any(|&b| b == 0x01), "ADD opcode 0x01 not found in encoded output");
+    }
+
+    #[test]
+    fn test_isel_add_imm32() {
+        let code = isel_single_instr(IRInstr::Add {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(42),
+        });
+        // With immediate rhs, should use ADD r64, imm32 (opcode 0x81 /0)
+        let has_add_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x00);
+        assert!(has_add_imm, "ADD r64, imm32 not found in encoded output");
+    }
+
+    #[test]
+    fn test_isel_sub_reg_reg() {
+        let code = isel_single_instr(IRInstr::Sub {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        });
+        // Should contain SUB r64, r64 (opcode 0x29)
+        assert!(code.iter().any(|&b| b == 0x29), "SUB opcode 0x29 not found");
+    }
+
+    #[test]
+    fn test_isel_sub_imm32() {
+        let code = isel_single_instr(IRInstr::Sub {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(10),
+        });
+        // With immediate, should use SUB r64, imm32 (0x81 /5)
+        let has_sub_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x28);
+        assert!(has_sub_imm, "SUB r64, imm32 not found");
+    }
+
+    #[test]
+    fn test_isel_binop_and() {
+        let code = isel_single_instr(IRInstr::BinOp {
+            op: BinOpKind::And,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        });
+        // AND r64, r64 (opcode 0x21)
+        assert!(code.iter().any(|&b| b == 0x21), "AND opcode 0x21 not found");
+    }
+
+    #[test]
+    fn test_isel_binop_xor() {
+        let code = isel_single_instr(IRInstr::BinOp {
+            op: BinOpKind::Xor,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        });
+        // XOR r64, r64 (opcode 0x31)
+        assert!(code.iter().any(|&b| b == 0x31), "XOR opcode 0x31 not found");
+    }
+
+    #[test]
+    fn test_isel_binop_sdiv() {
+        let code = isel_single_instr(IRInstr::BinOp {
+            op: BinOpKind::SDiv,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        });
+        // SDiv uses CQO (0x48 0x99) + IDIV (0xF7 /7)
+        assert!(code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x99), "CQO not found for SDiv");
+        assert!(code.iter().any(|&b| b == 0xF7), "IDIV opcode not found for SDiv");
+    }
+
+    #[test]
+    fn test_isel_unaryop_neg() {
+        let code = isel_single_instr(IRInstr::UnaryOp {
+            op: UnaryOpKind::Neg,
+            dst: IRValue::Register(0),
+            operand: IRValue::Register(1),
+        });
+        // NEG r64 (0xF7 /3)
+        assert!(code.iter().any(|&b| b == 0xF7), "NEG opcode 0xF7 not found");
+    }
+
+    #[test]
+    fn test_isel_unaryop_not() {
+        let code = isel_single_instr(IRInstr::UnaryOp {
+            op: UnaryOpKind::Not,
+            dst: IRValue::Register(0),
+            operand: IRValue::Register(1),
+        });
+        // NOT r64 (0xF7 /2)
+        assert!(code.iter().any(|&b| b == 0xF7), "NOT opcode 0xF7 not found");
+    }
+
+    #[test]
+    fn test_isel_cmp_imm32() {
+        let code = isel_single_instr(IRInstr::Cmp {
+            kind: CmpKind::Eq,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(5),
+        });
+        // CMP r64, imm32 (0x81 /7)
+        let has_cmp_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38);
+        assert!(has_cmp_imm, "CMP r64, imm32 not found");
+        // Should also have SETcc (0F 9x) and MOVZX (0F B6)
+        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] >= 0x90 && w[1] <= 0x9F), "SETcc not found");
+    }
+
+    #[test]
+    fn test_isel_cast_zext() {
+        let code = isel_single_instr(IRInstr::Cast {
+            kind: CastKind::ZExt,
+            dst: IRValue::Register(0),
+            src: IRValue::Register(1),
+        });
+        // ZExt of a register uses MOVZX r8→r64 (0F B6)
+        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xB6), "MOVZX r8 not found for ZExt");
+    }
+
+    #[test]
+    fn test_isel_cast_sext() {
+        let code = isel_single_instr(IRInstr::Cast {
+            kind: CastKind::SExt,
+            dst: IRValue::Register(0),
+            src: IRValue::Register(1),
+        });
+        // SExt of a register uses MOVSX r8→r64 (0F BE)
+        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xBE), "MOVSX r8 not found for SExt");
+    }
+
+    #[test]
+    fn test_isel_select() {
+        let code = isel_single_instr(IRInstr::Select {
+            dst: IRValue::Register(0),
+            cond: IRValue::Register(1),
+            true_val: IRValue::Register(2),
+            false_val: IRValue::Register(3),
+        });
+        // Select uses TEST + CMOVcc
+        assert!(code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85), "TEST not found for Select");
+        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] >= 0x40 && w[1] <= 0x4F), "CMOVcc not found for Select");
     }
 }

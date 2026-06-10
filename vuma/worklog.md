@@ -297,3 +297,78 @@ All 22 control_flow tests pass:
 ### Build
 
 Clean compilation with zero errors and zero warnings (in control_flow.rs).
+
+---
+
+## Wave 7: Real I/O in Standard Library
+
+**Date**: 2026-03-05
+**Status**: ✅ Completed
+
+### Summary
+
+Replaced all simulated I/O in the VUMA standard library with real implementations
+for the Linux path. Added VumaStderr type. Bare-metal UART code preserved with
+enhanced MMIO address comments. All 255 tests pass (39 io tests, including 8 new).
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/std/src/io.rs | Real I/O for VumaStdin/VumaStdout/VumaFile, new VumaStderr, MMIO comments, 8 new tests | +210 |
+| src/std/src/lib.rs | Added VumaStderr to re-exports | +1 |
+| src/std/src/time.rs | Fixed pre-existing `impl Hash` → `impl std::hash::Hash` compile error | +1 |
+
+### Linux Path Changes (Real I/O)
+
+1. **VumaStdin** — `VumaReader::read()` now calls `std::io::stdin().read(buf)` instead of filling buffer with zeros
+2. **VumaStdout** — `VumaWriter::write()` now calls `std::io::stdout().write(buf)`; `flush()` calls `std::io::stdout().flush()`
+3. **VumaStderr** (NEW) — `VumaWriter` implementation using `std::io::stderr()` for write and flush; bare-metal variant writes to UART
+4. **VumaFile** — Added `inner: Option<std::fs::File>` field:
+   - `open()` uses `std::fs::OpenOptions` with real file creation; `fd` populated from `as_raw_fd()`
+   - `read()` uses `std::io::Read::read()` on inner file
+   - `write()` uses `std::io::Write::write()` on inner file
+   - `seek()` uses `std::io::Seek::seek()` with `SeekFrom::Start`
+   - `close()` drops inner file handle (closes OS fd)
+   - `flush()` calls `std::io::Write::flush()` on inner file
+5. Fake fd values (100/101/102) replaced with real OS file descriptors
+
+### Bare-Metal UART Comments (MMIO Addresses)
+
+Enhanced comments on all UART methods showing real BCM2711 Pi 5 MMIO addresses:
+- Data Register (DR): `mmio_base + 0x00`
+- Flag Register (FR): `mmio_base + 0x18` with bit layout (RXFE bit 4, TXFF bit 5, TXFE bit 7)
+- Control Register (CR): `mmio_base + 0x30`
+- Line Control Register (LCRH): `mmio_base + 0x2C`
+- Default PL011 base: `0xFE201000`
+- eMMC2 base: `0xFE340000`
+
+### New Tests (8 added)
+
+- `test_vuma_stderr_writer_trait` — VumaStderr writes to real stderr
+- `test_vuma_stderr_bare_metal` — VumaStderr bare-metal UART write
+- `test_vuma_file_write_seek_read_roundtrip` — Write, seek back, read verifies data
+- `test_vuma_file_real_fd` — Verifies fd is a real OS fd (not fake 100/101/102)
+- `test_vuma_stdout_real_write` — VumaStdout writes actual bytes
+- `test_vuma_file_open_nonexistent` — Opening non-existent file returns error
+- `test_vuma_file_read_empty` — Reading from empty file returns 0 bytes
+- `test_vuma_stderr_display` — Display formatting for VumaStderr
+
+### Updated Existing Tests
+
+Existing VumaFile tests updated to use real temp files (via `std::env::temp_dir()`) instead of simulated I/O with fake paths:
+- `test_vuma_file_capability_enforcement`
+- `test_vuma_file_close_blocks_io`
+- `test_vuma_buf_reader_buffering`
+- `test_vuma_file_vuma_reader_trait`
+- `test_vuma_buf_reader_into_inner`
+- `test_vuma_file_display`
+
+`test_vuma_stdin_reader_trait` updated to not call `read()` (would block on real stdin in test environments).
+
+### Build Verification
+
+- `cargo check -p vuma-std`: zero errors
+- `cargo test -p vuma-std`: 255 tests pass, 0 failures (39 io tests)
+
+---

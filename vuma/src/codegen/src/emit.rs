@@ -110,6 +110,8 @@ const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 /// Section header type: no bits (BSS).
 const SHT_NOBITS: u32 = 8;
+/// Section header type: relocation entries with addend.
+const SHT_RELA: u32 = 4;
 
 /// Symbol binding: local.
 const STB_LOCAL: u8 = 0;
@@ -120,12 +122,36 @@ const STB_GLOBAL: u8 = 1;
 const STT_FUNC: u8 = 2;
 /// Symbol type: section.
 const STT_SECTION: u8 = 3;
+/// Symbol type: no type (undefined/external symbol).
+const STT_NOTYPE: u8 = 0;
 
 /// Default base address for Linux LOAD segment.
 const BASE_ADDR_LINUX: u64 = 0x400000;
 
 /// Default base address for bare-metal Pi 5 (kernel load address).
 const BASE_ADDR_BARE: u64 = 0x80000;
+
+/// Special section index: undefined/missing section.
+const SHN_UNDEF: u16 = 0;
+
+// ---------------------------------------------------------------------------
+// AArch64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_AARCH64_CALL26 — B/BL relocation for 26-bit branch offset.
+const R_AARCH64_CALL26: u32 = 283;
+
+/// R_AARCH64_JUMP26 — B relocation for 26-bit branch offset (unconditional branch).
+#[allow(dead_code)]
+const R_AARCH64_JUMP26: u32 = 282;
+
+/// R_AARCH64_ADR_PREL_PG_HI21 — ADRP page-relative relocation.
+#[allow(dead_code)]
+const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+
+/// R_AARCH64_LDST64_ABS_LO12_NC — 64-bit load/store offset relocation.
+#[allow(dead_code)]
+const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
 
 // ---------------------------------------------------------------------------
 // EmitConfig
@@ -270,6 +296,56 @@ struct CallRelocation {
     text_byte_offset: u64,
     /// Name of the target function.
     target_func: String,
+}
+
+// ---------------------------------------------------------------------------
+// ELF RelaEntry
+// ---------------------------------------------------------------------------
+
+/// An ELF64 relocation entry with an explicit addend (SHT_RELA).
+///
+/// Each entry specifies where in the section a relocation must be applied,
+/// which symbol the relocation references, the type of relocation, and an
+/// addend value used in the relocation computation.
+#[derive(Debug, Clone)]
+pub struct RelaEntry {
+    /// Byte offset within the section where the relocation applies.
+    pub offset: u64,
+    /// Symbol index (upper 32 bits) and relocation type (lower 32 bits),
+    /// packed as: `(sym_idx << 32) | r_type`.
+    pub info: u64,
+    /// Addend value used in the relocation computation.
+    pub addend: i64,
+}
+
+impl RelaEntry {
+    /// Create a new relocation entry.
+    pub fn new(offset: u64, sym_idx: u32, r_type: u32, addend: i64) -> Self {
+        Self {
+            offset,
+            info: ((sym_idx as u64) << 32) | (r_type as u64),
+            addend,
+        }
+    }
+
+    /// Extract the symbol index from `info`.
+    pub fn sym_idx(&self) -> u32 {
+        (self.info >> 32) as u32
+    }
+
+    /// Extract the relocation type from `info`.
+    pub fn r_type(&self) -> u32 {
+        (self.info & 0xFFFFFFFF) as u32
+    }
+
+    /// Serialize the entry to 24 bytes (little-endian).
+    pub fn to_bytes(&self) -> [u8; 24] {
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&self.offset.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.info.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.addend.to_le_bytes());
+        buf
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -975,13 +1051,28 @@ pub fn emit_elf(
         }
     }
 
-    // ---- Step 2: Resolve inter-function call relocations ----
-    resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+    // ---- Step 2: Handle inter-function call relocations ----
+    // For ET_REL, collect external symbols and defer to the linker.
+    // For ET_EXEC, resolve call relocations in-place.
+    let mut external_symbols: Vec<String> = Vec::new();
+    let mut rela_entries: Vec<RelaEntry> = Vec::new();
+    if is_obj {
+        let mut extern_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for reloc in &all_call_relocs {
+            if !function_offsets.contains_key(&reloc.target_func) {
+                extern_set.insert(reloc.target_func.clone());
+            }
+        }
+        external_symbols = extern_set.into_iter().collect();
+        external_symbols.sort();
+    } else {
+        resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+    }
 
     // ---- Step 3: Collect data sections ----
     let (rodata_section, data_section, bss_size) = collect_data_sections(data_sections);
 
-    // ---- Step 4: Compute layout ----
+    // ---- Step 4: Compute partial layout ----
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
     let shdr_size: u64 = 64;
@@ -992,28 +1083,49 @@ pub fn emit_elf(
     let text_size = text_section.len() as u64;
     let text_aligned = align_up(text_size, 16);
 
-    let data_file_offset = text_offset + text_aligned;
-    let rodata_size = rodata_section.len() as u64;
-    let rwdata_size = data_section.len() as u64;
-    let data_file_total = rodata_size + rwdata_size;
-
     let text_vaddr = if is_obj { 0 } else { base_addr + text_offset };
-    let data_vaddr = if is_obj { 0 } else { base_addr + data_file_offset };
 
     let entry_offset = function_offsets.get(&config.entry_name).copied().unwrap_or(0);
     let entry_point = if is_obj { 0 } else { base_addr + entry_offset };
 
     // ---- Step 5: Build symbol table and string table ----
-    let (symtab_bytes, strtab_bytes) = if config.symbol_table {
-        build_symbol_table(functions, &function_offsets, &function_sizes, text_vaddr)
+    let (symtab_bytes, strtab_bytes, sym_name_to_idx) = if config.symbol_table {
+        build_symbol_table(functions, &function_offsets, &function_sizes, text_vaddr, &external_symbols)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), HashMap::new())
     };
 
-    // ---- Step 6: Build section header string table ----
+    // Build .rela.text entries for ET_REL objects.
+    if is_obj {
+        for reloc in &all_call_relocs {
+            let sym_idx = sym_name_to_idx.get(&reloc.target_func).copied().unwrap_or(0);
+            rela_entries.push(RelaEntry::new(
+                reloc.text_byte_offset,
+                sym_idx,
+                R_AARCH64_CALL26,
+                0,
+            ));
+        }
+        rela_entries.sort_by_key(|r| r.offset);
+    }
+    let rela_text_bytes: Vec<u8> = rela_entries.iter().flat_map(|r| r.to_bytes()).collect();
+
+    // ---- Step 6: Compute remaining layout ----
+    let rela_text_offset = text_offset + text_aligned;
+    let rela_text_size = rela_text_bytes.len() as u64;
+    let rela_text_aligned = if is_obj { align_up(rela_text_size, 8) } else { 0 };
+
+    let data_file_offset = text_offset + text_aligned + rela_text_aligned;
+    let rodata_size = rodata_section.len() as u64;
+    let rwdata_size = data_section.len() as u64;
+    let data_file_total = rodata_size + rwdata_size;
+
+    let data_vaddr = if is_obj { 0 } else { base_addr + data_file_offset };
+
+    // ---- Step 7: Build section header string table ----
     let shstrtab = build_shstrtab(config);
 
-    // ---- Step 7: Compute section header offsets ----
+    // ---- Step 8: Compute section header offsets ----
     let symtab_file_offset = data_file_offset + data_file_total;
     let symtab_aligned = align_up(symtab_bytes.len() as u64, 8);
     let strtab_file_offset = symtab_file_offset + symtab_aligned;
@@ -1022,7 +1134,7 @@ pub fn emit_elf(
     let shstrtab_aligned = align_up(shstrtab.len() as u64, 8);
     let shdr_offset = shstrtab_file_offset + shstrtab_aligned;
 
-    // ---- Step 8: Build ELF header ----
+    // ---- Step 9: Build ELF header ----
     let mut elf = Vec::new();
 
     // e_ident
@@ -1051,9 +1163,10 @@ pub fn emit_elf(
     elf.extend_from_slice(&(56u16).to_le_bytes());
     elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes());
     elf.extend_from_slice(&(shdr_size as u16).to_le_bytes());
-    let num_shdrs: u64 = if config.section_headers { 8 } else { 0 };
+    let rela_shift: u64 = if is_obj { 1 } else { 0 };
+    let num_shdrs: u64 = if config.section_headers { 8 + rela_shift } else { 0 };
     elf.extend_from_slice(&(num_shdrs as u16).to_le_bytes());
-    let shstrndx = if config.section_headers { 7u16 } else { 0u16 };
+    let shstrndx = if config.section_headers { (7 + rela_shift) as u16 } else { 0u16 };
     elf.extend_from_slice(&shstrndx.to_le_bytes());
 
     assert_eq!(elf.len(), 64, "ELF header must be exactly 64 bytes");
@@ -1068,6 +1181,13 @@ pub fn emit_elf(
     elf.extend_from_slice(&text_section);
     let padding = text_aligned - text_size;
     elf.extend_from_slice(&vec![0u8; padding as usize]);
+
+    // ---- Step 10.5: .rela.text section (ET_REL only) ----
+    if is_obj {
+        elf.extend_from_slice(&rela_text_bytes);
+        let pad = rela_text_aligned - rela_text_bytes.len() as u64;
+        elf.extend_from_slice(&vec![0u8; pad as usize]);
+    }
 
     // ---- Step 11: .rodata + .data ----
     elf.extend_from_slice(&rodata_section);
@@ -1088,18 +1208,37 @@ pub fn emit_elf(
 
     // ---- Step 15: Section Headers ----
     if config.section_headers {
+        let rela_shift: u32 = if is_obj { 1 } else { 0 };
+
+        // Section 0: null
         write_filled_shdr(&mut elf, &new_shdr(SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0));
 
+        // Section 1: .text
         let text_name_idx = shstrtab_name_offset(&shstrtab, ".text");
         let mut sh = new_shdr(SHT_PROGBITS, (PF_R | PF_X) as u64, text_vaddr, text_offset, text_size, 0, 0, 16, 0);
         sh.name = text_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 2: .rela.text (ET_REL only)
+        if is_obj {
+            let rela_name_idx = shstrtab_name_offset(&shstrtab, ".rela.text");
+            let mut sh = new_shdr(
+                SHT_RELA, 0, 0, rela_text_offset, rela_text_size,
+                5 + rela_shift,  // sh_link: .symtab section index
+                1,               // sh_info: .text section index
+                8, 24,           // alignment, entry size
+            );
+            sh.name = rela_name_idx as u32;
+            write_filled_shdr(&mut elf, &sh);
+        }
+
+        // Section 2+rela_shift: .rodata
         let rodata_name_idx = shstrtab_name_offset(&shstrtab, ".rodata");
         let mut sh = new_shdr(SHT_PROGBITS, PF_R as u64, data_vaddr, data_file_offset, rodata_size, 0, 0, 8, 0);
         sh.name = rodata_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 3+rela_shift: .data
         let data_name_idx = shstrtab_name_offset(&shstrtab, ".data");
         let data_section_offset = data_file_offset + rodata_size;
         let data_section_vaddr = data_vaddr + rodata_size;
@@ -1107,22 +1246,30 @@ pub fn emit_elf(
         sh.name = data_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 4+rela_shift: .bss
         let bss_name_idx = shstrtab_name_offset(&shstrtab, ".bss");
         let bss_vaddr = data_vaddr + data_file_total;
         let mut sh = new_shdr(SHT_NOBITS, (PF_R | PF_W) as u64, bss_vaddr, 0, bss_size, 0, 0, 16, 0);
         sh.name = bss_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 5+rela_shift: .symtab
         let symtab_name_idx = shstrtab_name_offset(&shstrtab, ".symtab");
-        let mut sh = new_shdr(SHT_SYMTAB, 0, 0, symtab_file_offset, symtab_bytes.len() as u64, 6, 1, 8, 24);
+        let mut sh = new_shdr(SHT_SYMTAB, 0, 0, symtab_file_offset, symtab_bytes.len() as u64,
+            6 + rela_shift,  // sh_link: .strtab section index
+            2,               // sh_info: one past last local symbol
+            8, 24,
+        );
         sh.name = symtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 6+rela_shift: .strtab
         let strtab_name_idx = shstrtab_name_offset(&shstrtab, ".strtab");
         let mut sh = new_shdr(SHT_STRTAB, 0, 0, strtab_file_offset, strtab_bytes.len() as u64, 0, 0, 1, 0);
         sh.name = strtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
+        // Section 7+rela_shift: .shstrtab
         let shstrtab_name_idx = shstrtab_name_offset(&shstrtab, ".shstrtab");
         let mut sh = new_shdr(SHT_STRTAB, 0, 0, shstrtab_file_offset, shstrtab.len() as u64, 0, 0, 1, 0);
         sh.name = shstrtab_name_idx as u32;
@@ -1267,14 +1414,19 @@ fn write_filled_shdr(buf: &mut Vec<u8>, sh: &FilledShdr) {
 }
 
 /// Build the symbol table (`.symtab`) and associated string table (`.strtab`).
+///
+/// Also returns a mapping from symbol name to symbol table index, used to
+/// populate relocation entries.
 fn build_symbol_table(
     functions: &[IRFunction],
     function_offsets: &HashMap<String, u64>,
     function_sizes: &HashMap<String, u64>,
     text_vaddr: u64,
-) -> (Vec<u8>, Vec<u8>) {
+    external_symbols: &[String],
+) -> (Vec<u8>, Vec<u8>, HashMap<String, u32>) {
     let mut strtab = Vec::new();
     let mut symtab = Vec::new();
+    let mut name_to_idx: HashMap<String, u32> = HashMap::new();
 
     strtab.push(0); // null byte at offset 0
 
@@ -1297,7 +1449,8 @@ fn build_symbol_table(
     symtab.extend_from_slice(&text_vaddr.to_le_bytes());
     symtab.extend_from_slice(&0u64.to_le_bytes());
 
-    // One symbol per function.
+    // One symbol per function (global).
+    let mut next_idx: u32 = 2;
     for func in functions {
         let name_off = strtab.len() as u32;
         strtab.extend_from_slice(func.name.as_bytes());
@@ -1311,9 +1464,28 @@ fn build_symbol_table(
         symtab.extend_from_slice(&1u16.to_le_bytes()); // .text section
         symtab.extend_from_slice(&value.to_le_bytes());
         symtab.extend_from_slice(&size.to_le_bytes());
+        name_to_idx.insert(func.name.clone(), next_idx);
+        next_idx += 1;
     }
 
-    (symtab, strtab)
+    // External symbols (undefined, global) — for relocation targets not
+    // defined in this object file.
+    for name in external_symbols {
+        let name_off = strtab.len() as u32;
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+        let st_info = (STB_GLOBAL << 4) | STT_NOTYPE;
+        symtab.extend_from_slice(&name_off.to_le_bytes());
+        symtab.push(st_info);
+        symtab.push(0);
+        symtab.extend_from_slice(&SHN_UNDEF.to_le_bytes());
+        symtab.extend_from_slice(&0u64.to_le_bytes()); // st_value = 0
+        symtab.extend_from_slice(&0u64.to_le_bytes()); // st_size = 0
+        name_to_idx.insert(name.clone(), next_idx);
+        next_idx += 1;
+    }
+
+    (symtab, strtab, name_to_idx)
 }
 
 /// Build the section-header string table (`.shstrtab`).
@@ -1322,6 +1494,9 @@ fn build_shstrtab(config: &EmitConfig) -> Vec<u8> {
     buf.push(0);
     if config.section_headers {
         buf.extend_from_slice(b".text\0");
+        if config.format == OutputFormat::Obj {
+            buf.extend_from_slice(b".rela.text\0");
+        }
         buf.extend_from_slice(b".rodata\0");
         buf.extend_from_slice(b".data\0");
         buf.extend_from_slice(b".bss\0");
@@ -1584,6 +1759,258 @@ mod tests {
             }
             assert!(found, "function '{}' must appear in strtab", name);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Relocation tests
+    // -----------------------------------------------------------------------
+
+    /// Parse SHT_RELA entries from an ELF binary.
+    fn parse_rela_entries_from_elf(elf: &[u8]) -> Vec<RelaEntry> {
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
+                let sh_size = u64::from_le_bytes(elf[off+32..off+40].try_into().unwrap()) as usize;
+                let sh_entsize = u64::from_le_bytes(elf[off+56..off+64].try_into().unwrap()) as usize;
+                if sh_entsize == 0 { continue; }
+                let num_entries = sh_size / sh_entsize;
+                let mut entries = Vec::new();
+                for j in 0..num_entries {
+                    let base = sh_offset + j * sh_entsize;
+                    let r_offset = u64::from_le_bytes(elf[base..base+8].try_into().unwrap());
+                    let r_info = u64::from_le_bytes(elf[base+8..base+16].try_into().unwrap());
+                    let r_addend = i64::from_le_bytes(elf[base+16..base+24].try_into().unwrap());
+                    entries.push(RelaEntry { offset: r_offset, info: r_info, addend: r_addend });
+                }
+                return entries;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Parse symbols from an ELF binary, returning (name, st_info, st_value, st_shndx).
+    fn parse_symbols_from_elf(elf: &[u8]) -> Vec<(String, u8, u64, u16)> {
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+
+        // Find .symtab and its linked .strtab.
+        let mut symtab_offset: usize = 0;
+        let mut symtab_size: usize = 0;
+        let mut strtab_offset: usize = 0;
+        let mut strtab_size: usize = 0;
+
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            if sh_type == SHT_SYMTAB {
+                symtab_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
+                symtab_size = u64::from_le_bytes(elf[off+32..off+40].try_into().unwrap()) as usize;
+                let sh_link = u32::from_le_bytes(elf[off+40..off+44].try_into().unwrap()) as usize;
+                let strtab_off = e_shoff + sh_link * 64;
+                strtab_offset = u64::from_le_bytes(elf[strtab_off+24..strtab_off+32].try_into().unwrap()) as usize;
+                strtab_size = u64::from_le_bytes(elf[strtab_off+32..strtab_off+40].try_into().unwrap()) as usize;
+                break;
+            }
+        }
+
+        if symtab_size == 0 { return Vec::new(); }
+
+        let strtab = &elf[strtab_offset..strtab_offset + strtab_size];
+        let num_syms = symtab_size / 24;
+        let mut symbols = Vec::new();
+        for i in 0..num_syms {
+            let base = symtab_offset + i * 24;
+            let st_name = u32::from_le_bytes(elf[base..base+4].try_into().unwrap()) as usize;
+            let st_info = elf[base + 4];
+            let st_shndx = u16::from_le_bytes(elf[base+6..base+8].try_into().unwrap());
+            let st_value = u64::from_le_bytes(elf[base+8..base+16].try_into().unwrap());
+
+            let name = if st_name < strtab.len() {
+                let end = strtab[st_name..].iter().position(|&b| b == 0).unwrap_or(strtab.len() - st_name);
+                String::from_utf8_lossy(&strtab[st_name..st_name + end]).to_string()
+            } else {
+                String::new()
+            };
+            symbols.push((name, st_info, st_value, st_shndx));
+        }
+        symbols
+    }
+
+    #[test]
+    fn rela_text_section_in_obj() {
+        // Verify that .rela.text section header exists in ET_REL output.
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let funcs = vec![helper, caller];
+        let config = EmitConfig::relocatable_obj();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+        assert!(e_shnum >= 9, "ET_REL with calls should have at least 9 section headers");
+
+        // Find the .rela.text section by looking for SHT_RELA type.
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let mut found_rela = false;
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                found_rela = true;
+                break;
+            }
+        }
+        assert!(found_rela, ".rela.text section (SHT_RELA) must exist in ET_REL");
+    }
+
+    #[test]
+    fn rela_call26_entry_for_bl() {
+        // Verify that R_AARCH64_CALL26 entries are generated for BL instructions.
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let funcs = vec![helper, caller];
+        let config = EmitConfig::relocatable_obj();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        let entries = parse_rela_entries_from_elf(&elf);
+        assert!(!entries.is_empty(), "should have at least one rela entry");
+
+        // All BL relocations should be R_AARCH64_CALL26.
+        for entry in &entries {
+            assert_eq!(entry.r_type(), R_AARCH64_CALL26,
+                "expected R_AARCH64_CALL26, got type {}", entry.r_type());
+        }
+    }
+
+    #[test]
+    fn rela_external_symbol_undefined() {
+        // Verify that external function symbols have SHN_UNDEF.
+        let caller = make_calling_function("main", "external_func");
+        let funcs = vec![caller];
+        let config = EmitConfig::relocatable_obj();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        // Parse the symbol table to find external_func.
+        let symbols = parse_symbols_from_elf(&elf);
+        let ext_sym = symbols.iter().find(|(name, _, _, shndx)|
+            name == "external_func" && *shndx == SHN_UNDEF
+        );
+        assert!(ext_sym.is_some(), "external_func should be SHN_UNDEF");
+    }
+
+    #[test]
+    fn rela_offset_matches_bl_location() {
+        // Verify the rela offset points to a BL instruction in .text.
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let funcs = vec![helper, caller];
+        let config = EmitConfig::relocatable_obj();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        let entries = parse_rela_entries_from_elf(&elf);
+        assert!(!entries.is_empty());
+
+        // Find the .text section file offset from section headers.
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+        let mut text_file_offset: usize = 0;
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            if sh_type == SHT_PROGBITS {
+                text_file_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
+                break;
+            }
+        }
+
+        for entry in &entries {
+            let bl_file_offset = text_file_offset + entry.offset as usize;
+            assert!(bl_file_offset + 4 <= elf.len(), "relocation offset out of bounds");
+            let word = u32::from_le_bytes([
+                elf[bl_file_offset], elf[bl_file_offset + 1],
+                elf[bl_file_offset + 2], elf[bl_file_offset + 3],
+            ]);
+            // BL opcode: bits [31:26] = 100101
+            assert_eq!((word >> 26) & 0x3F, 0b100101,
+                "relocation offset should point to a BL instruction, got {:08x}", word);
+        }
+    }
+
+    #[test]
+    fn rela_multiple_calls() {
+        // Verify multiple BL instructions generate multiple rela entries.
+        let mut func = IRFunction::new("main");
+        func.current_block().push(IRInstr::Call {
+            dst: None, func: "foo".to_string(), args: vec![],
+        });
+        func.current_block().push(IRInstr::Call {
+            dst: None, func: "bar".to_string(), args: vec![],
+        });
+        func.current_block().push(IRInstr::Call {
+            dst: None, func: "baz".to_string(), args: vec![],
+        });
+        func.current_block().terminator = IRTerminator::Return(vec![]);
+        let funcs = vec![func];
+        let config = EmitConfig::relocatable_obj();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        let entries = parse_rela_entries_from_elf(&elf);
+        assert_eq!(entries.len(), 3, "expected 3 rela entries for 3 calls");
+
+        // Verify offsets are distinct and increasing.
+        for i in 1..entries.len() {
+            assert!(entries[i].offset > entries[i-1].offset,
+                "rela entries should be sorted by offset");
+        }
+    }
+
+    #[test]
+    fn rela_no_rela_in_exec() {
+        // Verify ET_EXEC does not have SHT_RELA sections.
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let funcs = vec![helper, caller];
+        let config = EmitConfig::linux_elf();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            assert_ne!(sh_type, SHT_RELA, "ET_EXEC should not have SHT_RELA sections");
+        }
+    }
+
+    #[test]
+    fn rela_entry_struct_encoding() {
+        // Verify RelaEntry struct encoding and field accessors.
+        let entry = RelaEntry::new(0x1234, 5, R_AARCH64_CALL26, -4);
+        assert_eq!(entry.offset, 0x1234);
+        assert_eq!(entry.sym_idx(), 5);
+        assert_eq!(entry.r_type(), R_AARCH64_CALL26);
+        assert_eq!(entry.addend, -4);
+
+        let bytes = entry.to_bytes();
+        let parsed_offset = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let parsed_info = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let parsed_addend = i64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        assert_eq!(parsed_offset, 0x1234);
+        assert_eq!(parsed_info, ((5u64) << 32) | (R_AARCH64_CALL26 as u64));
+        assert_eq!(parsed_addend, -4);
+    }
+
+    #[test]
+    fn rela_relocation_type_constants() {
+        // Verify AArch64 relocation type constant values match the ELF spec.
+        assert_eq!(R_AARCH64_CALL26, 283);
+        assert_eq!(R_AARCH64_JUMP26, 282);
+        assert_eq!(R_AARCH64_ADR_PREL_PG_HI21, 275);
+        assert_eq!(R_AARCH64_LDST64_ABS_LO12_NC, 286);
     }
 }
 
