@@ -46,9 +46,11 @@
 //! ```
 
 pub mod bd_solver;
+pub mod cache;
 pub mod cleanup;
 pub mod constraint;
 pub mod debt;
+pub mod escape;
 pub mod exclusivity;
 pub mod inference;
 pub mod interpretation;
@@ -63,13 +65,15 @@ pub use constraint::{Constraint, ConstraintId};
 pub use debt::{DebtItem, DebtStatus, Priority, VerificationDebt};
 pub use inference::{InferenceEngine, InferenceError, InferenceResult};
 pub use result::{
-    Assumption, ConfidenceLevel, CounterExample, Evidence, InvariantName, ProgramPoint, ProofStep,
-    VerificationResult, VerificationStatus,
+    Assumption, BatchedViolations, ConfidenceLevel, CounterExample, Evidence, InvariantName,
+    InvariantViolation, ProgramPoint, ProofStep, Severity, VerificationResult, VerificationStatus,
 };
 pub use invariant_aggregator::{
     AggregatedResult, DiagnosticsReport, InvariantAggregator, InvariantDelta, InvariantKind,
     OverallVerdict, VerificationLevel, VerificationSummary,
 };
+pub use escape::{EscapeKind, analyze_escapes};
+pub use cache::{InvariantViolation as CacheInvariantViolation, Severity as CacheSeverity, VerificationCache, compute_fingerprint};
 pub use verification::{VerificationEngine, VerificationInput};
 pub use interpretation::{
     AccessEvent, CapDTransitionResult, InterpretationVerifier, InterpretationViolation,

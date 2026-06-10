@@ -659,6 +659,37 @@ pub fn context_weaken(c: &CapD, usage: UsageContext) -> CapD {
 }
 
 // ---------------------------------------------------------------------------
+// Widening
+// ---------------------------------------------------------------------------
+
+/// Compute the **widening** of two CapDs for fixpoint convergence.
+///
+/// Widening replaces increasing chains with `Top`. If `c2` is strictly
+/// above `c1` in the lattice, the result is `CapD::all()` (Top).
+/// Otherwise, the result is `c2`.
+///
+/// This ensures convergence in the CapD lattice during iterative
+/// fixed-point computation on cyclic data.
+///
+/// # Example
+///
+/// ```
+/// use vuma_bd::capd::{CapD, Capability};
+/// use vuma_bd::capd_lattice::widen;
+///
+/// let c1 = CapD::empty().strengthen(&[Capability::Read]);
+/// let c2 = CapD::empty().strengthen(&[Capability::Read, Capability::Write]);
+/// let w = widen(&c1, &c2);
+/// // c2 is strictly above c1, so widening jumps to Top
+/// assert!(w.caps.contains(&Capability::Read));
+/// assert!(w.caps.contains(&Capability::Write));
+/// assert!(w.caps.contains(&Capability::Execute));
+/// ```
+pub fn widen(c1: &CapD, c2: &CapD) -> CapD {
+    c1.widen(c2)
+}
+
+// ---------------------------------------------------------------------------
 // Lattice property verification helpers
 // ---------------------------------------------------------------------------
 
@@ -1215,4 +1246,51 @@ mod tests {
             other => panic!("expected BothViolations, got {other:?}"),
         }
     }
+
+    // ---- widen ----
+
+    #[test]
+    fn test_widen_increasing_jumps_to_top() {
+        let c1 = capd_from(&[Capability::Read]);
+        let c2 = capd_from(&[Capability::Read, Capability::Write]);
+        let w = widen(&c1, &c2);
+        // c2 is strictly above c1, so widening jumps to Top
+        assert_eq!(w, CapD::all());
+    }
+
+    #[test]
+    fn test_widen_same_returns_other() {
+        let d = capd_from(&[Capability::Read, Capability::Write]);
+        let w = widen(&d, &d);
+        // Same descriptor: not strictly above, so result is the other (d itself)
+        assert_eq!(w, d);
+    }
+
+    #[test]
+    fn test_widen_decreasing_returns_other() {
+        let c1 = capd_from(&[Capability::Read, Capability::Write]);
+        let c2 = capd_from(&[Capability::Read]);
+        // c2 is below c1, not above, so widening returns c2
+        let w = widen(&c1, &c2);
+        assert_eq!(w, c2);
+    }
+
+    #[test]
+    fn test_widen_incomparable_returns_other() {
+        let c1 = capd_from(&[Capability::Read]);
+        let c2 = capd_from(&[Capability::Write]);
+        // Incomparable: not strictly above, so returns c2
+        let w = widen(&c1, &c2);
+        assert_eq!(w, c2);
+    }
+
+    #[test]
+    fn test_widen_condition_removal_jumps_to_top() {
+        let c1 = capd_with_cond(&[Capability::Read], Condition::InPhase(1));
+        let c2 = capd_from(&[Capability::Read]);
+        // c2 has fewer conditions (more permissive) => c2 is above c1
+        let w = widen(&c1, &c2);
+        assert_eq!(w, CapD::all());
+    }
+
 }

@@ -1356,6 +1356,138 @@ pub fn verify_liveness(input: &LivenessInput) -> VerificationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Path-sensitive liveness with meet at join points
+// ---------------------------------------------------------------------------
+
+/// Compute path-sensitive liveness states using **meet at join points**.
+///
+/// For each program point, this computes the set of resources that are
+/// **live on ALL paths** reaching that point (the meet/intersection of
+/// incoming liveness sets). This is more precise than the standard
+/// may-analysis (which uses join/union) and reduces false positives.
+///
+/// At a **join point** (a CFG node with ≥2 predecessors), the live set is:
+/// ```text
+/// live_in[n] = ⋂_{p ∈ preds(n)} live_out[p]
+/// ```
+///
+/// At a **fork point** (a CFG node with ≥2 successors), the live set is:
+/// ```text
+/// live_out[n] = (live_in[n] ∪ gen[n]) \ kill[n]
+/// ```
+///
+/// Returns a map from program point to the set of resources that are
+/// definitely live at that point on all paths.
+pub fn compute_path_sensitive_liveness(
+    input: &LivenessInput,
+) -> hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> {
+    // Build the CFG
+    let mut succs: hashbrown::HashMap<PointId, Vec<PointId>> = hashbrown::HashMap::new();
+    let mut preds: hashbrown::HashMap<PointId, Vec<PointId>> = hashbrown::HashMap::new();
+    for edge in &input.cfg_edges {
+        succs.entry(edge.from).or_default().push(edge.to);
+        preds.entry(edge.to).or_default().push(edge.from);
+    }
+
+    // Collect all points
+    let mut all_points: hashbrown::HashSet<PointId> = hashbrown::HashSet::new();
+    for edge in &input.cfg_edges {
+        all_points.insert(edge.from);
+        all_points.insert(edge.to);
+    }
+
+    // Build gen and kill sets for each point
+    let mut gen: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> = hashbrown::HashMap::new();
+    let mut kill: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> = hashbrown::HashMap::new();
+
+    for event in &input.events {
+        let point = event.point;
+        match event.event {
+            EventAction::Allocate | EventAction::Acquire | EventAction::Send => {
+                gen.entry(point).or_default().insert(event.resource);
+            }
+            EventAction::Deallocate | EventAction::Release | EventAction::Receive => {
+                kill.entry(point).or_default().insert(event.resource);
+            }
+        }
+    }
+
+    // Initialize: all resources are live at all points (top = full set)
+    let all_resources: hashbrown::HashSet<ResourceId> =
+        input.events.iter().map(|e| e.resource).collect();
+
+    let mut live_in: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
+        hashbrown::HashMap::new();
+    let mut live_out: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
+        hashbrown::HashMap::new();
+
+    // Initialize live_in to all resources (top element for meet lattice)
+    for &point in &all_points {
+        live_in.insert(point, all_resources.clone());
+    }
+
+    // Iterative dataflow with meet at join points
+    let mut changed = true;
+    let max_iters = 1000;
+    let mut iter = 0;
+
+    while changed && iter < max_iters {
+        changed = false;
+        iter += 1;
+
+        for &point in &all_points {
+            // Compute live_in using meet (intersection) at join points
+            let new_live_in = if let Some(pred_list) = preds.get(&point) {
+                if pred_list.is_empty() {
+                    // Entry point: live_in = all resources (top)
+                    all_resources.clone()
+                } else {
+                    // Meet: intersection of live_out from all predecessors
+                    let mut result: Option<hashbrown::HashSet<ResourceId>> = None;
+                    for &p in pred_list {
+                        let out = live_out.get(&p).cloned().unwrap_or_else(|| all_resources.clone());
+                        result = match result {
+                            None => Some(out),
+                            Some(acc) => Some(
+                                acc.intersection(&out).copied().collect(),
+                            ),
+                        };
+                    }
+                    result.unwrap_or_else(|| all_resources.clone())
+                }
+            } else {
+                // No predecessors — entry point
+                all_resources.clone()
+            };
+
+            // Update live_in
+            if live_in.get(&point) != Some(&new_live_in) {
+                live_in.insert(point, new_live_in.clone());
+                changed = true;
+            }
+
+            // Compute live_out = (live_in ∪ gen) \ kill
+            let gen_set = gen.get(&point).cloned().unwrap_or_default();
+            let kill_set = kill.get(&point).cloned().unwrap_or_default();
+            let new_live_out: hashbrown::HashSet<ResourceId> = live_in
+                .get(&point)
+                .unwrap_or(&all_resources)
+                .union(&gen_set)
+                .copied()
+                .filter(|r| !kill_set.contains(r))
+                .collect();
+
+            if live_out.get(&point) != Some(&new_live_out) {
+                live_out.insert(point, new_live_out);
+                changed = true;
+            }
+        }
+    }
+
+    live_in
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

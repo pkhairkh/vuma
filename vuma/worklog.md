@@ -1,5 +1,67 @@
 # VUMA Compiler Work Log
 
+## W3-4: BD+IVE Key Additions
+
+**Date**: 2026-03-05
+**Status**: ✅ Completed
+
+### Summary
+
+Wave 3-4 adds key functions and tests to the BD (Behavioral Descriptor) and IVE
+(Inference & Verification Engine) crates. BD gains 15 tests for interprocedural
+inference, generic instantiation, and incremental re-inference. IVE gains
+spec-compliant BatchedViolations and VerificationCache signatures plus 15 new
+tests across escape analysis, batched violations, and verification cache.
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/bd/src/inference.rs | Added 15 tests for infer_interprocedural, instantiate_generic, reinfer_incremental | +345 |
+| src/ive/src/result.rs | Made `violations` field public; renamed `by_severity` field to `severity_index`; added `by_severity()` returning `HashMap<Severity, Vec<&InvariantViolation>>`; renamed old `by_severity(severity)` to `by_severity_level(severity)`; added 5 new tests | +65 |
+| src/ive/src/cache.rs | Renamed `fingerprints` field to `cache`; changed `get()` return type to `Option<&Vec<InvariantViolation>>`; changed `invalidate()` to return `()`; renamed `invalidate_all()` to `clear()`; added 5 new tests | +65 |
+| src/ive/src/escape.rs | Added 4 new tests (display, empty scg, read access, worse_escape symmetry) | +40 |
+
+### BD Crate Changes
+
+**inference.rs** — 15 new tests added:
+- `infer_interprocedural`: 5 tests (empty SCG, single entry, multiple entries, CapD propagation, nonexistent entry)
+- `instantiate_generic`: 5 tests (no type args, preserves CapD/RelD, nested struct, ptr replacement, func RepD)
+- `reinfer_incremental`: 5 tests (empty dirty set, dirty node re-inferred, preserves clean nodes, existing BD preserved for clean, transitive dependents)
+
+**descriptor.rs** — `check_trait_compatibility` already existed with 6 tests from prior work.
+
+### IVE Crate Changes
+
+**result.rs** — BatchedViolations spec alignment:
+- `violations` field made `pub` (was private)
+- `by_severity` field renamed to `severity_index` (internal)
+- New `by_severity(&self) -> HashMap<Severity, Vec<&InvariantViolation>>` method added per spec
+- Old `by_severity(severity: Severity) -> &[InvariantViolation]` renamed to `by_severity_level(severity)`
+- `add(&mut self, v: InvariantViolation)` parameter name matches spec
+- 5 new tests: grouped by_severity, public violations field, empty by_severity, total matches, add parameter name
+
+**cache.rs** — VerificationCache spec alignment:
+- Internal field `fingerprints` renamed to `cache`
+- `get()` returns `Option<&Vec<InvariantViolation>>` (was `Option<&[InvariantViolation]>`)
+- `invalidate()` returns `()` (was `bool`)
+- `invalidate_all()` renamed to `clear()`
+- `get_for_nodes()` adapted for new `get()` return type
+- 5 new tests: clear, get returns Vec, insert replaces, compute_and_insert, len and is_empty
+
+**escape.rs** — 4 new tests:
+- EscapeKind Display formatting
+- Empty SCG analysis
+- Read access does not cause escape
+- worse_escape symmetry
+
+### Build Verification
+
+- `cargo check --workspace`: zero errors
+- `cargo test -p vuma-bd -p vuma-ive`: 247 + 203 = 450 tests pass, 0 failures
+
+---
+
 ## Wave 9: x86_64 Backend Implementation
 
 **Date**: 2026-03-05

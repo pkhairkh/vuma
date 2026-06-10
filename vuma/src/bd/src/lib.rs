@@ -36,6 +36,7 @@ pub mod descriptor;
 pub mod inference;
 pub mod reld;
 pub mod reld_refine;
+pub mod error_reporting;
 pub mod repd;
 pub mod repd_compat;
 pub mod unify;

@@ -38,7 +38,7 @@ use crate::capd::CapD;
 use crate::descriptor::BD;
 use crate::reld::RelD;
 use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -310,18 +310,54 @@ impl std::error::Error for UnificationError {}
 /// (different RepD constructors, empty capability meet, or inconsistent
 /// relational merge).
 pub fn unify(bd1: &BD, bd2: &BD) -> Result<BD, UnificationError> {
-    let repd = unify_repd(&bd1.repd, &bd2.repd)?;
+    let mut visited = HashSet::new();
+    let repd = unify_repd_with_occurs(&bd1.repd, &bd2.repd, &mut visited)?;
     let capd = unify_capd(&bd1.capd, &bd2.capd)?;
     let reld = unify_reld(&bd1.reld, &bd2.reld)?;
     Ok(BD::new(repd, capd, reld))
 }
 
-/// Unify two representation descriptors.
+/// Unify two representation descriptors with occurs-check for recursive types.
 ///
 /// Both must have the same top-level constructor variant.  Fields are
 /// unified recursively.  The result preserves the structural shape with
 /// each field being the unification of the corresponding input fields.
-fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
+///
+/// The `visited` set tracks (pointer, pointer) pairs of RepDs already
+/// being unified to detect recursive type cycles.  If we encounter the
+/// same pair again during recursive descent, we assume the recursive
+/// structure unifies coinductively (returning the first operand) rather
+/// than looping infinitely.
+fn unify_repd_with_occurs(
+    r1: &RepD,
+    r2: &RepD,
+    visited: &mut HashSet<(usize, usize)>,
+) -> Result<RepD, UnificationError> {
+    // Occurs-check: if we've already started unifying this exact pair,
+    // assume they unify coinductively (standard treatment for recursive types).
+    let ptr1 = r1 as *const RepD as usize;
+    let ptr2 = r2 as *const RepD as usize;
+    let key = if ptr1 < ptr2 { (ptr1, ptr2) } else { (ptr2, ptr1) };
+    if visited.contains(&key) {
+        // Recursive occurrence — assume unification succeeds coinductively
+        return Ok(r1.clone());
+    }
+    visited.insert(key);
+
+    let result = unify_repd_inner(r1, r2, visited)?;
+
+    // Remove the key after returning so other branches can re-explore
+    // different paths through the type graph.
+    visited.remove(&key);
+    Ok(result)
+}
+
+/// Inner RepD unification logic (called after occurs-check).
+fn unify_repd_inner(
+    r1: &RepD,
+    r2: &RepD,
+    visited: &mut HashSet<(usize, usize)>,
+) -> Result<RepD, UnificationError> {
     match (r1, r2) {
         // Byte: sizes and alignments must match exactly.
         (RepD::Byte(a), RepD::Byte(b)) => {
@@ -365,7 +401,7 @@ fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
                         ),
                     });
                 }
-                fields.push((*off_a, unify_repd(rep_a, rep_b)?));
+                fields.push((*off_a, unify_repd_with_occurs(rep_a, rep_b, visited)?));
             }
             Ok(RepD::Struct(StructRep {
                 fields,
@@ -386,7 +422,7 @@ fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
                     ),
                 });
             }
-            let element = unify_repd(&a.element, &b.element)?;
+            let element = unify_repd_with_occurs(&a.element, &b.element, visited)?;
             Ok(RepD::Array(ArrayRep {
                 element: Box::new(element),
                 count: a.count,
@@ -417,14 +453,14 @@ fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
                         reason: format!("enum tag mismatch: {tag_a} vs {tag_b}"),
                     });
                 }
-                variants.push((*tag_a, unify_repd(rep_a, rep_b)?));
+                variants.push((*tag_a, unify_repd_with_occurs(rep_a, rep_b, visited)?));
             }
             Ok(RepD::Enum(EnumRep { variants }))
         }
 
         // Ptr: unify pointee representations.
         (RepD::Ptr(a), RepD::Ptr(b)) => {
-            let pointee = unify_repd(&a.pointee, &b.pointee)?;
+            let pointee = unify_repd_with_occurs(&a.pointee, &b.pointee, visited)?;
             Ok(RepD::Ptr(PtrRep {
                 pointee: Box::new(pointee),
             }))
@@ -445,7 +481,7 @@ fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
             }
             let mut alternatives = Vec::with_capacity(a.alternatives.len());
             for (alt_a, alt_b) in a.alternatives.iter().zip(&b.alternatives) {
-                alternatives.push(unify_repd(alt_a, alt_b)?);
+                alternatives.push(unify_repd_with_occurs(alt_a, alt_b, visited)?);
             }
             Ok(RepD::Union(UnionRep {
                 alternatives,
@@ -469,9 +505,9 @@ fn unify_repd(r1: &RepD, r2: &RepD) -> Result<RepD, UnificationError> {
             }
             let mut params = Vec::with_capacity(a.params.len());
             for (p_a, p_b) in a.params.iter().zip(&b.params) {
-                params.push(unify_repd(p_a, p_b)?);
+                params.push(unify_repd_with_occurs(p_a, p_b, visited)?);
             }
-            let result = unify_repd(&a.result, &b.result)?;
+            let result = unify_repd_with_occurs(&a.result, &b.result, visited)?;
             Ok(RepD::Func(FuncRep {
                 params,
                 result: Box::new(result),
@@ -1159,7 +1195,7 @@ mod tests {
             align: 4,
         });
         let result =
-            unify_repd(&s1, &s2).expect("identical structs should unify");
+            unify_repd_with_occurs(&s1, &s2, &mut HashSet::new()).expect("identical structs should unify");
         assert_eq!(result.size(), 8);
     }
 
@@ -1175,7 +1211,7 @@ mod tests {
             element: Box::new(byte_rep(4, 4)),
             count: 20,
         });
-        let result = unify_repd(&a1, &a2);
+        let result = unify_repd_with_occurs(&a1, &a2, &mut HashSet::new());
         assert!(result.is_err());
     }
 
@@ -1190,7 +1226,7 @@ mod tests {
             pointee: Box::new(byte_rep(4, 4)),
         });
         let result =
-            unify_repd(&p1, &p2).expect("identical ptrs should unify");
+            unify_repd_with_occurs(&p1, &p2, &mut HashSet::new()).expect("identical ptrs should unify");
         assert_eq!(result.size(), 8); // pointer size
     }
 
@@ -1342,7 +1378,7 @@ mod tests {
             result: Box::new(byte_rep(4, 4)),
         });
         let result =
-            unify_repd(&f1, &f2).expect("identical func sigs should unify");
+            unify_repd_with_occurs(&f1, &f2, &mut HashSet::new()).expect("identical func sigs should unify");
         assert_eq!(result.size(), 8); // function pointer size
     }
 
@@ -1356,7 +1392,7 @@ mod tests {
         let e2 = RepD::Enum(EnumRep {
             variants: vec![(0u64, byte_rep(4, 4)), (2u64, byte_rep(4, 4))],
         });
-        let result = unify_repd(&e1, &e2);
+        let result = unify_repd_with_occurs(&e1, &e2, &mut HashSet::new());
         assert!(result.is_err());
     }
 

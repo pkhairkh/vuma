@@ -277,6 +277,28 @@ impl CapD {
         }
     }
 
+    /// **Widen** this descriptor with `other` to ensure fixpoint convergence
+    /// on cyclic data.
+    ///
+    /// Widening replaces increasing chains with `Top`. If `other` is strictly
+    /// above `self` in the lattice (i.e., `self ⊂ other`), the result is
+    /// `CapD::all()` (Top). Otherwise, the result is `other` (stable or
+    /// decreasing iteration).
+    ///
+    /// This guarantees that any ascending chain in the CapD lattice converges
+    /// in at most two iterations: one to detect the increase, and one to
+    /// jump to Top.
+    pub fn widen(&self, other: &CapD) -> CapD {
+        // If other is strictly above self (strictly more capabilities or
+        // strictly fewer conditions), jump to Top to ensure convergence.
+        if other.is_superset(self) && other != self {
+            CapD::all()
+        } else {
+            // Stable or decreasing: keep other as the new iterate.
+            other.clone()
+        }
+    }
+
     /// **Strengthen** this descriptor by adding the specified capabilities
     /// (without adding new conditions).
     pub fn strengthen(&self, add: &[Capability]) -> CapD {

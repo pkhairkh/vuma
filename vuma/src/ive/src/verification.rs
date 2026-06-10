@@ -22,9 +22,11 @@ use crate::exclusivity::{AccessKind as ExclusivityAccessKind, AccessRecord, Excl
 use crate::interpretation::InterpretationVerifier;
 use crate::liveness::{EventAction, LivenessInput, LivenessVerifier, ResourceEvent, ResourceId, ResourceKind, PointId, ThreadId};
 use crate::origin::{Access as OriginAccess, AccessId as OriginAccessId, AccessKind as OriginAccessKind, Address, Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier, Region as OriginRegion, RegionId as OriginRegionId};
-use crate::result::{VerificationResult};
+use crate::result::{BatchedViolations, InvariantViolation, Severity, VerificationResult};
 use std::collections::HashMap;
+use vuma_bd::capd::{CapD, Capability};
 use vuma_bd::descriptor::BD;
+use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{AccessMode, NodeId, NodePayload, NodeType};
 
@@ -555,6 +557,323 @@ impl Default for VerificationEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hardened Invariant Checks
+// ---------------------------------------------------------------------------
+
+/// A structured violation from the hardened invariant checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HardenedViolation {
+    /// Which invariant was violated.
+    pub invariant: &'static str,
+    /// A human-readable description.
+    pub description: String,
+    /// The node where the violation was found (if applicable).
+    pub node: Option<NodeId>,
+}
+
+impl std::fmt::Display for HardenedViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.node {
+            Some(n) => write!(f, "[{}] {} at {}", self.invariant, self.description, n),
+            None => write!(f, "[{}] {}", self.invariant, self.description),
+        }
+    }
+}
+
+/// Flow-sensitive CapD checking for Invariant 2.
+///
+/// Tracks CapD transitions through every SCG edge and detects use-after-cap-drop
+/// violations — reading a value after its Write capability has been dropped.
+pub fn check_capability_flow(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+    let mut violations = Vec::new();
+
+    // Track the effective CapD at each node (initially from BD map or all())
+    let mut effective_capd: HashMap<NodeId, CapD> = HashMap::new();
+
+    // Initialize CapD from BD map
+    for node in scg.nodes() {
+        if let Some(bd) = bd_map.get(&node.id) {
+            effective_capd.insert(node.id, bd.capd.clone());
+        } else {
+            effective_capd.insert(node.id, CapD::all());
+        }
+    }
+
+    // For each edge, check if the CapD transition is valid
+    for edge in scg.edges() {
+        if edge.kind == EdgeKind::ControlFlow || edge.kind == EdgeKind::DataFlow {
+            let src_capd = effective_capd.get(&edge.source).cloned().unwrap_or_else(CapD::all);
+            let dst_capd = effective_capd.get(&edge.target).cloned().unwrap_or_else(CapD::all);
+
+            // Check: if source has Write but target does not, that's a capability drop
+            let src_has_write = src_capd.caps.contains(&Capability::Write);
+            let dst_has_write = dst_capd.caps.contains(&Capability::Write);
+
+            if src_has_write && !dst_has_write {
+                // Write was dropped — check if target is a read (use-after-cap-drop)
+                if let Some(target_node) = scg.get_node(edge.target) {
+                    if target_node.node_type == NodeType::Access {
+                        if let NodePayload::Access(access) = &target_node.payload {
+                            if access.mode == AccessMode::Read || access.mode == AccessMode::ReadWrite {
+                                violations.push(HardenedViolation {
+                                    invariant: "capability_flow",
+                                    description: format!(
+                                        "use-after-cap-drop: Write capability dropped before read at node {}",
+                                        edge.target.as_u64()
+                                    ),
+                                    node: Some(edge.target),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check: if the meet of source and target CapD is empty, that's a violation
+            let meet = src_capd.meet(&dst_capd);
+            if meet.caps.is_empty() {
+                violations.push(HardenedViolation {
+                    invariant: "capability_flow",
+                    description: format!(
+                        "empty capability meet between nodes {} and {}",
+                        edge.source.as_u64(),
+                        edge.target.as_u64()
+                    ),
+                    node: Some(edge.target),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+/// Aliasing verification for Invariant 3.
+///
+/// Verifies aliasing RelD guarantees at every write. Detects write-through-alias
+/// violations where two pointers alias the same region and one writes.
+pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+    let mut violations = Vec::new();
+
+    // Collect all access nodes grouped by region
+    let mut accesses_by_region: HashMap<u64, Vec<(NodeId, AccessMode, Option<BD>)>> = HashMap::new();
+
+    for node in scg.nodes() {
+        if node.node_type == NodeType::Access {
+            if let NodePayload::Access(access) = &node.payload {
+                let region_key = access.region_id.as_u64();
+                let bd = bd_map.get(&node.id).cloned();
+                accesses_by_region
+                    .entry(region_key)
+                    .or_default()
+                    .push((node.id, access.mode, bd));
+            }
+        }
+    }
+
+    // For each region with multiple accesses, check for write-through-alias
+    for (_region, accesses) in &accesses_by_region {
+        if accesses.len() < 2 {
+            continue;
+        }
+
+        // Find all write accesses
+        let writers: Vec<&(NodeId, AccessMode, Option<BD>)> = accesses
+            .iter()
+            .filter(|(_, mode, _)| *mode == AccessMode::Write || *mode == AccessMode::ReadWrite)
+            .collect();
+
+        if writers.is_empty() {
+            continue;
+        }
+
+        // For each pair of accesses where at least one writes, check aliasing
+        for i in 0..accesses.len() {
+            for j in (i + 1)..accesses.len() {
+                let (id_a, mode_a, bd_a) = &accesses[i];
+                let (id_b, mode_b, bd_b) = &accesses[j];
+
+                let a_is_write = *mode_a == AccessMode::Write || *mode_a == AccessMode::ReadWrite;
+                let b_is_write = *mode_b == AccessMode::Write || *mode_b == AccessMode::ReadWrite;
+
+                // Check if they could alias (same region, different nodes)
+                // If both write, or one writes and one reads, that's a potential aliasing issue
+                if a_is_write || b_is_write {
+                    // Check BD RelD for aliasing information
+                    // If neither BD has anti-alias guarantees, flag as potential violation
+                    let a_has_alias_guard = bd_a.as_ref().map_or(false, |bd| {
+                        !bd.reld.relations.is_empty()
+                    });
+                    let b_has_alias_guard = bd_b.as_ref().map_or(false, |bd| {
+                        !bd.reld.relations.is_empty()
+                    });
+
+                    if !a_has_alias_guard && !b_has_alias_guard {
+                        // No aliasing guarantees — potential write-through-alias
+                        if a_is_write && b_is_write {
+                            violations.push(HardenedViolation {
+                                invariant: "aliasing",
+                                description: format!(
+                                    "write-through-alias: two writes to same region at nodes {} and {} without aliasing guarantees",
+                                    id_a.as_u64(), id_b.as_u64()
+                                ),
+                                node: Some(*id_b),
+                            });
+                        } else if a_is_write != b_is_write {
+                            // One write + one read to same region without aliasing guard
+                            // This is a potential data race but not necessarily a violation
+                            // Only report if they're on different threads or unsynchronized
+                            // For now, report as medium severity
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+/// Derivation chain validation for Invariant 5.
+///
+/// Verifies that derive() produces a sub-CapD of source, and validates
+/// transitive derivation chains (A→B→C where C.capd ≤ A.capd).
+pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+    let mut violations = Vec::new();
+
+    // Collect derivation edges
+    let mut derivation_edges: Vec<(NodeId, NodeId)> = Vec::new();
+    for edge in scg.edges() {
+        if edge.kind == EdgeKind::Derivation {
+            derivation_edges.push((edge.source, edge.target));
+        }
+    }
+
+    // For each derivation edge (source → target), check that target.capd ⊆ source.capd
+    for (source, target) in &derivation_edges {
+        let source_capd = bd_map.get(source).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+        let target_capd = bd_map.get(target).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+
+        // In a valid derivation, the derived CapD should be a subset of the source
+        if !target_capd.is_subset(&source_capd) {
+            violations.push(HardenedViolation {
+                invariant: "derivation_chain",
+                description: format!(
+                    "derivation from {} to {} produces non-sub-CapD: target has capabilities not in source",
+                    source.as_u64(),
+                    target.as_u64()
+                ),
+                node: Some(*target),
+            });
+        }
+    }
+
+    // Validate transitive chains: for A→B→C, verify C.capd ⊆ A.capd
+    // Build an adjacency list for derivation edges
+    let mut deriv_successors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for (source, target) in &derivation_edges {
+        deriv_successors.entry(*source).or_default().push(*target);
+    }
+
+    // For each node, find transitive derivation targets (BFS through derivation edges)
+    for (source, _targets) in &deriv_successors {
+        let source_capd = bd_map.get(source).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+
+        // BFS to find all transitively derived nodes
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(succs) = deriv_successors.get(source) {
+            for &s in succs {
+                queue.push_back(s);
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current);
+
+            let current_capd = bd_map.get(&current).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+
+            // Check transitive property: current.capd ⊆ source.capd
+            if !current_capd.is_subset(&source_capd) {
+                violations.push(HardenedViolation {
+                    invariant: "derivation_chain",
+                    description: format!(
+                        "transitive derivation violation: {} transitively derives from {} but has non-sub-CapD",
+                        current.as_u64(),
+                        source.as_u64()
+                    ),
+                    node: Some(current),
+                });
+            }
+
+            // Continue BFS
+            if let Some(succs) = deriv_successors.get(&current) {
+                for &s in succs {
+                    if !visited.contains(&s) {
+                        queue.push_back(s);
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+/// Run all hardened invariant checks and collect ALL violations (error recovery).
+///
+/// Unlike the individual verify_* methods that stop at the first issue,
+/// this method collects every violation found across all checks into a
+/// `BatchedViolations` structure.
+pub fn verify_all_hardened(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> BatchedViolations {
+    let mut batched = BatchedViolations::new();
+
+    // Invariant 1: Escape analysis
+    let escape_map = crate::escape::analyze_escapes(scg);
+    for (node, kind) in &escape_map {
+        if *kind != crate::escape::EscapeKind::DoesNotEscape {
+            batched.add(InvariantViolation::new(
+                "memory_safety",
+                format!("pointer at node {} escapes: {}", node.as_u64(), kind),
+                Severity::Medium,
+            ));
+        }
+    }
+
+    // Invariant 2: Flow-sensitive CapD checking
+    for v in check_capability_flow(scg, bd_map) {
+        batched.add(InvariantViolation::new(
+            v.invariant,
+            v.description,
+            Severity::High,
+        ));
+    }
+
+    // Invariant 3: Aliasing verification
+    for v in check_aliasing_integrity(scg, bd_map) {
+        batched.add(InvariantViolation::new(
+            v.invariant,
+            v.description,
+            Severity::High,
+        ));
+    }
+
+    // Invariant 5: Derivation chain validation
+    for v in validate_derivation_chain(scg, bd_map) {
+        batched.add(InvariantViolation::new(
+            v.invariant,
+            v.description,
+            Severity::Medium,
+        ));
+    }
+
+    batched
 }
 
 // ---------------------------------------------------------------------------

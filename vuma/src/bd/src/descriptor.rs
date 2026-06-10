@@ -120,6 +120,74 @@ impl BD {
 }
 
 // ---------------------------------------------------------------------------
+// Trait-impl BD compatibility
+// ---------------------------------------------------------------------------
+
+/// Check trait-impl BD compatibility.
+///
+/// For a trait BD and an impl BD to be compatible, the impl must refine the
+/// trait.  This means:
+///
+/// - **RepD**: impl's representation must be compatible with the trait's.
+/// - **CapD**: impl must be a subset of trait (impl has ≤ capabilities than
+///   trait permits).  An impl cannot grant more capabilities than the trait
+///   promises.
+/// - **RelD**: impl must refine trait (impl's relations are at least as
+///   specific as the trait's).
+///
+/// # Errors
+///
+/// Returns a `String` describing the first incompatibility found.
+///
+/// # Example
+///
+/// ```
+/// use vuma_bd::descriptor::{BD, check_trait_compatibility};
+/// use vuma_bd::capd::CapD;
+/// use vuma_bd::reld::RelD;
+/// use vuma_bd::repd::{RepD, ByteRep};
+///
+/// let trait_bd = BD::new(
+///     RepD::Byte(ByteRep { size: 4, align: 4 }),
+///     CapD::all(),
+///     RelD::empty(),
+/// );
+/// let impl_bd = BD::new(
+///     RepD::Byte(ByteRep { size: 4, align: 4 }),
+///     CapD::empty().strengthen(&[vuma_bd::capd::Capability::Read]),
+///     RelD::empty(),
+/// );
+/// assert!(check_trait_compatibility(&trait_bd, &impl_bd).is_ok());
+/// ```
+pub fn check_trait_compatibility(trait_bd: &BD, impl_bd: &BD) -> Result<(), String> {
+    // Check RepD compatibility
+    if !impl_bd.repd.compatible(&trait_bd.repd) {
+        return Err(format!(
+            "RepD incompatibility: impl has {} but trait requires {}",
+            impl_bd.repd, trait_bd.repd
+        ));
+    }
+
+    // Check CapD: impl must be a subset of trait (impl has ≤ capabilities)
+    if !impl_bd.capd.is_subset(&trait_bd.capd) {
+        return Err(format!(
+            "CapD violation: impl has capabilities not in trait. impl={}, trait={}",
+            impl_bd.capd, trait_bd.capd
+        ));
+    }
+
+    // Check RelD: impl must refine trait
+    if !impl_bd.reld.refines(&trait_bd.reld) {
+        return Err(format!(
+            "RelD violation: impl relations do not refine trait. impl={}, trait={}",
+            impl_bd.reld, trait_bd.reld
+        ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Display — projection
 // ---------------------------------------------------------------------------
 
@@ -225,5 +293,59 @@ mod tests {
     fn bd_id_display() {
         let id = BDId(42);
         assert_eq!(format!("{id}"), "BD#42");
+    }
+
+    // ----- check_trait_compatibility tests -----
+
+    #[test]
+    fn trait_compat_ok() {
+        let trait_bd = BD::new(byte_rep(4, 4), CapD::all(), RelD::empty());
+        let impl_bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
+        assert!(check_trait_compatibility(&trait_bd, &impl_bd).is_ok());
+    }
+
+    #[test]
+    fn trait_compat_incompatible_repd() {
+        let trait_bd = BD::new(byte_rep(4, 4), CapD::all(), RelD::empty());
+        let impl_bd = BD::new(byte_rep(8, 8), read_cap(), RelD::empty());
+        let err = check_trait_compatibility(&trait_bd, &impl_bd).unwrap_err();
+        assert!(err.contains("RepD"));
+    }
+
+    #[test]
+    fn trait_compat_capd_violation() {
+        let trait_bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
+        let impl_bd = BD::new(byte_rep(4, 4), read_write_cap(), RelD::empty());
+        let err = check_trait_compatibility(&trait_bd, &impl_bd).unwrap_err();
+        assert!(err.contains("CapD"));
+    }
+
+    #[test]
+    fn trait_compat_reld_violation() {
+        use crate::reld::Relation;
+        let mut trait_reld = RelD::empty();
+        trait_reld.relations.insert(Relation::Liveness);
+        let trait_bd = BD::new(byte_rep(4, 4), read_cap(), trait_reld);
+        let impl_bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
+        let err = check_trait_compatibility(&trait_bd, &impl_bd).unwrap_err();
+        assert!(err.contains("RelD"));
+    }
+
+    #[test]
+    fn trait_compat_identical() {
+        let bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
+        assert!(check_trait_compatibility(&bd, &bd).is_ok());
+    }
+
+    #[test]
+    fn trait_compat_impl_subset_reld() {
+        use crate::reld::{DepKind, Relation};
+        let mut trait_reld = RelD::empty();
+        trait_reld.relations.insert(Relation::Liveness);
+        trait_reld.relations.insert(Relation::Dependency(DepKind::DataDep));
+        let impl_bd = BD::new(byte_rep(4, 4), read_cap(), trait_reld.clone());
+        let trait_bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
+        // impl has more relations → refines trait
+        assert!(check_trait_compatibility(&trait_bd, &impl_bd).is_ok());
     }
 }

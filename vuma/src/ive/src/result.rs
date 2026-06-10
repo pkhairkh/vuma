@@ -4,6 +4,7 @@
 //! verification engine to report outcomes of invariant checks.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 /// The name of an invariant being verified.
@@ -212,6 +213,172 @@ impl fmt::Display for ConfidenceLevel {
 }
 
 // ---------------------------------------------------------------------------
+// Severity
+// ---------------------------------------------------------------------------
+
+/// Severity level for invariant violations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Severity {
+    /// A minor issue or warning.
+    Low,
+    /// A significant issue that may affect correctness.
+    Medium,
+    /// A critical safety violation.
+    High,
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Severity::Low => write!(f, "LOW"),
+            Severity::Medium => write!(f, "MEDIUM"),
+            Severity::High => write!(f, "HIGH"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvariantViolation
+// ---------------------------------------------------------------------------
+
+/// A structured invariant violation for use in batched error recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InvariantViolation {
+    /// Which invariant was violated.
+    pub invariant: InvariantName,
+    /// A human-readable description of the violation.
+    pub description: String,
+    /// The severity of the violation.
+    pub severity: Severity,
+}
+
+impl InvariantViolation {
+    /// Create a new invariant violation.
+    pub fn new(
+        invariant: impl Into<InvariantName>,
+        description: impl Into<String>,
+        severity: Severity,
+    ) -> Self {
+        Self {
+            invariant: invariant.into(),
+            description: description.into(),
+            severity,
+        }
+    }
+}
+
+impl fmt::Display for InvariantViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}: {}", self.severity, self.invariant, self.description)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BatchedViolations
+// ---------------------------------------------------------------------------
+
+/// A collection of all violations found during verification, organized by
+/// severity for error recovery. Unlike stopping at the first violation,
+/// `BatchedViolations` collects ALL violations so the user can see every
+/// issue in a single pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchedViolations {
+    /// All violations found, in order of discovery.
+    pub violations: Vec<InvariantViolation>,
+    /// Violations indexed by severity for efficient lookup.
+    severity_index: HashMap<Severity, Vec<InvariantViolation>>,
+}
+
+impl BatchedViolations {
+    /// Create a new, empty batched violations collector.
+    pub fn new() -> Self {
+        Self {
+            violations: Vec::new(),
+            severity_index: HashMap::new(),
+        }
+    }
+
+    /// Add a violation to the batch.
+    pub fn add(&mut self, v: InvariantViolation) {
+        let severity = v.severity;
+        self.severity_index.entry(severity).or_default().push(v.clone());
+        self.violations.push(v);
+    }
+
+    /// Group all violations by severity level.
+    ///
+    /// Returns a HashMap mapping each severity level to the list of
+    /// violations at that level.
+    pub fn by_severity(&self) -> HashMap<Severity, Vec<&InvariantViolation>> {
+        let mut result = HashMap::new();
+        for (sev, violations) in &self.severity_index {
+            result.insert(*sev, violations.iter().collect());
+        }
+        result
+    }
+
+    /// Generate a human-readable report of all violations.
+    pub fn report(&self) -> String {
+        if self.violations.is_empty() {
+            return "No violations found.".to_string();
+        }
+
+        let mut report = format!("Batched Violations Report ({} total):\n", self.total());
+
+        for severity in &[Severity::High, Severity::Medium, Severity::Low] {
+            if let Some(violations) = self.severity_index.get(severity) {
+                if !violations.is_empty() {
+                    report.push_str(&format!("\n{} severity ({}):\n", severity, violations.len()));
+                    for v in violations {
+                        report.push_str(&format!("  - {}\n", v));
+                    }
+                }
+            }
+        }
+
+        report
+    }
+
+    /// Get all violations at a specific severity level.
+    pub fn by_severity_level(&self, severity: Severity) -> &[InvariantViolation] {
+        self.severity_index.get(&severity).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Get the total number of violations.
+    pub fn total(&self) -> usize {
+        self.violations.len()
+    }
+
+    /// Returns `true` if there are no violations.
+    pub fn is_empty(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    /// Returns `true` if there are any high-severity violations.
+    pub fn has_critical(&self) -> bool {
+        self.severity_index.contains_key(&Severity::High)
+            && !self.severity_index[&Severity::High].is_empty()
+    }
+
+    /// Get all violations in order of discovery.
+    pub fn all(&self) -> &[InvariantViolation] {
+        &self.violations
+    }
+}
+
+impl Default for BatchedViolations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for BatchedViolations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.report())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -262,5 +429,114 @@ mod tests {
 
         let s2 = format!("{}", Evidence::ExhaustiveAnalysis);
         assert_eq!(s2, "ExhaustiveAnalysis");
+    }
+
+    // ----- BatchedViolations tests -----
+
+    #[test]
+    fn batched_violations_empty() {
+        let bv = BatchedViolations::new();
+        assert!(bv.is_empty());
+        assert_eq!(bv.total(), 0);
+        assert!(!bv.has_critical());
+    }
+
+    #[test]
+    fn batched_violations_add_and_query() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("memory_safety", "leak detected", Severity::High));
+        bv.add(InvariantViolation::new("capability", "use-after-cap-drop", Severity::Medium));
+        bv.add(InvariantViolation::new("aliasing", "minor alias concern", Severity::Low));
+
+        assert_eq!(bv.total(), 3);
+        assert!(bv.has_critical());
+        assert_eq!(bv.by_severity_level(Severity::High).len(), 1);
+        assert_eq!(bv.by_severity_level(Severity::Medium).len(), 1);
+        assert_eq!(bv.by_severity_level(Severity::Low).len(), 1);
+    }
+
+    #[test]
+    fn batched_violations_report() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("memory_safety", "leak", Severity::High));
+        let report = bv.report();
+        assert!(report.contains("1 total"));
+        assert!(report.contains("HIGH severity"));
+        assert!(report.contains("leak"));
+    }
+
+    #[test]
+    fn batched_violations_display() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("test", "msg", Severity::Low));
+        let s = format!("{}", bv);
+        assert!(s.contains("1 total"));
+    }
+
+    #[test]
+    fn batched_violations_severity_ordering() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("low_inv", "low", Severity::Low));
+        bv.add(InvariantViolation::new("high_inv", "high", Severity::High));
+        bv.add(InvariantViolation::new("med_inv", "med", Severity::Medium));
+
+        let all = bv.all();
+        assert_eq!(all[0].invariant, "low_inv");
+        assert_eq!(all[1].invariant, "high_inv");
+        assert_eq!(all[2].invariant, "med_inv");
+
+        // by_severity_level returns only matching
+        assert_eq!(bv.by_severity_level(Severity::High).len(), 1);
+        assert_eq!(bv.by_severity_level(Severity::High)[0].invariant, "high_inv");
+    }
+
+    // ----- Additional BatchedViolations tests -----
+
+    #[test]
+    fn batched_violations_by_severity_grouped() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("h1", "high1", Severity::High));
+        bv.add(InvariantViolation::new("m1", "med1", Severity::Medium));
+        bv.add(InvariantViolation::new("h2", "high2", Severity::High));
+
+        let grouped = bv.by_severity();
+        assert_eq!(grouped.get(&Severity::High).unwrap().len(), 2);
+        assert_eq!(grouped.get(&Severity::Medium).unwrap().len(), 1);
+        assert!(grouped.get(&Severity::Low).is_none());
+    }
+
+    #[test]
+    fn batched_violations_public_violations_field() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("test", "msg", Severity::Low));
+        // violations is a public field
+        assert_eq!(bv.violations.len(), 1);
+        assert_eq!(bv.violations[0].invariant, "test");
+    }
+
+    #[test]
+    fn batched_violations_by_severity_empty() {
+        let bv = BatchedViolations::new();
+        let grouped = bv.by_severity();
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn batched_violations_total_matches() {
+        let mut bv = BatchedViolations::new();
+        bv.add(InvariantViolation::new("a", "a", Severity::High));
+        bv.add(InvariantViolation::new("b", "b", Severity::High));
+        bv.add(InvariantViolation::new("c", "c", Severity::Medium));
+        bv.add(InvariantViolation::new("d", "d", Severity::Low));
+        assert_eq!(bv.total(), 4);
+        assert_eq!(bv.violations.len(), bv.total());
+    }
+
+    #[test]
+    fn batched_violations_add_parameter_name() {
+        let mut bv = BatchedViolations::new();
+        let v = InvariantViolation::new("inv", "desc", Severity::Medium);
+        bv.add(v);
+        assert_eq!(bv.total(), 1);
     }
 }
