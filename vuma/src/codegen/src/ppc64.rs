@@ -42,7 +42,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, PhysicalReg, PowerPC64TargetInfo, RegClass, TargetInfo,
 };
-use crate::ir::{IRFunction, IRInstr};
+use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
 use std::fmt;
 
 // ===========================================================================
@@ -1328,13 +1328,488 @@ fn map_vreg_to_gpr(
     Gpr::R12
 }
 
+/// Helper: extract the virtual register ID from an IRValue, if it is a register.
+fn vreg_id(val: &IRValue) -> u32 {
+    match val {
+        IRValue::Register(id) => *id,
+        _ => 0,
+    }
+}
+
+/// Emit a single AllocatedInstruction from a PPC64 Instruction.
+fn emit_alloc_instr(inst: Instruction, reads: Vec<PhysicalReg>, writes: Vec<PhysicalReg>) -> AllocatedInstruction {
+    AllocatedInstruction {
+        opcode: inst.mnemonic().to_string(),
+        reads,
+        writes,
+        encoded: inst.encode().to_vec(),
+    }
+}
+
+/// Lower a comparison kind to PPC64 instructions, producing 0 or 1 in `dst`.
+fn lower_cmp_ppc64(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<AllocatedInstruction> {
+    let mut result = Vec::new();
+    let (cmp_inst, cond_bit) = match kind {
+        CmpKind::Eq => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 2),
+        CmpKind::Ne => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 2),
+        CmpKind::SLt => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 0),
+        CmpKind::SLe => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 0),
+        CmpKind::SGt => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 1),
+        CmpKind::SGe => (Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 1),
+        CmpKind::ULt => (Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 0),
+        CmpKind::ULe => (Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 0),
+        CmpKind::UGt => (Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 1),
+        CmpKind::UGe => (Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }, 1),
+    };
+    result.push(emit_alloc_instr(
+        cmp_inst.clone(),
+        vec![PhysicalReg::new(RegClass::Gpr, lhs.encoding()), PhysicalReg::new(RegClass::Gpr, rhs.encoding())],
+        vec![],
+    ));
+    // li dst, 0; then conditionally set to 1
+    result.push(emit_alloc_instr(
+        Instruction::Li { rt: dst, simm: 0 },
+        vec![],
+        vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+    ));
+    let (bo, bi) = match kind {
+        CmpKind::Eq => (12, 2 + CrField::CR0.encoding() * 4),  // cr0.eq
+        CmpKind::Ne => (4, 2 + CrField::CR0.encoding() * 4),   // cr0.eq inverted
+        CmpKind::SLt | CmpKind::ULt => (12, CrField::CR0.encoding() * 4),  // cr0.lt
+        CmpKind::SLe | CmpKind::ULe => (4, 1 + CrField::CR0.encoding() * 4),   // cr0.gt inverted
+        CmpKind::SGt | CmpKind::UGt => (12, 1 + CrField::CR0.encoding() * 4),  // cr0.gt
+        CmpKind::SGe | CmpKind::UGe => (4, CrField::CR0.encoding() * 4),   // cr0.lt inverted
+    };
+    let _ = cond_bit;
+    result.push(emit_alloc_instr(
+        Instruction::Li { rt: dst, simm: 1 },
+        vec![],
+        vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+    ));
+    // Patch: use a simplified approach — li dst,1 is always emitted but should be conditional.
+    // For simplicity, use select-like pattern:
+    // cmp; li dst, 0; bne cr0, +8; li dst, 1
+    // Actually let's redo this more correctly:
+    result.clear();
+    result.push(emit_alloc_instr(
+        cmp_inst,
+        vec![PhysicalReg::new(RegClass::Gpr, lhs.encoding()), PhysicalReg::new(RegClass::Gpr, rhs.encoding())],
+        vec![],
+    ));
+    result.push(emit_alloc_instr(
+        Instruction::Li { rt: dst, simm: 0 },
+        vec![],
+        vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+    ));
+    result.push(emit_alloc_instr(
+        Instruction::Bc { bo, bi, bd: 8 },
+        vec![],
+        vec![],
+    ));
+    result.push(emit_alloc_instr(
+        Instruction::Li { rt: dst, simm: 1 },
+        vec![],
+        vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+    ));
+    result
+}
+
+/// Lower an IR instruction to a sequence of PPC64 AllocatedInstructions.
+fn lower_ir_instr_ppc64(
+    instr: &IRInstr,
+    vreg_map: &mut std::collections::HashMap<u32, Gpr>,
+) -> Vec<AllocatedInstruction> {
+    let mut result = Vec::new();
+
+    match instr {
+        IRInstr::BinOp { op, dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            match op {
+                BinOpKind::Add => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Add { rt: d, ra: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Sub => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Subf { rt: d, ra: r, rb: l },
+                        vec![PhysicalReg::new(RegClass::Gpr, r.encoding()), PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Mul => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Mullw { rt: d, ra: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::SDiv => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Divd { rt: d, ra: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::UDiv => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Divd { rt: d, ra: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::SRem | BinOpKind::URem => {
+                    // div then mul then sub: rem = lhs - (lhs/rhs)*rhs
+                    let scratch = Gpr::R11; // volatile scratch
+                    result.push(emit_alloc_instr(
+                        Instruction::Divd { rt: scratch, ra: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+                    ));
+                    result.push(emit_alloc_instr(
+                        Instruction::Mullw { rt: scratch, ra: scratch, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+                    ));
+                    result.push(emit_alloc_instr(
+                        Instruction::Subf { rt: d, ra: scratch, rb: l },
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding()), PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::And => {
+                    result.push(emit_alloc_instr(
+                        Instruction::And { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Or => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Or { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Xor => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Xor { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Shl => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Sld { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::ShrL => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Srd { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::ShrA => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Srad { ra: d, rs: l, rb: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+                | BinOpKind::Eq | BinOpKind::Ne => {
+                    let kind = match op {
+                        BinOpKind::SLt => CmpKind::SLt,
+                        BinOpKind::SLe => CmpKind::SLe,
+                        BinOpKind::SGt => CmpKind::SGt,
+                        BinOpKind::SGe => CmpKind::SGe,
+                        BinOpKind::ULt => CmpKind::ULt,
+                        BinOpKind::ULe => CmpKind::ULe,
+                        BinOpKind::UGt => CmpKind::UGt,
+                        BinOpKind::UGe => CmpKind::UGe,
+                        BinOpKind::Eq => CmpKind::Eq,
+                        BinOpKind::Ne => CmpKind::Ne,
+                        _ => CmpKind::Eq,
+                    };
+                    result.extend(lower_cmp_ppc64(&kind, d, l, r));
+                }
+            }
+        }
+
+        IRInstr::Add { dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Add { rt: d, ra: l, rb: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Sub { dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Subf { rt: d, ra: r, rb: l },
+                vec![PhysicalReg::new(RegClass::Gpr, r.encoding()), PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Mul { dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Mullw { rt: d, ra: l, rb: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Div { dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Divd { rt: d, ra: l, rb: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::UnaryOp { op, dst, operand } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let s = map_vreg_to_gpr(vreg_id(operand), None, vreg_map);
+            match op {
+                UnaryOpKind::Neg => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Neg { rt: d, ra: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                UnaryOpKind::Not => {
+                    // nor d, s, s
+                    result.push(emit_alloc_instr(
+                        Instruction::Nor { ra: d, rs: s, rb: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                    // Placeholder: mr d, s
+                    result.push(emit_alloc_instr(
+                        Instruction::Mr { ra: d, rs: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+            }
+        }
+
+        IRInstr::Cmp { kind, dst, lhs, rhs } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            result.extend(lower_cmp_ppc64(kind, d, l, r));
+        }
+
+        IRInstr::Load { dst, addr } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let a = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Ld { rt: d, ra: a, ds: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Store { value, addr } => {
+            let v = map_vreg_to_gpr(vreg_id(value), None, vreg_map);
+            let a = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Std { rs: v, ra: a, ds: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, a.encoding()), PhysicalReg::new(RegClass::Gpr, v.encoding())],
+                vec![],
+            ));
+        }
+
+        IRInstr::Alloc { dst, size: _ } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Addi { rt: d, ra: Gpr::R1, simm: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Ret { values } => {
+            if let Some(val) = values.first() {
+                let v = map_vreg_to_gpr(vreg_id(val), None, vreg_map);
+                if v != Gpr::R3 {
+                    result.push(emit_alloc_instr(
+                        Instruction::Mr { ra: Gpr::R3, rs: v },
+                        vec![PhysicalReg::new(RegClass::Gpr, v.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+                    ));
+                }
+            }
+            result.push(emit_alloc_instr(
+                Instruction::Bclr { bo: 20, bi: 0, bh: 0 },
+                vec![],
+                vec![],
+            ));
+        }
+
+        IRInstr::Call { dst, func: _, args } => {
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(arg_reg) = Gpr::arg_register(i) {
+                    let a = map_vreg_to_gpr(vreg_id(arg), None, vreg_map);
+                    if a != arg_reg {
+                        result.push(emit_alloc_instr(
+                            Instruction::Mr { ra: arg_reg, rs: a },
+                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, arg_reg.encoding())],
+                        ));
+                    }
+                }
+            }
+            result.push(emit_alloc_instr(
+                Instruction::Bl { li: 0 },
+                vec![],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+            ));
+            if let Some(d) = dst {
+                let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
+                if d_reg != Gpr::R3 {
+                    result.push(emit_alloc_instr(
+                        Instruction::Mr { ra: d_reg, rs: Gpr::R3 },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d_reg.encoding())],
+                    ));
+                }
+            }
+        }
+
+        IRInstr::Branch { target: _ } => {
+            result.push(emit_alloc_instr(
+                Instruction::B { li: 0 },
+                vec![],
+                vec![],
+            ));
+        }
+
+        IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+            let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
+            // cmpi cr0, 0, c, 0; bne cr0, +8; b false_target
+            result.push(emit_alloc_instr(
+                Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: c, simm: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+                vec![],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::Bc { bo: 12, bi: 2 + CrField::CR0.encoding() * 4, bd: 8 },
+                vec![],
+                vec![],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::B { li: 0 },
+                vec![],
+                vec![],
+            ));
+        }
+
+        IRInstr::Cast { dst, src, .. } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let s = map_vreg_to_gpr(vreg_id(src), None, vreg_map);
+            if d != s {
+                result.push(emit_alloc_instr(
+                    Instruction::Mr { ra: d, rs: s },
+                    vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
+        }
+
+        IRInstr::Select { dst, cond, true_val, false_val } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
+            let tv = map_vreg_to_gpr(vreg_id(true_val), None, vreg_map);
+            let fv = map_vreg_to_gpr(vreg_id(false_val), None, vreg_map);
+            // mr d, fv; cmpi cr0, 0, c, 0; bne cr0, +8; mr d, tv
+            if fv != d {
+                result.push(emit_alloc_instr(
+                    Instruction::Mr { ra: d, rs: fv },
+                    vec![PhysicalReg::new(RegClass::Gpr, fv.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
+            result.push(emit_alloc_instr(
+                Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: c, simm: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+                vec![],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::Bc { bo: 4, bi: 2 + CrField::CR0.encoding() * 4, bd: 8 },
+                vec![],
+                vec![],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::Mr { ra: d, rs: tv },
+                vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Offset { dst, base, offset } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let b = map_vreg_to_gpr(vreg_id(base), None, vreg_map);
+            let o = map_vreg_to_gpr(vreg_id(offset), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Add { rt: d, ra: b, rb: o },
+                vec![PhysicalReg::new(RegClass::Gpr, b.encoding()), PhysicalReg::new(RegClass::Gpr, o.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::GetAddress { dst, name: _ } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            result.push(emit_alloc_instr(
+                Instruction::Li { rt: d, simm: 0 },
+                vec![],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        IRInstr::Free { ptr: _ } | IRInstr::Phi { .. } => {
+            result.push(emit_alloc_instr(
+                Instruction::Nop,
+                vec![],
+                vec![],
+            ));
+        }
+    }
+
+    result
+}
+
 impl Backend for PPC64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        use crate::ir::IRValue;
 
         let func_name = func.name.clone();
         let frame_size = ppc64_compute_frame_size(func);
@@ -1461,89 +1936,11 @@ impl Backend for PPC64Backend {
             .to_vec(),
         });
 
-        // Generate body instructions.
+        // Body: real instruction selection — translate each IR instruction
+        // into one or more PPC64 machine-code instructions.
         for block in &func.blocks {
             for instr in &block.instructions {
-                let opcode_name = match instr {
-                    IRInstr::BinOp { op, .. } => format!("{:?}_ppc64", op),
-                    IRInstr::Add { .. } => "add_ppc64".to_string(),
-                    IRInstr::Sub { .. } => "subf_ppc64".to_string(),
-                    IRInstr::Mul { .. } => "mullw_ppc64".to_string(),
-                    IRInstr::Div { .. } => "divw_ppc64".to_string(),
-                    IRInstr::Load { .. } => "ld_ppc64".to_string(),
-                    IRInstr::Store { .. } => "std_ppc64".to_string(),
-                    IRInstr::Alloc { .. } => "alloc_ppc64".to_string(),
-                    IRInstr::Call { .. } => "bl_ppc64".to_string(),
-                    _ => format!("{:?}_ppc64", instr),
-                };
-                let reads = match instr {
-                    IRInstr::BinOp { lhs, rhs, .. } => {
-                        let mut r = Vec::new();
-                        if let IRValue::Register(id) = lhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        if let IRValue::Register(id) = rhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        r
-                    }
-                    IRInstr::Add { lhs, rhs, .. }
-                    | IRInstr::Sub { lhs, rhs, .. }
-                    | IRInstr::Mul { lhs, rhs, .. }
-                    | IRInstr::Div { lhs, rhs, .. } => {
-                        let mut r = Vec::new();
-                        if let IRValue::Register(id) = lhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        if let IRValue::Register(id) = rhs {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                r.push(PhysicalReg::new(RegClass::Gpr, gpr.encoding()));
-                            }
-                        }
-                        r
-                    }
-                    _ => vec![],
-                };
-                let writes = match instr {
-                    IRInstr::BinOp { dst, .. } => {
-                        if let IRValue::Register(id) = dst {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                vec![PhysicalReg::new(RegClass::Gpr, gpr.encoding())]
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            vec![]
-                        }
-                    }
-                    IRInstr::Add { dst, .. }
-                    | IRInstr::Sub { dst, .. }
-                    | IRInstr::Mul { dst, .. }
-                    | IRInstr::Div { dst, .. } => {
-                        if let IRValue::Register(id) = dst {
-                            if let Some(gpr) = vreg_map.get(id) {
-                                vec![PhysicalReg::new(RegClass::Gpr, gpr.encoding())]
-                            } else {
-                                vec![]
-                            }
-                        } else {
-                            vec![]
-                        }
-                    }
-                    _ => vec![],
-                };
-                instructions.push(AllocatedInstruction {
-                    opcode: opcode_name,
-                    reads,
-                    writes,
-                    encoded: Instruction::Nop.encode().to_vec(),
-                });
+                instructions.extend(lower_ir_instr_ppc64(instr, &mut vreg_map));
             }
         }
 

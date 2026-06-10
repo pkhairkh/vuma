@@ -104,6 +104,45 @@ impl Gpr {
         *self as u32
     }
 
+    /// Returns the Gpr for a 5-bit encoding index.
+    pub fn from_encoding(idx: u32) -> Option<Gpr> {
+        match idx {
+            0 => Some(Gpr::Zero),
+            1 => Some(Gpr::Ra),
+            2 => Some(Gpr::Sp),
+            3 => Some(Gpr::Gp),
+            4 => Some(Gpr::Tp),
+            5 => Some(Gpr::T0),
+            6 => Some(Gpr::T1),
+            7 => Some(Gpr::T2),
+            8 => Some(Gpr::S0),
+            9 => Some(Gpr::S1),
+            10 => Some(Gpr::A0),
+            11 => Some(Gpr::A1),
+            12 => Some(Gpr::A2),
+            13 => Some(Gpr::A3),
+            14 => Some(Gpr::A4),
+            15 => Some(Gpr::A5),
+            16 => Some(Gpr::A6),
+            17 => Some(Gpr::A7),
+            18 => Some(Gpr::S2),
+            19 => Some(Gpr::S3),
+            20 => Some(Gpr::S4),
+            21 => Some(Gpr::S5),
+            22 => Some(Gpr::S6),
+            23 => Some(Gpr::S7),
+            24 => Some(Gpr::S8),
+            25 => Some(Gpr::S9),
+            26 => Some(Gpr::S10),
+            27 => Some(Gpr::S11),
+            28 => Some(Gpr::T3),
+            29 => Some(Gpr::T4),
+            30 => Some(Gpr::T5),
+            31 => Some(Gpr::T6),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if this register is available for register allocation.
     ///
     /// Zero (x0), Sp (x2), Gp (x3), and Tp (x4) are reserved.
@@ -244,6 +283,45 @@ impl Fpr {
     /// Returns the 5-bit encoding index for this register.
     pub fn encoding(&self) -> u32 {
         *self as u32
+    }
+
+    /// Returns the Fpr for a 5-bit encoding index.
+    pub fn from_encoding(idx: u32) -> Option<Fpr> {
+        match idx {
+            0 => Some(Fpr::F0),
+            1 => Some(Fpr::F1),
+            2 => Some(Fpr::F2),
+            3 => Some(Fpr::F3),
+            4 => Some(Fpr::F4),
+            5 => Some(Fpr::F5),
+            6 => Some(Fpr::F6),
+            7 => Some(Fpr::F7),
+            8 => Some(Fpr::F8),
+            9 => Some(Fpr::F9),
+            10 => Some(Fpr::F10),
+            11 => Some(Fpr::F11),
+            12 => Some(Fpr::F12),
+            13 => Some(Fpr::F13),
+            14 => Some(Fpr::F14),
+            15 => Some(Fpr::F15),
+            16 => Some(Fpr::F16),
+            17 => Some(Fpr::F17),
+            18 => Some(Fpr::F18),
+            19 => Some(Fpr::F19),
+            20 => Some(Fpr::F20),
+            21 => Some(Fpr::F21),
+            22 => Some(Fpr::F22),
+            23 => Some(Fpr::F23),
+            24 => Some(Fpr::F24),
+            25 => Some(Fpr::F25),
+            26 => Some(Fpr::F26),
+            27 => Some(Fpr::F27),
+            28 => Some(Fpr::F28),
+            29 => Some(Fpr::F29),
+            30 => Some(Fpr::F30),
+            31 => Some(Fpr::F31),
+            _ => None,
+        }
     }
 
     /// Returns `true` if this register is callee-saved (f8–f9, f18–f27).
@@ -1005,6 +1083,252 @@ impl Instruction {
             Instruction::Ebreak => "ebreak",
             Instruction::Fence { .. } => "fence",
             Instruction::Nop => "nop",
+        }
+    }
+
+    /// Decode a 32-bit RISC-V machine-code word into an `Instruction`.
+    ///
+    /// Returns `None` for encodings not yet covered by the decoder.
+    /// Covers all instruction classes defined in this backend.
+    pub fn decode(word: u32) -> Option<Instruction> {
+        let opcode = word & 0x7F;
+        let rd = (word >> 7) & 0x1F;
+        let funct3 = (word >> 12) & 0x7;
+        let rs1 = (word >> 15) & 0x1F;
+        let rs2 = (word >> 20) & 0x1F;
+        let funct7 = (word >> 25) & 0x7F;
+
+        match opcode {
+            // ── LUI ────────────────────────────────────────────────
+            0b0110111 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let imm = word & 0xFFFFF000;
+                Some(Instruction::Lui { rd: rd_reg, imm })
+            }
+
+            // ── AUIPC ──────────────────────────────────────────────
+            0b0010111 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let imm = word & 0xFFFFF000;
+                Some(Instruction::Auipc { rd: rd_reg, imm })
+            }
+
+            // ── JAL ────────────────────────────────────────────────
+            0b1101111 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let imm20 = ((word >> 31) & 1) << 20
+                    | ((word >> 12) & 0xFF) << 12
+                    | ((word >> 20) & 1) << 11
+                    | ((word >> 21) & 0x3FF) << 1;
+                let offset = ((imm20 << 11) as i32) >> 11;
+                Some(Instruction::Jal { rd: rd_reg, offset })
+            }
+
+            // ── JALR ───────────────────────────────────────────────
+            0b1100111 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let imm = (((word >> 20) as i32) << 20) >> 20;
+                Some(Instruction::Jalr {
+                    rd: rd_reg,
+                    rs1: rs1_reg,
+                    imm,
+                })
+            }
+
+            // ── BRANCH ─────────────────────────────────────────────
+            0b1100011 => {
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let rs2_reg = Gpr::from_encoding(rs2)?;
+                let imm12 = ((word >> 31) & 1) << 12
+                    | ((word >> 7) & 1) << 11
+                    | ((word >> 25) & 0x3F) << 5
+                    | ((word >> 8) & 0xF) << 1;
+                let offset = ((imm12 << 19) as i32) >> 19;
+                match funct3 {
+                    0b000 => Some(Instruction::Beq { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    0b001 => Some(Instruction::Bne { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    0b100 => Some(Instruction::Blt { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    0b101 => Some(Instruction::Bge { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    0b110 => Some(Instruction::Bltu { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    0b111 => Some(Instruction::Bgeu { rs1: rs1_reg, rs2: rs2_reg, offset }),
+                    _ => None,
+                }
+            }
+
+            // ── LOAD ───────────────────────────────────────────────
+            0b0000011 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let imm = (((word >> 20) as i32) << 20) >> 20;
+                match funct3 {
+                    0b000 => Some(Instruction::Lb { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b001 => Some(Instruction::Lh { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b010 => Some(Instruction::Lw { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b011 => Some(Instruction::Ld { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b100 => Some(Instruction::Lbu { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b101 => Some(Instruction::Lhu { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b110 => Some(Instruction::Lwu { rd: rd_reg, rs1: rs1_reg, imm }),
+                    _ => None,
+                }
+            }
+
+            // ── STORE ──────────────────────────────────────────────
+            0b0100011 => {
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let rs2_reg = Gpr::from_encoding(rs2)?;
+                let imm_lo = (word >> 7) & 0x1F;
+                let imm_hi = (word >> 25) & 0x7F;
+                let imm_raw = (imm_hi << 5) | imm_lo;
+                let imm = ((imm_raw as i32) << 20) >> 20;
+                match funct3 {
+                    0b000 => Some(Instruction::Sb { rs1: rs1_reg, rs2: rs2_reg, imm }),
+                    0b001 => Some(Instruction::Sh { rs1: rs1_reg, rs2: rs2_reg, imm }),
+                    0b010 => Some(Instruction::Sw { rs1: rs1_reg, rs2: rs2_reg, imm }),
+                    0b011 => Some(Instruction::Sd { rs1: rs1_reg, rs2: rs2_reg, imm }),
+                    _ => None,
+                }
+            }
+
+            // ── OP-IMM (RV64I) ─────────────────────────────────────
+            0b0010011 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let imm = (((word >> 20) as i32) << 20) >> 20;
+                let shamt = (word >> 20) & 0x3F;
+                match funct3 {
+                    0b000 => Some(Instruction::Addi { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b010 => Some(Instruction::Slti { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b011 => Some(Instruction::Sltiu { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b100 => Some(Instruction::Xori { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b110 => Some(Instruction::Ori { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b111 => Some(Instruction::Andi { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b001 => Some(Instruction::Slli { rd: rd_reg, rs1: rs1_reg, shamt }),
+                    0b101 => {
+                        if funct7 == 0b0100000 {
+                            Some(Instruction::Srai { rd: rd_reg, rs1: rs1_reg, shamt })
+                        } else {
+                            Some(Instruction::Srli { rd: rd_reg, rs1: rs1_reg, shamt })
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            // ── OP (RV64I register-register) ────────────────────────
+            0b0110011 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let rs2_reg = Gpr::from_encoding(rs2)?;
+                match (funct7, funct3) {
+                    (0b0000000, 0b000) => Some(Instruction::Add { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0100000, 0b000) => Some(Instruction::Sub { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b001) => Some(Instruction::Sll { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b010) => Some(Instruction::Slt { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b011) => Some(Instruction::Sltu { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b100) => Some(Instruction::Xor { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b101) => Some(Instruction::Srl { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0100000, 0b101) => Some(Instruction::Sra { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b110) => Some(Instruction::Or { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b111) => Some(Instruction::And { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    // M extension
+                    (0b0000001, 0b000) => Some(Instruction::Mul { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b001) => Some(Instruction::Mulh { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b010) => Some(Instruction::Mulhsu { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b011) => Some(Instruction::Mulhu { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b100) => Some(Instruction::Div { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b101) => Some(Instruction::Divu { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b110) => Some(Instruction::Rem { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000001, 0b111) => Some(Instruction::Remu { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    _ => None,
+                }
+            }
+
+            // ── OP-IMM-32 (RV64) ───────────────────────────────────
+            0b0011011 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let imm = (((word >> 20) as i32) << 20) >> 20;
+                let shamt = (word >> 20) & 0x1F;
+                match funct3 {
+                    0b000 => Some(Instruction::Addiw { rd: rd_reg, rs1: rs1_reg, imm }),
+                    0b001 => Some(Instruction::Slliw { rd: rd_reg, rs1: rs1_reg, shamt }),
+                    0b101 => {
+                        if funct7 == 0b0100000 {
+                            Some(Instruction::Sraiw { rd: rd_reg, rs1: rs1_reg, shamt })
+                        } else {
+                            Some(Instruction::Srliw { rd: rd_reg, rs1: rs1_reg, shamt })
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            // ── OP-32 (RV64) ───────────────────────────────────────
+            0b0111011 => {
+                let rd_reg = Gpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let rs2_reg = Gpr::from_encoding(rs2)?;
+                match (funct7, funct3) {
+                    (0b0000000, 0b000) => Some(Instruction::Addw { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0100000, 0b000) => Some(Instruction::Subw { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b001) => Some(Instruction::Sllw { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0000000, 0b101) => Some(Instruction::Srlw { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    (0b0100000, 0b101) => Some(Instruction::Sraw { rd: rd_reg, rs1: rs1_reg, rs2: rs2_reg }),
+                    _ => None,
+                }
+            }
+
+            // ── SYSTEM ─────────────────────────────────────────────
+            0b1110011 => {
+                if word == 0x00000073 {
+                    Some(Instruction::Ecall)
+                } else if word == 0x00100073 {
+                    Some(Instruction::Ebreak)
+                } else {
+                    let csr = (word >> 20) & 0xFFF;
+                    let rd_reg = Gpr::from_encoding(rd)?;
+                    let rs1_reg = Gpr::from_encoding(rs1)?;
+                    match funct3 {
+                        0b001 => Some(Instruction::Csrrw { rd: rd_reg, csr, rs1: rs1_reg }),
+                        0b010 => Some(Instruction::Csrrs { rd: rd_reg, csr, rs1: rs1_reg }),
+                        0b011 => Some(Instruction::Csrrc { rd: rd_reg, csr, rs1: rs1_reg }),
+                        0b101 => Some(Instruction::Csrrwi { rd: rd_reg, csr, uimm: rs1 }),
+                        0b110 => Some(Instruction::Csrrsi { rd: rd_reg, csr, uimm: rs1 }),
+                        0b111 => Some(Instruction::Csrrci { rd: rd_reg, csr, uimm: rs1 }),
+                        _ => None,
+                    }
+                }
+            }
+
+            // ── MISC-MEM (FENCE / FENCE.I) ─────────────────────────
+            0b0001111 => {
+                if funct3 == 0b001 {
+                    Some(Instruction::FenceI)
+                } else {
+                    let imm = (word >> 20) & 0xFF;
+                    let pred = (imm >> 4) & 0xF;
+                    let succ = imm & 0xF;
+                    Some(Instruction::Fence { pred, succ })
+                }
+            }
+
+            // ── FP (opcode=0x53) ───────────────────────────────────
+            0b1010011 => {
+                let rd_fpr = Fpr::from_encoding(rd)?;
+                let rs1_fpr = Fpr::from_encoding(rs1)?;
+                let rs2_fpr = Fpr::from_encoding(rs2)?;
+                match (funct7, funct3) {
+                    (0b0000001, 0b111) => Some(Instruction::FaddD { rd: rd_fpr, rs1: rs1_fpr, rs2: rs2_fpr }),
+                    (0b0000101, 0b111) => Some(Instruction::FsubD { rd: rd_fpr, rs1: rs1_fpr, rs2: rs2_fpr }),
+                    (0b0001001, 0b111) => Some(Instruction::FmulD { rd: rd_fpr, rs1: rs1_fpr, rs2: rs2_fpr }),
+                    (0b0001101, 0b111) => Some(Instruction::FdivD { rd: rd_fpr, rs1: rs1_fpr, rs2: rs2_fpr }),
+                    (0b0010001, 0b000) if rs1 == rs2 => Some(Instruction::FmvD { rd: rd_fpr, rs1: rs1_fpr }),
+                    _ => None,
+                }
+            }
+
+            _ => None,
         }
     }
 }
@@ -2431,8 +2755,13 @@ impl Backend for RiscV64Backend {
                     bytes[offset + 3],
                 ]);
 
-                // Decode the instruction mnemonic from the opcode.
-                let mnemonic = decode_mnemonic(word);
+                // Decode the instruction: prefer the structured Instruction::decode
+                // which uses the enum's Display impl; fall back to the string decoder.
+                let mnemonic = if let Some(instr) = Instruction::decode(word) {
+                    format!("{}", instr)
+                } else {
+                    decode_mnemonic(word)
+                };
                 lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
 
                 offset += 4;
@@ -3460,5 +3789,84 @@ mod tests {
         assert_eq!(word & 0x7F, 0b0010011); // opcode = OP-IMM
         assert_eq!((word >> 12) & 0x7, 0b100); // funct3 = XORI
         assert_eq!((word >> 20) & 0xFFF, 0xFFF); // imm = -1 (12-bit)
+    }
+
+    // ── Decode Roundtrip Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_decode_addi_roundtrip() {
+        let instr = Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T1, imm: 42 };
+        let bytes = instr.encode();
+        let word = u32::from_le_bytes(bytes);
+        let decoded = Instruction::decode(word).expect("ADDI should decode");
+        assert_eq!(format!("{}", decoded), "addi t0, t1, 42");
+    }
+
+    #[test]
+    fn test_decode_add_sub_roundtrip() {
+        let add_instr = Instruction::Add { rd: Gpr::A0, rs1: Gpr::A1, rs2: Gpr::A2 };
+        let word = u32::from_le_bytes(add_instr.encode());
+        let decoded = Instruction::decode(word).expect("ADD should decode");
+        assert_eq!(format!("{}", decoded), "add a0, a1, a2");
+
+        let sub_instr = Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T1, rs2: Gpr::T2 };
+        let word = u32::from_le_bytes(sub_instr.encode());
+        let decoded = Instruction::decode(word).expect("SUB should decode");
+        assert_eq!(format!("{}", decoded), "sub t0, t1, t2");
+    }
+
+    #[test]
+    fn test_decode_ld_sd_roundtrip() {
+        let ld_instr = Instruction::Ld { rd: Gpr::A0, rs1: Gpr::Sp, imm: 8 };
+        let word = u32::from_le_bytes(ld_instr.encode());
+        let decoded = Instruction::decode(word).expect("LD should decode");
+        assert_eq!(format!("{}", decoded), "ld a0, 8(sp)");
+
+        let sd_instr = Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Ra, imm: -8 };
+        let word = u32::from_le_bytes(sd_instr.encode());
+        let decoded = Instruction::decode(word).expect("SD should decode");
+        assert!(format!("{}", decoded).starts_with("sd"));
+    }
+
+    #[test]
+    fn test_decode_branch_roundtrip() {
+        let beq = Instruction::Beq { rs1: Gpr::A0, rs2: Gpr::A1, offset: 16 };
+        let word = u32::from_le_bytes(beq.encode());
+        let decoded = Instruction::decode(word).expect("BEQ should decode");
+        assert!(format!("{}", decoded).starts_with("beq"));
+
+        let bne = Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: -4 };
+        let word = u32::from_le_bytes(bne.encode());
+        let decoded = Instruction::decode(word).expect("BNE should decode");
+        assert!(format!("{}", decoded).starts_with("bne"));
+    }
+
+    #[test]
+    fn test_decode_ecall_ebreak_nop() {
+        // ECALL = 0x00000073
+        let decoded = Instruction::decode(0x00000073).expect("ECALL should decode");
+        assert_eq!(format!("{}", decoded), "ecall");
+
+        // EBREAK = 0x00100073
+        let decoded = Instruction::decode(0x00100073).expect("EBREAK should decode");
+        assert_eq!(format!("{}", decoded), "ebreak");
+
+        // NOP = ADDI x0, x0, 0 = 0x00000013
+        let decoded = Instruction::decode(0x00000013).expect("NOP should decode");
+        // NOP decodes as ADDI x0, x0, 0
+        assert!(format!("{}", decoded).contains("addi"));
+    }
+
+    #[test]
+    fn test_decode_lui_jal_roundtrip() {
+        let lui_instr = Instruction::Lui { rd: Gpr::A0, imm: 0x12345000 };
+        let word = u32::from_le_bytes(lui_instr.encode());
+        let decoded = Instruction::decode(word).expect("LUI should decode");
+        assert!(format!("{}", decoded).starts_with("lui"));
+
+        let jal_instr = Instruction::Jal { rd: Gpr::Ra, offset: 100 };
+        let word = u32::from_le_bytes(jal_instr.encode());
+        let decoded = Instruction::decode(word).expect("JAL should decode");
+        assert!(format!("{}", decoded).starts_with("jal"));
     }
 }

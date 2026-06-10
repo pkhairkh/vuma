@@ -1088,7 +1088,11 @@ impl Backend for AArch64Backend {
                 bytes[offset + 2],
                 bytes[offset + 3],
             ]);
-            let mnemonic = decode_aarch64(word);
+            let mnemonic = if let Some(instr) = crate::arm64::Instruction::decode(word) {
+                format!("{}", instr)
+            } else {
+                decode_aarch64(word)
+            };
             lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
             offset += 4;
             pc += 4;

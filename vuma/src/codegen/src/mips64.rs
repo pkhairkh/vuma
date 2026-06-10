@@ -50,7 +50,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, Mips64TargetInfo, PhysicalReg, RegClass, TargetInfo,
 };
-use crate::ir::{BinOpKind, IRFunction, IRInstr, IRValue};
+use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
 use std::fmt;
 
 // ===========================================================================
@@ -1989,8 +1989,161 @@ fn lower_ir_instr(
             });
         }
 
+        IRInstr::Cmp { kind, dst, lhs, rhs } => {
+            let _dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let _lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
+            let _rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            let binop_kind = match kind {
+                CmpKind::Eq => BinOpKind::Eq,
+                CmpKind::Ne => BinOpKind::Ne,
+                CmpKind::SLt => BinOpKind::SLt,
+                CmpKind::SLe => BinOpKind::SLe,
+                CmpKind::SGt => BinOpKind::SGt,
+                CmpKind::SGe => BinOpKind::SGe,
+                CmpKind::ULt => BinOpKind::ULt,
+                CmpKind::ULe => BinOpKind::ULe,
+                CmpKind::UGt => BinOpKind::UGt,
+                CmpKind::UGe => BinOpKind::UGe,
+            };
+            result.extend(lower_binop(&binop_kind, dst, lhs, rhs, vreg_map));
+        }
+
+        IRInstr::UnaryOp { op, dst, operand } => {
+            let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let src_reg = map_vreg_to_gpr(vreg_id(operand), None, vreg_map);
+            match op {
+                UnaryOpKind::Neg => {
+                    let neg = Instruction::Dsubu { rd: dst_reg, rs: Gpr::Zero, rt: src_reg };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsubu".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: neg.encode().to_vec(),
+                    });
+                }
+                UnaryOpKind::Not => {
+                    let not = Instruction::Nor { rd: dst_reg, rs: Gpr::Zero, rt: src_reg };
+                    result.push(AllocatedInstruction {
+                        opcode: "nor".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: not.encode().to_vec(),
+                    });
+                }
+                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                    let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                    result.push(AllocatedInstruction {
+                        opcode: "daddu".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: mov.encode().to_vec(),
+                    });
+                }
+            }
+        }
+
+        IRInstr::Call { dst, func: _, args } => {
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(arg_reg) = Gpr::arg_register(i) {
+                    let a = map_vreg_to_gpr(vreg_id(arg), None, vreg_map);
+                    if a != arg_reg {
+                        let mov = Instruction::Daddu { rd: arg_reg, rs: a, rt: Gpr::Zero };
+                        result.push(AllocatedInstruction {
+                            opcode: "daddu".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+                            writes: vec![PhysicalReg::new(RegClass::Gpr, arg_reg.encoding())],
+                            encoded: mov.encode().to_vec(),
+                        });
+                    }
+                }
+            }
+            let jal = Instruction::Jal { target: 0 };
+            result.push(AllocatedInstruction {
+                opcode: "jal".to_string(),
+                reads: vec![],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
+                encoded: jal.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "nop".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: encode_nop().to_vec(),
+            });
+            if let Some(d) = dst {
+                let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
+                if d_reg != Gpr::V0 {
+                    let mov = Instruction::Daddu { rd: d_reg, rs: Gpr::V0, rt: Gpr::Zero };
+                    result.push(AllocatedInstruction {
+                        opcode: "daddu".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::V0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, d_reg.encoding())],
+                        encoded: mov.encode().to_vec(),
+                    });
+                }
+            }
+        }
+
+        IRInstr::Branch { target: _ } => {
+            let b = Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 };
+            result.push(AllocatedInstruction {
+                opcode: "beq".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: b.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "nop".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: encode_nop().to_vec(),
+            });
+        }
+
+        IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+            let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
+            let bnez = Instruction::Bne { rs: c, rt: Gpr::Zero, offset: 8 };
+            result.push(AllocatedInstruction {
+                opcode: "bne".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+                writes: vec![],
+                encoded: bnez.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "nop".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: encode_nop().to_vec(),
+            });
+            let beq = Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 };
+            result.push(AllocatedInstruction {
+                opcode: "beq".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: beq.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "nop".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: encode_nop().to_vec(),
+            });
+        }
+
+        IRInstr::Free { ptr: _ } | IRInstr::Phi { .. } => {
+            result.push(AllocatedInstruction {
+                opcode: "nop".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: encode_nop().to_vec(),
+            });
+        }
+
+        #[allow(unreachable_patterns)]
         _ => {
             // Unknown/unhandled instruction: emit a NOP
+            // Note: all IRInstr variants are handled above, so this is a safeguard.
+            #[allow(unreachable_patterns)]
             result.push(AllocatedInstruction {
                 opcode: "nop".to_string(),
                 reads: vec![],

@@ -45,7 +45,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Arm32TargetInfo,
     Backend, BackendError, PhysicalReg, RegClass, TargetInfo,
 };
-use crate::ir::IRFunction;
+use crate::ir::{BinOpKind, CmpKind, IRFunction, UnaryOpKind};
 use std::fmt;
 
 // ===========================================================================
@@ -1732,6 +1732,211 @@ impl Backend for Arm32Backend {
                         }
                         code.extend_from_slice(&encode_mul(Condition::Al, false, d.encoding(), d.encoding(), r.encoding(), d.encoding()));
                         code
+                    }
+                    crate::ir::IRInstr::Div { dst, lhs, rhs: _ } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        // ARM32 doesn't have hardware divide in baseline; use SWI 0 as placeholder
+                        let mut code = Vec::new();
+                        if l != d {
+                            code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding()));
+                        }
+                        // Placeholder: move lhs to r0, rhs to r1 for software div
+                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                        code
+                    }
+                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let r = reg_map.get(&rhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let mut code = Vec::new();
+                        match op {
+                            BinOpKind::And => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_AND, false, l.encoding(), d.encoding(), r.encoding()));
+                            }
+                            BinOpKind::Or => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_ORR, false, l.encoding(), d.encoding(), r.encoding()));
+                            }
+                            BinOpKind::Xor => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_EOR, false, l.encoding(), d.encoding(), r.encoding()));
+                            }
+                            BinOpKind::Shl => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                // LSL Rd, Rn, Rs: shift_type=0, by register
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), 0, r.encoding(), l.encoding()));
+                            }
+                            BinOpKind::ShrL => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                // LSR Rd, Rn, Rs: shift_type=1, by register
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), 1, r.encoding(), l.encoding()));
+                            }
+                            BinOpKind::ShrA => {
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                // ASR Rd, Rn, Rs: shift_type=2, by register
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), 2, r.encoding(), l.encoding()));
+                            }
+                            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv
+                            | BinOpKind::SRem | BinOpKind::URem => {
+                                // Use the dedicated Add/Sub/Mul/Div instructions
+                                if l != d { code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), l.encoding())); }
+                                let arm_op = match op {
+                                    BinOpKind::Add => DP_ADD,
+                                    BinOpKind::Sub => DP_SUB,
+                                    _ => DP_ADD, // fallback
+                                };
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, arm_op, false, l.encoding(), d.encoding(), r.encoding()));
+                            }
+                            // Comparison BinOps: produce 0 or 1
+                            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+                            | BinOpKind::Eq | BinOpKind::Ne => {
+                                // CMP l, r; MOV d, #0; MOVcond d, #1
+                                let cmp_cond = match op {
+                                    BinOpKind::SLt | BinOpKind::ULt => Condition::Lt,
+                                    BinOpKind::SLe | BinOpKind::ULe => Condition::Le,
+                                    BinOpKind::SGt | BinOpKind::UGt => Condition::Gt,
+                                    BinOpKind::SGe | BinOpKind::UGe => Condition::Ge,
+                                    BinOpKind::Eq => Condition::Eq,
+                                    BinOpKind::Ne => Condition::Ne,
+                                    _ => Condition::Eq,
+                                };
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_CMP, true, l.encoding(), 0, r.encoding()));
+                                code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_MOV, false, 0, d.encoding(), 0, 0));
+                                code.extend_from_slice(&encode_dp_imm(cmp_cond, DP_MOV, false, 0, d.encoding(), 0, 1));
+                            }
+                        }
+                        code
+                    }
+                    crate::ir::IRInstr::UnaryOp { op, dst, operand } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let s = reg_map.get(&operand.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let mut code = Vec::new();
+                        match op {
+                            UnaryOpKind::Neg => {
+                                // RSB d, s, #0 (reverse subtract)
+                                code.extend_from_slice(&encode_dp_imm(Condition::Al, 0b0011, false, s.encoding(), d.encoding(), 0, 0));
+                            }
+                            UnaryOpKind::Not => {
+                                // MVN d, s
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MVN, false, 0, d.encoding(), s.encoding()));
+                            }
+                            UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                                // Placeholder: MOV d, s
+                                if s != d {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), s.encoding()));
+                                }
+                            }
+                        }
+                        code
+                    }
+                    crate::ir::IRInstr::Cmp { kind, dst, lhs, rhs } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let l = reg_map.get(&lhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let r = reg_map.get(&rhs.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let mut code = Vec::new();
+                        let cmp_cond = match kind {
+                            CmpKind::Eq => Condition::Eq,
+                            CmpKind::Ne => Condition::Ne,
+                            CmpKind::SLt => Condition::Lt,
+                            CmpKind::SLe => Condition::Le,
+                            CmpKind::SGt => Condition::Gt,
+                            CmpKind::SGe => Condition::Ge,
+                            CmpKind::ULt => Condition::Cc,
+                            CmpKind::ULe => Condition::Ls,
+                            CmpKind::UGt => Condition::Hi,
+                            CmpKind::UGe => Condition::Cs,
+                        };
+                        code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_CMP, true, l.encoding(), 0, r.encoding()));
+                        code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_MOV, false, 0, d.encoding(), 0, 0));
+                        code.extend_from_slice(&encode_dp_imm(cmp_cond, DP_MOV, false, 0, d.encoding(), 0, 1));
+                        code
+                    }
+                    crate::ir::IRInstr::Load { dst, addr } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let a = reg_map.get(&addr.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        encode_ls_imm(Condition::Al, true, true, false, false, true, a.encoding(), d.encoding(), 0).to_vec()
+                    }
+                    crate::ir::IRInstr::Store { value, addr } => {
+                        let v = reg_map.get(&value.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let a = reg_map.get(&addr.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        encode_ls_imm(Condition::Al, true, true, false, false, false, a.encoding(), v.encoding(), 0).to_vec()
+                    }
+                    crate::ir::IRInstr::Alloc { dst, size: _ } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        // Point to frame area: ADD d, R11, #0
+                        encode_dp_imm(Condition::Al, DP_ADD, false, Gpr::R11.encoding(), d.encoding(), 0, 0).to_vec()
+                    }
+                    crate::ir::IRInstr::Call { dst, func: _, args } => {
+                        let mut code = Vec::new();
+                        // Move args to argument registers
+                        for (i, arg) in args.iter().enumerate() {
+                            if let Some(arg_reg) = Gpr::arg_register(i) {
+                                let a = reg_map.get(&arg.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                                if a != arg_reg {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, arg_reg.encoding(), a.encoding()));
+                                }
+                            }
+                        }
+                        // BL offset (placeholder)
+                        code.extend_from_slice(&encode_branch(Condition::Al, true, 0));
+                        // Move return value from R0 to dst
+                        if let Some(d) = dst {
+                            let d_reg = reg_map.get(&d.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                            if d_reg != Gpr::R0 {
+                                code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d_reg.encoding(), Gpr::R0.encoding()));
+                            }
+                        }
+                        code
+                    }
+                    crate::ir::IRInstr::Branch { target: _ } => {
+                        // B offset (placeholder)
+                        encode_branch(Condition::Al, false, 0).to_vec()
+                    }
+                    crate::ir::IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+                        let c = reg_map.get(&cond.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let mut code = Vec::new();
+                        // CMP c, #0; BNE true_target; B false_target
+                        code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_CMP, true, c.encoding(), 0, 0, 0));
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                        code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                        code
+                    }
+                    crate::ir::IRInstr::Cast { dst, src, .. } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let s = reg_map.get(&src.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let mut code = Vec::new();
+                        if s != d {
+                            code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), s.encoding()));
+                        }
+                        code
+                    }
+                    crate::ir::IRInstr::Select { dst, cond, true_val, false_val } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let c = reg_map.get(&cond.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let tv = reg_map.get(&true_val.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R2);
+                        let fv = reg_map.get(&false_val.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R3);
+                        let mut code = Vec::new();
+                        // MOV d, fv; CMP c, #0; MOVNE d, tv
+                        if fv != d {
+                            code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), fv.encoding()));
+                        }
+                        code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_CMP, true, c.encoding(), 0, 0, 0));
+                        code.extend_from_slice(&encode_dp_reg(Condition::Ne, DP_MOV, false, 0, d.encoding(), tv.encoding()));
+                        code
+                    }
+                    crate::ir::IRInstr::Offset { dst, base, offset } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        let b = reg_map.get(&base.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
+                        let o = reg_map.get(&offset.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R2);
+                        encode_dp_reg(Condition::Al, DP_ADD, false, b.encoding(), d.encoding(), o.encoding()).to_vec()
+                    }
+                    crate::ir::IRInstr::GetAddress { dst, name: _ } => {
+                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
+                        // Placeholder: MOV d, #0
+                        encode_dp_imm(Condition::Al, DP_MOV, false, 0, d.encoding(), 0, 0).to_vec()
                     }
                     crate::ir::IRInstr::Ret { values } => {
                         let mut code = Vec::new();

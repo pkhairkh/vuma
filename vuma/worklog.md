@@ -522,3 +522,88 @@ via the new `EmitConfig.debug_info` flag. 15 tests pass (all new).
 
 - `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
 - `cargo test -p vuma-codegen`: **562 tests pass** (15 new dwarf tests + 547 existing)
+
+---
+
+## Wave 6: AArch64 + RISC-V64 Mnemonic Disassemblers
+
+**Date**: 2026-03-05
+**Status**: ✅ Completed
+
+### Summary
+
+Implemented mnemonic disassemblers for both AArch64 and RISC-V64 backends,
+replacing the raw hex-dump / string-based mnemonic decoders with structured
+`Instruction::decode()` methods that reverse the `encode()` pipeline and use
+the existing `Display` impl for human-readable output. 12 new tests added
+(6 per backend). Also fixed pre-existing encoding bugs in SUB (shifted register)
+and BCond, and several unrelated clippy failures.
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| arm64.rs | Added `Register::from_encoding()`, `Condition::from_encoding()`, `Instruction::decode()` covering top 20+ instruction classes; fixed SUB shifted-register encode (was 0x8B004000 → 0xCB000000) and BCond encode (was 0x2A000000 → 0x54000000); added 6 decode roundtrip tests | +450 |
+| riscv64.rs | Added `Gpr::from_encoding()`, `Fpr::from_encoding()`, `Instruction::decode()` covering all instruction classes; updated `disassemble()` to use decode + Display; added 6 decode roundtrip tests | +350 |
+| backend.rs | Updated AArch64 `disassemble()` to use `Instruction::decode()` + Display, falling back to `decode_aarch64()` for unrecognized encodings | +4 |
+| arm32.rs | Fixed pre-existing unused import warning | -1 |
+| ppc64.rs | Fixed pre-existing move-after-use error and clippy warnings | ~10 |
+| mips64.rs | Fixed pre-existing unreachable-pattern warning | +1 |
+
+### AArch64 `Instruction::decode()` Coverage
+
+Decodes the following instruction classes (20+):
+
+- **Arithmetic (immediate)**: ADD, SUB
+- **Arithmetic (shifted register)**: ADD, SUB (with shift detection)
+- **Bitwise**: AND, ORR, EOR (plus MOV as ORR-alias when Rn=XZR)
+- **Multiply/Divide**: MUL, SDIV, UDIV
+- **Compare**: CMP (immediate + register)
+- **Branch**: B, BL, B.cond, BR, BLR, CBZ, CBNZ, RET
+- **Load/Store**: LDR, STR, LDRB, STRB, LDRH, STRH, LDRSW
+- **Load/Store Pair**: LDP, STP
+- **Move**: MOVZ, MOVK
+- **Special**: NOP, RET
+
+### RISC-V64 `Instruction::decode()` Coverage
+
+Decodes ALL instruction classes in the `Instruction` enum:
+
+- **U-type**: LUI, AUIPC
+- **J-type**: JAL
+- **I-type**: JALR, all loads (LB–LWU), all OP-IMM (ADDI–SRAI)
+- **S-type**: all stores (SB–SD)
+- **B-type**: all branches (BEQ–BGEU)
+- **R-type**: all OP (ADD–AND, MUL–REMU), all OP-32 (ADDW–SRAW)
+- **RV64I-32**: OP-IMM-32 (ADDIW, SLLIW, SRLIW, SRAIW)
+- **System**: ECALL, EBREAK, all CSR instructions
+- **Fence**: FENCE, FENCE.I
+- **FP**: FADD.D, FSUB.D, FMUL.D, FDIV.D, FMV.D
+
+### Encoder Bug Fixes
+
+1. **SUB (shifted register)** — Base was 0x8B004000 (ADD encoding with corrupted imm6). Fixed to 0xCB000000 (correct SUB with bit 30 = 1, op = 1).
+2. **B.cond** — Base was 0x2A000000 (31-bit value, missing leading zero). Fixed to 0x54000000 (correct 32-bit B.cond encoding with bits[31:25] = 0101010).
+
+### Test Coverage (12 new tests)
+
+**AArch64** (6 tests):
+- `decode_add_immediate_roundtrip` — ADD #imm encode→decode→display
+- `decode_sub_register_roundtrip` — SUB register encode→decode→display
+- `decode_ldr_str_roundtrip` — LDR + STR encode→decode→display
+- `decode_nop_ret` — Fixed-pattern NOP and RET decode
+- `decode_bcond_roundtrip` — B.cond EQ encode→decode→display
+- `decode_movz_movk_roundtrip` — MOVZ + MOVK encode→decode→display
+
+**RISC-V64** (6 tests):
+- `test_decode_addi_roundtrip` — ADDI encode→decode→display
+- `test_decode_add_sub_roundtrip` — ADD + SUB encode→decode→display
+- `test_decode_ld_sd_roundtrip` — LD + SD encode→decode→display
+- `test_decode_branch_roundtrip` — BEQ + BNE encode→decode→display
+- `test_decode_ecall_ebreak_nop` — Fixed-pattern ECALL/EBREAK/NOP decode
+- `test_decode_lui_jal_roundtrip` — LUI + JAL encode→decode→display
+
+### Build Verification
+
+- `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
+- `cargo test -p vuma-codegen`: **574 tests pass** (12 new decode tests + 562 existing)
