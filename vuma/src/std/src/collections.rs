@@ -2293,3 +2293,637 @@ mod tests {
         assert_eq!(r2.as_ref(), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// BTreeMap
+// ---------------------------------------------------------------------------
+
+/// A VUMA-verified B-tree map with BD annotations.
+///
+/// A sorted map based on a B-tree data structure. Keys are kept in
+/// sorted order, enabling efficient range queries and ordered iteration.
+///
+/// ## BD Annotations
+///
+/// - Type CapD: { Read, Write, Iterate, Compare, Serialize, Send }
+/// - SyncEdge: insert → get (Seq), remove → get (Seq)
+pub struct BTreeMap<K, V> {
+    inner: std::collections::BTreeMap<K, V>,
+}
+
+impl<K: Ord, V> BTreeMap<K, V> {
+    /// Create a new, empty BTreeMap.
+    // VUMA-VERIFIED: empty map is safe to construct
+    pub fn new() -> Self {
+        Self {
+            inner: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Insert a key-value pair, returning the old value if the key was present.
+    // VUMA-VERIFIED: insert maintains B-tree invariants
+    pub fn insert(&mut self, key: K, value: V) -> BdResult<Option<V>> {
+        let old = self.inner.insert(key, value);
+        BdResult::ok(old, CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+    }
+
+    /// Get a reference to the value for a key.
+    // VUMA-VERIFIED: read-only access
+    pub fn get(&self, key: &K) -> BdResult<&V> {
+        match self.inner.get(key) {
+            Some(v) => BdResult::ok(v, readonly_collection_capd()),
+            None => BdResult::err(readonly_collection_capd()),
+        }
+    }
+
+    /// Remove a key, returning the value if present.
+    // VUMA-VERIFIED: remove maintains B-tree invariants
+    pub fn remove(&mut self, key: &K) -> BdResult<Option<V>> {
+        let old = self.inner.remove(key);
+        BdResult::ok(old, CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+    }
+
+    /// Returns the number of elements in the map.
+    // VUMA-VERIFIED: pure query
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true if the map is empty.
+    // VUMA-VERIFIED: pure query
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns true if the map contains the given key.
+    // VUMA-VERIFIED: pure query
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.inner.contains_key(key)
+    }
+
+    /// Returns an iterator over the entries in sorted order.
+    // VUMA-VERIFIED: iteration is safe — read-only access
+    pub fn iter(&self) -> BTreeMapIter<'_, K, V> {
+        BTreeMapIter {
+            inner: self.inner.iter(),
+            capd: readonly_collection_capd(),
+        }
+    }
+
+    /// Returns the RepD for this collection.
+    // VUMA-VERIFIED: type descriptor is correct
+    pub fn repd() -> RepD {
+        RepD::new("BTreeMap", 0, 8, collection_capd())
+    }
+
+    /// Returns the SyncEdge annotations for this collection.
+    // VUMA-VERIFIED: synchronization edges model map operations
+    pub fn sync_edges() -> std::vec::Vec<SyncEdge> {
+        std::vec![
+            SyncEdge::new("btreemap_insert", "btreemap_get", SyncEdgeKind::Seq),
+            SyncEdge::new("btreemap_remove", "btreemap_get", SyncEdgeKind::Seq),
+        ]
+    }
+}
+
+impl<K: Ord, V> Default for BTreeMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Shared iterator over `BTreeMap<K, V>` entries with BD annotation.
+pub struct BTreeMapIter<'a, K, V> {
+    inner: std::collections::btree_map::Iter<'a, K, V>,
+    /// CapD annotation for this iterator.
+    pub capd: CapD,
+}
+
+impl<'a, K, V> Iterator for BTreeMapIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BTreeSet
+// ---------------------------------------------------------------------------
+
+/// A VUMA-verified B-tree set with BD annotations.
+///
+/// A sorted set based on a B-tree data structure. Elements are kept in
+/// sorted order, enabling efficient range queries and ordered iteration.
+///
+/// ## BD Annotations
+///
+/// - Type CapD: { Read, Write, Iterate, Compare, Serialize, Send }
+/// - SyncEdge: insert → contains (Seq), remove → contains (Seq)
+pub struct BTreeSet<T> {
+    inner: std::collections::BTreeSet<T>,
+}
+
+impl<T: Ord> BTreeSet<T> {
+    /// Create a new, empty BTreeSet.
+    // VUMA-VERIFIED: empty set is safe to construct
+    pub fn new() -> Self {
+        Self {
+            inner: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Insert a value, returning true if it was not already present.
+    // VUMA-VERIFIED: insert maintains B-tree invariants
+    pub fn insert(&mut self, value: T) -> BdResult<bool> {
+        let was_new = self.inner.insert(value);
+        BdResult::ok(was_new, CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+    }
+
+    /// Returns true if the set contains the value.
+    // VUMA-VERIFIED: pure query
+    pub fn contains(&self, value: &T) -> bool {
+        self.inner.contains(value)
+    }
+
+    /// Remove a value, returning true if it was present.
+    // VUMA-VERIFIED: remove maintains B-tree invariants
+    pub fn remove(&mut self, value: &T) -> BdResult<bool> {
+        let was_present = self.inner.remove(value);
+        BdResult::ok(was_present, CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+    }
+
+    /// Returns the number of elements in the set.
+    // VUMA-VERIFIED: pure query
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true if the set is empty.
+    // VUMA-VERIFIED: pure query
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns an iterator over the elements in sorted order.
+    // VUMA-VERIFIED: iteration is safe — read-only access
+    pub fn iter(&self) -> BTreeSetIter<'_, T> {
+        BTreeSetIter {
+            inner: self.inner.iter(),
+            capd: readonly_collection_capd(),
+        }
+    }
+
+    /// Returns the RepD for this collection.
+    // VUMA-VERIFIED: type descriptor is correct
+    pub fn repd() -> RepD {
+        RepD::new("BTreeSet", 0, 8, collection_capd())
+    }
+
+    /// Returns the SyncEdge annotations for this collection.
+    // VUMA-VERIFIED: synchronization edges model set operations
+    pub fn sync_edges() -> std::vec::Vec<SyncEdge> {
+        std::vec![
+            SyncEdge::new("btreeset_insert", "btreeset_contains", SyncEdgeKind::Seq),
+            SyncEdge::new("btreeset_remove", "btreeset_contains", SyncEdgeKind::Seq),
+        ]
+    }
+}
+
+impl<T: Ord> Default for BTreeSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Shared iterator over `BTreeSet<T>` elements with BD annotation.
+pub struct BTreeSetIter<'a, T> {
+    inner: std::collections::btree_set::Iter<'a, T>,
+    /// CapD annotation for this iterator.
+    pub capd: CapD,
+}
+
+impl<'a, T> Iterator for BTreeSetIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BinaryHeap
+// ---------------------------------------------------------------------------
+
+/// A VUMA-verified binary heap (priority queue) with BD annotations.
+///
+/// A max-heap based on a binary tree. The largest element is always
+/// at the front, enabling efficient access to the maximum.
+///
+/// ## BD Annotations
+///
+/// - Type CapD: { Read, Write, Iterate, Compare, Serialize, Send }
+/// - SyncEdge: push → pop (Seq), peek → pop (Seq)
+pub struct BinaryHeap<T: Ord> {
+    inner: std::collections::BinaryHeap<T>,
+}
+
+impl<T: Ord> BinaryHeap<T> {
+    /// Create a new, empty binary heap.
+    // VUMA-VERIFIED: empty heap is safe to construct
+    pub fn new() -> Self {
+        Self {
+            inner: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    /// Push a value onto the heap.
+    // VUMA-VERIFIED: push maintains heap invariants
+    pub fn push(&mut self, value: T) {
+        self.inner.push(value);
+    }
+
+    /// Pop the largest value from the heap.
+    // VUMA-VERIFIED: pop maintains heap invariants
+    pub fn pop(&mut self) -> BdResult<T> {
+        match self.inner.pop() {
+            Some(v) => BdResult::ok(v, CapD::new(vec![CapFlag::Read, CapFlag::Write])),
+            None => BdResult::err(readonly_collection_capd()),
+        }
+    }
+
+    /// Peek at the largest value without removing it.
+    // VUMA-VERIFIED: read-only access
+    pub fn peek(&self) -> BdResult<&T> {
+        match self.inner.peek() {
+            Some(v) => BdResult::ok(v, readonly_collection_capd()),
+            None => BdResult::err(readonly_collection_capd()),
+        }
+    }
+
+    /// Returns the number of elements in the heap.
+    // VUMA-VERIFIED: pure query
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true if the heap is empty.
+    // VUMA-VERIFIED: pure query
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns an iterator over the heap elements in arbitrary order.
+    // VUMA-VERIFIED: iteration is safe — read-only access
+    pub fn iter(&self) -> BinaryHeapIter<'_, T> {
+        BinaryHeapIter {
+            inner: self.inner.iter(),
+            capd: readonly_collection_capd(),
+        }
+    }
+
+    /// Returns the RepD for this collection.
+    // VUMA-VERIFIED: type descriptor is correct
+    pub fn repd() -> RepD {
+        RepD::new("BinaryHeap", 0, 8, collection_capd())
+    }
+
+    /// Returns the SyncEdge annotations for this collection.
+    // VUMA-VERIFIED: synchronization edges model heap operations
+    pub fn sync_edges() -> std::vec::Vec<SyncEdge> {
+        std::vec![
+            SyncEdge::new("heap_push", "heap_pop", SyncEdgeKind::Seq),
+            SyncEdge::new("heap_peek", "heap_pop", SyncEdgeKind::Seq),
+        ]
+    }
+}
+
+impl<T: Ord> Default for BinaryHeap<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Shared iterator over `BinaryHeap<T>` elements with BD annotation.
+pub struct BinaryHeapIter<'a, T> {
+    inner: std::collections::binary_heap::Iter<'a, T>,
+    /// CapD annotation for this iterator.
+    pub capd: CapD,
+}
+
+impl<'a, T> Iterator for BinaryHeapIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for new collections
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod btreemap_tests {
+    use super::*;
+
+    #[test]
+    fn test_btreemap_new_and_len() {
+        let map: BTreeMap<i32, &str> = BTreeMap::new();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn test_btreemap_insert_and_get() {
+        let mut map = BTreeMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        map.insert(3, "three");
+        assert_eq!(map.len(), 3);
+        let r = map.get(&2);
+        assert!(r.success);
+        assert_eq!(r.value.unwrap(), &"two");
+    }
+
+    #[test]
+    fn test_btreemap_overwrite() {
+        let mut map = BTreeMap::new();
+        let old = map.insert(1, "one");
+        assert!(old.value.unwrap().is_none());
+        let old = map.insert(1, "uno");
+        assert_eq!(old.value.unwrap(), Some("one"));
+        assert_eq!(map.get(&1).value.unwrap(), &"uno");
+    }
+
+    #[test]
+    fn test_btreemap_remove() {
+        let mut map = BTreeMap::new();
+        map.insert(1, "one");
+        map.insert(2, "two");
+        let removed = map.remove(&1);
+        assert_eq!(removed.value.unwrap(), Some("one"));
+        assert_eq!(map.len(), 1);
+        assert!(!map.contains_key(&1));
+        assert!(map.contains_key(&2));
+    }
+
+    #[test]
+    fn test_btreemap_contains_key() {
+        let mut map = BTreeMap::new();
+        map.insert(42, "answer");
+        assert!(map.contains_key(&42));
+        assert!(!map.contains_key(&0));
+    }
+
+    #[test]
+    fn test_btreemap_iter() {
+        let mut map = BTreeMap::new();
+        map.insert(3, "c");
+        map.insert(1, "a");
+        map.insert(2, "b");
+        let keys: Vec<&i32> = map.iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec![&1, &2, &3]); // sorted order
+    }
+
+    #[test]
+    fn test_btreemap_empty_get() {
+        let map: BTreeMap<i32, String> = BTreeMap::new();
+        let r = map.get(&1);
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn test_btreemap_remove_nonexistent() {
+        let mut map = BTreeMap::new();
+        map.insert(1, "one");
+        let removed = map.remove(&99);
+        assert!(removed.value.unwrap().is_none());
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_btreemap_repd_and_edges() {
+        let repd = BTreeMap::<i32, i32>::repd();
+        assert_eq!(repd.name, "BTreeMap");
+        let edges = BTreeMap::<i32, i32>::sync_edges();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_btreemap_default() {
+        let map: BTreeMap<i32, i32> = BTreeMap::default();
+        assert!(map.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod btreeset_tests {
+    use super::*;
+
+    #[test]
+    fn test_btreeset_new_and_len() {
+        let set: BTreeSet<i32> = BTreeSet::new();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn test_btreeset_insert_and_contains() {
+        let mut set = BTreeSet::new();
+        let r = set.insert(1);
+        assert!(r.value.unwrap());
+        set.insert(2);
+        set.insert(3);
+        assert!(set.contains(&1));
+        assert!(set.contains(&2));
+        assert!(!set.contains(&4));
+    }
+
+    #[test]
+    fn test_btreeset_insert_duplicate() {
+        let mut set = BTreeSet::new();
+        set.insert(1);
+        let r = set.insert(1);
+        assert!(!r.value.unwrap()); // was not new
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_btreeset_remove() {
+        let mut set = BTreeSet::new();
+        set.insert(1);
+        set.insert(2);
+        let r = set.remove(&1);
+        assert!(r.value.unwrap());
+        assert!(!set.contains(&1));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_btreeset_remove_nonexistent() {
+        let mut set = BTreeSet::new();
+        set.insert(1);
+        let r = set.remove(&99);
+        assert!(!r.value.unwrap());
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_btreeset_iter_sorted() {
+        let mut set = BTreeSet::new();
+        set.insert(3);
+        set.insert(1);
+        set.insert(2);
+        let vals: Vec<&i32> = set.iter().collect();
+        assert_eq!(vals, vec![&1, &2, &3]);
+    }
+
+    #[test]
+    fn test_btreeset_len_tracking() {
+        let mut set = BTreeSet::new();
+        assert_eq!(set.len(), 0);
+        set.insert(10);
+        assert_eq!(set.len(), 1);
+        set.insert(20);
+        assert_eq!(set.len(), 2);
+        set.remove(&10);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_btreeset_repd_and_edges() {
+        let repd = BTreeSet::<i32>::repd();
+        assert_eq!(repd.name, "BTreeSet");
+        let edges = BTreeSet::<i32>::sync_edges();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_btreeset_default() {
+        let set: BTreeSet<i32> = BTreeSet::default();
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn test_btreeset_many_elements() {
+        let mut set = BTreeSet::new();
+        for i in 0..100 {
+            set.insert(i);
+        }
+        assert_eq!(set.len(), 100);
+        for i in 0..100 {
+            assert!(set.contains(&i));
+        }
+        assert!(!set.contains(&100));
+    }
+}
+
+#[cfg(test)]
+mod binaryheap_tests {
+    use super::*;
+
+    #[test]
+    fn test_binaryheap_new_and_len() {
+        let heap: BinaryHeap<i32> = BinaryHeap::new();
+        assert!(heap.is_empty());
+        assert_eq!(heap.len(), 0);
+    }
+
+    #[test]
+    fn test_binaryheap_push_and_pop() {
+        let mut heap = BinaryHeap::new();
+        heap.push(3);
+        heap.push(1);
+        heap.push(2);
+        assert_eq!(heap.len(), 3);
+        let max = heap.pop();
+        assert_eq!(max.value.unwrap(), 3);
+        assert_eq!(heap.len(), 2);
+    }
+
+    #[test]
+    fn test_binaryheap_peek() {
+        let mut heap = BinaryHeap::new();
+        let r = heap.peek();
+        assert!(!r.success);
+        heap.push(5);
+        heap.push(10);
+        let r = heap.peek();
+        assert_eq!(r.value.unwrap(), &10);
+        assert_eq!(heap.len(), 2); // peek doesn't remove
+    }
+
+    #[test]
+    fn test_binaryheap_max_ordering() {
+        let mut heap = BinaryHeap::new();
+        heap.push(1);
+        heap.push(5);
+        heap.push(3);
+        heap.push(2);
+        heap.push(4);
+        let mut sorted = Vec::new();
+        while let r = heap.pop() {
+            if r.success {
+                sorted.push(r.value.unwrap());
+            } else {
+                break;
+            }
+        }
+        assert_eq!(sorted, vec![5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn test_binaryheap_empty_pop() {
+        let mut heap: BinaryHeap<i32> = BinaryHeap::new();
+        let r = heap.pop();
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn test_binaryheap_iter() {
+        let mut heap = BinaryHeap::new();
+        heap.push(1);
+        heap.push(2);
+        heap.push(3);
+        let count = heap.iter().count();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_binaryheap_len_tracking() {
+        let mut heap = BinaryHeap::new();
+        assert_eq!(heap.len(), 0);
+        heap.push(42);
+        assert_eq!(heap.len(), 1);
+        heap.push(99);
+        assert_eq!(heap.len(), 2);
+        heap.pop();
+        assert_eq!(heap.len(), 1);
+    }
+
+    #[test]
+    fn test_binaryheap_repd_and_edges() {
+        let repd = BinaryHeap::<i32>::repd();
+        assert_eq!(repd.name, "BinaryHeap");
+        let edges = BinaryHeap::<i32>::sync_edges();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn test_binaryheap_default() {
+        let heap: BinaryHeap<i32> = BinaryHeap::default();
+        assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn test_binaryheap_many_elements() {
+        let mut heap = BinaryHeap::new();
+        for i in 0..50 {
+            heap.push(i);
+        }
+        assert_eq!(heap.len(), 50);
+        let top = heap.peek();
+        assert_eq!(top.value.unwrap(), &49);
+    }
+}

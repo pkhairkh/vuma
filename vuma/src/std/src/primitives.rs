@@ -67,6 +67,8 @@ pub enum CapFlag {
     Exclusive,
     /// Type supports shared (immutable) access.
     Shared,
+    /// Type supports execution (e.g., process spawning, bind operations).
+    Execute,
 }
 
 impl fmt::Display for CapFlag {
@@ -82,6 +84,7 @@ impl fmt::Display for CapFlag {
             CapFlag::Receive => write!(f, "Receive"),
             CapFlag::Exclusive => write!(f, "Exclusive"),
             CapFlag::Shared => write!(f, "Shared"),
+            CapFlag::Execute => write!(f, "Execute"),
         }
     }
 }

@@ -1324,6 +1324,77 @@ fn build_minimal_loongarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
 // LoongArch64Backend
 // ===========================================================================
 
+/// Decode a single LoongArch64 32-bit instruction word into a mnemonic string.
+fn decode_loongarch64_instruction(word: u32) -> String {
+    let opcode = word & 0x7f;
+    match opcode {
+        0x00 => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let rk = (word >> 10) & 0x1f;
+            format!("add.w $r{}, $r{}, $r{}", rd, rj, rk)
+        }
+        0x01 => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let rk = (word >> 10) & 0x1f;
+            format!("sub.w $r{}, $r{}, $r{}", rd, rj, rk)
+        }
+        0x02 => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let rk = (word >> 10) & 0x1f;
+            format!("mul.w $r{}, $r{}, $r{}", rd, rj, rk)
+        }
+        0x05 => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let si12 = ((word >> 10) as i32) << 20 >> 20;
+            format!("lu12i.w $r{}, {}({})", rd, si12, si12)
+        }
+        0x08 => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let si12 = ((word >> 10) as i32) << 20 >> 20;
+            format!("ld.w $r{}, $r{}, {}({})", rd, rj, si12, si12)
+        }
+        0x0a => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let si12 = ((word >> 10) as i32) << 20 >> 20;
+            format!("st.w $r{}, $r{}, {}({})", rd, rj, si12, si12)
+        }
+        0x0c => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let si12 = ((word >> 10) as i32) << 20 >> 20;
+            format!("ld.d $r{}, $r{}, {}({})", rd, rj, si12, si12)
+        }
+        0x0e => {
+            let rd = (word >> 7) & 0x1f;
+            let rj = (word >> 15) & 0x1f;
+            let si12 = ((word >> 10) as i32) << 20 >> 20;
+            format!("st.d $r{}, $r{}, {}({})", rd, rj, si12, si12)
+        }
+        0x10 => {
+            let rj = (word >> 15) & 0x1f;
+            let offs = ((word >> 10) as i32) << 12 >> 10;
+            format!("beq $r{}, {}({})", rj, offs, offs)
+        }
+        0x11 => {
+            let rj = (word >> 15) & 0x1f;
+            let offs = ((word >> 10) as i32) << 12 >> 10;
+            format!("bne $r{}, {}({})", rj, offs, offs)
+        }
+        0x14 => format!("bl {}", ((word >> 10) as i32) << 12 >> 10),
+        0x15 => {
+            let rd = (word >> 7) & 0x1f;
+            format!("jirl $r{}, {}", rd, ((word >> 10) as i32) << 12 >> 10)
+        }
+        _ => format!(".word {:08x}", word),
+    }
+}
+
 /// LoongArch64 code generation backend (LP64 ABI).
 pub struct LoongArch64Backend {
     target_info: LoongArch64TargetInfo,
@@ -1718,7 +1789,7 @@ impl Backend for LoongArch64Backend {
     }
 
     fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
-        // Simple hex-based disassembler for LoongArch64 (4-byte fixed-width instructions).
+        // LoongArch64 disassembler decoding 10+ instruction types.
         let mut lines = Vec::new();
         let mut offset = 0usize;
         let mut pc = addr;
@@ -1729,7 +1800,8 @@ impl Backend for LoongArch64Backend {
                 bytes[offset + 2],
                 bytes[offset + 3],
             ]);
-            lines.push(format!("{:#010x}:  {:08x}", pc, word));
+            let decoded = decode_loongarch64_instruction(word);
+            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, decoded));
             offset += 4;
             pc += 4;
         }

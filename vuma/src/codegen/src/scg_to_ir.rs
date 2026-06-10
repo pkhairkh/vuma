@@ -1627,7 +1627,6 @@ mod tests {
                 lhs: ScgExpr::Var("x".into()),
                 rhs: ScgExpr::Int(1),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
         ]);
@@ -1667,7 +1666,6 @@ mod tests {
                     lhs: ScgExpr::Int(1),
                     rhs: ScgExpr::Int(2),
     tail_call: false,
-                tail_call: false,
                 })],
                 else_body: None,
             }),
@@ -1874,19 +1872,16 @@ mod tests {
                 dst: "s".into(), op: BinOpKind::Sub,
                 lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Int(1),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "m".into(), op: BinOpKind::Mul,
                 lhs: ScgExpr::Var("s".into()), rhs: ScgExpr::Int(2),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "d".into(), op: BinOpKind::SDiv,
                 lhs: ScgExpr::Var("m".into()), rhs: ScgExpr::Int(4),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("d".into())]),
         ]);
@@ -1956,7 +1951,6 @@ mod tests {
                 lhs: ScgExpr::Var("input".into()),
                 rhs: ScgExpr::Int(10),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("output".into())]),
         ]);
@@ -2020,7 +2014,6 @@ mod tests {
                     lhs: ScgExpr::Int(1),
                     rhs: ScgExpr::Int(2),
     tail_call: false,
-                tail_call: false,
                 }),
             ],
             else_body: Some(vec![
@@ -2030,7 +2023,6 @@ mod tests {
                     lhs: ScgExpr::Int(5),
                     rhs: ScgExpr::Int(3),
     tail_call: false,
-                tail_call: false,
                 }),
             ]),
         }),
@@ -2144,7 +2136,6 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(10),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "equal".into(),
@@ -2152,7 +2143,6 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(0),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("less".into()), ScgExpr::Var("equal".into())]),
         ]);
@@ -2187,7 +2177,6 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(10),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "uge".into(),
@@ -2195,7 +2184,6 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(5),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("ult".into()), ScgExpr::Var("uge".into())]),
         ]);
@@ -2265,7 +2253,6 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
     tail_call: false,
-                    tail_call: false,
                     }),
                 ],
                 else_body: Some(vec![
@@ -2275,7 +2262,6 @@ mod tests {
                         lhs: ScgExpr::Int(10),
                         rhs: ScgExpr::Int(3),
     tail_call: false,
-                    tail_call: false,
                     }),
                 ]),
             }),
@@ -2305,13 +2291,11 @@ mod tests {
                 dst: "a".into(), op: BinOpKind::Add,
                 lhs: ScgExpr::Int(1), rhs: ScgExpr::Int(2),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(), op: BinOpKind::Add,
                 lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Int(3),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("b".into())]),
         ];
@@ -2332,19 +2316,16 @@ mod tests {
                 dst: "a".into(), op: BinOpKind::Add,
                 lhs: ScgExpr::Int(1), rhs: ScgExpr::Int(2),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(), op: BinOpKind::Mul,
                 lhs: ScgExpr::Int(3), rhs: ScgExpr::Int(4),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "c".into(), op: BinOpKind::Add,
                 lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Var("b".into()),
     tail_call: false,
-            tail_call: false,
             }),
         ];
         let order = IRBuilder::topological_sort_statements(&stmts);
@@ -2488,7 +2469,6 @@ mod tests {
                 lhs: ScgExpr::Var("x".into()),
                 rhs: ScgExpr::Int(0xFF),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "or_result".into(),
@@ -2496,7 +2476,6 @@ mod tests {
                 lhs: ScgExpr::Var("x".into()),
                 rhs: ScgExpr::Int(0x100),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("and_result".into()), ScgExpr::Var("or_result".into())]),
         ]);
@@ -2622,7 +2601,6 @@ mod tests {
                 lhs: ScgExpr::Var("x".into()),
                 rhs: ScgExpr::Int(0),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "sge".into(),
@@ -2630,7 +2608,6 @@ mod tests {
                 lhs: ScgExpr::Var("x".into()),
                 rhs: ScgExpr::Int(0),
     tail_call: false,
-            tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("ne".into()), ScgExpr::Var("sge".into())]),
         ]);
@@ -2689,7 +2666,6 @@ mod tests {
                         lhs: ScgExpr::Var("n".into()),
                         rhs: ScgExpr::Int(1),
     tail_call: false,
-                    tail_call: false,
                     }),
                     ScgStatement::Control(ControlNode::Break),
                 ],

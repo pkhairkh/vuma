@@ -31,6 +31,9 @@ pub mod alloc;
 pub mod collections;
 pub mod io;
 pub mod sync;
+pub mod net;
+pub mod time;
+pub mod process;
 
 // Re-export core BD types for convenience
 pub use primitives::{
