@@ -25,12 +25,15 @@
 //! - `regalloc` — Simple register allocator.
 //! - `emit` — ARM64 code emitter and ELF generation.
 
+pub mod arm32;
 pub mod arm64;
 pub mod backend;
 pub mod control_flow;
 pub mod emit;
 pub mod ir;
 pub mod loongarch64;
+pub mod mips64;
+pub mod ppc64;
 pub mod regalloc;
 pub mod riscv64;
 pub mod scg_to_ir;
@@ -51,6 +54,9 @@ pub use backend::{
     RegClass, TargetInfo,
 };
 
+/// Re-export ARM 32-bit backend types.
+pub use arm32::Arm32Backend;
+
 /// Re-export RISC-V 64-bit backend types.
 pub use riscv64::RiscV64Backend;
 
@@ -62,6 +68,12 @@ pub use loongarch64::LoongArch64Backend;
 
 /// Re-export x86_64 backend types.
 pub use x86_64::X86_64Backend;
+
+/// Re-export MIPS64 backend types.
+pub use mips64::Mips64Backend;
+
+/// Re-export PowerPC64 backend types.
+pub use ppc64::PPC64Backend;
 
 /// Re-export target description types.
 pub use target_desc::{CallingConventionDesc, InstCategoryDesc, RegDesc, TargetDesc, TargetDescRegistry};

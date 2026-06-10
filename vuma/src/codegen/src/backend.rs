@@ -4,8 +4,11 @@
 //! multiple instruction set architectures. Each ISA implements these traits
 //! to provide target-specific information and code generation.
 
+use crate::arm32::Arm32Backend;
 use crate::ir::{IRFunction, IRInstr, IRType};
 use crate::loongarch64::LoongArch64Backend;
+use crate::mips64::Mips64Backend;
+use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
 use std::fmt;
@@ -940,10 +943,9 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::Wasm32 => Ok(Box::new(crate::wasm32::Wasm32Backend::new())),
         BackendKind::LoongArch64 => Ok(Box::new(LoongArch64Backend::new())),
         BackendKind::X86_64 => Ok(Box::new(X86_64Backend::new())),
-        _ => Err(BackendError::UnsupportedFeature {
-            isa: kind.isa_name(),
-            feature: format!("Backend for {} is not yet implemented", kind.isa_name()),
-        }),
+        BackendKind::Arm32 => Ok(Box::new(Arm32Backend::new())),
+        BackendKind::Mips64 => Ok(Box::new(Mips64Backend::new())),
+        BackendKind::PowerPC64 => Ok(Box::new(PPC64Backend::new())),
     }
 }
 
