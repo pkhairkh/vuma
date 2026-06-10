@@ -694,3 +694,89 @@ added, all passing. 601 total codegen tests pass.
 
 - `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
 - `cargo test -p vuma-codegen`: **601 tests pass** (41 mips64, including 8 new ISel tests)
+
+---
+
+## Wave 14: Parser Fuzzing Harness
+
+**Date**: 2026-03-06
+**Status**: ✅ Completed
+
+### Summary
+
+Added a cargo-fuzz style fuzzing harness for the VUMA parser, plus fixed an
+infinite loop bug discovered during testing. The fuzzer generates semi-structured
+VUMA-like source strings using the `arbitrary` crate approach and feeds them
+to `Parser::new(input).parse_program()`, verifying the parser never panics.
+32 edge-case tests were added covering deep nesting, Unicode, long identifiers,
+operator soup, empty programs, keyword edge cases, and more. The fuzzer ran for
+1500 iterations with zero panics.
+
+### Bug Fixed
+
+**Infinite loop in `recover_to_item_boundary`**: When the parser encountered a
+`#` token not followed by `[` (e.g., `###$$$@@@`), `recover_to_item_boundary`
+would break immediately because `TokenKind::Hash` is in `ITEM_STARTERS`,
+causing `parse_program`'s loop to retry the same token indefinitely. Fixed by
+checking that `#` is followed by `[` before treating it as an item starter in
+the recovery path.
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/parser/fuzz/Cargo.toml | NEW: Fuzz harness Cargo.toml with rand dependency, standalone workspace | +16 |
+| src/parser/fuzz/fuzz_targets/parse_program.rs | NEW: Standalone fuzzer generating VUMA-like source strings | +668 |
+| src/parser/tests/edge_cases.rs | NEW: 32 edge-case tests for tricky parser scenarios | +291 |
+| src/parser/src/parser.rs | Fixed infinite loop in `recover_to_item_boundary` for bare `#` tokens | +7 |
+
+### Fuzzing Harness Design
+
+The fuzzer (`parse_program`) uses a `FuzzInput` struct that reads from a byte
+buffer to make generation decisions. It generates VUMA-like source strings with:
+
+- **Item generators**: region, fn, struct, enum, let, assign, import, export,
+  const, free, expression statements, raw keyword injection
+- **Statement generators**: if/while/for/match/return/sync/bd-directive/expr
+- **Expression generators**: binary/unary ops, calls, grouping, allocate,
+  field access, casts, sizeof/alignof, derive, indexing
+- **Type generators**: named, pointer, array, generic, function types
+- **Atom generators**: integers (decimal/hex/binary/octal), identifiers,
+  booleans, null, string literals
+
+Each fuzz iteration:
+1. Generates 16–512 random bytes
+2. Converts bytes into a VUMA-like source string via `FuzzInput`
+3. Feeds it to `Parser::new(input).parse_program()`
+4. Uses `panic::catch_unwind` to verify no panics
+
+### Edge Case Tests (32 tests)
+
+**Deeply nested delimiters**: nested parens (50 deep), nested braces (30 deep),
+nested brackets (30 deep), unmatched closing parens/braces
+
+**Unicode identifiers**: é, 世界, Greek α+β as identifiers, Unicode in strings
+
+**Very long identifiers**: 2048-char identifier, 2048-char type name
+
+**Consecutive operators**: >> chains, << chains, === triple-equals, mixed
+operators, operator soup (>>>===!==<=>=<=>>>, ..===..=..., &&||!&&||!)
+
+**Empty/comment-only programs**: empty string, whitespace only, line comment,
+block comment, multiple comments, doc comments
+
+**Keywords in unusual positions**: 20 keywords as expressions, keywords as
+type names, keywords in match patterns, all 58 keywords in sequence
+
+**Expression depth**: 300-level nested expression (hits max_depth guard)
+
+**Incomplete constructs**: bare fn/struct/region keywords, partial definitions
+
+**Garbage input**: null bytes, ###$$$@@@, ???!!!, 0x0x0x, null in expression
+
+### Test Results
+
+- `cargo check -p vuma-parser`: zero errors
+- `cargo test -p vuma-parser`: 275 unit tests + 32 edge-case tests + 2 doc-tests = **309 tests pass**, 0 failures
+- `cargo clippy -p vuma-parser`: **0 warnings**
+- Fuzzer: **1500 iterations, 1500 ok, 0 panics**

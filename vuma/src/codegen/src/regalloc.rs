@@ -1,9 +1,9 @@
 //! # Register Allocation
 //!
-//! Provides register allocators that map IR virtual registers to ARM64
-//! physical registers.
+//! Provides register allocators that map IR virtual registers to physical
+//! registers. The module contains two families of allocators:
 //!
-//! ## Allocators
+//! ## ARM64-specific allocators (legacy)
 //!
 //! ### `RegAllocator` (legacy greedy)
 //!
@@ -11,9 +11,9 @@
 //! registers first, then callee-saved, spilling when all are exhausted.
 //! Kept for backward-compatibility with the existing emitter.
 //!
-//! ### `LinearScanAllocator` (production)
+//! ### `LinearScanAllocator` (ARM64 production)
 //!
-//! A real **linear-scan** register allocator that:
+//! A real **linear-scan** register allocator for ARM64 that:
 //!
 //! 1. Computes live ranges from the IR (per-function, across all blocks).
 //! 2. Sorts intervals by start point.
@@ -23,6 +23,16 @@
 //! 5. Generates spill/reload code as needed — including reloads at each
 //!    use position after eviction.
 //! 6. Applies register coalescing to eliminate redundant copies.
+//!
+//! ## Target-agnostic allocator (new)
+//!
+//! ### `TargetAgnosticRegAlloc`
+//!
+//! A **target-agnostic** linear-scan register allocator driven by the
+//! `TargetDesc` data from `target_desc.rs`. It derives the available
+//! register pool (caller-saved, callee-saved, per class) from the target
+//! description rather than hard-coding ARM64 registers. Any backend can
+//! use this allocator by passing its `TargetDesc`.
 //!
 //! ## ARM64 Register Conventions (AAPCS64)
 //!
@@ -1800,6 +1810,676 @@ impl RegAllocator {
 impl Default for RegAllocator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Target-Agnostic Register Allocator
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A target-agnostic linear-scan register allocator.
+///
+/// This allocator is driven by a [`TargetDesc`] from `target_desc.rs`,
+/// which provides the complete register file including which registers are
+/// allocatable, caller-saved, and callee-saved. Any backend (AArch64,
+/// x86_64, RISC-V, etc.) can use this allocator by passing its target
+/// description — no target-specific code is needed inside the allocator.
+///
+/// ## Algorithm
+///
+/// 1. **Derive register pools** from `TargetDesc::registers`:
+///    - Caller-saved GPRs, callee-saved GPRs
+///    - Caller-saved SIMD/FP, callee-saved SIMD/FP
+/// 2. **Compute live intervals** using the shared `LiveRangeComputer`.
+/// 3. **Sort intervals** by start position (longer first at same start).
+/// 4. **Linear scan**: for each interval, expire old intervals, try to
+///    allocate a free register, or evict/spill if the pool is exhausted.
+/// 5. **Calling convention awareness**: intervals that cross calls are
+///    preferentially assigned callee-saved registers.
+/// 6. **Spill with eviction**: when all registers are occupied, the
+///    interval with the lowest spill weight per length is evicted.
+pub struct TargetAgnosticRegAlloc {
+    /// Name of the target ISA (for error messages).
+    isa_name: &'static str,
+    /// Caller-saved GPRs available for allocation.
+    caller_saved_gprs: Vec<crate::backend::PhysicalReg>,
+    /// Callee-saved GPRs available for allocation.
+    callee_saved_gprs: Vec<crate::backend::PhysicalReg>,
+    /// Caller-saved SIMD/FP registers available for allocation.
+    caller_saved_fps: Vec<crate::backend::PhysicalReg>,
+    /// Callee-saved SIMD/FP registers available for allocation.
+    callee_saved_fps: Vec<crate::backend::PhysicalReg>,
+}
+
+impl TargetAgnosticRegAlloc {
+    /// Create a new target-agnostic register allocator from a `TargetDesc`.
+    ///
+    /// The allocator inspects the `registers` field of the target description
+    /// to build caller-saved and callee-saved pools for each register class.
+    /// Only registers marked `is_allocatable` are included; reserved registers
+    /// (SP, FP, LR, etc.) are excluded.
+    pub fn new(target: &crate::target_desc::TargetDesc) -> Self {
+        let mut caller_saved_gprs = Vec::new();
+        let mut callee_saved_gprs = Vec::new();
+        let mut caller_saved_fps = Vec::new();
+        let mut callee_saved_fps = Vec::new();
+
+        for reg in &target.registers {
+            if !reg.is_allocatable {
+                continue;
+            }
+            let preg = crate::backend::PhysicalReg::new(
+                reg.class,
+                reg.index as u32,
+            );
+            match reg.class {
+                crate::backend::RegClass::Gpr => {
+                    if reg.is_callee_saved {
+                        callee_saved_gprs.push(preg);
+                    } else {
+                        caller_saved_gprs.push(preg);
+                    }
+                }
+                crate::backend::RegClass::SimdFp => {
+                    if reg.is_callee_saved {
+                        callee_saved_fps.push(preg);
+                    } else {
+                        caller_saved_fps.push(preg);
+                    }
+                }
+                // Condition and Special registers are not allocatable.
+                _ => {}
+            }
+        }
+
+        Self {
+            isa_name: target.name,
+            caller_saved_gprs,
+            callee_saved_gprs,
+            caller_saved_fps,
+            callee_saved_fps,
+        }
+    }
+
+    /// Create a new target-agnostic register allocator from a `TargetInfo`
+    /// trait object, using the `TargetDescRegistry` to look up the full
+    /// register description. Returns `None` if the target is not found.
+    pub fn from_target_info(
+        info: &dyn crate::backend::TargetInfo,
+        registry: &crate::target_desc::TargetDescRegistry,
+    ) -> Option<Self> {
+        registry.get(info.isa_name()).map(Self::new)
+    }
+
+    /// Returns the ISA name of this allocator.
+    pub fn isa_name(&self) -> &'static str {
+        self.isa_name
+    }
+
+    /// Total number of allocatable GPRs.
+    pub fn gpr_count(&self) -> usize {
+        self.caller_saved_gprs.len() + self.callee_saved_gprs.len()
+    }
+
+    /// Total number of allocatable SIMD/FP registers.
+    pub fn fp_count(&self) -> usize {
+        self.caller_saved_fps.len() + self.callee_saved_fps.len()
+    }
+
+    /// Run linear-scan register allocation on a single function.
+    ///
+    /// Returns a `RegAllocResult` mapping virtual registers to physical
+    /// registers, with spill slot assignments for evicted intervals.
+    pub fn allocate_function(
+        &self,
+        func: &IRFunction,
+    ) -> std::result::Result<RegAllocResult, crate::backend::BackendError> {
+        let computer = LiveRangeComputer::new();
+        let (mut intervals, _call_positions) = computer.compute(func);
+
+        // Sort by start position, then by end position (longer first).
+        intervals.sort_by(|a, b| {
+            a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
+        });
+
+        self.allocate_intervals(&intervals)
+    }
+
+    /// Run allocation with per-vreg register class overrides.
+    pub fn allocate_function_with_classes(
+        &self,
+        func: &IRFunction,
+        class_overrides: HashMap<IRValueId, RegClass>,
+    ) -> std::result::Result<RegAllocResult, crate::backend::BackendError> {
+        let mut computer = LiveRangeComputer::new();
+        for (&vreg, &class) in &class_overrides {
+            computer.set_class(vreg, class);
+        }
+        let (mut intervals, _call_positions) = computer.compute(func);
+
+        intervals.sort_by(|a, b| {
+            a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
+        });
+
+        self.allocate_intervals(&intervals)
+    }
+
+    /// Core linear-scan algorithm over sorted intervals.
+    fn allocate_intervals(
+        &self,
+        intervals: &[LiveInterval],
+    ) -> std::result::Result<RegAllocResult, crate::backend::BackendError> {
+        let mut result = RegAllocResult::new();
+
+        // Active intervals: (vreg, PhysicalReg, end_pos, weight_per_length)
+        let mut active_gprs: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
+            Vec::new();
+        let mut active_fps: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
+            Vec::new();
+
+        // Free register pools.
+        let mut free_caller_gprs = self.caller_saved_gprs.clone();
+        let mut free_callee_gprs = self.callee_saved_gprs.clone();
+        let mut free_caller_fps = self.caller_saved_fps.clone();
+        let mut free_callee_fps = self.callee_saved_fps.clone();
+
+        let mut next_spill_index: u32 = 0;
+
+        for interval in intervals {
+            // Expire old intervals.
+            Self::expire_old(
+                &mut active_gprs,
+                &mut free_caller_gprs,
+                &mut free_callee_gprs,
+                interval.start,
+            );
+            Self::expire_old(
+                &mut active_fps,
+                &mut free_caller_fps,
+                &mut free_callee_fps,
+                interval.start,
+            );
+
+            match interval.class {
+                RegClass::Gpr => {
+                    let preg = self.try_alloc_reg(
+                        interval,
+                        &mut free_caller_gprs,
+                        &mut free_callee_gprs,
+                        &mut active_gprs,
+                        &mut next_spill_index,
+                        &mut result,
+                    )?;
+                    if let Some(preg) = preg {
+                        self.assign(interval, preg, &mut result);
+                    }
+                }
+                RegClass::SimdFp => {
+                    let preg = self.try_alloc_reg(
+                        interval,
+                        &mut free_caller_fps,
+                        &mut free_callee_fps,
+                        &mut active_fps,
+                        &mut next_spill_index,
+                        &mut result,
+                    )?;
+                    if let Some(preg) = preg {
+                        self.assign(interval, preg, &mut result);
+                    }
+                }
+            }
+        }
+
+        result.live_intervals = intervals.to_vec();
+        result.total_spill_slots = next_spill_index;
+        Ok(result)
+    }
+
+    /// Try to allocate a physical register for the given interval.
+    fn try_alloc_reg(
+        &self,
+        interval: &LiveInterval,
+        free_caller: &mut Vec<crate::backend::PhysicalReg>,
+        free_callee: &mut Vec<crate::backend::PhysicalReg>,
+        active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
+        next_spill_idx: &mut u32,
+        result: &mut RegAllocResult,
+    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError> {
+        // If the interval crosses a call, prefer callee-saved.
+        let reg = if interval.crosses_call {
+            free_callee.pop().or_else(|| free_caller.pop())
+        } else {
+            free_caller.pop().or_else(|| free_callee.pop())
+        };
+
+        if let Some(r) = reg {
+            active.push((
+                interval.vreg,
+                r,
+                interval.end,
+                interval.weight_per_length(),
+            ));
+            return Ok(Some(r));
+        }
+
+        // No free register — need to spill or evict.
+        self.spill_or_evict(
+            interval,
+            active,
+            free_caller,
+            free_callee,
+            next_spill_idx,
+            result,
+        )
+    }
+
+    /// Spill the current interval or evict the least-deserving active one.
+    fn spill_or_evict(
+        &self,
+        interval: &LiveInterval,
+        active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
+        free_caller: &mut Vec<crate::backend::PhysicalReg>,
+        free_callee: &mut Vec<crate::backend::PhysicalReg>,
+        next_spill_idx: &mut u32,
+        result: &mut RegAllocResult,
+    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError> {
+        if active.is_empty() {
+            // Spill the current interval entirely.
+            let slot_idx = *next_spill_idx;
+            *next_spill_idx += 1;
+            let offset = Self::spill_offset(slot_idx, interval.class);
+            let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
+
+            Self::gen_spill_reload(interval, &slot, result);
+            result.spill_slots.insert(interval.vreg, slot);
+
+            return Ok(None);
+        }
+
+        // Find the active interval with the lowest weight per length.
+        let evict_idx = active
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                a.1 .3
+                    .cmp(&b.1 .3)
+                    .then_with(|| b.1 .2.cmp(&a.1 .2))
+            })
+            .map(|(i, _)| i)
+            .unwrap();
+
+        let (evict_vreg, evict_reg, _evict_end, evict_weight) = active[evict_idx];
+        let current_weight = interval.weight_per_length();
+
+        // If the current interval has lower weight than the best eviction
+        // candidate, spill the current interval instead.
+        if current_weight <= evict_weight {
+            let slot_idx = *next_spill_idx;
+            *next_spill_idx += 1;
+            let offset = Self::spill_offset(slot_idx, interval.class);
+            let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
+
+            Self::gen_spill_reload(interval, &slot, result);
+            result.spill_slots.insert(interval.vreg, slot);
+
+            return Ok(None);
+        }
+
+        // Evict the chosen active interval.
+        active.remove(evict_idx);
+
+        let slot_idx = *next_spill_idx;
+        *next_spill_idx += 1;
+        let offset = Self::spill_offset(slot_idx, interval.class);
+        let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
+        result.spill_slots.insert(evict_vreg, slot.clone());
+
+        // Remove the evicted vreg's physical register mapping.
+        result.vreg_to_preg.remove(&evict_vreg);
+        result.used_callee_saved.remove(&evict_reg);
+
+        // Generate eviction spill/reload code.
+        Self::gen_eviction_spill_reload(evict_vreg, evict_reg, &slot, result);
+
+        // Return the freed register to the appropriate pool.
+        if evict_reg.class == crate::backend::RegClass::Gpr {
+            // Check if it was callee-saved by looking at the callee-saved list.
+            if self.is_callee_saved(evict_reg) {
+                free_callee.push(evict_reg);
+            } else {
+                free_caller.push(evict_reg);
+            }
+        } else {
+            if self.is_callee_saved(evict_reg) {
+                free_callee.push(evict_reg);
+            } else {
+                free_caller.push(evict_reg);
+            }
+        }
+
+        active.push((
+            interval.vreg,
+            evict_reg,
+            interval.end,
+            interval.weight_per_length(),
+        ));
+        Ok(Some(evict_reg))
+    }
+
+    /// Check if a physical register is callee-saved.
+    fn is_callee_saved(&self, preg: crate::backend::PhysicalReg) -> bool {
+        self.callee_saved_gprs.contains(&preg) || self.callee_saved_fps.contains(&preg)
+    }
+
+    /// Assign a physical register to an interval, recording the mapping
+    /// for all coalesced vregs.
+    fn assign(
+        &self,
+        interval: &LiveInterval,
+        preg: crate::backend::PhysicalReg,
+        result: &mut RegAllocResult,
+    ) {
+        result.vreg_to_preg.insert(interval.vreg, preg);
+        if self.is_callee_saved(preg) {
+            result.used_callee_saved.insert(preg);
+        }
+        // Map all coalesced vregs to the same physical register.
+        for &coalesced_vreg in &interval.coalesced_vregs {
+            if coalesced_vreg != interval.vreg {
+                result.record_coalescing(coalesced_vreg, interval.vreg);
+            }
+        }
+    }
+
+    /// Expire old intervals whose end point is before `position`.
+    fn expire_old(
+        active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
+        free_caller: &mut Vec<crate::backend::PhysicalReg>,
+        free_callee: &mut Vec<crate::backend::PhysicalReg>,
+        position: u32,
+    ) {
+        let mut i = 0;
+        while i < active.len() {
+            if active[i].2 < position {
+                let (_, reg, _, _) = active.remove(i);
+                if free_callee.contains(&reg) || is_callee_saved_in(&reg, free_callee) {
+                    free_callee.push(reg);
+                } else {
+                    free_caller.push(reg);
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Calculate the stack offset for a spill slot.
+    fn spill_offset(slot_index: u32, class: RegClass) -> i32 {
+        let size: i32 = match class {
+            RegClass::Gpr => 8,
+            RegClass::SimdFp => 16,
+        };
+        -((slot_index as i32 + 1) * size)
+    }
+
+    /// Generate spill and reload code for an entirely-spilled interval.
+    fn gen_spill_reload(
+        interval: &LiveInterval,
+        slot: &GenericSpillSlot,
+        result: &mut RegAllocResult,
+    ) {
+        // Use a scratch register for spill/reload code annotation.
+        let scratch = crate::backend::PhysicalReg::new(interval.class.into(), 0);
+
+        for &def_pos in &interval.def_positions {
+            let spill = GenericSpillCode::Spill {
+                vreg: interval.vreg,
+                preg: scratch,
+                slot: slot.clone(),
+            };
+            result.spill_code.entry(def_pos + 1).or_default().push(spill);
+        }
+
+        for &use_pos in &interval.use_positions {
+            let reload = GenericSpillCode::Reload {
+                vreg: interval.vreg,
+                preg: scratch,
+                slot: slot.clone(),
+            };
+            result.spill_code.entry(use_pos).or_default().push(reload);
+        }
+    }
+
+    /// Generate spill code for an evicted interval.
+    fn gen_eviction_spill_reload(
+        evict_vreg: IRValueId,
+        evict_preg: crate::backend::PhysicalReg,
+        slot: &GenericSpillSlot,
+        result: &mut RegAllocResult,
+    ) {
+        let spill = GenericSpillCode::Spill {
+            vreg: evict_vreg,
+            preg: evict_preg,
+            slot: slot.clone(),
+        };
+        result.spill_code.entry(0).or_default().push(spill);
+    }
+}
+
+/// Check if a physical register appears in the callee-saved lists.
+#[allow(dead_code)]
+fn self_is_callee_saved(
+    _caller_gprs: &[crate::backend::PhysicalReg],
+    callee_gprs: &[crate::backend::PhysicalReg],
+    _caller_fps: &[crate::backend::PhysicalReg],
+    callee_fps: &[crate::backend::PhysicalReg],
+    preg: &crate::backend::PhysicalReg,
+) -> bool {
+    callee_gprs.contains(preg) || callee_fps.contains(preg)
+}
+
+/// Check if a register is in the callee list.
+fn is_callee_saved_in(
+    preg: &crate::backend::PhysicalReg,
+    callee: &[crate::backend::PhysicalReg],
+) -> bool {
+    callee.contains(preg)
+}
+
+/// Convert the local `RegClass` to `backend::RegClass`.
+impl From<RegClass> for crate::backend::RegClass {
+    fn from(class: RegClass) -> Self {
+        match class {
+            RegClass::Gpr => crate::backend::RegClass::Gpr,
+            RegClass::SimdFp => crate::backend::RegClass::SimdFp,
+        }
+    }
+}
+
+/// Convert `backend::RegClass` to the local `RegClass`.
+impl From<crate::backend::RegClass> for RegClass {
+    fn from(class: crate::backend::RegClass) -> Self {
+        match class {
+            crate::backend::RegClass::Gpr => RegClass::Gpr,
+            crate::backend::RegClass::SimdFp => RegClass::SimdFp,
+            crate::backend::RegClass::Condition | crate::backend::RegClass::Special => RegClass::Gpr,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Target-Agnostic Allocation Result
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The result of target-agnostic register allocation for a single function.
+///
+/// Uses `backend::PhysicalReg` (class + index) instead of target-specific
+/// register enums, making it portable across all supported ISAs.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegAllocResult {
+    /// Mapping from virtual register ID to physical register.
+    pub vreg_to_preg: HashMap<IRValueId, crate::backend::PhysicalReg>,
+    /// Mapping from virtual register ID to spill slot.
+    pub spill_slots: HashMap<IRValueId, GenericSpillSlot>,
+    /// Total number of spill slots used.
+    pub total_spill_slots: u32,
+    /// Set of callee-saved physical registers used (for prologue/epilogue).
+    pub used_callee_saved: HashSet<crate::backend::PhysicalReg>,
+    /// Spill/reload instructions to insert, keyed by instruction position.
+    pub spill_code: BTreeMap<u32, Vec<GenericSpillCode>>,
+    /// The live intervals used during allocation.
+    pub live_intervals: Vec<LiveInterval>,
+    /// Mapping from coalesced vreg IDs to their representative.
+    pub coalesced_map: HashMap<IRValueId, IRValueId>,
+}
+
+impl RegAllocResult {
+    /// Create an empty allocation result.
+    pub fn new() -> Self {
+        Self {
+            vreg_to_preg: HashMap::new(),
+            spill_slots: HashMap::new(),
+            total_spill_slots: 0,
+            used_callee_saved: HashSet::new(),
+            spill_code: BTreeMap::new(),
+            live_intervals: Vec::new(),
+            coalesced_map: HashMap::new(),
+        }
+    }
+
+    /// Look up the physical register assigned to a virtual register,
+    /// following coalescing chains.
+    pub fn get_phys_reg(&self, vreg: IRValueId) -> Option<crate::backend::PhysicalReg> {
+        if let Some(&preg) = self.vreg_to_preg.get(&vreg) {
+            return Some(preg);
+        }
+        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+        self.vreg_to_preg.get(&rep).copied()
+    }
+
+    /// Check if a virtual register is spilled.
+    pub fn is_spilled(&self, vreg: IRValueId) -> bool {
+        if self.spill_slots.contains_key(&vreg) {
+            return true;
+        }
+        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+        self.spill_slots.contains_key(&rep)
+    }
+
+    /// Get the spill slot for a virtual register.
+    pub fn spill_slot(&self, vreg: IRValueId) -> Option<&GenericSpillSlot> {
+        if let Some(slot) = self.spill_slots.get(&vreg) {
+            return Some(slot);
+        }
+        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+        self.spill_slots.get(&rep)
+    }
+
+    /// Record a coalescing: `src` was merged into `dst`'s interval.
+    pub fn record_coalescing(&mut self, src: IRValueId, dst: IRValueId) {
+        self.coalesced_map.insert(src, dst);
+    }
+
+    /// Resolve a vreg through the coalescing map.
+    pub fn resolve_vreg(&self, vreg: IRValueId) -> IRValueId {
+        self.coalesced_map.get(&vreg).copied().unwrap_or(vreg)
+    }
+
+    /// Number of callee-saved registers that must be saved in prologue.
+    pub fn callee_saved_count(&self) -> usize {
+        self.used_callee_saved.len()
+    }
+
+    /// Calculate the total frame size needed for spill slots.
+    pub fn spill_frame_bytes(&self) -> u32 {
+        self.spill_slots.values().map(|s| s.size_bytes()).sum()
+    }
+}
+
+impl Default for RegAllocResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Target-Agnostic Spill Slot
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A target-agnostic spill slot on the stack.
+///
+/// Uses `backend::RegClass` instead of the ARM64-specific `RegClass`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GenericSpillSlot {
+    /// Slot index (sequential).
+    pub index: u32,
+    /// Offset from the frame pointer in bytes (negative = deeper).
+    pub offset: i32,
+    /// The register class that occupies this slot.
+    pub class: RegClass,
+}
+
+impl GenericSpillSlot {
+    /// Create a new spill slot.
+    pub fn new(index: u32, offset: i32, class: RegClass) -> Self {
+        Self {
+            index,
+            offset,
+            class,
+        }
+    }
+
+    /// Size in bytes: 8 for GPRs, 16 for SIMD/FP registers.
+    pub fn size_bytes(&self) -> u32 {
+        match self.class {
+            RegClass::Gpr => 8,
+            RegClass::SimdFp => 16,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Target-Agnostic Spill Code
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A target-agnostic spill or reload instruction.
+///
+/// Uses `backend::PhysicalReg` and `GenericSpillSlot` so it is not tied
+/// to any specific ISA.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GenericSpillCode {
+    /// Spill (store) a register to its stack slot.
+    Spill {
+        vreg: IRValueId,
+        preg: crate::backend::PhysicalReg,
+        slot: GenericSpillSlot,
+    },
+    /// Reload (load) a register from its stack slot.
+    Reload {
+        vreg: IRValueId,
+        preg: crate::backend::PhysicalReg,
+        slot: GenericSpillSlot,
+    },
+}
+
+impl std::fmt::Display for GenericSpillCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenericSpillCode::Spill { vreg, preg, slot } => {
+                write!(
+                    f,
+                    "spill %v{} -> {:?}:{} [slot {} offset {}]",
+                    vreg, preg.class, preg.index, slot.index, slot.offset
+                )
+            }
+            GenericSpillCode::Reload { vreg, preg, slot } => {
+                write!(
+                    f,
+                    "reload %v{} <- {:?}:{} [slot {} offset {}]",
+                    vreg, preg.class, preg.index, slot.index, slot.offset
+                )
+            }
+        }
     }
 }
 

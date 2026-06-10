@@ -2463,6 +2463,15 @@ impl<'src> Parser<'src> {
     /// to any enclosing block when we're at the program level).
     fn recover_to_item_boundary(&mut self) {
         loop {
+            // `#` alone (without `[`) is not a real item starter — skip it
+            // to avoid infinite loops when `#` appears without an attribute.
+            if self.at(TokenKind::Hash) {
+                let next = self.peek_next();
+                if next.kind != TokenKind::LBracket {
+                    self.advance();
+                    continue;
+                }
+            }
             if ITEM_STARTERS.contains(&self.current.kind)
                 || self.current.kind == TokenKind::Mod
                 || (self.current.kind == TokenKind::Ident
