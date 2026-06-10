@@ -548,6 +548,8 @@ pub enum Instruction {
     Subf { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Multiply Low Word: `mullw rT, rA, rB` (XO-form, primary=31, xo=235)
     Mullw { rt: Gpr, ra: Gpr, rb: Gpr },
+    /// Multiply Low Doubleword: `mulld rT, rA, rB` (XO-form, primary=31, xo=233)
+    Mulld { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Multiply High Word: `mulhw rT, rA, rB` (X-form, primary=31, xo=75)
     Mulhw { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Multiply High Doubleword: `mulhd rT, rA, rB` (X-form, primary=31, xo=73)
@@ -708,6 +710,10 @@ impl Instruction {
             Instruction::Mullw { rt, ra, rb } => {
                 // MULLW rT, rA, rB: primary=31, OE=0, xo=235, Rc=0
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 235, 0)
+            }
+            Instruction::Mulld { rt, ra, rb } => {
+                // MULLD rT, rA, rB: primary=31, OE=0, xo=233, Rc=0
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 233, 0)
             }
             Instruction::Mulhw { rt, ra, rb } => {
                 // MULHW rT, rA, rB: primary=31, xo=75, Rc=0
@@ -1014,6 +1020,7 @@ impl Instruction {
             Instruction::Addis { .. } => "addis",
             Instruction::Subf { .. } => "subf",
             Instruction::Mullw { .. } => "mullw",
+            Instruction::Mulld { .. } => "mulld",
             Instruction::Mulhw { .. } => "mulhw",
             Instruction::Mulhd { .. } => "mulhd",
             Instruction::Divw { .. } => "divw",
@@ -1085,6 +1092,7 @@ impl fmt::Display for Instruction {
             Instruction::Addis { rt, ra, simm } => write!(f, "addis {}, {}, {}", rt, ra, simm),
             Instruction::Subf { rt, ra, rb } => write!(f, "subf {}, {}, {}", rt, ra, rb),
             Instruction::Mullw { rt, ra, rb } => write!(f, "mullw {}, {}, {}", rt, ra, rb),
+            Instruction::Mulld { rt, ra, rb } => write!(f, "mulld {}, {}, {}", rt, ra, rb),
             Instruction::Mulhw { rt, ra, rb } => write!(f, "mulhw {}, {}, {}", rt, ra, rb),
             Instruction::Mulhd { rt, ra, rb } => write!(f, "mulhd {}, {}, {}", rt, ra, rb),
             Instruction::Divw { rt, ra, rb } => write!(f, "divw {}, {}, {}", rt, ra, rb),
@@ -1443,7 +1451,7 @@ fn lower_ir_instr_ppc64(
                 }
                 BinOpKind::Mul => {
                     result.push(emit_alloc_instr(
-                        Instruction::Mullw { rt: d, ra: l, rb: r },
+                        Instruction::Mulld { rt: d, ra: l, rb: r },
                         vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
@@ -1471,7 +1479,7 @@ fn lower_ir_instr_ppc64(
                         vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
                     ));
                     result.push(emit_alloc_instr(
-                        Instruction::Mullw { rt: scratch, ra: scratch, rb: r },
+                        Instruction::Mulld { rt: scratch, ra: scratch, rb: r },
                         vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
                     ));
@@ -1571,7 +1579,7 @@ fn lower_ir_instr_ppc64(
             let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
             result.push(emit_alloc_instr(
-                Instruction::Mullw { rt: d, ra: l, rb: r },
+                Instruction::Mulld { rt: d, ra: l, rb: r },
                 vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
             ));
@@ -1600,7 +1608,9 @@ fn lower_ir_instr_ppc64(
                     ));
                 }
                 UnaryOpKind::Not => {
-                    // nor d, s, s
+                    // nor d, s, r0 → d = ~(s | r0)
+                    // Note: R0 is NOT hardwired to zero on PPC64; we use nor d, s, s
+                    // which produces ~(s | s) = ~s, the correct bitwise complement.
                     result.push(emit_alloc_instr(
                         Instruction::Nor { ra: d, rs: s, rb: s },
                         vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
@@ -1645,13 +1655,28 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Alloc { dst, size: _ } => {
+        IRInstr::Alloc { dst, size } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            // stdu r1, -size(r1) — store back chain and allocate stack space
+            let neg_size = -(*size as i32);
+            let stdu = Instruction::Std {
+                rs: Gpr::R1,
+                ra: Gpr::R1,
+                ds: neg_size,
+            };
             result.push(emit_alloc_instr(
-                Instruction::Addi { rt: d, ra: Gpr::R1, simm: 0 },
+                stdu,
                 vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
             ));
+            // Copy updated sp to dst: mr d, r1
+            if d != Gpr::R1 {
+                result.push(emit_alloc_instr(
+                    Instruction::Mr { ra: d, rs: Gpr::R1 },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Ret { values } => {
@@ -2483,5 +2508,67 @@ mod tests {
         let lines = backend.disassemble(&code, 0x10000000);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("60000000"));
+    }
+
+    // ── ISel integration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_isel_mulld_encoding() {
+        // mulld r3, r4, r5: primary=31, rT=3, rA=4, rB=5, OE=0, xo=233, Rc=0
+        let mulld = Instruction::Mulld {
+            rt: Gpr::R3,
+            ra: Gpr::R4,
+            rb: Gpr::R5,
+        };
+        let encoded = mulld.encode();
+        let word = u32::from_le_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 31, "primary opcode should be 31");
+        assert_eq!((word >> 21) & 0x1F, 3, "rT should be r3");
+        assert_eq!((word >> 16) & 0x1F, 4, "rA should be r4");
+        assert_eq!((word >> 11) & 0x1F, 5, "rB should be r5");
+        assert_eq!((word >> 1) & 0x1FF, 233, "xo should be 233 for mulld");
+    }
+
+    #[test]
+    fn test_isel_alloc_emits_stdu() {
+        // Alloc should emit stdu r1, -size(r1), not a NOP or addi
+        let backend = PPC64Backend::new();
+        let mut func = IRFunction::new("test_alloc");
+        func.blocks[0].instructions.push(IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 32,
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+        let allocated = backend.allocate_registers(&func).unwrap();
+        // Find the stdu instruction for the alloc
+        let stdu_instrs: Vec<_> = allocated
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| i.opcode == "stdu")
+            .collect();
+        assert!(
+            !stdu_instrs.is_empty(),
+            "alloc should emit at least one stdu instruction"
+        );
+        // The stdu encoded bytes should not be a NOP (0x60000000)
+        let stdu_encoded = &stdu_instrs[0].encoded;
+        let word = u32::from_le_bytes([stdu_encoded[0], stdu_encoded[1], stdu_encoded[2], stdu_encoded[3]]);
+        assert_ne!(word, 0x60000000, "stdu should not encode as NOP");
+    }
+
+    #[test]
+    fn test_isel_neg_encoding() {
+        // neg r3, r4: primary=31, rT=3, rA=4, rB=0, OE=0, xo=104, Rc=0
+        let neg = Instruction::Neg {
+            rt: Gpr::R3,
+            ra: Gpr::R4,
+        };
+        let encoded = neg.encode();
+        let word = u32::from_le_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 31, "primary opcode should be 31");
+        assert_eq!((word >> 21) & 0x1F, 3, "rT should be r3");
+        assert_eq!((word >> 16) & 0x1F, 4, "rA should be r4");
+        assert_eq!((word >> 1) & 0x1FF, 104, "xo should be 104 for neg");
     }
 }

@@ -1487,6 +1487,87 @@ fn vreg_id(val: &IRValue) -> u32 {
     }
 }
 
+/// Load a 64-bit immediate into a register using the lu12i.w/ori/lu32i.d/lu52i.d
+/// instruction sequence.
+///
+/// Returns the list of AllocatedInstructions emitted to perform the load.
+fn load_imm_la64(rd: Gpr, imm: i64) -> Vec<AllocatedInstruction> {
+    let mut result = Vec::new();
+    let val = imm as u64;
+
+    // lu12i.w rd, bits[31:12]
+    let hi20 = ((val >> 12) & 0xFFFFF) as i32;
+    result.push(emit_alloc_instr(
+        Instruction::Lu12iW { rd, imm20: hi20 },
+        vec![],
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+    ));
+
+    // ori rd, rd, bits[11:0]
+    let lo12 = (val & 0xFFF) as u32;
+    result.push(emit_alloc_instr(
+        Instruction::Ori { rd, rj: rd, imm12: lo12 },
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+    ));
+
+    // lu32i.d rd, bits[51:32]
+    let hi32 = ((val >> 32) & 0xFFFFF) as i32;
+    result.push(emit_alloc_instr(
+        Instruction::Lu32iD { rd, imm20: hi32 },
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+    ));
+
+    // lu52i.d rd, rd, bits[63:52]
+    let hi52 = ((val >> 52) & 0xFFF) as i32;
+    result.push(emit_alloc_instr(
+        Instruction::Lu52iD { rd, rj: rd, imm12: hi52 },
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+    ));
+
+    result
+}
+
+/// Resolve an IRValue to a physical GPR.
+///
+/// - For `IRValue::Register`: looks up in `vreg_map`.
+/// - For `IRValue::Immediate`: loads the value into `scratch` and returns
+///   `(scratch, instructions)`.
+/// - For `IRValue::Address`: loads the address into `scratch`.
+/// - For `IRValue::Label`: loads a placeholder into `scratch`.
+fn resolve_gpr_la64(
+    val: &IRValue,
+    vreg_map: &mut std::collections::HashMap<u32, Gpr>,
+    scratch: Gpr,
+) -> (Gpr, Vec<AllocatedInstruction>) {
+    match val {
+        IRValue::Register(id) => {
+            let reg = map_vreg_to_gpr(*id, None, vreg_map);
+            (reg, Vec::new())
+        }
+        IRValue::Immediate(imm) => {
+            let code = load_imm_la64(scratch, *imm);
+            (scratch, code)
+        }
+        IRValue::Address(addr) => {
+            let code = load_imm_la64(scratch, *addr as i64);
+            (scratch, code)
+        }
+        IRValue::Label(_) => {
+            // Labels need relocation; emit a placeholder load
+            let code = load_imm_la64(scratch, 0);
+            (scratch, code)
+        }
+    }
+}
+
+/// Check if an immediate value fits in a signed 12-bit range (for addi.d/slti/etc.).
+fn fits_si12(val: i64) -> bool {
+    (-2048..=2047).contains(&val)
+}
+
 /// Emit a single AllocatedInstruction from a LoongArch64 Instruction.
 fn emit_alloc_instr(inst: Instruction, reads: Vec<PhysicalReg>, writes: Vec<PhysicalReg>) -> AllocatedInstruction {
     AllocatedInstruction {
@@ -1630,111 +1711,293 @@ fn lower_binop_cmp_la64(op: &BinOpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<All
     lower_cmp_la64(&kind, dst, lhs, rhs)
 }
 
-/// Lower a BinOp to LoongArch64 instructions.
+/// Lower a BinOp to LoongArch64 instructions with immediate-form optimisations.
 fn lower_binop_la64(op: &BinOpKind, dst: &IRValue, lhs: &IRValue, rhs: &IRValue, vreg_map: &mut std::collections::HashMap<u32, Gpr>) -> Vec<AllocatedInstruction> {
     let mut result = Vec::new();
     let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-    let lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-    let rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+    let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+    result.extend(code);
 
     match op {
         BinOpKind::Add => {
-            result.push(emit_alloc_instr(
-                Instruction::AddD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if fits_si12(*imm) {
+                    // addi.d dst, l, imm
+                    result.push(emit_alloc_instr(
+                        Instruction::AddiD { rd: dst_reg, rj: l, imm12: *imm as i32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::AddD { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::AddD { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::Sub => {
-            result.push(emit_alloc_instr(
-                Instruction::SubD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if fits_si12(*imm) {
+                    // addi.d dst, l, -imm
+                    result.push(emit_alloc_instr(
+                        Instruction::AddiD { rd: dst_reg, rj: l, imm12: -(*imm as i32) },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::SubD { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::SubD { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::Mul => {
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
-                Instruction::MulD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
+                Instruction::MulD { rd: dst_reg, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));
         }
         BinOpKind::SDiv => {
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
-                Instruction::DivD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
+                Instruction::DivD { rd: dst_reg, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));
         }
         BinOpKind::UDiv => {
-            // LoongArch64 doesn't have unsigned div.d; use div.d as approximation
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
+            // LoongArch64 div.du is not in our instruction enum; use div.d as approximation
             result.push(emit_alloc_instr(
-                Instruction::DivD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
+                Instruction::DivD { rd: dst_reg, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));
         }
         BinOpKind::SRem => {
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
-                Instruction::ModD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
+                Instruction::ModD { rd: dst_reg, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));
         }
         BinOpKind::URem => {
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
-                Instruction::ModD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
+                Instruction::ModD { rd: dst_reg, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));
         }
         BinOpKind::And => {
-            result.push(emit_alloc_instr(
-                Instruction::And { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if (*imm as u64) & 0xFFF == *imm as u64 && *imm >= 0 {
+                    // andi dst, l, imm12 (unsigned 12-bit)
+                    result.push(emit_alloc_instr(
+                        Instruction::Andi { rd: dst_reg, rj: l, imm12: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::And { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::And { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::Or => {
-            result.push(emit_alloc_instr(
-                Instruction::Or { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if (*imm as u64) & 0xFFF == *imm as u64 && *imm >= 0 {
+                    result.push(emit_alloc_instr(
+                        Instruction::Ori { rd: dst_reg, rj: l, imm12: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::Or { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::Or { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::Xor => {
-            result.push(emit_alloc_instr(
-                Instruction::Xor { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if *imm == -1 {
+                    // xori dst, l, -1 => NOT via xori with 0xFFF
+                    result.push(emit_alloc_instr(
+                        Instruction::Xori { rd: dst_reg, rj: l, imm12: 0xFFF },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else if (*imm as u64) & 0xFFF == *imm as u64 && *imm >= 0 {
+                    result.push(emit_alloc_instr(
+                        Instruction::Xori { rd: dst_reg, rj: l, imm12: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::Xor { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::Xor { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::Shl => {
-            result.push(emit_alloc_instr(
-                Instruction::SllD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if *imm >= 0 && *imm < 64 {
+                    result.push(emit_alloc_instr(
+                        Instruction::SlliD { rd: dst_reg, rj: l, imm8: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::SllD { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::SllD { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::ShrL => {
-            result.push(emit_alloc_instr(
-                Instruction::SrlD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if *imm >= 0 && *imm < 64 {
+                    result.push(emit_alloc_instr(
+                        Instruction::SrliD { rd: dst_reg, rj: l, imm8: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::SrlD { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::SrlD { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         BinOpKind::ShrA => {
-            result.push(emit_alloc_instr(
-                Instruction::SraD { rd: dst_reg, rj: lhs_reg, rk: rhs_reg },
-                vec![PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()), PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-            ));
+            if let IRValue::Immediate(imm) = rhs {
+                if *imm >= 0 && *imm < 64 {
+                    result.push(emit_alloc_instr(
+                        Instruction::SraiD { rd: dst_reg, rj: l, imm8: *imm as u32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::SraD { rd: dst_reg, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::SraD { rd: dst_reg, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                ));
+            }
         }
         // Comparison BinOps
         BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
         | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
         | BinOpKind::Eq | BinOpKind::Ne => {
-            result.extend(lower_binop_cmp_la64(op, dst_reg, lhs_reg, rhs_reg));
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
+            result.extend(lower_binop_cmp_la64(op, dst_reg, l, r));
         }
     }
     result
@@ -1754,30 +2017,73 @@ fn lower_ir_instr_la64(
 
         IRInstr::Add { dst, lhs, rhs } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
-            result.push(emit_alloc_instr(
-                Instruction::AddD { rd: d, rj: l, rk: r },
-                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-            ));
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            if let IRValue::Immediate(imm) = rhs {
+                if fits_si12(*imm) {
+                    result.push(emit_alloc_instr(
+                        Instruction::AddiD { rd: d, rj: l, imm12: *imm as i32 },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::AddD { rd: d, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::AddD { rd: d, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Sub { dst, lhs, rhs } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
-            result.push(emit_alloc_instr(
-                Instruction::SubD { rd: d, rj: l, rk: r },
-                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-            ));
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            if let IRValue::Immediate(imm) = rhs {
+                if fits_si12(*imm) {
+                    // sub dst, l, imm => addi.d dst, l, -imm
+                    result.push(emit_alloc_instr(
+                        Instruction::AddiD { rd: d, rj: l, imm12: -(*imm as i32) },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                } else {
+                    let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                    result.extend(pre);
+                    result.push(emit_alloc_instr(
+                        Instruction::SubD { rd: d, rj: l, rk: r },
+                        vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+            } else {
+                let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+                result.extend(pre);
+                result.push(emit_alloc_instr(
+                    Instruction::SubD { rd: d, rj: l, rk: r },
+                    vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Mul { dst, lhs, rhs } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
                 Instruction::MulD { rd: d, rj: l, rk: r },
                 vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
@@ -1787,8 +2093,10 @@ fn lower_ir_instr_la64(
 
         IRInstr::Div { dst, lhs, rhs } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
                 Instruction::DivD { rd: d, rj: l, rk: r },
                 vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
@@ -1798,7 +2106,8 @@ fn lower_ir_instr_la64(
 
         IRInstr::UnaryOp { op, dst, operand } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let s = map_vreg_to_gpr(vreg_id(operand), None, vreg_map);
+            let (s, code) = resolve_gpr_la64(operand, vreg_map, Gpr::T0);
+            result.extend(code);
             match op {
                 UnaryOpKind::Neg => {
                     // sub.d d, $r0, s
@@ -1816,7 +2125,19 @@ fn lower_ir_instr_la64(
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
                 }
-                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                UnaryOpKind::Clz => {
+                    // Count leading zeros using clo.d + adjustment
+                    // LoongArch has no direct clz; use clo.d (count leading ones) on
+                    // the inverted value: clz(x) = clo(~x)
+                    // For now, emit: nor d, $r0, s; then a placeholder
+                    result.push(emit_alloc_instr(
+                        Instruction::Nor { rd: d, rj: Gpr::R0, rk: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                    // TODO: actual clo.d when Instruction enum gains it
+                }
+                UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
                     // Placeholder: move operand to dst
                     result.push(emit_alloc_instr(
                         Instruction::AddD { rd: d, rj: s, rk: Gpr::R0 },
@@ -1829,14 +2150,17 @@ fn lower_ir_instr_la64(
 
         IRInstr::Cmp { kind, dst, lhs, rhs } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let l = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
-            let r = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.extend(lower_cmp_la64(kind, d, l, r));
         }
 
         IRInstr::Load { dst, addr } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let a = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
+            let (a, code) = resolve_gpr_la64(addr, vreg_map, Gpr::T0);
+            result.extend(code);
             result.push(emit_alloc_instr(
                 Instruction::LdD { rd: d, rj: a, imm12: 0 },
                 vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
@@ -1845,8 +2169,10 @@ fn lower_ir_instr_la64(
         }
 
         IRInstr::Store { value, addr } => {
-            let v = map_vreg_to_gpr(vreg_id(value), None, vreg_map);
-            let a = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
+            let (v, code) = resolve_gpr_la64(value, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (a, pre) = resolve_gpr_la64(addr, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
                 Instruction::StD { rd: v, rj: a, imm12: 0 },
                 vec![PhysicalReg::new(RegClass::Gpr, a.encoding()), PhysicalReg::new(RegClass::Gpr, v.encoding())],
@@ -1856,7 +2182,7 @@ fn lower_ir_instr_la64(
 
         IRInstr::Alloc { dst, size: _ } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // Placeholder: point to frame pointer area
+            // addi.d d, $fp, 0 (point to frame pointer area)
             result.push(emit_alloc_instr(
                 Instruction::AddiD { rd: d, rj: Gpr::Fp, imm12: 0 },
                 vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
@@ -1867,7 +2193,8 @@ fn lower_ir_instr_la64(
         IRInstr::Ret { values } => {
             // Move return value to $a0 if present
             if let Some(val) = values.first() {
-                let v = map_vreg_to_gpr(vreg_id(val), None, vreg_map);
+                let (v, code) = resolve_gpr_la64(val, vreg_map, Gpr::T0);
+                result.extend(code);
                 if v != Gpr::A0 {
                     result.push(emit_alloc_instr(
                         Instruction::AddD { rd: Gpr::A0, rj: v, rk: Gpr::R0 },
@@ -1876,9 +2203,7 @@ fn lower_ir_instr_la64(
                     ));
                 }
             }
-            // Epilogue: ld.d $fp, $sp, fs-16; ld.d $ra, $sp, fs-8; addi.d $sp, $sp, fs; jirl $r0, $ra, 0
-            // Note: the frame size is not available here; the epilogue is already in the main function.
-            // For Ret, we just do the return jump.
+            // jirl $r0, $ra, 0 (return)
             result.push(emit_alloc_instr(
                 Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 },
                 vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
@@ -1890,7 +2215,8 @@ fn lower_ir_instr_la64(
             // Move args to argument registers, then bl
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {
-                    let a = map_vreg_to_gpr(vreg_id(arg), None, vreg_map);
+                    let (a, code) = resolve_gpr_la64(arg, vreg_map, Gpr::T0);
+                    result.extend(code);
                     if a != arg_reg {
                         result.push(emit_alloc_instr(
                             Instruction::AddD { rd: arg_reg, rj: a, rk: Gpr::R0 },
@@ -1928,7 +2254,8 @@ fn lower_ir_instr_la64(
         }
 
         IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
-            let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
+            let (c, code) = resolve_gpr_la64(cond, vreg_map, Gpr::T0);
+            result.extend(code);
             // bnez c, true_target; b false_target
             result.push(emit_alloc_instr(
                 Instruction::Bnez { rj: c, offs21: 8 },
@@ -1944,7 +2271,8 @@ fn lower_ir_instr_la64(
 
         IRInstr::Cast { dst, src, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let s = map_vreg_to_gpr(vreg_id(src), None, vreg_map);
+            let (s, code) = resolve_gpr_la64(src, vreg_map, Gpr::T0);
+            result.extend(code);
             if d != s {
                 result.push(emit_alloc_instr(
                     Instruction::AddD { rd: d, rj: s, rk: Gpr::R0 },
@@ -1956,9 +2284,12 @@ fn lower_ir_instr_la64(
 
         IRInstr::Select { dst, cond, true_val, false_val } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
-            let tv = map_vreg_to_gpr(vreg_id(true_val), None, vreg_map);
-            let fv = map_vreg_to_gpr(vreg_id(false_val), None, vreg_map);
+            let (c, code) = resolve_gpr_la64(cond, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (fv, pre_fv) = resolve_gpr_la64(false_val, vreg_map, Gpr::T1);
+            result.extend(pre_fv);
+            let (tv, pre_tv) = resolve_gpr_la64(true_val, vreg_map, Gpr::T2);
+            result.extend(pre_tv);
             // Move false_val to dst; beqz cond, +8; move true_val to dst
             if fv != d {
                 result.push(emit_alloc_instr(
@@ -1981,8 +2312,10 @@ fn lower_ir_instr_la64(
 
         IRInstr::Offset { dst, base, offset } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            let b = map_vreg_to_gpr(vreg_id(base), None, vreg_map);
-            let o = map_vreg_to_gpr(vreg_id(offset), None, vreg_map);
+            let (b, code) = resolve_gpr_la64(base, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (o, pre) = resolve_gpr_la64(offset, vreg_map, Gpr::T1);
+            result.extend(pre);
             result.push(emit_alloc_instr(
                 Instruction::AddD { rd: d, rj: b, rk: o },
                 vec![PhysicalReg::new(RegClass::Gpr, b.encoding()), PhysicalReg::new(RegClass::Gpr, o.encoding())],
@@ -2598,5 +2931,163 @@ mod tests {
         // Check e_machine at offset 18 (2 bytes)
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
         assert_eq!(e_machine, 258); // EM_LOONGARCH
+    }
+
+    // ── ISel (instruction selection) tests ──────────────────────────────
+
+    /// Helper: build a minimal IR function with a single instruction.
+    fn make_ir_func(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
+        use crate::ir::{IRBlock, IRValue};
+        use std::collections::HashSet;
+        IRFunction {
+            name: name.to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: instrs,
+                terminator: crate::ir::IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_isel_add_with_immediate_si12() {
+        // dst = lhs + 10 should emit addi.d
+        let func = make_ir_func("add_imm", vec![
+            IRInstr::Add {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(10),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // Should contain an "addi.d" instruction (not just "add.d")
+        let has_addi = result.blocks[0].instructions.iter().any(|i| i.opcode == "addi.d");
+        assert!(has_addi, "expected addi.d for small immediate add, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_sub_with_immediate_si12() {
+        // dst = lhs - 5 should emit addi.d with negated immediate
+        let func = make_ir_func("sub_imm", vec![
+            IRInstr::Sub {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(5),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_addi = result.blocks[0].instructions.iter().any(|i| i.opcode == "addi.d");
+        assert!(has_addi, "expected addi.d for small immediate sub, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_neg_is_sub_from_zero() {
+        // Neg: dst = -operand => sub.d dst, $r0, src
+        let func = make_ir_func("neg", vec![
+            IRInstr::UnaryOp {
+                op: UnaryOpKind::Neg,
+                dst: IRValue::Register(0),
+                operand: IRValue::Register(1),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_sub = result.blocks[0].instructions.iter().any(|i| i.opcode == "sub.d");
+        assert!(has_sub, "expected sub.d for neg, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_not_is_nor_from_zero() {
+        // Not: dst = ~operand => nor dst, $r0, src
+        let func = make_ir_func("not", vec![
+            IRInstr::UnaryOp {
+                op: UnaryOpKind::Not,
+                dst: IRValue::Register(0),
+                operand: IRValue::Register(1),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_nor = result.blocks[0].instructions.iter().any(|i| i.opcode == "nor");
+        assert!(has_nor, "expected nor for not, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_cmp_slt_emits_slt() {
+        // Cmp SLt: dst = (lhs < rhs) => slt dst, lhs, rhs
+        let func = make_ir_func("cmp_slt", vec![
+            IRInstr::Cmp {
+                kind: CmpKind::SLt,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_slt = result.blocks[0].instructions.iter().any(|i| i.opcode == "slt");
+        assert!(has_slt, "expected slt for signed less-than, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_load_immediate_emits_lu12i() {
+        // Adding with a large immediate should emit lu12i.w to load the constant
+        let func = make_ir_func("add_big_imm", vec![
+            IRInstr::Add {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(100000),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_lu12i = result.blocks[0].instructions.iter().any(|i| i.opcode == "lu12i.w");
+        assert!(has_lu12i, "expected lu12i.w for large immediate load, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_shift_by_immediate_emits_slli() {
+        // BinOp Shl with immediate should emit slli.d
+        let func = make_ir_func("shl_imm", vec![
+            IRInstr::BinOp {
+                op: BinOpKind::Shl,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(3),
+            },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_slli = result.blocks[0].instructions.iter().any(|i| i.opcode == "slli.d");
+        assert!(has_slli, "expected slli.d for shift-by-immediate, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_isel_ret_emits_jirl() {
+        // Ret should emit jirl $r0, $ra, 0
+        let func = make_ir_func("ret_test", vec![
+            IRInstr::Ret { values: vec![] },
+        ]);
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_jirl = result.blocks[0].instructions.iter().any(|i| i.opcode == "jirl");
+        assert!(has_jirl, "expected jirl for ret, got opcodes: {:?}",
+            result.blocks[0].instructions.iter().map(|i| &i.opcode).collect::<Vec<_>>());
     }
 }

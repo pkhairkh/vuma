@@ -1907,36 +1907,63 @@ impl Backend for Arm32Backend {
                     crate::ir::IRInstr::Cast { dst, src, .. } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
                         let s = reg_map.get(&src.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
-                        let mut code = Vec::new();
+                        // Bitwise reinterpret: just move the register
                         if s != d {
-                            code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), s.encoding()));
+                            Instruction::Mov { rd: d, rm: s, cond: Condition::Al }.encode().to_vec()
+                        } else {
+                            Vec::new()
                         }
-                        code
                     }
                     crate::ir::IRInstr::Select { dst, cond, true_val, false_val } => {
+                        // dst = if cond != 0 { true_val } else { false_val }
+                        // Lowered as: MOV dst, false_val; CMP cond, #0; MOVNE dst, true_val
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
                         let c = reg_map.get(&cond.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
                         let tv = reg_map.get(&true_val.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R2);
                         let fv = reg_map.get(&false_val.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R3);
                         let mut code = Vec::new();
-                        // MOV d, fv; CMP c, #0; MOVNE d, tv
+                        // MOV dst, fv
                         if fv != d {
-                            code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_MOV, false, 0, d.encoding(), fv.encoding()));
+                            code.extend_from_slice(&Instruction::Mov { rd: d, rm: fv, cond: Condition::Al }.encode());
                         }
-                        code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_CMP, true, c.encoding(), 0, 0, 0));
-                        code.extend_from_slice(&encode_dp_reg(Condition::Ne, DP_MOV, false, 0, d.encoding(), tv.encoding()));
+                        // CMP c, #0
+                        code.extend_from_slice(&Instruction::CmpImm { rn: c, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
+                        // MOVNE dst, tv
+                        code.extend_from_slice(&Instruction::Mov { rd: d, rm: tv, cond: Condition::Ne }.encode());
                         code
                     }
                     crate::ir::IRInstr::Offset { dst, base, offset } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
                         let b = reg_map.get(&base.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R1);
-                        let o = reg_map.get(&offset.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R2);
-                        encode_dp_reg(Condition::Al, DP_ADD, false, b.encoding(), d.encoding(), o.encoding()).to_vec()
+                        let mut code = Vec::new();
+                        match offset {
+                            crate::ir::IRValue::Immediate(imm) => {
+                                let off = *imm as u32;
+                                // ADD d, b, #off
+                                code.extend_from_slice(&Instruction::AddImm { rd: d, rn: b, rotate: 0, imm8: off & 0xFF, cond: Condition::Al }.encode());
+                            }
+                            _ => {
+                                let o = reg_map.get(&offset.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R2);
+                                if b != d {
+                                    code.extend_from_slice(&Instruction::Mov { rd: d, rm: b, cond: Condition::Al }.encode());
+                                }
+                                code.extend_from_slice(&Instruction::Add { rd: d, rn: d, rm: o, cond: Condition::Al }.encode());
+                            }
+                        }
+                        code
                     }
                     crate::ir::IRInstr::GetAddress { dst, name: _ } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::R0);
-                        // Placeholder: MOV d, #0
-                        encode_dp_imm(Condition::Al, DP_MOV, false, 0, d.encoding(), 0, 0).to_vec()
+                        // Placeholder: load 0 as the address (relocation needed at link time)
+                        Instruction::MovImm { rd: d, rotate: 0, imm8: 0, cond: Condition::Al }.encode().to_vec()
+                    }
+                    crate::ir::IRInstr::Free { ptr: _ } => {
+                        // Free is lowered to a runtime call; emit a NOP as placeholder
+                        Instruction::Nop.encode().to_vec()
+                    }
+                    crate::ir::IRInstr::Phi { .. } => {
+                        // Phi nodes are eliminated during register allocation; no code to emit
+                        Vec::new()
                     }
                     crate::ir::IRInstr::Ret { values } => {
                         let mut code = Vec::new();
@@ -1957,10 +1984,7 @@ impl Backend for Arm32Backend {
                         code.extend_from_slice(&encode_ldm(Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8800));
                         code
                     }
-                    _ => {
-                        // For unhandled instructions, emit a NOP
-                        Instruction::Nop.encode().to_vec()
-                    }
+
                 };
 
                 encoded_instrs.push(AllocatedInstruction {

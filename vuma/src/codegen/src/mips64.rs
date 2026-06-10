@@ -1848,15 +1848,35 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Alloc { dst, size: _ } => {
+        IRInstr::Alloc { dst, size } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // Alloc is handled by stack frame computation; emit a placeholder.
+            // Adjust stack pointer: daddiu $sp, $sp, -size
+            let neg_size = -(*size as i32);
+            let daddiu = Instruction::Daddiu {
+                rt: Gpr::Sp,
+                rs: Gpr::Sp,
+                imm: neg_size,
+            };
             result.push(AllocatedInstruction {
-                opcode: "alloc".to_string(),
-                reads: vec![],
-                writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-                encoded: encode_nop().to_vec(),
+                opcode: "daddiu".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                encoded: daddiu.encode().to_vec(),
             });
+            // Copy updated $sp to dst: daddu dst, $sp, $zero
+            if dst_reg != Gpr::Sp {
+                let mov_sp = Instruction::Daddu {
+                    rd: dst_reg,
+                    rs: Gpr::Sp,
+                    rt: Gpr::Zero,
+                };
+                result.push(AllocatedInstruction {
+                    opcode: "daddu".to_string(),
+                    reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                    encoded: mov_sp.encode().to_vec(),
+                });
+            }
         }
 
         IRInstr::Ret { values } => {
@@ -2022,7 +2042,8 @@ fn lower_ir_instr(
                     });
                 }
                 UnaryOpKind::Not => {
-                    let not = Instruction::Nor { rd: dst_reg, rs: Gpr::Zero, rt: src_reg };
+                    // nor dst, src, $zero → dst = ~(src | 0) = ~src
+                    let not = Instruction::Nor { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
                     result.push(AllocatedInstruction {
                         opcode: "nor".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
@@ -2746,5 +2767,67 @@ mod tests {
             offset: 8,
         };
         assert_eq!(format!("{}", beq), "beq $a0, $zero, +8");
+    }
+
+    // ── ISel integration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_isel_alloc_emits_daddiu() {
+        // Alloc should emit daddiu $sp, $sp, -size (not a NOP)
+        let backend = Mips64Backend::new();
+        let mut func = IRFunction::new("test_alloc");
+        func.blocks[0].instructions.push(IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 32,
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+        let allocated = backend.allocate_registers(&func).unwrap();
+        // Find the daddiu instruction for the alloc (not the prologue one)
+        let alloc_instrs: Vec<_> = allocated
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| i.opcode == "daddiu")
+            .collect();
+        // Should have at least the prologue daddiu and the alloc daddiu
+        assert!(
+            alloc_instrs.len() >= 2,
+            "expected at least 2 daddiu instructions (prologue + alloc), got {}",
+            alloc_instrs.len()
+        );
+        // The alloc daddiu should not be a NOP (0x00000000)
+        let alloc_encoded = &alloc_instrs[1].encoded;
+        let word = u32::from_be_bytes([alloc_encoded[0], alloc_encoded[1], alloc_encoded[2], alloc_encoded[3]]);
+        assert_ne!(word, 0, "alloc daddiu should not encode as NOP");
+    }
+
+    #[test]
+    fn test_isel_neg_emits_dsubu() {
+        // Neg should emit dsubu dst, $zero, src
+        let neg = Instruction::Dsubu {
+            rd: Gpr::V0,
+            rs: Gpr::Zero,
+            rt: Gpr::A0,
+        };
+        let encoded = neg.encode();
+        let word = u32::from_be_bytes(encoded);
+        // dsubu is R-type: opcode=0, rs=$zero(0), rt=$a0(4), rd=$v0(2), sa=0, funct=0x2F
+        let expected: u32 = (0 << 26) | (0 << 21) | (4 << 16) | (2 << 11) | (0 << 6) | 0x2F;
+        assert_eq!(word, expected, "neg (dsubu dst, $zero, src) encoding mismatch");
+    }
+
+    #[test]
+    fn test_isel_not_emits_nor() {
+        // Not should emit nor dst, src, $zero → ~(src | 0) = ~src
+        let not = Instruction::Nor {
+            rd: Gpr::V0,
+            rs: Gpr::A0,
+            rt: Gpr::Zero,
+        };
+        let encoded = not.encode();
+        let word = u32::from_be_bytes(encoded);
+        // nor is R-type: opcode=0, rs=$a0(4), rt=$zero(0), rd=$v0(2), sa=0, funct=0x27
+        let expected: u32 = (0 << 26) | (4 << 21) | (0 << 16) | (2 << 11) | (0 << 6) | 0x27;
+        assert_eq!(word, expected, "not (nor dst, src, $zero) encoding mismatch");
     }
 }

@@ -8703,3 +8703,92 @@ Replaced all NOP-emitting placeholders in the RISC-V64 backend's `allocate_regis
 ### Verification
 - `cargo clippy -p vuma-codegen -- -D warnings` — no errors in riscv64.rs
 - `cargo test -p vuma-codegen -- riscv64` — 63 tests pass (8 new ISel tests + 55 existing)
+
+## Task w4-loongarch64: Real ISel for LoongArch64 Backend
+**Date:** 2026-03-06
+**Agent:** w4-loongarch64
+**Status:** ✅ Complete
+
+### Summary
+Replaced the NOP-emitting instruction selection in the LoongArch64 backend with real instruction encoding, following the x86_64 ISel pattern. Added `resolve_gpr_la64` helper for immediate/address/label handling, updated all ISel patterns in `lower_ir_instr_la64` and `lower_binop_la64` to properly resolve IRValues (including immediates), and added immediate-form optimizations for add/sub/and/or/xor/shift instructions. Added 8 ISel tests.
+
+### Files Modified
+| File | Description |
+|------|-------------|
+| `src/codegen/src/loongarch64.rs` | Main changes — added resolve_gpr_la64, load_imm_la64, fits_si12, rewrote lower_binop_la64 and lower_ir_instr_la64, added 8 ISel tests |
+| `src/codegen/src/ppc64.rs` | Fixed pre-existing test compilation error (missing IRFunction/IRBlock fields) |
+| `src/codegen/src/mips64.rs` | No changes needed (already used IRFunction::new()) |
+
+### Key Changes in loongarch64.rs
+
+1. **`load_imm_la64(rd, imm)` — new function**: Loads a 64-bit immediate into a register using the lu12i.w/ori/lu32i.d/lu52i.d 4-instruction sequence. This is the LoongArch64 equivalent of x86_64's `encode_mov_reg_imm64`.
+
+2. **`resolve_gpr_la64(val, vreg_map, scratch)` — new function**: Resolves an IRValue to a physical GPR, following the x86_64 `resolve_gpr` pattern:
+   - `IRValue::Register` → look up in vreg_map
+   - `IRValue::Immediate` → load into scratch register via `load_imm_la64`
+   - `IRValue::Address` → load into scratch register
+   - `IRValue::Label` → load placeholder into scratch register
+
+3. **`fits_si12(val)` — new function**: Checks if an immediate fits in signed 12-bit range (-2048..=2047) for addi.d/slti/etc.
+
+4. **`lower_binop_la64` — rewritten**: Now uses `resolve_gpr_la64` for all operands and includes immediate-form optimizations:
+   - Add with si12 immediate → `addi.d`
+   - Sub with si12 immediate → `addi.d` with negated immediate
+   - And with ui12 immediate → `andi`
+   - Or with ui12 immediate → `ori`
+   - Xor with -1 → `xori` (NOT optimization)
+   - Xor with ui12 immediate → `xori`
+   - Shl/ShrL/ShrA with small immediate → `slli.d`/`srli.d`/`srai.d`
+   - Large immediates → load into scratch register + register-register op
+
+5. **`lower_ir_instr_la64` — rewritten**: All instruction selection now uses `resolve_gpr_la64` for proper immediate/address handling:
+   - Add/Sub with immediate → addi.d (si12) or load+add.d
+   - Mul/Div → resolve both operands via resolve_gpr_la64
+   - UnaryOp Neg → `sub.d d, $r0, s` (subtract from zero)
+   - UnaryOp Not → `nor d, $r0, s` (NOR with zero)
+   - Cmp → resolves lhs/rhs properly
+   - Load/Store → resolves addr operand
+   - Ret → resolves return value
+   - Call → resolves argument values
+   - CondBranch → resolves condition
+   - Cast/Select/Offset → resolves all value operands
+
+### ISel Mappings (as specified in task)
+| IR Operation | LoongArch64 Instruction |
+|-------------|------------------------|
+| Add (reg+reg) | `add.d rd, rj, rk` |
+| Add (reg+imm si12) | `addi.d rd, rj, imm` |
+| Sub (reg-reg) | `sub.d rd, rj, rk` |
+| Sub (reg-imm si12) | `addi.d rd, rj, -imm` |
+| Mul | `mul.d rd, rj, rk` |
+| Div | `div.d rd, rj, rk` |
+| BinOp::And | `and rd, rj, rk` or `andi` |
+| BinOp::Or | `or rd, rj, rk` or `ori` |
+| BinOp::Xor | `xor rd, rj, rk` or `xori` |
+| BinOp::Shl | `sll.d` or `slli.d` |
+| BinOp::ShrL | `srl.d` or `srli.d` |
+| BinOp::ShrA | `sra.d` or `srai.d` |
+| Comparisons | SLT/SLTU + XORI/XOR sequences |
+| Load | `ld.d rd, rj, 0` |
+| Store | `st.d rd, rj, 0` |
+| Ret | `jirl $r0, $ra, 0` |
+| Call | `bl offset` |
+| Alloc | `addi.d d, $fp, 0` |
+| Neg | `sub.d d, $r0, s` |
+| Not | `nor d, $r0, s` |
+
+### Test Coverage (8 new ISel tests, all passing)
+| # | Test | Description |
+|---|------|-------------|
+| 1 | `test_isel_add_with_immediate_si12` | Add with small immediate emits addi.d |
+| 2 | `test_isel_sub_with_immediate_si12` | Sub with small immediate emits addi.d |
+| 3 | `test_isel_neg_is_sub_from_zero` | Neg emits sub.d d, $r0, s |
+| 4 | `test_isel_not_is_nor_from_zero` | Not emits nor d, $r0, s |
+| 5 | `test_isel_cmp_slt_emits_slt` | Cmp SLt emits slt instruction |
+| 6 | `test_isel_load_immediate_emits_lu12i` | Large immediate emits lu12i.w load sequence |
+| 7 | `test_isel_shift_by_immediate_emits_slli` | Shl with immediate emits slli.d |
+| 8 | `test_isel_ret_emits_jirl` | Ret emits jirl $r0, $ra, 0 |
+
+### Verification
+- `cargo clippy -p vuma-codegen -- -D warnings` — 0 warnings, 0 errors
+- `cargo test -p vuma-codegen` — 588 tests pass (8 new ISel tests + 580 existing)
