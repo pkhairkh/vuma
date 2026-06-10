@@ -608,16 +608,16 @@ impl VumaRepl {
         // Parse.
         let parse_start = Instant::now();
         let mut parser = Parser::new(&self.source_buffer);
-        let program = match parser.parse_program() {
-            Ok(p) => p,
-            Err(errors) => {
-                // Roll back the source buffer on parse error.
-                self.source_buffer.truncate(prev_len);
-                self.profile.parse_errors += errors.len();
-                self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
-                return Err(ReplError::ParseErrors(errors));
-            }
-        };
+        let result = parser.parse_program();
+        if result.has_errors() {
+            // Roll back the source buffer on parse error.
+            let errors = result.errors.clone();
+            self.source_buffer.truncate(prev_len);
+            self.profile.parse_errors += errors.len();
+            self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+            return Err(ReplError::ParseErrors(errors));
+        }
+        let program = result.unwrap();
         self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
 
         // Build SCG.
@@ -756,14 +756,14 @@ Expressions:
         // Parse and build SCG.
         let parse_start = Instant::now();
         let mut parser = Parser::new(&self.source_buffer);
-        let program = match parser.parse_program() {
-            Ok(p) => p,
-            Err(errors) => {
-                self.profile.parse_errors += errors.len();
-                self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
-                return Err(ReplError::ParseErrors(errors));
-            }
-        };
+        let result = parser.parse_program();
+        if result.has_errors() {
+            let errors = result.errors.clone();
+            self.profile.parse_errors += errors.len();
+            self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+            return Err(ReplError::ParseErrors(errors));
+        }
+        let program = result.unwrap();
         self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
 
         // Build SCG.
@@ -851,8 +851,11 @@ Expressions:
         // Step 2: Rebuild SCG.
         let scg_start = Instant::now();
         let mut parser = Parser::new(&self.source_buffer);
-        let program = parser.parse_program()
-            .map_err(ReplError::ParseErrors)?;
+        let result = parser.parse_program();
+        if result.has_errors() {
+            return Err(ReplError::ParseErrors(result.errors.clone()));
+        }
+        let program = result.unwrap();
         let mut converter = AstToScg::new();
         let scg = converter.convert(&program)
             .map_err(ReplError::Parse)?;

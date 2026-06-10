@@ -242,6 +242,10 @@ pub enum TokenKind {
     Fn,
     /// `let`
     Let,
+    /// `pub`
+    Pub,
+    /// `crate` (used in `pub(crate)`)
+    Crate,
     /// `ptr`
     Ptr,
     /// `region`
@@ -454,6 +458,8 @@ impl std::fmt::Display for TokenKind {
             // Keywords
             TokenKind::Fn => write!(f, "'fn'"),
             TokenKind::Let => write!(f, "'let'"),
+            TokenKind::Pub => write!(f, "'pub'"),
+            TokenKind::Crate => write!(f, "'crate'"),
             TokenKind::Ptr => write!(f, "'ptr'"),
             TokenKind::Region => write!(f, "'region'"),
             TokenKind::Alloc => write!(f, "'alloc'"),
@@ -537,6 +543,8 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         // Core
         "fn" => Some(TokenKind::Fn),
         "let" => Some(TokenKind::Let),
+        "pub" => Some(TokenKind::Pub),
+        "crate" => Some(TokenKind::Crate),
         "if" => Some(TokenKind::If),
         "else" => Some(TokenKind::Else),
         "while" => Some(TokenKind::While),

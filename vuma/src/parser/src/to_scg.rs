@@ -2568,7 +2568,7 @@ mod tests {
     /// Helper: parse source and convert to SCG.
     fn parse_and_convert(source: &str) -> SCG {
         let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
+        let program = parser.parse_program().unwrap();
         let mut converter = AstToScg::new();
         converter.convert(&program).expect("convert should succeed")
     }

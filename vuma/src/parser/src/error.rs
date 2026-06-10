@@ -574,6 +574,11 @@ impl<T> ParseResult<T> {
     pub fn unwrap(self) -> T {
         self.value.expect("ParseResult::unwrap on err")
     }
+
+    /// Unwrap the value, panicking with the given message if it is `None`.
+    pub fn expect(self, msg: &str) -> T {
+        self.value.expect(msg)
+    }
 }
 
 // ---------------------------------------------------------------------------

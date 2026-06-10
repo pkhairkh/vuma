@@ -591,34 +591,32 @@ fn cmd_repl() -> Result<(), String> {
 
         // Try to parse as a full program first.
         let mut parser = vuma_parser::Parser::new(trimmed);
-        match parser.parse_program() {
-            Ok(program) => {
-                // Successfully parsed; display the AST.
+        let result = parser.parse_program();
+        if !result.has_errors() {
+            // Successfully parsed; display the AST.
+            let program = result.unwrap();
+            println!("{:#?}", program);
+            continue;
+        }
+        // Program parse had errors; try to parse as an expression via
+        // wrapping it in a dummy program context.
+        let program_errors = result.errors.clone();
+        // Since parse_expr is private, we re-parse as a minimal program.
+        let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
+        let mut expr_parser = vuma_parser::Parser::new(&wrapped);
+        let expr_result = expr_parser.parse_program();
+        if !expr_result.has_errors() {
+            // Print the function body AST.
+            let program = expr_result.unwrap();
+            if let Some(item) = program.items.first() {
+                println!("{:#?}", item);
+            } else {
                 println!("{:#?}", program);
-                continue;
             }
-            Err(program_errors) => {
-                // Program parse failed; try to parse as an expression via
-                // wrapping it in a dummy program context.
-                // Since parse_expr is private, we re-parse as a minimal program.
-                let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
-                let mut expr_parser = vuma_parser::Parser::new(&wrapped);
-                match expr_parser.parse_program() {
-                    Ok(program) => {
-                        // Print the function body AST.
-                        if let Some(item) = program.items.first() {
-                            println!("{:#?}", item);
-                        } else {
-                            println!("{:#?}", program);
-                        }
-                    }
-                    Err(_) => {
-                        // Show the original parse errors.
-                        for err in &program_errors {
-                            eprintln!("parse error: {}", err);
-                        }
-                    }
-                }
+        } else {
+            // Show the original parse errors.
+            for err in &program_errors {
+                eprintln!("parse error: {}", err);
             }
         }
     }

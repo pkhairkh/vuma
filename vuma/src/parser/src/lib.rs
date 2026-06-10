@@ -25,7 +25,7 @@
 //! "#;
 //!
 //! let mut parser = Parser::new(source);
-//! let program = parser.parse_program().expect("parse");
+//! let program = parser.parse_program().unwrap();
 //! let mut converter = AstToScg::new();
 //! let scg = converter.convert(&program).expect("convert");
 //! ```
@@ -47,7 +47,7 @@ pub mod parser;
 pub mod to_scg;
 
 // Convenience re-exports for the most commonly used types.
-pub use ast::{Block, Expr, Item, Lit, Program, Stmt, Type};
+pub use ast::{Attribute, AttrValue, Block, Expr, Item, Lit, Program, Stmt, Type, Visibility};
 pub use error::{
     Diagnostic, ErrorCollector, ErrorRecovery, ParseError, ParseErrorKind, ParseResult, Severity,
     SourceLocation, Span, format_suggestion, levenshtein, offset_to_location, suggest,
@@ -75,7 +75,7 @@ mod integration_tests {
 
         // Parse.
         let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
+        let program = parser.parse_program().unwrap();
 
         // Verify AST structure.
         assert!(program.items.len() >= 2, "should have region + fn + free");
@@ -92,7 +92,7 @@ mod integration_tests {
     fn parse_round_trip_keywords() {
         let source = "import \"std\"; export main;";
         let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse");
+        let program = parser.parse_program().unwrap();
         assert_eq!(program.items.len(), 2);
     }
 }

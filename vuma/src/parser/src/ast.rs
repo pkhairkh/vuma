@@ -15,6 +15,67 @@ use crate::error::Span;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Visibility
+// ---------------------------------------------------------------------------
+
+/// Visibility modifier for items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Visibility {
+    /// Default (private) visibility — no modifier.
+    #[default]
+    Private,
+    /// `pub` — public visibility.
+    Public,
+    /// `pub(crate)` — visible within the current crate.
+    PublicCrate,
+    /// `pub(super)` — visible in the parent module.
+    PublicSuper,
+    /// `pub(in path)` — visible in the specified path.
+    PublicIn(String),
+}
+
+impl std::fmt::Display for Visibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Visibility::Private => write!(f, ""),
+            Visibility::Public => write!(f, "pub"),
+            Visibility::PublicCrate => write!(f, "pub(crate)"),
+            Visibility::PublicSuper => write!(f, "pub(super)"),
+            Visibility::PublicIn(path) => write!(f, "pub(in {})", path),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attributes
+// ---------------------------------------------------------------------------
+
+/// An outer attribute: `#[attr]` or `#[attr = value]` or `#[attr(key = value)]`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attribute {
+    /// Whether this is an inner attribute (`#![...]`) or outer (`#[...]`).
+    pub is_inner: bool,
+    /// The attribute path/name (e.g. `inline`, `derive`, `cfg`).
+    pub name: String,
+    /// Optional single value: `#[inline(always)]` or `#[cfg(test)]`.
+    /// Stored as a string; structured parsing is left to later passes.
+    pub value: Option<AttrValue>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// The value part of an attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttrValue {
+    /// A single identifier or literal: `#[inline(always)]` → `always`
+    Single(String),
+    /// Key-value pairs: `#[derive(Debug)]`, `#[cfg(test)]`, `#[allow(dead_code)]`
+    List(Vec<String>),
+    /// Key = value: `#[repr(C)]` → the `C` part
+    KeyValue { key: String, value: String },
+}
+
+// ---------------------------------------------------------------------------
 // Program
 // ---------------------------------------------------------------------------
 
@@ -64,8 +125,14 @@ pub enum Item {
 /// Function definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FnDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Function name.
     pub name: String,
+    /// Generic type parameters with optional bounds.
+    pub type_params: Vec<TypeParam>,
     /// Formal parameters: (name, optional type annotation).
     pub params: Vec<Param>,
     /// Optional return type annotation.
@@ -94,6 +161,10 @@ pub struct Param {
 /// Struct definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Struct name.
     pub name: String,
     /// Generic type parameters with optional bounds.
@@ -120,6 +191,10 @@ pub struct StructField {
 /// Enum definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Enum name.
     pub name: String,
     /// Generic type parameters with optional bounds.
@@ -177,6 +252,10 @@ pub struct Export {
 /// Constant definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Constant name.
     pub name: String,
     /// Optional type annotation.
@@ -190,6 +269,10 @@ pub struct ConstDef {
 /// Static definition: `static name: T = value;`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Static name.
     pub name: String,
     /// Optional type annotation.
@@ -218,6 +301,10 @@ pub struct ModuleDef {
 /// Trait definition: `trait Name<T> { … }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraitDef {
+    /// Visibility modifier.
+    pub visibility: Visibility,
+    /// Outer attributes.
+    pub attrs: Vec<Attribute>,
     /// Trait name.
     pub name: String,
     /// Generic type parameters with optional bounds.
@@ -252,6 +339,10 @@ pub struct AssocConst {
 /// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplBlock {
+    /// Outer attributes on this impl block.
+    pub attrs: Vec<Attribute>,
+    /// Generic type parameters on the impl itself: `impl<T> …`
+    pub type_params: Vec<TypeParam>,
     /// Optional trait name being implemented.
     pub trait_name: Option<String>,
     /// The target type for the impl.

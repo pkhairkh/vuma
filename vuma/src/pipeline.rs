@@ -1690,11 +1690,13 @@ pub fn compile_incremental(
 /// Parse VUMA source text into an AST.
 fn parse_source(source: &str) -> Result<AstProgram, VumaError> {
     let mut parser = Parser::new(source);
-    parser
-        .parse_program()
-        .map_err(|e| VumaError::Parse {
-            errors: e,
-        })
+    let result = parser.parse_program();
+    if result.has_errors() {
+        return Err(VumaError::Parse {
+            errors: result.errors,
+        });
+    }
+    Ok(result.unwrap())
 }
 
 /// Convert an AST to an SCG.

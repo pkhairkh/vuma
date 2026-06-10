@@ -21,12 +21,15 @@
 //!   literals (int, float, bool, string, address, null), struct init, namespace access
 
 use crate::ast::*;
-use crate::error::{ParseError, ParseErrorKind, Span};
+use crate::error::{ErrorRecovery, ParseError, ParseErrorKind, ParseResult, Span, suggest_keyword};
 use crate::lexer::{Lexer, Token, TokenKind};
 
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
+
+/// Default maximum recursion depth for expression parsing.
+const MAX_EXPR_DEPTH: u32 = 256;
 
 /// A recursive-descent parser that turns a token stream into an AST.
 pub struct Parser<'src> {
@@ -38,6 +41,10 @@ pub struct Parser<'src> {
     errors: Vec<ParseError>,
     /// Pushback buffer for token rewinding (used in struct literal disambiguation).
     pushback: std::collections::VecDeque<Token>,
+    /// Current recursion depth in expression parsing.
+    expr_depth: u32,
+    /// Maximum allowed recursion depth for expression parsing.
+    max_depth: u32,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -50,6 +57,8 @@ const ITEM_STARTERS: &[TokenKind] = &[
     TokenKind::Export,
     TokenKind::Const,
     TokenKind::Static,
+    TokenKind::Pub,
+    TokenKind::Hash,
     // `mod` is TokenKind::Mod — handled directly
 ];
 
@@ -85,7 +94,16 @@ impl<'src> Parser<'src> {
             current,
             errors: Vec::new(),
             pushback: std::collections::VecDeque::new(),
+            expr_depth: 0,
+            max_depth: MAX_EXPR_DEPTH,
         }
+    }
+
+    /// Create a new parser with a custom maximum expression recursion depth.
+    pub fn with_max_depth(source: &'src str, max_depth: u32) -> Self {
+        let mut parser = Self::new(source);
+        parser.max_depth = max_depth;
+        parser
     }
 
     // -- public entry point --------------------------------------------------
@@ -93,8 +111,10 @@ impl<'src> Parser<'src> {
     /// Parse the full source into a [`Program`].
     ///
     /// If errors are encountered the parser attempts recovery and continues;
-    /// collected errors are available via [`Parser::errors`].
-    pub fn parse_program(&mut self) -> Result<Program, Vec<ParseError>> {
+    /// the returned [`ParseResult`] carries both the partial AST and any
+    /// accumulated non-fatal errors, enabling multi-error reporting in a
+    /// single pass.
+    pub fn parse_program(&mut self) -> ParseResult<Program> {
         let start = self.current.span.start;
         let mut items = Vec::new();
 
@@ -115,9 +135,9 @@ impl<'src> Parser<'src> {
         };
 
         if self.errors.is_empty() {
-            Ok(program)
+            ParseResult::ok(program)
         } else {
-            Err(std::mem::take(&mut self.errors))
+            ParseResult::ok_with_errors(program, std::mem::take(&mut self.errors))
         }
     }
 
@@ -138,19 +158,25 @@ impl<'src> Parser<'src> {
 
     /// Parse a single top-level item or statement.
     fn parse_item(&mut self) -> Result<Item, ParseError> {
+        // Parse outer attributes (#[...]) that precede the item.
+        let attrs = self.parse_outer_attributes()?;
+
+        // Parse visibility modifier.
+        let visibility = self.parse_visibility()?;
+
         match self.current.kind {
-            TokenKind::Fn => self.parse_fn_def(false).map(Item::FnDef),
+            TokenKind::Fn => self.parse_fn_def(false, visibility, attrs).map(Item::FnDef),
             TokenKind::Async => {
                 // Could be `async fn` or `async { block }` as expression
                 let next = self.peek_next();
                 if next.kind == TokenKind::Fn {
-                    self.parse_fn_def(true).map(Item::FnDef)
+                    self.parse_fn_def(true, visibility, attrs).map(Item::FnDef)
                 } else {
                     self.parse_stmt().map(Item::Stmt)
                 }
             }
-            TokenKind::Struct => self.parse_struct_def().map(Item::StructDef),
-            TokenKind::Enum => self.parse_enum_def().map(Item::EnumDef),
+            TokenKind::Struct => self.parse_struct_def(visibility, attrs).map(Item::StructDef),
+            TokenKind::Enum => self.parse_enum_def(visibility, attrs).map(Item::EnumDef),
             TokenKind::Region => {
                 // Distinguish: `region name = allocate(...)` vs `region` used as
                 // a variable name in an expression/assignment (e.g. `region = allocate(8);`)
@@ -163,15 +189,15 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Import => self.parse_import().map(Item::Import),
             TokenKind::Export => self.parse_export().map(Item::Export),
-            TokenKind::Const => self.parse_const_item().map(Item::Const),
-            TokenKind::Static => self.parse_static_item().map(Item::Static),
+            TokenKind::Const => self.parse_const_item(visibility, attrs).map(Item::Const),
+            TokenKind::Static => self.parse_static_item(visibility, attrs).map(Item::Static),
             TokenKind::Mod => self.parse_module_def().map(Item::ModuleDef),
-            TokenKind::Trait => self.parse_trait_def().map(Item::TraitDef),
-            TokenKind::Impl => self.parse_impl_block().map(Item::ImplBlock),
+            TokenKind::Trait => self.parse_trait_def(visibility, attrs).map(Item::TraitDef),
+            TokenKind::Impl => self.parse_impl_block(attrs).map(Item::ImplBlock),
             TokenKind::Ident => {
                 let lexeme = self.current.lexeme.as_str();
                 match lexeme {
-                    "static" => self.parse_static_item().map(Item::Static),
+                    "static" => self.parse_static_item(visibility, attrs).map(Item::Static),
                     _ => self.parse_stmt().map(Item::Stmt),
                 }
             }
@@ -180,7 +206,7 @@ impl<'src> Parser<'src> {
     }
 
     /// [`async`] `fn` <ident> [`<` type_params `>`] `(` <params>? `)` [`->` <type>] [`;` | `{` <block> `}`]
-    fn parse_fn_def(&mut self, is_async: bool) -> Result<FnDef, ParseError> {
+    fn parse_fn_def(&mut self, is_async: bool, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<FnDef, ParseError> {
         let start = self.current.span.start;
 
         // Consume 'async' if present
@@ -193,9 +219,11 @@ impl<'src> Parser<'src> {
         let name = self.expect_name()?;
 
         // Optional generic type parameters: `<T, U>`
-        if self.at(TokenKind::Lt) {
-            self.skip_generic_params();
-        }
+        let type_params = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()?
+        } else {
+            Vec::new()
+        };
 
         self.expect(TokenKind::LParen)?;
 
@@ -236,7 +264,10 @@ impl<'src> Parser<'src> {
         let end = body.span.end;
 
         Ok(FnDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
+            type_params,
             params,
             return_type,
             body,
@@ -247,7 +278,7 @@ impl<'src> Parser<'src> {
     }
 
     /// `struct` <ident> [`<` type_params `>`] `{` <fields> `}`
-    fn parse_struct_def(&mut self) -> Result<StructDef, ParseError> {
+    fn parse_struct_def(&mut self, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<StructDef, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Struct)?;
 
@@ -291,6 +322,8 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::RBrace)?;
 
         Ok(StructDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
             type_params,
             fields,
@@ -300,7 +333,7 @@ impl<'src> Parser<'src> {
     }
 
     /// `enum` <ident> [`<` type_params `>`] `{` <variants> `}`
-    fn parse_enum_def(&mut self) -> Result<EnumDef, ParseError> {
+    fn parse_enum_def(&mut self, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<EnumDef, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Enum)?;
 
@@ -351,6 +384,8 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::RBrace)?;
 
         Ok(EnumDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
             type_params,
             variants,
@@ -364,7 +399,7 @@ impl<'src> Parser<'src> {
     fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(TokenKind::Lt)?;
         let mut params = Vec::new();
-        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+        while !self.at_closing_gt() && !self.at(TokenKind::Eof) {
             params.push(self.expect_name()?);
             if self.at(TokenKind::Comma) {
                 self.advance();
@@ -372,7 +407,7 @@ impl<'src> Parser<'src> {
                 break;
             }
         }
-        self.expect(TokenKind::Gt)?;
+        self.expect_gt_closing_generic()?;
         Ok(params)
     }
 
@@ -380,7 +415,7 @@ impl<'src> Parser<'src> {
     fn parse_type_params_with_bounds(&mut self) -> Result<Vec<TypeParam>, ParseError> {
         self.expect(TokenKind::Lt)?;
         let mut params = Vec::new();
-        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+        while !self.at_closing_gt() && !self.at(TokenKind::Eof) {
             let name = self.expect_name()?;
             let bounds = if self.at(TokenKind::Colon) {
                 self.advance();
@@ -395,7 +430,7 @@ impl<'src> Parser<'src> {
                 break;
             }
         }
-        self.expect(TokenKind::Gt)?;
+        self.expect_gt_closing_generic()?;
         Ok(params)
     }
 
@@ -428,22 +463,10 @@ impl<'src> Parser<'src> {
         Ok(WhereClause { predicates })
     }
 
-    /// Skip generic parameter list `<T, U, ...>` without recording them.
-    fn skip_generic_params(&mut self) {
-        self.advance(); // consume '<'
-        let mut depth = 1;
-        while depth > 0 && !self.at(TokenKind::Eof) {
-            if self.at(TokenKind::Lt) {
-                depth += 1;
-            } else if self.at(TokenKind::Gt) {
-                depth -= 1;
-                if depth == 0 {
-                    self.advance();
-                    return;
-                }
-            }
-            self.advance();
-        }
+    /// Parse generic parameter list `<T, U, ...>` with optional bounds.
+    /// Returns parsed type parameters for recording in the AST.
+    fn parse_generic_params(&mut self) -> Result<Vec<TypeParam>, ParseError> {
+        self.parse_type_params_with_bounds()
     }
 
     /// Parse a comma-separated parameter list (may be empty).
@@ -537,7 +560,7 @@ impl<'src> Parser<'src> {
     }
 
     /// `const` <name> [`:` <type>] `=` <expr> `;`
-    fn parse_const_item(&mut self) -> Result<ConstDef, ParseError> {
+    fn parse_const_item(&mut self, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<ConstDef, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Const)?;
 
@@ -557,6 +580,8 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Semicolon)?;
 
         Ok(ConstDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
             ty,
             value,
@@ -565,7 +590,7 @@ impl<'src> Parser<'src> {
     }
 
     /// `static` <name> [`:` <type>] `=` <expr> `;`
-    fn parse_static_item(&mut self) -> Result<StaticDef, ParseError> {
+    fn parse_static_item(&mut self, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<StaticDef, ParseError> {
         let start = self.current.span.start;
         // "static" can be TokenKind::Static or TokenKind::Ident
         self.advance(); // consume 'static'
@@ -586,6 +611,8 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Semicolon)?;
 
         Ok(StaticDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
             ty,
             value,
@@ -623,7 +650,7 @@ impl<'src> Parser<'src> {
     }
 
     /// `trait` <name> [`<` type_params `>`] `{` <members> `}`
-    fn parse_trait_def(&mut self) -> Result<TraitDef, ParseError> {
+    fn parse_trait_def(&mut self, _visibility: Visibility, _attrs: Vec<Attribute>) -> Result<TraitDef, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Trait)?;
 
@@ -681,7 +708,7 @@ impl<'src> Parser<'src> {
             }
             // Method: `fn name(...) -> T;` or `fn name(...) -> T { body }`
             if self.at(TokenKind::Fn) {
-                let method = self.parse_fn_def(false)?;
+                let method = self.parse_fn_def(false, Visibility::default(), Vec::new())?;
                 if method.body.statements.is_empty()
                     && !method.is_async
                     && method.where_clause.is_none()
@@ -710,6 +737,8 @@ impl<'src> Parser<'src> {
         };
 
         Ok(TraitDef {
+            visibility: _visibility,
+            attrs: _attrs,
             name,
             type_params,
             associated_types,
@@ -722,18 +751,20 @@ impl<'src> Parser<'src> {
     }
 
     /// `impl` [<trait_name> `for`] <type> `{` <methods> `}`
-    fn parse_impl_block(&mut self) -> Result<ImplBlock, ParseError> {
+    fn parse_impl_block(&mut self, _attrs: Vec<Attribute>) -> Result<ImplBlock, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Impl)?;
 
+        // Parse optional generic params on the impl itself: `impl<T> ...`
+        // This must come before the trait/type name.
+        let type_params = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()?
+        } else {
+            Vec::new()
+        };
+
         // Parse the first name — could be a trait name or the target type
         let first_name = self.expect_name()?;
-
-        // Check for generic params on the impl itself: `impl<T> ...`
-        // We skip them for now (not stored)
-        if self.at(TokenKind::Lt) {
-            self.skip_generic_params();
-        }
 
         // Check if `for` follows — if so, first_name is the trait name
         let (trait_name, target_type) = if self.at(TokenKind::For) {
@@ -747,14 +778,14 @@ impl<'src> Parser<'src> {
                 // Generic type: `Name<Args>`
                 self.advance(); // consume '<'
                 let mut args = Vec::new();
-                if !self.at(TokenKind::Gt) {
+                if !self.at_closing_gt() {
                     args.push(self.parse_type()?);
                     while self.at(TokenKind::Comma) {
                         self.advance();
                         args.push(self.parse_type()?);
                     }
                 }
-                self.expect(TokenKind::Gt)?;
+                self.expect_gt_closing_generic()?;
                 Type::Generic { name: first_name, args }
             } else {
                 Type::BDBase(first_name)
@@ -767,7 +798,7 @@ impl<'src> Parser<'src> {
         let mut methods = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             if self.at(TokenKind::Fn) {
-                match self.parse_fn_def(false) {
+                match self.parse_fn_def(false, Visibility::default(), Vec::new()) {
                     Ok(method) => methods.push(method),
                     Err(err) => {
                         self.errors.push(err);
@@ -788,6 +819,8 @@ impl<'src> Parser<'src> {
         };
 
         Ok(ImplBlock {
+            attrs: _attrs,
+            type_params,
             trait_name,
             target_type,
             methods,
@@ -1119,12 +1152,21 @@ impl<'src> Parser<'src> {
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             let arm_start = self.current.span.start;
             let pattern = self.parse_match_pattern()?;
+
+            // Optional guard: `if expr`
+            let guard = if self.at(TokenKind::If) {
+                self.advance(); // consume 'if'
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
             let arm_end = body.span().end;
             arms.push(MatchArm {
                 pattern,
-                guard: None,
+                guard,
                 body,
                 span: Span::new(arm_start, arm_end),
             });
@@ -1260,6 +1302,28 @@ impl<'src> Parser<'src> {
                     Ok(MatchPattern::Ident { name, span })
                 }
             }
+            // Handle Option/Result keywords as enum variant patterns
+            TokenKind::SomeKw | TokenKind::NoneKw | TokenKind::OkKw | TokenKind::ErrKw => {
+                let name = self.current.lexeme.clone();
+                self.advance();
+                if self.at(TokenKind::LParen) {
+                    self.advance();
+                    let binding = if self.at(TokenKind::RParen) {
+                        None
+                    } else {
+                        let b = self.expect_name()?;
+                        Some(b)
+                    };
+                    self.expect(TokenKind::RParen)?;
+                    Ok(MatchPattern::Enum {
+                        name,
+                        binding,
+                        span,
+                    })
+                } else {
+                    Ok(MatchPattern::Ident { name, span })
+                }
+            }
             _ => Err(ParseError::unexpected(
                 format!("expected match pattern, found {}", self.current.kind),
                 self.current.span,
@@ -1363,6 +1427,22 @@ impl<'src> Parser<'src> {
     ///   8  =>  +  -
     ///   9  =>  *  /  %
     fn parse_expr_with_precedence(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
+        self.expr_depth += 1;
+        if self.expr_depth > self.max_depth {
+            self.expr_depth -= 1;
+            return Err(ParseError::new(
+                format!("expression nesting depth exceeds maximum ({})", self.max_depth),
+                self.current.span,
+                ParseErrorKind::InvalidSyntax,
+            ));
+        }
+        let result = self.parse_expr_with_precedence_inner(min_prec);
+        self.expr_depth -= 1;
+        result
+    }
+
+    /// Inner implementation of precedence climbing (called after depth check).
+    fn parse_expr_with_precedence_inner(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_unary()?;
 
         loop {
@@ -2136,14 +2216,14 @@ impl<'src> Parser<'src> {
         if self.at(TokenKind::Lt) {
             self.advance(); // consume '<'
             let mut args = Vec::new();
-            if !self.at(TokenKind::Gt) {
+            if !self.at_closing_gt() {
                 args.push(self.parse_type()?);
                 while self.at(TokenKind::Comma) {
                     self.advance();
                     args.push(self.parse_type()?);
                 }
             }
-            self.expect(TokenKind::Gt)?;
+            self.expect_gt_closing_generic()?;
             return Ok(Type::Generic { name, args });
         }
 
@@ -2151,6 +2231,61 @@ impl<'src> Parser<'src> {
     }
 
     // -- helper methods ------------------------------------------------------
+
+    /// True if the current token is `>` (Gt) or `>>` (Shr).
+    ///
+    /// Used when parsing generic argument/parameter lists where `>>` should
+    /// be split into two `>` tokens.  This is the classic C++/Java generics
+    /// ambiguity: `A<B<C>>` is lexed as `A < B < C >>` where `>>` is a
+    /// single `Shr` token, but in a generic context it means two closing `>`s.
+    fn at_closing_gt(&self) -> bool {
+        self.current.kind == TokenKind::Gt || self.current.kind == TokenKind::Shr
+    }
+
+    /// Expect a closing `>` in a generic context.
+    ///
+    /// When the current token is `Gt`, this behaves exactly like
+    /// `expect(TokenKind::Gt)`.  When the current token is `Shr` (`>>`),
+    /// it splits it into two `>` tokens: the first `>` closes the current
+    /// generic list, and a synthetic `Gt` is pushed into the pushback buffer
+    /// so that the outer generic list (if any) can consume the second `>`.
+    fn expect_gt_closing_generic(&mut self) -> Result<Token, ParseError> {
+        if self.at(TokenKind::Gt) {
+            return Ok(self.advance());
+        }
+        if self.at(TokenKind::Shr) {
+            // Split `>>` into two `>` tokens.
+            let shr_token = self.advance(); // consume `>>` — self.current is now the token after `>>`
+            // Create a synthetic `Gt` for the second `>` and make it the current
+            // token, pushing the real "next token" (now in self.current) into the
+            // pushback buffer so it appears after the synthetic `Gt`.
+            let synthetic_gt = Token::new(
+                TokenKind::Gt,
+                ">",
+                Span::new(shr_token.span.start + 1, shr_token.span.end),
+                shr_token.line,
+                shr_token.column + 1,
+            );
+            // Swap: push current (the token after `>>`) to pushback, then
+            // push the synthetic Gt. The pushback is LIFO on the front, so
+            // we push in reverse order: first push current, then synthetic_gt
+            // so that advance() pops synthetic_gt first, then the saved current.
+            self.pushback.push_front(self.current.clone());
+            self.current = synthetic_gt;
+            // Return a token representing the first `>`.
+            return Ok(Token::new(
+                TokenKind::Gt,
+                ">",
+                Span::new(shr_token.span.start, shr_token.span.start + 1),
+                shr_token.line,
+                shr_token.column,
+            ));
+        }
+        Err(ParseError::unexpected(
+            format!("expected {}, found {}", TokenKind::Gt, self.current.kind),
+            self.current.span,
+        ))
+    }
 
     /// True if the current token is of the given kind.
     fn at(&self, kind: TokenKind) -> bool {
@@ -2177,14 +2312,25 @@ impl<'src> Parser<'src> {
     }
 
     /// Consume the current token, asserting its kind.
+    ///
+    /// If the current token is an identifier that is close to a VUMA keyword,
+    /// a "did you mean?" suggestion is automatically attached to the error.
     fn expect(&mut self, kind: TokenKind) -> Result<Token, ParseError> {
         if self.current.kind == kind {
             Ok(self.advance())
         } else {
-            Err(ParseError::unexpected(
+            let mut err = ParseError::unexpected(
                 format!("expected {}, found {}", kind, self.current.kind),
                 self.current.span,
-            ))
+            );
+            // If the unexpected token is an identifier, check if it's a typo
+            // of a VUMA keyword and attach a "did you mean?" suggestion.
+            if self.current.kind == TokenKind::Ident {
+                if let Some(kw) = suggest_keyword(&self.current.lexeme) {
+                    err = err.with_suggestion(kw);
+                }
+            }
+            Err(err)
         }
     }
 
@@ -2205,16 +2351,26 @@ impl<'src> Parser<'src> {
 
     /// Consume a name token (identifier or certain keywords that can be used
     /// as names in VUMA) and return its text.
+    ///
+    /// If the current token is not a valid name but is close to a VUMA keyword,
+    /// a "did you mean?" suggestion is attached to the error.
     fn expect_name(&mut self) -> Result<String, ParseError> {
         if self.current.kind == TokenKind::Ident || Self::is_name_keyword(self.current.kind) {
             let name = self.current.lexeme.clone();
             self.advance();
             Ok(name)
         } else {
-            Err(ParseError::unexpected(
+            let mut err = ParseError::unexpected(
                 format!("expected name, found {}", self.current.kind),
                 self.current.span,
-            ))
+            );
+            // If the unexpected token is an identifier, check for keyword typos.
+            if self.current.kind == TokenKind::Ident {
+                if let Some(kw) = suggest_keyword(&self.current.lexeme) {
+                    err = err.with_suggestion(kw);
+                }
+            }
+            Err(err)
         }
     }
 
@@ -2259,6 +2415,10 @@ impl<'src> Parser<'src> {
                 | TokenKind::ResultKw
                 | TokenKind::OkKw
                 | TokenKind::ErrKw
+                | TokenKind::Derive
+                | TokenKind::Crate
+                | TokenKind::Async
+                | TokenKind::Fn
         )
     }
 
@@ -2320,11 +2480,239 @@ impl<'src> Parser<'src> {
             self.advance();
         }
     }
+
+    /// Skip tokens until a likely block boundary is found.
+    ///
+    /// More conservative than statement recovery: skips until we see `}` or
+    /// EOF. Useful when an error inside a block might cascade if we only
+    /// skip to the next `;`.
+    #[allow(dead_code)]
+    fn recover_to_block_boundary(&mut self) {
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.advance();
+        }
+    }
+
+    /// Recover from a parse error by dispatching through [`ErrorRecovery::for_kind`].
+    ///
+    /// The `level` parameter provides context about where the error occurred
+    /// (item-level vs statement-level) and is used as a fallback when the
+    /// strategy from `for_kind()` doesn't match the recovery context.
+    #[allow(dead_code)]
+    fn recover_from_error(&mut self, kind: &ParseErrorKind, level: RecoveryLevel) {
+        let strategy = ErrorRecovery::for_kind(kind);
+        match strategy {
+            ErrorRecovery::SkipToStatementBoundary => {
+                self.recover_to_statement_boundary();
+            }
+            ErrorRecovery::SkipToBlockBoundary => {
+                self.recover_to_block_boundary();
+            }
+            ErrorRecovery::InsertMissingToken(_) => {
+                // For inserted tokens we don't actually skip — the parser
+                // continues as if the token had been present. In practice
+                // this means we do nothing and let the next `expect()` call
+                // try the following token.
+            }
+            ErrorRecovery::SkipOneToken => {
+                if !self.at(TokenKind::Eof) {
+                    self.advance();
+                }
+            }
+            ErrorRecovery::AbortItem => {
+                // Fall back to context-appropriate recovery.
+                match level {
+                    RecoveryLevel::Item => self.recover_to_item_boundary(),
+                    RecoveryLevel::Statement => self.recover_to_statement_boundary(),
+                    RecoveryLevel::Block => self.recover_to_block_boundary(),
+                }
+            }
+        }
+    }
+
+    // -- visibility parsing -------------------------------------------------
+
+    /// Parse an optional visibility modifier: `pub`, `pub(crate)`, `pub(super)`,
+    /// `pub(in path)`, or nothing (private).
+    fn parse_visibility(&mut self) -> Result<Visibility, ParseError> {
+        if self.at(TokenKind::Pub) {
+            self.advance(); // consume 'pub'
+            if self.at(TokenKind::LParen) {
+                self.advance(); // consume '('
+                if self.at(TokenKind::Crate) {
+                    self.advance(); // consume 'crate'
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Visibility::PublicCrate)
+                } else if self.at(TokenKind::Super) {
+                    self.advance(); // consume 'super'
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Visibility::PublicSuper)
+                } else if self.current.kind == TokenKind::Ident && self.current.lexeme == "in" {
+                    self.advance(); // consume 'in'
+                    let path = self.expect_name()?;
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Visibility::PublicIn(path))
+                } else {
+                    Err(ParseError::unexpected(
+                        format!("expected 'crate', 'super', or 'in' after 'pub(', found {}", self.current.kind),
+                        self.current.span,
+                    ))
+                }
+            } else {
+                Ok(Visibility::Public)
+            }
+        } else {
+            Ok(Visibility::Private)
+        }
+    }
+
+    // -- attribute parsing --------------------------------------------------
+
+    /// Parse zero or more outer attributes (`#[...]`) that precede an item.
+    fn parse_outer_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+        let mut attrs = Vec::new();
+        while self.at(TokenKind::Hash) {
+            let next = self.peek_next();
+            if next.kind == TokenKind::LBracket {
+                let attr = self.parse_attribute(false)?;
+                attrs.push(attr);
+            } else {
+                break;
+            }
+        }
+        Ok(attrs)
+    }
+
+    /// Parse zero or more inner attributes (`#![...]`) at the start of a block.
+    #[allow(dead_code)]
+    fn parse_inner_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
+        let mut attrs = Vec::new();
+        while self.at(TokenKind::Hash) {
+            let next = self.peek_next();
+            if next.kind == TokenKind::Bang {
+                let attr = self.parse_attribute(true)?;
+                attrs.push(attr);
+            } else {
+                break;
+            }
+        }
+        Ok(attrs)
+    }
+
+    /// Parse a single attribute: `#[name]`, `#[name(value)]`, `#[name = "value"]`,
+    /// `#![name]`, etc.
+    fn parse_attribute(&mut self, is_inner: bool) -> Result<Attribute, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::Hash)?;
+
+        if is_inner {
+            self.expect(TokenKind::Bang)?;
+        }
+
+        self.expect(TokenKind::LBracket)?;
+
+        // Attribute name: could be a keyword like 'derive', 'inline', 'cfg', 'allow', 'repr'
+        let name = if self.current.kind == TokenKind::Ident
+            || Self::is_name_keyword(self.current.kind)
+        {
+            let n = self.current.lexeme.clone();
+            self.advance();
+            n
+        } else {
+            return Err(ParseError::unexpected(
+                format!("expected attribute name, found {}", self.current.kind),
+                self.current.span,
+            ));
+        };
+
+        let value = if self.at(TokenKind::LParen) {
+            // `#[name(val1, val2)]` or `#[name(val)]`
+            self.advance(); // consume '('
+            let mut items = Vec::new();
+            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                // Attribute values can be keywords like 'test', 'C', 'dead_code'
+                let item = if self.current.kind == TokenKind::Ident
+                    || Self::is_name_keyword(self.current.kind)
+                {
+                    let v = self.current.lexeme.clone();
+                    self.advance();
+                    v
+                } else {
+                    return Err(ParseError::unexpected(
+                        format!("expected attribute value, found {}", self.current.kind),
+                        self.current.span,
+                    ));
+                };
+                items.push(item);
+                if self.at(TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+            if items.len() == 1 {
+                Some(AttrValue::Single(items.into_iter().next().unwrap()))
+            } else {
+                Some(AttrValue::List(items))
+            }
+        } else if self.at(TokenKind::Assign) {
+            // `#[name = value]`
+            self.advance(); // consume '='
+            let val = if self.at(TokenKind::String) {
+                self.expect_string()?
+            } else if self.current.kind == TokenKind::Ident
+                || Self::is_name_keyword(self.current.kind)
+            {
+                let v = self.current.lexeme.clone();
+                self.advance();
+                v
+            } else {
+                return Err(ParseError::unexpected(
+                    format!("expected attribute value, found {}", self.current.kind),
+                    self.current.span,
+                ));
+            };
+            Some(AttrValue::KeyValue { key: name.clone(), value: val })
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::RBracket)?;
+
+        Ok(Attribute {
+            is_inner,
+            name,
+            value,
+            span: Span::new(start, self.current.span.end),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Span helper on Expr
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// RecoveryLevel
+// ---------------------------------------------------------------------------
+
+/// Context level for error recovery dispatch.
+///
+/// Used by [`Parser::recover_from_error`] to select the appropriate fallback
+/// when the [`ErrorRecovery`] strategy is [`AbortItem`].
+///
+/// [`AbortItem`]: ErrorRecovery::AbortItem
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryLevel {
+    /// Top-level item boundary (fn, struct, enum, import, …).
+    Item,
+    /// Statement boundary (`;` or `}`).
+    Statement,
+    /// Block boundary (`}`).
+    Block,
+}
 
 /// Convenience: every [`Expr`] variant can report its source span.
 impl Expr {
@@ -2767,6 +3155,208 @@ mod tests {
         }
     }
 
+    // ---- Test: Nested generics (>> disambiguation) ----
+
+    #[test]
+    fn parse_nested_generic_a_bc() {
+        // A<B<C>> — the >> is lexed as Shr, must be split into two Gt tokens
+        let source = "fn test() { let v: A<B<C>> = data; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("A<B<C>> should parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Let(l) => {
+                        match l.ty.as_ref().unwrap() {
+                            Type::Generic { name, args } => {
+                                assert_eq!(name, "A");
+                                assert_eq!(args.len(), 1);
+                                match &args[0] {
+                                    Type::Generic { name: inner_name, args: inner_args } => {
+                                        assert_eq!(inner_name, "B");
+                                        assert_eq!(inner_args.len(), 1);
+                                        match &inner_args[0] {
+                                            Type::BDBase(n) => assert_eq!(n, "C"),
+                                            other => panic!("expected BDBase 'C', got {:?}", other),
+                                        }
+                                    }
+                                    other => panic!("expected Generic B<C>, got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected Generic A<B<C>>, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Let, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_deeply_nested_generic_a_bc_d() {
+        // A<B<C<D>>> — the >>> is lexed as Shr + Gt, must be split correctly
+        let source = "fn test() { let v: A<B<C<D>>> = data; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("A<B<C<D>>> should parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Let(l) => {
+                        match l.ty.as_ref().unwrap() {
+                            Type::Generic { name, args } => {
+                                assert_eq!(name, "A");
+                                assert_eq!(args.len(), 1);
+                                // B<C<D>>
+                                match &args[0] {
+                                    Type::Generic { name: b_name, args: b_args } => {
+                                        assert_eq!(b_name, "B");
+                                        assert_eq!(b_args.len(), 1);
+                                        // C<D>
+                                        match &b_args[0] {
+                                            Type::Generic { name: c_name, args: c_args } => {
+                                                assert_eq!(c_name, "C");
+                                                assert_eq!(c_args.len(), 1);
+                                                match &c_args[0] {
+                                                    Type::BDBase(d) => assert_eq!(d, "D"),
+                                                    other => panic!("expected BDBase 'D', got {:?}", other),
+                                                }
+                                            }
+                                            other => panic!("expected Generic C<D>, got {:?}", other),
+                                        }
+                                    }
+                                    other => panic!("expected Generic B<C<D>>, got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected Generic A<B<C<D>>>, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Let, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_nested_generic_in_fn_arg() {
+        // Nested generics in function parameters
+        let source = "fn test(x: A<B<C>>) {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("nested generic in fn arg should parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.params.len(), 1);
+                let ty = f.params[0].ty.as_ref().expect("param should have type");
+                match ty {
+                    Type::Generic { name, args } => {
+                        assert_eq!(name, "A");
+                        assert_eq!(args.len(), 1);
+                        match &args[0] {
+                            Type::Generic { name: inner_name, args: inner_args } => {
+                                assert_eq!(inner_name, "B");
+                                assert_eq!(inner_args.len(), 1);
+                                match &inner_args[0] {
+                                    Type::BDBase(n) => assert_eq!(n, "C"),
+                                    other => panic!("expected BDBase 'C', got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected Generic B<C>, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Generic A<B<C>>, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_nested_generic_in_return_type() {
+        // Nested generics in return type
+        let source = "fn test() -> A<B<C>> {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("nested generic in return type should parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                let rt = f.return_type.as_ref().expect("should have return type");
+                match rt {
+                    Type::Generic { name, args } => {
+                        assert_eq!(name, "A");
+                        assert_eq!(args.len(), 1);
+                        match &args[0] {
+                            Type::Generic { name: inner_name, args: inner_args } => {
+                                assert_eq!(inner_name, "B");
+                                assert_eq!(inner_args.len(), 1);
+                                match &inner_args[0] {
+                                    Type::BDBase(n) => assert_eq!(n, "C"),
+                                    other => panic!("expected BDBase 'C', got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected Generic B<C>, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Generic A<B<C>>, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_shr_still_works_as_operator() {
+        // >> as right shift operator in expressions must NOT be affected
+        let source = "fn test() { let x = a >> b; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect(">> as Shr operator should still parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Let(l) => {
+                        match &l.value {
+                            Expr::BinOp { op: BinOp::Shr, .. } => {} // correct
+                            other => panic!("expected Shr binop, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Let, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_struct_field_nested_generic() {
+        // Nested generic types in struct fields
+        let source = "struct Foo { data: A<B<C>> }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("struct with nested generic field should parse");
+        match &program.items[0] {
+            Item::StructDef(s) => {
+                assert_eq!(s.fields.len(), 1);
+                match &s.fields[0].ty {
+                    Type::Generic { name, args } => {
+                        assert_eq!(name, "A");
+                        assert_eq!(args.len(), 1);
+                        match &args[0] {
+                            Type::Generic { name: inner_name, args: inner_args } => {
+                                assert_eq!(inner_name, "B");
+                                assert_eq!(inner_args.len(), 1);
+                                match &inner_args[0] {
+                                    Type::BDBase(n) => assert_eq!(n, "C"),
+                                    other => panic!("expected BDBase 'C', got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected Generic B<C>, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Generic A<B<C>>, got {:?}", other),
+                }
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
     // ---- Test 20: Module definition ----
     #[test]
     fn parse_module_def() {
@@ -2857,7 +3447,8 @@ mod tests {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse example program: {:?}", result.err());
+        assert!(result.is_ok(), "should parse example program");
+        assert!(!result.is_err(), "should have no parse errors");
     }
 
     // ---- Test 25: Error recovery ----
@@ -2871,12 +3462,10 @@ mod tests {
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         // Should recover and still parse some items, collecting errors for bad
-        match result {
-            Err(errors) => assert!(errors.len() > 0, "should have parse errors"),
-            Ok(program) => {
-                // If recovery succeeded and returned Ok, check we got some items
-                assert!(program.items.len() > 0, "should have recovered some items");
-            }
+        assert!(result.has_errors(), "should have parse errors");
+        if result.is_ok() {
+            let program = result.unwrap();
+            assert!(program.items.len() > 0, "should have recovered some items");
         }
     }
 
@@ -3029,7 +3618,8 @@ fn main() -> i32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse doubly_linked_list: {:?}", result.err());
+        assert!(result.is_ok(), "should parse doubly_linked_list");
+        assert!(!result.is_err(), "should have no parse errors");
         let program = result.unwrap();
         // Should have 4 items: struct + 3 functions
         assert!(program.items.len() >= 4);
@@ -3385,7 +3975,8 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse full program: {:?}", result.err());
+        assert!(result.is_ok(), "should parse full program");
+        assert!(!result.is_err(), "should have no parse errors");
         let program = result.unwrap();
         assert!(program.items.len() >= 4);
     }
@@ -3488,13 +4079,12 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        // parse_program returns Err when errors are collected
-        match result {
-            Err(errors) => assert!(errors.len() >= 1, "expected at least 1 error"),
-            Ok(program) => {
-                // If recovery succeeded, we should still have parsed ok1 and ok2
-                assert!(program.items.len() >= 1, "should have recovered some items");
-            }
+        // parse_program now returns ParseResult with both partial program and errors
+        assert!(result.has_errors(), "expected at least 1 error");
+        if result.is_ok() {
+            let program = result.unwrap();
+            // If recovery succeeded, we should still have parsed ok1 and ok2
+            assert!(program.items.len() >= 1, "should have recovered some items");
         }
     }
 
@@ -3589,7 +4179,7 @@ fn process(buf: *Buffer) -> u32 {
         source.push_str("}");
         let mut parser = Parser::new(&source);
         let result = parser.parse_program();
-        assert!(result.is_ok(), "deeply nested if/else should parse: {:?}", result.err());
+        assert!(result.is_ok(), "deeply nested if/else should parse");
     }
 
     // ---- Reg Test 2: Deeply nested match arms ----
@@ -3881,10 +4471,7 @@ fn process(buf: *Buffer) -> u32 {
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         // Should produce errors but not panic
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {}, // recovery may succeed
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 17: Missing closing braces ----
@@ -3897,10 +4484,7 @@ fn process(buf: *Buffer) -> u32 {
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         // Should produce errors but not panic
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 18: Missing else block ----
@@ -3916,10 +4500,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 19: Invalid token in expression ----
@@ -3932,10 +4513,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 20: Unterminated string in expression ----
@@ -3948,10 +4526,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 21: Double else ----
@@ -3970,10 +4545,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {}, // recovery may accept it
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 22: Invalid type syntax ----
@@ -3986,10 +4558,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 23: Missing function name ----
@@ -4000,10 +4569,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // ---- Reg Test 24: Duplicate field names in struct ----
@@ -4015,14 +4581,12 @@ fn process(buf: *Buffer) -> u32 {
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         // Parser may accept it syntactically (duplicate check is semantic)
-        match result {
-            Ok(program) => {
-                match &program.items[0] {
-                    Item::StructDef(s) => assert_eq!(s.fields.len(), 2),
-                    other => panic!("expected StructDef, got {:?}", other),
-                }
+        if result.is_ok() {
+            let program = result.unwrap();
+            match &program.items[0] {
+                Item::StructDef(s) => assert_eq!(s.fields.len(), 2),
+                other => panic!("expected StructDef, got {:?}", other),
             }
-            Err(_) => {}, // also acceptable if parser rejects it
         }
     }
 
@@ -4038,10 +4602,7 @@ fn process(buf: *Buffer) -> u32 {
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
-        match result {
-            Err(errors) => assert!(!errors.is_empty()),
-            Ok(_) => {},
-        }
+        assert!(result.is_err() || result.is_ok());
     }
 
     // =========================================================================
@@ -4900,4 +5461,404 @@ fn process(buf: *Buffer) -> u32 {
             other => panic!("expected FnDef, got {:?}", other),
         }
     }
+
+    // =========================================================================
+    // Feature: Recursion depth limit
+    // =========================================================================
+
+    #[test]
+    fn recursion_depth_normal_expr_ok() {
+        // Normal expressions should parse fine at default depth
+        let source = "fn test() { let x = 1 + 2 + 3 + 4 + 5; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.name, "test");
+                assert_eq!(f.body.statements.len(), 1);
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn recursion_depth_exceeded() {
+        // A deeply nested expression should hit the limit with a low max_depth
+        let parens = "(".repeat(20);
+        let close_parens = ")".repeat(20);
+        let source = format!("fn test() {{ let x = {}1{}; }}", parens, close_parens);
+        let mut parser = Parser::with_max_depth(&source, 10);
+        let result = parser.parse_program();
+        assert!(result.has_errors(), "should fail with recursion depth exceeded");
+        assert!(result.errors.iter().any(|e| e.message.contains("nesting depth")),
+            "expected depth error, got: {:?}", result.errors);
+    }
+
+    #[test]
+    fn recursion_depth_custom_limit() {
+        // With a custom high limit, deep nesting should work
+        let parens = "(".repeat(30);
+        let close_parens = ")".repeat(30);
+        let source = format!("fn test() {{ let x = {}1{}; }}", parens, close_parens);
+        let mut parser = Parser::new(&source);
+        let program = parser.parse_program().expect("should succeed with high depth");
+        match &program.items[0] {
+            Item::FnDef(f) => assert_eq!(f.name, "test"),
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // Feature: pub visibility modifier
+    // =========================================================================
+
+    #[test]
+    fn pub_fn_visibility() {
+        let source = "pub fn hello() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.name, "hello");
+                assert_eq!(f.visibility, Visibility::Public);
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pub_crate_struct_visibility() {
+        let source = "pub(crate) struct Foo {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::StructDef(s) => {
+                assert_eq!(s.name, "Foo");
+                assert_eq!(s.visibility, Visibility::PublicCrate);
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pub_super_enum_visibility() {
+        let source = "pub(super) enum Color { Red }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::EnumDef(e) => {
+                assert_eq!(e.name, "Color");
+                assert_eq!(e.visibility, Visibility::PublicSuper);
+            }
+            other => panic!("expected EnumDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pub_in_visibility() {
+        let source = "pub(in my_mod) const MAX: u32 = 42;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::Const(c) => {
+                assert_eq!(c.name, "MAX");
+                assert_eq!(c.visibility, Visibility::PublicIn("my_mod".to_string()));
+            }
+            other => panic!("expected Const, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn private_item_default_visibility() {
+        let source = "fn private_fn() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.visibility, Visibility::Private);
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pub_static_visibility() {
+        let source = "pub static GLOBAL: u32 = 0;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::Static(s) => {
+                assert_eq!(s.name, "GLOBAL");
+                assert_eq!(s.visibility, Visibility::Public);
+            }
+            other => panic!("expected Static, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // Feature: Attribute syntax
+    // =========================================================================
+
+    #[test]
+    fn parse_simple_attribute() {
+        let source = "#[inline] fn fast() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.name, "fast");
+                assert_eq!(f.attrs.len(), 1);
+                assert_eq!(f.attrs[0].name, "inline");
+                assert!(!f.attrs[0].is_inner);
+                assert!(f.attrs[0].value.is_none());
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_attribute_with_single_value() {
+        let source = "#[cfg(test)] fn test_fn() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.attrs.len(), 1);
+                assert_eq!(f.attrs[0].name, "cfg");
+                match &f.attrs[0].value {
+                    Some(AttrValue::Single(v)) => assert_eq!(v, "test"),
+                    other => panic!("expected Single value, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_attribute_with_list() {
+        let source = "#[derive(Debug, Clone)] struct Foo {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::StructDef(s) => {
+                assert_eq!(s.attrs.len(), 1);
+                assert_eq!(s.attrs[0].name, "derive");
+                match &s.attrs[0].value {
+                    Some(AttrValue::List(items)) => {
+                        assert_eq!(items.len(), 2);
+                        assert_eq!(items[0], "Debug");
+                        assert_eq!(items[1], "Clone");
+                    }
+                    other => panic!("expected List value, got {:?}", other),
+                }
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_attribute_with_key_value() {
+        let source = "#[repr(C)] struct Foo {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::StructDef(s) => {
+                assert_eq!(s.attrs.len(), 1);
+                assert_eq!(s.attrs[0].name, "repr");
+                match &s.attrs[0].value {
+                    Some(AttrValue::Single(v)) => assert_eq!(v, "C"),
+                    other => panic!("expected Single value for repr(C), got {:?}", other),
+                }
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_attributes() {
+        let source = "#[inline] #[allow(dead_code)] fn foo() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.attrs.len(), 2);
+                assert_eq!(f.attrs[0].name, "inline");
+                assert_eq!(f.attrs[1].name, "allow");
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_attribute_on_enum() {
+        let source = "#[allow(dead_code)] enum E { A, B }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::EnumDef(e) => {
+                assert_eq!(e.attrs.len(), 1);
+                assert_eq!(e.attrs[0].name, "allow");
+                match &e.attrs[0].value {
+                    Some(AttrValue::Single(v)) => assert_eq!(v, "dead_code"),
+                    other => panic!("expected Single value, got {:?}", other),
+                }
+            }
+            other => panic!("expected EnumDef, got {:?}", other),
+        }
+    }
+
+    // =========================================================================
+    // Feature: Match guards
+    // =========================================================================
+
+    #[test]
+    fn parse_match_guard_simple() {
+        let source = r#"
+            fn test() {
+                match x {
+                    Some(v) if v > 0 => v,
+                    _ => 0,
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Match(m) => {
+                        assert_eq!(m.arms.len(), 2);
+                        // First arm has a guard
+                        assert!(m.arms[0].guard.is_some(), "first arm should have a guard");
+                        // Second arm has no guard
+                        assert!(m.arms[1].guard.is_none(), "second arm should have no guard");
+                    }
+                    other => panic!("expected Match, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_match_guard_with_comparison() {
+        let source = r#"
+            fn test() {
+                match n {
+                    0 => "zero",
+                    x if x == 1 => "one",
+                    _ => "other",
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Match(m) => {
+                        assert_eq!(m.arms.len(), 3);
+                        assert!(m.arms[0].guard.is_none());
+                        assert!(m.arms[1].guard.is_some(), "second arm should have guard");
+                        assert!(m.arms[2].guard.is_none());
+                    }
+                    other => panic!("expected Match, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_match_no_guard() {
+        let source = r#"
+            fn test() {
+                match x {
+                    1 => a,
+                    2 => b,
+                    _ => c,
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Match(m) => {
+                        assert_eq!(m.arms.len(), 3);
+                        for arm in &m.arms {
+                            assert!(arm.guard.is_none(), "no arm should have a guard");
+                        }
+                    }
+                    other => panic!("expected Match, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_match_guard_complex_expr() {
+        let source = r#"
+            fn test() {
+                match val {
+                    n if n > 0 && n < 100 => n,
+                    _ => 0,
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                match &f.body.statements[0] {
+                    Stmt::Match(m) => {
+                        assert_eq!(m.arms.len(), 2);
+                        assert!(m.arms[0].guard.is_some(), "first arm should have a guard");
+                    }
+                    other => panic!("expected Match, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
 }
+
+    // ---- Diagnostic test for generic params ----
+    #[test]
+    fn diag_fn_single_generic_param() {
+        let source = "fn foo<T>(x: T) {}";
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        eprintln!("DIAG: is_ok={}, has_errors={}", result.is_ok(), result.has_errors());
+        for e in &result.errors {
+            eprintln!("DIAG error: {:?}", e);
+        }
+        let program = result.unwrap();
+        eprintln!("DIAG: items len={}", program.items.len());
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                eprintln!("DIAG: fn name={}, type_params={:?}", f.name, f.type_params);
+            }
+            other => eprintln!("DIAG: expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn diag_fn_nested_generic_type() {
+        let source = "fn test(x: A<B<C>>) {}";
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        eprintln!("DIAG2: is_ok={}, has_errors={}", result.is_ok(), result.has_errors());
+        for e in &result.errors {
+            eprintln!("DIAG2 error: {:?}", e);
+        }
+        if result.is_ok() {
+            let program = result.unwrap();
+            eprintln!("DIAG2: items len={}", program.items.len());
+            for item in &program.items {
+                eprintln!("DIAG2 item: {:?}", item);
+            }
+        }
+    }

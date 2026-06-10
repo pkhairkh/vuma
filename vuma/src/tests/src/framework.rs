@@ -627,7 +627,11 @@ impl<'a> fmt::Display for TestReport<'a> {
 pub fn build_scg_from_source(source: &str) -> Result<SCG, Vec<ParseError>> {
     // Step 1: Parse source -> AST.
     let mut parser = Parser::new(source);
-    let program = parser.parse_program()?;
+    let result = parser.parse_program();
+    if result.has_errors() {
+        return Err(result.errors);
+    }
+    let program = result.unwrap();
 
     // Step 2: Convert AST -> vuma_scg::SCG (AstToScg now produces SCG directly).
     let mut converter = AstToScg::new();
@@ -704,20 +708,18 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
 
     // Stage 1: Parse source -> AST.
     let mut parser = Parser::new(source);
-    let program = match parser.parse_program() {
-        Ok(p) => {
-            stages.push((PipelineStage::Parse, StageOutcome::Passed));
-            p
-        }
-        Err(_) => {
-            stages.push((PipelineStage::Parse, StageOutcome::Failed));
-            return PipelineResult {
-                stages,
-                scg: None,
-                verification: None,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            };
-        }
+    let parse_result = parser.parse_program();
+    let program = if parse_result.has_errors() {
+        stages.push((PipelineStage::Parse, StageOutcome::Failed));
+        return PipelineResult {
+            stages,
+            scg: None,
+            verification: None,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        };
+    } else {
+        stages.push((PipelineStage::Parse, StageOutcome::Passed));
+        parse_result.unwrap()
     };
 
     // Stage 2: AST -> vuma_scg::SCG (AstToScg now produces SCG directly).
@@ -791,7 +793,11 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
 pub fn compile_to_arm64(source: &str) -> Result<Vec<u8>, Vec<CompileError>> {
     // Step 1: Parse source -> AST -> parser SCG.
     let mut parser = Parser::new(source);
-    let _program = parser.parse_program().map_err(|errors| vec![CompileError::Parse(errors)])?;
+    let result = parser.parse_program();
+    if result.has_errors() {
+        return Err(vec![CompileError::Parse(result.errors)]);
+    }
+    let _program = result.unwrap();
 
     // TODO: Wire through vuma-codegen once the crate compiles.
     // The full pipeline will be:
