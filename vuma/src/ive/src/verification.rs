@@ -248,25 +248,51 @@ impl VerificationEngine {
         // spurious "shortcut" paths in the CFG, leading to false-positive
         // leak reports for well-formed programs.
         //
-        // Now that the SCG models interprocedural Call and Return edges, we no
-        // longer skip ControlFlow edges involving FunctionEntry/FunctionReturn
-        // nodes. Instead, we include those ControlFlow edges AND also add CFG
-        // edges for Call edges (caller → callee entry) and Return edges
-        // (callee return → caller), which properly connect the interprocedural
-        // control flow and avoid the dangling-branch false positives that
-        // previously required skipping these edges.
+        // Intraprocedural call-return ControlFlow edges (computation→FunctionEntry,
+        // FunctionEntry→FunctionReturn) create dead-end branches that cause
+        // false-positive "conditional deallocation" violations. We skip these
+        // because the real control flow is already captured by the sequential
+        // ControlFlow chain through the Computation nodes. We only include
+        // interprocedural Call/Return edges (which connect real function
+        // definitions) and ControlFlow edges that don't enter/exit
+        // FunctionEntry/FunctionReturn nodes.
+        let fn_entry_nodes: hashbrown::HashSet<u64> = scg.nodes()
+            .filter(|n| matches!(
+                n.node_type,
+                NodeType::Control
+            ) && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionEntry))
+            .map(|n| n.id.as_u64())
+            .collect();
+        let fn_return_nodes: hashbrown::HashSet<u64> = scg.nodes()
+            .filter(|n| matches!(
+                n.node_type,
+                NodeType::Control
+            ) && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionReturn))
+            .map(|n| n.id.as_u64())
+            .collect();
+
         for edge in scg.edges() {
             match &edge.kind {
                 vuma_scg::edge::EdgeKind::ControlFlow => {
+                    let src = edge.source.as_u64();
+                    let dst = edge.target.as_u64();
+                    // Skip intraprocedural call-return edges:
+                    // - computation → FunctionEntry (enters the call stub)
+                    // - FunctionEntry → FunctionReturn (the call stub itself)
+                    // - FunctionReturn → * (dead-end exit from call stub)
+                    if fn_entry_nodes.contains(&dst) || fn_return_nodes.contains(&src) {
+                        continue;
+                    }
                     input.add_cfg_edge(crate::liveness::ControlFlowEdge {
-                        from: PointId(edge.source.as_u64()),
-                        to: PointId(edge.target.as_u64()),
+                        from: PointId(src),
+                        to: PointId(dst),
                         conditional: false,
                         label: None,
                     });
                 }
                 vuma_scg::edge::EdgeKind::Call { .. } => {
-                    // Call edge: caller → callee's FunctionEntry
+                    // Interprocedural Call edge: caller → callee's FunctionEntry.
+                    // These connect real function definitions and are valid paths.
                     input.add_cfg_edge(crate::liveness::ControlFlowEdge {
                         from: PointId(edge.source.as_u64()),
                         to: PointId(edge.target.as_u64()),
@@ -275,7 +301,7 @@ impl VerificationEngine {
                     });
                 }
                 vuma_scg::edge::EdgeKind::Return { .. } => {
-                    // Return edge: callee's FunctionReturn → caller
+                    // Interprocedural Return edge: callee's FunctionReturn → caller.
                     input.add_cfg_edge(crate::liveness::ControlFlowEdge {
                         from: PointId(edge.source.as_u64()),
                         to: PointId(edge.target.as_u64()),
@@ -521,10 +547,36 @@ impl VerificationEngine {
         // Derivation and DataFlow edges represent logical relationships
         // (e.g., "deallocation is derived from allocation"), not execution
         // ordering, and are excluded to avoid false-positive leak reports.
+        //
+        // We also skip intraprocedural call-return ControlFlow edges that
+        // enter FunctionEntry nodes or exit FunctionReturn nodes, since
+        // these create dead-end branches that cause false-positive leak
+        // reports. The real control flow is already captured by the
+        // sequential ControlFlow chain through the main nodes.
+        let fn_entry_cleanup_ids: hashbrown::HashSet<CleanupNodeId> = scg.nodes()
+            .filter(|n| matches!(n.node_type, NodeType::Control)
+                && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionEntry))
+            .filter_map(|n| node_map.get(&n.id).copied())
+            .collect();
+        let fn_return_cleanup_ids: hashbrown::HashSet<CleanupNodeId> = scg.nodes()
+            .filter(|n| matches!(n.node_type, NodeType::Control)
+                && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionReturn))
+            .filter_map(|n| node_map.get(&n.id).copied())
+            .collect();
+
         for edge in scg.edges() {
             match &edge.kind {
-                vuma_scg::edge::EdgeKind::ControlFlow
-                | vuma_scg::edge::EdgeKind::Call { .. }
+                vuma_scg::edge::EdgeKind::ControlFlow => {
+                    if let (Some(&src), Some(&dst)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
+                        // Skip intraprocedural call-return edges that create
+                        // dead-end branches in the cleanup graph.
+                        if fn_entry_cleanup_ids.contains(&dst) || fn_return_cleanup_ids.contains(&src) {
+                            continue;
+                        }
+                        let _ = graph.add_edge(src, dst);
+                    }
+                }
+                vuma_scg::edge::EdgeKind::Call { .. }
                 | vuma_scg::edge::EdgeKind::Return { .. } => {
                     if let (Some(&src), Some(&dst)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
                         let _ = graph.add_edge(src, dst);
