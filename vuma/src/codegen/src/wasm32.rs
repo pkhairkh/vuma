@@ -259,6 +259,26 @@ pub enum WasmInstr {
 
     // ── Pseudo-instruction: no-op (used for IR ops that lower to nothing) ──
     Nop,
+
+    // ── SIMD v128 instructions ────────────────────────────────────────
+    /// v128.const: push a 128-bit vector constant
+    V128Const([u8; 16]),
+    /// i32x4.add: lane-wise addition of two i32x4 vectors
+    I32X4Add,
+    /// i32x4.mul: lane-wise multiplication of two i32x4 vectors
+    I32X4Mul,
+    /// f32x4.add: lane-wise addition of two f32x4 vectors
+    F32X4Add,
+    /// f32x4.mul: lane-wise multiplication of two f32x4 vectors
+    F32X4Mul,
+
+    // ── Bulk Memory Operations ────────────────────────────────────────
+    /// memory.copy: copy from one memory region to another
+    MemoryCopy { src_mem: u32, dst_mem: u32 },
+    /// memory.fill: fill a memory region with a byte value
+    MemoryFill { mem: u32 },
+    /// memory.init: initialize memory from a data segment
+    MemoryInit { data_idx: u32, mem: u32 },
 }
 
 impl WasmInstr {
@@ -583,6 +603,48 @@ impl WasmInstr {
 
             // ── Nop ─────────────────────────────────────────────────
             WasmInstr::Nop => out.push(0x01),
+
+            // ── SIMD v128 ──────────────────────────────────────────
+            WasmInstr::V128Const(bytes) => {
+                out.push(0xFD); // SIMD prefix
+                out.extend_from_slice(&encode_unsigned_leb128(0x0C)); // v128.const opcode
+                out.extend_from_slice(bytes);
+            }
+            WasmInstr::I32X4Add => {
+                out.push(0xFD);
+                out.extend_from_slice(&encode_unsigned_leb128(0x0E)); // i32x4.add
+            }
+            WasmInstr::I32X4Mul => {
+                out.push(0xFD);
+                out.extend_from_slice(&encode_unsigned_leb128(0x15)); // i32x4.mul
+            }
+            WasmInstr::F32X4Add => {
+                out.push(0xFD);
+                out.extend_from_slice(&encode_unsigned_leb128(0x2C)); // f32x4.add
+            }
+            WasmInstr::F32X4Mul => {
+                out.push(0xFD);
+                out.extend_from_slice(&encode_unsigned_leb128(0x35)); // f32x4.mul
+            }
+
+            // ── Bulk Memory Operations ────────────────────────────
+            WasmInstr::MemoryCopy { src_mem, dst_mem } => {
+                out.push(0xFC); // multi-byte op prefix
+                out.extend_from_slice(&encode_unsigned_leb128(0x0A)); // memory.copy
+                out.extend_from_slice(&encode_unsigned_leb128(*src_mem as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*dst_mem as u64));
+            }
+            WasmInstr::MemoryFill { mem } => {
+                out.push(0xFC);
+                out.extend_from_slice(&encode_unsigned_leb128(0x0B)); // memory.fill
+                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+            }
+            WasmInstr::MemoryInit { data_idx, mem } => {
+                out.push(0xFC);
+                out.extend_from_slice(&encode_unsigned_leb128(0x08)); // memory.init
+                out.extend_from_slice(&encode_unsigned_leb128(*data_idx as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+            }
         }
     }
 
@@ -698,6 +760,9 @@ const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D]; // "\0asm"
 const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // version 1
 
 /// A Wasm function type signature: (params) -> (results).
+///
+/// Supports multi-value returns (Wasm 2.0 feature): the `results` vector
+/// may contain more than one type.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WasmFuncType {
     pub params: Vec<WasmType>,
@@ -727,6 +792,30 @@ pub struct WasmImport {
     pub module: String,
     pub name: String,
     pub kind: WasmImportKind,
+}
+
+impl WasmImport {
+    /// Create a WASI `fd_write` import (wasip1).
+    ///
+    /// Signature: (fd: i32, iov_ptr: i32, iov_cnt: i32, nwritten_ptr: i32) -> i32
+    pub fn wasi_fd_write(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "fd_write".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `proc_exit` import (wasip1).
+    ///
+    /// Signature: (exit_code: i32) -> ()
+    pub fn wasi_proc_exit(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "proc_exit".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
 }
 
 /// Kind of import.
@@ -822,10 +911,24 @@ pub struct WasmModuleBuilder {
 }
 
 /// A Wasm function body.
+///
+/// Supports local declarations (count + type pairs) as per the Wasm binary format.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WasmFuncBody {
     pub locals: Vec<(u32, WasmType)>, // (count, type) pairs
     pub body: Vec<u8>,                // bytecode of the function body
+}
+
+impl WasmFuncBody {
+    /// Create a new function body with given locals and body bytecode.
+    pub fn new(locals: Vec<(u32, WasmType)>, body: Vec<u8>) -> Self {
+        Self { locals, body }
+    }
+
+    /// Create a function body with no extra locals.
+    pub fn from_body(body: Vec<u8>) -> Self {
+        Self { locals: vec![], body }
+    }
 }
 
 impl WasmModuleBuilder {
@@ -857,6 +960,14 @@ impl WasmModuleBuilder {
         let idx = self.memories.len() as u32;
         self.memories.push(limits);
         idx
+    }
+
+    /// Add an import.
+    pub fn add_import(&mut self, import: WasmImport) {
+        if let WasmImportKind::Function { .. } = import.kind {
+            self.num_imported_functions += 1;
+        }
+        self.imports.push(import);
     }
 
     /// Add an export.
@@ -1045,6 +1156,24 @@ fn emit_section(module: &mut Vec<u8>, section_id: u8, content: &[u8]) {
     module.push(section_id);
     module.extend_from_slice(&encode_unsigned_leb128(content.len() as u64));
     module.extend_from_slice(content);
+}
+
+/// Skip `count` unsigned LEB128 values in the byte slice, advancing `offset`.
+fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+    for _ in 0..count {
+        while *offset < bytes.len() && (bytes[*offset] & 0x80) != 0 {
+            *offset += 1;
+        }
+        if *offset < bytes.len() {
+            *offset += 1;
+        }
+    }
+}
+
+/// Skip `count` signed LEB128 values in the byte slice, advancing `offset`.
+fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+    // Signed and unsigned LEB128 have the same encoding structure for skipping
+    skip_leb128(bytes, offset, count);
 }
 
 // ===========================================================================
@@ -1803,171 +1932,141 @@ impl Backend for Wasm32Backend {
 
         while offset < bytes.len() {
             let byte = bytes[offset];
-            let mnemonic = match byte {
-                0x00 => "unreachable".to_string(),
-                0x01 => "nop".to_string(),
-                0x02 => "block".to_string(),
-                0x03 => "loop".to_string(),
-                0x04 => "if".to_string(),
-                0x05 => "else".to_string(),
-                0x0B => "end".to_string(),
-                0x0C => "br".to_string(),
-                0x0D => "br_if".to_string(),
-                0x0E => "br_table".to_string(),
-                0x0F => "return".to_string(),
-                0x10 => "call".to_string(),
-                0x11 => "call_indirect".to_string(),
-                0x1A => "drop".to_string(),
-                0x1B => "select".to_string(),
-                0x20 => "local.get".to_string(),
-                0x21 => "local.set".to_string(),
-                0x22 => "local.tee".to_string(),
-                0x23 => "global.get".to_string(),
-                0x24 => "global.set".to_string(),
-                0x28 => "i32.load".to_string(),
-                0x29 => "i64.load".to_string(),
-                0x2A => "f32.load".to_string(),
-                0x2B => "f64.load".to_string(),
-                0x36 => "i32.store".to_string(),
-                0x37 => "i64.store".to_string(),
-                0x38 => "f32.store".to_string(),
-                0x39 => "f64.store".to_string(),
-                0x41 => "i32.const".to_string(),
-                0x42 => "i64.const".to_string(),
-                0x43 => "f32.const".to_string(),
-                0x44 => "f64.const".to_string(),
-                0x45 => "i32.eqz".to_string(),
-                0x46 => "i32.eq".to_string(),
-                0x47 => "i32.ne".to_string(),
-                0x48 => "i32.lt_s".to_string(),
-                0x49 => "i32.lt_u".to_string(),
-                0x4A => "i32.gt_s".to_string(),
-                0x4B => "i32.gt_u".to_string(),
-                0x4C => "i32.le_s".to_string(),
-                0x4D => "i32.le_u".to_string(),
-                0x4E => "i32.ge_s".to_string(),
-                0x4F => "i32.ge_u".to_string(),
-                0x50 => "i64.eqz".to_string(),
-                0x51 => "i64.eq".to_string(),
-                0x52 => "i64.ne".to_string(),
-                0x6A => "i32.add".to_string(),
-                0x6B => "i32.sub".to_string(),
-                0x6C => "i32.mul".to_string(),
-                0x6D => "i32.div_s".to_string(),
-                0x6E => "i32.div_u".to_string(),
-                0x6F => "i32.rem_s".to_string(),
-                0x70 => "i32.rem_u".to_string(),
-                0x71 => "i32.and".to_string(),
-                0x72 => "i32.or".to_string(),
-                0x73 => "i32.xor".to_string(),
-                0x74 => "i32.shl".to_string(),
-                0x75 => "i32.shr_s".to_string(),
-                0x76 => "i32.shr_u".to_string(),
-                0x77 => "i32.rotl".to_string(),
-                0x78 => "i32.rotr".to_string(),
-                0x7C => "i64.add".to_string(),
-                0x7D => "i64.sub".to_string(),
-                0x7E => "i64.mul".to_string(),
-                0x7F => "i64.div_s".to_string(),
-                0x80 => "i64.div_u".to_string(),
-                0x81 => "i64.rem_s".to_string(),
-                0x82 => "i64.rem_u".to_string(),
-                0x83 => "i64.and".to_string(),
-                0x84 => "i64.or".to_string(),
-                0x85 => "i64.xor".to_string(),
-                0x86 => "i64.shl".to_string(),
-                0x87 => "i64.shr_s".to_string(),
-                0x88 => "i64.shr_u".to_string(),
-                0x89 => "i64.rotl".to_string(),
-                0x8A => "i64.rotr".to_string(),
-                0x92 => "f32.add".to_string(),
-                0x93 => "f32.sub".to_string(),
-                0x94 => "f32.mul".to_string(),
-                0x95 => "f32.div".to_string(),
-                0xA0 => "f64.add".to_string(),
-                0xA1 => "f64.sub".to_string(),
-                0xA2 => "f64.mul".to_string(),
-                0xA3 => "f64.div".to_string(),
-                _ => format!("op_{:#04x}", byte),
-            };
-            lines.push(format!("{:#010x}:  {:02x}  {}", pc, byte, mnemonic));
-            offset += 1;
-            pc += 1;
+            let start_offset = offset;
 
-            // Skip LEB128 immediates (simplified: skip 1-5 bytes for common patterns)
-            match byte {
-                0x20..=0x24 | 0x0C..=0x0D | 0x10 => {
-                    // One unsigned LEB128 immediate
-                    while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                        offset += 1;
-                        pc += 1;
-                    }
-                    if offset < bytes.len() {
-                        offset += 1;
-                        pc += 1;
-                    }
+            // Handle multi-byte opcodes (0xFC = bulk memory, 0xFD = SIMD)
+            let mnemonic = if byte == 0xFC && offset + 1 < bytes.len() {
+                // Bulk memory / saturated arithmetic prefix
+                let (subop, subop_size) = decode_unsigned_leb128(&bytes[offset + 1..]);
+                offset += 1 + subop_size;
+                let name = match subop {
+                    0x08 => "memory.init".to_string(),
+                    0x09 => "data.drop".to_string(),
+                    0x0A => "memory.copy".to_string(),
+                    0x0B => "memory.fill".to_string(),
+                    0x0C => "memory.grow".to_string(),
+                    0x0D => "memory.size".to_string(),
+                    _ => format!("fc_subop_{:#04x}", subop),
+                };
+                // Skip remaining LEB128 operands for the sub-opcode
+                match subop {
+                    0x08 => { skip_leb128(&bytes, &mut offset, 2); }  // data_idx, mem
+                    0x0A => { skip_leb128(&bytes, &mut offset, 2); }  // src, dst
+                    0x0B => { skip_leb128(&bytes, &mut offset, 1); }  // mem
+                    _ => {}
                 }
-                0x11 => {
-                    // Two unsigned LEB128 immediates
-                    for _ in 0..2 {
-                        while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                            offset += 1;
-                            pc += 1;
-                        }
-                        if offset < bytes.len() {
-                            offset += 1;
-                            pc += 1;
-                        }
-                    }
+                name
+            } else if byte == 0xFD && offset + 1 < bytes.len() {
+                // SIMD prefix
+                let (subop, subop_size) = decode_unsigned_leb128(&bytes[offset + 1..]);
+                offset += 1 + subop_size;
+                let name = match subop {
+                    0x0C => "v128.const".to_string(),
+                    0x0E => "i32x4.add".to_string(),
+                    0x15 => "i32x4.mul".to_string(),
+                    0x2C => "f32x4.add".to_string(),
+                    0x35 => "f32x4.mul".to_string(),
+                    _ => format!("simd_subop_{:#04x}", subop),
+                };
+                // Skip v128.const payload (16 bytes)
+                if subop == 0x0C {
+                    offset += 16;
                 }
-                0x41 => {
-                    // i32.const: signed LEB128
-                    while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                        offset += 1;
-                        pc += 1;
+                name
+            } else {
+                let m = match byte {
+                    0x00 => "unreachable".to_string(),
+                    0x01 => "nop".to_string(),
+                    0x02 => "block".to_string(),
+                    0x03 => "loop".to_string(),
+                    0x04 => "if".to_string(),
+                    0x05 => "else".to_string(),
+                    0x0B => "end".to_string(),
+                    0x0C => "br".to_string(),
+                    0x0D => "br_if".to_string(),
+                    0x0E => "br_table".to_string(),
+                    0x0F => "return".to_string(),
+                    0x10 => "call".to_string(),
+                    0x11 => "call_indirect".to_string(),
+                    0x1A => "drop".to_string(),
+                    0x1B => "select".to_string(),
+                    0x20 => "local.get".to_string(),
+                    0x21 => "local.set".to_string(),
+                    0x22 => "local.tee".to_string(),
+                    0x23 => "global.get".to_string(),
+                    0x24 => "global.set".to_string(),
+                    0x28 => "i32.load".to_string(),
+                    0x29 => "i64.load".to_string(),
+                    0x2A => "f32.load".to_string(),
+                    0x2B => "f64.load".to_string(),
+                    0x36 => "i32.store".to_string(),
+                    0x37 => "i64.store".to_string(),
+                    0x38 => "f32.store".to_string(),
+                    0x39 => "f64.store".to_string(),
+                    0x41 => "i32.const".to_string(),
+                    0x42 => "i64.const".to_string(),
+                    0x43 => "f32.const".to_string(),
+                    0x44 => "f64.const".to_string(),
+                    0x45 => "i32.eqz".to_string(),
+                    0x46 => "i32.eq".to_string(),
+                    0x47 => "i32.ne".to_string(),
+                    0x48 => "i32.lt_s".to_string(),
+                    0x49 => "i32.lt_u".to_string(),
+                    0x4A => "i32.gt_s".to_string(),
+                    0x4B => "i32.gt_u".to_string(),
+                    0x4C => "i32.le_s".to_string(),
+                    0x4D => "i32.le_u".to_string(),
+                    0x4E => "i32.ge_s".to_string(),
+                    0x4F => "i32.ge_u".to_string(),
+                    0x6A => "i32.add".to_string(),
+                    0x6B => "i32.sub".to_string(),
+                    0x6C => "i32.mul".to_string(),
+                    0x6D => "i32.div_s".to_string(),
+                    0x6E => "i32.div_u".to_string(),
+                    0x6F => "i32.rem_s".to_string(),
+                    0x70 => "i32.rem_u".to_string(),
+                    0x7C => "i64.add".to_string(),
+                    0x7D => "i64.sub".to_string(),
+                    0x7E => "i64.mul".to_string(),
+                    0x92 => "f32.add".to_string(),
+                    0x93 => "f32.sub".to_string(),
+                    0x94 => "f32.mul".to_string(),
+                    0xA0 => "f64.add".to_string(),
+                    0xA1 => "f64.sub".to_string(),
+                    0xA2 => "f64.mul".to_string(),
+                    _ => format!("op_{:#04x}", byte),
+                };
+                offset += 1;
+
+                // Skip LEB128 immediates for common patterns
+                match byte {
+                    0x20..=0x24 | 0x0C..=0x0D | 0x10 => {
+                        skip_leb128(&bytes, &mut offset, 1);
                     }
-                    if offset < bytes.len() {
-                        offset += 1;
-                        pc += 1;
+                    0x11 => {
+                        skip_leb128(&bytes, &mut offset, 2);
                     }
+                    0x41 | 0x42 => {
+                        skip_signed_leb128(&bytes, &mut offset, 1);
+                    }
+                    0x28..=0x3E => {
+                        skip_leb128(&bytes, &mut offset, 2);
+                    }
+                    0x3F..=0x40 => {
+                        skip_leb128(&bytes, &mut offset, 1);
+                    }
+                    0x43 => { offset += 4; }  // f32.const: 4 bytes
+                    0x44 => { offset += 8; }  // f64.const: 8 bytes
+                    _ => {}
                 }
-                0x42 => {
-                    // i64.const: signed LEB128
-                    while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                        offset += 1;
-                        pc += 1;
-                    }
-                    if offset < bytes.len() {
-                        offset += 1;
-                        pc += 1;
-                    }
-                }
-                0x28..=0x3E => {
-                    // Memory instructions: two unsigned LEB128 (align, offset)
-                    for _ in 0..2 {
-                        while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                            offset += 1;
-                            pc += 1;
-                        }
-                        if offset < bytes.len() {
-                            offset += 1;
-                            pc += 1;
-                        }
-                    }
-                }
-                0x3F..=0x40 => {
-                    // Memory size/grow: one unsigned LEB128
-                    while offset < bytes.len() && (bytes[offset] & 0x80) != 0 {
-                        offset += 1;
-                        pc += 1;
-                    }
-                    if offset < bytes.len() {
-                        offset += 1;
-                        pc += 1;
-                    }
-                }
-                _ => {}
-            }
+                m
+            };
+
+            let consumed = offset - start_offset;
+            let hex_bytes: Vec<String> = bytes[start_offset..offset]
+                .iter().map(|b| format!("{:02x}", b)).collect();
+            lines.push(format!("{:#010x}:  {:20}  {}", pc, hex_bytes.join(" "), mnemonic));
+            pc += consumed as u64;
         }
         lines
     }
@@ -2400,5 +2499,108 @@ mod tests {
         let wasm_bytes = result.unwrap();
         // Must start with Wasm magic
         assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
+    }
+
+    // ── SIMD v128 Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_v128_const_encoding() {
+        let val = [0x01u8; 16];
+        let instr = WasmInstr::V128Const(val);
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+        // The sub-opcode is LEB128(0x0C) = 0x0C
+        assert_eq!(bytes[1], 0x0C);
+        // 16 bytes of data follow
+        assert_eq!(&bytes[2..18], &[0x01u8; 16]);
+    }
+
+    #[test]
+    fn test_i32x4_add_encoding() {
+        let bytes = WasmInstr::I32X4Add.to_bytes();
+        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+        // LEB128(0x0E)
+        assert_eq!(bytes[1], 0x0E);
+    }
+
+    #[test]
+    fn test_f32x4_mul_encoding() {
+        let bytes = WasmInstr::F32X4Mul.to_bytes();
+        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+        // LEB128(0x35)
+        assert_eq!(bytes[1], 0x35);
+    }
+
+    // ── Bulk Memory Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_copy_encoding() {
+        let bytes = WasmInstr::MemoryCopy { src_mem: 0, dst_mem: 0 }.to_bytes();
+        assert_eq!(bytes[0], 0xFC); // multi-byte op prefix
+        // LEB128(0x0A) for memory.copy
+        assert_eq!(bytes[1], 0x0A);
+    }
+
+    #[test]
+    fn test_memory_fill_encoding() {
+        let bytes = WasmInstr::MemoryFill { mem: 0 }.to_bytes();
+        assert_eq!(bytes[0], 0xFC);
+        assert_eq!(bytes[1], 0x0B); // memory.fill
+    }
+
+    #[test]
+    fn test_memory_init_encoding() {
+        let bytes = WasmInstr::MemoryInit { data_idx: 0, mem: 0 }.to_bytes();
+        assert_eq!(bytes[0], 0xFC);
+        assert_eq!(bytes[1], 0x08); // memory.init
+    }
+
+    // ── WASI Import Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_wasi_fd_write_import() {
+        let imp = WasmImport::wasi_fd_write(0);
+        assert_eq!(imp.module, "wasi_snapshot_preview1");
+        assert_eq!(imp.name, "fd_write");
+    }
+
+    #[test]
+    fn test_wasi_proc_exit_import() {
+        let imp = WasmImport::wasi_proc_exit(1);
+        assert_eq!(imp.module, "wasi_snapshot_preview1");
+        assert_eq!(imp.name, "proc_exit");
+    }
+
+    // ── Multi-value Return / WasmFuncType Tests ─────────────────────
+
+    #[test]
+    fn test_multi_value_func_type() {
+        let ft = WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I64],
+            results: vec![WasmType::I32, WasmType::I64], // multi-value return
+        };
+        let encoded = ft.encode();
+        assert_eq!(encoded[0], 0x60); // func type tag
+        // 2 params + 2 results should encode correctly
+        let decoded_params = decode_unsigned_leb128(&encoded[1..]);
+        assert_eq!(decoded_params.0, 2);
+    }
+
+    // ── Disassemble SIMD and Bulk Memory ────────────────────────────
+
+    #[test]
+    fn test_disassemble_simd_i32x4_add() {
+        let backend = Wasm32Backend::new();
+        let bytes = WasmInstr::I32X4Add.to_bytes();
+        let lines = backend.disassemble(&bytes, 0);
+        assert!(lines[0].contains("i32x4.add"));
+    }
+
+    #[test]
+    fn test_disassemble_memory_copy() {
+        let backend = Wasm32Backend::new();
+        let bytes = WasmInstr::MemoryCopy { src_mem: 0, dst_mem: 0 }.to_bytes();
+        let lines = backend.disassemble(&bytes, 0);
+        assert!(lines[0].contains("memory.copy"));
     }
 }

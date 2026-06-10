@@ -573,6 +573,24 @@ pub enum Instruction {
     /// FP Move Double: `fmv.d fd, fs1` (pseudo: fsgnj.d)
     FmvD { rd: Fpr, rs1: Fpr },
 
+    // ── Zicsr Extension: Control and Status Register ────────────────
+    /// CSR Read/Write: `csrrw rd, csr, rs1`
+    Csrrw { rd: Gpr, csr: u32, rs1: Gpr },
+    /// CSR Read and Set: `csrrs rd, csr, rs1`
+    Csrrs { rd: Gpr, csr: u32, rs1: Gpr },
+    /// CSR Read and Clear: `csrrc rd, csr, rs1`
+    Csrrc { rd: Gpr, csr: u32, rs1: Gpr },
+    /// CSR Read/Write Immediate: `csrrwi rd, csr, uimm`
+    Csrrwi { rd: Gpr, csr: u32, uimm: u32 },
+    /// CSR Read and Set Immediate: `csrrsi rd, csr, uimm`
+    Csrrsi { rd: Gpr, csr: u32, uimm: u32 },
+    /// CSR Read and Clear Immediate: `csrrci rd, csr, uimm`
+    Csrrci { rd: Gpr, csr: u32, uimm: u32 },
+
+    // ── Zifencei Extension ──────────────────────────────────────────
+    /// Fence.I: `fence.i` — instruction stream synchronization
+    FenceI,
+
     // ── System / Misc ────────────────────────────────────────────────
     /// Environment Call: `ecall`
     Ecall,
@@ -854,6 +872,38 @@ impl Instruction {
                 encode_r_type(0b0010001, rs1.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
             }
 
+            // ── Zicsr Extension ──────────────────────────────────────
+            Instruction::Csrrw { rd, csr, rs1 } => {
+                // CSRRW: I-type, funct3=0b001, opcode=SYSTEM
+                encode_i_type(*csr, rs1.encoding(), 0b001, rd.encoding(), OP_SYSTEM)
+            }
+            Instruction::Csrrs { rd, csr, rs1 } => {
+                // CSRRS: I-type, funct3=0b010, opcode=SYSTEM
+                encode_i_type(*csr, rs1.encoding(), 0b010, rd.encoding(), OP_SYSTEM)
+            }
+            Instruction::Csrrc { rd, csr, rs1 } => {
+                // CSRRC: I-type, funct3=0b011, opcode=SYSTEM
+                encode_i_type(*csr, rs1.encoding(), 0b011, rd.encoding(), OP_SYSTEM)
+            }
+            Instruction::Csrrwi { rd, csr, uimm } => {
+                // CSRRWI: I-type, funct3=0b101, opcode=SYSTEM
+                encode_i_type(*csr, *uimm & 0x1F, 0b101, rd.encoding(), OP_SYSTEM)
+            }
+            Instruction::Csrrsi { rd, csr, uimm } => {
+                // CSRRSI: I-type, funct3=0b110, opcode=SYSTEM
+                encode_i_type(*csr, *uimm & 0x1F, 0b110, rd.encoding(), OP_SYSTEM)
+            }
+            Instruction::Csrrci { rd, csr, uimm } => {
+                // CSRRCI: I-type, funct3=0b111, opcode=SYSTEM
+                encode_i_type(*csr, *uimm & 0x1F, 0b111, rd.encoding(), OP_SYSTEM)
+            }
+
+            // ── Zifencei Extension ──────────────────────────────────
+            Instruction::FenceI => {
+                // FENCE.I: opcode=MISC-MEM, funct3=0b001, rd=0, rs1=0, imm=0
+                encode_i_type(0, 0, 0b001, 0, OP_MISC_MEM)
+            }
+
             // ── System / Misc ───────────────────────────────────────
             Instruction::Ecall => {
                 // ECALL = 0x00000073
@@ -944,6 +994,13 @@ impl Instruction {
             Instruction::FmulD { .. } => "fmul.d",
             Instruction::FdivD { .. } => "fdiv.d",
             Instruction::FmvD { .. } => "fmv.d",
+            Instruction::Csrrw { .. } => "csrrw",
+            Instruction::Csrrs { .. } => "csrrs",
+            Instruction::Csrrc { .. } => "csrrc",
+            Instruction::Csrrwi { .. } => "csrrwi",
+            Instruction::Csrrsi { .. } => "csrrsi",
+            Instruction::Csrrci { .. } => "csrrci",
+            Instruction::FenceI => "fence.i",
             Instruction::Ecall => "ecall",
             Instruction::Ebreak => "ebreak",
             Instruction::Fence { .. } => "fence",
@@ -1021,6 +1078,13 @@ impl std::fmt::Display for Instruction {
             Instruction::FmulD { rd, rs1, rs2 } => write!(f, "fmul.d {}, {}, {}", rd, rs1, rs2),
             Instruction::FdivD { rd, rs1, rs2 } => write!(f, "fdiv.d {}, {}, {}", rd, rs1, rs2),
             Instruction::FmvD { rd, rs1 } => write!(f, "fmv.d {}, {}", rd, rs1),
+            Instruction::Csrrw { rd, csr, rs1 } => write!(f, "csrrw {}, 0x{:03x}, {}", rd, csr, rs1),
+            Instruction::Csrrs { rd, csr, rs1 } => write!(f, "csrrs {}, 0x{:03x}, {}", rd, csr, rs1),
+            Instruction::Csrrc { rd, csr, rs1 } => write!(f, "csrrc {}, 0x{:03x}, {}", rd, csr, rs1),
+            Instruction::Csrrwi { rd, csr, uimm } => write!(f, "csrrwi {}, 0x{:03x}, {}", rd, csr, uimm),
+            Instruction::Csrrsi { rd, csr, uimm } => write!(f, "csrrsi {}, 0x{:03x}, {}", rd, csr, uimm),
+            Instruction::Csrrci { rd, csr, uimm } => write!(f, "csrrci {}, 0x{:03x}, {}", rd, csr, uimm),
+            Instruction::FenceI => write!(f, "fence.i"),
             Instruction::Ecall => write!(f, "ecall"),
             Instruction::Ebreak => write!(f, "ebreak"),
             Instruction::Fence { pred, succ } => write!(f, "fence {:#x}, {:#x}", pred, succ),
@@ -1475,24 +1539,38 @@ impl Backend for RiscV64Backend {
         let mut lines = Vec::new();
         let mut offset = 0usize;
         let mut pc = addr;
-        while offset + 4 <= bytes.len() {
-            let word = u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]);
+        while offset < bytes.len() {
+            // Check for RVC (compressed) 16-bit instruction:
+            // Low bits of the first byte determine instruction length.
+            // If bits [1:0] != 0b11, it's a 16-bit compressed instruction.
+            let first_byte = bytes[offset];
+            let is_compressed = (first_byte & 0x03) != 0x03;
 
-            // Decode the instruction mnemonic from the opcode.
-            let mnemonic = decode_mnemonic(word);
-            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
+            if is_compressed && offset + 2 <= bytes.len() {
+                let half = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+                let mnemonic = decode_compressed_mnemonic(half);
+                lines.push(format!("{:#010x}:  {:04x}    {}", pc, half, mnemonic));
+                offset += 2;
+                pc += 2;
+            } else if offset + 4 <= bytes.len() {
+                let word = u32::from_le_bytes([
+                    bytes[offset],
+                    bytes[offset + 1],
+                    bytes[offset + 2],
+                    bytes[offset + 3],
+                ]);
 
-            offset += 4;
-            pc += 4;
-        }
-        if offset < bytes.len() {
-            let remaining = &bytes[offset..];
-            lines.push(format!("{:#010x}:  {:02x?}", pc, remaining));
+                // Decode the instruction mnemonic from the opcode.
+                let mnemonic = decode_mnemonic(word);
+                lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
+
+                offset += 4;
+                pc += 4;
+            } else {
+                let remaining = &bytes[offset..];
+                lines.push(format!("{:#010x}:  {:02x?}", pc, remaining));
+                break;
+            }
         }
         lines
     }
@@ -1653,12 +1731,80 @@ fn decode_mnemonic(word: u32) -> String {
             } else if word == 0x00100073 {
                 "ebreak".to_string()
             } else {
-                "system???".to_string()
+                let csr = (word >> 20) & 0xFFF;
+                let csr_name = match funct3 {
+                    0b001 => "csrrw",
+                    0b010 => "csrrs",
+                    0b011 => "csrrc",
+                    0b101 => "csrrwi",
+                    0b110 => "csrrsi",
+                    0b111 => "csrrci",
+                    _ => "system???",
+                };
+                format!("{} x{}, 0x{:03x}, x{}", csr_name, rd, csr, rs1)
             }
         }
-        0b0001111 => "fence".to_string(),
+        0b0001111 => {
+            if funct3 == 0b001 {
+                "fence.i".to_string()
+            } else {
+                "fence".to_string()
+            }
+        }
         0b1010011 => "fp_op".to_string(),
         _ => format!("unknown(opcode={:#05b})", opcode),
+    }
+}
+
+/// Decode a compressed (RVC) 16-bit instruction into a mnemonic string.
+///
+/// Handles the main quadrants (0, 1, 2) of the RVC encoding space.
+fn decode_compressed_mnemonic(half: u16) -> String {
+    let op = half & 0x03;
+    let funct3 = (half >> 13) & 0x07;
+    match op {
+        0 => {
+            // Quadrant 0: CIW, CL, CS
+            match funct3 {
+                0b000 => "c.addi4spn".to_string(),
+                0b010 => "c.lw".to_string(),
+                0b011 => "c.ld".to_string(),
+                0b110 => "c.sw".to_string(),
+                0b111 => "c.sd".to_string(),
+                _ => format!("c.q0??? funct3={}", funct3),
+            }
+        }
+        1 => {
+            // Quadrant 1: CI, CB, CJ
+            match funct3 {
+                0b000 => "c.nop/c.addi".to_string(),
+                0b001 => "c.addiw".to_string(),
+                0b010 => "c.li".to_string(),
+                0b011 => "c.addi16sp/c.lui".to_string(),
+                0b100 => "c.srli/c.srai/c.andi/c.sub/c.xor/c.or/c.and".to_string(),
+                0b101 => "c.j".to_string(),
+                0b110 => "c.beqz".to_string(),
+                0b111 => "c.bnez".to_string(),
+                _ => format!("c.q1??? funct3={}", funct3),
+            }
+        }
+        2 => {
+            // Quadrant 2: CI, CSS, CIW, CL, CS, CB
+            match funct3 {
+                0b000 => "c.slli".to_string(),
+                0b010 => "c.lwsp".to_string(),
+                0b011 => "c.ldsp".to_string(),
+                0b100 => "c.jr/c.mv/c.ebreak/c.jalr/c.add".to_string(),
+                0b110 => "c.swsp".to_string(),
+                0b111 => "c.sdsp".to_string(),
+                _ => format!("c.q2??? funct3={}", funct3),
+            }
+        }
+        3 => {
+            // This should not happen (32-bit instruction), but just in case
+            format!("c.illegal({:#06x})", half)
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -2189,5 +2335,107 @@ mod tests {
             format!("{}", Instruction::Ld { rd: Gpr::A0, rs1: Gpr::Sp, imm: 8 }),
             "ld a0, 8(sp)"
         );
+    }
+
+    // ── Zicsr Encoding Tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_csrrw_encoding() {
+        // CSRRW x10, 0x300 (mstatus), x5
+        let bytes = Instruction::Csrrw { rd: Gpr::A0, csr: 0x300, rs1: Gpr::T0 }.encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!(word & 0x7F, 0b1110011); // opcode = SYSTEM
+        assert_eq!((word >> 12) & 0x7, 0b001); // funct3 = CSRRW
+        assert_eq!((word >> 7) & 0x1F, 10); // rd = a0
+        assert_eq!((word >> 15) & 0x1F, 5); // rs1 = t0
+        assert_eq!((word >> 20) & 0xFFF, 0x300); // csr
+    }
+
+    #[test]
+    fn test_csrrs_encoding() {
+        // CSRRS x11, 0x342 (mcause), x6
+        let bytes = Instruction::Csrrs { rd: Gpr::A1, csr: 0x342, rs1: Gpr::T1 }.encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 12) & 0x7, 0b010); // funct3 = CSRRS
+        assert_eq!((word >> 20) & 0xFFF, 0x342); // csr = mcause
+    }
+
+    #[test]
+    fn test_csrrc_encoding() {
+        let bytes = Instruction::Csrrc { rd: Gpr::A2, csr: 0x344, rs1: Gpr::T2 }.encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 12) & 0x7, 0b011); // funct3 = CSRRC
+    }
+
+    #[test]
+    fn test_csrrwi_encoding() {
+        // CSRRWI x10, 0x300, 5
+        let bytes = Instruction::Csrrwi { rd: Gpr::A0, csr: 0x300, uimm: 5 }.encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 12) & 0x7, 0b101); // funct3 = CSRRWI
+        assert_eq!((word >> 15) & 0x1F, 5); // uimm in rs1 field
+    }
+
+    #[test]
+    fn test_csrrsi_csrrci_encoding() {
+        let bytes_si = Instruction::Csrrsi { rd: Gpr::A0, csr: 0x342, uimm: 3 }.encode();
+        let word_si = u32::from_le_bytes(bytes_si);
+        assert_eq!((word_si >> 12) & 0x7, 0b110);
+
+        let bytes_ci = Instruction::Csrrci { rd: Gpr::A0, csr: 0x342, uimm: 3 }.encode();
+        let word_ci = u32::from_le_bytes(bytes_ci);
+        assert_eq!((word_ci >> 12) & 0x7, 0b111);
+    }
+
+    #[test]
+    fn test_fence_i_encoding() {
+        let bytes = Instruction::FenceI.encode();
+        let word = u32::from_le_bytes(bytes);
+        // FENCE.I = 0x0000100F
+        assert_eq!(word & 0x7F, 0b0001111); // opcode = MISC-MEM
+        assert_eq!((word >> 12) & 0x7, 0b001); // funct3 = 1 for fence.i
+    }
+
+    #[test]
+    fn test_m_extension_mul_div() {
+        // MUL x10, x11, x12 => funct7=0b0000001, funct3=0b000, opcode=OP_REG
+        let mul_bytes = Instruction::Mul { rd: Gpr::A0, rs1: Gpr::A1, rs2: Gpr::A2 }.encode();
+        let mul_word = u32::from_le_bytes(mul_bytes);
+        assert_eq!((mul_word >> 25) & 0x7F, 0b0000001); // funct7 for M ext
+        assert_eq!((mul_word >> 12) & 0x7, 0b000); // MUL funct3
+        assert_eq!(mul_word & 0x7F, 0b0110011); // OP_REG
+
+        // DIV x10, x11, x12 => funct3=0b100
+        let div_bytes = Instruction::Div { rd: Gpr::A0, rs1: Gpr::A1, rs2: Gpr::A2 }.encode();
+        let div_word = u32::from_le_bytes(div_bytes);
+        assert_eq!((div_word >> 12) & 0x7, 0b100); // DIV funct3
+
+        // REMU x10, x11, x12 => funct3=0b111
+        let remu_bytes = Instruction::Remu { rd: Gpr::A0, rs1: Gpr::A1, rs2: Gpr::A2 }.encode();
+        let remu_word = u32::from_le_bytes(remu_bytes);
+        assert_eq!((remu_word >> 12) & 0x7, 0b111); // REMU funct3
+    }
+
+    #[test]
+    fn test_disassemble_with_compressed() {
+        let backend = RiscV64Backend::new();
+        // Mix a 32-bit NOP (0x00000013) with a 16-bit C.NOP (0x0001)
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x00000013u32.to_le_bytes()); // 32-bit NOP
+        bytes.extend_from_slice(&0x0001u16.to_le_bytes());    // 16-bit C.NOP
+        let lines = backend.disassemble(&bytes, 0x1000);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("addi"));   // 32-bit NOP decodes as addi x0,x0,0
+        assert!(lines[1].contains("c.nop"));  // 16-bit compressed NOP
+    }
+
+    #[test]
+    fn test_disassemble_csrrw() {
+        let backend = RiscV64Backend::new();
+        let instr = Instruction::Csrrw { rd: Gpr::A0, csr: 0x300, rs1: Gpr::T0 };
+        let bytes = instr.encode();
+        let lines = backend.disassemble(&bytes, 0x1000);
+        assert!(lines[0].contains("csrrw"));
+        assert!(lines[0].contains("0x300"));
     }
 }

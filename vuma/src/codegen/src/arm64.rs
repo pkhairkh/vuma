@@ -2272,8 +2272,13 @@ impl InstructionSelector {
                         };
                         // Compute quotient in rd
                         self.select_computation_arith(div_op, rd, rn, Operand::reg(rm_reg))?;
-                        // MSUB: rd = rm * rd - rn
-                        // TODO: add MSUB instruction variant
+                        // MSUB: rd = ra - rn * rm
+                        self.push(Instruction::MSUB {
+                            rd,
+                            rn: rm_reg,
+                            rm: rd,
+                            ra: rn,
+                        });
                     }
                     // Comparison operators — lower to CMP + CSEL
                     BinOpKind::Eq | BinOpKind::Ne
@@ -2348,11 +2353,18 @@ impl InstructionSelector {
                         });
                     }
                     crate::ir::UnaryOpKind::Not => {
-                        // MVN = ORN Rd, XZR, Rn
+                        // MVN = ORN Rd, XZR, Rn — but we use EOR with all-ones.
+                        // Load -1 (all ones) into X9, then EOR rd, rn, X9.
+                        self.push(Instruction::MOVZ { rd: Register::X9, imm16: 0, shift: 0 });
+                        self.push(Instruction::SUB {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            rm: Operand::Imm12(1),
+                        });
                         self.push(Instruction::EOR {
                             rd,
                             rn,
-                            rm: Register::X9, // TODO: load -1 into X9 first
+                            rm: Register::X9,
                         });
                     }
                     _ => {
@@ -2447,8 +2459,8 @@ impl InstructionSelector {
                     rn,
                     rm,
                 });
-                // TODO: CSET based on condition.  Placeholder MOV for now.
-                self.push(Instruction::MOV { rd, rm: Register::XZR });
+                // CSET based on condition: use NE (not-equal) after SUB sets flags.
+                self.push(Instruction::CSET { rd, cond: Condition::NE });
             }
 
             IRInstr::Ret { .. } => {
