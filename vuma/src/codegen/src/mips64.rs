@@ -1699,9 +1699,14 @@ fn lower_binop(
 
 /// Lower an IR instruction to a sequence of MIPS64 `AllocatedInstruction`s,
 /// handling branch delay slots by inserting NOPs after branches/jumps.
+///
+/// `frame_size` is the stack frame size (0 if not yet known), used by the
+/// `Ret` handler to generate a proper epilogue that restores $ra and
+/// deallocates the frame.
 fn lower_ir_instr(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
+    frame_size: usize,
 ) -> Vec<AllocatedInstruction> {
     let mut result = Vec::new();
 
@@ -1896,6 +1901,35 @@ fn lower_ir_instr(
                         encoded: mov.encode().to_vec(),
                     });
                 }
+            }
+            // Epilogue: restore $ra and deallocate frame
+            if frame_size > 0 {
+                // ld $ra, frame_size-8($sp)
+                let ra_offset = (frame_size - 8) as i32;
+                let load_ra = Instruction::Ld {
+                    rt: Gpr::Ra,
+                    base: Gpr::Sp,
+                    offset: ra_offset,
+                };
+                result.push(AllocatedInstruction {
+                    opcode: "ld".to_string(),
+                    reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
+                    encoded: load_ra.encode().to_vec(),
+                });
+                // daddiu $sp, $sp, frame_size
+                let frame_imm = frame_size as i32;
+                let dealloc = Instruction::Daddiu {
+                    rt: Gpr::Sp,
+                    rs: Gpr::Sp,
+                    imm: frame_imm,
+                };
+                result.push(AllocatedInstruction {
+                    opcode: "daddiu".to_string(),
+                    reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    encoded: dealloc.encode().to_vec(),
+                });
             }
             // jr $ra
             let jr = Instruction::Jr { rs: Gpr::Ra };
@@ -2151,7 +2185,22 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Free { ptr: _ } | IRInstr::Phi { .. } => {
+        IRInstr::Free { ptr: _ } => {
+            // Free is heap deallocation; the IR specifies it should be lowered
+            // to a runtime call.  Until a runtime is available, emit a break
+            // instruction with code 0xFF to trap if accidentally executed.
+            let brk = Instruction::Break { code: 0xFF };
+            result.push(AllocatedInstruction {
+                opcode: "break".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: brk.encode().to_vec(),
+            });
+        }
+
+        IRInstr::Phi { .. } => {
+            // Phi nodes should be eliminated by SSA deconstruction before
+            // instruction selection.  Emit a NOP as a safety net.
             result.push(AllocatedInstruction {
                 opcode: "nop".to_string(),
                 reads: vec![],
@@ -2233,7 +2282,7 @@ impl Backend for Mips64Backend {
         // Lower IR instructions.
         for block in &func.blocks {
             for instr in &block.instructions {
-                let lowered = lower_ir_instr(instr, &mut vreg_map);
+                let lowered = lower_ir_instr(instr, &mut vreg_map, frame_size);
                 instructions.extend(lowered);
             }
         }
@@ -2829,5 +2878,136 @@ mod tests {
         // nor is R-type: opcode=0, rs=$a0(4), rt=$zero(0), rd=$v0(2), sa=0, funct=0x27
         let expected: u32 = (0 << 26) | (4 << 21) | (0 << 16) | (2 << 11) | (0 << 6) | 0x27;
         assert_eq!(word, expected, "not (nor dst, src, $zero) encoding mismatch");
+    }
+
+    // ── ISel integration tests ─────────────────────────────────────────
+
+    /// Helper: build a minimal IR function with one block and the given
+    /// instructions, then run allocate_registers and return the result.
+    fn isel_func(name: &str, instrs: Vec<IRInstr>) -> AllocatedFunction {
+        use std::collections::HashSet;
+        let backend = Mips64Backend::new();
+        let func = IRFunction {
+            name: name.to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![crate::ir::IRBlock {
+                label: "entry".to_string(),
+                instructions: instrs,
+                terminator: crate::ir::IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        };
+        backend.allocate_registers(&func).unwrap()
+    }
+
+    #[test]
+    fn test_isel_add_emits_daddu() {
+        let result = isel_func("add_test", vec![IRInstr::Add {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        }]);
+        // Skip prologue (2 instructions: daddiu + sd), look for daddu
+        let instrs = &result.blocks[0].instructions;
+        // Find a daddu instruction (opcode field starts with "daddu")
+        let daddu_count = instrs.iter().filter(|i| i.opcode == "daddu").count();
+        assert!(daddu_count >= 1, "expected at least one daddu, found {daddu_count}");
+    }
+
+    #[test]
+    fn test_isel_mul_emits_dmult_mflo() {
+        let result = isel_func("mul_test", vec![IRInstr::Mul {
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        let has_dmult = instrs.iter().any(|i| i.opcode == "dmult");
+        let has_mflo = instrs.iter().any(|i| i.opcode == "mflo");
+        assert!(has_dmult, "expected dmult instruction for Mul");
+        assert!(has_mflo, "expected mflo instruction after dmult");
+    }
+
+    #[test]
+    fn test_isel_ret_emits_epilogue() {
+        let result = isel_func("ret_test", vec![IRInstr::Ret {
+            values: vec![IRValue::Register(0)],
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        // With a frame, Ret should emit: ld $ra, ...; daddiu $sp, ...; jr $ra; nop
+        let has_ld_ra = instrs.iter().any(|i| i.opcode == "ld" && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())));
+        let has_jr = instrs.iter().any(|i| i.opcode == "jr");
+        let has_nop = instrs.iter().any(|i| i.opcode == "nop");
+        assert!(has_ld_ra, "expected ld to restore $ra in epilogue");
+        assert!(has_jr, "expected jr $ra in epilogue");
+        assert!(has_nop, "expected nop delay slot after jr");
+    }
+
+    #[test]
+    fn test_isel_binop_and_emits_and() {
+        let result = isel_func("and_test", vec![IRInstr::BinOp {
+            op: BinOpKind::And,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        let has_and = instrs.iter().any(|i| i.opcode == "and");
+        assert!(has_and, "expected and instruction for BinOp::And");
+    }
+
+    #[test]
+    fn test_isel_free_emits_break() {
+        let result = isel_func("free_test", vec![IRInstr::Free {
+            ptr: IRValue::Register(0),
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        let has_break = instrs.iter().any(|i| i.opcode == "break");
+        assert!(has_break, "expected break instruction for Free (runtime trap)");
+    }
+
+    #[test]
+    fn test_isel_cmp_eq_emits_xor_sltiu() {
+        let result = isel_func("cmp_eq_test", vec![IRInstr::Cmp {
+            kind: CmpKind::Eq,
+            dst: IRValue::Register(0),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        let has_xor = instrs.iter().any(|i| i.opcode == "xor");
+        let has_sltiu = instrs.iter().any(|i| i.opcode == "sltiu");
+        assert!(has_xor, "expected xor for Cmp Eq");
+        assert!(has_sltiu, "expected sltiu for Cmp Eq");
+    }
+
+    #[test]
+    fn test_isel_load_store_roundtrip() {
+        let result = isel_func("ld_sd_test", vec![
+            IRInstr::Load { dst: IRValue::Register(0), addr: IRValue::Register(1) },
+            IRInstr::Store { value: IRValue::Register(0), addr: IRValue::Register(1) },
+        ]);
+        let instrs = &result.blocks[0].instructions;
+        let has_ld = instrs.iter().any(|i| i.opcode == "ld");
+        let has_sd = instrs.iter().any(|i| i.opcode == "sd");
+        assert!(has_ld, "expected ld instruction for Load");
+        assert!(has_sd, "expected sd instruction for Store");
+    }
+
+    #[test]
+    fn test_isel_alloc_emits_daddiu_sp() {
+        let result = isel_func("alloc_test", vec![IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 32,
+        }]);
+        let instrs = &result.blocks[0].instructions;
+        // Alloc should emit daddiu $sp, $sp, -32 and daddu dst, $sp, $zero
+        let daddiu_count = instrs.iter().filter(|i| i.opcode == "daddiu").count();
+        assert!(daddiu_count >= 2, "expected at least 2 daddiu (prologue + alloc), found {daddiu_count}");
     }
 }

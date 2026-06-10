@@ -42,7 +42,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, PhysicalReg, PowerPC64TargetInfo, RegClass, TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
 use std::fmt;
 
 // ===========================================================================
@@ -560,6 +560,12 @@ pub enum Instruction {
     Divd { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Negate: `neg rT, rA` (XO-form, primary=31, xo=104)
     Neg { rt: Gpr, ra: Gpr },
+    /// Count Leading Zeros Doubleword: `cntlzd rA, rS` (X-form, primary=31, xo=58)
+    Cntlzd { ra: Gpr, rs: Gpr },
+    /// Population Count Doubleword: `popcntd rA, rS` (X-form, primary=31, xo=506)
+    Popcntd { ra: Gpr, rs: Gpr },
+    /// Extend Sign Word: `extsw rA, rS` (X-form, primary=31, xo=986)
+    Extsw { ra: Gpr, rs: Gpr },
 
     // ── Logical ────────────────────────────────────────────────────
     /// AND: `and rA, rS, rB` (X-form, primary=31, xo=28)
@@ -620,6 +626,8 @@ pub enum Instruction {
     Stw { rs: Gpr, ra: Gpr, d: i32 },
     /// Store Word with Update: `stwu rS, d(rA)` (D-form, primary=37)
     Stwu { rs: Gpr, ra: Gpr, d: i32 },
+    /// Store Doubleword with Update: `stdu rS, ds(rA)` (DS-form, primary=62, xo=1)
+    Stdu { rs: Gpr, ra: Gpr, ds: i32 },
     /// Load Byte and Zero: `lbz rT, d(rA)` (D-form, primary=34)
     Lbz { rt: Gpr, ra: Gpr, d: i32 },
     /// Load Halfword and Zero: `lhz rT, d(rA)` (D-form, primary=40)
@@ -734,6 +742,18 @@ impl Instruction {
             Instruction::Neg { rt, ra } => {
                 // NEG rT, rA: primary=31, OE=0, xo=104, Rc=0, rB=0
                 encode_xo_form(31, rt.encoding(), ra.encoding(), 0, 0, 104, 0)
+            }
+            Instruction::Cntlzd { ra, rs } => {
+                // CNTLZD rA, rS: primary=31, xo=58, Rc=0, rB=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 58, 0)
+            }
+            Instruction::Popcntd { ra, rs } => {
+                // POPCNTD rA, rS: primary=31, xo=506, Rc=0, rB=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 506, 0)
+            }
+            Instruction::Extsw { ra, rs } => {
+                // EXTSW rA, rS: primary=31, xo=986, Rc=0, rB=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 986, 0)
             }
 
             // ── Logical ────────────────────────────────────────
@@ -878,6 +898,10 @@ impl Instruction {
             Instruction::Stwu { rs, ra, d } => {
                 // STWU rS, d(rA): primary=37
                 encode_d_form(37, rs.encoding(), ra.encoding(), *d)
+            }
+            Instruction::Stdu { rs, ra, ds } => {
+                // STDU rS, ds(rA): primary=62, xo=1
+                encode_ds_form(62, rs.encoding(), ra.encoding(), *ds, 1)
             }
             Instruction::Lbz { rt, ra, d } => {
                 // LBZ rT, d(rA): primary=34
@@ -1026,6 +1050,9 @@ impl Instruction {
             Instruction::Divw { .. } => "divw",
             Instruction::Divd { .. } => "divd",
             Instruction::Neg { .. } => "neg",
+            Instruction::Cntlzd { .. } => "cntlzd",
+            Instruction::Popcntd { .. } => "popcntd",
+            Instruction::Extsw { .. } => "extsw",
             Instruction::And { .. } => "and",
             Instruction::Andi { .. } => "andi.",
             Instruction::Or { .. } => "or",
@@ -1053,6 +1080,7 @@ impl Instruction {
             Instruction::Std { .. } => "std",
             Instruction::Stw { .. } => "stw",
             Instruction::Stwu { .. } => "stwu",
+            Instruction::Stdu { .. } => "stdu",
             Instruction::Lbz { .. } => "lbz",
             Instruction::Lhz { .. } => "lhz",
             Instruction::Stb { .. } => "stb",
@@ -1098,6 +1126,9 @@ impl fmt::Display for Instruction {
             Instruction::Divw { rt, ra, rb } => write!(f, "divw {}, {}, {}", rt, ra, rb),
             Instruction::Divd { rt, ra, rb } => write!(f, "divd {}, {}, {}", rt, ra, rb),
             Instruction::Neg { rt, ra } => write!(f, "neg {}, {}", rt, ra),
+            Instruction::Cntlzd { ra, rs } => write!(f, "cntlzd {}, {}", ra, rs),
+            Instruction::Popcntd { ra, rs } => write!(f, "popcntd {}, {}", ra, rs),
+            Instruction::Extsw { ra, rs } => write!(f, "extsw {}, {}", ra, rs),
             Instruction::And { ra, rs, rb } => write!(f, "and {}, {}, {}", ra, rs, rb),
             Instruction::Andi { ra, rs, uimm } => write!(f, "andi. {}, {}, {}", ra, rs, uimm),
             Instruction::Or { ra, rs, rb } => write!(f, "or {}, {}, {}", ra, rs, rb),
@@ -1133,6 +1164,7 @@ impl fmt::Display for Instruction {
             Instruction::Std { rs, ra, ds } => write!(f, "std {}, {}({})", rs, ds, ra),
             Instruction::Stw { rs, ra, d } => write!(f, "stw {}, {}({})", rs, d, ra),
             Instruction::Stwu { rs, ra, d } => write!(f, "stwu {}, {}({})", rs, d, ra),
+            Instruction::Stdu { rs, ra, ds } => write!(f, "stdu {}, {}({})", rs, ds, ra),
             Instruction::Lbz { rt, ra, d } => write!(f, "lbz {}, {}({})", rt, d, ra),
             Instruction::Lhz { rt, ra, d } => write!(f, "lhz {}, {}({})", rt, d, ra),
             Instruction::Stb { rs, ra, d } => write!(f, "stb {}, {}({})", rs, d, ra),
@@ -1617,10 +1649,59 @@ fn lower_ir_instr_ppc64(
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
                 }
-                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                    // Placeholder: mr d, s
+                UnaryOpKind::Clz => {
+                    // cntlzd d, s — count leading zeros doubleword
                     result.push(emit_alloc_instr(
-                        Instruction::Mr { ra: d, rs: s },
+                        Instruction::Cntlzd { ra: d, rs: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                UnaryOpKind::Ctz => {
+                    // ctz = 63 - cntlzd(x & -x)
+                    // Use scratch R11 for intermediate:
+                    //   subf r11, s, r0 → r11 = -s (use neg)
+                    //   and r11, s, r11 → r11 = s & -s (isolates lowest set bit)
+                    //   cntlzd d, r11   → d = leading zeros of isolated bit
+                    //   li r12, 63
+                    //   subf d, d, r12  → d = 63 - clz = ctz
+                    let scratch1 = Gpr::R11;
+                    let scratch2 = Gpr::R12;
+                    // neg scratch1, s
+                    result.push(emit_alloc_instr(
+                        Instruction::Neg { rt: scratch1, ra: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+                    ));
+                    // and scratch1, s, scratch1
+                    result.push(emit_alloc_instr(
+                        Instruction::And { ra: scratch1, rs: s, rb: scratch1 },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+                    ));
+                    // cntlzd d, scratch1
+                    result.push(emit_alloc_instr(
+                        Instruction::Cntlzd { ra: d, rs: scratch1 },
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                    // li scratch2, 63
+                    result.push(emit_alloc_instr(
+                        Instruction::Li { rt: scratch2, simm: 63 },
+                        vec![],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch2.encoding())],
+                    ));
+                    // subf d, d, scratch2  → d = 63 - clz
+                    result.push(emit_alloc_instr(
+                        Instruction::Subf { rt: d, ra: d, rb: scratch2 },
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding()), PhysicalReg::new(RegClass::Gpr, scratch2.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                UnaryOpKind::Popcnt => {
+                    // popcntd d, s — population count doubleword
+                    result.push(emit_alloc_instr(
+                        Instruction::Popcntd { ra: d, rs: s },
                         vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
@@ -1659,7 +1740,7 @@ fn lower_ir_instr_ppc64(
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             // stdu r1, -size(r1) — store back chain and allocate stack space
             let neg_size = -(*size as i32);
-            let stdu = Instruction::Std {
+            let stdu = Instruction::Stdu {
                 rs: Gpr::R1,
                 ra: Gpr::R1,
                 ds: neg_size,
@@ -1755,15 +1836,29 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Cast { dst, src, .. } => {
+        IRInstr::Cast { kind, dst, src, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let s = map_vreg_to_gpr(vreg_id(src), None, vreg_map);
-            if d != s {
-                result.push(emit_alloc_instr(
-                    Instruction::Mr { ra: d, rs: s },
-                    vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
-                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                ));
+            match kind {
+                CastKind::SExt => {
+                    // extsw d, s — sign-extend word to doubleword
+                    result.push(emit_alloc_instr(
+                        Instruction::Extsw { ra: d, rs: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                CastKind::ZExt | CastKind::Trunc | CastKind::BitCast => {
+                    // Zero-extend, trunc, and bitcast are all just moves on PPC64
+                    // (zero-extension is free after load, trunc just uses lower bits)
+                    if d != s {
+                        result.push(emit_alloc_instr(
+                            Instruction::Mr { ra: d, rs: s },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
+                }
             }
         }
 
@@ -1906,10 +2001,10 @@ impl Backend for PPC64Backend {
             opcode: "stdu".to_string(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
             writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-            encoded: Instruction::Stwu {
+            encoded: Instruction::Stdu {
                 rs: Gpr::R1,
                 ra: Gpr::R1,
-                d: -fs,
+                ds: -fs,
             }
             .encode()
             .to_vec(),

@@ -8792,3 +8792,53 @@ Replaced the NOP-emitting instruction selection in the LoongArch64 backend with 
 ### Verification
 - `cargo clippy -p vuma-codegen -- -D warnings` — 0 warnings, 0 errors
 - `cargo test -p vuma-codegen` — 588 tests pass (8 new ISel tests + 580 existing)
+
+## Task W4-ARM32-v2: ARM32 ISel Implementation
+**Date:** 2026-03-06
+**Agent:** W4-ARM32-v2
+**Status:** ✅ Complete
+
+### Summary
+Implemented real instruction selection for the ARM32 backend's `allocate_registers()` method. The backend previously used `as_register().unwrap_or(0)` for all operands, silently defaulting to R0 for immediate/address/label values instead of loading them into registers. Added a `resolve_gpr_arm32` helper (following the x86_64 pattern), a `try_encode_arm_imm` helper for ARM rotated immediate encoding, and a `load_immediate_arm32` helper for multi-instruction immediate loading. Updated all IR instruction match arms to properly resolve operands via `resolve_gpr_arm32` and to optimise immediate-form ARM instructions where possible.
+
+### Files Modified
+| File | Description |
+|------|-------------|
+| `src/codegen/src/arm32.rs` | Added 3 helper functions + rewrote all ISel match arms + added 5 tests |
+
+### New Helper Functions
+| Function | Purpose |
+|----------|---------|
+| `try_encode_arm_imm(val: u32) -> Option<(u32, u32)>` | Tries to encode a 32-bit value as an ARM rotated immediate (imm8, rotate). Returns `Some((rotate, imm8))` if representable, `None` otherwise. Tries all 16 rotation values (0–15). |
+| `load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8>` | Generates ARM32 machine code to load a 32-bit immediate into a register. Uses single MOV for rotated immediates, MVN for complemented values, and MOV+ORR decomposition for large constants (splits into byte lanes at offsets 0, 8, 16, 24). |
+| `resolve_gpr_arm32(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>)` | Resolves an IRValue to a physical GPR. For registers, looks up in reg_map. For immediates/addresses/labels, loads into the scratch register using `load_immediate_arm32`. Returns the GPR and any pre-code bytes that must precede the main instruction. |
+
+### ISel Changes in allocate_registers()
+All IR instruction match arms were updated:
+- **Add/Sub**: Use `resolve_gpr_arm32` for lhs; optimise rhs immediate with `ADD/SUB imm` when the value fits in ARM rotated immediate form; fall back to `resolve_gpr_arm32` + register-register form for large immediates
+- **Mul**: Use `resolve_gpr_arm32` for both operands; emit ARM MUL instruction
+- **Div**: Use `resolve_gpr_arm32` for both operands; set up R0/R1 for software divide via SVC; move result to dst
+- **BinOp**: All variants (And, Or, Xor, Shl, ShrL, ShrA, Add, Sub, Mul, SDiv, UDiv, SRem, URem, comparisons) use `resolve_gpr_arm32` for operands
+- **UnaryOp**: Neg, Not, Clz/Ctz/Popcnt all use `resolve_gpr_arm32` for the operand
+- **Cmp**: Uses `resolve_gpr_arm32` for lhs and rhs
+- **Load/Store**: Uses `resolve_gpr_arm32` for address and value operands
+- **Call**: Uses `resolve_gpr_arm32` for argument values (loads immediates into arg registers directly)
+- **CondBranch**: Uses `resolve_gpr_arm32` for the condition operand
+- **Cast**: Uses `resolve_gpr_arm32` for the source operand
+- **Select**: Uses `resolve_gpr_arm32` for cond, true_val, false_val with proper pre-code emission order
+- **Offset**: Uses `resolve_gpr_arm32` for base; tries `ADD imm` for immediate offsets, falls back to `load_immediate_arm32` + `ADD reg`
+- **Ret**: Uses `resolve_gpr_arm32` for return value
+- **GetAddress**: Uses `load_immediate_arm32` instead of `Instruction::MovImm` (handles arbitrary addresses)
+
+### Test Coverage (5 new tests, all passing)
+| # | Test | Description |
+|---|------|-------------|
+| 1 | `test_isel_add_with_immediate` | ADD dst, lhs, #42 emits ADD immediate instruction (bits[27:25]=001, opcode=ADD) |
+| 2 | `test_isel_resolve_gpr_immediate` | resolve_gpr_arm32: Register→mapped Gpr with no pre-code; Immediate(0)→MOV R12, #0; Immediate(42)→MOV R3, #42 |
+| 3 | `test_isel_try_encode_arm_imm` | Simple 8-bit values, rotated values (0x100, 0xFF0), and unrepresentable values (0x101, 0x12345678) |
+| 4 | `test_isel_load_immediate_large` | 0x12345678 requires MOV+ORR sequence (≥2 instructions), all with AL condition code |
+| 5 | `test_isel_sub_with_immediate_rhs` | SUB dst, lhs, #10 emits SUB immediate instruction |
+
+### Verification
+- `cargo clippy -p vuma-codegen -- -D warnings` — 0 warnings, 0 errors
+- `cargo test -p vuma-codegen` — 601 tests pass (5 new ISel tests + 596 existing)

@@ -607,3 +607,90 @@ Decodes ALL instruction classes in the `Instruction` enum:
 
 - `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
 - `cargo test -p vuma-codegen`: **574 tests pass** (12 new decode tests + 562 existing)
+
+## Wave 4: MIPS64 ISel Implementation
+
+**Date**: 2026-03-05
+**Status**: ✅ Completed
+
+### Summary
+
+Wave 4 implements real instruction selection for the MIPS64 backend, replacing
+the previous NOP-emitting stub for `Free` instructions and adding a proper
+function epilogue in the `Ret` handler. The `lower_ir_instr` function now
+accepts a `frame_size` parameter so that `Ret` can emit the correct epilogue
+sequence (ld $ra, daddiu $sp, jr $ra, nop). 8 new ISel integration tests were
+added, all passing. 601 total codegen tests pass.
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/codegen/src/mips64.rs | Fixed Ret epilogue, replaced Free NOP with break trap, added frame_size param to lower_ir_instr, added 8 ISel tests | +140 |
+| src/codegen/src/arm32.rs | Fixed pre-existing compile errors in IRFunction/IRBlock test helpers (missing fields) | +16 |
+
+### Key Changes in mips64.rs
+
+1. **`lower_ir_instr` now accepts `frame_size: usize`** — used by the Ret
+   handler to generate a proper function epilogue that restores $ra from the
+   stack and deallocates the frame.
+
+2. **`Ret` handler now emits full epilogue** — Previously, Ret only emitted
+   `jr $ra; nop`, which is incorrect when the prologue saves $ra and adjusts
+   $sp. Now it emits:
+   - `ld $ra, frame_size-8($sp)` — restore saved return address
+   - `daddiu $sp, $sp, frame_size` — deallocate stack frame
+   - `jr $ra` — return
+   - `nop` — delay slot
+
+3. **`Free` handler now emits `break 0xFF`** instead of NOP — Since Free is
+   heap deallocation that should be lowered to a runtime call, emitting a
+   `break` instruction with code 0xFF traps if accidentally executed, which is
+   safer than silently falling through.
+
+4. **`Phi` handler separated from `Free`** — Phi nodes get their own match arm
+   with a comment explaining they should be eliminated by SSA deconstruction
+   before instruction selection.
+
+5. **`allocate_registers` passes `frame_size`** to `lower_ir_instr` so the
+   Ret handler can emit the correct epilogue.
+
+### ISel Coverage (all IR instructions mapped to MIPS64)
+
+- Add/Sub → DADDU/DSUBU
+- Mul → DMULT + MFLO
+- Div → DDIV + MFLO
+- BinOp::Add/Sub/Mul/SDiv/UDiv/SRem/URem/And/Or/Xor/Shl/ShrL/ShrA → correct R-type
+- BinOp::SLt/ULt → SLT/SLTU; SLe/SGt/SGe/ULe/UGt/UGe → SLT/SLTU + XORI or swapped ops
+- BinOp::Eq → XOR + SLTIU; Ne → XOR + SLTU
+- Load/Store → LD/SD
+- Ret → LD $ra + DADDIU $sp + JR $ra + NOP
+- Call → arg shuffle + JAL + NOP + result move
+- Branch → BEQ $zero,$zero,0 + NOP
+- CondBranch → BNE + NOP + BEQ + NOP
+- Alloc → DADDIU $sp,-size + DADDU dst,$sp,$zero
+- Cast → DADDU dst,src,$zero
+- Select → DADDU + MOVN
+- UnaryOp::Neg → DSUBU dst,$zero,src
+- UnaryOp::Not → NOR dst,src,$zero
+- Cmp → delegates to lower_binop
+- Offset → DADDU
+- GetAddress → LUI (placeholder)
+- Free → BREAK 0xFF
+- Phi → NOP
+
+### New Tests (8 added)
+
+1. `test_isel_add_emits_daddu` — Add IR → daddu instruction
+2. `test_isel_mul_emits_dmult_mflo` — Mul IR → dmult + mflo
+3. `test_isel_ret_emits_epilogue` — Ret IR → ld $ra + daddiu $sp + jr $ra + nop
+4. `test_isel_binop_and_emits_and` — BinOp::And → and instruction
+5. `test_isel_free_emits_break` — Free → break 0xFF (not NOP)
+6. `test_isel_cmp_eq_emits_xor_sltiu` — Cmp::Eq → xor + sltiu
+7. `test_isel_load_store_roundtrip` — Load → ld, Store → sd
+8. `test_isel_alloc_emits_daddiu_sp` — Alloc → daddiu $sp + daddu dst
+
+### Build Verification
+
+- `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
+- `cargo test -p vuma-codegen`: **601 tests pass** (41 mips64, including 8 new ISel tests)
