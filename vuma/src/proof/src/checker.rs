@@ -488,9 +488,6 @@ mod tests {
 
     // -- check_proof_cached tests -----------------------------------------------
 
-    use crate::proof::{Goal, ProofContext, Target};
-    use crate::rules::InferenceRule;
-
     /// Checks a proof goal against the checker, using a cache to avoid
     /// redundant work. If the goal's fingerprint is already in the cache,
     /// the cached result is returned directly. Otherwise the proof is

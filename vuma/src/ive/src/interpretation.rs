@@ -512,7 +512,7 @@ impl InterpretationVerifier {
         // or they are equal)
         if write_repd.alignment() != read_repd.alignment() {
             // Allow if read alignment is a divisor of write alignment
-            if write_repd.alignment() % read_repd.alignment() != 0 {
+            if !write_repd.alignment().is_multiple_of(read_repd.alignment()) {
                 return Err(format!(
                     "alignment mismatch: write align={}, read align={}",
                     write_repd.alignment(),

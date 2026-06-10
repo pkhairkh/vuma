@@ -674,7 +674,7 @@ impl VisualProjection {
                         EdgeKind::Annotation => "──@──▶",
                     };
 
-                    let prefix = if i == 0 { "    " } else { "    " };
+                    let prefix = "    ";
                     lines.push(format!(
                         "{}{} {}{}",
                         prefix, VLINE, edge_symbol, target_label

@@ -367,7 +367,7 @@ pub fn encode_mov_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
         if offset == 0 {
             code.push(modrm(0, dst.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
-        } else if offset >= -128 && offset <= 127 {
+        } else if (-128..=127).contains(&offset) {
             code.push(modrm(1, dst.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
             code.push(offset as u8);
@@ -376,7 +376,7 @@ pub fn encode_mov_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
             code.push(sib(0, 4, base.encoding() & 7));
             code.extend_from_slice(&offset.to_le_bytes());
         }
-    } else if offset >= -128 && offset <= 127 {
+    } else if (-128..=127).contains(&offset) {
         // mod=01, disp8
         code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
         code.push(offset as u8);
@@ -411,7 +411,7 @@ pub fn encode_mov_mem_reg(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
         if offset == 0 {
             code.push(modrm(0, src.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
-        } else if offset >= -128 && offset <= 127 {
+        } else if (-128..=127).contains(&offset) {
             code.push(modrm(1, src.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
             code.push(offset as u8);
@@ -420,7 +420,7 @@ pub fn encode_mov_mem_reg(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
             code.push(sib(0, 4, base.encoding() & 7));
             code.extend_from_slice(&offset.to_le_bytes());
         }
-    } else if offset >= -128 && offset <= 127 {
+    } else if (-128..=127).contains(&offset) {
         code.push(modrm(1, src.encoding() & 7, base.encoding() & 7));
         code.push(offset as u8);
     } else {
@@ -650,7 +650,7 @@ pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
         if offset == 0 {
             code.push(modrm(0, dst.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
-        } else if offset >= -128 && offset <= 127 {
+        } else if (-128..=127).contains(&offset) {
             code.push(modrm(1, dst.encoding() & 7, 4));
             code.push(sib(0, 4, base.encoding() & 7));
             code.push(offset as u8);
@@ -659,7 +659,7 @@ pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
             code.push(sib(0, 4, base.encoding() & 7));
             code.extend_from_slice(&offset.to_le_bytes());
         }
-    } else if offset >= -128 && offset <= 127 {
+    } else if (-128..=127).contains(&offset) {
         code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
         code.push(offset as u8);
     } else {
@@ -1049,7 +1049,7 @@ fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as usize + 15) / 16) * 16;
+                let aligned = (*size as usize).div_ceil(16) * 16;
                 total += aligned;
             }
         }

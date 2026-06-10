@@ -1079,7 +1079,7 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
     out.push_str("    rankdir=TB;\n");
     out.push_str("    node [shape=record, fontname=\"monospace\"];\n");
     out.push_str("    edge [fontname=\"monospace\"];\n");
-    out.push_str("\n");
+    out.push('\n');
 
     // Group nodes by region for subgraph clustering
     let mut node_to_region: std::collections::HashMap<NodeId, RegionId> =

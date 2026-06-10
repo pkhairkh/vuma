@@ -1077,19 +1077,11 @@ impl BidirectionalProjection {
 ///
 /// This is kept for backward compatibility. New code should use
 /// [`BidirectionalProjection`] instead.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BidirectionalEditor {
     /// The textual projection engine used for re-projection after edits.
     #[allow(dead_code)]
     projection: TextualProjection,
-}
-
-impl Default for BidirectionalEditor {
-    fn default() -> Self {
-        Self {
-            projection: TextualProjection::default(),
-        }
-    }
 }
 
 impl BidirectionalEditor {

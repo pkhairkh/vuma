@@ -79,7 +79,7 @@ pub enum InferenceRule {
     /// Premises (2):
     ///   0. "region R1 has exclusive access"
     ///   1. "region R2 has exclusive access"
-    ///   (R1 and R2 must be non-overlapping)
+    ///      (R1 and R2 must be non-overlapping)
     ///
     /// Conclusion: "no conflict between R1 and R2"
     ExclusivityElim,
@@ -113,7 +113,7 @@ pub enum InferenceRule {
     /// Premises (2):
     ///   0. "source type S has layout L_s"
     ///   1. "target type T has layout L_t"
-    ///   (L_t.size ≤ L_s.size and alignments are compatible)
+    ///      (L_t.size ≤ L_s.size and alignments are compatible)
     ///
     /// Conclusion: "cast from S to T is valid"
     CastValidity,

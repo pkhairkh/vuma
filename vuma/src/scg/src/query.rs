@@ -250,7 +250,7 @@ fn dfs_derivation(
     results: &mut Vec<DerivationChain>,
 ) {
     if remaining_depth == 0 {
-        if chain.len() > 0 {
+        if !chain.is_empty() {
             results.push(chain.clone());
         }
         return;
@@ -273,7 +273,7 @@ fn dfs_derivation(
 
     if derivation_edges.is_empty() {
         // Leaf node: record this chain if it has at least one edge
-        if chain.len() > 0 {
+        if !chain.is_empty() {
             results.push(chain.clone());
         }
         return;

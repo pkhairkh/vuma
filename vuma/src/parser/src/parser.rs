@@ -1368,7 +1368,7 @@ impl<'src> Parser<'src> {
         loop {
             // Range expression: `start..end` — handled as a very low-precedence
             // binary-like construct that produces Expr::Range instead of BinOp.
-            if self.current.kind == TokenKind::DotDot && min_prec <= 0 {
+            if self.current.kind == TokenKind::DotDot && min_prec == 0 {
                 let start = left.span().start;
                 self.advance(); // consume '..'
                 let end_expr = self.parse_expr_with_precedence(1)?;
@@ -2206,11 +2206,7 @@ impl<'src> Parser<'src> {
     /// Consume a name token (identifier or certain keywords that can be used
     /// as names in VUMA) and return its text.
     fn expect_name(&mut self) -> Result<String, ParseError> {
-        if self.current.kind == TokenKind::Ident {
-            let name = self.current.lexeme.clone();
-            self.advance();
-            Ok(name)
-        } else if Self::is_name_keyword(self.current.kind) {
+        if self.current.kind == TokenKind::Ident || Self::is_name_keyword(self.current.kind) {
             let name = self.current.lexeme.clone();
             self.advance();
             Ok(name)

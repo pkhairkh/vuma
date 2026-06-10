@@ -81,7 +81,7 @@ impl BenchmarkResult {
         let mean_ns = sum / n as u64;
 
         // Median from sorted data.
-        let median_ns = if n % 2 == 0 {
+        let median_ns = if n.is_multiple_of(2) {
             (measurements_ns[n / 2 - 1] + measurements_ns[n / 2]) / 2
         } else {
             measurements_ns[n / 2]
@@ -154,7 +154,7 @@ impl BenchmarkStats {
         let mean_ns = sum / n as u64;
         let mean_f = mean_ns as f64;
 
-        let median_ns = if n % 2 == 0 {
+        let median_ns = if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2
         } else {
             sorted[n / 2]
@@ -901,18 +901,16 @@ pub fn e2e_pipeline_bench() -> Vec<BenchmarkResult> {
 
 /// Run the entire benchmark suite and return all results.
 pub fn run_all_benchmarks() -> BenchmarkSuiteResult {
-    let mut suite = BenchmarkSuiteResult::default();
-
-    suite.scg_construction = scg_construction_bench();
-    suite.bd_inference = bd_inference_bench();
-    suite.msg_construction = msg_construction_bench();
-    suite.ive_verification = ive_verification_bench();
-    suite.codegen = codegen_bench();
-    suite.c_comparison = c_comparison_bench();
-    suite.memory_usage = memory_usage_bench();
-    suite.e2e_pipeline = e2e_pipeline_bench();
-
-    suite
+    BenchmarkSuiteResult {
+        scg_construction: scg_construction_bench(),
+        bd_inference: bd_inference_bench(),
+        msg_construction: msg_construction_bench(),
+        ive_verification: ive_verification_bench(),
+        codegen: codegen_bench(),
+        c_comparison: c_comparison_bench(),
+        memory_usage: memory_usage_bench(),
+        e2e_pipeline: e2e_pipeline_bench(),
+    }
 }
 
 /// The complete output of the benchmark suite.

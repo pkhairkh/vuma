@@ -21,7 +21,7 @@
 //!    b. Skip if their byte ranges do not overlap.
 //!    c. Skip if they are ordered by a sync edge (in either direction).
 //!    d. Otherwise, check CapD permissions: if both have Write → write-write
-//!       data race; if one Write + one Read → read-write race.
+//!    data race; if one Write + one Read → read-write race.
 //! 4. Build an interference graph from all detected conflicts.
 //! 5. Return a structured [`VerificationResult`].
 //!

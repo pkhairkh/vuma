@@ -745,7 +745,7 @@ fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 total += aligned;
             }
         }

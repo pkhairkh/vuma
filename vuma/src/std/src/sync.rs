@@ -144,6 +144,12 @@ pub struct VumaSpinLock {
     lock: AtomicBool,
 }
 
+impl Default for VumaSpinLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VumaSpinLock {
     /// Create a new unlocked spinlock.
     // VUMA-VERIFIED: spinlock creation is safe
@@ -372,26 +378,26 @@ impl<'a, T> VumaMutexGuard<'a, T> {
     /// Returns a reference to the guarded data.
     // VUMA-VERIFIED: read access under exclusive lock is safe
     pub fn get(&self) -> &T {
-        &*self.inner
+        &self.inner
     }
 
     /// Returns a mutable reference to the guarded data.
     // VUMA-VERIFIED: write access under exclusive lock is safe
     pub fn get_mut(&mut self) -> &mut T {
-        &mut *self.inner
+        &mut self.inner
     }
 }
 
 impl<'a, T> std::ops::Deref for VumaMutexGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        &*self.inner
+        &self.inner
     }
 }
 
 impl<'a, T> std::ops::DerefMut for VumaMutexGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
-        &mut *self.inner
+        &mut self.inner
     }
 }
 

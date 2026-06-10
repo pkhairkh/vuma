@@ -234,6 +234,12 @@ pub struct HotPath {
     pub cumulative_fraction: f64,
 }
 
+impl Default for HotPath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HotPath {
     /// Creates an empty hot path.
     pub fn new() -> Self {
@@ -317,7 +323,7 @@ impl ProfileData {
 
     /// Records PMU counter values for a node (accumulates into existing values).
     pub fn record_pmu(&mut self, node_id: NodeId, pmu: &Pi5PmuCounters) {
-        let entry = self.node_pmu.entry(node_id).or_insert_with(Pi5PmuCounters::new);
+        let entry = self.node_pmu.entry(node_id).or_default();
         entry.cycle_count += pmu.cycle_count;
         entry.instruction_count += pmu.instruction_count;
         entry.cache_misses += pmu.cache_misses;
@@ -359,7 +365,7 @@ impl ProfileData {
             .iter()
             .map(|(&n, &t)| (n, t))
             .collect();
-        nodes.sort_by(|a, b| b.1.cmp(&a.1));
+        nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut accumulated: u64 = 0;
         let mut path_nodes: Vec<NodeId> = Vec::new();
@@ -395,7 +401,7 @@ impl ProfileData {
     pub fn get_hot_paths(&mut self, k: usize) -> Vec<(NodeId, u64)> {
         let mut pairs: Vec<(NodeId, u64)> =
             self.call_counts.iter().map(|(&n, &c)| (n, c)).collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
         pairs.truncate(k);
         pairs
     }
@@ -427,7 +433,7 @@ impl ProfileData {
             .iter()
             .map(|(&n, &c)| (n, c))
             .collect();
-        nodes.sort_by(|a, b| b.1.cmp(&a.1));
+        nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (node_id, count) in nodes.iter().take(3) {
             if *count > 100 {
                 suggestions.push(OptimizationSuggestion {
@@ -600,7 +606,7 @@ impl ProfileCollector {
         let mut data = self.data.lock().unwrap();
         *data = ProfileData::new();
         self.sample_count.store(0, Ordering::Relaxed);
-        self.epoch; // epoch stays the same — timestamps remain monotonic
+        let _ = self.epoch; // epoch stays the same — timestamps remain monotonic
     }
 }
 
@@ -693,7 +699,7 @@ pub fn collect_profile(scg: &SCG, samples: &[ProfileSample]) -> ProfileReport {
             }
         })
         .collect();
-    hot_spots.sort_by(|a, b| b.total_time_ns.cmp(&a.total_time_ns));
+    hot_spots.sort_by_key(|b| std::cmp::Reverse(b.total_time_ns));
 
     // --- Cold spots ---
     // Build a list of all node IDs from 0..scg.node_count (in the full

@@ -383,7 +383,7 @@ impl fmt::Display for RepD {
 /// Panics if `align` is zero.
 fn align_to(val: u64, align: u64) -> u64 {
     assert!(align > 0, "align_to: alignment must be non-zero");
-    (val + align - 1) / align * align
+    val.div_ceil(align) * align
 }
 
 #[cfg(test)]

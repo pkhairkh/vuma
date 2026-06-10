@@ -84,12 +84,12 @@ impl Region {
         match self.status {
             RegionStatus::Allocated | RegionStatus::Stack | RegionStatus::Mapped => {
                 self.alloc_point <= pp
-                    && self.free_point.map_or(true, |fp| pp < fp)
+                    && self.free_point.is_none_or(|fp| pp < fp)
             }
             RegionStatus::Leaked => self.alloc_point <= pp,
             RegionStatus::Freed => {
                 self.alloc_point <= pp
-                    && self.free_point.map_or(false, |fp| pp < fp)
+                    && self.free_point.is_some_and(|fp| pp < fp)
             }
         }
     }
@@ -677,7 +677,6 @@ impl std::fmt::Display for LivenessProof {
 ///
 /// If any tactic succeeds, the resulting `LivenessProof` can be independently
 /// checked by calling [`LivenessProof::check`].
-
 /// Helper: returns `true` if the failure is a concrete program violation
 /// (use-after-free, out-of-bounds, deadlock) that no tactic can fix.
 fn is_concrete_violation(e: &ProofFailure) -> bool {
@@ -729,7 +728,7 @@ fn prove_liveness_tactic(
 
     // --- Step 1: Verify every access targets an allocated region. ---
     for access in &msg.accesses {
-        let region = msg.find_region(access.region).ok_or_else(|| {
+        let region = msg.find_region(access.region).ok_or({
             ProofFailure::UseAfterFree {
                 access_id: access.id,
                 region_id: access.region,

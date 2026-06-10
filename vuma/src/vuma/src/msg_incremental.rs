@@ -1106,7 +1106,7 @@ fn find_accesses_to_region(msg: &MSG, rid: RegionId) -> Vec<AccessId> {
     for aid in msg.access_ids() {
         if let Some(access) = msg.access(aid) {
             if let Some(deriv) = msg.derivation(access.target) {
-                if derivation_resolves_to_region(msg, &deriv, rid) {
+                if derivation_resolves_to_region(msg, deriv, rid) {
                     result.push(aid);
                 }
             }
@@ -1121,7 +1121,7 @@ fn derivation_resolves_to_region(msg: &MSG, deriv: &Derivation, target_rid: Regi
         DerivationSource::Region(rid) => *rid == target_rid,
         DerivationSource::AnotherDerivation(parent_id) => {
             if let Some(parent) = msg.derivation(*parent_id) {
-                derivation_resolves_to_region(msg, &parent, target_rid)
+                derivation_resolves_to_region(msg, parent, target_rid)
             } else {
                 false
             }
@@ -1143,7 +1143,7 @@ fn find_downstream_derivations(
             continue; // Skip the sources themselves
         }
         if let Some(deriv) = msg.derivation(did) {
-            if is_derived_from_any(msg, &deriv, source_ids, &mut visited) {
+            if is_derived_from_any(msg, deriv, source_ids, &mut visited) {
                 downstream.push(deriv.clone());
             }
         }
@@ -1170,7 +1170,7 @@ fn is_derived_from_any(
                 return true;
             }
             if let Some(parent) = msg.derivation(*parent_id) {
-                is_derived_from_any(msg, &parent, source_ids, visited)
+                is_derived_from_any(msg, parent, source_ids, visited)
             } else {
                 false
             }

@@ -734,7 +734,7 @@ pub fn compute_stack_layout_with_info(
                 offset = (offset - align as i32) & !(align as i32 - 1);
                 offset -= size as i32;
                 // Re-align offset to the start of the slot.
-                offset = (offset) & !(align as i32 - 1);
+                offset &= !(align as i32 - 1);
                 let name = match dst {
                     IRValue::Register(id) => format!("local_%v{}", id),
                     _ => format!("local_{}", alloc_index),

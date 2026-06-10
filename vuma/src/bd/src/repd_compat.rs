@@ -212,7 +212,7 @@ pub fn are_compatible(r1: &RepD, r2: &RepD) -> CompatibilityResult {
     // meaning there exists an address satisfying both.
     let a1 = r1.alignment();
     let a2 = r2.alignment();
-    if a1 % a2 != 0 && a2 % a1 != 0 {
+    if !a1.is_multiple_of(a2) && !a2.is_multiple_of(a1) {
         return CompatibilityResult::no(IncompatibilityReason::AlignmentIncompatible {
             align1: a1,
             align2: a2,
@@ -942,7 +942,7 @@ pub fn is_subtype(sub: &RepD, sup: &RepD) -> bool {
     // subsumes(Byte{n,a}, r2) iff size(r2)=n && alignment(r2) | a
     // i.e., sub.alignment() must divide sup.align (sub has stricter alignment)
     if let RepD::Byte(b) = sup {
-        if sub.size() == b.size && sub.alignment() > 0 && b.align > 0 && sub.alignment() % b.align == 0 {
+        if sub.size() == b.size && sub.alignment() > 0 && b.align > 0 && sub.alignment().is_multiple_of(b.align) {
             return true;
         }
     }

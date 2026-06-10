@@ -474,8 +474,9 @@ static mut TX_BUFFER: UartBuffer = UartBuffer::new();
 /// running on a single core).
 #[inline]
 pub unsafe fn rx_buffer() -> &'static mut UartBuffer {
+    let ptr = &raw mut RX_BUFFER;
     // SAFETY: Caller guarantees exclusive access.
-    unsafe { &mut *(&raw mut RX_BUFFER) }
+    unsafe { &mut *ptr }
 }
 
 /// Returns a mutable reference to the global TX buffer.
@@ -486,8 +487,9 @@ pub unsafe fn rx_buffer() -> &'static mut UartBuffer {
 /// running on a single core).
 #[inline]
 pub unsafe fn tx_buffer() -> &'static mut UartBuffer {
+    let ptr = &raw mut TX_BUFFER;
     // SAFETY: Caller guarantees exclusive access.
-    unsafe { &mut *(&raw mut TX_BUFFER) }
+    unsafe { &mut *ptr }
 }
 
 // ===========================================================================
@@ -1022,7 +1024,8 @@ pub fn uart_read_byte() -> Option<u8> {
     // the global buffer. In multi-core or pre-emptible contexts the
     // caller must ensure proper synchronisation.
     unsafe {
-        if let Some(byte) = (*(&raw mut RX_BUFFER)).pop() {
+        let ptr = &raw mut RX_BUFFER;
+        if let Some(byte) = (*ptr).pop() {
             return Some(byte);
         }
     }
@@ -1036,7 +1039,8 @@ pub fn uart_read_byte() -> Option<u8> {
 pub fn uart_read_byte_blocking() -> u8 {
     // Check the software buffer first.
     unsafe {
-        if let Some(byte) = (*(&raw mut RX_BUFFER)).pop() {
+        let ptr = &raw mut RX_BUFFER;
+        if let Some(byte) = (*ptr).pop() {
             return byte;
         }
     }
@@ -1048,8 +1052,9 @@ pub fn uart_read_byte_blocking() -> u8 {
 ///
 /// Call this from the UART0 ISR.
 pub fn uart0_rx_interrupt_handler() -> usize {
+    let ptr = &raw mut RX_BUFFER;
     // SAFETY: Called from ISR context with IRQs disabled.
-    unsafe { Uart::uart0().handle_rx_interrupt(&mut *(&raw mut RX_BUFFER)) }
+    unsafe { Uart::uart0().handle_rx_interrupt(&mut *ptr) }
 }
 
 /// UART0 TX interrupt handler — fills hardware FIFO from the global
@@ -1057,8 +1062,9 @@ pub fn uart0_rx_interrupt_handler() -> usize {
 ///
 /// Call this from the UART0 ISR.
 pub fn uart0_tx_interrupt_handler() -> usize {
+    let ptr = &raw mut TX_BUFFER;
     // SAFETY: Called from ISR context with IRQs disabled.
-    unsafe { Uart::uart0().handle_tx_interrupt(&mut *(&raw mut TX_BUFFER)) }
+    unsafe { Uart::uart0().handle_tx_interrupt(&mut *ptr) }
 }
 
 /// Enables UART0 RX interrupts.

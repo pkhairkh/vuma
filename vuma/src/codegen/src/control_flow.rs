@@ -614,6 +614,7 @@ impl ExceptionLowerer {
     /// and the selector value from another, then branches to the unwind
     /// destination. The number of vregs allocated for exception info depends
     /// on the target's calling convention.
+    #[allow(clippy::too_many_arguments)]
     pub fn lower_invoke_for_target(
         dst: Option<IRValue>,
         func: &str,
@@ -985,10 +986,10 @@ impl TailCallLowerer {
         let mut needs_temp = vec![false; args.len()];
         for i in 1..args.len() {
             if let Some(src_reg) = arg_regs[i] {
-                for j in 0..i {
+                for arg_reg in arg_regs.iter().take(i) {
                     // If src_reg is the register for arg j and j's destination
                     // would overwrite it before we read arg i.
-                    if arg_regs[j] == Some(src_reg) && src_reg != i as u32 {
+                    if *arg_reg == Some(src_reg) && src_reg != i as u32 {
                         needs_temp[i] = true;
                         break;
                     }
@@ -2051,7 +2052,7 @@ impl LoopOptimizer {
 
 /// Round `value` up to the nearest multiple of `alignment`.
 fn align_to(value: u32, alignment: u32) -> u32 {
-    (value + alignment - 1) / alignment * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 /// Get the successor block indices for a terminator.
@@ -2189,7 +2190,7 @@ fn compute_dominators(
 
 /// Check if block `a` dominates block `b`.
 fn dominates(doms: &[HashSet<usize>], a: usize, b: usize) -> bool {
-    doms.get(b).map_or(false, |d| d.contains(&a))
+    doms.get(b).is_some_and(|d| d.contains(&a))
 }
 
 /// Collect all blocks in the natural loop defined by a back edge
@@ -2247,45 +2248,42 @@ fn estimate_trip_count(
             kind,
             dst: _,
             lhs,
-            rhs,
+            rhs: IRValue::Immediate(upper_bound),
         } = instr
         {
-            // Check if lhs is a phi node and rhs is an immediate.
-            if let IRValue::Immediate(upper_bound) = rhs {
-                // Find the initial value of the phi source.
-                if let IRValue::Register(_phi_reg) = lhs {
-                    // Search for a Phi instruction that defines this register.
-                    for block in &func.blocks {
-                        for inner_instr in &block.instructions {
-                            if let IRInstr::Phi {
-                                dst,
-                                incoming,
-                            } = inner_instr
-                            {
-                                if dst == lhs {
-                                    // Found the phi. Look for an initial value
-                                    // that comes from outside the loop.
-                                    for (val, src_block) in incoming {
-                                        if let Some(&src_idx) =
-                                            label_to_idx.get(src_block)
-                                        {
-                                            if !body_set.contains(&src_idx) {
-                                                // Initial value from outside the loop.
-                                                if let IRValue::Immediate(init) = val {
-                                                    let range =
-                                                        (*upper_bound - init) as u64;
-                                                    // Adjust based on comparison kind.
-                                                    let trip = match kind {
-                                                        CmpKind::SLt
-                                                        | CmpKind::ULt
-                                                        | CmpKind::Ne => range,
-                                                        CmpKind::SLe
-                                                        | CmpKind::ULe => range + 1,
-                                                        _ => range,
-                                                    };
-                                                    if trip > 0 && trip < 1_000_000 {
-                                                        return Some(trip);
-                                                    }
+            // Find the initial value of the phi source.
+            if let IRValue::Register(_phi_reg) = lhs {
+                // Search for a Phi instruction that defines this register.
+                for block in &func.blocks {
+                    for inner_instr in &block.instructions {
+                        if let IRInstr::Phi {
+                            dst,
+                            incoming,
+                        } = inner_instr
+                        {
+                            if dst == lhs {
+                                // Found the phi. Look for an initial value
+                                // that comes from outside the loop.
+                                for (val, src_block) in incoming {
+                                    if let Some(&src_idx) =
+                                        label_to_idx.get(src_block)
+                                    {
+                                        if !body_set.contains(&src_idx) {
+                                            // Initial value from outside the loop.
+                                            if let IRValue::Immediate(init) = val {
+                                                let range =
+                                                    (*upper_bound - init) as u64;
+                                                // Adjust based on comparison kind.
+                                                let trip = match kind {
+                                                    CmpKind::SLt
+                                                    | CmpKind::ULt
+                                                    | CmpKind::Ne => range,
+                                                    CmpKind::SLe
+                                                    | CmpKind::ULe => range + 1,
+                                                    _ => range,
+                                                };
+                                                if trip > 0 && trip < 1_000_000 {
+                                                    return Some(trip);
                                                 }
                                             }
                                         }
@@ -2372,11 +2370,10 @@ fn rewrite_terminator_to_target(
     new_target: &str,
 ) {
     match terminator {
-        IRTerminator::Jump(target) => {
-            if target == old_target {
-                *target = new_target.to_string();
-            }
+        IRTerminator::Jump(target) if target == old_target => {
+            *target = new_target.to_string();
         }
+        IRTerminator::Jump(_) => {}
         IRTerminator::Branch {
             true_block,
             false_block,

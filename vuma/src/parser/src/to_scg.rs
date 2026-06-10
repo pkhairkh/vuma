@@ -1489,7 +1489,7 @@ impl AstToScg {
 
     // -- Closure lowering (2b) ------------------------------------------------
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn emit_closure_lowering(
         &mut self,
         params: &[Param],
@@ -1729,7 +1729,7 @@ impl AstToScg {
 
     // -- Trait dispatch lowering (2d) ----------------------------------------
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn emit_static_dispatch(
         &mut self,
         _callee: &Expr,
@@ -1782,7 +1782,7 @@ impl AstToScg {
         Ok(impl_entry_id)
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn emit_dynamic_dispatch(
         &mut self,
         _callee: &Expr,
@@ -1841,7 +1841,7 @@ impl AstToScg {
         Ok(dispatch_id)
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn emit_monomorphization(
         &mut self,
         _callee: &Expr,
@@ -1989,6 +1989,7 @@ impl AstToScg {
 
     // -- Allocation from expression (enhanced: type-based size/align) --------
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_alloc_from_expr(
         &mut self,
         size: &Expr,

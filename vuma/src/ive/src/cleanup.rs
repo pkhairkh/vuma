@@ -350,7 +350,7 @@ impl CleanupGraph {
     pub fn terminal_nodes(&self) -> Vec<NodeId> {
         self.nodes
             .keys()
-            .filter(|&&id| self.successors.get(&id).map_or(true, |s| s.is_empty()))
+            .filter(|&&id| self.successors.get(&id).is_none_or(|s| s.is_empty()))
             .copied()
             .collect()
     }
@@ -471,9 +471,10 @@ impl PathState {
                         .insert(*resource, (node.id, rk));
                 }
             }
-            OperationKind::Access { resource } => {
+            OperationKind::Access { resource }
                 // Check for use-after-free: resource has been released
-                if self.released_resources.contains_key(resource) {
+                if self.released_resources.contains_key(resource) =>
+                {
                     let kind = self
                         .released_resources
                         .get(resource)
@@ -491,7 +492,6 @@ impl PathState {
                         ),
                     });
                 }
-            }
             _ => {}
         }
 
@@ -635,7 +635,7 @@ impl CleanupVerifier {
             let entries: Vec<NodeId> = graph
                 .node_ids()
                 .filter(|&id| {
-                    graph.predecessors_of(id).map_or(true, |p| p.is_empty())
+                    graph.predecessors_of(id).is_none_or(|p| p.is_empty())
                 })
                 .collect();
             if entries.is_empty() && graph.node_count() > 0 {

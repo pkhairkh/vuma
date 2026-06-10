@@ -868,7 +868,7 @@ impl VumaString {
         // Validate UTF-8 by attempting to convert
         let s: &str = str::from_utf8(unsafe {
             // SAFETY: We only read from the slice for validation
-            std::slice::from_raw_parts(vec.as_ptr() as *const u8, vec.len())
+            std::slice::from_raw_parts(vec.as_ptr(), vec.len())
         })?;
         // If valid, reconstruct (we know it's valid now)
         let _ = s;

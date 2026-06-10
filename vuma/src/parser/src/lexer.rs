@@ -1032,7 +1032,7 @@ impl<'src> Lexer<'src> {
     /// `.` and/or exponent `e`/`E`.  Underscore separators are allowed.
     fn lex_number(&mut self, start: usize, line: usize, column: usize) -> Token {
         let first = self.chars.peek().copied();
-        debug_assert!(first.map_or(false, |c| c.is_ascii_digit()));
+        debug_assert!(first.is_some_and(|c| c.is_ascii_digit()));
 
         if first == Some('0') {
             let second = self.peek_next(1);
@@ -1040,7 +1040,7 @@ impl<'src> Lexer<'src> {
                 Some('x') | Some('X') => {
                     // Hex prefix — only if followed by at least one hex digit
                     let third = self.peek_next(2);
-                    if third.map_or(false, |c| c.is_ascii_hexdigit() || c == '_') {
+                    if third.is_some_and(|c| c.is_ascii_hexdigit() || c == '_') {
                         self.bump(); // consume '0'
                         self.bump(); // consume 'x'/'X'
                         return self.lex_hex_digits(start, line, column);
@@ -1051,7 +1051,7 @@ impl<'src> Lexer<'src> {
                 }
                 Some('b') | Some('B') => {
                     let third = self.peek_next(2);
-                    if third.map_or(false, |c| c == '0' || c == '1' || c == '_') {
+                    if third.is_some_and(|c| c == '0' || c == '1' || c == '_') {
                         self.bump(); self.bump(); // consume '0b'
                         return self.lex_binary_digits(start, line, column);
                     }
@@ -1061,7 +1061,7 @@ impl<'src> Lexer<'src> {
                 }
                 Some('o') | Some('O') => {
                     let third = self.peek_next(2);
-                    if third.map_or(false, |c| ('0'..='7').contains(&c) || c == '_') {
+                    if third.is_some_and(|c| ('0'..='7').contains(&c) || c == '_') {
                         self.bump(); self.bump(); // consume '0o'
                         return self.lex_octal_digits(start, line, column);
                     }
@@ -1078,7 +1078,7 @@ impl<'src> Lexer<'src> {
                 Some('.') => {
                     // 0.xxx — float
                     let third = self.peek_next(2);
-                    if third.map_or(false, |c| c.is_ascii_digit()) {
+                    if third.is_some_and(|c| c.is_ascii_digit()) {
                         self.bump(); // consume '0'
                         self.bump(); // consume '.'
                         self.consume_decimal_digits();
@@ -1107,7 +1107,7 @@ impl<'src> Lexer<'src> {
     fn check_float_or_int(&mut self, start: usize, line: usize, column: usize) -> Token {
         if self.chars.peek() == Some(&'.') {
             let next = self.peek_next(1);
-            if next.map_or(false, |c| c.is_ascii_digit()) {
+            if next.is_some_and(|c| c.is_ascii_digit()) {
                 self.bump(); // consume '.'
                 self.consume_decimal_digits();
                 self.lex_exponent();

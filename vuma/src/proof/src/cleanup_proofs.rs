@@ -515,7 +515,6 @@ pub fn prove_no_double_free_with_tactic(
     tactic: CleanupTactic,
 ) -> Result<NoDoubleFreeProof, ProofFailure> {
     let mut free_map: HashMap<RegionId, ProgramPoint> = HashMap::new();
-    let mut fact_id: FactId = 0;
 
     let goal = Goal::new(
         "no_double_free",
@@ -525,7 +524,7 @@ pub fn prove_no_double_free_with_tactic(
     let mut proof = Proof::new(goal);
 
     // Check: for each free operation, the region must not already have been freed.
-    for op in msg.frees() {
+    for (fact_id, op) in (0_u64..).zip(msg.frees()) {
         let stmt = format!("region {} freed at 0x{:x}", op.region, op.location);
         proof.add_step(ProofStep::Assume {
             fact: Fact::checked(fact_id, &stmt),
@@ -544,7 +543,6 @@ pub fn prove_no_double_free_with_tactic(
             });
         }
         free_map.insert(op.region, op.location);
-        fact_id += 1;
     }
 
     // All regions have at most one free — proven.
@@ -684,7 +682,6 @@ fn prove_via_path_enumeration(
         ProofContext::new("cleanup::path_enumeration"),
     );
     let mut proof_obj = Proof::new(goal);
-    let mut fact_id: FactId = 0;
     let mut release_map: HashMap<RegionId, ReleaseInfo> = HashMap::new();
 
     // First, check no double free.
@@ -697,7 +694,7 @@ fn prove_via_path_enumeration(
     let paths = scg.enumerate_paths(64);
     let alloc_regions: HashSet<RegionId> = msg.allocs().iter().map(|op| op.region).collect();
 
-    for region in &alloc_regions {
+    for (fact_id, region) in (0_u64..).zip(alloc_regions.iter()) {
         let alloc_pts = msg.alloc_points(*region);
         let free_pts = msg.free_points(*region);
 
@@ -760,7 +757,6 @@ fn prove_via_path_enumeration(
                 ),
             ),
         });
-        fact_id += 1;
     }
 
     proof_obj.add_step(ProofStep::ByDefinition {
@@ -871,7 +867,7 @@ fn prove_via_ownership_tracking(
 
     // At the end of the program, all allocated regions must have been freed.
     if !allocated.is_empty() {
-        for &region in &allocated {
+        if let Some(&region) = allocated.iter().next() {
             let alloc_pts = msg.alloc_points(region);
             proof_obj.conclude(Conclusion::Refuted);
             return Err(ProofFailure::LeakedResource {

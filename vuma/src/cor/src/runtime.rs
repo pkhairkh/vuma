@@ -550,8 +550,8 @@ impl CORuntime {
                     ScgStatement::Computation(CgComputationNode {
                         dst: format!("v{}", node.id),
                         op: BinOpKind::Add,
-                        lhs: ScgExpr::Var(format!("arg0")),
-                        rhs: ScgExpr::Var(format!("arg1")),
+                        lhs: ScgExpr::Var("arg0".to_string()),
+                        rhs: ScgExpr::Var("arg1".to_string()),
                     tail_call: false,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))]),

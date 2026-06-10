@@ -155,7 +155,7 @@ impl SpeculativeOpt {
     ) -> bool {
         let valid = match &self.assumption {
             Assumption::LikelyBranch(expected_edge) => {
-                actual_edge.map_or(true, |e| e == *expected_edge)
+                actual_edge.is_none_or(|e| e == *expected_edge)
             }
             Assumption::HotPath(_) => {
                 // HotPath validity is determined by profile data updates;
@@ -749,7 +749,7 @@ impl Snapshot {
     /// Creates a snapshot of the given regions.
     fn from_regions(regions: &[(RegionId, CompiledRegion)], node_count: usize, edge_count: usize) -> Self {
         Snapshot {
-            regions: regions.iter().cloned().map(|(id, r)| (id, r)).collect(),
+            regions: regions.iter().cloned().collect(),
             scg_node_count: node_count,
             scg_edge_count: edge_count,
         }

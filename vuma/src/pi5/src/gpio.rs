@@ -420,7 +420,7 @@ pub const HEADER_PINS: [HeaderPin; 40] = [
 /// (1–40), or `None` if the pin number is out of range.
 #[inline]
 pub fn header_pin(pin: u8) -> Option<&'static HeaderPin> {
-    if pin >= 1 && pin <= 40 {
+    if (1..=40).contains(&pin) {
         Some(&HEADER_PINS[(pin - 1) as usize])
     } else {
         None

@@ -701,7 +701,6 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
     let start = Instant::now();
     let mut stages = Vec::new();
     let scg_result: Option<SCG>;
-    let verification_result: Option<AggregatedResult>;
 
     // Stage 1: Parse source -> AST.
     let mut parser = Parser::new(source);
@@ -756,7 +755,7 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
     let aggregator = InvariantAggregator::new();
     let aggregated = aggregator.verify_all(&input);
     stages.push((PipelineStage::IveVerification, StageOutcome::Passed));
-    verification_result = Some(aggregated);
+    let verification_result: Option<AggregatedResult> = Some(aggregated);
 
     // Stage 6: Codegen (not yet available).
     stages.push((PipelineStage::Codegen, StageOutcome::Skipped));

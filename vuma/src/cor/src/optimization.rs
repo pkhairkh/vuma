@@ -63,7 +63,7 @@ impl ProfileReport {
             .iter()
             .map(|(&n, &c)| (n, c))
             .collect();
-        all_nodes.sort_by(|a, b| b.1.cmp(&a.1));
+        all_nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let hot_nodes: Vec<(NodeId, u64)> = all_nodes
             .iter()
@@ -433,7 +433,7 @@ impl OptimizationPass for ColdPathOutline {
                     .iter()
                     .chain(node.outgoing_edges.iter())
                     .any(|&eid| {
-                        scg.get_edge(eid).map_or(false, |e| {
+                        scg.get_edge(eid).is_some_and(|e| {
                             profile.is_hot(e.source) || profile.is_hot(e.target)
                         })
                     })
@@ -471,7 +471,7 @@ impl OptimizationPass for ColdPathOutline {
                     .iter()
                     .chain(node.outgoing_edges.iter())
                     .any(|&eid| {
-                        scg.get_edge(eid).map_or(false, |e| profile.is_hot(e.source) || profile.is_hot(e.target))
+                        scg.get_edge(eid).is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
                     });
                 if adjacent_hot && profile.is_cold(node_id) {
                     to_outline.push((

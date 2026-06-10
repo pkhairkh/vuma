@@ -316,6 +316,7 @@ impl ContextRule {
     }
 
     /// Add capabilities to strengthen.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, caps: &[Capability]) -> Self {
         for &c in caps {
             self.add_caps.insert(c);
@@ -543,7 +544,7 @@ impl ContextSolver {
     /// Rules are re-sorted by priority after insertion.
     pub fn add_rule(&mut self, rule: ContextRule) {
         self.rules.push(rule);
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.rules.sort_by_key(|b| std::cmp::Reverse(b.priority));
         // Invalidate cache since rules changed
         self.cache.clear();
     }

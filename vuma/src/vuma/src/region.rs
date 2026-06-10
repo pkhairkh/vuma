@@ -118,11 +118,11 @@ impl fmt::Display for Region {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Region {} [{}..{}) {} status={} alloc={}",
+            "Region {} [{}..{}) 0x{:x} bytes status={} alloc={}",
             self.id,
             self.base,
             self.end(),
-            format!("0x{:x} bytes", self.size),
+            self.size,
             self.status,
             self.alloc_point,
         )?;

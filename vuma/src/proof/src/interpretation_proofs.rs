@@ -172,7 +172,7 @@ impl RepD {
         }
 
         // Alignment check: the access address must satisfy the read BD's alignment.
-        if read.alignment > 0 && access_addr % read.alignment != 0 {
+        if read.alignment > 0 && !access_addr.is_multiple_of(read.alignment) {
             return Compatibility::Incompatible(format!(
                 "alignment violation: address 0x{:x} not aligned to {} bytes",
                 access_addr, read.alignment

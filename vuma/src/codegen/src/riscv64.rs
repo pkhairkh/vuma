@@ -381,7 +381,7 @@ fn encode_b_type(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> [u8;
 ///
 /// The immediate is the upper 20 bits; the lower 12 bits are zero.
 fn encode_u_type(imm: u32, rd: u32, opcode: u32) -> [u8; 4] {
-    let word = ((imm & 0xFFFFF000))
+    let word = (imm & 0xFFFFF000)
         | ((rd & 0x1F) << 7)
         | (opcode & 0x7F);
     word.to_le_bytes()
@@ -1189,7 +1189,7 @@ fn riscv64_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 total += aligned;
             }
         }

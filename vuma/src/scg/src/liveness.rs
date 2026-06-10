@@ -142,14 +142,14 @@ impl LivenessAnalysis {
     pub fn is_live_in(&self, node: NodeId, value: NodeId) -> bool {
         self.liveness
             .get(&node)
-            .map_or(false, |info| info.is_live_in(&value))
+            .is_some_and(|info| info.is_live_in(&value))
     }
 
     /// Returns `true` if the given value is live at the exit of the given node.
     pub fn is_live_out(&self, node: NodeId, value: NodeId) -> bool {
         self.liveness
             .get(&node)
-            .map_or(false, |info| info.is_live_out(&value))
+            .is_some_and(|info| info.is_live_out(&value))
     }
 
     /// Returns the set of all values that are live anywhere in the graph.

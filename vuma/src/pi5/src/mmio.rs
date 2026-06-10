@@ -58,25 +58,25 @@ pub const RAM_MAX_SIZE: u64 = 8 * 1024 * 1024 * 1024;
 /// Returns `true` if `addr` falls within the BCM2712 peripheral region.
 #[inline]
 pub fn is_bcm2712_peripheral(addr: Address) -> bool {
-    addr >= BCM2712_PERIPHERAL_START && addr <= BCM2712_PERIPHERAL_END
+    (BCM2712_PERIPHERAL_START..=BCM2712_PERIPHERAL_END).contains(&addr)
 }
 
 /// Returns `true` if `addr` falls within the RP1 I/O region.
 #[inline]
 pub fn is_rp1_io(addr: Address) -> bool {
-    addr >= RP1_IO_START && addr <= RP1_IO_END
+    (RP1_IO_START..=RP1_IO_END).contains(&addr)
 }
 
 /// Returns `true` if `addr` falls within the ARM local region.
 #[inline]
 pub fn is_arm_local(addr: Address) -> bool {
-    addr >= ARM_LOCAL_START && addr <= ARM_LOCAL_END
+    (ARM_LOCAL_START..=ARM_LOCAL_END).contains(&addr)
 }
 
 /// Returns `true` if `addr` falls within RAM.
 #[inline]
 pub fn is_ram(addr: Address) -> bool {
-    addr >= RAM_BASE && addr < RAM_BASE + RAM_MAX_SIZE
+    (RAM_BASE..RAM_BASE + RAM_MAX_SIZE).contains(&addr)
 }
 
 // ---------------------------------------------------------------------------

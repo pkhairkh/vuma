@@ -72,20 +72,15 @@ use vuma_codegen::{
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The compilation target platform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
 pub enum CompileTarget {
     /// Bare-metal Raspberry Pi 5 (ARMv8.2-A, loaded at 0x80000).
     Pi5Bare,
     /// Linux user-space on Raspberry Pi 5 (AArch64).
+    #[default]
     Pi5Linux,
     /// Generic Linux user-space on AArch64.
     Linux,
-}
-
-impl Default for CompileTarget {
-    fn default() -> Self {
-        CompileTarget::Pi5Linux
-    }
 }
 
 impl fmt::Display for CompileTarget {
@@ -99,22 +94,17 @@ impl fmt::Display for CompileTarget {
 }
 
 /// Optimization level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
 pub enum OptLevel {
     /// No optimisation — fastest compilation, best debuggability.
     O0,
     /// Basic optimisations (DCE, constant folding).
     O1,
     /// Full optimisations (DCE, CSE, constant folding, inlining).
+    #[default]
     O2,
     /// Aggressive optimisations (O2 + inlining of larger functions).
     O3,
-}
-
-impl Default for OptLevel {
-    fn default() -> Self {
-        OptLevel::O2
-    }
 }
 
 impl fmt::Display for OptLevel {
@@ -129,22 +119,17 @@ impl fmt::Display for OptLevel {
 }
 
 /// Verification thoroughness level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default)]
 pub enum VerificationLevel {
     /// Skip verification entirely.
     None,
     /// Quick: only cheap syntactic checks.
     Quick,
     /// Normal: all five invariant checks.
+    #[default]
     Normal,
     /// Exhaustive: all checks + formal proof attempts.
     Exhaustive,
-}
-
-impl Default for VerificationLevel {
-    fn default() -> Self {
-        VerificationLevel::Normal
-    }
 }
 
 impl fmt::Display for VerificationLevel {
@@ -1026,7 +1011,7 @@ fn walk_control_flow(
 
             // ── Non-control nodes: convert to statements ───────────
             _ => {
-                if let Some(stmt) = convert_node_to_statement(node_id, &node_data, edge_idx) {
+                if let Some(stmt) = convert_node_to_statement(node_id, node_data, edge_idx) {
                     stmts.push(stmt);
                 }
 

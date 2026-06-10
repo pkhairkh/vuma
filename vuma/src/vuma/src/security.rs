@@ -925,10 +925,8 @@ impl SecurityBoundary {
     ) -> Result<(), SecurityViolation> {
         if src_region == self.region_high {
             // High → Low read: information flows downward
-            if value_level.can_flow_to(self.level_low) {
+            if value_level.can_flow_to(self.level_low) || self.declassification_gate.is_some() {
                 Ok(())
-            } else if self.declassification_gate.is_some() {
-                Ok(()) // gate will be checked at declassification time
             } else {
                 Err(SecurityViolation::InformationLeak {
                     src_level: value_level,
@@ -1247,6 +1245,12 @@ pub struct VerificationResult {
     pub passed: usize,
     /// Violations detected.
     pub violations: Vec<SecurityViolation>,
+}
+
+impl Default for VerificationResult {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VerificationResult {

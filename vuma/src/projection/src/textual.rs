@@ -53,9 +53,10 @@ use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCG, SCGDiff, SCGNode}
 // ── Projection style ─────────────────────────────────────────────────────────
 
 /// The language style used for textual projection output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ProjectionStyle {
     /// Emit Rust-like syntax (`fn`, `->`, `+` bounds, `@` annotations).
+    #[default]
     RustLike,
     /// Emit C-like syntax (function signatures, `__attribute__`).
     CLike,
@@ -63,11 +64,6 @@ pub enum ProjectionStyle {
     Custom,
 }
 
-impl Default for ProjectionStyle {
-    fn default() -> Self {
-        Self::RustLike
-    }
-}
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -107,18 +103,10 @@ impl Default for TextualConfig {
 ///
 /// Renders SCG structures as source-code-like text in the configured language
 /// style, with BDs formatted as type-like annotations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TextualProjection {
     /// Configuration controlling what is rendered and how.
     pub config: TextualConfig,
-}
-
-impl Default for TextualProjection {
-    fn default() -> Self {
-        Self {
-            config: TextualConfig::default(),
-        }
-    }
 }
 
 impl TextualProjection {
@@ -129,9 +117,12 @@ impl TextualProjection {
 
     /// Creates a new textual projection engine with default configuration.
     pub fn default_with_style(style: ProjectionStyle) -> Self {
-        let mut config = TextualConfig::default();
-        config.language_style = style;
-        Self { config }
+        Self {
+            config: TextualConfig {
+                language_style: style,
+                ..Default::default()
+            },
+        }
     }
 
     /// Returns an indentation string of the given level.

@@ -11,7 +11,7 @@
 
 use std::fs;
 use std::io::{self, Write as IoWrite};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -253,7 +253,7 @@ fn print_errors(errors: &[VumaError]) {
 }
 
 /// Determine the default output path for a given input file.
-fn default_output_path(input: &PathBuf) -> PathBuf {
+fn default_output_path(input: &Path) -> PathBuf {
     let stem = input
         .file_stem()
         .unwrap_or_default()

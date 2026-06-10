@@ -526,8 +526,7 @@ where
             // but we can skip Read-Read pairs later.
         }
 
-        for j in (i + 1)..access_info.len() {
-            let (id2, base2, access2) = &access_info[j];
+        for (id2, base2, access2) in access_info.iter().skip(i + 1) {
 
             // Two reads never conflict.
             if access1.kind == AccessKind::Read && access2.kind == AccessKind::Read {

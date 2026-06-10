@@ -405,7 +405,7 @@ fn encode_1ri21(opcode: u32, imm21: u32, rj: u32) -> [u8; 4] {
 fn encode_i26(opcode: u32, imm26: u32) -> [u8; 4] {
     let hi10 = (imm26 >> 16) & 0x3FF;
     let lo16 = imm26 & 0xFFFF;
-    let word = ((opcode & 0x3F) << 26) | (hi10 << 16) | (lo16 << 0);
+    let word = ((opcode & 0x3F) << 26) | (hi10 << 16) | lo16;
     word.to_le_bytes()
 }
 
@@ -1348,7 +1348,7 @@ fn decode_loongarch64_instruction(word: u32) -> String {
         }
         0x05 => {
             let rd = (word >> 7) & 0x1f;
-            let rj = (word >> 15) & 0x1f;
+            let _rj = (word >> 15) & 0x1f; // lu12i.w does not use rj in the disassembly
             let si12 = ((word >> 10) as i32) << 20 >> 20;
             format!("lu12i.w $r{}, {}({})", rd, si12, si12)
         }
@@ -1424,7 +1424,7 @@ fn loongarch64_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 total += aligned;
             }
         }

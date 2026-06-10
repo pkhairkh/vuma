@@ -188,6 +188,7 @@ pub struct Ipv6Addr {
 impl Ipv6Addr {
     /// Create a new IPv6 address from eight 16-bit segments.
     // VUMA-VERIFIED: constructor is pure
+    #[allow(clippy::too_many_arguments)]
     pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
         Self { segments: [a, b, c, d, e, f, g, h] }
     }

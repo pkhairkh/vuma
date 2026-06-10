@@ -682,8 +682,8 @@ impl DiffProjection {
         let mut lines: Vec<String> = Vec::new();
 
         // Header
-        lines.push(format!("--- SCG (old)"));
-        lines.push(format!("+++ SCG (new)"));
+        lines.push("--- SCG (old)".to_string());
+        lines.push("+++ SCG (new)".to_string());
 
         // Summary hunk
         lines.push(format!(
@@ -780,11 +780,13 @@ impl DiffProjection {
         for node in &diff.removed_nodes {
             let left = format!("- {} ({:?})", node.label, node.kind);
             let right = String::new();
+            let left_padded = format!("{:<width$}", left, width = col_width);
+            let right_padded = format!("{:<width$}", right, width = col_width);
             lines.push(format!(
                 "{}{}{}",
-                self.red(&format!("{:<width$}", left, width = col_width)),
+                self.red(&left_padded),
                 separator,
-                format!("{:<width$}", right, width = col_width)
+                right_padded
             ));
         }
 
@@ -792,11 +794,13 @@ impl DiffProjection {
         for node in &diff.added_nodes {
             let left = String::new();
             let right = format!("+ {} ({:?})", node.label, node.kind);
+            let left_padded = format!("{:<width$}", left, width = col_width);
+            let right_padded = format!("{:<width$}", right, width = col_width);
             lines.push(format!(
                 "{}{}{}",
-                format!("{:<width$}", left, width = col_width),
+                left_padded,
                 separator,
-                self.green(&format!("{:<width$}", right, width = col_width)),
+                self.green(&right_padded),
             ));
         }
 
@@ -860,11 +864,13 @@ impl DiffProjection {
         for edge in &diff.removed_edges {
             let left = format!("- edge: {}→{} ({:?})", edge.source, edge.target, edge.kind);
             let right = String::new();
+            let left_padded = format!("{:<width$}", left, width = col_width);
+            let right_padded = format!("{:<width$}", right, width = col_width);
             lines.push(format!(
                 "{}{}{}",
-                self.red(&format!("{:<width$}", left, width = col_width)),
+                self.red(&left_padded),
                 separator,
-                format!("{:<width$}", right, width = col_width),
+                right_padded,
             ));
         }
 
@@ -872,11 +878,13 @@ impl DiffProjection {
         for edge in &diff.added_edges {
             let left = String::new();
             let right = format!("+ edge: {}→{} ({:?})", edge.source, edge.target, edge.kind);
+            let left_padded = format!("{:<width$}", left, width = col_width);
+            let right_padded = format!("{:<width$}", right, width = col_width);
             lines.push(format!(
                 "{}{}{}",
-                format!("{:<width$}", left, width = col_width),
+                left_padded,
                 separator,
-                self.green(&format!("{:<width$}", right, width = col_width)),
+                self.green(&right_padded),
             ));
         }
 

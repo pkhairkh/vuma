@@ -675,7 +675,7 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
     }
 
     // For each region with multiple accesses, check for write-through-alias
-    for (_region, accesses) in &accesses_by_region {
+    for accesses in accesses_by_region.values() {
         if accesses.len() < 2 {
             continue;
         }
@@ -704,10 +704,10 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
                 if a_is_write || b_is_write {
                     // Check BD RelD for aliasing information
                     // If neither BD has anti-alias guarantees, flag as potential violation
-                    let a_has_alias_guard = bd_a.as_ref().map_or(false, |bd| {
+                    let a_has_alias_guard = bd_a.as_ref().is_some_and(|bd| {
                         !bd.reld.relations.is_empty()
                     });
-                    let b_has_alias_guard = bd_b.as_ref().map_or(false, |bd| {
+                    let b_has_alias_guard = bd_b.as_ref().is_some_and(|bd| {
                         !bd.reld.relations.is_empty()
                     });
 
@@ -779,7 +779,7 @@ pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec
     }
 
     // For each node, find transitive derivation targets (BFS through derivation edges)
-    for (source, _targets) in &deriv_successors {
+    for source in deriv_successors.keys() {
         let source_capd = bd_map.get(source).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
 
         // BFS to find all transitively derived nodes

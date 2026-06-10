@@ -259,6 +259,7 @@ fn tarjan_scc(graph: &WaitForGraph) -> Vec<Vec<RegionId>> {
     sccs
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tarjan_dfs(
     v: RegionId,
     graph: &WaitForGraph,

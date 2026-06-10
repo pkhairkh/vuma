@@ -822,8 +822,7 @@ impl Instruction {
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | ((mb & 0x1F) << 6)
-                    | (8 << 1)
-                    | 0;
+                    | (8 << 1);
                 encode_word(word)
             }
             Instruction::Rldcr { ra, rs, rb, me } => {
@@ -833,8 +832,7 @@ impl Instruction {
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | ((me & 0x1F) << 6)
-                    | (9 << 1)
-                    | 0;
+                    | (9 << 1);
                 encode_word(word)
             }
             Instruction::Rlwinm { ra, rs, sh, mb, me } => {
@@ -916,9 +914,7 @@ impl Instruction {
                     | ((bf.encoding() & 0x7) << 23)
                     | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
-                    | (rb.encoding() << 11)
-                    | (0 << 1)
-                    | 0;
+                    | (rb.encoding() << 11);
                 encode_word(word)
             }
             Instruction::Cmpi { bf, l, ra, simm } => {
@@ -937,8 +933,7 @@ impl Instruction {
                     | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
-                    | (32 << 1)
-                    | 0;
+                    | (32 << 1);
                 encode_word(word)
             }
             Instruction::Cmpli { bf, l, ra, uimm } => {
@@ -1255,7 +1250,7 @@ fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 total += aligned;
             }
         }
@@ -1702,9 +1697,8 @@ impl Backend for PPC64Backend {
         let sldi32_word: u32 = (30u32 << 26)
             | (Gpr::R12.encoding() << 21)
             | (Gpr::R12.encoding() << 16)
-            | (((32u32 >> 5) & 1) << 1)
-            | ((32 & 0x1F) << 11)
-            | ((31 & 0x1F) << 6)
+            | (1 << 1)
+            | (31 << 6)
             | (25 << 1);
         code.extend_from_slice(&encode_word(sldi32_word));
         // oris r12, r12, hi16(lo32) -- oris = primary=25

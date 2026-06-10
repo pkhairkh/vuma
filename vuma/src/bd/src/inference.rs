@@ -1062,6 +1062,7 @@ pub fn instantiate_generic(template: &BD, type_args: &HashMap<String, RepD>) -> 
 }
 
 /// Recursively instantiate type arguments in a RepD.
+#[allow(clippy::only_used_in_recursion)]
 fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
     match repd {
         RepD::Byte(b) => RepD::Byte(b.clone()),

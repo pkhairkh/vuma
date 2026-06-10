@@ -100,23 +100,18 @@ pub enum SCGEdit {
 /// Verbosity level for conversational output.
 ///
 /// Controls how much detail is included in natural-language descriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Verbosity {
     /// One-line summaries. Ideal for compact logs, tooltips, and quick
     /// overviews.
     Brief,
     /// Balanced descriptions with key details. The default level.
+    #[default]
     Normal,
     /// Exhaustive descriptions including every BD, edge, region membership,
     /// and contextual notes. Suitable for documentation generation and
     /// deep debugging.
     Detailed,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Verbosity::Normal
-    }
 }
 
 impl Verbosity {

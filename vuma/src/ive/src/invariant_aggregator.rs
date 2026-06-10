@@ -305,8 +305,7 @@ pub struct VerificationSummary {
 impl VerificationSummary {
     /// Compute a summary from a slice of per-invariant results.
     pub fn from_results(results: &[PerInvariantResult]) -> Self {
-        let mut summary = Self::default();
-        summary.total_checked = results.len();
+        let mut summary = Self { total_checked: results.len(), ..Default::default() };
 
         for r in results {
             if r.cached {

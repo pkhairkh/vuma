@@ -110,7 +110,7 @@ impl Add<u64> for Address {
 
 /// `Address + Address` is intentionally **not** provided (adding two addresses
 /// is semantically wrong). Use `Address + u64` for offsets instead.
-
+///
 /// `Address - u64` → offset backward by `rhs` bytes.
 impl Sub<u64> for Address {
     type Output = Address;

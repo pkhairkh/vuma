@@ -583,14 +583,14 @@ impl Default for LivenessVerificationResult {
 
 /// A simple control-flow graph for reachability analysis.
 #[derive(Debug, Clone, Default)]
-struct CFG {
+struct Cfg {
     /// Adjacency list: point -> list of successor points.
     successors: hashbrown::HashMap<PointId, Vec<PointId>>,
     /// Reverse adjacency list: point -> list of predecessor points.
     predecessors: hashbrown::HashMap<PointId, Vec<PointId>>,
 }
 
-impl CFG {
+impl Cfg {
     fn new() -> Self {
         Self::default()
     }
@@ -714,7 +714,7 @@ impl CFG {
 
 /// Strongly connected component in a directed graph.
 #[derive(Debug, Clone)]
-struct SCC {
+struct Scc {
     /// Nodes in this SCC.
     nodes: hashbrown::HashSet<ResourceId>,
     /// Whether this SCC is a non-trivial cycle (size > 1 or self-loop).
@@ -725,13 +725,13 @@ struct SCC {
 /// The graph is represented as an adjacency list of ResourceId.
 fn tarjan_scc(
     graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>,
-) -> Vec<SCC> {
+) -> Vec<Scc> {
     let mut index_counter: u64 = 0;
     let mut stack: Vec<ResourceId> = Vec::new();
     let mut on_stack: hashbrown::HashSet<ResourceId> = hashbrown::HashSet::new();
     let mut indices: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
     let mut lowlinks: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
-    let mut sccs: Vec<SCC> = Vec::new();
+    let mut sccs: Vec<Scc> = Vec::new();
 
     let all_nodes: Vec<ResourceId> = graph.keys().copied().collect();
 
@@ -753,6 +753,7 @@ fn tarjan_scc(
     sccs
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tarjan_strongconnect(
     v: ResourceId,
     graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>,
@@ -761,7 +762,7 @@ fn tarjan_strongconnect(
     on_stack: &mut hashbrown::HashSet<ResourceId>,
     indices: &mut hashbrown::HashMap<ResourceId, u64>,
     lowlinks: &mut hashbrown::HashMap<ResourceId, u64>,
-    sccs: &mut Vec<SCC>,
+    sccs: &mut Vec<Scc>,
 ) {
     indices.insert(v, *index_counter);
     lowlinks.insert(v, *index_counter);
@@ -801,9 +802,9 @@ fn tarjan_strongconnect(
             || component.iter().any(|&node| {
                 graph
                     .get(&node)
-                    .map_or(false, |nbrs| nbrs.contains(&node))
+                    .is_some_and(|nbrs| nbrs.contains(&node))
             });
-        sccs.push(SCC {
+        sccs.push(Scc {
             nodes: component,
             is_cycle,
         });
@@ -908,8 +909,8 @@ impl LivenessVerifier {
     }
 
     /// Build the internal CFG from the input control-flow edges.
-    fn build_cfg(&self, input: &LivenessInput) -> CFG {
-        let mut cfg = CFG::new();
+    fn build_cfg(&self, input: &LivenessInput) -> Cfg {
+        let mut cfg = Cfg::new();
         for edge in &input.cfg_edges {
             cfg.add_edge(edge.from, edge.to);
         }
@@ -933,7 +934,7 @@ impl LivenessVerifier {
     fn check_resource_leaks(
         &mut self,
         input: &LivenessInput,
-        cfg: &CFG,
+        cfg: &Cfg,
         result: &mut LivenessVerificationResult,
     ) -> usize {
         let mut leak_count = 0;
@@ -1201,7 +1202,7 @@ impl LivenessVerifier {
     fn check_lock_discipline(
         &mut self,
         input: &LivenessInput,
-        cfg: &CFG,
+        cfg: &Cfg,
         result: &mut LivenessVerificationResult,
     ) -> usize {
         let mut violation_count = 0;
@@ -1258,7 +1259,7 @@ impl LivenessVerifier {
     fn check_message_completeness(
         &mut self,
         input: &LivenessInput,
-        _cfg: &CFG,
+        _cfg: &Cfg,
         result: &mut LivenessVerificationResult,
     ) -> usize {
         let mut violation_count = 0;
@@ -1318,7 +1319,7 @@ impl LivenessVerifier {
     // -----------------------------------------------------------------------
 
     /// Count the approximate number of paths analyzed during verification.
-    fn count_analyzed_paths(&self, input: &LivenessInput, cfg: &CFG) -> usize {
+    fn count_analyzed_paths(&self, input: &LivenessInput, cfg: &Cfg) -> usize {
         let mut count = 0;
         let allocations = input.allocations();
 
@@ -1927,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_cfg_reachability() {
-        let mut cfg = CFG::new();
+        let mut cfg = Cfg::new();
         cfg.add_edge(pp(1), pp(2));
         cfg.add_edge(pp(2), pp(3));
         cfg.add_edge(pp(3), pp(4));
@@ -1940,7 +1941,7 @@ mod tests {
 
     #[test]
     fn test_cfg_find_path() {
-        let mut cfg = CFG::new();
+        let mut cfg = Cfg::new();
         cfg.add_edge(pp(1), pp(2));
         cfg.add_edge(pp(2), pp(3));
         cfg.add_edge(pp(3), pp(4));
@@ -1957,7 +1958,7 @@ mod tests {
 
     #[test]
     fn test_cfg_find_all_paths() {
-        let mut cfg = CFG::new();
+        let mut cfg = Cfg::new();
         cfg.add_edge(pp(1), pp(2));
         cfg.add_edge(pp(1), pp(3));
         cfg.add_edge(pp(2), pp(4));
@@ -1977,7 +1978,7 @@ mod tests {
         graph.insert(rid(3), vec![]);
 
         let sccs = tarjan_scc(&graph);
-        let cycles: Vec<&SCC> = sccs.iter().filter(|scc| scc.is_cycle).collect();
+        let cycles: Vec<&Scc> = sccs.iter().filter(|scc| scc.is_cycle).collect();
         assert!(cycles.is_empty(), "Expected no cycles in a DAG");
     }
 
@@ -1991,7 +1992,7 @@ mod tests {
         graph.insert(rid(3), vec![rid(1)]);
 
         let sccs = tarjan_scc(&graph);
-        let cycles: Vec<&SCC> = sccs.iter().filter(|scc| scc.is_cycle).collect();
+        let cycles: Vec<&Scc> = sccs.iter().filter(|scc| scc.is_cycle).collect();
         assert_eq!(cycles.len(), 1, "Expected one SCC cycle");
         assert_eq!(cycles[0].nodes.len(), 3);
     }

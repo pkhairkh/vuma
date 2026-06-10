@@ -181,7 +181,7 @@ impl fmt::Display for OriginRoot {
 // ---------------------------------------------------------------------------
 
 /// The trust level of a value, propagated from its root source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 pub enum TaintLevel {
     /// The value originates from a trusted source and no untrusted data
     /// flows into it.
@@ -189,6 +189,7 @@ pub enum TaintLevel {
     /// The value depends on untrusted data (user input, hardware register).
     Untrusted = 1,
     /// The origin is unknown — the value is an orphan.
+    #[default]
     Unknown = 2,
 }
 
@@ -199,12 +200,6 @@ impl fmt::Display for TaintLevel {
             TaintLevel::Untrusted => write!(f, "UNTRUSTED"),
             TaintLevel::Unknown => write!(f, "UNKNOWN"),
         }
-    }
-}
-
-impl Default for TaintLevel {
-    fn default() -> Self {
-        TaintLevel::Unknown
     }
 }
 
@@ -621,7 +616,7 @@ impl OriginReport {
                 VerificationStatus::Violated {
                     counterexample: CounterExample::new(
                         Vec::new(),
-                        format!("origin_violation"),
+                        "origin_violation".to_string(),
                         descriptions.join("; "),
                     ),
                 },

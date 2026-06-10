@@ -470,10 +470,10 @@ impl SCGPass for CommonSubexpressionElimination {
                             && e.target == succ
                             && e.kind == EdgeKind::DataFlow
                     });
-                    if !already_exists {
-                        if scg.add_edge(*replacement, succ, EdgeKind::DataFlow).is_ok() {
-                            result.edges_added += 1;
-                        }
+                    if !already_exists
+                        && scg.add_edge(*replacement, succ, EdgeKind::DataFlow).is_ok()
+                    {
+                        result.edges_added += 1;
                     }
                 }
             }
@@ -685,10 +685,10 @@ impl SCGPass for InliningPass {
             if let Some(&cloned_entry) = node_remap.get(&entry_id) {
                 for &pred in &entry_preds {
                     // Avoid self-loops
-                    if pred != cloned_entry {
-                        if scg.add_edge(pred, cloned_entry, EdgeKind::DataFlow).is_ok() {
-                            result.edges_added += 1;
-                        }
+                    if pred != cloned_entry
+                        && scg.add_edge(pred, cloned_entry, EdgeKind::DataFlow).is_ok()
+                    {
+                        result.edges_added += 1;
                     }
                 }
             }
@@ -697,10 +697,10 @@ impl SCGPass for InliningPass {
             if let Some(ret) = return_id {
                 if let Some(&cloned_ret) = node_remap.get(&ret) {
                     for &succ in &return_succs {
-                        if succ != cloned_ret {
-                            if scg.add_edge(cloned_ret, succ, EdgeKind::DataFlow).is_ok() {
-                                result.edges_added += 1;
-                            }
+                        if succ != cloned_ret
+                            && scg.add_edge(cloned_ret, succ, EdgeKind::DataFlow).is_ok()
+                        {
+                            result.edges_added += 1;
                         }
                     }
                 }
@@ -801,10 +801,8 @@ impl SCGPass for VerificationPass {
         // don't fail compilation.
 
         // Additional check: acyclicity
-        if self.check_acyclic {
-            if scg.topological_sort().is_err() {
-                result.errors.push("graph contains a cycle".to_string());
-            }
+        if self.check_acyclic && scg.topological_sort().is_err() {
+            result.errors.push("graph contains a cycle".to_string());
         }
 
         // Additional check: duplicate edges
@@ -1694,10 +1692,10 @@ pub fn dead_region_elim(graph: &mut SCG) -> Vec<NodeId> {
         }
 
         // Remove deallocation (may have been invalidated by alloc removal — check first)
-        if graph.get_node(dealloc_id).is_some() {
-            if graph.remove_node(dealloc_id).is_ok() {
-                removed.push(dealloc_id);
-            }
+        if graph.get_node(dealloc_id).is_some()
+            && graph.remove_node(dealloc_id).is_ok()
+        {
+            removed.push(dealloc_id);
         }
     }
 

@@ -463,7 +463,7 @@ impl Emitter {
             IRInstr::Alloc { dst, size } => {
                 let rd = self.resolve_reg(dst)?;
                 self.emit_instruction(Instruction::MOV { rd, rm: Register::SP })?;
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 self.emit_instruction(Instruction::SUB {
                     rd: Register::SP,
                     rn: Register::SP,
@@ -492,11 +492,7 @@ impl Emitter {
                 match kind {
                     CastKind::ZExt => {
                         // Zero-extend 32-bit to 64-bit using UBFM
-                        if rd != rn {
-                            self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
-                        } else {
-                            self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
-                        }
+                        self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
                     }
                     CastKind::SExt => {
                         // Sign-extend 32-bit to 64-bit using SBFM
@@ -819,11 +815,11 @@ impl Emitter {
     }
 
     fn emit_load_immediate(&mut self, rd: Register, value: i64) -> Result<()> {
-        if value >= 0 && value <= 65535 {
+        if (0..=65535).contains(&value) {
             self.emit_instruction(Instruction::MOVZ { rd, imm16: value as u16, shift: 0 })?;
             return Ok(());
         }
-        if value >= 0 && value <= 0xFFFF_FFFF {
+        if (0..=0xFFFF_FFFF).contains(&value) {
             let lo = (value & 0xFFFF) as u16;
             let hi = ((value >> 16) & 0xFFFF) as u16;
             self.emit_instruction(Instruction::MOVZ { rd, imm16: lo, shift: 0 })?;
@@ -928,7 +924,7 @@ fn compute_frame_size(func: &IRFunction) -> u16 {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as u32 + 15) / 16) * 16;
+                let aligned = (*size).div_ceil(16) * 16;
                 total += aligned;
             }
         }
@@ -1168,7 +1164,7 @@ pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>
 
 /// Patch BL instructions in `text_section` according to the relocation records.
 fn resolve_call_relocs(
-    text_section: &mut Vec<u8>,
+    text_section: &mut [u8],
     relocs: &[CallRelocation],
     function_offsets: &HashMap<String, u64>,
 ) -> Result<()> {
@@ -1226,6 +1222,7 @@ fn collect_data_sections(data_sections: &[DataSection]) -> (Vec<u8>, Vec<u8>, u6
 // ---------------------------------------------------------------------------
 
 /// Write a 64-bit ELF program header.
+#[allow(clippy::too_many_arguments)]
 fn write_phdr(buf: &mut Vec<u8>, p_type: u32, p_flags: u32, p_offset: u64, p_vaddr: u64, p_paddr: u64, p_filesz: u64, p_memsz: u64) {
     buf.extend_from_slice(&p_type.to_le_bytes());
     buf.extend_from_slice(&p_flags.to_le_bytes());
@@ -1251,6 +1248,7 @@ struct FilledShdr {
     sh_entsize: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_shdr(sh_type: u32, sh_flags: u64, sh_addr: u64, sh_offset: u64, sh_size: u64, sh_link: u32, sh_info: u32, sh_addralign: u64, sh_entsize: u64) -> FilledShdr {
     FilledShdr { name: 0, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
 }
@@ -1354,7 +1352,7 @@ fn shstrtab_name_offset(shstrtab: &[u8], name: &str) -> usize {
 
 /// Round `value` up to the nearest multiple of `alignment`.
 fn align_up(value: u64, alignment: u64) -> u64 {
-    ((value + alignment - 1) / alignment) * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 // ---------------------------------------------------------------------------

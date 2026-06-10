@@ -137,6 +137,12 @@ pub struct MSG {
     pub sync_edges: Vec<SyncEdge>,
 }
 
+impl Default for MSG {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MSG {
     /// Create an empty MSG.
     pub fn new() -> Self {
@@ -923,7 +929,7 @@ fn detect_lock_cycle(msg: &MSG) -> Option<Vec<LockId>> {
     }
 
     // Add edges between locks that are held simultaneously
-    for (_access, lock_list) in &access_locks {
+    for lock_list in access_locks.values() {
         for &l1 in lock_list {
             for &l2 in lock_list {
                 if l1 != l2 {

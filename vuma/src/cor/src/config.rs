@@ -41,20 +41,15 @@ impl Default for TargetArch {
 ///
 /// Controls how aggressively the runtime optimizes compiled regions.
 /// Higher levels trade longer compilation time for better runtime performance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OptimizationLevel {
     /// Minimal optimization – fast compilation, useful for debugging.
     None,
     /// Basic optimizations – constant folding, dead code elimination.
+    #[default]
     Basic,
     /// Aggressive optimizations – inlining, vectorization, loop transformations.
     Aggressive,
-}
-
-impl Default for OptimizationLevel {
-    fn default() -> Self {
-        OptimizationLevel::Basic
-    }
 }
 
 /// COR runtime configuration.

@@ -577,8 +577,8 @@ impl SCG {
                     if src_region != tgt_region {
                         let src = self.regions.get(&src_region);
                         let tgt = self.regions.get(&tgt_region);
-                        if src.map_or(false, |r| r.security_boundary)
-                            || tgt.map_or(false, |r| r.security_boundary)
+                        if src.is_some_and(|r| r.security_boundary)
+                            || tgt.is_some_and(|r| r.security_boundary)
                         {
                             result = result.with_error(format!(
                                 "data flow edge {} crosses security boundary between regions {} and {}",

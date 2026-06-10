@@ -75,14 +75,11 @@ impl TemporalRel {
         }
         // Before/After are incomparable with each other but both refine During and Concurrent.
         // During refines Concurrent.
-        match (self, other) {
-            (TemporalRel::Before, TemporalRel::During)
+        matches!((self, other), (TemporalRel::Before, TemporalRel::During)
             | (TemporalRel::Before, TemporalRel::Concurrent)
             | (TemporalRel::After, TemporalRel::During)
             | (TemporalRel::After, TemporalRel::Concurrent)
-            | (TemporalRel::During, TemporalRel::Concurrent) => true,
-            _ => false,
-        }
+            | (TemporalRel::During, TemporalRel::Concurrent))
     }
 
     /// Weaken to the most general relation that both `self` and `other` satisfy.
@@ -103,11 +100,8 @@ impl TemporalRel {
 
     /// Check if two temporal relations are contradictory.
     pub fn contradicts(&self, other: &TemporalRel) -> bool {
-        match (self, other) {
-            (TemporalRel::Before, TemporalRel::After)
-            | (TemporalRel::After, TemporalRel::Before) => true,
-            _ => false,
-        }
+        matches!((self, other), (TemporalRel::Before, TemporalRel::After)
+            | (TemporalRel::After, TemporalRel::Before))
     }
 }
 
@@ -168,12 +162,9 @@ impl StructuralRel {
         //
         // So the refinement chain is: Contains ≤ SubsetOf ≤ Aliases
         // Disjoint is incomparable with all except itself.
-        match (self, other) {
-            (StructuralRel::Contains, StructuralRel::SubsetOf)
+        matches!((self, other), (StructuralRel::Contains, StructuralRel::SubsetOf)
             | (StructuralRel::Contains, StructuralRel::Aliases)
-            | (StructuralRel::SubsetOf, StructuralRel::Aliases) => true,
-            _ => false,
-        }
+            | (StructuralRel::SubsetOf, StructuralRel::Aliases))
     }
 
     /// Weaken (join) two structural relations.
@@ -260,15 +251,12 @@ impl SecurityRel {
         if self == other {
             return true;
         }
-        match (self, other) {
-            (SecurityRel::TrustedAs, SecurityRel::TaintedBy)
+        matches!((self, other), (SecurityRel::TrustedAs, SecurityRel::TaintedBy)
             | (SecurityRel::TrustedAs, SecurityRel::IsolatedFrom)
             | (SecurityRel::TrustedAs, SecurityRel::DeclassifiesTo)
             | (SecurityRel::TaintedBy, SecurityRel::IsolatedFrom)
             | (SecurityRel::TaintedBy, SecurityRel::DeclassifiesTo)
-            | (SecurityRel::IsolatedFrom, SecurityRel::DeclassifiesTo) => true,
-            _ => false,
-        }
+            | (SecurityRel::IsolatedFrom, SecurityRel::DeclassifiesTo))
     }
 
     /// Weaken (join) two security relations.
@@ -340,10 +328,8 @@ impl OwnershipRel {
 
     /// Weaken (join).
     pub fn join(&self, other: &OwnershipRel) -> OwnershipRel {
-        if self.refines(other) {
+        if self.refines(other) || other.refines(self) {
             *other
-        } else if other.refines(self) {
-            *self
         } else {
             *self
         }
@@ -404,12 +390,9 @@ impl LifetimeRel {
         if self == other {
             return true;
         }
-        match (self, other) {
-            (LifetimeRel::Static, LifetimeRel::Outlives)
+        matches!((self, other), (LifetimeRel::Static, LifetimeRel::Outlives)
             | (LifetimeRel::Static, LifetimeRel::ScopedTo)
-            | (LifetimeRel::Outlives, LifetimeRel::ScopedTo) => true,
-            _ => false,
-        }
+            | (LifetimeRel::Outlives, LifetimeRel::ScopedTo))
     }
 
     /// Weaken (join).

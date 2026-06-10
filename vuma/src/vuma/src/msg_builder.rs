@@ -866,7 +866,7 @@ impl MsgBuilder {
 
         // Fallback: return the first derivation we can find.
         self.first_derivation_id()
-            .ok_or_else(|| BuilderError::DerivationNotFound(DerivationId(0)))
+            .ok_or(BuilderError::DerivationNotFound(DerivationId(0)))
     }
 
     /// Find the target DerivationId for an access node.

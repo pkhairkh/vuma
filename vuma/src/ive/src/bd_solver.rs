@@ -256,7 +256,7 @@ enum ApplyResult {
     /// The solution was already consistent; no modification needed.
     Unchanged,
     /// The constraint is unsatisfiable.
-    Error(SolverError),
+    Error(Box<SolverError>),
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +443,7 @@ impl BDConstraintSolver {
                         if !errors.iter().any(|existing: &SolverError| {
                             format!("{}", existing) == format!("{}", e)
                         }) {
-                            errors.push(e);
+                            errors.push(*e);
                         }
                     }
                 }
@@ -525,7 +525,7 @@ impl BDConstraintSolver {
                         if !errors.iter().any(|existing| {
                             format!("{}", existing) == format!("{}", e)
                         }) {
-                            errors.push(e);
+                            errors.push(*e);
                         }
                     }
                 }
@@ -606,12 +606,12 @@ impl BDConstraintSolver {
                 // Both are specific and incompatible.
                 let repd_a = solution.get(&node_a).unwrap().repd.clone();
                 let repd_b = solution.get(&node_b).unwrap().repd.clone();
-                ApplyResult::Error(SolverError::RepDIncompatible {
+                ApplyResult::Error(Box::new(SolverError::RepDIncompatible {
                     node_a,
                     node_b,
                     repd_a,
                     repd_b,
-                })
+                }))
             }
         }
     }
@@ -676,11 +676,11 @@ impl BDConstraintSolver {
 
             // Check consistency of the composed RelD.
             if !composed.is_consistent() {
-                return ApplyResult::Error(SolverError::RelDRefinementFailed {
+                return ApplyResult::Error(Box::new(SolverError::RelDRefinementFailed {
                     node_a,
                     node_b,
                     composed,
-                });
+                }));
             }
 
             let bd_a = solution.get_mut(&node_a).unwrap();
@@ -716,12 +716,12 @@ impl BDConstraintSolver {
 
         // RepDs must be compatible for equality to hold.
         if !bd_a.repd.compatible(&bd_b.repd) {
-            return ApplyResult::Error(SolverError::EqualityViolated {
+            return ApplyResult::Error(Box::new(SolverError::EqualityViolated {
                 node_a,
                 node_b,
                 bd_a,
                 bd_b,
-            });
+            }));
         }
 
         // Compute the meet BD.
@@ -730,12 +730,12 @@ impl BDConstraintSolver {
 
         // Check RelD consistency.
         if !met_reld.is_consistent() {
-            return ApplyResult::Error(SolverError::EqualityViolated {
+            return ApplyResult::Error(Box::new(SolverError::EqualityViolated {
                 node_a,
                 node_b,
                 bd_a,
                 bd_b,
-            });
+            }));
         }
 
         // Use the more specific RepD.

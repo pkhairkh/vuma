@@ -286,9 +286,7 @@ fn collect_access_ids(msg: &MSG) -> Vec<AccessId> {
         let aid = AccessId(raw);
         if msg.access(aid).is_some() {
             ids.push(aid);
-        } else if raw > 0 && ids.is_empty() {
-            break;
-        } else if raw > ids.last().map_or(0, |last| last.0) + 100 {
+        } else if (raw > 0 && ids.is_empty()) || raw > ids.last().map_or(0, |last| last.0) + 100 {
             break;
         }
     }
@@ -433,7 +431,7 @@ fn compute_provenance(
 
     // Check for inverted provenance range.
     let deriv = msg.derivation(deriv_id);
-    if let Some(ref d) = deriv {
+    if let Some(d) = deriv {
         if d.proven_range.0 >= d.proven_range.1 {
             violations.push(OriginViolation::InvertedProvenanceRange {
                 derivation_id: deriv_id,
@@ -459,7 +457,7 @@ fn compute_provenance(
                 }
 
                 // Check bounds: provenance range must be within region range.
-                if let Some(ref d) = deriv {
+                if let Some(d) = deriv {
                     let region_base = region.base;
                     let region_end = region.end();
                     let (proven_lo, proven_hi) = d.proven_range;

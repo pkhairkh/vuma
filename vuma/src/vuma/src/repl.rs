@@ -375,9 +375,9 @@ fn format_error_with_context(source: &str, span: &Span, message: &str) -> String
     let mut result = String::new();
     result.push_str(&format!("error: {message}\n"));
     result.push_str(&format!("  --> {}:{}:{}\n", loc.line, loc.column, span.start));
-    result.push_str(&format!("   |\n"));
+    result.push_str("   |\n");
     result.push_str(&format!("{:3}| {}\n", loc.line, line_text));
-    result.push_str(&format!("   | "));
+    result.push_str("   | ");
     result.push_str(&" ".repeat(column));
     result.push_str(&"^".repeat(caret_width));
     result.push('\n');
@@ -410,7 +410,7 @@ fn format_scg_summary(scg: &SCG) -> String {
     if !type_counts.is_empty() {
         result.push_str("  Node types:\n");
         let mut entries: Vec<_> = type_counts.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (kind, count) in entries {
             result.push_str(&format!("    {kind}: {count}\n"));
         }
@@ -419,7 +419,7 @@ fn format_scg_summary(scg: &SCG) -> String {
     if !edge_counts.is_empty() {
         result.push_str("  Edge types:\n");
         let mut entries: Vec<_> = edge_counts.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (kind, count) in entries {
             result.push_str(&format!("    {kind}: {count}\n"));
         }
@@ -668,11 +668,9 @@ impl VumaRepl {
     fn extract_simple_bindings(&mut self, program: &vuma_parser::ast::Program) {
         for item in &program.items {
             match item {
-                Item::Stmt(s) => {
-                    if let Stmt::Let(l) = s {
-                        if let Expr::Lit { value: Lit::Int(n), .. } = &l.value {
-                            self.simple_vars.insert(l.name.clone(), *n);
-                        }
+                Item::Stmt(Stmt::Let(l)) => {
+                    if let Expr::Lit { value: Lit::Int(n), .. } = &l.value {
+                        self.simple_vars.insert(l.name.clone(), *n);
                     }
                 }
                 Item::Const(c) => {
@@ -813,7 +811,6 @@ Expressions:
         self.profile.verify_time_ms += verify_start.elapsed().as_millis() as u64;
         self.profile.verification_runs += 1;
 
-        let result = result;
         self.last_verification = Some(result.clone());
 
         Ok(ReplResult::Verification(result))

@@ -945,7 +945,7 @@ impl WasmModuleBuilder {
 
     /// Add a function (type index only; body added separately).
     pub fn add_function(&mut self, type_idx: u32) -> u32 {
-        let idx = (self.num_imported_functions as u32) + (self.functions.len() as u32);
+        let idx = self.num_imported_functions + (self.functions.len() as u32);
         self.functions.push(type_idx);
         idx
     }
@@ -1295,7 +1295,7 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
     // Assign locals for parameters
     for (i, param) in func.params.iter().enumerate() {
         let ty = func.param_types.get(i)
-            .and_then(|t| WasmType::from_ir_type(t))
+            .and_then(WasmType::from_ir_type)
             .unwrap_or(WasmType::I32);
         if let IRValue::Register(id) = param {
             let idx = ctx.num_locals;
@@ -1339,10 +1339,10 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
 
     // Build the function type
     let param_types: Vec<WasmType> = func.param_types.iter()
-        .filter_map(|t| WasmType::from_ir_type(t))
+        .filter_map(WasmType::from_ir_type)
         .collect();
     let result_types: Vec<WasmType> = func.result_types.iter()
-        .filter_map(|t| WasmType::from_ir_type(t))
+        .filter_map(WasmType::from_ir_type)
         .collect();
 
     let func_type = WasmFuncType {
@@ -1548,7 +1548,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         IRInstr::Alloc { dst, size } => {
             // In Wasm, Alloc maps to a local variable.
             // We allocate `size` bytes worth of locals (as i32 slots).
-            let num_slots = (*size as u32 + 3) / 4; // round up to i32 slots
+            let num_slots = (*size).div_ceil(4); // round up to i32 slots
             if let IRValue::Register(id) = dst {
                 // Use the first slot as the "pointer" (which is just the local index)
                 // For Wasm, locals ARE the storage; we just allocate them
@@ -1950,9 +1950,9 @@ impl Backend for Wasm32Backend {
                 };
                 // Skip remaining LEB128 operands for the sub-opcode
                 match subop {
-                    0x08 => { skip_leb128(&bytes, &mut offset, 2); }  // data_idx, mem
-                    0x0A => { skip_leb128(&bytes, &mut offset, 2); }  // src, dst
-                    0x0B => { skip_leb128(&bytes, &mut offset, 1); }  // mem
+                    0x08 => { skip_leb128(bytes, &mut offset, 2); }  // data_idx, mem
+                    0x0A => { skip_leb128(bytes, &mut offset, 2); }  // src, dst
+                    0x0B => { skip_leb128(bytes, &mut offset, 1); }  // mem
                     _ => {}
                 }
                 name
@@ -2041,19 +2041,19 @@ impl Backend for Wasm32Backend {
                 // Skip LEB128 immediates for common patterns
                 match byte {
                     0x20..=0x24 | 0x0C..=0x0D | 0x10 => {
-                        skip_leb128(&bytes, &mut offset, 1);
+                        skip_leb128(bytes, &mut offset, 1);
                     }
                     0x11 => {
-                        skip_leb128(&bytes, &mut offset, 2);
+                        skip_leb128(bytes, &mut offset, 2);
                     }
                     0x41 | 0x42 => {
-                        skip_signed_leb128(&bytes, &mut offset, 1);
+                        skip_signed_leb128(bytes, &mut offset, 1);
                     }
                     0x28..=0x3E => {
-                        skip_leb128(&bytes, &mut offset, 2);
+                        skip_leb128(bytes, &mut offset, 2);
                     }
                     0x3F..=0x40 => {
-                        skip_leb128(&bytes, &mut offset, 1);
+                        skip_leb128(bytes, &mut offset, 1);
                     }
                     0x43 => { offset += 4; }  // f32.const: 4 bytes
                     0x44 => { offset += 8; }  // f64.const: 8 bytes

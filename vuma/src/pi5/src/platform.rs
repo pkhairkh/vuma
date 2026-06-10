@@ -143,19 +143,13 @@ pub trait Platform {
 // ---------------------------------------------------------------------------
 
 /// Whether the Pi 5 is operating in low- or high-peripheral mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeripheralMode {
     /// Peripherals mapped at `0x1c000000`.
+    #[default]
     Low,
     /// Peripherals mapped at `0x7c000000`.
     High,
-}
-
-impl Default for PeripheralMode {
-    fn default() -> Self {
-        // The Pi 5 firmware typically uses low-peripheral mode.
-        PeripheralMode::Low
-    }
 }
 
 /// Platform descriptor for the Raspberry Pi 5 (BCM2712).

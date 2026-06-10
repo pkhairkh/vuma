@@ -239,7 +239,7 @@ impl InferenceEngine {
             summary: format!("{}", e),
         })?;
 
-        result.bd_map.get(&node_id).cloned().ok_or_else(|| {
+        result.bd_map.get(&node_id).cloned().ok_or({
             InferenceError::NodeNotFound { node_id }
         })
     }
@@ -357,15 +357,12 @@ impl InferenceEngine {
         for node in scg.nodes() {
             if let NodeType::Control = node.node_type {
                 if let NodePayload::Control(ctrl) = &node.payload {
-                    match ctrl.kind {
-                        vuma_scg::node::ControlKind::LoopHeader => {
-                            let desc = format!(
-                                "loop at node {} — complexity must be bounded",
-                                node.id.as_u64()
-                            );
-                            constraints.push(Constraint::Complexity(ComplexityConstraint { description: desc }));
-                        }
-                        _ => {}
+                    if ctrl.kind == vuma_scg::node::ControlKind::LoopHeader {
+                        let desc = format!(
+                            "loop at node {} — complexity must be bounded",
+                            node.id.as_u64()
+                        );
+                        constraints.push(Constraint::Complexity(ComplexityConstraint { description: desc }));
                     }
                 }
             }

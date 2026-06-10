@@ -906,7 +906,11 @@ impl BumpAllocator {
     ///
     /// Realloc creates a new MSG region and copies data from the old region.
     // VUMA-VERIFIED: realloc copies valid data; old region remains valid until reset
-    pub fn realloc(&mut self, _ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    ///
+    /// # Safety
+    ///
+    /// `_ptr` must point to a valid allocation previously returned by `alloc`.
+    pub unsafe fn realloc(&mut self, _ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
         let new_ptr = self.alloc(new_size, align);
         if new_ptr.is_null() {
             return std::ptr::null_mut();
@@ -1352,7 +1356,11 @@ impl FreeListAllocator {
     /// Updates the MSG region with new size; may create a new region
     /// if the block is moved.
     // VUMA-VERIFIED: realloc preserves data integrity and BD constraints
-    pub fn realloc(&mut self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid allocation previously returned by `alloc`.
+    pub unsafe fn realloc(&mut self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
         if ptr.is_null() {
             return self.alloc(new_size, align);
         }
@@ -1438,7 +1446,7 @@ impl FreeListAllocator {
 
         unsafe {
             while offset + MIN_BLOCK_SIZE <= self.heap_size {
-                let header = (self.heap_start as *mut u8).add(offset) as *mut BlockHeader;
+                let header = self.heap_start.add(offset) as *mut BlockHeader;
                 let block_size = (*header).size;
 
                 if block_size < MIN_BLOCK_SIZE {
@@ -1451,7 +1459,7 @@ impl FreeListAllocator {
                     let mut next_offset = offset + block_size;
 
                     while next_offset + MIN_BLOCK_SIZE <= self.heap_size {
-                        let next_header = (self.heap_start as *mut u8).add(next_offset) as *mut BlockHeader;
+                        let next_header = self.heap_start.add(next_offset) as *mut BlockHeader;
                         if !(*next_header).is_free() {
                             break;
                         }
@@ -1620,6 +1628,12 @@ pub struct VumaAllocator {
 unsafe impl Sync for VumaAllocator {}
 unsafe impl Send for VumaAllocator {}
 
+impl Default for VumaAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VumaAllocator {
     /// Create a new uninitialized VumaAllocator.
     ///
@@ -1734,12 +1748,16 @@ impl VumaAllocator {
     }
 
     /// Reallocate a previously allocated block.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid allocation previously returned by `alloc`.
     // VUMA-VERIFIED: realloc preserves data integrity and BD constraints
-    pub fn realloc(&self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    pub unsafe fn realloc(&self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
         let result = match inner {
-            Some(ref mut inner) => inner.free_list.realloc(ptr, old_size, new_size, align),
+            Some(ref mut inner) => unsafe { inner.free_list.realloc(ptr, old_size, new_size, align) },
             None => ptr::null_mut(),
         };
         self.lock.unlock();
@@ -2027,7 +2045,7 @@ mod tests {
         assert!(!p1.is_null());
         // Write some data
         unsafe { ptr::write(p1, 0x42u8); }
-        let p2 = alloc.realloc(p1, 32, 64, 8);
+        let p2 = unsafe { alloc.realloc(p1, 32, 64, 8) };
         assert!(!p2.is_null());
         // Data should be preserved
         unsafe { assert_eq!(ptr::read(p2), 0x42u8); }
@@ -2090,7 +2108,7 @@ mod tests {
         // Write data
         unsafe { ptr::write(p1, 0xABu8); }
         // Grow
-        let p2 = alloc.realloc(p1, 64, 128, 8);
+        let p2 = unsafe { alloc.realloc(p1, 64, 128, 8) };
         assert!(!p2.is_null());
         // Data preserved
         unsafe { assert_eq!(ptr::read(p2), 0xABu8); }
@@ -2103,7 +2121,7 @@ mod tests {
         let p1 = alloc.alloc(256, 8);
         assert!(!p1.is_null());
         // Shrink — should be in-place
-        let p2 = alloc.realloc(p1, 256, 64, 8);
+        let p2 = unsafe { alloc.realloc(p1, 256, 64, 8) };
         assert!(!p2.is_null());
         // Should be the same pointer for in-place shrink
         assert_eq!(p1, p2);
@@ -2168,7 +2186,7 @@ mod tests {
         let p1 = alloc.alloc(64, 8);
         let p2 = alloc.alloc(32, 8);
         alloc.dealloc(p1, 64, 8);
-        let _p3 = alloc.realloc(p2, 32, 128, 8);
+        let _p3 = unsafe { alloc.realloc(p2, 32, 128, 8) };
 
         // Tracker should have recorded all events
         let records = alloc.tracker().records();
@@ -2236,7 +2254,7 @@ mod tests {
         unsafe { ptr::write(ptr, 0xFFu8); }
 
         // Grow
-        let new_ptr = allocator.realloc(ptr, 64, 128, 8);
+        let new_ptr = unsafe { allocator.realloc(ptr, 64, 128, 8) };
         assert!(!new_ptr.is_null());
         // Data preserved
         unsafe { assert_eq!(ptr::read(new_ptr), 0xFFu8); }

@@ -368,13 +368,12 @@ fn encode_dp_reg(
     rm: u32,
 ) -> [u8; 4] {
     let word = (cond.encoding() << 28)
-        | (0b00 << 26)
-        | (0 << 25) // I=0: register operand2
+        // I=0: register operand2
         | ((opcode & 0xF) << 21)
         | ((s as u32) << 20)
         | ((rn & 0xF) << 16)
         | ((rd & 0xF) << 12)
-        | (0 << 4) // shift = 0, type = 0
+        // shift = 0, type = 0
         | (rm & 0xF);
     word.to_le_bytes()
 }
@@ -393,7 +392,6 @@ fn encode_dp_imm(
     imm8: u32,
 ) -> [u8; 4] {
     let word = (cond.encoding() << 28)
-        | (0b00 << 26)
         | (1 << 25) // I=1: immediate operand2
         | ((opcode & 0xF) << 21)
         | ((s as u32) << 20)
@@ -410,6 +408,7 @@ fn encode_dp_imm(
 /// Format: `cond[31:28] | 00[27:26] | I=0[25] | opcode[24:21] | S[20] |
 ///         Rn[19:16] | Rd[15:12] | shift_imm[11:7] | shift_type[6:5] |
 ///         0[4] | Rm[3:0]`
+#[allow(clippy::too_many_arguments)]
 fn encode_dp_shift_imm(
     cond: Condition,
     opcode: u32,
@@ -421,15 +420,13 @@ fn encode_dp_shift_imm(
     rm: u32,
 ) -> [u8; 4] {
     let word = (cond.encoding() << 28)
-        | (0b00 << 26)
-        | (0 << 25)
+        // I=0: immediate shift
         | ((opcode & 0xF) << 21)
         | ((s as u32) << 20)
         | ((rn & 0xF) << 16)
         | ((rd & 0xF) << 12)
         | ((shift_imm & 0x1F) << 7)
         | ((shift_type & 0x3) << 5)
-        | (0 << 4)
         | (rm & 0xF);
     word.to_le_bytes()
 }
@@ -439,6 +436,7 @@ fn encode_dp_shift_imm(
 ///
 /// Format: `cond[31:28] | 00[27:26] | I=0[25] | opcode[24:21] | S[20] |
 ///         Rn[19:16] | Rd[15:12] | Rs[11:8] | shift_type[6:5] | 1[4] | Rm[3:0]`
+#[allow(clippy::too_many_arguments)]
 fn encode_dp_shift_reg(
     cond: Condition,
     opcode: u32,
@@ -450,8 +448,6 @@ fn encode_dp_shift_reg(
     rm: u32,
 ) -> [u8; 4] {
     let word = (cond.encoding() << 28)
-        | (0b00 << 26)
-        | (0 << 25)
         | ((opcode & 0xF) << 21)
         | ((s as u32) << 20)
         | ((rn & 0xF) << 16)
@@ -467,6 +463,7 @@ fn encode_dp_shift_reg(
 ///
 /// Format: `cond[31:28] | 01[27:26] | I=0[25] | P[24] | U[23] | B[22] |
 ///         W[21] | L[20] | Rn[19:16] | Rd[15:12] | offset12[11:0]`
+#[allow(clippy::too_many_arguments)]
 fn encode_ls_imm(
     cond: Condition,
     p: bool,
@@ -480,7 +477,7 @@ fn encode_ls_imm(
 ) -> [u8; 4] {
     let word = (cond.encoding() << 28)
         | (0b01 << 26)
-        | (0 << 25) // I=0: immediate offset
+        // I=0: immediate offset
         | ((p as u32) << 24)
         | ((u as u32) << 23)
         | ((b as u32) << 22)
@@ -497,6 +494,7 @@ fn encode_ls_imm(
 /// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
 ///         L[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1011[7:4] |
 ///         offset_low[3:0]`
+#[allow(clippy::too_many_arguments)]
 fn encode_ls_half_imm(
     cond: Condition,
     p: bool,
@@ -510,10 +508,9 @@ fn encode_ls_half_imm(
     let imm_hi = (offset8 >> 4) & 0xF;
     let imm_lo = offset8 & 0xF;
     let word = (cond.encoding() << 28)
-        | (0b000 << 25)
         | ((p as u32) << 24)
         | ((u as u32) << 23)
-        | (0 << 22) // I=0: immediate offset
+        // I=0: immediate offset
         | ((w as u32) << 21)
         | ((l as u32) << 20)
         | ((rn & 0xF) << 16)
@@ -529,6 +526,7 @@ fn encode_ls_half_imm(
 /// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
 ///         L=0[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1111[7:4] |
 ///         offset_low[3:0]`
+#[allow(clippy::too_many_arguments)]
 fn encode_ls_double_imm(
     cond: Condition,
     p: bool,
@@ -546,10 +544,9 @@ fn encode_ls_double_imm(
     // STRD: L=0, LDRD: L=1. But wait — the ARM ARM says for LDRD/STRD,
     // bit 20 distinguishes: 0=STRD, 1=LDRD.
     let word = (cond.encoding() << 28)
-        | (0b000 << 25)
         | ((p as u32) << 24)
         | ((u as u32) << 23)
-        | (0 << 22) // I=0
+        // I=0
         | ((w as u32) << 21)
         | ((is_load as u32) << 20)
         | ((rn & 0xF) << 16)
@@ -577,10 +574,8 @@ fn encode_ldrsb_imm(
     let imm_hi = (offset8 >> 4) & 0xF;
     let imm_lo = offset8 & 0xF;
     let word = (cond.encoding() << 28)
-        | (0b000 << 25)
         | ((p as u32) << 24)
         | ((u as u32) << 23)
-        | (0 << 22)
         | ((w as u32) << 21)
         | (1 << 20) // L=1
         | ((rn & 0xF) << 16)
@@ -608,10 +603,8 @@ fn encode_ldrsh_imm(
     let imm_hi = (offset8 >> 4) & 0xF;
     let imm_lo = offset8 & 0xF;
     let word = (cond.encoding() << 28)
-        | (0b000 << 25)
         | ((p as u32) << 24)
         | ((u as u32) << 23)
-        | (0 << 22)
         | ((w as u32) << 21)
         | (1 << 20) // L=1
         | ((rn & 0xF) << 16)
@@ -672,7 +665,6 @@ fn encode_blx_reg(cond: Condition, rm: u32) -> [u8; 4] {
 ///         Rs[11:8] | 1001[7:4] | Rm[3:0]`
 fn encode_mul(cond: Condition, s: bool, rd: u32, rn: u32, rs: u32, rm: u32) -> [u8; 4] {
     let word = (cond.encoding() << 28)
-        | (0b000000 << 22)
         | ((s as u32) << 20)
         | ((rd & 0xF) << 16)
         | ((rn & 0xF) << 12)
@@ -788,7 +780,7 @@ fn encode_stm(
         | ((u as u32) << 23)
         | ((s as u32) << 22)
         | ((w as u32) << 21)
-        | (0 << 20) // L=0 for store
+        // L=0 for store
         | ((rn & 0xF) << 16)
         | (register_list as u32);
     word.to_le_bytes()
@@ -1497,7 +1489,7 @@ fn arm32_compute_frame_size(func: &IRFunction) -> usize {
     for block in &func.blocks {
         for instr in &block.instructions {
             if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = ((*size as usize + 7) / 8) * 8;
+                let aligned = (*size as usize).div_ceil(8) * 8;
                 total += aligned;
             }
         }

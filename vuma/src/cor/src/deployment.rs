@@ -259,10 +259,10 @@ impl DeploymentDelta {
             offset += BLOCK;
         }
         // Handle the tail (< BLOCK bytes).
-        if offset < min_len {
-            if old_code[offset..min_len] != new_code[offset..min_len] {
-                patches.push((offset, new_code[offset..min_len].to_vec()));
-            }
+        if offset < min_len
+            && old_code[offset..min_len] != new_code[offset..min_len]
+        {
+            patches.push((offset, new_code[offset..min_len].to_vec()));
         }
 
         let mut deletions = Vec::new();
@@ -313,7 +313,7 @@ impl DeploymentDelta {
 
         // Apply deletions (truncate tail only — ordered back-to-front).
         let mut sorted_deletions = self.deletions.clone();
-        sorted_deletions.sort_by(|a, b| b.0.cmp(&a.0));
+        sorted_deletions.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (offset, len) in &sorted_deletions {
             let end = *offset + len;
             if end > result.len() {
@@ -328,7 +328,7 @@ impl DeploymentDelta {
         // Apply insertions (at specific offsets).
         // Sort by offset descending so later insertions don't shift earlier ones.
         let mut sorted_insertions = self.insertions.clone();
-        sorted_insertions.sort_by(|a, b| b.0.cmp(&a.0));
+        sorted_insertions.sort_by_key(|b| std::cmp::Reverse(b.0));
         for (offset, data) in &sorted_insertions {
             if *offset > result.len() {
                 return Err(DeploymentError::DeltaApplyFailed(
@@ -590,7 +590,7 @@ impl DeploymentPlanner {
         let hot_threshold = 100;
 
         for &region_id in region_ids {
-            let is_hot = profile
+            let _is_hot = profile
                 .call_counts
                 .values()
                 .any(|&count| count > hot_threshold);
@@ -608,8 +608,6 @@ impl DeploymentPlanner {
                         core_affinity: Some(core_id),
                     }
                 }
-            } else if is_hot {
-                DeploymentTarget::Local
             } else {
                 DeploymentTarget::Local
             };
