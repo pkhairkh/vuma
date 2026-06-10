@@ -489,7 +489,7 @@ impl MsgBuilder {
             ScgNodeType::Access => self.rule_access(&node_data)?,
             ScgNodeType::Cast => self.rule_cast(&node_data)?,
             ScgNodeType::Effect => self.rule_effect(&node_data)?,
-            ScgNodeType::Control | ScgNodeType::Phantom => ScgNodeMapping::None,
+            ScgNodeType::Control | ScgNodeType::Phantom | ScgNodeType::VTable | ScgNodeType::ClosureEnv => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);
@@ -799,7 +799,7 @@ impl MsgBuilder {
         for edge in edges {
             // Only consider edges that imply synchronization.
             match edge.kind {
-                ScgEdgeKind::ControlFlow | ScgEdgeKind::Annotation => {
+                ScgEdgeKind::ControlFlow | ScgEdgeKind::Annotation | ScgEdgeKind::Dispatch => {
                     self.process_sync_edge(&edge)?;
                 }
                 ScgEdgeKind::DataFlow | ScgEdgeKind::Derivation => {
@@ -1530,8 +1530,7 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "assign".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(5),
         );
         scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
@@ -1554,8 +1553,7 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_16".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(5),
         );
         scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
@@ -1809,8 +1807,7 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_32".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(3),
         );
         let cast_id = scg.add_node(
@@ -1916,16 +1913,14 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             scg_pp(1),
         );
         let n2 = scg.add_node(
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             scg_pp(2),
         );
         scg.add_edge(n1, n2, ScgEdgeKind::DataFlow).unwrap();
@@ -2040,8 +2035,7 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_9999".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(5),
         );
         scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
@@ -2110,8 +2104,7 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_64".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(2),
         );
 

@@ -472,6 +472,8 @@ pub struct MatchStmt {
 pub struct MatchArm {
     /// Pattern (simple string for now; can be extended to full patterns).
     pub pattern: MatchPattern,
+    /// Optional guard expression: `x if x > 0 => ...`
+    pub guard: Option<Expr>,
     /// Arm body (expression).
     pub body: Expr,
     /// Source span.
@@ -489,6 +491,12 @@ pub enum MatchPattern {
     Ident { name: String, span: Span },
     /// Struct-like pattern: `Name { field, … }`
     Struct { name: String, fields: Vec<String>, span: Span },
+    /// Enum variant pattern: `Some(v)` or `None`
+    Enum { name: String, binding: Option<String>, span: Span },
+    /// Range pattern: `1..=10`
+    Range { start: Lit, end: Lit, span: Span },
+    /// Or-pattern: `1 | 2 | 3`
+    Or { patterns: Vec<MatchPattern>, span: Span },
 }
 
 /// `sync { … }` block for synchronized access.

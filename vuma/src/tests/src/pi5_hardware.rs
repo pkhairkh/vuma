@@ -166,6 +166,7 @@ fn build_gpio_set_output_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(GPIO_OFFSET as i64),
+                tail_call: false,
                 }),
                 // Store 0x01 to the GPIO base (simplified: real HW would compute offset from pin)
                 ScgStatement::Access(CgAccessNode::Store {
@@ -195,6 +196,7 @@ fn build_uart_transmit_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(UART_OFFSET as i64),
+                tail_call: false,
                 }),
                 // Write character to UART Data Register (offset 0)
                 ScgStatement::Access(CgAccessNode::Store {
@@ -224,6 +226,7 @@ fn build_timer_delay_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(TIMER_OFFSET as i64),
+                tail_call: false,
                 }),
                 // Read current timer value (offset 4 = CLO register)
                 ScgStatement::Access(CgAccessNode::Load {
@@ -237,6 +240,7 @@ fn build_timer_delay_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Var("current".to_string()),
                     rhs: ScgExpr::Var("ticks".to_string()),
+                tail_call: false,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -261,6 +265,7 @@ fn build_smp_mailbox_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(0x0000_B800),
+                tail_call: false,
                 }),
                 // Write message to mailbox register
                 ScgStatement::Access(CgAccessNode::Store {
@@ -291,6 +296,7 @@ fn build_gpio_uart_combined_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(GPIO_OFFSET as i64),
+                tail_call: false,
                 }),
                 // Set GPIO pin
                 ScgStatement::Access(CgAccessNode::Store {
@@ -304,6 +310,7 @@ fn build_gpio_uart_combined_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(UART_OFFSET as i64),
+                tail_call: false,
                 }),
                 // Transmit character
                 ScgStatement::Access(CgAccessNode::Store {

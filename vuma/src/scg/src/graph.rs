@@ -748,8 +748,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             make_program_point(),
         );
         let node = scg.get_node(id).unwrap();
@@ -786,16 +785,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "f".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "g".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let eid = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -818,24 +815,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "c".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -858,24 +852,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "x".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "y".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "z".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -892,16 +883,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "first".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "second".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -921,16 +910,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -993,8 +980,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
 
@@ -1003,8 +989,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             make_program_point(),
         );
 

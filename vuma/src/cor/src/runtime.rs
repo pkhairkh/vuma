@@ -552,6 +552,7 @@ impl CORuntime {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var(format!("arg0")),
                         rhs: ScgExpr::Var(format!("arg1")),
+                    tail_call: false,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))]),
                 ]
@@ -577,6 +578,7 @@ impl CORuntime {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var(format!("loaded_{}", node.id)),
                         rhs: ScgExpr::Int(0),
+                    tail_call: false,
                     }));
                 }
                 stmts.push(ScgStatement::Return(vec![ScgExpr::Var(format!("loaded_{}", node.id))]));
@@ -593,6 +595,7 @@ impl CORuntime {
                             op: BinOpKind::Add,
                             lhs: ScgExpr::Var(format!("counter_{}", node.id)),
                             rhs: ScgExpr::Int(1),
+                        tail_call: false,
                         })]
                     })
                     .collect();
@@ -652,6 +655,7 @@ impl CORuntime {
                             op: BinOpKind::Add,
                             lhs: ScgExpr::Var("arg0".to_string()),
                             rhs: ScgExpr::Int(1),
+                        tail_call: false,
                         }),
                         ScgStatement::Return(vec![ScgExpr::Var("inlined_result".to_string())]),
                     ]

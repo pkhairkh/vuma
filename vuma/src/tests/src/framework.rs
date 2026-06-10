@@ -996,8 +996,7 @@ pub fn build_trivial_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "write_buffer".to_string(),
-            result_type: None,
-        }),
+            result_type: None, tail_call: false }),
         ProgramPoint {
             file: Some("trivial.vu".to_string()),
             line: Some(2),
@@ -1255,8 +1254,7 @@ pub fn build_leaked_allocation_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "use_leaked_buf".to_string(),
-            result_type: None,
-        }),
+            result_type: None, tail_call: false }),
         ProgramPoint {
             file: Some("leak.vu".to_string()),
             line: Some(2),
@@ -1302,8 +1300,7 @@ pub fn build_multi_region_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "process_region1".to_string(),
-            result_type: None,
-        }),
+            result_type: None, tail_call: false }),
         ProgramPoint {
             file: Some("multi.vu".to_string()),
             line: Some(2),
@@ -1346,8 +1343,7 @@ pub fn build_multi_region_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "process_region2".to_string(),
-            result_type: None,
-        }),
+            result_type: None, tail_call: false }),
         ProgramPoint {
             file: Some("multi.vu".to_string()),
             line: Some(5),

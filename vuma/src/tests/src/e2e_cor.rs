@@ -62,8 +62,7 @@ fn build_test_vuma_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i64".to_string()),
-        }),
+            result_type: Some("i64".to_string()), tail_call: false }),
         pp.clone(),
     );
     let dealloc_id = scg.add_node(

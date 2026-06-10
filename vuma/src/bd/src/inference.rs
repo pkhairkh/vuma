@@ -374,6 +374,10 @@ impl BDInferenceEngine {
             NodeType::Phantom => {
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
+            NodeType::VTable | NodeType::ClosureEnv => {
+                // VTable and ClosureEnv nodes inherit BD from their inputs
+                self.compute_phantom_bd(scg, node_id, bd_map)
+            }
         }
     }
 
@@ -853,6 +857,7 @@ impl BDInferenceEngine {
             NodeType::Effect => Some(UsageContext::ReadWrite),
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
+            NodeType::VTable | NodeType::ClosureEnv => None,
         }
     }
 
@@ -1063,8 +1068,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
 
@@ -1153,16 +1157,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "double".to_string(),
-                result_type: Some("i64".to_string()),
-            }),
+                result_type: Some("i64".to_string()), tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "square".to_string(),
-                result_type: Some("i64".to_string()),
-            }),
+                result_type: Some("i64".to_string()), tail_call: false }),
             pp(),
         );
 
@@ -1237,8 +1239,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "process".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -1265,16 +1266,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -1318,6 +1317,7 @@ mod tests {
                 NodePayload::Computation(ComputationNode {
                     operation: format!("step_{i}"),
                     result_type: Some("i32".to_string()),
+                tail_call: false,
                 }),
                 pp(),
             );
@@ -1376,8 +1376,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "transform".to_string(),
-                result_type: Some("i64".to_string()),
-            }),
+                result_type: Some("i64".to_string()), tail_call: false }),
             pp(),
         );
         let access = scg.add_node(
@@ -1394,8 +1393,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "finalize".to_string(),
-                result_type: Some("i64".to_string()),
-            }),
+                result_type: Some("i64".to_string()), tail_call: false }),
             pp(),
         );
         let dealloc = scg.add_node(

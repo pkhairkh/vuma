@@ -1124,6 +1124,7 @@ impl<'src> Parser<'src> {
             let arm_end = body.span().end;
             arms.push(MatchArm {
                 pattern,
+                guard: None,
                 body,
                 span: Span::new(arm_start, arm_end),
             });
@@ -1238,6 +1239,21 @@ impl<'src> Parser<'src> {
                     Ok(MatchPattern::Struct {
                         name,
                         fields,
+                        span,
+                    })
+                } else if self.at(TokenKind::LParen) {
+                    // Enum variant pattern: `Some(v)` or `None()`
+                    self.advance();
+                    let binding = if self.at(TokenKind::RParen) {
+                        None
+                    } else {
+                        let b = self.expect_name()?;
+                        Some(b)
+                    };
+                    self.expect(TokenKind::RParen)?;
+                    Ok(MatchPattern::Enum {
+                        name,
+                        binding,
                         span,
                     })
                 } else {

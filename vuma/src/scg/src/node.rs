@@ -55,6 +55,10 @@ pub enum NodeType {
     Control,
     /// A phantom node used for structural or analysis purposes.
     Phantom,
+    /// A virtual method table node for dynamic dispatch.
+    VTable,
+    /// A closure environment node capturing variables.
+    ClosureEnv,
 }
 
 impl std::fmt::Display for NodeType {
@@ -68,6 +72,8 @@ impl std::fmt::Display for NodeType {
             NodeType::Effect => write!(f, "Effect"),
             NodeType::Control => write!(f, "Control"),
             NodeType::Phantom => write!(f, "Phantom"),
+            NodeType::VTable => write!(f, "VTable"),
+            NodeType::ClosureEnv => write!(f, "ClosureEnv"),
         }
     }
 }
@@ -140,6 +146,10 @@ pub enum NodePayload {
     Control(ControlNode),
     /// Payload for `NodeType::Phantom`.
     Phantom(PhantomNode),
+    /// Payload for `NodeType::VTable`.
+    VTable(VTableNode),
+    /// Payload for `NodeType::ClosureEnv`.
+    ClosureEnv(ClosureEnvNode),
 }
 
 /// Data specific to a computation node.
@@ -152,6 +162,9 @@ pub struct ComputationNode {
     pub operation: String,
     /// An optional type signature for the computation's result.
     pub result_type: Option<String>,
+    /// Whether this computation is a tail call (the last action before return).
+    /// Set by the TailCallOptimization transform.
+    pub tail_call: bool,
 }
 
 /// Data specific to an allocation node.
@@ -250,6 +263,20 @@ pub enum ControlKind {
     FunctionReturn,
     /// An unconditional jump.
     Jump,
+    /// A switch/match decision point that dispatches to multiple cases.
+    Switch,
+    /// A single case arm of a switch/match.
+    SwitchCase,
+    /// A closure entry point.
+    ClosureEntry,
+    /// A closure return point.
+    ClosureReturn,
+    /// A future poll point (await).
+    FuturePoll,
+    /// A waker registration node for async state machines.
+    WakerRegistration,
+    /// A state machine state transition point.
+    StateTransition,
 }
 
 /// Data specific to a control flow node.
@@ -272,6 +299,32 @@ pub struct ControlNode {
 pub struct PhantomNode {
     /// A textual description of the phantom node's purpose.
     pub purpose: String,
+}
+
+/// Data specific to a vtable node for dynamic dispatch.
+///
+/// Represents a virtual method table used in trait object dispatch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VTableNode {
+    /// The trait name this vtable implements.
+    pub trait_name: String,
+    /// The concrete type the vtable is instantiated for.
+    pub concrete_type: String,
+    /// List of method entry node IDs in the vtable.
+    pub method_entries: Vec<NodeId>,
+}
+
+/// Data specific to a closure environment node.
+///
+/// Represents the captured environment of a closure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClosureEnvNode {
+    /// Names of captured variables.
+    pub captured_vars: Vec<String>,
+    /// Whether each capture is by move (true) or by borrow (false).
+    pub capture_modes: Vec<bool>,
+    /// The NodeId of the closure entry this environment belongs to.
+    pub closure_entry: Option<NodeId>,
 }
 
 #[cfg(test)]

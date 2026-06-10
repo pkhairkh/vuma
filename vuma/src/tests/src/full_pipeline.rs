@@ -299,6 +299,7 @@ fn test_full_pipeline_compile_to_elf() {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(10),
                     rhs: ScgExpr::Int(20),
+                tail_call: false,
                 }),
                 // Return the computed value
                 ScgStatement::Return(vec![ScgExpr::Var("value".to_string())]),

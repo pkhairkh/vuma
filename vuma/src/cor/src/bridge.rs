@@ -62,13 +62,22 @@ fn map_node_type(
                     vuma_scg::node::ControlKind::FunctionEntry => NodeKind::FunctionEntry,
                     vuma_scg::node::ControlKind::FunctionReturn => NodeKind::FunctionReturn,
                     vuma_scg::node::ControlKind::Jump => NodeKind::Jump,
+                    vuma_scg::node::ControlKind::Switch => NodeKind::Branch,
+                    vuma_scg::node::ControlKind::SwitchCase => NodeKind::Branch,
+                    vuma_scg::node::ControlKind::ClosureEntry => NodeKind::FunctionEntry,
+                    vuma_scg::node::ControlKind::ClosureReturn => NodeKind::FunctionReturn,
+                    vuma_scg::node::ControlKind::FuturePoll => NodeKind::Call,
+                    vuma_scg::node::ControlKind::WakerRegistration => NodeKind::Call,
+                    vuma_scg::node::ControlKind::StateTransition => NodeKind::Jump,
                 }
             } else {
                 NodeKind::Entry
             }
         }
 
-        vuma_scg::NodeType::Phantom => NodeKind::Entry,
+        vuma_scg::NodeType::Phantom
+        | vuma_scg::NodeType::VTable
+        | vuma_scg::NodeType::ClosureEnv => NodeKind::Entry,
 
         vuma_scg::NodeType::Effect => NodeKind::Call,
     }
@@ -95,6 +104,7 @@ fn edge_weight(kind: &vuma_scg::EdgeKind) -> u64 {
         vuma_scg::EdgeKind::DataFlow => 1,
         vuma_scg::EdgeKind::Derivation => 1,
         vuma_scg::EdgeKind::Annotation => 1,
+        vuma_scg::EdgeKind::Dispatch => 10,
     }
 }
 
@@ -306,8 +316,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -359,8 +368,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "body".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 

@@ -48,6 +48,8 @@ pub enum EdgeKind {
     Derivation,
     /// An annotation edge: the source annotates or provides metadata about the target.
     Annotation,
+    /// A dispatch edge: connects a switch/vtable to its dispatch targets.
+    Dispatch,
 }
 
 impl std::fmt::Display for EdgeKind {
@@ -57,6 +59,7 @@ impl std::fmt::Display for EdgeKind {
             EdgeKind::ControlFlow => write!(f, "ControlFlow"),
             EdgeKind::Derivation => write!(f, "Derivation"),
             EdgeKind::Annotation => write!(f, "Annotation"),
+            EdgeKind::Dispatch => write!(f, "Dispatch"),
         }
     }
 }

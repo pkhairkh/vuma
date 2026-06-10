@@ -341,7 +341,7 @@ fn process_node(
         NodeType::Deallocation => {
             process_deallocation(ctx, node)?;
         }
-        NodeType::Computation | NodeType::Effect | NodeType::Control | NodeType::Phantom => {
+        NodeType::Computation | NodeType::Effect | NodeType::Control | NodeType::Phantom | NodeType::VTable | NodeType::ClosureEnv => {
             // These node types do not directly produce MSG constructs.
             // However, if they participate in derivation chains via Derivation
             // edges, we create a passthrough derivation.
@@ -1292,8 +1292,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_compute".to_string(),
-                result_type: Some("*mut u8".to_string()),
-            }),
+                result_type: Some("*mut u8".to_string()), tail_call: false }),
             scg_pp(2),
         );
 

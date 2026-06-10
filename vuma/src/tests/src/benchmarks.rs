@@ -331,6 +331,7 @@ pub fn build_linear_scg(n_chains: usize) -> SCG {
             NodePayload::Computation(ComputationNode {
                 operation: format!("compute_{}", i),
                 result_type: Some("i64".to_string()),
+            tail_call: false,
             }),
             pp.clone(),
         );
@@ -426,6 +427,7 @@ pub fn build_rich_scg(n_chains: usize) -> SCG {
             NodePayload::Computation(ComputationNode {
                 operation: format!("transform_{}", i),
                 result_type: Some("i64".to_string()),
+            tail_call: false,
             }),
             pp.clone(),
         );
@@ -681,6 +683,7 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var(format!("v_{}", j - 1)),
                         rhs: ScgExpr::Int(1),
+                        tail_call: false,
                     }));
                 } else {
                     // Store.
@@ -731,6 +734,7 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
                                 op: BinOpKind::Add,
                                 lhs: ScgExpr::Var("arg".to_string()),
                                 rhs: ScgExpr::Int(1),
+                                tail_call: false,
                             }),
                             ScgStatement::Return(vec![ScgExpr::Var("tmp".to_string())]),
                         ],

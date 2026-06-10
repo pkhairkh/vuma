@@ -861,8 +861,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "test".into(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         )
     }

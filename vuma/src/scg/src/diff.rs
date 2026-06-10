@@ -1077,16 +1077,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1106,8 +1104,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         ).unwrap();
         let n2 = scg2.add_node_with_id(
@@ -1115,8 +1112,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         scg2.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1139,8 +1135,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         ).unwrap();
         new.add_node_with_id(
@@ -1148,8 +1143,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         new.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
@@ -1179,8 +1173,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         old.add_node_with_id(
@@ -1188,8 +1181,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1199,8 +1191,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1219,8 +1210,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1230,8 +1220,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(), // changed operation
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1243,12 +1232,10 @@ mod tests {
         if let DiffEntry::NodeModified { old, new, .. } = mod_entry {
             assert_eq!(old.payload, NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }));
+                result_type: Some("i32".to_string()), tail_call: false }));
             assert_eq!(new.payload, NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(),
-                result_type: Some("i32".to_string()),
-            }));
+                result_type: Some("i32".to_string()), tail_call: false }));
         } else {
             panic!("Expected NodeModified entry");
         }
@@ -1260,20 +1247,20 @@ mod tests {
     fn test_diff_edge_changes() {
         let mut old = SCG::new();
         old.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         old.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         old.add_node_with_id(NodeId::new(2), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         old.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
 
         let mut new = SCG::new();
         new.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         new.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         new.add_node_with_id(NodeId::new(2), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         // Old edge removed, new edge added
         new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), NodeId::new(2), EdgeKind::ControlFlow).unwrap();
 
@@ -1312,8 +1299,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         let n2 = old.add_node_with_id(
@@ -1321,8 +1307,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         old.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1333,8 +1318,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(), // modified
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         // n2 removed, n3 added
@@ -1375,8 +1359,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1387,8 +1370,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1399,8 +1381,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(), // modified
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1413,8 +1394,7 @@ mod tests {
         let n0 = merged.get_node(NodeId::new(0)).unwrap();
         assert_eq!(n0.payload, NodePayload::Computation(ComputationNode {
             operation: "mul".to_string(),
-            result_type: None,
-        }));
+            result_type: None, tail_call: false }));
         // Node 1 should have been added from ours
         assert!(merged.get_node(NodeId::new(1)).is_some());
     }
@@ -1430,8 +1410,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1442,8 +1421,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1454,8 +1432,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1474,14 +1451,14 @@ mod tests {
     fn test_edit_script_ordering() {
         let mut old = SCG::new();
         old.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         old.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         old.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
 
         let mut new = SCG::new();
         new.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a_v2".to_string(), result_type: None }), pp()).unwrap();
+            NodePayload::Computation(ComputationNode { operation: "a_v2".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
         new.add_node_with_id(NodeId::new(2), NodeType::Phantom,
             NodePayload::Phantom(PhantomNode { purpose: "new".to_string() }), pp()).unwrap();
         new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), NodeId::new(2), EdgeKind::ControlFlow).unwrap();
@@ -1520,8 +1497,7 @@ mod tests {
             program_point: pp,
             payload: NodePayload::Computation(ComputationNode {
                 operation: "test".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
         };
 
         let added = DiffEntry::NodeAdded(node_data.clone());
@@ -1577,8 +1553,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
 
@@ -1607,8 +1582,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         base.add_node_with_id(
@@ -1627,8 +1601,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         // NodeId::new(1) is absent — removed
@@ -1640,8 +1613,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         ).unwrap();
         theirs.add_node_with_id(

@@ -327,8 +327,7 @@ fn test_infer_security_level() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "parse_int".to_string(),
-            result_type: Some("i32".to_string()),
-        }),
+            result_type: Some("i32".to_string()), tail_call: false }),
         pp(),
     );
 
@@ -452,8 +451,7 @@ fn test_infer_temporal_relation() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i32".to_string()),
-        }),
+            result_type: Some("i32".to_string()), tail_call: false }),
         pp(),
     );
 
@@ -543,8 +541,7 @@ fn test_bd_vs_rust_type() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i32".to_string()),
-        }),
+            result_type: Some("i32".to_string()), tail_call: false }),
         pp(),
     );
 

@@ -239,12 +239,12 @@ fn compute_successor_set(scg: &SCG, node_id: NodeId) -> Vec<NodeId> {
 /// let pp = ProgramPoint { file: None, line: None, column: None, offset: None };
 /// let n1 = scg.add_node(
 ///     NodeType::Computation,
-///     NodePayload::Computation(ComputationNode { operation: "a".into(), result_type: None }),
+///     NodePayload::Computation(ComputationNode { operation: "a".into(), result_type: None, tail_call: false }),
 ///     pp.clone(),
 /// );
 /// let n2 = scg.add_node(
 ///     NodeType::Computation,
-///     NodePayload::Computation(ComputationNode { operation: "b".into(), result_type: None }),
+///     NodePayload::Computation(ComputationNode { operation: "b".into(), result_type: None, tail_call: false }),
 ///     pp,
 /// );
 /// scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -710,8 +710,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -732,16 +731,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
@@ -790,24 +787,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "src".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "left".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "right".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n4 = scg.add_node(
@@ -844,16 +838,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "dead".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "also_dead".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
@@ -886,8 +878,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "live_val".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1037,8 +1028,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "use".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -1186,8 +1176,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "x".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1229,8 +1218,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "compute".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1337,8 +1325,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(

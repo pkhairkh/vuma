@@ -121,9 +121,9 @@ impl DominatorTree {
 /// let n0 = scg.add_node(NodeType::Control, NodePayload::Phantom(
 ///     vuma_scg::PhantomNode { purpose: "entry".into() }), pp.clone());
 /// let n1 = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "a".into(), result_type: None }), pp.clone());
+///     ComputationNode { operation: "a".into(), result_type: None, tail_call: false }), pp.clone());
 /// let n2 = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "b".into(), result_type: None }), pp);
+///     ComputationNode { operation: "b".into(), result_type: None, tail_call: false }), pp);
 /// scg.add_edge(n0, n1, EdgeKind::ControlFlow).unwrap();
 /// scg.add_edge(n1, n2, EdgeKind::ControlFlow).unwrap();
 ///
@@ -392,7 +392,7 @@ impl LengauerTarjan {
 /// let entry = scg.add_node(NodeType::Control, NodePayload::Phantom(
 ///     vuma_scg::PhantomNode { purpose: "entry".into() }), pp.clone());
 /// let a = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "a".into(), result_type: None }), pp);
+///     ComputationNode { operation: "a".into(), result_type: None, tail_call: false }), pp);
 ///
 /// scg.add_edge(entry, a, EdgeKind::ControlFlow).unwrap();
 ///
@@ -929,8 +929,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: op.to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         )
     }

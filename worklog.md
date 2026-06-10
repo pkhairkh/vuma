@@ -7896,3 +7896,30 @@ cargo check -p vuma-codegen: PASSED (0 errors, 0 warnings)
 cargo test -p vuma-codegen: 418 passed, 0 failed
 cargo check --workspace: PASSED (0 errors, 0 warnings)
 ```
+
+## W2: SCG Transforms — 2026-06-10
+
+### Summary
+Implemented 4 new SCG transform functions in `transform.rs`, each returning `Vec<NodeId>` of affected nodes, plus 25 new tests.
+
+### Changes
+
+**`src/scg/src/transform.rs`** — Added 4 standalone transform functions:
+1. `pub fn licm(graph: &mut SCG) -> Vec<NodeId>` — Loop Invariant Code Motion. Identifies loop-invariant computation nodes inside loop bodies and hoists them before the LoopHeader by adding ControlFlow edges from the pre-header. Includes the LoopHeader in the "inside loop" set for invariant checking (fixes false positive where header-dependent nodes were incorrectly hoisted).
+2. `pub fn strength_reduce(graph: &mut SCG) -> Vec<NodeId>` — Strength Reduction. Replaces `mul` by constant power-of-2 with `shl_N`, `div` by power-of-2 with `shr_N`, `mod`/`rem` by power-of-2 with `and_(N-1)`. Helper `get_const_df_predecessor` extracts constant integer from data-flow predecessor nodes.
+3. `pub fn detect_tail_calls(graph: &mut SCG) -> Vec<NodeId>` — Tail Call Detection. Finds Computation nodes with call-like operations that feed directly into a FunctionReturn, marks their `tail_call` field as `true`. Idempotent (won't re-mark already-marked nodes).
+4. `pub fn dead_region_elim(graph: &mut SCG) -> Vec<NodeId>` — Dead Region Elimination. Finds Allocate/Deallocate pairs where the region has no Read or ReadWrite access nodes, removes the allocation, deallocation, and any write-only Access nodes.
+
+Also added 25 tests:
+- 5 LICM tests (hoist invariant, skip side effects, skip loop-variant, no loops, multiple invariants)
+- 5 Strength Reduction tests (mul→shl, div→shr, mod→and, non-power-of-2, no const pred)
+- 5 Tail Call Detection tests (simple, via dataflow, not tail, non-call node, idempotent)
+- 10 Dead Region Elimination tests (write-only, preserves read, preserves readwrite, no dealloc, multiple writes, empty graph, multi-region, alloc-only, different regions, computation-not-access)
+
+**`src/scg/src/lib.rs`** — Added exports for `licm`, `strength_reduce`, `detect_tail_calls`, `dead_region_elim`. Fixed doc comment for `ComputationNode` struct literal formatting.
+
+**`src/scg/src/serialize.rs`** — Fixed 2 doc comments with malformed `ComputationNode` struct literals (`, tail_call: false` → `tail_call: false`).
+
+### Verification
+- `cargo check -p vuma-scg`: passes (1 pre-existing unused variable warning)
+- `cargo test -p vuma-scg`: 138 unit tests pass, 6 doc tests pass

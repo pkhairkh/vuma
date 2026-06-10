@@ -988,7 +988,721 @@ impl Default for PassManager {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// ── Loop Invariant Code Motion ────────────────────────────────────────
+
+/// Hoists loop-invariant computations out of loops.
+///
+/// A computation node is loop-invariant if all its inputs are defined
+/// outside the loop (i.e., none of its data-flow predecessors are
+/// inside the loop body). Such nodes are hoisted to the loop pre-header
+/// (before the LoopHeader node).
+///
+/// Nodes with side effects (memory writes, calls, allocations) are
+/// never hoisted.
+pub struct LoopInvariantCodeMotion;
+
+impl LoopInvariantCodeMotion {
+    pub fn new() -> Self { Self }
+
+    /// Returns true if the node type has side effects and must not be hoisted.
+    fn has_side_effects(node_type: &NodeType) -> bool {
+        matches!(
+            node_type,
+            NodeType::Effect
+                | NodeType::Allocation
+                | NodeType::Deallocation
+                | NodeType::Access
+                | NodeType::Control
+                | NodeType::Phantom
+                | NodeType::VTable
+                | NodeType::ClosureEnv
+        )
+    }
+
+    /// Collects all nodes that belong to a loop body: nodes reachable
+    /// from the LoopHeader but before the LoopExit, and not the
+    /// LoopHeader/LoopExit themselves.
+    fn collect_loop_body(scg: &SCG, header: NodeId) -> (Vec<NodeId>, Option<NodeId>) {
+        let mut body = Vec::new();
+        let mut exit = None;
+        let mut visited = HashSet::new();
+        let mut stack = vec![header];
+        while let Some(nid) = stack.pop() {
+            if !visited.insert(nid) { continue; }
+            if let Some(node) = scg.get_node(nid) {
+                if let NodePayload::Control(ref c) = node.payload {
+                    if c.kind == ControlKind::LoopExit {
+                        exit = Some(nid);
+                        continue; // don't include exit in body
+                    }
+                    if nid == header { /* don't include header itself */ }
+                }
+            }
+            if nid != header {
+                body.push(nid);
+            }
+            if let Some(succs) = scg.successors(nid) {
+                for s in succs {
+                    if !visited.contains(&s) {
+                        stack.push(s);
+                    }
+                }
+            }
+        }
+        (body, exit)
+    }
+
+    /// Checks whether a node is loop-invariant: all data-flow predecessors
+    /// are defined outside the loop body.
+    fn is_loop_invariant(scg: &SCG, node_id: NodeId, loop_body: &HashSet<NodeId>) -> bool {
+        if let Some(preds) = scg.predecessors(node_id) {
+            for pred in preds {
+                let is_df = scg.edges().any(|e| {
+                    e.source == pred && e.target == node_id && e.kind == EdgeKind::DataFlow
+                });
+                if is_df && loop_body.contains(&pred) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+impl Default for LoopInvariantCodeMotion {
+    fn default() -> Self { Self::new() }
+}
+
+impl SCGPass for LoopInvariantCodeMotion {
+    fn name(&self) -> &str { "LoopInvariantCodeMotion" }
+
+    fn run(&self, scg: &mut SCG) -> PassResult {
+        let mut result = PassResult::new(self.name());
+
+        // Find all LoopHeader nodes.
+        let loop_headers: Vec<NodeId> = scg.nodes()
+            .filter(|n| matches!(&n.payload, NodePayload::Control(c) if c.kind == ControlKind::LoopHeader))
+            .map(|n| n.id)
+            .collect();
+
+        for header in loop_headers {
+            let (body, _exit) = Self::collect_loop_body(scg, header);
+            let body_set: HashSet<NodeId> = body.iter().copied().collect();
+
+            // Find the pre-header: the predecessor of the header that is not in the body.
+            let pre_header = scg.predecessors(header)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|p| !body_set.contains(p));
+
+            for &nid in &body {
+                let node_type = match scg.get_node(nid) {
+                    Some(n) => n.node_type.clone(),
+                    None => continue,
+                };
+                if Self::has_side_effects(&node_type) { continue; }
+                if !Self::is_loop_invariant(scg, nid, &body_set) { continue; }
+
+                // Hoist: add a ControlFlow edge from pre_header to nid,
+                // and from nid to header. Remove the old edges within the loop.
+                if let Some(pre) = pre_header {
+                    let _ = scg.add_edge(pre, nid, EdgeKind::ControlFlow);
+                    let _ = scg.add_edge(nid, header, EdgeKind::ControlFlow);
+                    result.edges_added += 2;
+                    result.changed = true;
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// ── Strength Reduction ────────────────────────────────────────────────
+
+/// Replaces expensive operations with cheaper equivalents.
+///
+/// - Multiply by constant power of 2 → left shift
+/// - Divide by power of 2 → right shift
+/// - Modulo by power of 2 → bitwise AND
+pub struct StrengthReduction;
+
+impl StrengthReduction {
+    pub fn new() -> Self { Self }
+
+    /// Returns true if `n` is a power of 2 (and n > 0).
+    fn is_power_of_two(n: u64) -> bool {
+        n > 0 && (n & (n - 1)) == 0
+    }
+
+    /// Returns log2(n) for powers of 2.
+    fn log2(n: u64) -> u32 {
+        63 - n.leading_zeros()
+    }
+
+    /// Try to parse a constant integer from a ComputationNode's operation string.
+    /// Convention: "const.<type>:<value>" or just a bare integer in the operation.
+    fn try_parse_const_int(operation: &str) -> Option<u64> {
+        if let Some(rest) = operation.strip_prefix("const.") {
+            if let Some(colon_pos) = rest.find(':') {
+                let val_str = &rest[colon_pos + 1..];
+                return val_str.parse::<u64>().ok();
+            }
+        }
+        None
+    }
+}
+
+impl Default for StrengthReduction {
+    fn default() -> Self { Self::new() }
+}
+
+impl SCGPass for StrengthReduction {
+    fn name(&self) -> &str { "StrengthReduction" }
+
+    fn run(&self, scg: &mut SCG) -> PassResult {
+        let mut result = PassResult::new(self.name());
+        let node_ids: Vec<NodeId> = scg.node_ids().collect();
+
+        for id in node_ids {
+            let (operation, _result_type) = match scg.get_node(id) {
+                Some(n) => match &n.payload {
+                    NodePayload::Computation(c) => (c.operation.clone(), c.result_type.clone()),
+                    _ => continue,
+                },
+                None => continue,
+            };
+
+            // Check for mul by constant power of 2 → shift left
+            if operation == "mul" {
+                let const_preds: Vec<(NodeId, u64)> = scg.predecessors(id).unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|pred| {
+                        let is_df = scg.edges().any(|e| e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow);
+                        if !is_df { return None; }
+                        if let Some(pn) = scg.get_node(pred) {
+                            if let NodePayload::Computation(c) = &pn.payload {
+                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                if let Some(&(_, const_val)) = const_preds.first() {
+                    if Self::is_power_of_two(const_val) {
+                        let shift = Self::log2(const_val);
+                        let new_op = format!("shl_{}", shift);
+                        if let Some(node) = scg.get_node_mut(id) {
+                            if let NodePayload::Computation(ref mut c) = node.payload {
+                                c.operation = new_op;
+                            }
+                        }
+                        result.changed = true;
+                    }
+                }
+            }
+
+            // Check for div by constant power of 2 → shift right
+            if operation == "div" {
+                let const_preds: Vec<(NodeId, u64)> = scg.predecessors(id).unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|pred| {
+                        let is_df = scg.edges().any(|e| e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow);
+                        if !is_df { return None; }
+                        if let Some(pn) = scg.get_node(pred) {
+                            if let NodePayload::Computation(c) = &pn.payload {
+                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                if let Some(&(_, const_val)) = const_preds.first() {
+                    if Self::is_power_of_two(const_val) {
+                        let shift = Self::log2(const_val);
+                        let new_op = format!("shr_{}", shift);
+                        if let Some(node) = scg.get_node_mut(id) {
+                            if let NodePayload::Computation(ref mut c) = node.payload {
+                                c.operation = new_op;
+                            }
+                        }
+                        result.changed = true;
+                    }
+                }
+            }
+
+            // Check for modulo by power of 2 → bitwise AND
+            if operation == "mod" || operation == "rem" {
+                let const_preds: Vec<(NodeId, u64)> = scg.predecessors(id).unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|pred| {
+                        let is_df = scg.edges().any(|e| e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow);
+                        if !is_df { return None; }
+                        if let Some(pn) = scg.get_node(pred) {
+                            if let NodePayload::Computation(c) = &pn.payload {
+                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                if let Some(&(_, const_val)) = const_preds.first() {
+                    if Self::is_power_of_two(const_val) {
+                        let mask = const_val - 1;
+                        let new_op = format!("and_{}", mask);
+                        if let Some(node) = scg.get_node_mut(id) {
+                            if let NodePayload::Computation(ref mut c) = node.payload {
+                                c.operation = new_op;
+                            }
+                        }
+                        result.changed = true;
+                    }
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// ── Tail-Call Optimization Detection ─────────────────────────────────
+
+/// Identifies tail calls and marks them with `tail_call: bool`.
+///
+/// A tail call is a function call that is the last action before return.
+/// When detected, the backend can reuse the current stack frame.
+///
+/// Detection: a Computation node is a tail call if:
+/// - Its operation is a call (contains "call" or "fn_call"),
+/// - It feeds directly into a FunctionReturn control node via
+///   DataFlow or ControlFlow,
+/// - And there are no other nodes between the call and the return.
+pub struct TailCallOptDetection;
+
+impl TailCallOptDetection {
+    pub fn new() -> Self { Self }
+
+    /// Check if a computation node represents a function call.
+    fn is_call_node(operation: &str) -> bool {
+        operation.contains("call") || operation.contains("fn_call") || operation.contains("call_")
+    }
+
+    /// Check if a node feeds directly into a FunctionReturn.
+    fn feeds_into_return(scg: &SCG, id: NodeId) -> bool {
+        if let Some(succs) = scg.successors(id) {
+            for succ in succs {
+                let is_cf_or_df = scg.edges().any(|e| {
+                    e.source == id && e.target == succ
+                        && (e.kind == EdgeKind::ControlFlow || e.kind == EdgeKind::DataFlow)
+                });
+                if is_cf_or_df {
+                    if let Some(node) = scg.get_node(succ) {
+                        if let NodePayload::Control(c) = &node.payload {
+                            if c.kind == ControlKind::FunctionReturn {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+impl Default for TailCallOptDetection {
+    fn default() -> Self { Self::new() }
+}
+
+impl SCGPass for TailCallOptDetection {
+    fn name(&self) -> &str { "TailCallOptDetection" }
+
+    fn run(&self, scg: &mut SCG) -> PassResult {
+        let mut result = PassResult::new(self.name());
+        let node_ids: Vec<NodeId> = scg.node_ids().collect();
+
+        for id in node_ids {
+            let is_call = match scg.get_node(id) {
+                Some(n) => match &n.payload {
+                    NodePayload::Computation(c) => Self::is_call_node(&c.operation),
+                    _ => false,
+                },
+                None => continue,
+            };
+            if !is_call { continue; }
+
+            if Self::feeds_into_return(scg, id) {
+                if let Some(node) = scg.get_node_mut(id) {
+                    if let NodePayload::Computation(ref mut c) = node.payload {
+                        if !c.tail_call {
+                            c.tail_call = true;
+                            result.changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+}
+
+// ── Dead Region Elimination ───────────────────────────────────────────
+
+/// Identifies allocation/deallocation pairs where the region is never
+/// read from, and removes both along with any write-only operations.
+///
+/// An allocation region is "dead" if:
+/// - There is a matching allocation/deallocation pair,
+/// - No Access node with Read or ReadWrite mode references the same
+///   region,
+/// - All accesses to the region (if any) are Write-only.
+///
+/// When a dead region is found:
+/// - The allocation and deallocation nodes are removed,
+/// - Any write-only access nodes to that region are also removed.
+pub struct DeadRegionElimination;
+
+impl DeadRegionElimination {
+    pub fn new() -> Self { Self }
+
+    /// Find allocation/deallocation pairs and their region IDs.
+    fn find_alloc_dealloc_pairs(scg: &SCG) -> Vec<(NodeId, NodeId, crate::region::RegionId)> {
+        let mut allocs: HashMap<crate::region::RegionId, NodeId> = HashMap::new();
+        let mut pairs = Vec::new();
+
+        for node in scg.nodes() {
+            match &node.payload {
+                NodePayload::Allocation(a) => {
+                    allocs.insert(a.region_id, node.id);
+                }
+                NodePayload::Deallocation(d) => {
+                    if let Some(&alloc_id) = allocs.get(&d.region_id) {
+                        pairs.push((alloc_id, node.id, d.region_id));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pairs
+    }
+
+    /// Check if any Access node reads from the given region.
+    fn has_read_access(scg: &SCG, region_id: crate::region::RegionId) -> bool {
+        scg.nodes().any(|n| {
+            if let NodePayload::Access(a) = &n.payload {
+                a.region_id == region_id
+                    && (a.mode == crate::node::AccessMode::Read
+                        || a.mode == crate::node::AccessMode::ReadWrite)
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Find all write-only access nodes to the given region.
+    fn find_write_only_accesses(scg: &SCG, region_id: crate::region::RegionId) -> Vec<NodeId> {
+        scg.nodes()
+            .filter(|n| {
+                if let NodePayload::Access(a) = &n.payload {
+                    a.region_id == region_id && a.mode == crate::node::AccessMode::Write
+                } else {
+                    false
+                }
+            })
+            .map(|n| n.id)
+            .collect()
+    }
+}
+
+impl Default for DeadRegionElimination {
+    fn default() -> Self { Self::new() }
+}
+
+impl SCGPass for DeadRegionElimination {
+    fn name(&self) -> &str { "DeadRegionElimination" }
+
+    fn run(&self, scg: &mut SCG) -> PassResult {
+        let mut result = PassResult::new(self.name());
+
+        let pairs = Self::find_alloc_dealloc_pairs(scg);
+
+        for (alloc_id, dealloc_id, region_id) in pairs {
+            // Check if the region has any reads
+            if Self::has_read_access(scg, region_id) {
+                continue; // Region is live — has reads
+            }
+
+            // Find write-only accesses to this region
+            let write_only = Self::find_write_only_accesses(scg, region_id);
+
+            // Remove write-only accesses
+            for woid in &write_only {
+                let out = scg.successors(*woid).map_or(0, |s| s.len());
+                let inc = scg.predecessors(*woid).map_or(0, |p| p.len());
+                if scg.remove_node(*woid).is_ok() {
+                    result.nodes_removed += 1;
+                    result.edges_removed += out + inc;
+                }
+            }
+
+            // Remove allocation
+            let out = scg.successors(alloc_id).map_or(0, |s| s.len());
+            let inc = scg.predecessors(alloc_id).map_or(0, |p| p.len());
+            if scg.remove_node(alloc_id).is_ok() {
+                result.nodes_removed += 1;
+                result.edges_removed += out + inc;
+            }
+
+            // Remove deallocation (may have been invalidated by alloc removal — check first)
+            if scg.get_node(dealloc_id).is_some() {
+                let out = scg.successors(dealloc_id).map_or(0, |s| s.len());
+                let inc = scg.predecessors(dealloc_id).map_or(0, |p| p.len());
+                if scg.remove_node(dealloc_id).is_ok() {
+                    result.nodes_removed += 1;
+                    result.edges_removed += out + inc;
+                }
+            }
+
+            result.changed = true;
+        }
+
+        result
+    }
+}
+
+// ── Standalone Transform Functions ─────────────────────────────────────
+
+/// Loop Invariant Code Motion (LICM).
+///
+/// Identifies nodes inside loop bodies whose inputs don't change across
+/// iterations and hoists them before the LoopHeader node. Nodes with side
+/// effects (writes, calls, allocations) are never hoisted.
+///
+/// Returns the list of hoisted node IDs.
+pub fn licm(graph: &mut SCG) -> Vec<NodeId> {
+    let mut hoisted = Vec::new();
+
+    // Find all LoopHeader nodes.
+    let loop_headers: Vec<NodeId> = graph
+        .nodes()
+        .filter(|n| {
+            matches!(
+                &n.payload,
+                NodePayload::Control(c) if c.kind == ControlKind::LoopHeader
+            )
+        })
+        .map(|n| n.id)
+        .collect();
+
+    for header in loop_headers {
+        let (body, _exit) = LoopInvariantCodeMotion::collect_loop_body(graph, header);
+        let body_set: HashSet<NodeId> = body.iter().copied().collect();
+        // Include the header itself as "inside the loop" for invariant checking,
+        // since values produced by the header may change across iterations.
+        let mut loop_set: HashSet<NodeId> = body_set.clone();
+        loop_set.insert(header);
+
+        // Find the pre-header: predecessor of the header that is not in the body.
+        let pre_header = graph
+            .predecessors(header)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| !body_set.contains(p));
+
+        for &nid in &body {
+            let node_type = match graph.get_node(nid) {
+                Some(n) => n.node_type.clone(),
+                None => continue,
+            };
+            if LoopInvariantCodeMotion::has_side_effects(&node_type) {
+                continue;
+            }
+            if !LoopInvariantCodeMotion::is_loop_invariant(graph, nid, &loop_set) {
+                continue;
+            }
+
+            // Hoist: add ControlFlow edges from pre_header to nid and from nid to header.
+            if let Some(pre) = pre_header {
+                let _ = graph.add_edge(pre, nid, EdgeKind::ControlFlow);
+                let _ = graph.add_edge(nid, header, EdgeKind::ControlFlow);
+                hoisted.push(nid);
+            }
+        }
+    }
+
+    hoisted
+}
+
+/// Strength Reduction.
+///
+/// Replaces multiply-by-constant-2^n with left shift, divide-by-power-of-2
+/// with right shift, and modulo-by-power-of-2 with bitwise AND.
+///
+/// Returns the list of replaced node IDs.
+pub fn strength_reduce(graph: &mut SCG) -> Vec<NodeId> {
+    let mut replaced = Vec::new();
+    let node_ids: Vec<NodeId> = graph.node_ids().collect();
+
+    for id in node_ids {
+        let operation = match graph.get_node(id) {
+            Some(n) => match &n.payload {
+                NodePayload::Computation(c) => c.operation.clone(),
+                _ => continue,
+            },
+            None => continue,
+        };
+
+        let new_op = if operation == "mul" {
+            let const_val = get_const_df_predecessor(graph, id);
+            const_val.and_then(|v| {
+                if StrengthReduction::is_power_of_two(v) {
+                    Some(format!("shl_{}", StrengthReduction::log2(v)))
+                } else {
+                    None
+                }
+            })
+        } else if operation == "div" {
+            let const_val = get_const_df_predecessor(graph, id);
+            const_val.and_then(|v| {
+                if StrengthReduction::is_power_of_two(v) {
+                    Some(format!("shr_{}", StrengthReduction::log2(v)))
+                } else {
+                    None
+                }
+            })
+        } else if operation == "mod" || operation == "rem" {
+            let const_val = get_const_df_predecessor(graph, id);
+            const_val.and_then(|v| {
+                if StrengthReduction::is_power_of_two(v) {
+                    Some(format!("and_{}", v - 1))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        if let Some(op) = new_op {
+            if let Some(node) = graph.get_node_mut(id) {
+                if let NodePayload::Computation(ref mut c) = node.payload {
+                    c.operation = op;
+                    replaced.push(id);
+                }
+            }
+        }
+    }
+
+    replaced
+}
+
+/// Helper: get the constant integer value of the first data-flow predecessor
+/// that is a constant node, if any.
+fn get_const_df_predecessor(graph: &SCG, id: NodeId) -> Option<u64> {
+    let preds = graph.predecessors(id).unwrap_or_default();
+    for pred in preds {
+        let is_df = graph
+            .edges()
+            .any(|e| e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow);
+        if !is_df {
+            continue;
+        }
+        if let Some(pn) = graph.get_node(pred) {
+            if let NodePayload::Computation(c) = &pn.payload {
+                if let Some(v) = StrengthReduction::try_parse_const_int(&c.operation) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Tail Call Detection.
+///
+/// Finds function calls that are the last action before FunctionReturn and
+/// marks the `ComputationNode.tail_call` field as `true`.
+///
+/// Returns the list of tail call node IDs.
+pub fn detect_tail_calls(graph: &mut SCG) -> Vec<NodeId> {
+    let mut tail_calls = Vec::new();
+    let node_ids: Vec<NodeId> = graph.node_ids().collect();
+
+    for id in node_ids {
+        let is_call = match graph.get_node(id) {
+            Some(n) => match &n.payload {
+                NodePayload::Computation(c) => {
+                    TailCallOptDetection::is_call_node(&c.operation)
+                }
+                _ => false,
+            },
+            None => continue,
+        };
+        if !is_call {
+            continue;
+        }
+
+        if TailCallOptDetection::feeds_into_return(graph, id) {
+            if let Some(node) = graph.get_node_mut(id) {
+                if let NodePayload::Computation(ref mut c) = node.payload {
+                    if !c.tail_call {
+                        c.tail_call = true;
+                        tail_calls.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    tail_calls
+}
+
+/// Dead Region Elimination.
+///
+/// Finds Allocate nodes whose region is never read from (only written) and
+/// removes the Allocate, corresponding Free, and any write-only operations.
+///
+/// Returns the list of removed node IDs.
+pub fn dead_region_elim(graph: &mut SCG) -> Vec<NodeId> {
+    let mut removed = Vec::new();
+
+    let pairs = DeadRegionElimination::find_alloc_dealloc_pairs(graph);
+
+    for (alloc_id, dealloc_id, region_id) in pairs {
+        // Check if the region has any reads
+        if DeadRegionElimination::has_read_access(graph, region_id) {
+            continue; // Region is live — has reads
+        }
+
+        // Find write-only accesses to this region
+        let write_only = DeadRegionElimination::find_write_only_accesses(graph, region_id);
+
+        // Remove write-only accesses
+        for woid in &write_only {
+            if graph.remove_node(*woid).is_ok() {
+                removed.push(*woid);
+            }
+        }
+
+        // Remove allocation
+        if graph.remove_node(alloc_id).is_ok() {
+            removed.push(alloc_id);
+        }
+
+        // Remove deallocation (may have been invalidated by alloc removal — check first)
+        if graph.get_node(dealloc_id).is_some() {
+            if graph.remove_node(dealloc_id).is_ok() {
+                removed.push(dealloc_id);
+            }
+        }
+    }
+
+    removed
+}
 
 #[cfg(test)]
 mod tests {
@@ -1020,8 +1734,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:10".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1036,8 +1749,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1078,24 +1790,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:1".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:2".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
@@ -1117,24 +1826,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:10".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:20".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
@@ -1161,16 +1867,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "load".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1188,16 +1892,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:5".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:3".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         // Two identical add nodes consuming same inputs
@@ -1205,24 +1907,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n4 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n5 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "use".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
 
@@ -1245,24 +1944,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:5".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1281,16 +1977,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1313,16 +2007,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1370,24 +2062,21 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:10".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const.i32:20".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
@@ -1410,8 +2099,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -1448,5 +2136,836 @@ mod tests {
         let r = PassResult::new("test");
         assert!(!r.has_errors());
         assert_eq!(r.errors.len(), 0);
+    }
+
+    // ── LICM (licm) Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_licm_hoists_invariant_computation() {
+        let mut scg = SCG::new();
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        // pre_header → header → body_add → exit
+        //              ↑___________|
+        // outer_const feeds body_add from outside loop
+        let pre_header = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "pre".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let outer_const = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:10".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let header = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopHeader, label: None }),
+            pp(),
+        );
+        let body_add = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let exit = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopExit, label: None }),
+            pp(),
+        );
+        scg.add_edge(pre_header, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, body_add, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(outer_const, body_add, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(body_add, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+
+        let hoisted = licm(&mut scg);
+        assert_eq!(hoisted.len(), 1);
+        assert!(hoisted.contains(&body_add));
+    }
+
+    #[test]
+    fn test_licm_does_not_hoist_side_effect_nodes() {
+        let mut scg = SCG::new();
+        use crate::node::AllocationNode;
+        use crate::region::RegionId;
+
+        let pre_header = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "pre".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let header = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopHeader, label: None }),
+            pp(),
+        );
+        // An allocation inside the loop — must NOT be hoisted
+        let body_alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: RegionId::new(1), type_name: None }),
+            pp(),
+        );
+        let exit = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopExit, label: None }),
+            pp(),
+        );
+        scg.add_edge(pre_header, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, body_alloc, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(body_alloc, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+
+        let hoisted = licm(&mut scg);
+        assert!(hoisted.is_empty());
+    }
+
+    #[test]
+    fn test_licm_does_not_hoist_loop_variant() {
+        let mut scg = SCG::new();
+        // body_add depends on header (a loop-body node), so it is NOT invariant
+        let pre_header = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "pre".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let header = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopHeader, label: None }),
+            pp(),
+        );
+        let body_add = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let exit = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopExit, label: None }),
+            pp(),
+        );
+        scg.add_edge(pre_header, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, body_add, EdgeKind::ControlFlow).unwrap();
+        // body_add depends on header via DataFlow → not invariant
+        scg.add_edge(header, body_add, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(body_add, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+
+        let hoisted = licm(&mut scg);
+        assert!(hoisted.is_empty());
+    }
+
+    #[test]
+    fn test_licm_no_loops_returns_empty() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let hoisted = licm(&mut scg);
+        assert!(hoisted.is_empty());
+    }
+
+    #[test]
+    fn test_licm_multiple_invariant_nodes() {
+        let mut scg = SCG::new();
+        let pre_header = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "pre".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let outer1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:5".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let outer2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:7".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let header = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopHeader, label: None }),
+            pp(),
+        );
+        let inv1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let inv2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "sub".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let exit = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::LoopExit, label: None }),
+            pp(),
+        );
+        scg.add_edge(pre_header, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, inv1, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, inv2, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(outer1, inv1, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(outer2, inv2, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(inv1, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(inv2, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+
+        let hoisted = licm(&mut scg);
+        assert_eq!(hoisted.len(), 2);
+        assert!(hoisted.contains(&inv1));
+        assert!(hoisted.contains(&inv2));
+    }
+
+    // ── Strength Reduction (strength_reduce) Tests ────────────────────
+
+    #[test]
+    fn test_strength_reduce_mul_by_power_of_two() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:8".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "mul".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+
+        let replaced = strength_reduce(&mut scg);
+        assert_eq!(replaced.len(), 1);
+        let node = scg.get_node(n3).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert_eq!(c.operation, "shl_3"),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_strength_reduce_div_by_power_of_two() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:16".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "div".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+
+        let replaced = strength_reduce(&mut scg);
+        assert_eq!(replaced.len(), 1);
+        let node = scg.get_node(n3).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert_eq!(c.operation, "shr_4"),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_strength_reduce_mod_by_power_of_two() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:8".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "mod".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+
+        let replaced = strength_reduce(&mut scg);
+        assert_eq!(replaced.len(), 1);
+        let node = scg.get_node(n3).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert_eq!(c.operation, "and_7"),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_strength_reduce_non_power_of_two_unchanged() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "const.i32:3".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "mul".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+
+        let replaced = strength_reduce(&mut scg);
+        assert!(replaced.is_empty());
+        // Operation should remain "mul"
+        let node = scg.get_node(n3).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert_eq!(c.operation, "mul"),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_strength_reduce_no_constant_predecessor() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "load".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        let n3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "mul".to_string(), result_type: Some("i32".to_string()), tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+
+        let replaced = strength_reduce(&mut scg);
+        assert!(replaced.is_empty());
+    }
+
+    // ── Tail Call Detection (detect_tail_calls) Tests ─────────────────
+
+    #[test]
+    fn test_detect_tail_calls_simple() {
+        let mut scg = SCG::new();
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "call_foo".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::FunctionReturn, label: None }),
+            pp(),
+        );
+        scg.add_edge(call_node, ret, EdgeKind::ControlFlow).unwrap();
+
+        let detected = detect_tail_calls(&mut scg);
+        assert_eq!(detected.len(), 1);
+        assert!(detected.contains(&call_node));
+        // Check the node was marked
+        let node = scg.get_node(call_node).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert!(c.tail_call),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_detect_tail_calls_via_dataflow() {
+        let mut scg = SCG::new();
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "call_bar".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::FunctionReturn, label: None }),
+            pp(),
+        );
+        scg.add_edge(call_node, ret, EdgeKind::DataFlow).unwrap();
+
+        let detected = detect_tail_calls(&mut scg);
+        assert_eq!(detected.len(), 1);
+    }
+
+    #[test]
+    fn test_detect_tail_calls_not_tail() {
+        let mut scg = SCG::new();
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "call_foo".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let other = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "use".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        // Call feeds into "use", not directly into a return
+        scg.add_edge(call_node, other, EdgeKind::DataFlow).unwrap();
+
+        let detected = detect_tail_calls(&mut scg);
+        assert!(detected.is_empty());
+        // Not marked
+        let node = scg.get_node(call_node).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert!(!c.tail_call),
+            _ => panic!("expected computation"),
+        }
+    }
+
+    #[test]
+    fn test_detect_tail_calls_non_call_node() {
+        let mut scg = SCG::new();
+        let add_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "add".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::FunctionReturn, label: None }),
+            pp(),
+        );
+        scg.add_edge(add_node, ret, EdgeKind::ControlFlow).unwrap();
+
+        let detected = detect_tail_calls(&mut scg);
+        assert!(detected.is_empty());
+    }
+
+    #[test]
+    fn test_detect_tail_calls_idempotent() {
+        let mut scg = SCG::new();
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "fn_call_baz".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode { kind: ControlKind::FunctionReturn, label: None }),
+            pp(),
+        );
+        scg.add_edge(call_node, ret, EdgeKind::ControlFlow).unwrap();
+
+        let d1 = detect_tail_calls(&mut scg);
+        assert_eq!(d1.len(), 1);
+        let d2 = detect_tail_calls(&mut scg);
+        assert!(d2.is_empty()); // Already marked
+    }
+
+    // ── Dead Region Elimination (dead_region_elim) Tests ──────────────
+
+    #[test]
+    fn test_dead_region_elim_removes_write_only_region() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(1);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region, type_name: None }),
+            pp(),
+        );
+        let write = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: region, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc, write, EdgeKind::DataFlow).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        // Should remove write, alloc, dealloc = 3 nodes
+        assert_eq!(removed.len(), 3);
+        assert!(scg.get_node(alloc).is_none());
+        assert!(scg.get_node(dealloc).is_none());
+        assert!(scg.get_node(write).is_none());
+    }
+
+    #[test]
+    fn test_dead_region_elim_preserves_read_region() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(2);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region, type_name: None }),
+            pp(),
+        );
+        let read = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read, region_id: region, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc, read, EdgeKind::DataFlow).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        assert!(removed.is_empty());
+        assert!(scg.get_node(alloc).is_some());
+        assert!(scg.get_node(dealloc).is_some());
+        assert!(scg.get_node(read).is_some());
+    }
+
+    #[test]
+    fn test_dead_region_elim_preserves_readwrite_region() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(3);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 32, align: 4, region_id: region, type_name: None }),
+            pp(),
+        );
+        let rw = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::ReadWrite, region_id: region, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_dead_region_elim_no_dealloc_not_removed() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(4);
+        // Alloc with no dealloc pair → no pair found, nothing removed
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region, type_name: None }),
+            pp(),
+        );
+        let write = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: region, offset: None, access_size: None }),
+            pp(),
+        );
+
+        let removed = dead_region_elim(&mut scg);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_dead_region_elim_multiple_write_only_accesses() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(5);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 128, align: 16, region_id: region, type_name: None }),
+            pp(),
+        );
+        let w1 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: region, offset: Some(0), access_size: Some(4) }),
+            pp(),
+        );
+        let w2 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: region, offset: Some(4), access_size: Some(4) }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        // alloc + dealloc + w1 + w2 = 4
+        assert_eq!(removed.len(), 4);
+    }
+
+    #[test]
+    fn test_dead_region_elim_empty_graph() {
+        let mut scg = SCG::new();
+        let removed = dead_region_elim(&mut scg);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_dead_region_elim_multiple_regions_one_dead_one_live() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        // Dead region (write-only)
+        let dead_region = RegionId::new(10);
+        let alloc1 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: dead_region, type_name: None }),
+            pp(),
+        );
+        let write1 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: dead_region, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc1 = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc1, region_id: dead_region }),
+            pp(),
+        );
+        scg.add_edge(alloc1, dealloc1, EdgeKind::Derivation).unwrap();
+
+        // Live region (has a read)
+        let live_region = RegionId::new(11);
+        let alloc2 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: live_region, type_name: None }),
+            pp(),
+        );
+        let read2 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read, region_id: live_region, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc2 = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc2, region_id: live_region }),
+            pp(),
+        );
+        scg.add_edge(alloc2, dealloc2, EdgeKind::Derivation).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        // Only the dead region should be removed: alloc1 + dealloc1 + write1 = 3
+        assert_eq!(removed.len(), 3);
+        assert!(scg.get_node(alloc2).is_some());
+        assert!(scg.get_node(read2).is_some());
+        assert!(scg.get_node(dealloc2).is_some());
+    }
+
+    #[test]
+    fn test_dead_region_elim_alloc_only_no_accesses() {
+        use crate::node::{AllocationNode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(20);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region, type_name: None }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        // Region with no accesses at all → no reads → dead
+        let removed = dead_region_elim(&mut scg);
+        assert_eq!(removed.len(), 2); // alloc + dealloc
+        assert!(scg.get_node(alloc).is_none());
+        assert!(scg.get_node(dealloc).is_none());
+    }
+
+    #[test]
+    fn test_dead_region_elim_write_and_read_different_regions() {
+        use crate::node::{AllocationNode, AccessNode, AccessMode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        // Region A: write only (dead)
+        let region_a = RegionId::new(30);
+        let alloc_a = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 32, align: 4, region_id: region_a, type_name: None }),
+            pp(),
+        );
+        let write_a = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write, region_id: region_a, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc_a = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc_a, region_id: region_a }),
+            pp(),
+        );
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
+
+        // Region B: read (live)
+        let region_b = RegionId::new(31);
+        let alloc_b = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 32, align: 4, region_id: region_b, type_name: None }),
+            pp(),
+        );
+        let read_b = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read, region_id: region_b, offset: None, access_size: None }),
+            pp(),
+        );
+        let dealloc_b = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc_b, region_id: region_b }),
+            pp(),
+        );
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
+
+        let removed = dead_region_elim(&mut scg);
+        assert_eq!(removed.len(), 3); // alloc_a + dealloc_a + write_a
+        // Region B should survive
+        assert!(scg.get_node(alloc_b).is_some());
+        assert!(scg.get_node(read_b).is_some());
+        assert!(scg.get_node(dealloc_b).is_some());
+    }
+
+    #[test]
+    fn test_dead_region_elim_rem_call_in_operation_is_not_access() {
+        use crate::node::{AllocationNode, DeallocationNode};
+        use crate::region::RegionId;
+
+        // Make sure computation nodes don't interfere with region analysis
+        let mut scg = SCG::new();
+        let region = RegionId::new(40);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64, align: 8, region_id: region, type_name: None }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc, region_id: region }),
+            pp(),
+        );
+        // A computation node that references the alloc but is NOT an Access node
+        let comp = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "call_process".to_string(), result_type: None, tail_call: false }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc, comp, EdgeKind::DataFlow).unwrap();
+
+        // No Access nodes → no reads → dead region
+        let removed = dead_region_elim(&mut scg);
+        assert_eq!(removed.len(), 2); // alloc + dealloc
     }
 }

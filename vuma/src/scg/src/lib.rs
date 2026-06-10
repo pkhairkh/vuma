@@ -38,7 +38,7 @@
 //!     NodePayload::Computation(ComputationNode {
 //!         operation: "add".to_string(),
 //!         result_type: Some("i32".to_string()),
-//!     }),
+//!         tail_call: false }),
 //!     ProgramPoint { file: None, line: None, column: None, offset: None },
 //! );
 //!
@@ -61,9 +61,9 @@ pub mod transform;
 
 // -- Node types --
 pub use node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ComputationNode, ControlKind,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
     ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType,
-    PhantomNode, ProgramPoint,
+    PhantomNode, ProgramPoint, VTableNode,
 };
 
 // -- Edge types --
@@ -102,7 +102,9 @@ pub use liveness::{
 // -- Transform passes --
 pub use transform::{
     CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination, InliningPass,
-    PassManager, PassResult, PipelineResult, SCGPass, VerificationPass,
+    LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass,
+    StrengthReduction, TailCallOptDetection, DeadRegionElimination, VerificationPass,
+    licm, strength_reduce, detect_tail_calls, dead_region_elim,
 };
 
 #[cfg(test)]
@@ -143,8 +145,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "write_buffer".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             ProgramPoint {
                 file: Some("main.vu".to_string()),
                 line: Some(11),

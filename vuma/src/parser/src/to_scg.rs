@@ -65,9 +65,9 @@ use crate::ast::*;
 use crate::error::{ParseError, Span};
 use std::collections::HashMap;
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, CastNode, ComputationNode, ControlKind, ControlNode,
+    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationNode, ControlKind, ControlNode,
     DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, RegionId, SCG, SCGRegion,
+    NodeType, PhantomNode, ProgramPoint, RegionId, SCG, SCGRegion, VTableNode,
 };
 
 // ---------------------------------------------------------------------------
@@ -170,6 +170,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("import \"{}\"", i.path),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&i.span),
                 );
@@ -182,6 +183,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("export {}", e.name),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&e.span),
                 );
@@ -194,8 +196,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: c.ty.as_ref().map(|t| t.to_string()),
-                    }),
+                        result_type: c.ty.as_ref().map(|t| t.to_string()), tail_call: false }),
                     self.span_to_pp(&c.span),
                 );
                 default_region.add_node(id);
@@ -212,6 +213,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("struct {} {{ {} }}", s.name, fields_str.join(", ")),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&s.span),
                 );
@@ -227,6 +229,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("enum {} {{ {} }}", e.name, variants_str.join(", ")),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&e.span),
                 );
@@ -239,6 +242,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("module {}", m.name),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&m.span),
                 );
@@ -252,8 +256,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: s.ty.as_ref().map(|t| t.to_string()),
-                    }),
+                        result_type: s.ty.as_ref().map(|t| t.to_string()), tail_call: false }),
                     self.span_to_pp(&s.span),
                 );
                 default_region.add_node(id);
@@ -271,6 +274,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&t.span),
                 );
@@ -292,6 +296,7 @@ impl AstToScg {
                             target_str,
                             methods_str.join(", ")),
                         result_type: None,
+                    tail_call: false,
                     }),
                     self.span_to_pp(&i.span),
                 );
@@ -335,6 +340,7 @@ impl AstToScg {
                 NodePayload::Computation(ComputationNode {
                     operation: format!("param {}", p.name),
                     result_type: p.ty.as_ref().map(|t| t.to_string()),
+                tail_call: false,
                 }),
                 self.span_to_pp(&p.span),
             );
@@ -472,8 +478,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: result_type.clone(),
-                    }),
+                        result_type: result_type.clone(), tail_call: false }),
                     self.span_to_pp(&l.span),
                 );
                 region.add_node(id);
@@ -538,8 +543,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None,
-                    }),
+                        result_type: None, tail_call: false }),
                     self.span_to_pp(&a.span),
                 );
                 region.add_node(id);
@@ -952,21 +956,23 @@ impl AstToScg {
                 Ok(header_id)
             }
 
-            // Match statement → Branch + Join nodes
+            // Match statement → Switch/Branch + Join decision tree
             Stmt::Match(m) => {
                 let subject_str = self.expr_to_string(&m.subject);
 
-                let branch_id = scg.add_node(
+                // Create the top-level Switch decision node.
+                let switch_id = scg.add_node(
                     NodeType::Control,
                     NodePayload::Control(ControlNode {
-                        kind: ControlKind::Branch,
+                        kind: ControlKind::Switch,
                         label: Some(format!("match {}", subject_str)),
                     }),
                     self.span_to_pp(&m.span),
                 );
-                region.add_node(branch_id);
-                self.add_data_flow_edges(&m.subject, branch_id, scg);
+                region.add_node(switch_id);
+                self.add_data_flow_edges(&m.subject, switch_id, scg);
 
+                // Join node where all arms converge.
                 let join_id = scg.add_node(
                     NodeType::Control,
                     NodePayload::Control(ControlNode {
@@ -977,23 +983,145 @@ impl AstToScg {
                 );
                 region.add_node(join_id);
 
-                // For each arm, create a computation node and edges.
-                for arm in &m.arms {
-                    let arm_desc = self.expr_to_string(&arm.body);
-                    let arm_id = scg.add_node(
-                        NodeType::Computation,
-                        NodePayload::Computation(ComputationNode {
-                            operation: format!("match_arm: {}", arm_desc),
-                            result_type: None,
+                // For each arm, create a decision-tree subgraph.
+                for (arm_idx, arm) in m.arms.iter().enumerate() {
+                    let pattern_desc = self.pattern_to_string(&arm.pattern);
+                    let arm_body_desc = self.expr_to_string(&arm.body);
+
+                    // Create a SwitchCase node for this arm's pattern test.
+                    let case_id = scg.add_node(
+                        NodeType::Control,
+                        NodePayload::Control(ControlNode {
+                            kind: ControlKind::SwitchCase,
+                            label: Some(format!("case {}: {}", arm_idx, pattern_desc)),
                         }),
                         self.span_to_pp(&arm.span),
                     );
-                    region.add_node(arm_id);
-                    let _ = scg.add_edge(branch_id, arm_id, EdgeKind::ControlFlow);
-                    let _ = scg.add_edge(arm_id, join_id, EdgeKind::ControlFlow);
+                    region.add_node(case_id);
+
+                    // Dispatch edge from switch to case.
+                    let eid = scg.add_edge(switch_id, case_id, EdgeKind::Dispatch);
+                    if let Ok(id) = eid {
+                        if let Some(edge) = scg.get_edge_mut(id) {
+                            edge.label = Some(pattern_desc.clone());
+                        }
+                    }
+
+                    // If this arm has a guard, create a Branch node for it.
+                    let arm_entry = if let Some(guard) = &arm.guard {
+                        let guard_str = self.expr_to_string(guard);
+                        let guard_branch_id = scg.add_node(
+                            NodeType::Control,
+                            NodePayload::Control(ControlNode {
+                                kind: ControlKind::Branch,
+                                label: Some(format!("guard {}", guard_str)),
+                            }),
+                            self.span_to_pp(&arm.span),
+                        );
+                        region.add_node(guard_branch_id);
+                        let _ = scg.add_edge(case_id, guard_branch_id, EdgeKind::ControlFlow);
+                        self.add_data_flow_edges(guard, guard_branch_id, scg);
+                        guard_branch_id
+                    } else {
+                        case_id
+                    };
+
+                    // Computation node for the arm body.
+                    let body_id = scg.add_node(
+                        NodeType::Computation,
+                        NodePayload::Computation(ComputationNode {
+                            operation: format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
+                            result_type: None,
+                        tail_call: false,
+                        }),
+                        self.span_to_pp(&arm.span),
+                    );
+                    region.add_node(body_id);
+                    let _ = scg.add_edge(arm_entry, body_id, EdgeKind::ControlFlow);
+
+                    // Struct destructuring: create Access nodes for each field.
+                    if let MatchPattern::Struct { name, fields, .. } = &arm.pattern {
+                        for field in fields {
+                            let field_access_id = scg.add_node(
+                                NodeType::Access,
+                                NodePayload::Access(AccessNode {
+                                    mode: AccessMode::Read,
+                                    region_id: region.id,
+                                    offset: None,
+                                    access_size: None,
+                                }),
+                                self.span_to_pp(&arm.span),
+                            );
+                            region.add_node(field_access_id);
+                            let _ = scg.add_edge(body_id, field_access_id, EdgeKind::Derivation);
+                            let field_comp_id = scg.add_node(
+                                NodeType::Computation,
+                                NodePayload::Computation(ComputationNode {
+                                    operation: format!("destructure {}.{}", name, field),
+                                    result_type: None,
+                                tail_call: false,
+                                }),
+                                self.span_to_pp(&arm.span),
+                            );
+                            region.add_node(field_comp_id);
+                            let _ = scg.add_edge(field_access_id, field_comp_id, EdgeKind::DataFlow);
+                        }
+                    }
+
+                    // Enum variant binding: create a Computation node for the binding.
+                    if let MatchPattern::Enum { name, binding: Some(b), .. } = &arm.pattern {
+                        let bind_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                operation: format!("enum_bind {}({})", name, b),
+                                result_type: None,
+                            tail_call: false,
+                            }),
+                            self.span_to_pp(&arm.span),
+                        );
+                        region.add_node(bind_id);
+                        let _ = scg.add_edge(body_id, bind_id, EdgeKind::DataFlow);
+                        self.define_var(b, bind_id);
+                    }
+
+                    // Range pattern: create a range-check computation.
+                    if let MatchPattern::Range { start, end, .. } = &arm.pattern {
+                        let range_check_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                operation: format!("range_check {}..={}", self.lit_to_string(start), self.lit_to_string(end)),
+                                result_type: Some("bool".to_string()),
+                            tail_call: false,
+                            }),
+                            self.span_to_pp(&arm.span),
+                        );
+                        region.add_node(range_check_id);
+                        let _ = scg.add_edge(case_id, range_check_id, EdgeKind::DataFlow);
+                    }
+
+                    // Or-pattern: create a Branch for each alternative.
+                    if let MatchPattern::Or { patterns, .. } = &arm.pattern {
+                        for (p_idx, sub_pat) in patterns.iter().enumerate() {
+                            let sub_desc = self.pattern_to_string(sub_pat);
+                            let or_branch_id = scg.add_node(
+                                NodeType::Control,
+                                NodePayload::Control(ControlNode {
+                                    kind: ControlKind::SwitchCase,
+                                    label: Some(format!("or_alt[{}]: {}", p_idx, sub_desc)),
+                                }),
+                                self.span_to_pp(&arm.span),
+                            );
+                            region.add_node(or_branch_id);
+                            let _ = scg.add_edge(case_id, or_branch_id, EdgeKind::Dispatch);
+                            let _ = scg.add_edge(or_branch_id, body_id, EdgeKind::ControlFlow);
+                        }
+                    }
+
+                    // Arm body → join.
+                    let _ = scg.add_edge(body_id, join_id, EdgeKind::ControlFlow);
                 }
 
-                Ok(branch_id)
+                Ok(switch_id)
             }
 
             // 12. Sync block → Synchronization edges
@@ -1066,8 +1194,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None,
-                    }),
+                        result_type: None, tail_call: false }),
                     self.span_to_pp(&e.span),
                 );
                 region.add_node(id);
@@ -1185,6 +1312,7 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: format!("sizeof({})", ty),
                             result_type: Some("usize".to_string()),
+                        tail_call: false,
                         }),
                         self.span_to_pp(&e.span),
                     );
@@ -1198,6 +1326,7 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: format!("alignof({})", ty),
                             result_type: Some("usize".to_string()),
+                        tail_call: false,
                         }),
                         self.span_to_pp(&e.span),
                     );
@@ -1228,8 +1357,7 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None,
-                    }),
+                        result_type: None, tail_call: false }),
                     self.span_to_pp(&ca.span),
                 );
                 region.add_node(id);
@@ -1357,6 +1485,413 @@ impl AstToScg {
         let _ = scg.add_edge(ret_id, caller_node, EdgeKind::DataFlow);
 
         Ok(())
+    }
+
+    // -- Closure lowering (2b) ------------------------------------------------
+
+    #[allow(dead_code)]
+    fn emit_closure_lowering(
+        &mut self,
+        params: &[Param],
+        body: &ClosureBody,
+        capture_kind: &CaptureKind,
+        parent_id: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Capture analysis: find which enclosing variables are used in the closure body.
+        let body_uses = match body {
+            ClosureBody::Expr(e) => self.expr_uses(e),
+            ClosureBody::Block(b) => {
+                let mut uses = Vec::new();
+                for stmt in &b.statements {
+                    self.collect_stmt_uses(stmt, &mut uses);
+                }
+                uses.sort();
+                uses.dedup();
+                uses
+            }
+        };
+
+        // Filter to only those that exist in the enclosing scope.
+        let captured_vars: Vec<(String, NodeId)> = body_uses.iter()
+            .filter_map(|name| self.lookup_var(name).map(|id| (name.clone(), id)))
+            .collect();
+
+        // Determine capture mode for each variable.
+        let _is_move = matches!(capture_kind, CaptureKind::Move);
+        let capture_modes: Vec<bool> = captured_vars.iter()
+            .map(|(name, _)| {
+                match capture_kind {
+                    CaptureKind::Move => true,
+                    CaptureKind::Ref => false,
+                    CaptureKind::Auto => {
+                        // Simple heuristic: if the variable is an allocation, capture by borrow;
+                        // otherwise capture by move.
+                        self.lookup_alloc(name).is_none()
+                    }
+                }
+            })
+            .collect();
+
+        // Create a ClosureEnv node.
+        let env_id = scg.add_node(
+            NodeType::ClosureEnv,
+            NodePayload::ClosureEnv(ClosureEnvNode {
+                captured_vars: captured_vars.iter().map(|(n, _)| n.clone()).collect(),
+                capture_modes: capture_modes.clone(),
+                closure_entry: None,
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(env_id);
+        let _ = scg.add_edge(parent_id, env_id, EdgeKind::Derivation);
+
+        // DataFlow / Derivation from each captured variable to the env.
+        for (idx, (_, source_id)) in captured_vars.iter().enumerate() {
+            if capture_modes[idx] {
+                // Move capture: create Copy node and DataFlow edge.
+                let copy_id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        operation: format!("copy_capture[{}]", idx),
+                        result_type: None,
+                    tail_call: false,
+                    }),
+                    self.span_to_pp(span),
+                );
+                region.add_node(copy_id);
+                let _ = scg.add_edge(*source_id, copy_id, EdgeKind::DataFlow);
+                let _ = scg.add_edge(copy_id, env_id, EdgeKind::DataFlow);
+            } else {
+                // Borrow capture: Derivation edge.
+                let _ = scg.add_edge(*source_id, env_id, EdgeKind::Derivation);
+            }
+        }
+
+        // Create ClosureEntry node.
+        let entry_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::ClosureEntry,
+                label: Some("closure_entry".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(entry_id);
+        let _ = scg.add_edge(env_id, entry_id, EdgeKind::ControlFlow);
+        let _ = scg.add_edge(parent_id, entry_id, EdgeKind::ControlFlow);
+
+        // Update env to reference closure entry.
+        if let Some(env_node) = scg.get_node_mut(env_id) {
+            if let NodePayload::ClosureEnv(ref mut ce) = env_node.payload {
+                ce.closure_entry = Some(entry_id);
+            }
+        }
+
+        // Define closure params in a new scope.
+        self.push_scope();
+        let mut prev_node: Option<NodeId> = Some(entry_id);
+        for p in params {
+            let param_id = scg.add_node(
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: format!("closure_param {}", p.name),
+                    result_type: p.ty.as_ref().map(|t| t.to_string()),
+                tail_call: false,
+                }),
+                self.span_to_pp(&p.span),
+            );
+            region.add_node(param_id);
+            self.define_var(&p.name, param_id);
+            let _ = scg.add_edge(entry_id, param_id, EdgeKind::DataFlow);
+            if let Some(prev) = prev_node {
+                let _ = scg.add_edge(prev, param_id, EdgeKind::ControlFlow);
+            }
+            prev_node = Some(param_id);
+        }
+
+        // Convert the closure body.
+        match body {
+            ClosureBody::Expr(e) => {
+                let body_id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        operation: self.expr_to_string(e),
+                        result_type: None,
+                    tail_call: false,
+                    }),
+                    self.span_to_pp(span),
+                );
+                region.add_node(body_id);
+                self.add_data_flow_edges(e, body_id, scg);
+                if let Some(prev) = prev_node {
+                    let _ = scg.add_edge(prev, body_id, EdgeKind::ControlFlow);
+                }
+                prev_node = Some(body_id);
+            }
+            ClosureBody::Block(b) => {
+                for stmt in &b.statements {
+                    let stmt_id = self.convert_stmt_in_region(stmt, scg, region)?;
+                    if let Some(prev) = prev_node {
+                        let _ = scg.add_edge(prev, stmt_id, EdgeKind::ControlFlow);
+                    }
+                    prev_node = Some(stmt_id);
+                }
+            }
+        }
+
+        // Create ClosureReturn node.
+        let ret_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::ClosureReturn,
+                label: Some("closure_return".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(ret_id);
+        if let Some(prev) = prev_node {
+            let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+        }
+
+        self.pop_scope();
+
+        Ok(entry_id)
+    }
+
+    // -- Async/await lowering (2c) -------------------------------------------
+
+    #[allow(dead_code)]
+    fn emit_async_await_lowering(
+        &mut self,
+        expr: &Expr,
+        parent_id: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Create a FuturePoll node for this await point.
+        let poll_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FuturePoll,
+                label: Some("future_poll".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(poll_id);
+        let _ = scg.add_edge(parent_id, poll_id, EdgeKind::ControlFlow);
+        self.add_data_flow_edges(expr, poll_id, scg);
+
+        // Create a WakerRegistration node.
+        let waker_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::WakerRegistration,
+                label: Some("waker_register".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(waker_id);
+        let _ = scg.add_edge(poll_id, waker_id, EdgeKind::ControlFlow);
+
+        // Create a StateTransition node (the await is a split point in the state machine).
+        let state_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::StateTransition,
+                label: Some("await_suspend".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(state_id);
+        let _ = scg.add_edge(waker_id, state_id, EdgeKind::ControlFlow);
+
+        // DataFlow edge from the awaited expression.
+        self.add_data_flow_edges(expr, state_id, scg);
+
+        // The resume point after the await.
+        let resume_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FuturePoll,
+                label: Some("future_resume".to_string()),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(resume_id);
+        let _ = scg.add_edge(state_id, resume_id, EdgeKind::ControlFlow);
+
+        Ok(poll_id)
+    }
+
+    // -- Trait dispatch lowering (2d) ----------------------------------------
+
+    #[allow(dead_code)]
+    fn emit_static_dispatch(
+        &mut self,
+        _callee: &Expr,
+        args: &[Expr],
+        target_type: &str,
+        method_name: &str,
+        caller_node: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Inline the concrete impl's SCG subgraph.
+        let impl_entry_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionEntry,
+                label: Some(format!("static_dispatch {}::{}", target_type, method_name)),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(impl_entry_id);
+        let _ = scg.add_edge(caller_node, impl_entry_id, EdgeKind::ControlFlow);
+
+        // Per-argument DataFlow edges.
+        for (i, arg) in args.iter().enumerate() {
+            for var_name in &self.expr_uses(arg) {
+                if let Some(source) = self.lookup_var(var_name) {
+                    let eid = scg.add_edge(source, impl_entry_id, EdgeKind::DataFlow);
+                    if let Ok(id) = eid {
+                        if let Some(edge) = scg.get_edge_mut(id) {
+                            edge.label = Some(format!("arg{}", i));
+                        }
+                    }
+                }
+            }
+        }
+
+        let impl_ret_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionReturn,
+                label: Some(format!("static_dispatch_return {}::{}", target_type, method_name)),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(impl_ret_id);
+        let _ = scg.add_edge(impl_entry_id, impl_ret_id, EdgeKind::ControlFlow);
+        let _ = scg.add_edge(impl_ret_id, caller_node, EdgeKind::DataFlow);
+
+        Ok(impl_entry_id)
+    }
+
+    #[allow(dead_code)]
+    fn emit_dynamic_dispatch(
+        &mut self,
+        _callee: &Expr,
+        args: &[Expr],
+        trait_name: &str,
+        concrete_type: &str,
+        method_name: &str,
+        caller_node: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Create a VTable node.
+        let vtable_id = scg.add_node(
+            NodeType::VTable,
+            NodePayload::VTable(VTableNode {
+                trait_name: trait_name.to_string(),
+                concrete_type: concrete_type.to_string(),
+                method_entries: Vec::new(),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(vtable_id);
+        let _ = scg.add_edge(caller_node, vtable_id, EdgeKind::Derivation);
+
+        // Create the dispatch call.
+        let dispatch_id = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: format!("dyn_dispatch {}::{} for {}", trait_name, method_name, concrete_type),
+                result_type: None,
+            tail_call: false,
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(dispatch_id);
+        let _ = scg.add_edge(caller_node, dispatch_id, EdgeKind::ControlFlow);
+
+        // Dispatch edge from vtable to dispatch node.
+        let _ = scg.add_edge(vtable_id, dispatch_id, EdgeKind::Dispatch);
+
+        // Per-argument DataFlow edges.
+        for (i, arg) in args.iter().enumerate() {
+            for var_name in &self.expr_uses(arg) {
+                if let Some(source) = self.lookup_var(var_name) {
+                    let eid = scg.add_edge(source, dispatch_id, EdgeKind::DataFlow);
+                    if let Ok(id) = eid {
+                        if let Some(edge) = scg.get_edge_mut(id) {
+                            edge.label = Some(format!("arg{}", i));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dispatch_id)
+    }
+
+    #[allow(dead_code)]
+    fn emit_monomorphization(
+        &mut self,
+        _callee: &Expr,
+        args: &[Expr],
+        generic_fn: &str,
+        concrete_type: &str,
+        caller_node: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Create a specialized copy of the generic function.
+        let mono_entry_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionEntry,
+                label: Some(format!("mono_{}_for_{}", generic_fn, concrete_type)),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(mono_entry_id);
+        let _ = scg.add_edge(caller_node, mono_entry_id, EdgeKind::ControlFlow);
+
+        // Per-argument DataFlow edges.
+        for (i, arg) in args.iter().enumerate() {
+            for var_name in &self.expr_uses(arg) {
+                if let Some(source) = self.lookup_var(var_name) {
+                    let eid = scg.add_edge(source, mono_entry_id, EdgeKind::DataFlow);
+                    if let Ok(id) = eid {
+                        if let Some(edge) = scg.get_edge_mut(id) {
+                            edge.label = Some(format!("arg{}", i));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mono_ret_id = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionReturn,
+                label: Some(format!("mono_{}_for_{}_return", generic_fn, concrete_type)),
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(mono_ret_id);
+        let _ = scg.add_edge(mono_entry_id, mono_ret_id, EdgeKind::ControlFlow);
+        let _ = scg.add_edge(mono_ret_id, caller_node, EdgeKind::DataFlow);
+
+        Ok(mono_entry_id)
     }
 
     // -- 11. Async → Parallel region -----------------------------------------
@@ -1973,6 +2508,43 @@ impl AstToScg {
                 (self.expr_to_string(inner), Some(field.clone()))
             }
             _ => (self.expr_to_string(expr), None),
+        }
+    }
+
+    // -- pattern helpers -------------------------------------------------------
+
+    fn pattern_to_string(&self, pattern: &MatchPattern) -> String {
+        match pattern {
+            MatchPattern::Wildcard(_) => "_".to_string(),
+            MatchPattern::Lit { value, .. } => self.lit_to_string(value),
+            MatchPattern::Ident { name, .. } => name.clone(),
+            MatchPattern::Struct { name, fields, .. } => {
+                format!("{} {{ {} }}", name, fields.join(", "))
+            }
+            MatchPattern::Enum { name, binding, .. } => {
+                if let Some(b) = binding {
+                    format!("{}({})", name, b)
+                } else {
+                    name.clone()
+                }
+            }
+            MatchPattern::Range { start, end, .. } => {
+                format!("{}..={}", self.lit_to_string(start), self.lit_to_string(end))
+            }
+            MatchPattern::Or { patterns, .. } => {
+                let parts: Vec<String> = patterns.iter().map(|p| self.pattern_to_string(p)).collect();
+                parts.join(" | ")
+            }
+        }
+    }
+
+    fn lit_to_string(&self, lit: &Lit) -> String {
+        match lit {
+            Lit::Int(i) => i.to_string(),
+            Lit::Float(f) => f.to_string(),
+            Lit::String(s) => format!("\"{}\"", s),
+            Lit::Bool(b) => b.to_string(),
+            Lit::Address(a) => format!("0x{:X}", a),
         }
     }
 }

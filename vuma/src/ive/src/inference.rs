@@ -342,6 +342,14 @@ impl InferenceEngine {
                     // Annotation edges carry BD compatibility constraints
                     // These are already handled by the BD inference engine
                 }
+                EdgeKind::Dispatch => {
+                    // Dispatch edges impose temporal constraints like ControlFlow
+                    let desc = format!(
+                        "dispatch: {} -> {}",
+                        edge.source.as_u64(), edge.target.as_u64()
+                    );
+                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                }
             }
         }
 

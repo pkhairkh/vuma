@@ -1004,6 +1004,24 @@ fn walk_control_flow(
                     current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
                     continue;
                 }
+
+                ControlKind::Switch | ControlKind::SwitchCase => {
+                    // Switch/switch-case nodes are handled like Branch
+                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                    continue;
+                }
+
+                ControlKind::ClosureEntry | ControlKind::ClosureReturn => {
+                    // Closure entry/return handled like function entry/return
+                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                    continue;
+                }
+
+                ControlKind::FuturePoll | ControlKind::WakerRegistration | ControlKind::StateTransition => {
+                    // Async state machine nodes: pass through
+                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                    continue;
+                }
             },
 
             // ── Non-control nodes: convert to statements ───────────
@@ -1063,6 +1081,7 @@ fn convert_node_to_statement(
                 op,
                 lhs: resolve_df_input(node_id, 0, edge_idx),
                 rhs: resolve_df_input(node_id, 1, edge_idx),
+            tail_call: false,
             }))
         }
 
@@ -1102,6 +1121,11 @@ fn convert_node_to_statement(
 
         NodePayload::Control(_) => {
             // Control nodes are handled by walk_control_flow
+            None
+        }
+
+        NodePayload::VTable(_) | NodePayload::ClosureEnv(_) => {
+            // VTable and ClosureEnv are structural nodes; no IR statement
             None
         }
     }

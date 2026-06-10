@@ -29,9 +29,9 @@
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::graph::SCG;
 use crate::node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ComputationNode, ControlKind,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
     ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType,
-    PhantomNode, ProgramPoint,
+    PhantomNode, ProgramPoint, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -56,11 +56,14 @@ const NODE_TYPE_CAST: u32 = 4;
 const NODE_TYPE_EFFECT: u32 = 5;
 const NODE_TYPE_CONTROL: u32 = 6;
 const NODE_TYPE_PHANTOM: u32 = 7;
+const NODE_TYPE_VTABLE: u32 = 8;
+const NODE_TYPE_CLOSURE_ENV: u32 = 9;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
 const EDGE_KIND_DERIVATION: u32 = 2;
 const EDGE_KIND_ANNOTATION: u32 = 3;
+const EDGE_KIND_DISPATCH: u32 = 4;
 
 const ACCESS_MODE_READ: u32 = 0;
 const ACCESS_MODE_WRITE: u32 = 1;
@@ -73,6 +76,13 @@ const CONTROL_KIND_JOIN: u32 = 3;
 const CONTROL_KIND_FUNCTION_ENTRY: u32 = 4;
 const CONTROL_KIND_FUNCTION_RETURN: u32 = 5;
 const CONTROL_KIND_JUMP: u32 = 6;
+const CONTROL_KIND_SWITCH: u32 = 7;
+const CONTROL_KIND_SWITCH_CASE: u32 = 8;
+const CONTROL_KIND_CLOSURE_ENTRY: u32 = 9;
+const CONTROL_KIND_CLOSURE_RETURN: u32 = 10;
+const CONTROL_KIND_FUTURE_POLL: u32 = 11;
+const CONTROL_KIND_WAKER_REGISTRATION: u32 = 12;
+const CONTROL_KIND_STATE_TRANSITION: u32 = 13;
 
 const DEPLOYMENT_TARGET_HEAP: u32 = 0;
 const DEPLOYMENT_TARGET_STACK: u32 = 1;
@@ -314,6 +324,8 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::Effect => NODE_TYPE_EFFECT,
         NodeType::Control => NODE_TYPE_CONTROL,
         NodeType::Phantom => NODE_TYPE_PHANTOM,
+        NodeType::VTable => NODE_TYPE_VTABLE,
+        NodeType::ClosureEnv => NODE_TYPE_CLOSURE_ENV,
     }
 }
 
@@ -327,6 +339,8 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_EFFECT => Ok(NodeType::Effect),
         NODE_TYPE_CONTROL => Ok(NodeType::Control),
         NODE_TYPE_PHANTOM => Ok(NodeType::Phantom),
+        NODE_TYPE_VTABLE => Ok(NodeType::VTable),
+        NODE_TYPE_CLOSURE_ENV => Ok(NodeType::ClosureEnv),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -340,6 +354,7 @@ fn edge_kind_to_tag(ek: &EdgeKind) -> u32 {
         EdgeKind::ControlFlow => EDGE_KIND_CONTROL_FLOW,
         EdgeKind::Derivation => EDGE_KIND_DERIVATION,
         EdgeKind::Annotation => EDGE_KIND_ANNOTATION,
+        EdgeKind::Dispatch => EDGE_KIND_DISPATCH,
     }
 }
 
@@ -349,6 +364,7 @@ fn tag_to_edge_kind(tag: u32) -> Result<EdgeKind, DeserializeError> {
         EDGE_KIND_CONTROL_FLOW => Ok(EdgeKind::ControlFlow),
         EDGE_KIND_DERIVATION => Ok(EdgeKind::Derivation),
         EDGE_KIND_ANNOTATION => Ok(EdgeKind::Annotation),
+        EDGE_KIND_DISPATCH => Ok(EdgeKind::Dispatch),
         _ => Err(DeserializeError::InvalidValue {
             field: "EdgeKind".to_string(),
             value: format!("{}", tag),
@@ -385,6 +401,13 @@ fn control_kind_to_tag(ck: &ControlKind) -> u32 {
         ControlKind::FunctionEntry => CONTROL_KIND_FUNCTION_ENTRY,
         ControlKind::FunctionReturn => CONTROL_KIND_FUNCTION_RETURN,
         ControlKind::Jump => CONTROL_KIND_JUMP,
+        ControlKind::Switch => CONTROL_KIND_SWITCH,
+        ControlKind::SwitchCase => CONTROL_KIND_SWITCH_CASE,
+        ControlKind::ClosureEntry => CONTROL_KIND_CLOSURE_ENTRY,
+        ControlKind::ClosureReturn => CONTROL_KIND_CLOSURE_RETURN,
+        ControlKind::FuturePoll => CONTROL_KIND_FUTURE_POLL,
+        ControlKind::WakerRegistration => CONTROL_KIND_WAKER_REGISTRATION,
+        ControlKind::StateTransition => CONTROL_KIND_STATE_TRANSITION,
     }
 }
 
@@ -397,6 +420,13 @@ fn tag_to_control_kind(tag: u32) -> Result<ControlKind, DeserializeError> {
         CONTROL_KIND_FUNCTION_ENTRY => Ok(ControlKind::FunctionEntry),
         CONTROL_KIND_FUNCTION_RETURN => Ok(ControlKind::FunctionReturn),
         CONTROL_KIND_JUMP => Ok(ControlKind::Jump),
+        CONTROL_KIND_SWITCH => Ok(ControlKind::Switch),
+        CONTROL_KIND_SWITCH_CASE => Ok(ControlKind::SwitchCase),
+        CONTROL_KIND_CLOSURE_ENTRY => Ok(ControlKind::ClosureEntry),
+        CONTROL_KIND_CLOSURE_RETURN => Ok(ControlKind::ClosureReturn),
+        CONTROL_KIND_FUTURE_POLL => Ok(ControlKind::FuturePoll),
+        CONTROL_KIND_WAKER_REGISTRATION => Ok(ControlKind::WakerRegistration),
+        CONTROL_KIND_STATE_TRANSITION => Ok(ControlKind::StateTransition),
         _ => Err(DeserializeError::InvalidValue {
             field: "ControlKind".to_string(),
             value: format!("{}", tag),
@@ -547,7 +577,7 @@ fn serialized_to_scg(s: SerializedSCG) -> Result<SCG, DeserializeError> {
 ///     NodePayload::Computation(ComputationNode {
 ///         operation: "add".to_string(),
 ///         result_type: None,
-///     }),
+///         tail_call: false }),
 ///     ProgramPoint { file: None, line: None, column: None, offset: None },
 /// );
 /// let bytes = vuma_scg::serialize::serialize_scg(&scg);
@@ -783,6 +813,27 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
             w.write_u32_le(NODE_TYPE_PHANTOM);
             w.write_string(&p.purpose);
         }
+        NodePayload::VTable(v) => {
+            w.write_u32_le(NODE_TYPE_VTABLE);
+            w.write_string(&v.trait_name);
+            w.write_string(&v.concrete_type);
+            w.write_u64_le(v.method_entries.len() as u64);
+            for &entry_id in &v.method_entries {
+                w.write_u64_le(entry_id.as_u64());
+            }
+        }
+        NodePayload::ClosureEnv(e) => {
+            w.write_u32_le(NODE_TYPE_CLOSURE_ENV);
+            w.write_u64_le(e.captured_vars.len() as u64);
+            for var in &e.captured_vars {
+                w.write_string(var);
+            }
+            w.write_u64_le(e.capture_modes.len() as u64);
+            for &mode in &e.capture_modes {
+                w.write_bool(mode);
+            }
+            w.write_optional_u64(&e.closure_entry.map(|id| id.as_u64()));
+        }
     }
 }
 
@@ -809,6 +860,7 @@ fn read_payload(
             Ok(NodePayload::Computation(ComputationNode {
                 operation,
                 result_type,
+            tail_call: false,
             }))
         }
         NodeType::Allocation => {
@@ -872,6 +924,30 @@ fn read_payload(
         NodeType::Phantom => {
             let purpose = reader.read_string(&format!("{}.purpose", context))?;
             Ok(NodePayload::Phantom(PhantomNode { purpose }))
+        }
+        NodeType::VTable => {
+            let trait_name = reader.read_string(&format!("{}.trait_name", context))?;
+            let concrete_type = reader.read_string(&format!("{}.concrete_type", context))?;
+            let count = reader.read_u64_le(&format!("{}.method_count", context))?;
+            let mut method_entries = Vec::with_capacity(count as usize);
+            for i in 0..count as usize {
+                method_entries.push(NodeId::new(reader.read_u64_le(&format!("{}.method[{}]", context, i))?));
+            }
+            Ok(NodePayload::VTable(VTableNode { trait_name, concrete_type, method_entries }))
+        }
+        NodeType::ClosureEnv => {
+            let var_count = reader.read_u64_le(&format!("{}.var_count", context))?;
+            let mut captured_vars = Vec::with_capacity(var_count as usize);
+            for i in 0..var_count as usize {
+                captured_vars.push(reader.read_string(&format!("{}.captured_var[{}]", context, i))?);
+            }
+            let mode_count = reader.read_u64_le(&format!("{}.mode_count", context))?;
+            let mut capture_modes = Vec::with_capacity(mode_count as usize);
+            for i in 0..mode_count as usize {
+                capture_modes.push(reader.read_bool(&format!("{}.capture_mode[{}]", context, i))?);
+            }
+            let closure_entry = reader.read_optional_u64(&format!("{}.closure_entry", context))?.map(NodeId::new);
+            Ok(NodePayload::ClosureEnv(ClosureEnvNode { captured_vars, capture_modes, closure_entry }))
         }
     }
 }
@@ -989,7 +1065,7 @@ pub fn deserialize_scg_json(json: &str) -> Result<SCG, DeserializeError> {
 ///     NodePayload::Computation(ComputationNode {
 ///         operation: "add".to_string(),
 ///         result_type: None,
-///     }),
+///         tail_call: false }),
 ///     ProgramPoint { file: None, line: None, column: None, offset: None },
 /// );
 /// let dot = vuma_scg::serialize::serialize_scg_dot(&scg);
@@ -1072,12 +1148,14 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::ControlFlow => "dashed",
             EdgeKind::Derivation => "dotted",
             EdgeKind::Annotation => "bold",
+            EdgeKind::Dispatch => "bold dashed",
         };
         let color = match edge_data.kind {
             EdgeKind::DataFlow => "black",
             EdgeKind::ControlFlow => "blue",
             EdgeKind::Derivation => "gray",
             EdgeKind::Annotation => "purple",
+            EdgeKind::Dispatch => "red",
         };
         let kind_str = format!("{}", edge_data.kind);
         let label = edge_data
@@ -1146,6 +1224,8 @@ fn format_node_label(node: &NodeData) -> String {
             format!("{:?}{}", c.kind, lbl)
         }
         NodePayload::Phantom(p) => format!("phantom({})", p.purpose),
+        NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
+        NodePayload::ClosureEnv(e) => format!("closure_env({:?})", e.captured_vars),
     };
 
     let ann = node
@@ -1203,8 +1283,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()),
-            }),
+                result_type: Some("i32".to_string()), tail_call: false }),
             pp(),
         );
         scg
@@ -1237,8 +1316,7 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "write".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
 
@@ -1657,16 +1735,14 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "f".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "g".to_string(),
-                result_type: None,
-            }),
+                result_type: None, tail_call: false }),
             pp(),
         );
         let eid = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
