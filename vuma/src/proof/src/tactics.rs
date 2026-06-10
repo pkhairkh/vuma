@@ -11,6 +11,79 @@ use thiserror::Error;
 use crate::proof::{Goal, ProofContext, Target};
 
 // ---------------------------------------------------------------------------
+// ProofGoal / ProofResult — stand-alone tactic function types
+// ---------------------------------------------------------------------------
+
+/// Alias for a proof goal used in stand-alone tactic functions.
+pub type ProofGoal = Goal;
+
+/// The result of applying a stand-alone proof tactic.
+#[derive(Debug, Clone)]
+pub enum ProofResult {
+    /// The tactic succeeded and produced sub-goals that must each be proven.
+    SubGoals(Vec<ProofGoal>),
+    /// The tactic discharged the goal (no sub-goals remain).
+    Discharged,
+    /// The tactic failed to apply to this goal.
+    Failed(String),
+}
+
+impl ProofResult {
+    /// Returns `true` if the tactic discharged the goal.
+    pub fn is_discharged(&self) -> bool {
+        matches!(self, ProofResult::Discharged)
+    }
+
+    /// Returns `true` if the tactic produced sub-goals.
+    pub fn has_subgoals(&self) -> bool {
+        matches!(self, ProofResult::SubGoals(_))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stand-alone tactic functions
+// ---------------------------------------------------------------------------
+
+/// Applies the induction tactic, producing a base-case and inductive-step
+/// sub-goal.
+///
+/// This is the stand-alone version of `Tactic::Induction`. It constructs a
+/// base case (with region/derivation ID 0) and an inductive step that
+/// carries the inductive hypothesis as an assumption.
+pub fn tactic_induction(base_case: ProofGoal, inductive_step: ProofGoal) -> ProofResult {
+    ProofResult::SubGoals(vec![base_case, inductive_step])
+}
+
+/// Applies the case-split tactic, producing one sub-goal per case.
+///
+/// Every case must be proven independently for the overall goal to hold.
+pub fn tactic_case_split(cases: Vec<ProofGoal>) -> ProofResult {
+    if cases.is_empty() {
+        ProofResult::Failed("case split requires at least one case".to_string())
+    } else {
+        ProofResult::SubGoals(cases)
+    }
+}
+
+/// Applies the contradiction tactic.
+///
+/// If the goal's context contains both an assumption and its negation,
+/// the goal is discharged. Otherwise the tactic fails.
+pub fn tactic_contradiction(goal: ProofGoal) -> ProofResult {
+    for a in &goal.context.assumptions {
+        let negated = if a.starts_with("not ") {
+            a.strip_prefix("not ").unwrap().to_string()
+        } else {
+            format!("not {}", a)
+        };
+        if goal.context.assumptions.contains(&negated) {
+            return ProofResult::Discharged;
+        }
+    }
+    ProofResult::Failed("no contradiction found in assumptions".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -359,5 +432,74 @@ mod tests {
     fn test_tactic_display() {
         assert_eq!(format!("{}", Tactic::Simplify), "Simplify");
         assert_eq!(format!("{}", Tactic::Auto), "Auto");
+    }
+
+    // -- Stand-alone tactic function tests --------------------------------------
+
+    fn make_proof_goal(invariant: &str, target: Target, assumptions: Vec<&str>) -> ProofGoal {
+        let mut ctx = ProofContext::new("test");
+        for a in assumptions {
+            ctx = ctx.with_assumption(a);
+        }
+        ProofGoal::new(invariant, target, ctx)
+    }
+
+    #[test]
+    fn tactic_induction_produces_two_subgoals() {
+        let base = make_proof_goal("liveness", Target::Region(0), vec!["base case"]);
+        let step = make_proof_goal("liveness", Target::Region(5), vec!["IH holds"]);
+        let result = tactic_induction(base, step);
+        assert!(result.has_subgoals());
+        if let ProofResult::SubGoals(goals) = result {
+            assert_eq!(goals.len(), 2);
+        }
+    }
+
+    #[test]
+    fn tactic_case_split_multiple_cases() {
+        let case1 = make_proof_goal("P", Target::FullProgram, vec![]);
+        let case2 = make_proof_goal("Q", Target::FullProgram, vec![]);
+        let case3 = make_proof_goal("R", Target::FullProgram, vec![]);
+        let result = tactic_case_split(vec![case1, case2, case3]);
+        assert!(result.has_subgoals());
+        if let ProofResult::SubGoals(goals) = result {
+            assert_eq!(goals.len(), 3);
+        }
+    }
+
+    #[test]
+    fn tactic_case_split_empty_fails() {
+        let result = tactic_case_split(vec![]);
+        assert!(!result.has_subgoals());
+        assert!(!result.is_discharged());
+    }
+
+    #[test]
+    fn tactic_contradiction_discharges() {
+        let goal = make_proof_goal("P", Target::FullProgram, vec!["Q", "not Q"]);
+        let result = tactic_contradiction(goal);
+        assert!(result.is_discharged());
+    }
+
+    #[test]
+    fn tactic_contradiction_no_contradiction_fails() {
+        let goal = make_proof_goal("P", Target::FullProgram, vec!["Q", "R"]);
+        let result = tactic_contradiction(goal);
+        assert!(!result.is_discharged());
+    }
+
+    #[test]
+    fn proof_result_helpers() {
+        let discharged = ProofResult::Discharged;
+        assert!(discharged.is_discharged());
+        assert!(!discharged.has_subgoals());
+
+        let subgoals = ProofResult::SubGoals(vec![]);
+        assert!(subgoals.has_subgoals());
+        assert!(!subgoals.is_discharged());
+
+        let failed = ProofResult::Failed("reason".to_string());
+        assert!(!failed.is_discharged());
+        assert!(!failed.has_subgoals());
     }
 }

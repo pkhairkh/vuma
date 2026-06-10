@@ -366,7 +366,8 @@ mod tests {
         let earlier = Instant::from_nanos(1000);
         let later = Instant::from_nanos(3500);
         let diff = later.duration_since(&earlier);
-        assert_eq!(diff.as_nanos(), 2500);
+        assert_eq!(diff.nanos, 2500);
+        assert_eq!(diff.secs, 0);
     }
 
     #[test]

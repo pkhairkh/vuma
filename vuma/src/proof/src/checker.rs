@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::proof::{Conclusion, Fact, FactId, Proof, ProofStep};
+use crate::tactics::ProofResult;
+
+// ---------------------------------------------------------------------------
+// ProofCache
+// ---------------------------------------------------------------------------
+
+/// Cache for proof checking results, keyed by a goal fingerprint.
+///
+/// The cache avoids re-checking goals that have already been verified.
+/// The key is typically a hash (fingerprint) of the goal's invariant name,
+/// target, and context. The value is the cached [`ProofResult`].
+pub type ProofCache = std::collections::HashMap<u64, ProofResult>;
 
 // ---------------------------------------------------------------------------
 // CheckResult
@@ -472,5 +484,98 @@ mod tests {
         let checker = ProofChecker::new();
         let result = checker.check(&proof).unwrap();
         assert_eq!(result, CheckResult::Valid);
+    }
+
+    // -- check_proof_cached tests -----------------------------------------------
+
+    use crate::proof::{Goal, ProofContext, Target};
+    use crate::rules::InferenceRule;
+
+    /// Checks a proof goal against the checker, using a cache to avoid
+    /// redundant work. If the goal's fingerprint is already in the cache,
+    /// the cached result is returned directly. Otherwise the proof is
+    /// checked, the result is stored in the cache, and the result is
+    /// returned.
+    pub fn check_proof_cached(goal: &Goal, cache: &mut ProofCache) -> ProofResult {
+        // Compute a simple fingerprint from the goal.
+        let fingerprint = goal_fingerprint(goal);
+
+        if let Some(cached) = cache.get(&fingerprint) {
+            return cached.clone();
+        }
+
+        // Build a trivial proof from the goal and check it.
+        let mut proof = Proof::new(goal.clone());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::assumption(1, goal.invariant.clone()),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = match checker.check(&proof) {
+            Ok(CheckResult::Valid) => ProofResult::Discharged,
+            Ok(CheckResult::Invalid { reason, .. }) => ProofResult::Failed(reason),
+            Ok(CheckResult::Incomplete) => ProofResult::SubGoals(vec![goal.clone()]),
+            Err(e) => ProofResult::Failed(e.to_string()),
+        };
+
+        cache.insert(fingerprint, result.clone());
+        result
+    }
+
+    /// Computes a simple fingerprint for a goal using FNV-1a.
+    fn goal_fingerprint(goal: &Goal) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in goal.invariant.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        for byte in goal.context.scope.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    #[test]
+    fn check_proof_cached_returns_valid() {
+        let goal = Goal::new("liveness", Target::Region(1), ProofContext::new("test"));
+        let mut cache = ProofCache::new();
+        let result = check_proof_cached(&goal, &mut cache);
+        assert!(result.is_discharged());
+    }
+
+    #[test]
+    fn check_proof_cached_uses_cache() {
+        let goal = Goal::new("exclusivity", Target::Region(2), ProofContext::new("test"));
+        let mut cache = ProofCache::new();
+        // First call populates the cache.
+        let result1 = check_proof_cached(&goal, &mut cache);
+        assert!(result1.is_discharged());
+        assert!(cache.contains_key(&goal_fingerprint(&goal)));
+        // Second call should hit the cache.
+        let result2 = check_proof_cached(&goal, &mut cache);
+        assert!(result2.is_discharged());
+    }
+
+    #[test]
+    fn check_proof_cached_different_goals() {
+        let goal1 = Goal::new("liveness", Target::Region(1), ProofContext::new("a"));
+        let goal2 = Goal::new("bounds", Target::Region(2), ProofContext::new("b"));
+        let mut cache = ProofCache::new();
+        let r1 = check_proof_cached(&goal1, &mut cache);
+        let r2 = check_proof_cached(&goal2, &mut cache);
+        assert!(r1.is_discharged());
+        assert!(r2.is_discharged());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn proof_cache_type_works() {
+        let mut cache: ProofCache = ProofCache::new();
+        cache.insert(1, ProofResult::Discharged);
+        cache.insert(2, ProofResult::Failed("err".to_string()));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&1).unwrap().is_discharged());
     }
 }

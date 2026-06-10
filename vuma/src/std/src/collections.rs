@@ -404,6 +404,39 @@ pub struct Vec<T> {
     bd_get_mut_count: Cell<u64>,
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for Vec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vec")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T: PartialEq> PartialEq for Vec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<T: PartialEq> PartialEq<std::vec::Vec<T>> for Vec<T> {
+    fn eq(&self, other: &std::vec::Vec<T>) -> bool {
+        &self.inner == other
+    }
+}
+
+impl<T> FromIterator<T> for Vec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let inner: std::vec::Vec<T> = iter.into_iter().collect();
+        Vec {
+            inner,
+            bd_push_count: Cell::new(0),
+            bd_pop_count: Cell::new(0),
+            bd_get_count: Cell::new(0),
+            bd_get_mut_count: Cell::new(0),
+        }
+    }
+}
+
 impl<T> Vec<T> {
     /// Create a new, empty vector.
     // VUMA-VERIFIED: empty vector is safe to construct
@@ -2863,14 +2896,15 @@ mod binaryheap_tests {
         heap.push(2);
         heap.push(4);
         let mut sorted = Vec::new();
-        while let r = heap.pop() {
+        loop {
+            let r = heap.pop();
             if r.success {
                 sorted.push(r.value.unwrap());
             } else {
                 break;
             }
         }
-        assert_eq!(sorted, vec![5, 4, 3, 2, 1]);
+        assert_eq!(sorted, std::vec![5, 4, 3, 2, 1]);
     }
 
     #[test]
