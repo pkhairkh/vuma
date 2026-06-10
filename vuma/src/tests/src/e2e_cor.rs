@@ -501,6 +501,8 @@ fn test_e2e_cor_full_lifecycle() {
 // ===========================================================================
 
 /// Extension trait to collect compiled region IDs from CompiledState.
+// Kept for potential future use in iterative compiled-region queries.
+#[allow(dead_code)]
 trait CompiledStateExt {
     fn iter(&self) -> Vec<(u64, vuma_cor::types::CompiledRegion)>;
 }

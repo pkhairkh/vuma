@@ -726,6 +726,53 @@ impl LiveRangeComputer {
                     }
                 }
                 IRTerminator::Jump(_) | IRTerminator::Unreachable => {}
+                // Switch, Invoke, TailCall, Resume are lowered before
+                // register allocation in the full pipeline. Handle them
+                // conservatively here for completeness.
+                IRTerminator::Switch { discr, .. } => {
+                    if let IRValue::Register(vreg) = discr {
+                        let class = self.class_of(*vreg);
+                        let interval = intervals
+                            .entry(*vreg)
+                            .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+                        interval.use_positions.push(pos);
+                        interval.extend_to(pos);
+                    }
+                }
+                IRTerminator::Invoke { args, .. } => {
+                    for val in args {
+                        if let IRValue::Register(vreg) = val {
+                            let class = self.class_of(*vreg);
+                            let interval = intervals
+                                .entry(*vreg)
+                                .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+                            interval.use_positions.push(pos);
+                            interval.extend_to(pos);
+                        }
+                    }
+                }
+                IRTerminator::TailCall { args, .. } => {
+                    for val in args {
+                        if let IRValue::Register(vreg) = val {
+                            let class = self.class_of(*vreg);
+                            let interval = intervals
+                                .entry(*vreg)
+                                .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+                            interval.use_positions.push(pos);
+                            interval.extend_to(pos);
+                        }
+                    }
+                }
+                IRTerminator::Resume { value } => {
+                    if let IRValue::Register(vreg) = value {
+                        let class = self.class_of(*vreg);
+                        let interval = intervals
+                            .entry(*vreg)
+                            .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+                        interval.use_positions.push(pos);
+                        interval.extend_to(pos);
+                    }
+                }
             }
             pos += 2;
         }

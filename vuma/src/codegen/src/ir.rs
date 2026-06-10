@@ -1145,6 +1145,14 @@ pub enum IRInstr {
         offset: IRValue,
     },
 
+    /// Conditional select: `dst = if cond != 0 { true_val } else { false_val }`
+    Select {
+        dst: IRValue,
+        cond: IRValue,
+        true_val: IRValue,
+        false_val: IRValue,
+    },
+
     // ── Dedicated arithmetic instructions ────────────────────────────
 
     /// Add: `dst = lhs + rhs`
@@ -1213,7 +1221,8 @@ impl IRInstr {
             | IRInstr::Cast { dst, .. }
             | IRInstr::Phi { dst, .. }
             | IRInstr::GetAddress { dst, .. }
-            | IRInstr::Offset { dst, .. } => dst.as_register().into_iter().collect(),
+            | IRInstr::Offset { dst, .. }
+            | IRInstr::Select { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Call { dst, .. } => dst.as_ref().and_then(|v| v.as_register()).into_iter().collect(),
             IRInstr::Add { dst, .. }
             | IRInstr::Sub { dst, .. }
@@ -1257,6 +1266,12 @@ impl IRInstr {
             IRInstr::Offset { base, offset, .. } => {
                 let mut r = base.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(offset.as_register());
+                r
+            }
+            IRInstr::Select { cond, true_val, false_val, .. } => {
+                let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(true_val.as_register());
+                r.extend(false_val.as_register());
                 r
             }
             IRInstr::Ret { values } => values.iter().filter_map(|v| v.as_register()).collect(),
@@ -1307,6 +1322,9 @@ impl fmt::Display for IRInstr {
             IRInstr::Offset { dst, base, offset } => {
                 write!(f, "{} = offset {}, {}", dst, base, offset)
             }
+            IRInstr::Select { dst, cond, true_val, false_val } => {
+                write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
+            }
             IRInstr::Add { dst, lhs, rhs } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
             IRInstr::Sub { dst, lhs, rhs } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
             IRInstr::Mul { dst, lhs, rhs } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
@@ -1351,6 +1369,42 @@ pub enum IRTerminator {
     Return(Vec<IRValue>),
     /// Unreachable code marker (e.g. after a diverging call).
     Unreachable,
+    /// Switch dispatch: branch to one of several targets based on the
+    /// discriminator value, or fall through to `default`.
+    Switch {
+        /// Discriminator value.
+        discr: IRValue,
+        /// (value, target_label) pairs.
+        targets: Vec<(i64, String)>,
+        /// Default target if no value matches.
+        default: String,
+    },
+    /// Invoke: call a function that may throw, with separate normal and
+    /// unwind continuations.
+    Invoke {
+        /// Destination register for the return value.
+        dst: Option<IRValue>,
+        /// Function name.
+        func: String,
+        /// Arguments.
+        args: Vec<IRValue>,
+        /// Normal continuation label.
+        normal: String,
+        /// Unwind (exception) continuation label.
+        unwind: String,
+    },
+    /// Tail call: jump to the callee, reusing the current stack frame.
+    TailCall {
+        /// Function name.
+        func: String,
+        /// Arguments.
+        args: Vec<IRValue>,
+    },
+    /// Resume unwinding with the given exception value.
+    Resume {
+        /// Exception value to resume with.
+        value: IRValue,
+    },
 }
 
 impl IRTerminator {
@@ -1364,6 +1418,13 @@ impl IRTerminator {
                 ..
             } => vec![true_block, false_block],
             IRTerminator::Return(_) | IRTerminator::Unreachable => vec![],
+            IRTerminator::Switch { targets, default, .. } => {
+                let mut labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
+                labels.push(default);
+                labels
+            }
+            IRTerminator::Invoke { normal, unwind, .. } => vec![normal, unwind],
+            IRTerminator::TailCall { .. } | IRTerminator::Resume { .. } => vec![],
         }
     }
 }
@@ -1388,6 +1449,34 @@ impl fmt::Display for IRTerminator {
                 write!(f, "ret {}", vals_str)
             }
             IRTerminator::Unreachable => write!(f, "unreachable"),
+            IRTerminator::Switch { discr, targets, default } => {
+                let pairs = targets
+                    .iter()
+                    .map(|(v, l)| format!("{}: @{}", v, l))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "switch {}, [{}] default @{}", discr, pairs, default)
+            }
+            IRTerminator::Invoke { dst, func, args, normal, unwind } => {
+                let args_str = args
+                    .iter()
+                    .map(|a| format!("{}", a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match dst {
+                    Some(d) => write!(f, "invoke {} = @{}({}) normal @{} unwind @{}", d, func, args_str, normal, unwind),
+                    None => write!(f, "invoke @{}({}) normal @{} unwind @{}", func, args_str, normal, unwind),
+                }
+            }
+            IRTerminator::TailCall { func, args } => {
+                let args_str = args
+                    .iter()
+                    .map(|a| format!("{}", a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "tailcall @{}({})", func, args_str)
+            }
+            IRTerminator::Resume { value } => write!(f, "resume {}", value),
         }
     }
 }

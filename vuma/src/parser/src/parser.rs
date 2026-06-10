@@ -1671,6 +1671,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Consume an identifier token and return its text.
+    #[allow(dead_code)] // part of Parser API for future grammar extensions
     fn expect_ident(&mut self) -> Result<String, ParseError> {
         if self.current.kind == TokenKind::Ident {
             let name = self.current.lexeme.clone();

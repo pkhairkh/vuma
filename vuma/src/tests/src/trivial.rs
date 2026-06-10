@@ -24,7 +24,7 @@ use vuma_ive::liveness::{
     ControlFlowEdge, EventAction, LivenessInput, LivenessVerifier, PointId, ResourceEvent,
     ResourceId as LivenessResourceId, ResourceKind as LivenessResourceKind, ThreadId,
 };
-use vuma_ive::result::VerificationStatus;
+
 use vuma_scg::region::RegionId;
 use vuma_scg::{
     AccessMode, AccessNode, AllocationNode, ControlKind, ControlNode, DeallocationNode,

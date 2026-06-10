@@ -161,6 +161,7 @@ impl<'a> BinaryReader<'a> {
         Self { data, pos: 0 }
     }
 
+    #[allow(dead_code)] // part of BinaryReader API for future serialization needs
     fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
     }
@@ -249,6 +250,7 @@ impl BinaryWriter {
         self.buf.extend_from_slice(data);
     }
 
+    #[allow(dead_code)] // part of BinaryWriter API for future serialization needs
     fn write_u8(&mut self, val: u8) {
         self.buf.push(val);
     }

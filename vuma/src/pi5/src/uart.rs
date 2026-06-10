@@ -475,7 +475,7 @@ static mut TX_BUFFER: UartBuffer = UartBuffer::new();
 #[inline]
 pub unsafe fn rx_buffer() -> &'static mut UartBuffer {
     // SAFETY: Caller guarantees exclusive access.
-    unsafe { &mut RX_BUFFER }
+    unsafe { &mut *(&raw mut RX_BUFFER) }
 }
 
 /// Returns a mutable reference to the global TX buffer.
@@ -487,7 +487,7 @@ pub unsafe fn rx_buffer() -> &'static mut UartBuffer {
 #[inline]
 pub unsafe fn tx_buffer() -> &'static mut UartBuffer {
     // SAFETY: Caller guarantees exclusive access.
-    unsafe { &mut TX_BUFFER }
+    unsafe { &mut *(&raw mut TX_BUFFER) }
 }
 
 // ===========================================================================
@@ -1022,7 +1022,7 @@ pub fn uart_read_byte() -> Option<u8> {
     // the global buffer. In multi-core or pre-emptible contexts the
     // caller must ensure proper synchronisation.
     unsafe {
-        if let Some(byte) = RX_BUFFER.pop() {
+        if let Some(byte) = (*(&raw mut RX_BUFFER)).pop() {
             return Some(byte);
         }
     }
@@ -1036,7 +1036,7 @@ pub fn uart_read_byte() -> Option<u8> {
 pub fn uart_read_byte_blocking() -> u8 {
     // Check the software buffer first.
     unsafe {
-        if let Some(byte) = RX_BUFFER.pop() {
+        if let Some(byte) = (*(&raw mut RX_BUFFER)).pop() {
             return byte;
         }
     }
@@ -1049,7 +1049,7 @@ pub fn uart_read_byte_blocking() -> u8 {
 /// Call this from the UART0 ISR.
 pub fn uart0_rx_interrupt_handler() -> usize {
     // SAFETY: Called from ISR context with IRQs disabled.
-    unsafe { Uart::uart0().handle_rx_interrupt(&mut RX_BUFFER) }
+    unsafe { Uart::uart0().handle_rx_interrupt(&mut *(&raw mut RX_BUFFER)) }
 }
 
 /// UART0 TX interrupt handler — fills hardware FIFO from the global
@@ -1058,7 +1058,7 @@ pub fn uart0_rx_interrupt_handler() -> usize {
 /// Call this from the UART0 ISR.
 pub fn uart0_tx_interrupt_handler() -> usize {
     // SAFETY: Called from ISR context with IRQs disabled.
-    unsafe { Uart::uart0().handle_tx_interrupt(&mut TX_BUFFER) }
+    unsafe { Uart::uart0().handle_tx_interrupt(&mut *(&raw mut TX_BUFFER)) }
 }
 
 /// Enables UART0 RX interrupts.

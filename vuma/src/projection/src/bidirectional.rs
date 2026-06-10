@@ -232,6 +232,7 @@ impl ConflictTracker {
 #[derive(Debug, Clone)]
 pub struct BidirectionalProjection {
     /// The textual projection engine used for re-projection after edits.
+    #[allow(dead_code)] // will be used for re-projection in future bidirectional edits
     textual: TextualProjection,
     /// The conversational projection engine used for NL → SCGEdit translation.
     conversational: ConversationalProjection,

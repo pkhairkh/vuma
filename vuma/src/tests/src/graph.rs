@@ -7,7 +7,7 @@
 
 use vuma_ive::cleanup::{
     CleanupGraph, CleanupVerifier, OperationKind, ResourceId as CleanupResourceId,
-    ResourceKind as CleanupResourceKind, ViolationKind,
+    ResourceKind as CleanupResourceKind,
 };
 use vuma_ive::exclusivity::{
     AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord,

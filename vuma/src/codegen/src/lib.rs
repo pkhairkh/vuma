@@ -1,19 +1,22 @@
 //! # VUMA Code Generation Module
 //!
 //! This crate handles code generation for the VUMA programming language,
-//! targeting ARM64 (AArch64) architectures — specifically the Raspberry Pi 5.
+//! supporting multiple instruction set architectures (AArch64, RISC-V64,
+//! Wasm32, LoongArch64, x86_64, ARM32, MIPS64, PowerPC64).
 //!
 //! ## Pipeline
 //!
 //! 1. **SCG → IR**: Convert Semantic Computation Graph nodes into an
 //!    intermediate representation (`scg_to_ir`).
-//! 2. **Register Allocation**: Assign physical ARM64 registers to IR values
-//!    (`regalloc`).
-//! 3. **Emission**: Generate ARM64 machine code and produce ELF binaries
-//!    (`emit`).
+//! 2. **Register Allocation**: Assign physical registers to IR values
+//!    (`regalloc`), or stack-based lowering for Wasm.
+//! 3. **Emission**: Generate target machine code and produce ELF / Wasm
+//!    binaries (`emit`, `backend`).
 //!
 //! ## Module Layout
 //!
+//! - `backend` — Multi-architecture trait definitions (`TargetInfo`, `Backend`)
+//!   and per-ISA target info implementations.
 //! - `arm64` — ARM64 instruction definitions, register/condition enums, and
 //!   binary encoding.
 //! - `ir` — Intermediate representation types (functions, blocks, instructions,
@@ -23,16 +26,45 @@
 //! - `emit` — ARM64 code emitter and ELF generation.
 
 pub mod arm64;
+pub mod backend;
+pub mod control_flow;
 pub mod emit;
 pub mod ir;
+pub mod loongarch64;
 pub mod regalloc;
+pub mod riscv64;
 pub mod scg_to_ir;
+pub mod target_desc;
+pub mod wasm32;
+pub mod x86_64;
 
 /// Re-export the primary pipeline entry point for convenience.
 pub use scg_to_ir::ScgToIr;
 
 /// Re-export commonly used IR types.
 pub use ir::{CastKind, DataSectionKind};
+
+/// Re-export multi-architecture backend types.
+pub use backend::{
+    create_backend, AArch64Backend, AllocatedBlock, AllocatedFunction, AllocatedInstruction,
+    AllocatedProgram, Backend, BackendError, BackendKind, Endianness, OutputFormat, PhysicalReg,
+    RegClass, TargetInfo,
+};
+
+/// Re-export RISC-V 64-bit backend types.
+pub use riscv64::RiscV64Backend;
+
+/// Re-export Wasm32 backend types.
+pub use wasm32::Wasm32Backend;
+
+/// Re-export LoongArch64 backend types.
+pub use loongarch64::LoongArch64Backend;
+
+/// Re-export x86_64 backend types.
+pub use x86_64::X86_64Backend;
+
+/// Re-export target description types.
+pub use target_desc::{CallingConventionDesc, InstCategoryDesc, RegDesc, TargetDesc, TargetDescRegistry};
 
 /// Error type for code-generation failures.
 #[derive(Debug, Clone, thiserror::Error)]

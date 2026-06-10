@@ -18,15 +18,15 @@
 //! 4. Aggregates results into a unified vector
 
 use crate::cleanup::{CleanupGraph, CleanupVerifier, NodeId as CleanupNodeId, OperationKind, ResourceId as CleanupResourceId, ResourceKind as CleanupResourceKind};
-use crate::exclusivity::{AccessKind as ExclusivityAccessKind, AccessRecord, CapDInfo, ExclusivityInput, ExclusivityVerifier, SyncEdgeRecord, SyncOrdering};
+use crate::exclusivity::{AccessKind as ExclusivityAccessKind, AccessRecord, ExclusivityInput, ExclusivityVerifier, SyncEdgeRecord, SyncOrdering};
 use crate::interpretation::InterpretationVerifier;
 use crate::liveness::{EventAction, LivenessInput, LivenessVerifier, ResourceEvent, ResourceId, ResourceKind, PointId, ThreadId};
-use crate::origin::{Access as OriginAccess, AccessId as OriginAccessId, AccessKind as OriginAccessKind, Address, Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier, Region as OriginRegion, RegionId as OriginRegionId, TaintLevel};
-use crate::result::{Evidence, VerificationResult, VerificationStatus};
+use crate::origin::{Access as OriginAccess, AccessId as OriginAccessId, AccessKind as OriginAccessKind, Address, Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier, Region as OriginRegion, RegionId as OriginRegionId};
+use crate::result::{VerificationResult};
 use std::collections::HashMap;
 use vuma_bd::descriptor::BD;
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{AccessMode, NodeData, NodeId, NodePayload, NodeType};
+use vuma_scg::node::{AccessMode, NodeId, NodePayload, NodeType};
 
 // ---------------------------------------------------------------------------
 // VerificationInput
@@ -564,6 +564,7 @@ impl Default for VerificationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::result::VerificationStatus;
 
     #[test]
     fn verify_all_on_empty_scg_returns_five_results() {

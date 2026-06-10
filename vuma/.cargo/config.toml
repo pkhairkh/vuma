@@ -37,6 +37,7 @@ rustflags = [
 # ---- Global build settings ------------------------------------------------
 
 [build]
+rustflags = ["-C", "target-cpu=native"]
 incremental = true
 # Default target when none is specified (override with --target)
 # target = "x86_64-unknown-linux-gnu"

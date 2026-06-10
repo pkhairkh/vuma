@@ -777,6 +777,7 @@ unsafe impl Send for BumpAllocator {}
 
 impl BumpAllocator {
     /// Minimum alignment for all allocations.
+    #[allow(dead_code)] // part of BumpAllocator API, used for alignment checks
     const ALIGN: usize = 8;
 
     /// Create a new BumpAllocator from a static mutable slice.
@@ -1011,6 +1012,7 @@ impl BlockHeader {
         }
     }
 
+    #[allow(dead_code)] // part of BlockHeader API for heap diagnostics
     fn was_realloc(&self) -> bool {
         self.flags & 2 != 0
     }
@@ -1043,6 +1045,7 @@ struct FreeNode {
 }
 
 impl FreeNode {
+    #[allow(dead_code)] // part of FreeNode API for size calculations
     const SIZE: usize = 16;
 }
 

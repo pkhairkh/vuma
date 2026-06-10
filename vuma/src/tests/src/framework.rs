@@ -58,7 +58,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use vuma_ive::{
-    AggregatedResult, InvariantAggregator, InvariantKind, OverallVerdict,
+    AggregatedResult, InvariantAggregator, InvariantKind,
     VerificationLevel,
 };
 use vuma_ive::verification::VerificationInput;
@@ -67,9 +67,8 @@ use vuma_parser::{
     to_scg::AstToScg,
 };
 use vuma_scg::{
-    SCG, NodeId, NodeType, NodePayload, ProgramPoint, EdgeKind,
+    SCG, NodeType, NodePayload, ProgramPoint, EdgeKind,
     AllocationNode, DeallocationNode, ComputationNode, AccessNode, AccessMode,
-    CastNode, ControlNode, ControlKind, EffectNode, PhantomNode,
     RegionId, SCGRegion, DeploymentTarget,
 };
 
@@ -537,7 +536,7 @@ impl TestRegistry {
     }
 
     /// Generate a summary report of all recorded tests.
-    pub fn report(&self) -> TestReport {
+    pub fn report(&self) -> TestReport<'_> {
         let mut by_category: HashMap<TestCategory, Vec<&TestRecord>> = HashMap::new();
         for record in &self.records {
             by_category.entry(record.category).or_default().push(record);
@@ -701,8 +700,8 @@ pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> Aggreg
 pub fn verify_program_detailed(source: &str) -> PipelineResult {
     let start = Instant::now();
     let mut stages = Vec::new();
-    let mut scg_result: Option<SCG> = None;
-    let mut verification_result: Option<AggregatedResult> = None;
+    let scg_result: Option<SCG>;
+    let verification_result: Option<AggregatedResult>;
 
     // Stage 1: Parse source -> AST.
     let mut parser = Parser::new(source);
@@ -1403,6 +1402,7 @@ pub fn build_multi_region_scg() -> SCG {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuma_ive::OverallVerdict;
 
     // -----------------------------------------------------------------------
     // Test 1: build_scg_from_source with valid program

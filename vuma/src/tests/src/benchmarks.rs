@@ -1111,10 +1111,9 @@ mod tests {
         });
 
         assert_eq!(result.iterations, 5);
-        // mean_ns and median_ns should be positive on any reasonable machine.
-        // On extremely fast hardware they might be 0, so we just check
-        // that median >= mean is not required (noise can make median < mean).
-        assert!(result.mean_ns > 0 || result.median_ns >= 0);
+        // mean_ns should be positive on any reasonable machine.
+        // On extremely fast hardware it might be 0; that's OK.
+        let _ = result.mean_ns;
     }
 
     // -- Test 9: BenchmarkStats::to_result() extracts correct fields --

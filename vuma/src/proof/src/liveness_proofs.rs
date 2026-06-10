@@ -29,7 +29,7 @@ use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::proof::{
-    Conclusion, Fact, FactId, FactKind, Goal, Proof, ProofContext, ProofStep, RegionId, Target,
+    Conclusion, Fact, Goal, Proof, ProofContext, ProofStep, RegionId, Target,
 };
 use crate::rules::InferenceRule;
 
@@ -511,7 +511,7 @@ pub struct AllocationFreedProof {
 
 impl AllocationFreedProof {
     /// Attempt to prove that `region` is freed on all paths through `scg`.
-    pub fn prove(region: &Region, scg: &SCG, tactic: LivenessTactic) -> Result<Self, ProofFailure> {
+    pub fn prove(region: &Region, _scg: &SCG, tactic: LivenessTactic) -> Result<Self, ProofFailure> {
         let mut proof = Proof::new(Goal::new(
             "allocation_freed",
             Target::Region(region.id),

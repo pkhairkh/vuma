@@ -2109,7 +2109,7 @@ impl InstructionSelector {
         rd: Register,
         rn: Register,
         is_float_conv: bool,
-        to_double: bool,
+        _to_double: bool,
     ) {
         if is_float_conv {
             match kind {
@@ -2460,6 +2460,11 @@ impl InstructionSelector {
             IRInstr::CondBranch { .. } => {
                 // Handled as a terminator; no machine instruction here.
             }
+            IRInstr::Select { .. } => {
+                // Handled by the emitter's emit_ir_instr. The instruction
+                // selector does not need to produce separate instructions
+                // for this; the emitter handles it directly.
+            }
         }
         Ok(())
     }
@@ -2489,6 +2494,14 @@ impl InstructionSelector {
                 self.push(Instruction::RET { rn: None });
             }
             IRTerminator::Unreachable => {
+                self.push(Instruction::NOP);
+            }
+            IRTerminator::Switch { .. }
+            | IRTerminator::Invoke { .. }
+            | IRTerminator::TailCall { .. }
+            | IRTerminator::Resume { .. } => {
+                // These are lowered by the control_flow module before
+                // instruction selection. Emitting a NOP as a safe fallback.
                 self.push(Instruction::NOP);
             }
         }

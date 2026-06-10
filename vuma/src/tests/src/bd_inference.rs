@@ -7,8 +7,7 @@
 //! - Temporal RelD (Relation Descriptor) for scoped variables
 //! - Comparison between BD typing and Rust's type system
 
-use vuma_bd::capd::{CapD, Capability};
-use vuma_bd::descriptor::BD;
+use vuma_bd::capd::Capability;
 use vuma_bd::reld::{DepKind, FlowPolicy, Relation, RelD, TemporalKind};
 use vuma_bd::repd::{ByteRep, RepD, StructRep};
 use vuma_bd::inference::BDInferenceEngine;
@@ -16,8 +15,8 @@ use vuma_ive::InferenceEngine;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode, ControlKind,
-    ControlNode, DeallocationNode, EffectNode, NodePayload, NodeType,
+    AccessMode, AccessNode, AllocationNode, ComputationNode,
+    EffectNode, NodePayload, NodeType,
     ProgramPoint,
 };
 use vuma_scg::region::RegionId;

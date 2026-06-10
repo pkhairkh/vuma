@@ -321,7 +321,6 @@ pub trait MmioDevice {
 mod tests {
     use super::*;
     use core::cell::UnsafeCell;
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     // -----------------------------------------------------------------------
     // Mock register bank for testing
@@ -356,6 +355,7 @@ mod tests {
         }
 
         /// Direct (non-volatile) write of a mock register for test setup.
+        #[allow(dead_code)] // Available for future test assertions
         fn set_reg(&self, index: usize, value: u32) {
             assert!(index < MOCK_REG_COUNT, "register index out of range");
             // SAFETY: We have &self and no concurrent read through our API.

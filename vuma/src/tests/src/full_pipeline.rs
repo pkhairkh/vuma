@@ -24,12 +24,12 @@
 //! | 9 | Empty program → default SCG              | Edge case: empty or minimal source              |
 //! | 10| Complex multi-operation program          | Multiple regions, accesses, computations        |
 
-use vuma_scg::{AccessMode, NodeType, NodePayload};
-use vuma_ive::{InvariantKind, VerificationLevel, OverallVerdict};
+use vuma_scg::NodeType;
+use vuma_ive::{VerificationLevel, OverallVerdict};
 use vuma_codegen::{
     ir::BinOpKind,
     scg_to_ir::{
-        IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
+        IRBuilder, Scg, ScgNode, ScgFunction, ScgType,
         ScgStatement, ScgExpr, ComputationNode, AllocationNode,
     },
     emit::{EmitConfig, emit_elf},
@@ -254,8 +254,8 @@ fn test_full_pipeline_detailed_tracking() {
     assert_eq!(stage_outcomes[&PipelineStage::IveVerification], StageOutcome::Passed);
     assert_eq!(stage_outcomes[&PipelineStage::Codegen], StageOutcome::Skipped);
 
-    // Timing should be non-negative
-    assert!(result.elapsed_ms >= 0, "Elapsed time should be non-negative");
+    // Timing should be non-negative (u64 is always >= 0)
+    let _ = result.elapsed_ms;
 
     // Display should be informative
     let display = format!("{}", result);

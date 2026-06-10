@@ -23,9 +23,9 @@
 //! | 10| ARM64 instruction encoding correctness  | Encode/decode round-trip for key instructions   |
 
 use vuma_codegen::{
-    arm64::{BarrierOption, Condition, Instruction, Operand, Register, ShiftKind},
+    arm64::{BarrierOption, Condition, Instruction, Operand, Register},
     ir::{
-        BinOpKind, IRInstr, IRTerminator, IRType, IRValue, IRProgram,
+        BinOpKind, IRInstr, IRTerminator, IRType, IRProgram,
         size_of, alignment_of, classify_arg,
         compute_calling_conv, compute_stack_layout, ArgClass, RegisterClass,
     },

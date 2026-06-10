@@ -774,7 +774,6 @@ pub fn prove_origin(info: &OriginInfo) -> Result<OriginProof, ProofFailure> {
             ),
         ),
     });
-    next_fid += 1;
 
     // By definition: origin invariant holds.
     proof.add_step(ProofStep::ByDefinition {

@@ -116,8 +116,6 @@ const STB_LOCAL: u8 = 0;
 /// Symbol binding: global.
 const STB_GLOBAL: u8 = 1;
 
-/// Symbol type: not specified.
-const STT_NOTYPE: u8 = 0;
 /// Symbol type: function.
 const STT_FUNC: u8 = 2;
 /// Symbol type: section.
@@ -613,6 +611,30 @@ impl Emitter {
                 self.fixups.push((fixup_b, true_target.clone()));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
+
+            IRInstr::Select { dst, cond, true_val, false_val } => {
+                // Lower select as: SUBS XZR, cond, #0; CSEL dst, false_val, true_val, NE
+                let rd = self.resolve_reg(dst)?;
+                let rc = self.resolve_reg(cond)?;
+                let rt = self.resolve_reg(true_val)?;
+                let rf = self.resolve_reg(false_val)?;
+                // Compare cond against zero and select.
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::XZR,
+                    rn: rc,
+                    rm: Operand::Imm12(0),
+                })?;
+                // Set flags by using a separate CMP (SUB with XZR destination
+                // doesn't set flags; we need a flags-setting variant).
+                // We emulate this with: CMP rc, #0 which is SUBS XZR, rc, #0.
+                // Since we only have SUB, we use the existing CMP pattern.
+                self.emit_instruction(Instruction::CSEL {
+                    rd,
+                    rn: rf,
+                    rm: rt,
+                    cond: crate::arm64::Condition::NE,
+                })?;
+            }
         }
         Ok(())
     }
@@ -739,6 +761,29 @@ impl Emitter {
             }
             IRTerminator::Unreachable => {
                 self.emit_instruction(Instruction::MOV { rd: Register::XZR, rm: Register::XZR })?;
+            }
+            // Switch, Invoke, TailCall, and Resume are lowered by the
+            // control_flow module before reaching the emitter. If they
+            // appear here, it means the lowering pass was not run.
+            IRTerminator::Switch { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Switch terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::Invoke { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Invoke terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::TailCall { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "TailCall terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::Resume { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Resume terminator must be lowered before emission".to_string(),
+                ));
             }
         }
         Ok(())

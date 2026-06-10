@@ -39,22 +39,18 @@ use std::time::Instant;
 
 // ── Workspace crate imports ──────────────────────────────────────────────
 
-use vuma_parser::{Parser, AstToScg, Program as AstProgram, ParseError, Diagnostic, Span};
+use vuma_parser::{Parser, AstToScg, Program as AstProgram, ParseError};
 use vuma_scg::{
     SCG, NodeId, NodeData, NodeType, EdgeKind, EdgeData,
     ControlKind, AccessMode, NodePayload,
-    SCGError, ValidationResult,
     CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination,
     InliningPass, PassManager, PipelineResult as ScgPipelineResult,
-    SCGPass, VerificationPass,
 };
 use vuma_ive::{
-    InferenceEngine, VerificationEngine,
+    InferenceEngine,
     InvariantAggregator, VerificationLevel as IveVerificationLevel,
-    AggregatedResult, OverallVerdict, DiagnosticsReport,
-    InvariantDelta, InvariantKind,
+    AggregatedResult,
 };
-use vuma_bd::BD;
 use vuma_cor::{CORuntime, Config as CorConfig};
 use vuma_core::{
     MSG,
@@ -63,12 +59,12 @@ use vuma_core::{
 use vuma_codegen::{
     scg_to_ir::{IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
                 ScgStatement, ControlNode, AllocationNode, AccessNode,
-                CastNode, ComputationNode, CallNode, ScgExpr, ScgData,
+                CastNode, ComputationNode, CallNode, ScgExpr,
                 SwitchArm},
-    ir::{IRProgram, IRFunction, IRBlock, IRInstr, IRValue, BinOpKind as IrBinOpKind},
-    emit::{Emitter, EmitConfig, emit_elf, emit_raw, OutputFormat as EmitOutputFormat, Target as EmitTarget},
+    ir::{IRProgram, BinOpKind as IrBinOpKind},
+    emit::{EmitConfig, emit_elf},
     regalloc::{LinearScanAllocator, AllocationResult},
-    CodegenError, DataSectionKind, CastKind as CodegenCastKind,
+    CodegenError, CastKind as CodegenCastKind,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

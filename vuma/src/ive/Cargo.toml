@@ -9,3 +9,4 @@ vuma-scg = { path = "../scg" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 log = "0.4"
+hashbrown = { version = "0.14", features = ["serde"] }

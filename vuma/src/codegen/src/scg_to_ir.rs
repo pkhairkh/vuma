@@ -595,7 +595,7 @@ impl IRBuilder {
         };
 
         // Then block.
-        let entry_block_label = ir_func.current_block().label.clone();
+        let _entry_block_label = ir_func.current_block().label.clone();
         ir_func.append_block(&then_label);
 
         // Track variable definitions in the then-branch.
@@ -611,7 +611,7 @@ impl IRBuilder {
         }
 
         // Determine the then-branch's end-block label (for phi incoming edges).
-        let then_end_label = {
+        let _then_end_label = {
             // Walk backwards from current block to find the last block
             // that was finalized in the then-branch.
             // Simple approach: the label of the last block we're in.
@@ -629,7 +629,7 @@ impl IRBuilder {
         let then_exit_label = ir_func.current_block().label.clone();
 
         // Else block (optional).
-        let else_exit_label = if let Some(else_stmts) = else_body {
+        let _else_exit_label = if let Some(else_stmts) = else_body {
             // Restore names to pre-if state before lowering else.
             *names = names_before.clone();
 

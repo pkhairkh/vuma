@@ -1091,7 +1091,9 @@ impl<'a> IntoIterator for &'a VumaString {
 ///
 /// - CapD: { Read, Write, Hash }
 pub struct SipHasher13 {
+    #[allow(dead_code)] // keys stored for key-rotation and hasher introspection
     k0: u64,
+    #[allow(dead_code)] // keys stored for key-rotation and hasher introspection
     k1: u64,
     state: [u64; 2], // v0, v1 (v2 and v3 derived)
     v2: u64,

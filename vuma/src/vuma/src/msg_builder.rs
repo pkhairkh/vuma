@@ -850,7 +850,7 @@ impl MsgBuilder {
     /// edges and looking for nodes that produced derivations.
     fn find_source_derivation_for_node(
         &mut self,
-        node: &NodeData,
+        _node: &NodeData,
     ) -> Result<DerivationId, BuilderError> {
         // Strategy: walk the node_map to find a predecessor that has a
         // Derivation mapping. We check all previously-processed nodes
@@ -1135,7 +1135,7 @@ impl MsgBuilder {
             if let Some(mapping) = self.node_map.get(&node_id).copied() {
                 match mapping {
                     ScgNodeMapping::Region(rid) => {
-                        if let Some(region) = self.msg.remove_region(rid) {
+                        if let Some(_region) = self.msg.remove_region(rid) {
                             delta.region_changes.push(RegionChange::Removed(rid));
                             // Also remove all derivations sourced from this region.
                             self.remove_derivations_for_region(rid, &mut delta);
@@ -1144,7 +1144,7 @@ impl MsgBuilder {
                         }
                     }
                     ScgNodeMapping::Derivation(did) => {
-                        if let Some(deriv) = self.msg.remove_derivation(did) {
+                        if let Some(_deriv) = self.msg.remove_derivation(did) {
                             delta.derivation_changes.push(DerivationChange::Removed(did));
                             // Remove downstream derivations.
                             self.remove_downstream_derivations(did, &mut delta);
@@ -1183,7 +1183,7 @@ impl MsgBuilder {
         // new nodes considering the existing SCG edges.
         for &node_id in added_nodes {
             // Record the entity counts before processing so we can compute the delta.
-            let regions_before = self.msg.region_count();
+            let _regions_before = self.msg.region_count();
             let derivs_before = self.msg.derivation_count();
             let accesses_before = self.msg.access_count();
 

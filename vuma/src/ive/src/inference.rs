@@ -277,7 +277,7 @@ impl InferenceEngine {
 
     /// Run the 3-phase BD inference algorithm via vuma-bd.
     fn run_bd_inference(&self, scg: &SCG) -> Result<BdInferenceResult, vuma_bd::inference::InferenceError> {
-        let mut engine = BdEngineInner::new()
+        let engine = BdEngineInner::new()
             .with_max_iterations(self.max_iterations);
 
         if self.verbose {

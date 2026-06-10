@@ -669,7 +669,7 @@ impl InterpretationVerifier {
     ) -> Option<String> {
         match (write_repd, read_repd) {
             // Pointer → non-pointer (except Byte) is suspicious
-            (RepD::Ptr(write_pointee), RepD::Byte(_)) => None, // OK: reading as raw bytes
+            (RepD::Ptr(_write_pointee), RepD::Byte(_)) => None, // OK: reading as raw bytes
             (RepD::Ptr(_), read) if !matches!(read, RepD::Ptr(_)) => {
                 Some(format!(
                     "pointer written but read as {}",
@@ -1040,7 +1040,6 @@ pub fn empty_reld() -> RelD {
 
 /// Helper to create a RelD with specific relations.
 pub fn reld_with(relations: &[Relation]) -> RelD {
-    use hashbrown::HashSet;
     RelD {
         relations: relations.iter().cloned().collect(),
     }
@@ -1059,7 +1058,7 @@ pub fn make_bd(repd: RepD, capd: CapD, reld: RelD) -> BD {
 mod tests {
     use super::*;
     use vuma_bd::capd::Capability;
-    use vuma_bd::reld::{DepKind, FlowPolicy, TemporalKind};
+    use vuma_bd::reld::TemporalKind;
     use vuma_bd::repd::{PtrRep, StructRep};
 
     // -----------------------------------------------------------------------

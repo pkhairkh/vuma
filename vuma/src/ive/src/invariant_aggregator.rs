@@ -24,16 +24,12 @@
 //! [`Exhaustive`]: VerificationLevel::Exhaustive
 
 use crate::result::{
-    ConfidenceLevel, CounterExample, Evidence, ProofStep, VerificationResult, VerificationStatus,
+    ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus,
 };
 use crate::verification::{VerificationEngine, VerificationInput};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
-use vuma_bd::descriptor::BD;
-use vuma_scg::graph::SCG;
-use vuma_scg::node::NodeId;
 
 // ---------------------------------------------------------------------------
 // InvariantKind
@@ -746,6 +742,8 @@ fn invariant_index(kind: InvariantKind) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::result::CounterExample;
+    use vuma_scg::graph::SCG;
 
     #[test]
     fn invariant_kind_all_has_five() {
