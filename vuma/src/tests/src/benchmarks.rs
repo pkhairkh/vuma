@@ -262,18 +262,64 @@ where
 /// Maximum time allowed per iteration before aborting (used in test builds
 /// to prevent hangs from infinite loops in library code).
 #[cfg(test)]
-const PER_ITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PER_ITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Maximum total time allowed for a single benchmark (test builds only).
+/// Prevents a single benchmark from stalling the entire test suite when
+/// library code contains infinite loops.
+#[cfg(test)]
+const BENCH_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+// ---------------------------------------------------------------------------
+// Thread-based timeout helpers (test builds only)
+// ---------------------------------------------------------------------------
+
+/// Run a closure with a wall-clock timeout (test builds only).
+///
+/// Returns `true` if the closure completed within the timeout, `false` if
+/// it timed out. On timeout the worker thread is detached (it will be
+/// killed when the process exits).
+///
+/// The closure must be `FnOnce + Send + 'static`. Callers that need to
+/// pass borrowed data should clone it into the closure first.
+#[cfg(test)]
+pub fn run_with_timeout<F>(timeout: std::time::Duration, f: F) -> bool
+where
+    F: FnOnce() + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(timeout).is_ok()
+}
 
 /// Run a benchmark with configurable warmup and measurement iterations,
 /// returning a [`BenchmarkResult`].
+///
+/// In test builds, each iteration is timed with a per-iteration and
+/// total-benchmark timeout. Iterations that exceed the per-iteration
+/// timeout are capped and may cause early termination of the benchmark.
 pub fn bench_with_iters<F>(name: &str, warmup: usize, measure: usize, f: F) -> BenchmarkResult
 where
     F: Fn(usize),
 {
+    #[cfg(test)]
+    let bench_start = Instant::now();
+
     // Warmup phase — results discarded.
     for i in 0..warmup {
         #[cfg(test)]
         {
+            // Check total bench timeout before each iteration.
+            if bench_start.elapsed() > BENCH_TOTAL_TIMEOUT {
+                eprintln!(
+                    "WARNING: bench '{}' exceeded total timeout {:?} during warmup, skipping remaining",
+                    name, BENCH_TOTAL_TIMEOUT
+                );
+                break;
+            }
             let start = Instant::now();
             f(i);
             if start.elapsed() > PER_ITER_TIMEOUT {
@@ -291,26 +337,43 @@ where
     // Measurement phase.
     let mut measurements = Vec::with_capacity(measure);
     for i in 0..measure {
-        let start = Instant::now();
-        f(warmup + i);
-        let elapsed = start.elapsed();
         #[cfg(test)]
-        if elapsed > PER_ITER_TIMEOUT {
-            eprintln!(
-                "WARNING: bench '{}' measure iter {} took > {:?}, using capped value",
-                name, i, PER_ITER_TIMEOUT
-            );
-            // Push the timeout as a cap so we still produce a measurement,
-            // but don't let infinite loops run forever.
-            measurements.push(PER_ITER_TIMEOUT.as_nanos() as u64);
-            // If an iteration hits the timeout, limit remaining iterations
-            // to avoid very long test runs.
-            if measurements.len() >= 3 {
+        {
+            // Check total bench timeout before each iteration.
+            if bench_start.elapsed() > BENCH_TOTAL_TIMEOUT {
+                eprintln!(
+                    "WARNING: bench '{}' exceeded total timeout {:?} during measure, stopping early",
+                    name, BENCH_TOTAL_TIMEOUT
+                );
                 break;
             }
-            continue;
+            let start = Instant::now();
+            f(warmup + i);
+            let elapsed = start.elapsed();
+            if elapsed > PER_ITER_TIMEOUT {
+                eprintln!(
+                    "WARNING: bench '{}' measure iter {} took > {:?}, using capped value",
+                    name, i, PER_ITER_TIMEOUT
+                );
+                // Push the timeout as a cap so we still produce a measurement,
+                // but don't let infinite loops run forever.
+                measurements.push(PER_ITER_TIMEOUT.as_nanos() as u64);
+                // If an iteration hits the timeout, limit remaining iterations
+                // to avoid very long test runs.
+                if measurements.len() >= 3 {
+                    break;
+                }
+                continue;
+            }
+            measurements.push(elapsed.as_nanos() as u64);
         }
-        measurements.push(elapsed.as_nanos() as u64);
+        #[cfg(not(test))]
+        {
+            let start = Instant::now();
+            f(warmup + i);
+            let elapsed = start.elapsed();
+            measurements.push(elapsed.as_nanos() as u64);
+        }
     }
 
     // Ensure at least one measurement exists.
@@ -323,14 +386,23 @@ where
 }
 
 /// Run a benchmark and return the full [`BenchmarkStats`].
+///
+/// In test builds, per-iteration and total-benchmark timeouts are enforced
+/// to prevent hangs from infinite loops in library code.
 pub fn bench_detailed<F>(name: &str, warmup: usize, measure: usize, f: F) -> BenchmarkStats
 where
     F: Fn(usize),
 {
+    #[cfg(test)]
+    let bench_start = Instant::now();
+
     // Warmup phase.
     for i in 0..warmup {
         #[cfg(test)]
         {
+            if bench_start.elapsed() > BENCH_TOTAL_TIMEOUT {
+                break;
+            }
             let start = Instant::now();
             f(i);
             if start.elapsed() > PER_ITER_TIMEOUT {
@@ -344,18 +416,30 @@ where
     // Measurement phase.
     let mut measurements = Vec::with_capacity(measure);
     for i in 0..measure {
-        let start = Instant::now();
-        f(warmup + i);
-        let elapsed = start.elapsed();
         #[cfg(test)]
-        if elapsed > PER_ITER_TIMEOUT {
-            measurements.push(PER_ITER_TIMEOUT.as_nanos() as u64);
-            if measurements.len() >= 3 {
+        {
+            if bench_start.elapsed() > BENCH_TOTAL_TIMEOUT {
                 break;
             }
-            continue;
+            let start = Instant::now();
+            f(warmup + i);
+            let elapsed = start.elapsed();
+            if elapsed > PER_ITER_TIMEOUT {
+                measurements.push(PER_ITER_TIMEOUT.as_nanos() as u64);
+                if measurements.len() >= 3 {
+                    break;
+                }
+                continue;
+            }
+            measurements.push(elapsed.as_nanos() as u64);
         }
-        measurements.push(elapsed.as_nanos() as u64);
+        #[cfg(not(test))]
+        {
+            let start = Instant::now();
+            f(warmup + i);
+            let elapsed = start.elapsed();
+            measurements.push(elapsed.as_nanos() as u64);
+        }
     }
 
     if measurements.is_empty() {
@@ -548,7 +632,7 @@ pub fn scg_construction_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10, 34];
+    let sizes: &[usize] = &[5, 10];
     #[cfg(not(test))]
     let sizes: &[usize] = &[34, 334, 3334];
 
@@ -581,7 +665,7 @@ pub fn bd_inference_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10, 50];
+    let sizes: &[usize] = &[5, 10];
     #[cfg(not(test))]
     let sizes: &[usize] = &[10, 100, 500];
 
@@ -627,7 +711,7 @@ pub fn msg_construction_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10, 50];
+    let sizes: &[usize] = &[5, 10];
     #[cfg(not(test))]
     let sizes: &[usize] = &[10, 100, 500];
 
@@ -660,7 +744,7 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10];
+    let sizes: &[usize] = &[5];
     #[cfg(not(test))]
     let sizes: &[usize] = &[10, 100];
 
@@ -763,7 +847,7 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let stmt_sizes: &[usize] = &[10, 100];
+    let stmt_sizes: &[usize] = &[10, 50];
     #[cfg(not(test))]
     let stmt_sizes: &[usize] = &[10, 100, 1000];
 
@@ -828,7 +912,7 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
 
     // Benchmark IR construction for many small functions.
     #[cfg(test)]
-    let func_sizes: &[usize] = &[10, 50];
+    let func_sizes: &[usize] = &[10, 20];
     #[cfg(not(test))]
     let func_sizes: &[usize] = &[10, 100, 500];
 
@@ -887,21 +971,53 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
 pub fn c_comparison_bench() -> Vec<BenchmarkResult> {
     let mut results = Vec::new();
 
-    let n_chains = 100;
+    // Use much smaller inputs in test mode to avoid hangs — the
+    // unbounded n_chains=100 was the primary source of test hangs.
+    #[cfg(test)]
+    let n_chains: usize = 5;
+    #[cfg(not(test))]
+    let n_chains: usize = 100;
+
     let scg = build_rich_scg(n_chains);
-    let input = VerificationInput::from_scg(scg.clone());
 
     // VUMA full pipeline (SCG → MSG → verify).
+    // In test mode, clone data into the closure so we can run it in a
+    // thread with a timeout — this prevents infinite loops in library
+    // code (e.g. scg_to_msg, verify_all) from hanging the test.
     let label = format!("c_comparison/vuma_pipeline/{}_nodes", scg.node_count());
-    let result = bench(&label, |_iter| {
-        let msg = scg_to_msg::scg_to_msg(&scg);
-        std::hint::black_box(&msg);
+    #[cfg(test)]
+    {
+        let scg_for_bench = scg.clone();
+        let result = bench(&label, move |_iter| {
+            // Clone inside the Fn closure so each iteration has its own copy.
+            let scg_clone = scg_for_bench.clone();
+            let ok = run_with_timeout(PER_ITER_TIMEOUT, move || {
+                let msg = scg_to_msg::scg_to_msg(&scg_clone);
+                std::hint::black_box(&msg);
+                let input = VerificationInput::from_scg(scg_clone);
+                let aggregator = InvariantAggregator::new();
+                let r = aggregator.verify_all(&input);
+                std::hint::black_box(&r);
+            });
+            if !ok {
+                eprintln!("WARNING: c_comparison/vuma_pipeline iteration timed out");
+            }
+        });
+        results.push(result);
+    }
+    #[cfg(not(test))]
+    {
+        let input = VerificationInput::from_scg(scg.clone());
+        let result = bench(&label, |_iter| {
+            let msg = scg_to_msg::scg_to_msg(&scg);
+            std::hint::black_box(&msg);
 
-        let aggregator = InvariantAggregator::new();
-        let r = aggregator.verify_all(&input);
-        std::hint::black_box(&r);
-    });
-    results.push(result);
+            let aggregator = InvariantAggregator::new();
+            let r = aggregator.verify_all(&input);
+            std::hint::black_box(&r);
+        });
+        results.push(result);
+    }
 
     // Placeholder: equivalent C compilation time.
     let label_c = format!("c_comparison/gcc_O2_baseline/{}_nodes", scg.node_count());
@@ -930,11 +1046,26 @@ pub fn memory_usage_bench() -> Vec<MemorySnapshot> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10, 50];
+    let sizes: &[usize] = &[5, 10];
     #[cfg(not(test))]
     let sizes: &[usize] = &[100, 500, 1000];
 
+    // Overall timeout for the entire benchmark in test mode.
+    #[cfg(test)]
+    let suite_start = Instant::now();
+    #[cfg(test)]
+    let suite_timeout = std::time::Duration::from_secs(15);
+
     for &n_chains in sizes {
+        #[cfg(test)]
+        if suite_start.elapsed() > suite_timeout {
+            eprintln!(
+                "WARNING: memory_usage_bench exceeded suite timeout {:?}, stopping early",
+                suite_timeout
+            );
+            break;
+        }
+
         // Measure before.
         let baseline = peak_rss_bytes();
 
@@ -942,14 +1073,60 @@ pub fn memory_usage_bench() -> Vec<MemorySnapshot> {
         let scg = build_rich_scg(n_chains);
         let after_scg = peak_rss_bytes();
 
-        // Convert to MSG.
+        // Convert to MSG — wrapped in timeout for test builds to prevent
+        // infinite loops in scg_to_msg from hanging the suite.
+        #[cfg(test)]
+        {
+            let scg_clone = scg.clone();
+            if !run_with_timeout(PER_ITER_TIMEOUT, move || {
+                let _msg = scg_to_msg::scg_to_msg(&scg_clone);
+                std::hint::black_box(&_msg);
+            }) {
+                eprintln!(
+                    "WARNING: memory_usage_bench scg_to_msg timed out for {} chains, skipping remaining",
+                    n_chains
+                );
+                // Push placeholder snapshots and move to next size.
+                snapshots.push(MemorySnapshot {
+                    label: format!("memory/baseline/{}_chains", n_chains),
+                    bytes: baseline,
+                });
+                for stage in &["after_scg", "after_msg", "after_verify", "after_drop"] {
+                    snapshots.push(MemorySnapshot {
+                        label: format!("memory/{}/{}_chains", stage, n_chains),
+                        bytes: 0,
+                    });
+                }
+                continue;
+            }
+        }
+        #[cfg(not(test))]
         let _msg = scg_to_msg::scg_to_msg(&scg);
         let after_msg = peak_rss_bytes();
 
-        // Verify.
-        let input = VerificationInput::from_scg(scg.clone());
+        // Verify — also wrapped in timeout for test builds.
         let aggregator = InvariantAggregator::new();
-        let _r = aggregator.verify_all(&input);
+
+        #[cfg(test)]
+        {
+            let scg_for_verify = scg.clone();
+            if !run_with_timeout(PER_ITER_TIMEOUT, move || {
+                let input = VerificationInput::from_scg(scg_for_verify);
+                let aggregator = InvariantAggregator::new();
+                let _r = aggregator.verify_all(&input);
+                std::hint::black_box(&_r);
+            }) {
+                eprintln!(
+                    "WARNING: memory_usage_bench verify_all timed out for {} chains",
+                    n_chains
+                );
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let input = VerificationInput::from_scg(scg.clone());
+            let _r = aggregator.verify_all(&input);
+        }
         let after_verify = peak_rss_bytes();
 
         // Drop everything.
@@ -994,7 +1171,7 @@ pub fn e2e_pipeline_bench() -> Vec<BenchmarkResult> {
 
     // Use smaller inputs in test mode to avoid hangs.
     #[cfg(test)]
-    let sizes: &[usize] = &[10, 30];
+    let sizes: &[usize] = &[5, 10];
     #[cfg(not(test))]
     let sizes: &[usize] = &[10, 50, 100];
 

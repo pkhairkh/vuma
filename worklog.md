@@ -8842,3 +8842,88 @@ All IR instruction match arms were updated:
 ### Verification
 - `cargo clippy -p vuma-codegen -- -D warnings` — 0 warnings, 0 errors
 - `cargo test -p vuma-codegen` — 601 tests pass (5 new ISel tests + 596 existing)
+
+---
+
+Task ID: w15-v2
+Agent: Wave 15 Benchmark Hang Fix
+Task: Fix the benchmark tests that hang in the VUMA integration test crate
+
+Work Log:
+- Read benchmarks.rs (1404 lines) — identified all benchmark functions and test cases
+- Root causes of hangs identified:
+  1. `c_comparison_bench()` used hardcoded `n_chains = 100` with no `#[cfg(test)]` reduction — builds 600-node SCG and runs expensive library calls
+  2. `memory_usage_bench()` called `scg_to_msg::scg_to_msg()` and `aggregator.verify_all()` directly without any timeout protection
+  3. `bench_with_iters()` per-iteration timeout was only checked AFTER the closure returned — infinite loops inside library code would never trigger the timeout
+  4. Test-mode input sizes were still too large (10-50 chains), risking slow or hanging library calls
+  5. No total-benchmark timeout — a single slow benchmark could stall the entire test suite
+- Fixes applied:
+  1. Added `BENCH_TOTAL_TIMEOUT` (10s per benchmark in test mode) with `Instant::now()` elapsed-time checks between iterations in `bench_with_iters()` and `bench_detailed()`
+  2. Reduced `PER_ITER_TIMEOUT` from 5s to 2s in test mode
+  3. Added `run_with_timeout()` helper using `std::thread::spawn` + `mpsc::channel` + `recv_timeout` for thread-based timeout on `Send + 'static` closures
+  4. Fixed `c_comparison_bench()`: added `#[cfg(test)] n_chains = 5` (was unconditionally 100), and wrapped the VUMA pipeline call in `run_with_timeout()` using cloned data
+  5. Fixed `memory_usage_bench()`: reduced test sizes from [10,50] to [5,10], added 15s suite timeout with elapsed checks, wrapped `scg_to_msg` and `verify_all` in `run_with_timeout()`
+  6. Reduced all test-mode input sizes across all benchmarks:
+     - scg_construction: [10,34] → [5,10]
+     - bd_inference: [10,50] → [5,10]
+     - msg_construction: [10,50] → [5,10]
+     - ive_verification: [10] → [5]
+     - codegen stmt_sizes: [10,100] → [10,50]
+     - codegen func_sizes: [10,50] → [10,20]
+     - e2e_pipeline: [10,30] → [5,10]
+
+Files Modified:
+- src/tests/src/benchmarks.rs
+
+Verification:
+- `cargo check -p vuma-tests`: PASSED (0 errors)
+- `timeout 60 cargo test -p vuma-tests benchmarks -- --test-threads=1`: 19 tests passed in 0.18s
+
+Next Actions:
+- Monitor for any remaining hangs in CI with the 60-second external timeout
+- Consider adding `Clone` derive to `VerificationInput` to simplify timeout-wrapped code paths
+- If library infinite loops are found, fix them at the source rather than working around them with timeouts
+
+---
+
+Task ID: w4-ppc64-v3
+Agent: Wave 4 PPC64 ISel Implementation
+Task: Implement real instruction selection for the PowerPC64 backend
+
+Work Log:
+- Read ppc64.rs (2860+ lines) to understand existing structure: Gpr/Fpr/CrField enums, Instruction enum with encode(), PPC64Backend with allocate_registers()
+- Found that lower_ir_instr_ppc64() already had real instruction selection for most IR ops (Add→Add, Sub→Subf, Mul→Mulld, Div→Divd, And→And, Or→Or, Xor→Xor, Shl→Sld, ShrL→Srd, ShrA→Srad, comparisons→CMP+branch, Load→Ld, Store→Std, Ret→Bclr, Call→Bl, Alloc→STDU, Neg→Neg, Not→NOR)
+- Identified two key gaps: (1) Free and Phi both emitted NOP — Free should emit Trap, Phi correctly stays NOP; (2) operands were resolved via vreg_id()+map_vreg_to_gpr() which returns R0 for IRValue::Immediate — no immediate loading support
+- Created `load_immediate_ppc64(rd, val, out)` helper function with 5-tier strategy:
+  - [-32768, 32767]: li rd, val (single addi)
+  - [0, 65535]: ori rd, r0, val
+  - 0xXXXX0000: lis rd, upper16
+  - Other 32-bit: lis + ori
+  - Full 64-bit: lis + ori + rldicr(sldi 32) + oris + ori
+- Created `resolve_gpr_ppc64(val, reg_map, scratch, out)` helper function that handles all IRValue variants:
+  - Register: looks up in vreg_map
+  - Immediate: loads into scratch via load_immediate_ppc64
+  - Address: loads address into scratch
+  - Label: loads 0 as placeholder
+- Updated all match arms in lower_ir_instr_ppc64 to use resolve_gpr_ppc64 for source operands (BinOp, Add, Sub, Mul, Div, UnaryOp, Cmp, Load, Store, Cast, Select, Offset, CondBranch, Call, Ret)
+- Changed IRInstr::Free from emitting Instruction::Nop to Instruction::Trap (tw 31, r0, r0)
+- Split the Free|Phi combined match arm into separate arms: Free→Trap, Phi→Nop
+- Fixed trampoline's sldi32 encoding: was using incorrect MD-form layout (ME[5]=1 giving ME=63 instead of ME=31). Correctly encoded as rldicr rd, rd, 32, 31 with proper SH[0:4]/SH[5]/ME[0:4]/ME[5]/xo=2 fields
+- Fixed clippy warning: replaced `val >= -32768 && val <= 32767` with `(-32768..=32767).contains(&val)`
+- Added 9 new tests:
+  1. test_load_immediate_ppc64_small — verifies li for small values
+  2. test_load_immediate_ppc64_32bit — verifies lis+ori for 32-bit values
+  3. test_load_immediate_ppc64_64bit — verifies full lis+ori+rldicr+oris+ori sequence
+  4. test_resolve_gpr_ppc64_immediate — verifies immediate→scratch register
+  5. test_resolve_gpr_ppc64_register — verifies register→vreg_map lookup
+  6. test_isel_free_emits_trap — verifies Free emits Trap not NOP
+  7. test_isel_phi_emits_nop — verifies Phi emits NOP
+  8. test_load_immediate_ppc64_negative — verifies li for negative values
+  9. test_isel_binop_with_immediate — verifies BinOp::Add with immediate operand
+
+Files Modified:
+- src/codegen/src/ppc64.rs (all changes)
+
+Verification:
+- cargo clippy -p vuma-codegen -- -D warnings: 0 warnings, 0 errors
+- cargo test -p vuma-codegen: 610 passed, 0 failed
