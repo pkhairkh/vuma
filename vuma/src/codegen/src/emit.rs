@@ -213,6 +213,8 @@ pub struct EmitConfig {
     pub section_headers: bool,
     /// Include symbol table in the ELF output.
     pub symbol_table: bool,
+    /// Include DWARF5 debug info sections in the ELF output.
+    pub debug_info: bool,
 }
 
 impl EmitConfig {
@@ -225,6 +227,7 @@ impl EmitConfig {
             entry_name: "main".to_string(),
             section_headers: true,
             symbol_table: true,
+            debug_info: false,
         }
     }
 
@@ -237,6 +240,7 @@ impl EmitConfig {
             entry_name: "_start".to_string(),
             section_headers: false,
             symbol_table: false,
+            debug_info: false,
         }
     }
 
@@ -249,6 +253,7 @@ impl EmitConfig {
             entry_name: "_start".to_string(),
             section_headers: true,
             symbol_table: true,
+            debug_info: false,
         }
     }
 
@@ -261,6 +266,7 @@ impl EmitConfig {
             entry_name: String::new(),
             section_headers: true,
             symbol_table: true,
+            debug_info: false,
         }
     }
 
@@ -1274,6 +1280,23 @@ pub fn emit_elf(
         let mut sh = new_shdr(SHT_STRTAB, 0, 0, shstrtab_file_offset, shstrtab.len() as u64, 0, 0, 1, 0);
         sh.name = shstrtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
+    }
+
+    // ---- Step 16: Append DWARF5 debug sections if requested ----
+    if config.debug_info && config.section_headers {
+        let mut db = crate::dwarf::DwarfBuilder::new();
+        let source_file = config.entry_name.clone() + ".vuma";
+        db.add_compile_unit(
+            &source_file,
+            "vuma-codegen 0.1",
+        );
+        for func in functions {
+            let start = function_offsets.get(&func.name).copied().unwrap_or(0);
+            let size = function_sizes.get(&func.name).copied().unwrap_or(0);
+            db.add_subprogram(&func.name, start, start + size);
+        }
+        let sections = db.emit_debug_sections();
+        crate::dwarf::append_debug_sections_to_elf(&mut elf, &sections);
     }
 
     Ok(elf)

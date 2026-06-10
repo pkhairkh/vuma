@@ -202,8 +202,9 @@ impl ProofChecker {
                     };
 
                     // 4. Verify the conclusion matches what the rule produces.
-                    // We compare the *kind* and *statement* loosely — the id
-                    // may differ because the rule assigns a provisional id.
+                    // We compare statements for backward compatibility, and
+                    // also verify structured judgments match when both sides
+                    // have them.
                     if expected_conclusion.statement != conclusion.statement {
                         log::debug!(
                             "Step {}: rule {} produced '{}' but proof claims '{}'",
@@ -221,6 +222,33 @@ impl ProofChecker {
                                 conclusion.statement
                             ),
                         });
+                    }
+
+                    // 4b. When both the expected and actual conclusion carry
+                    //     structured judgments, verify they are structurally
+                    //     equal. This prevents a proof from claiming one
+                    //     judgment while the rule produces another with the
+                    //     same string representation.
+                    if let (Some(expected_j), Some(actual_j)) =
+                        (&expected_conclusion.judgment, &conclusion.judgment)
+                    {
+                        if expected_j != actual_j {
+                            log::debug!(
+                                "Step {}: judgment mismatch — rule produced {:?} but step claims {:?}",
+                                step_idx,
+                                expected_j,
+                                actual_j,
+                            );
+                            return Ok(CheckResult::Invalid {
+                                step: step_idx,
+                                reason: format!(
+                                    "judgment mismatch: rule {} produces judgment {:?} but step claims {:?}",
+                                    rule.name(),
+                                    expected_j,
+                                    actual_j
+                                ),
+                            });
+                        }
                     }
 
                     established.insert(conclusion.id);
@@ -574,5 +602,272 @@ mod tests {
         cache.insert(2, ProofResult::Failed("err".to_string()));
         assert_eq!(cache.len(), 2);
         assert!(cache.get(&1).unwrap().is_discharged());
+    }
+
+    // -- Structured judgment checker tests ------------------------------------
+
+    use crate::judgment::Judgment;
+
+    #[test]
+    fn test_structured_liveness_intro_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(1, Judgment::Allocated { region: "r1".into() }),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessIntro,
+            conclusion: Fact::derived_j(2, Judgment::Live { region: "r1".into() }),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_liveness_intro_judgment_mismatch() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(1, Judgment::Allocated { region: "r1".into() }),
+        });
+        // Claim the conclusion is Live for r2, but the rule will produce Live for r1
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessIntro,
+            conclusion: Fact::derived_j(2, Judgment::Live { region: "r2".into() }),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert!(matches!(result, CheckResult::Invalid { .. }));
+        if let CheckResult::Invalid { reason, .. } = result {
+            assert!(reason.contains("mismatch"));
+        }
+    }
+
+    #[test]
+    fn test_structured_derivation_transitivity_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Derived {
+                    pointer: "p_a".into(),
+                    from: "p_b".into(),
+                    region: "r1".into(),
+                },
+            ),
+        });
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                2,
+                Judgment::Derived {
+                    pointer: "p_b".into(),
+                    from: "p_c".into(),
+                    region: "r1".into(),
+                },
+            ),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1, 2],
+            rule: InferenceRule::DerivationTransitivity,
+            conclusion: Fact::derived_j(
+                3,
+                Judgment::Derived {
+                    pointer: "p_a".into(),
+                    from: "p_c".into(),
+                    region: "r1".into(),
+                },
+            ),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_temporal_ordering_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                1,
+                Judgment::TemporalOrder {
+                    event_a: "e1".into(),
+                    event_b: "e2".into(),
+                },
+            ),
+        });
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                2,
+                Judgment::TemporalOrder {
+                    event_a: "e2".into(),
+                    event_b: "e3".into(),
+                },
+            ),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1, 2],
+            rule: InferenceRule::TemporalOrdering,
+            conclusion: Fact::derived_j(
+                3,
+                Judgment::TemporalOrder {
+                    event_a: "e1".into(),
+                    event_b: "e3".into(),
+                },
+            ),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_exclusivity_elim_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Exclusive { resource: "region_A".into() },
+            ),
+        });
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                2,
+                Judgment::Exclusive { resource: "region_B".into() },
+            ),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1, 2],
+            rule: InferenceRule::ExclusivityElim,
+            conclusion: Fact::derived(3, "no conflict between region_A and region_B"),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_liveness_elim_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::checked_j(1, Judgment::Freed { region: "r5".into() }),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessElim,
+            conclusion: Fact::derived(2, "region r5 is dead"),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_wrong_rule_for_judgment() {
+        // Try to apply LivenessIntro to a Freed judgment — should fail.
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(1, Judgment::Freed { region: "r1".into() }),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessIntro,
+            conclusion: Fact::derived(2, "region r1 is live"),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert!(matches!(result, CheckResult::Invalid { .. }));
+        if let CheckResult::Invalid { reason, .. } = result {
+            assert!(reason.contains("rule application failed"));
+        }
+    }
+
+    #[test]
+    fn test_structured_bounds_preservation_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::derived_j(
+                1,
+                Judgment::InBounds {
+                    pointer: "ptr".into(),
+                    offset: 8,
+                    size: 4,
+                },
+            ),
+        });
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom(2, "region r1 has bounds [0, 1024]"),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1, 2],
+            rule: InferenceRule::BoundsPreservation,
+            conclusion: Fact::derived(
+                3,
+                "bounds preserved: inbounds ptr offset=8 size=4 ∧ region r1 has bounds [0, 1024]",
+            ),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_structured_exclusivity_intro_proof() {
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Exclusive { resource: "lock_L_region_R".into() },
+            ),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::ExclusivityIntro,
+            conclusion: Fact::derived_j(
+                2,
+                Judgment::Exclusive { resource: "lock_L_region_R".into() },
+            ),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
+    }
+
+    #[test]
+    fn test_mixed_structured_and_string_backward_compat() {
+        // A proof that uses string-based facts (no judgments) should still
+        // be valid after the refactoring.
+        let mut proof = Proof::new(dummy_goal());
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom(1, "region 1 is allocated"),
+        });
+        proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessIntro,
+            conclusion: Fact::derived(2, "region 1 is live"),
+        });
+        proof.conclude(Conclusion::Proven);
+
+        let checker = ProofChecker::new();
+        let result = checker.check(&proof).unwrap();
+        assert_eq!(result, CheckResult::Valid);
     }
 }

@@ -3063,4 +3063,36 @@ mod tests {
         assert!(opcodes.iter().any(|o| o.contains("i32.add")),
             "Expected i32.add in opcodes, got: {:?}", opcodes);
     }
+
+    // ── Disassembler Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_wasm32_disassemble_nop() {
+        let backend = Wasm32Backend::new();
+        let bytes = WasmInstr::Nop.to_bytes();
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_wasm32_disassemble_i32_const() {
+        let backend = Wasm32Backend::new();
+        let bytes = WasmInstr::I32Const(42).to_bytes();
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("i32.const"), "Expected i32.const, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_wasm32_disassemble_add_sub() {
+        let backend = Wasm32Backend::new();
+        let mut bytes = Vec::new();
+        WasmInstr::I32Add.encode(&mut bytes);
+        WasmInstr::I32Sub.encode(&mut bytes);
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("i32.add"), "Expected i32.add, got: {}", lines[0]);
+        assert!(lines[1].contains("i32.sub"), "Expected i32.sub, got: {}", lines[1]);
+    }
 }

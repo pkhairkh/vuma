@@ -137,6 +137,12 @@ impl std::fmt::Display for FactKind {
 }
 
 /// A fact within a proof — a logical statement together with its kind and id.
+///
+/// A fact optionally carries a structured [`Judgment`] that enables precise
+/// structural matching in inference rules. When `judgment` is `Some`, rules
+/// match on the typed judgment variant instead of performing fragile string
+/// comparison on `statement`. When `judgment` is `None`, the rule falls back
+/// to string-based matching for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fact {
     /// Unique identifier for this fact within the proof.
@@ -145,36 +151,77 @@ pub struct Fact {
     pub statement: String,
     /// How this fact was established.
     pub kind: FactKind,
+    /// Optional structured judgment for precise structural matching.
+    /// When present, inference rules match on the judgment variant
+    /// rather than performing string pattern matching.
+    #[serde(default)]
+    pub judgment: Option<super::judgment::Judgment>,
 }
 
 impl Fact {
-    /// Create a new fact.
+    /// Create a new fact without a structured judgment.
     pub fn new(id: FactId, statement: impl Into<String>, kind: FactKind) -> Self {
         Self {
             id,
             statement: statement.into(),
             kind,
+            judgment: None,
         }
     }
 
-    /// Convenience constructor for an axiom.
+    /// Create a new fact with a structured judgment.
+    ///
+    /// The `statement` field is populated from the judgment's `to_statement()`
+    /// method, ensuring consistency between the string and structured
+    /// representations.
+    pub fn with_judgment(id: FactId, judgment: super::judgment::Judgment, kind: FactKind) -> Self {
+        let stmt = judgment.to_statement();
+        Self {
+            id,
+            statement: stmt,
+            kind,
+            judgment: Some(judgment),
+        }
+    }
+
+    /// Convenience constructor for an axiom without a structured judgment.
     pub fn axiom(id: FactId, statement: impl Into<String>) -> Self {
         Self::new(id, statement, FactKind::Axiom)
     }
 
-    /// Convenience constructor for a derived fact.
+    /// Convenience constructor for an axiom with a structured judgment.
+    pub fn axiom_j(id: FactId, judgment: super::judgment::Judgment) -> Self {
+        Self::with_judgment(id, judgment, FactKind::Axiom)
+    }
+
+    /// Convenience constructor for a derived fact without a structured judgment.
     pub fn derived(id: FactId, statement: impl Into<String>) -> Self {
         Self::new(id, statement, FactKind::Derived)
     }
 
-    /// Convenience constructor for an assumption.
+    /// Convenience constructor for a derived fact with a structured judgment.
+    pub fn derived_j(id: FactId, judgment: super::judgment::Judgment) -> Self {
+        Self::with_judgment(id, judgment, FactKind::Derived)
+    }
+
+    /// Convenience constructor for an assumption without a structured judgment.
     pub fn assumption(id: FactId, statement: impl Into<String>) -> Self {
         Self::new(id, statement, FactKind::Assumption)
     }
 
-    /// Convenience constructor for a checked fact.
+    /// Convenience constructor for an assumption with a structured judgment.
+    pub fn assumption_j(id: FactId, judgment: super::judgment::Judgment) -> Self {
+        Self::with_judgment(id, judgment, FactKind::Assumption)
+    }
+
+    /// Convenience constructor for a checked fact without a structured judgment.
     pub fn checked(id: FactId, statement: impl Into<String>) -> Self {
         Self::new(id, statement, FactKind::Checked)
+    }
+
+    /// Convenience constructor for a checked fact with a structured judgment.
+    pub fn checked_j(id: FactId, judgment: super::judgment::Judgment) -> Self {
+        Self::with_judgment(id, judgment, FactKind::Checked)
     }
 }
 

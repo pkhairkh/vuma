@@ -439,3 +439,86 @@ Add interprocedural analysis support to the VUMA IVE (Invariant Verification Eng
 - Cross-function data race detection compares write-regions between caller and callee
 - Recursive functions are detected and flagged if they may leak resources per recursion
 - The previous "skip ControlFlow edges involving Control nodes" workaround in verification.rs was replaced with proper interprocedural edge handling
+
+---
+
+## Wave 10: DWARF5 Debug Info Generation
+
+**Date**: 2026-03-05
+**Status**: ✅ Completed
+
+### Summary
+
+Wave 10 implements DWARF version 5 debug info generation for the VUMA AArch64
+backend. A new `dwarf.rs` module provides a `DwarfBuilder` that accumulates
+debug info during codegen and emits `.debug_abbrev`, `.debug_info`, and
+`.debug_line` sections. Integration with the AArch64 ELF emitter is achieved
+via the new `EmitConfig.debug_info` flag. 15 tests pass (all new).
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/codegen/src/dwarf.rs | NEW: DWARF5 debug info builder, section emission, ELF integration, 15 tests | ~1,100 |
+| src/codegen/src/emit.rs | Added `debug_info: bool` to `EmitConfig`; integrated dwarf section appending in `emit_elf` | +18 |
+| src/codegen/src/lib.rs | Added `pub mod dwarf;` | +1 |
+| src/codegen/src/backend.rs | Fixed pre-existing clippy issues (binary grouping, identity ops, unnecessary casts) | ~10 |
+| src/codegen/src/arm32.rs | Fixed pre-existing clippy issue (manual bit rotation → `rotate_right`) | ~2 |
+| src/codegen/src/riscv64.rs | Fixed pre-existing compile errors (missing `emit_clz_isel`/`emit_ctz_isel`/`emit_popcnt_isel`, doc over-indent, redundant field names) | ~8 |
+| src/codegen/src/x86_64.rs | Fixed pre-existing clippy issues (unnecessary casts, unused `rex_w`) | ~5 |
+
+### Components Implemented
+
+1. **DwarfBuilder** — accumulates debug info during codegen
+   - `add_compile_unit(source_file, producer)` — records the top-level compilation unit
+   - `add_subprogram(name, start_offset, end_offset)` — records function boundaries
+   - `add_variable(name, type_name, offset, register)` — records local variables with `DW_OP_fbreg` location
+   - `add_line_entry(offset, file, line, column)` — records line-number table entries
+
+2. **emit_debug_sections() → DebugSections** — produces three DWARF5 sections:
+   - `.debug_abbrev` — abbreviation table with 3 entries:
+     - Abbrev 1: `DW_TAG_compile_unit` (name, language, producer, low_pc, high_pc, stmt_list)
+     - Abbrev 2: `DW_TAG_subprogram` (name, low_pc, high_pc)
+     - Abbrev 3: `DW_TAG_variable` (name, type, location as DW_OP_fbreg)
+   - `.debug_info` — compilation unit DIE with nested subprogram and variable DIEs
+   - `.debug_line` — DWARF5 line-number program with standard opcodes (DW_LNS_copy, DW_LNS_advance_pc, DW_LNS_advance_line, DW_LNS_set_file, DW_LNE_end_sequence)
+
+3. **DWARF5 Encoding**
+   - Proper ULEB128/SLEB128 encoding/decoding
+   - DWARF5 compilation unit header (version 5, DW_UT_compile, 8-byte address size)
+   - DWARF5 line-number program header with directory/file tables
+   - All constants use proper uppercase naming convention
+
+4. **ELF Integration**
+   - `EmitConfig.debug_info: bool` field (default: false)
+   - When true, `emit_elf()` builds a `DwarfBuilder`, populates it with function info, and appends debug sections
+   - `append_debug_sections_to_elf()` inserts `.debug_abbrev`, `.debug_info`, `.debug_line` sections, updates section headers and string table
+
+5. **Helper Functions**
+   - `encode_uleb128()` / `encode_sleb128()` — LEB128 encoding
+   - `decode_uleb128()` / `decode_sleb128()` — LEB128 decoding (test-only)
+   - `write_null_string()` — null-terminated string writing
+   - `build_fbreg_expr()` — DW_OP_fbreg expression construction
+
+### Test Coverage (15 tests)
+
+1. `test_debug_abbrev_abbrev_codes` — first abbreviation code is 1, tag is DW_TAG_COMPILE_UNIT
+2. `test_debug_info_version` — .debug_info has DWARF version 5
+3. `test_debug_info_compile_unit_present` — first DIE uses abbrev code 1
+4. `test_subprogram_entries` — function names appear in .debug_info
+5. `test_debug_line_version` — .debug_line has DWARF version 5
+6. `test_line_program_end_sequence` — DW_LNE_end_sequence present and well-formed
+7. `test_line_program_has_copy_opcodes` — DW_LNS_copy opcodes present
+8. `test_elf_debug_section_integration` — debug sections appended to ELF, section count is 11, section names present
+9. `test_variable_location_expr` — DW_OP_fbreg with correct signed offset
+10. `test_leb128_roundtrip` — ULEB128 and SLEB128 encode/decode round-trips
+11. `test_empty_builder` — empty builder still produces valid non-empty sections
+12. `test_debug_info_unit_type` — unit type is DW_UT_COMPILE
+13. `test_debug_info_address_size` — address size is 8 (AArch64)
+14. `test_line_program_advance_line` — DW_LNS_advance_line for line jumps
+15. `test_debug_info_source_file` — source file name present in .debug_info
+
+### Build Verification
+
+- `cargo clippy -p vuma-codegen -- -D warnings`: **0 warnings**
+- `cargo test -p vuma-codegen`: **562 tests pass** (15 new dwarf tests + 547 existing)

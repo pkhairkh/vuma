@@ -1498,6 +1498,127 @@ fn arm32_compute_frame_size(func: &IRFunction) -> usize {
     (total + 7) & !7
 }
 
+// ===========================================================================
+// ARM32 Mnemonic Decoder
+// ===========================================================================
+
+/// Decode a 32-bit ARM instruction word into a human-readable mnemonic.
+///
+/// Covers data processing (ADD, SUB, AND, ORR, EOR, MOV, CMP, etc.),
+/// load/store, branch, multiply, and system instructions.
+fn decode_arm32(word: u32) -> String {
+    let cond = (word >> 28) & 0xF;
+    let cond_str = match cond {
+        0b0000 => "eq", 0b0001 => "ne", 0b0010 => "cs", 0b0011 => "cc",
+        0b0100 => "mi", 0b0101 => "pl", 0b0110 => "vs", 0b0111 => "vc",
+        0b1000 => "hi", 0b1001 => "ls", 0b1010 => "ge", 0b1011 => "lt",
+        0b1100 => "gt", 0b1101 => "le", 0b1110 => "", 0b1111 => "nv",
+        _ => "??",
+    };
+    let cond_suffix = if cond_str.is_empty() { String::new() } else { format!(".{}", cond_str) };
+
+    let bits27_26 = (word >> 26) & 0x3;
+    let i_bit = (word >> 25) & 1;
+    let opcode = (word >> 21) & 0xF;
+    let s_bit = (word >> 20) & 1;
+    let rn = (word >> 16) & 0xF;
+    let rd = (word >> 12) & 0xF;
+    let rm = word & 0xF;
+    let shift_imm = (word >> 7) & 0x1F;
+    let shift_type = (word >> 5) & 0x3;
+    let rotate = (word >> 8) & 0xF;
+    let imm8 = word & 0xFF;
+    let imm12 = word & 0xFFF;
+
+    match bits27_26 {
+        // Data processing
+        0b00 => {
+            if i_bit == 1 {
+                // Immediate operand2
+                let expanded = rotate_right(imm8, rotate * 2);
+                match opcode {
+                    0b0000 => format!("and{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b0001 => format!("eor{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b0010 => format!("sub{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b0011 => format!("rsb{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b0100 => format!("add{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b1000 => format!("tst{} r{}, #{}", cond_suffix, rn, expanded),
+                    0b1001 => format!("teq{} r{}, #{}", cond_suffix, rn, expanded),
+                    0b1010 => format!("cmp{} r{}, #{}", cond_suffix, rn, expanded),
+                    0b1011 => format!("cmn{} r{}, #{}", cond_suffix, rn, expanded),
+                    0b1100 => format!("orr{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b1101 => format!("mov{} r{}, #{}", cond_suffix, rd, expanded),
+                    0b1110 => format!("bic{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                    0b1111 => format!("mvn{} r{}, #{}", cond_suffix, rd, expanded),
+                    _ => format!(".word {:08x}", word),
+                }
+            } else {
+                // Register operand2
+                let shift_str = if shift_imm == 0 && shift_type == 0 {
+                    String::new()
+                } else {
+                    let st = match shift_type {
+                        0 => "lsl", 1 => "lsr", 2 => "asr", 3 => "ror", _ => "???",
+                    };
+                    format!(", {} #{}", st, shift_imm)
+                };
+                match opcode {
+                    0b0000 => format!("and{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b0001 => format!("eor{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b0010 => format!("sub{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b0011 => format!("rsb{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b0100 => format!("add{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b1000 if s_bit == 1 && rd == 0 => format!("tst{} r{}, r{}{}", cond_suffix, rn, rm, shift_str),
+                    0b1001 if s_bit == 1 && rd == 0 => format!("teq{} r{}, r{}{}", cond_suffix, rn, rm, shift_str),
+                    0b1010 if s_bit == 1 && rd == 0 => format!("cmp{} r{}, r{}{}", cond_suffix, rn, rm, shift_str),
+                    0b1011 if s_bit == 1 && rd == 0 => format!("cmn{} r{}, r{}{}", cond_suffix, rn, rm, shift_str),
+                    0b1100 => format!("orr{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b1101 if rn == 0 => format!("mov{} r{}, r{}{}", cond_suffix, rd, rm, shift_str),
+                    0b1110 => format!("bic{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                    0b1111 if rn == 0 => format!("mvn{} r{}, r{}{}", cond_suffix, rd, rm, shift_str),
+                    _ => format!(".word {:08x}", word),
+                }
+            }
+        }
+        // Load/Store word/byte
+        0b01 => {
+            let l_bit = (word >> 20) & 1;
+            let b_bit = (word >> 22) & 1;
+            let u_bit = (word >> 23) & 1;
+            let offset_val = imm12;
+            let off_str = if u_bit == 1 { format!("#{}", offset_val) } else { format!("#-{}", offset_val) };
+            if l_bit == 1 {
+                if b_bit == 1 {
+                    format!("ldrb{} r{}, [r{}, {}]", cond_suffix, rd, rn, off_str)
+                } else {
+                    format!("ldr{} r{}, [r{}, {}]", cond_suffix, rd, rn, off_str)
+                }
+            } else if b_bit == 1 {
+                format!("strb{} r{}, [r{}, {}]", cond_suffix, rd, rn, off_str)
+            } else {
+                format!("str{} r{}, [r{}, {}]", cond_suffix, rd, rn, off_str)
+            }
+        }
+        // Branch
+        0b10 => {
+            let l_bit = (word >> 24) & 1;
+            let imm24 = word & 0x00FFFFFF;
+            let offset = ((imm24 as i32) << 8) >> 6; // sign-extend and *4
+            if l_bit == 1 {
+                format!("bl{} {:+}", cond_suffix, offset)
+            } else {
+                format!("b{} {:+}", cond_suffix, offset)
+            }
+        }
+        _ => format!(".word {:08x}", word),
+    }
+}
+
+/// Rotate right a value by the specified amount.
+fn rotate_right(val: u32, shift: u32) -> u32 {
+    val.rotate_right(shift)
+}
+
 impl Backend for Arm32Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
@@ -1711,7 +1832,7 @@ impl Backend for Arm32Backend {
     }
 
     fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
-        // Simple hex-based disassembler for ARM32 (4-byte fixed-width instructions).
+        // Mnemonic decoder for ARM32 (4-byte fixed-width instructions).
         let mut lines = Vec::new();
         let mut offset = 0usize;
         let mut pc = addr;
@@ -1722,28 +1843,8 @@ impl Backend for Arm32Backend {
                 bytes[offset + 2],
                 bytes[offset + 3],
             ]);
-            // Extract condition code
-            let cond = (word >> 28) & 0xF;
-            let cond_str = match cond {
-                0b0000 => "eq",
-                0b0001 => "ne",
-                0b0010 => "cs",
-                0b0011 => "cc",
-                0b0100 => "mi",
-                0b0101 => "pl",
-                0b0110 => "vs",
-                0b0111 => "vc",
-                0b1000 => "hi",
-                0b1001 => "ls",
-                0b1010 => "ge",
-                0b1011 => "lt",
-                0b1100 => "gt",
-                0b1101 => "le",
-                0b1110 => "",
-                0b1111 => "nv",
-                _ => "??",
-            };
-            lines.push(format!("{:#010x}:  {:08x}  ({})", pc, word, cond_str));
+            let mnemonic = decode_arm32(word);
+            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
             offset += 4;
             pc += 4;
         }

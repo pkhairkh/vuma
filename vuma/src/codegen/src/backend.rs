@@ -709,6 +709,184 @@ impl TargetInfo for PowerPC64TargetInfo {
 }
 
 // ---------------------------------------------------------------------------
+// AArch64 Mnemonic Decoder
+// ---------------------------------------------------------------------------
+
+/// Decode a 32-bit AArch64 instruction word into a human-readable mnemonic.
+///
+/// Covers the most common AArch64 instructions: ADD, SUB, MOV, LDR, STR, B,
+/// BL, RET, CMP, B.cond, STP, LDP, NOP, MUL, SDIV, UDIV, AND, ORR, EOR,
+/// plus several additional frequently-encountered encodings.
+fn decode_aarch64(word: u32) -> String {
+    let rd = word & 0x1F;
+    let rn = (word >> 5) & 0x1F;
+    let rt = rd; // alias for load/store destination
+    let rm = (word >> 16) & 0x1F;
+    let imm12 = (word >> 10) & 0xFFF;
+    let cond = word & 0xF;
+
+    // NOP: d503201f
+    if word == 0xD503201F {
+        return "nop".to_string();
+    }
+
+    // RET: d65f03c0
+    if word == 0xD65F03C0 {
+        return "ret".to_string();
+    }
+
+    let _top8 = word >> 24;
+    let _top10 = word >> 22;
+
+    // --- ADD/SUB (immediate): 100100xx ...
+    if (word >> 23) & 0x1FF == 0b1_0010_0010 {
+        // ADD Xd, Xn, #imm12
+        return format!("add x{}, x{}, #{}", rd, rn, imm12);
+    }
+    if (word >> 23) & 0x1FF == 0b1_1010_0010 {
+        // SUB Xd, Xn, #imm12
+        return format!("sub x{}, x{}, #{}", rd, rn, imm12);
+    }
+
+    // --- ADD (shifted register): 1_00_0101_1_xxx ...
+    if (word >> 24) & 0xFF == 0b1000_1011 {
+        // ADD Xd, Xn, Xm
+        return format!("add x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- SUB (shifted register): 1_00_0101_1_xxx ... with S=1 at bit30
+    if (word >> 24) & 0xFF == 0b1101_0110 {
+        // SUB Xd, Xn, Xm (bit 30 set = sub)
+        return format!("sub x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- AND (shifted register): 1_00_0101_0_00_xxx
+    if (word >> 24) & 0xFE == 0b1000_1010 {
+        // Check bit 21-15: opcode[31:21] = 10001010_000
+        if (word >> 21) & 0x7FF == 0b10001010000 {
+            return format!("and x{}, x{}, x{}", rd, rn, rm);
+        }
+    }
+
+    // --- ORR (shifted register): 1_01_0101_0_00_xxx
+    if (word >> 21) & 0x7FF == 0b10101010000 {
+        return format!("orr x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- EOR (shifted register): 1_10_0101_0_00_xxx
+    if (word >> 21) & 0x7FF == 0b11001010000 {
+        return format!("eor x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- MOV (register): alias for ORR Xd, XZR, Xm
+    // ORR Xd, XZR, Xm: 10101010_000_rm_000000_xzr_rd
+    // More general: ORR with Rn=XZR(31)
+    if (word >> 21) & 0x7FF == 0b10101010000 && rn == 31 {
+        return format!("mov x{}, x{}", rd, rm);
+    }
+
+    // --- MUL: MADD Xd, Xn, Xm, XZR
+    // Encoding: 1_00_1101_1_000_Rm_0_01111_Rn_Rd
+    if (word >> 21) & 0x7FF == 0b10011011000 && ((word >> 10) & 0x1F) == 0b01111 {
+        return format!("mul x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- SDIV: 1_00_1101_1_0100_00000_00001_Rn_Rd  (actually 1_00_1101_0100_Rm_00001_Rn_Rd)
+    if (word >> 21) & 0x7FF == 0b10011010100 && (word >> 10) & 0x1F == 0b00001 {
+        return format!("sdiv x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- UDIV: 1_00_1101_0000_Rm_00001_Rn_Rd
+    if (word >> 21) & 0x7FF == 0b10011010000 && (word >> 10) & 0x1F == 0b00001 {
+        return format!("udiv x{}, x{}, x{}", rd, rn, rm);
+    }
+
+    // --- CMP (immediate): SUBS XZR, Xn, #imm12
+    // 11100001_00_xxx_xxx_xxx_xxx_xxx_11111_xxx
+    if (word >> 23) & 0x1FF == 0b1_1110_0010 && rd == 31 {
+        return format!("cmp x{}, #{}", rn, imm12);
+    }
+
+    // --- CMP (register): SUBS XZR, Xn, Xm
+    if (word >> 21) & 0x7FF == 0b11101011000 && rd == 31 {
+        return format!("cmp x{}, x{}", rn, rm);
+    }
+
+    // --- B.cond: 0101010x xxxxxxxxxx xxxxxx cond
+    if (word >> 24) & 0xFF == 0x54 {
+        let cond_name = match cond {
+            0 => "eq", 1 => "ne", 2 => "cs", 3 => "cc",
+            4 => "mi", 5 => "pl", 6 => "vs", 7 => "vc",
+            8 => "hi", 9 => "ls", 10 => "ge", 11 => "lt",
+            12 => "gt", 13 => "le", 14 => "al", _ => "??",
+        };
+        let imm19 = (word >> 5) & 0x7FFFF;
+        let offset = ((imm19 as i32) << 13) >> 11; // sign-extend and *4
+        return format!("b.{} {:+}", cond_name, offset);
+    }
+
+    // --- B (unconditional): 000101xx xxxxxxxxxxxxxxxxxxxx
+    if (word >> 26) & 0x3F == 0b000101 {
+        let imm26 = word & 0x3FFFFFF;
+        let offset = ((imm26 as i32) << 6) >> 4; // sign-extend and *4
+        return format!("b {:+}", offset);
+    }
+
+    // --- BL: 100101xx xxxxxxxxxxxxxxxxxxxx
+    if (word >> 26) & 0x3F == 0b100101 {
+        let imm26 = word & 0x3FFFFFF;
+        let offset = ((imm26 as i32) << 6) >> 4;
+        return format!("bl {:+}", offset);
+    }
+
+    // --- LDR (unsigned offset): 11111001_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+    if (word >> 22) & 0x3FF == 0b1111100101 {
+        let imm12_raw = (word >> 10) & 0xFFF;
+        let offset = imm12_raw * 8; // scale by 8 for 64-bit
+        return format!("ldr x{}, [x{}, #{}]", rt, rn, offset);
+    }
+
+    // --- STR (unsigned offset): 11111000_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+    if (word >> 22) & 0x3FF == 0b1111100001 {
+        let imm12_raw = (word >> 10) & 0xFFF;
+        let offset = imm12_raw * 8;
+        return format!("str x{}, [x{}, #{}]", rt, rn, offset);
+    }
+
+    // --- LDP (signed offset, 64-bit): 101_0100_110_xxx_xxx_xxx_xxx_xxx_xn_rt2
+    if (word >> 22) & 0x3FF == 0b1010100110 {
+        let rt2 = (word >> 10) & 0x1F;
+        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+        let offset = imm7 * 8;
+        return format!("ldp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+    }
+
+    // --- STP (signed offset, 64-bit): 101_0100_010_xxx_xxx_xxx_xxx_xxx_xn_rt2
+    if (word >> 22) & 0x3FF == 0b1010100010 {
+        let rt2 = (word >> 10) & 0x1F;
+        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+        let offset = imm7 * 8;
+        return format!("stp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+    }
+
+    // --- MOVZ: 110100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+    if (word >> 23) & 0x1FF == 0b110100101 {
+        let hw = (word >> 21) & 0x3;
+        let imm16 = (word >> 5) & 0xFFFF;
+        return format!("movz x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+    }
+
+    // --- MOVK: 111100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+    if (word >> 23) & 0x1FF == 0b111100101 {
+        let hw = (word >> 21) & 0x3;
+        let imm16 = (word >> 5) & 0xFFFF;
+        return format!("movk x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+    }
+
+    format!(".word {:08x}", word)
+}
+
+// ---------------------------------------------------------------------------
 // AArch64 Backend implementation
 // ---------------------------------------------------------------------------
 
@@ -899,8 +1077,7 @@ impl Backend for AArch64Backend {
     }
 
     fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
-        // Simple hex-based disassembler for ARM64 (4-byte fixed-width instructions).
-        // A full mnemonic decoder can be added in a future wave.
+        // Mnemonic decoder for AArch64 (4-byte fixed-width instructions).
         let mut lines = Vec::new();
         let mut offset = 0usize;
         let mut pc = addr;
@@ -911,11 +1088,11 @@ impl Backend for AArch64Backend {
                 bytes[offset + 2],
                 bytes[offset + 3],
             ]);
-            lines.push(format!("{:#010x}:  {:08x}", pc, word));
+            let mnemonic = decode_aarch64(word);
+            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
             offset += 4;
             pc += 4;
         }
-        // Handle trailing bytes (shouldn't happen for well-formed ARM64 code)
         if offset < bytes.len() {
             let remaining = &bytes[offset..];
             lines.push(format!("{:#010x}:  {:02x?}", pc, remaining));
@@ -1170,6 +1347,39 @@ mod tests {
     #[test]
     fn test_output_format_variants() {
         assert_ne!(OutputFormat::Elf64, OutputFormat::WasmBinary);
+    }
+
+    #[test]
+    fn test_aarch64_disassemble_nop() {
+        let backend = AArch64Backend::new();
+        // NOP = 0xD503201F
+        let bytes: Vec<u8> = 0xD503201Fu32.to_le_bytes().to_vec();
+        let lines = backend.disassemble(&bytes, 0x1000);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_aarch64_disassemble_ret() {
+        let backend = AArch64Backend::new();
+        // RET = 0xD65F03C0
+        let bytes: Vec<u8> = 0xD65F03C0u32.to_le_bytes().to_vec();
+        let lines = backend.disassemble(&bytes, 0x2000);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ret"), "Expected ret, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_aarch64_disassemble_add_imm() {
+        let backend = AArch64Backend::new();
+        // ADD X0, X1, #42: 0x9100A820
+        use crate::arm64::{Instruction, Operand, Register};
+        let instr = Instruction::ADD { rd: Register::X0, rn: Register::X1, rm: Operand::Imm12(42) };
+        let encoded = instr.encode().unwrap();
+        let bytes: Vec<u8> = encoded.to_le_bytes().to_vec();
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub mod arm32;
 pub mod arm64;
 pub mod backend;
 pub mod control_flow;
+pub mod dwarf;
 pub mod emit;
 pub mod ir;
 pub mod loongarch64;

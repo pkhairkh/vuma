@@ -837,16 +837,15 @@ pub fn encode_add_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
 }
 
 // ===========================================================================
-// Simple x86_64 Disassembler (byte-level)
+// x86_64 Mnemonic Disassembler
 // ===========================================================================
 
-/// Disassemble x86_64 bytes into hex-dump lines.
+/// Decode x86_64 bytes into mnemonic strings with (offset, mnemonic) pairs.
 ///
-/// Since x86_64 has variable-length instructions, a full disassembler would
-/// need to decode each instruction. This implementation provides a simple
-/// hex dump with a reasonable attempt at instruction boundary detection
-/// based on known opcode patterns.
-fn disassemble_x86_64(bytes: &[u8], addr: u64) -> Vec<String> {
+/// Handles the top 20+ most common x86_64 instructions including mov, add, sub,
+/// push, pop, call, ret, jmp, cmp, test, lea, xor, and, or, shl, shr, nop,
+/// mul, div, imul.
+fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
     let mut lines = Vec::new();
     let mut offset = 0usize;
     let mut pc = addr;
@@ -854,125 +853,337 @@ fn disassemble_x86_64(bytes: &[u8], addr: u64) -> Vec<String> {
     while offset < bytes.len() {
         let start = offset;
         let start_pc = pc;
+        let mut pos = offset;
 
-        // Simple length estimation based on opcode byte patterns
-        let len = estimate_instruction_length(bytes, offset);
-        let end = (offset + len).min(bytes.len());
+        // Skip legacy prefixes
+        while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
+            pos += 1;
+        }
 
-        let hex_bytes: Vec<String> = bytes[start..end]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        lines.push(format!("{:#010x}:  {}", start_pc, hex_bytes.join(" ")));
+        // REX prefix
+        let mut rex = 0u8;
+        let mut _rex_w = false;
+        let mut rex_r = false;
+        let mut rex_b = false;
+        if pos < bytes.len() && bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
+            rex = bytes[pos];
+            _rex_w = (rex & 0x08) != 0;
+            rex_r = (rex & 0x04) != 0;
+            rex_b = (rex & 0x01) != 0;
+            pos += 1;
+        }
+
+        if pos >= bytes.len() {
+            let end = pos.min(bytes.len());
+            let hex_bytes: Vec<String> = bytes[start..end].iter().map(|b| format!("{:02x}", b)).collect();
+            lines.push(format!("{:#010x}:  {}", start_pc, hex_bytes.join(" ")));
+            offset = end;
+            pc = start_pc + (end - start) as u64;
+            continue;
+        }
+
+        let opcode = bytes[pos];
+        pos += 1;
+
+        let mnemonic = match opcode {
+            // NOP
+            0x90 => "nop".to_string(),
+
+            // RET
+            0xC3 => "ret".to_string(),
+
+            // INT3
+            0xCC => "int3".to_string(),
+
+            // PUSH r64
+            0x50..=0x57 => {
+                let reg_idx = (opcode - 0x50) | (if rex_b { 8 } else { 0 });
+                format!("push {}", gpr_name_64(reg_idx))
+            }
+
+            // POP r64
+            0x58..=0x5F => {
+                let reg_idx = (opcode - 0x58) | (if rex_b { 8 } else { 0 });
+                format!("pop {}", gpr_name_64(reg_idx))
+            }
+
+            // MOV r64, imm64 (B8+rd)
+            0xB8..=0xBF => {
+                let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
+                if pos + 8 <= bytes.len() {
+                    let imm = u64::from_le_bytes(bytes[pos..pos+8].try_into().unwrap_or([0;8]));
+                    pos += 8;
+                    format!("mov {}, {:#x}", gpr_name_64(reg_idx), imm)
+                } else {
+                    pos = bytes.len();
+                    format!("mov {}, ???", gpr_name_64(reg_idx))
+                }
+            }
+
+            // JMP rel32
+            0xE9 => {
+                if pos + 4 <= bytes.len() {
+                    let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    pos += 4;
+                    format!("jmp {:#x}", (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                } else {
+                    pos = bytes.len();
+                    "jmp ???".to_string()
+                }
+            }
+
+            // CALL rel32
+            0xE8 => {
+                if pos + 4 <= bytes.len() {
+                    let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    pos += 4;
+                    format!("call {:#x}", (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                } else {
+                    pos = bytes.len();
+                    "call ???".to_string()
+                }
+            }
+
+            // Two-byte opcode (0F xx)
+            0x0F => {
+                if pos >= bytes.len() {
+                    "0f ???".to_string()
+                } else {
+                    let op2 = bytes[pos];
+                    pos += 1;
+                    match op2 {
+                        // SYSCALL
+                        0x05 => "syscall".to_string(),
+                        // IMUL r64, r64
+                        0xAF => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
+                        }
+                        // Jcc rel32
+                        0x80..=0x8F => {
+                            let cc_name = match op2 & 0xF {
+                                0 => "jo", 1 => "jno", 2 => "jb", 3 => "jae",
+                                4 => "je", 5 => "jne", 6 => "jbe", 7 => "ja",
+                                8 => "js", 9 => "jns", 0xA => "jp", 0xB => "jnp",
+                                0xC => "jl", 0xD => "jge", 0xE => "jle", 0xF => "jg",
+                                _ => "j??",
+                            };
+                            if pos + 4 <= bytes.len() {
+                                let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                                pos += 4;
+                                format!("{} {:#x}", cc_name, (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                            } else {
+                                pos = bytes.len();
+                                format!("{} ???", cc_name)
+                            }
+                        }
+                        // MOVZX r64, r8
+                        0xB6 => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            format!("movzx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+                        }
+                        // MOVZX r64, r16
+                        0xB7 => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            format!("movzx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+                        }
+                        // MOVSX r64, r8
+                        0xBE => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            format!("movsx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+                        }
+                        // MOVSX r64, r16
+                        0xBF => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            format!("movsx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+                        }
+                        // SETcc r/m8
+                        0x90..=0x9F => {
+                            let (_, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
+                            pos = new_pos;
+                            let cc_name = match op2 & 0xF {
+                                0 => "seto", 1 => "setno", 2 => "setb", 3 => "setae",
+                                4 => "sete", 5 => "setne", 6 => "setbe", 7 => "seta",
+                                8 => "sets", 9 => "setns", 0xA => "setp", 0xB => "setnp",
+                                0xC => "setl", 0xD => "setge", 0xE => "setle", 0xF => "setg",
+                                _ => "set??",
+                            };
+                            format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
+                        }
+                        // CMOVcc r64, r64
+                        0x40..=0x4F => {
+                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                            pos = new_pos;
+                            let cc_name = match op2 & 0xF {
+                                0 => "cmovo", 1 => "cmovno", 2 => "cmovb", 3 => "cmovae",
+                                4 => "cmove", 5 => "cmovne", 6 => "cmovbe", 7 => "cmova",
+                                8 => "cmovs", 9 => "cmovns", 0xA => "cmovp", 0xB => "cmovnp",
+                                0xC => "cmovl", 0xD => "cmovge", 0xE => "cmovle", 0xF => "cmovg",
+                                _ => "cmov??",
+                            };
+                            format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
+                        }
+                        _ => format!("0f {:02x}", op2),
+                    }
+                }
+            }
+
+            // ALU reg-reg opcodes (with ModR/M byte)
+            0x01 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x03 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x09 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x0B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x21 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x23 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x29 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x2B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x31 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x33 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x39 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x3B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x85 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x87 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x89 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
+            0x8B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x8D => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm)) }
+            0x63 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+
+            // F7 /x (NEG, NOT, MUL, DIV, IDIV)
+            0xF7 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                match r {
+                    2 => format!("not {}", gpr_name_64(rm)),
+                    3 => format!("neg {}", gpr_name_64(rm)),
+                    4 => format!("mul {}", gpr_name_64(rm)),
+                    6 => format!("div {}", gpr_name_64(rm)),
+                    7 => format!("idiv {}", gpr_name_64(rm)),
+                    _ => format!("f7 /{}, {}", r, gpr_name_64(rm)),
+                }
+            }
+
+            // D3 /x (shift by CL)
+            0xD3 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                match r {
+                    4 => format!("shl {}, cl", gpr_name_64(rm)),
+                    5 => format!("shr {}, cl", gpr_name_64(rm)),
+                    7 => format!("sar {}, cl", gpr_name_64(rm)),
+                    _ => format!("d3 /{}, {}", r, gpr_name_64(rm)),
+                }
+            }
+
+            // C7 /0 + imm32 (MOV r/m64, imm32)
+            0xC7 => {
+                let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                if pos + 4 <= bytes.len() {
+                    let imm = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    pos += 4;
+                    format!("mov {}, {}", gpr_name_64(rm), imm)
+                } else {
+                    pos = bytes.len();
+                    format!("mov {}, ???", gpr_name_64(rm))
+                }
+            }
+
+            // 81 /x + imm32 (ADD/SUB/etc r/m64, imm32)
+            0x81 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                if pos + 4 <= bytes.len() {
+                    let imm = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    pos += 4;
+                    let op_name = match r {
+                        0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
+                        4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                        _ => "???",
+                    };
+                    format!("{} {}, {}", op_name, gpr_name_64(rm), imm)
+                } else {
+                    pos = bytes.len();
+                    format!("81 /{}, {}", r, gpr_name_64(rm))
+                }
+            }
+
+            // 99 (CQO)
+            0x99 => "cqo".to_string(),
+
+            // XCHG rax, r64
+            0x91..=0x97 => {
+                let reg_idx = (opcode - 0x90) | (if rex_b { 8 } else { 0 });
+                format!("xchg rax, {}", gpr_name_64(reg_idx))
+            }
+
+            _ => {
+                // Unknown opcode — just show hex
+                format!(".byte {:02x}", opcode)
+            }
+        };
+
+        let end = pos.min(bytes.len());
+        let hex_bytes: Vec<String> = bytes[start..end].iter().map(|b| format!("{:02x}", b)).collect();
+        lines.push(format!("{:#010x}:  {:20} {}", start_pc, hex_bytes.join(" "), mnemonic));
 
         offset = end;
-        pc += (end - start) as u64;
+        pc = start_pc + (end - start) as u64;
     }
 
     lines
 }
 
-/// Estimate the length of the x86_64 instruction starting at `bytes[offset]`.
-///
-/// This is a heuristic that covers the most common instruction patterns.
-/// For unknown opcodes, defaults to 1 byte.
-fn estimate_instruction_length(bytes: &[u8], offset: usize) -> usize {
-    if offset >= bytes.len() {
-        return 1;
+/// Helper: get 64-bit GPR name from index (0-15).
+fn gpr_name_64(idx: u8) -> &'static str {
+    match idx & 0xF {
+        0 => "rax", 1 => "rcx", 2 => "rdx", 3 => "rbx",
+        4 => "rsp", 5 => "rbp", 6 => "rsi", 7 => "rdi",
+        8 => "r8", 9 => "r9", 10 => "r10", 11 => "r11",
+        12 => "r12", 13 => "r13", 14 => "r14", 15 => "r15",
+        _ => "r??",
     }
+}
 
-    let mut len = 1usize;
-    let mut pos = offset;
-
-    // Skip legacy prefixes (66, 67, F2, F3)
-    while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
-        len += 1;
-        pos += 1;
+/// Helper: get 8-bit GPR name from index (0-15).
+fn gpr_name_8(idx: u8, has_rex: bool) -> &'static str {
+    match idx & 0xF {
+        0 => if has_rex { "r8b" } else { "al" },
+        1 => if has_rex { "r9b" } else { "cl" },
+        2 => if has_rex { "r10b" } else { "dl" },
+        3 => if has_rex { "r11b" } else { "bl" },
+        4 => if has_rex { "r12b" } else { "spl" }, // REX required for spl
+        5 => if has_rex { "r13b" } else { "bpl" },
+        6 => if has_rex { "r14b" } else { "sil" },
+        7 => if has_rex { "r15b" } else { "dil" },
+        8 => "r8b", 9 => "r9b", 10 => "r10b", 11 => "r11b",
+        12 => "r12b", 13 => "r13b", 14 => "r14b", 15 => "r15b",
+        _ => "??b",
     }
+}
 
-    // REX prefix (0x40-0x4F)
-    if pos < bytes.len() && bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
-        len += 1;
-        pos += 1;
-    }
-
+/// Decode a ModR/M byte, returning (reg, rm, new_pos).
+/// Handles register-register (mod=3) only for simplicity.
+fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
     if pos >= bytes.len() {
-        return len;
+        return (0, 0, pos);
     }
+    let modrm = bytes[pos];
+    let new_pos = pos + 1;
+    let mod_bits = (modrm >> 6) & 3;
+    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+    let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
 
-    let opcode = bytes[pos];
-    len += 1;
-    pos += 1;
-
-    match opcode {
-        // Single-byte instructions
-        0x90 | 0xC3 | 0xCC => len,
-
-        // Two-byte instructions: 0F xx
-        0x0F => {
-            if pos >= bytes.len() { return len + 1; }
-            let op2 = bytes[pos];
-            len += 1;
-            match op2 {
-                // SYSCALL (0F 05)
-                0x05 => len,
-                // SETcc (0F 9x /r)
-                0x90..=0x9F => { len += 1; len }
-                // Jcc (0F 8x + rel32)
-                0x80..=0x8F => { len += 1 + 4; len }
-                // IMUL (0F AF /r)
-                0xAF => { len += 1; len }
-                // MOVZX/MOVSX byte (0F B6/B7/BE)
-                0xB6 | 0xB7 | 0xBE | 0xBF => { len += 1; len }
-                // CMOVcc (0F 4x /r)
-                0x40..=0x4F => { len += 1; len }
-                _ => { len += 1; len }
-            }
-        }
-
-        // PUSH/POP r64 (50-5F)
-        0x50..=0x5F => len,
-
-        // MOV r64, imm64 (B8-BF + 8 bytes)
-        0xB8..=0xBF => { len += 8; len }
-
-        // ALU reg-reg (01, 09, 21, 29, 31, 39, 85) + ModR/M
-        0x01 | 0x03 | 0x09 | 0x0B | 0x21 | 0x23 | 0x29 | 0x2B
-        | 0x31 | 0x33 | 0x39 | 0x3B | 0x85 | 0x87 | 0x89 | 0x8B
-        | 0x8D | 0x63 => {
-            len += 1; // ModR/M
-            if pos < bytes.len() {
-                let modrm_byte = bytes[pos - 1]; // we already incremented pos
-                let _ = modrm_byte; // could add displacement analysis
-            }
-            len
-        }
-
-        // F7 xx (1-byte opcode + ModR/M, may have no immediate)
-        0xF7 => { len += 1; len }
-
-        // D3 xx (shift by CL)
-        0xD3 => { len += 1; len }
-
-        // C7 /0 + imm32
-        0xC7 => { len += 1 + 4; len }
-
-        // 81 /r + imm32
-        0x81 => { len += 1 + 4; len }
-
-        // JMP rel32 (E9 + 4 bytes)
-        0xE9 => { len += 4; len }
-
-        // CALL rel32 (E8 + 4 bytes)
-        0xE8 => { len += 4; len }
-
-        // XCHG rax, r64 (90-97, but 90 is NOP)
-        0x91..=0x97 => len,
-
-        // 99 (CQO)
-        0x99 => len,
-
-        _ => len,
+    if mod_bits == 3 {
+        // Register-register
+        (reg, rm, new_pos)
+    } else {
+        // For memory operands, just return the rm as-is (simplified)
+        (reg, rm, new_pos)
     }
 }
 
@@ -1764,7 +1975,7 @@ impl Backend for X86_64Backend {
     }
 
     fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
-        disassemble_x86_64(bytes, addr)
+        disassemble_x86_64_mnemonic(bytes, addr)
     }
 
     fn name(&self) -> &'static str {
@@ -2562,5 +2773,58 @@ mod tests {
         // Select uses TEST + CMOVcc
         assert!(code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85), "TEST not found for Select");
         assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] >= 0x40 && w[1] <= 0x4F), "CMOVcc not found for Select");
+    }
+
+    // ── Disassembler Tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_x86_64_disassemble_nop() {
+        let backend = X86_64Backend::new();
+        let bytes = encode_nop();
+        let lines = backend.disassemble(&bytes, 0x1000);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_x86_64_disassemble_ret() {
+        let backend = X86_64Backend::new();
+        let bytes = encode_ret();
+        let lines = backend.disassemble(&bytes, 0x1000);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ret"), "Expected ret, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_x86_64_disassemble_push_pop() {
+        let backend = X86_64Backend::new();
+        let mut bytes = Vec::new();
+        bytes.extend(encode_push(Gpr::Rbp));
+        bytes.extend(encode_pop(Gpr::Rbp));
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("push"), "Expected push, got: {}", lines[0]);
+        assert!(lines[1].contains("pop"), "Expected pop, got: {}", lines[1]);
+    }
+
+    #[test]
+    fn test_x86_64_disassemble_mov_reg_reg() {
+        let backend = X86_64Backend::new();
+        let bytes = encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp);
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("mov"), "Expected mov, got: {}", lines[0]);
+    }
+
+    #[test]
+    fn test_x86_64_disassemble_add_sub() {
+        let backend = X86_64Backend::new();
+        let mut bytes = Vec::new();
+        bytes.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+        bytes.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+        let lines = backend.disassemble(&bytes, 0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
+        assert!(lines[1].contains("sub"), "Expected sub, got: {}", lines[1]);
     }
 }

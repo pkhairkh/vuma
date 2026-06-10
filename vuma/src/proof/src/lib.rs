@@ -23,6 +23,7 @@ pub mod cleanup_proofs;
 pub mod counterexample;
 pub mod exclusivity_proofs;
 pub mod interpretation_proofs;
+pub mod judgment;
 pub mod liveness_proofs;
 pub mod origin_proofs;
 pub mod proof;
@@ -32,6 +33,7 @@ pub mod tactics;
 // Re-export the primary types for convenience
 pub use checker::{CheckResult, ProofChecker};
 pub use counterexample::{CounterExample, Step, ViolationPoint};
+pub use judgment::{CapDKind, Judgment};
 pub use proof::{Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 pub use origin_proofs::{
     DerivationChainProof, OriginInfo, OriginInfoBuilder, OriginProof, OriginTactic, ProofFailure,
