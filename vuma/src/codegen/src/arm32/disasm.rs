@@ -116,6 +116,12 @@ impl Instruction {
         let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let cond = cond_from_bits((word >> 28) & 0xF);
 
+        // NOP: MOV R0, R0 = 0xE1A00000 — check before data-processing
+        // so it doesn't get decoded as a plain MOV.
+        if word == 0xE1A0_0000 {
+            return Ok(Instruction::Nop);
+        }
+
         // Branch: cond 101 L offset24
         if (word >> 25) & 0x7 == 0b101 {
             let link = (word >> 24) & 1 != 0;
@@ -255,11 +261,6 @@ impl Instruction {
             if !s_bit {
                 return Ok(Instruction::Mul { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rs: gpr_from_bits(rs), rm: gpr_from_bits(rm), cond });
             }
-        }
-
-        // NOP: MOV R0, R0 = 0xE1A00000
-        if word == 0xE1A0_0000 {
-            return Ok(Instruction::Nop);
         }
 
         // SVC: cond 1111 imm24

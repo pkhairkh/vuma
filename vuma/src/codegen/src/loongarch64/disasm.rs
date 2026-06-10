@@ -224,11 +224,15 @@ impl Instruction {
         }
 
         // 2RI8 opcodes (shift immediate)
+        // Note: SLLI.D (0x00B) shares its opcode with ADDI.D (2RI12 format).
+        // In 2RI8 format, bits [15:14] must be 0; if they're non-zero, it's
+        // actually a 2RI12 instruction and we skip the 2RI8 match.
         match _opc_2ri8 {
             0x008 => return Ok(Instruction::SlliW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
             0x009 => return Ok(Instruction::SrliW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
             0x00A => return Ok(Instruction::SraiW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
-            0x00B => return Ok(Instruction::SlliD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
+            // SLLI.D shares opcode with ADDI.D — only match if bits [15:14] are 0
+            0x00B if (word >> 14) & 0x3 == 0 => return Ok(Instruction::SlliD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
             0x00C => return Ok(Instruction::SrliD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
             0x00D => return Ok(Instruction::SraiD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
             _ => {}

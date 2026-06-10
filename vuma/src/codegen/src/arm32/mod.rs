@@ -1179,10 +1179,10 @@ impl Instruction {
 
             // ── Branch ──────────────────────────────────────────────
             Instruction::B { offset, cond } => {
-                encode_branch(*cond, false, *offset)
+                encode_branch(*cond, false, *offset >> 2)
             }
             Instruction::Bl { offset, cond } => {
-                encode_branch(*cond, true, *offset)
+                encode_branch(*cond, true, *offset >> 2)
             }
             Instruction::Bx { rm, cond } => {
                 encode_bx(*cond, rm.encoding())
