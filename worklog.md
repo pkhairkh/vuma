@@ -511,6 +511,186 @@ Updated and added VUMA example programs showcasing Phase 2 capabilities (BD anno
 - Add VUMA-VERIFIED blocks to lock_free_queue.vuma for concurrent operations
 - Create examples/README.md index of all examples with feature matrix
 
+## Task 1h: Parser Regression Tests
+**Date:** 2026-03-07
+**Agent:** Wave 1 Parser Regression Tests
+**Status:** ✅ Complete
+
+### Summary
+Added 50 regression/stress tests to the VUMA parser test suite covering lexer edge cases, parser edge cases, error recovery, and VUMA-specific constructs. Also fixed a pre-existing non-exhaustive match in to_scg.rs.
+
+### Files Modified
+| File | Description |
+|------|-------------|
+| `src/parser/src/lexer.rs` | Added 10 lexer edge case tests (Reg Tests 1–10) |
+| `src/parser/src/parser.rs` | Added 40 tests: 15 parser edge cases, 10 error recovery, 15 VUMA-specific constructs (Reg Tests 1–40) |
+| `src/parser/src/to_scg.rs` | Fixed non-exhaustive match for `Expr::FormatStr`, `Expr::Closure`, `Expr::Await` |
+
+### Test Coverage (50 new tests, all passing)
+
+#### Lexer Edge Cases (10 tests)
+| # | Test | Description |
+|---|------|-------------|
+## Task 1a: CLI Driver Implementation
+**Date:** 2026-03-07
+**Agent:** Wave 1a CLI Driver
+**Status:** ✅ Complete
+
+### Summary
+Implemented the VUMA CLI driver in `src/main.rs` with clap derive mode, providing 7 subcommands: build, run, check, emit, disasm, verify, and repl. Each subcommand is wired to the existing pipeline in `src/pipeline.rs`. Also fixed pre-existing non-exhaustive match errors in `src/parser/src/to_scg.rs` for `Item::TraitDef`, `Item::ImplBlock`, and `Expr::FormatStr/Closure/Await`.
+
+### Files Created/Modified
+| File | Action | Description |
+|------|--------|-------------|
+| `src/main.rs` | Created | Full CLI implementation with 7 subcommands, 20 tests |
+| `src/parser/src/to_scg.rs` | Modified | Fixed non-exhaustive matches for TraitDef, ImplBlock, FormatStr, Closure, Await |
+
+### Subcommand Details
+| Subcommand | Description | Pipeline Wiring |
+|------------|-------------|-----------------|
+| `vuma build <file>` | Parse + compile to ARM64 ELF | `compile()`, writes binary to output file |
+| `vuma run <file>` | Build + execute | `compile()` + native/qemu-aarch64 execution |
+| `vuma check <file>` | Parse + SCG + BD + IVE verification | `compile()` with verification enabled |
+| `vuma emit <isa> <file>` | Compile to specific ISA | `compile()` + multi-arch backend `create_backend()` |
+| `vuma disasm <file>` | Read binary and disassemble | `create_backend()` + `backend.disassemble()` |
+| `vuma verify <file>` | IVE 5-invariant verification | `compile()` with VerificationLevel::Exhaustive |
+| `vuma repl` | Interactive REPL | `Parser::parse_program()` + AST display |
+
+### CLI Flags
+- `--opt-level <O0|O1|O2|O3>` — Global optimization level (default: O2)
+- `--verification <none|quick|normal|exhaustive>` — Verification level (default: normal)
+- `--debug` — Include debug info in output
+
+### Error Handling
+- Every error path produces a human-readable message with pipeline stage prefix (`error[stage]: ...`)
+- Source file read failures include file path and OS error
+- Compilation errors are printed with stage name and detailed messages
+- Invalid CLI arguments are rejected by clap with helpful messages
+
+### Test Coverage (20 tests, all passing)
+| # | Test | Description |
+|---|------|-------------|
+| 1 | `test_build_basic` | `vuma build hello.vuma` parses correctly |
+| 2 | `test_build_with_options` | Build with -o and --target flags |
+| 3 | `test_run_basic` | `vuma run hello.vuma` parses correctly |
+| 4 | `test_run_with_args` | Run with trailing arguments |
+| 5 | `test_check` | `vuma check hello.vuma` parses correctly |
+| 6 | `test_emit_aarch64` | `vuma emit aarch64 hello.vuma` parses correctly |
+| 7 | `test_emit_x86_64_with_output` | Emit with -o flag |
+| 8 | `test_disasm` | Disasm with --isa and --base-addr |
+| 9 | `test_verify` | `vuma verify hello.vuma` parses correctly |
+| 10 | `test_repl` | `vuma repl` parses correctly |
+| 11 | `test_global_opt_level` | --opt-level global flag |
+| 12 | `test_global_verification_level` | --verification global flag |
+| 13 | `test_global_debug_flag` | --debug global flag |
+| 14 | `test_defaults` | Default values are correct |
+| 15 | `test_all_isa_values` | All 8 ISA values parse |
+| 16 | `test_opt_level_conversion` | OptLevelArg → OptLevel conversion |
+| 17 | `test_verification_conversion` | VerificationArg → VerificationLevel conversion |
+| 18 | `test_target_conversion` | TargetArg → CompileTarget conversion |
+| 19 | `test_default_output_path` | Default output path generation |
+| 20 | `test_invalid_subcommand` | Invalid subcommand rejected |
+
+### Key Design Decisions
+1. **Borrowed references in match arms** — Used `ref file` and `ref output` patterns to avoid partial moves when matching `cli.command` while borrowing `&cli` for config construction
+2. **REPL expression parsing** — Since `parse_expr()` is private, the REPL wraps user input in `fn _repl_expr() { ... }` and parses the wrapped program, then displays the function item AST
+3. **Multi-arch emit** — The `emit` command compiles with the ARM64 pipeline first, then uses `create_backend()` for the target ISA. Falls back to ARM64 ELF if backend encoding fails
+4. **Verification display** — Uses actual `VerificationStatus` variants (Proven, ProbablySafe, Unverified, Violated) rather than inventing Pass/Fail/Skip names
+5. **Run command** — Tries native execution first, falls back to `qemu-aarch64`, with Unix permissions set for executable
+
+### Build & Test Results
+```
+cargo check -p vuma: PASSED (0 errors, 0 warnings)
+cargo test -p vuma --tests: 20 passed, 0 failed (CLI tests)
+cargo test -p vuma --lib: 12 passed, 0 failed (pipeline tests)
+```
+
+### Next Actions
+- Add integration tests that compile actual .vuma files
+- Add `--output-format` flag for build/emit (elf, raw, wasm)
+- Add `--entry` flag to override entry point name
+- Add `-j/--jobs` flag for parallel compilation
+- Implement proper multi-ISA pipeline (skip ARM64 codegen for non-ARM targets)
+
+| 1 | `lex_long_identifier` | 1000+ character identifier |
+| 2 | `lex_deeply_nested_comments` | 20-level nested block comments |
+| 3 | `lex_emoji_in_strings` | Unicode emoji (🌍🎉) in string literals |
+| 4 | `lex_null_byte_no_panic` | Null byte doesn't crash lexer |
+| 5 | `lex_bom_at_start` | BOM at start of source |
+| 6 | `lex_unterminated_string_recovery` | Unterminated string error recovery |
+| 7 | `lex_consecutive_operators` | Operators without spaces |
+| 8 | `lex_numbers_many_underscores` | Numbers with many underscore separators |
+| 9 | `lex_very_long_hex_literal` | 64-digit hex literal |
+| 10 | `lex_float_edge_cases` | 0.0, 1e308, 0e0, 1.0e+0, 2.5e-10 |
+
+#### Parser Edge Cases (15 tests)
+| # | Test | Description |
+|---|------|-------------|
+| 1 | `reg_deeply_nested_if_else` | 12-level nested if/else |
+| 2 | `reg_deeply_nested_match` | Sequential match statements |
+| 3 | `reg_struct_with_many_fields` | Struct with 55 fields |
+| 4 | `reg_fn_with_many_params` | Function with 22 parameters |
+| 5 | `reg_chained_field_access` | a.b.c.d.e.f.g chain |
+| 6 | `reg_chained_method_calls` | a.b().c().d().e() chain |
+| 7 | `reg_complex_binary_expr` | All binary operators combined |
+| 8 | `reg_multiple_compound_assign` | All 10 compound assignment operators |
+| 9 | `reg_nested_paren_expr` | Deeply nested parenthesized expressions |
+| 10 | `reg_async_in_sync_block` | Async block nested in sync block |
+| 11 | `reg_match_many_arms` | Match with 25 arms |
+| 12 | `reg_for_loop_over_range` | for i in 0..10 loop |
+| 13 | `reg_const_complex_expr` | Const with bitwise/shift expressions |
+| 14 | `reg_static_with_struct_init` | Static with struct literal initializer |
+| 15 | `reg_type_ascription_complex` | Type ascription on complex expression |
+
+#### Error Recovery (10 tests)
+| # | Test | Description |
+|---|------|-------------|
+| 16 | `reg_error_missing_semicolons` | Missing semicolons recovery |
+| 17 | `reg_error_missing_closing_brace` | Missing closing brace recovery |
+| 18 | `reg_error_missing_else_block` | Missing else block |
+| 19 | `reg_error_invalid_token_in_expr` | Invalid token in expression |
+| 20 | `reg_error_unterminated_string_in_expr` | Unterminated string in expression |
+| 21 | `reg_error_double_else` | Double else clause |
+| 22 | `reg_error_invalid_type_syntax` | Invalid type syntax (>>>) |
+| 23 | `reg_error_missing_fn_name` | Missing function name |
+| 24 | `reg_error_duplicate_field_names` | Duplicate struct fields |
+| 25 | `reg_error_invalid_match_pattern` | Invalid match pattern (+) |
+
+#### VUMA-Specific Constructs (15 tests)
+| # | Test | Description |
+|---|------|-------------|
+| 26 | `reg_region_large_size` | Region with 4GB allocation |
+| 27 | `reg_allocate_free_pair` | allocate/free statement pair |
+| 28 | `reg_derive_complex_ptr` | derive(ptr + offset, heap) |
+| 29 | `reg_bd_directive` | bd(Secure) directive |
+| 30 | `reg_repd_directive` | repd(Fast, n) directive |
+| 31 | `reg_capd_directive` | capd(RW) directive |
+| 32 | `reg_reld_directive` | reld(Ordered, x + 1) directive |
+| 33 | `reg_sync_block_with_spawn` | sync { spawn async { } } |
+| 34 | `reg_deref_chain` | Triple deref ***ptr |
+| 35 | `reg_address_of_chain` | Double address-of @@x |
+| 36 | `reg_struct_init_nested` | Nested struct initialization |
+| 37 | `reg_generic_struct_queue` | struct Queue<T> |
+| 38 | `reg_enum_with_payload_types` | enum with *u8 payload |
+| 39 | `reg_import_export` | Import with symbols + export |
+| 40 | `reg_sizeof_alignof_expressions` | sizeof/alignof + array type |
+
+### Bug Fixes
+1. **to_scg.rs non-exhaustive match** — Added `Expr::FormatStr`, `Expr::Closure`, `Expr::Await` arms to 3 match blocks that were missing these variants
+2. **TypeParam comparison** — Fixed `assert_eq!(s.type_params[0], "T")` to `assert_eq!(s.type_params[0].name, "T")` since `type_params` is now `Vec<TypeParam>` not `Vec<String>`
+
+### Build & Test Results
+```
+cargo test -p vuma-parser
+running 218 tests — 218 passed, 0 failed
+```
+
+### Next Actions
+- Add property-based/fuzz tests for the lexer
+- Add tests for closure syntax (|| expr) once parser supports it
+- Add await expression tests
+- Add format string tests
+
 ## Task Wave 18: PPC64 Backend Implementation
 **Date:** 2026-03-06
 **Agent:** Wave 18 PPC64 Backend

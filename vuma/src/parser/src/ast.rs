@@ -52,6 +52,10 @@ pub enum Item {
     Static(StaticDef),
     /// Module declaration: `module name { items }`
     ModuleDef(ModuleDef),
+    /// Trait definition: `trait Name<T> { … }`
+    TraitDef(TraitDef),
+    /// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
+    ImplBlock(ImplBlock),
     /// Top-level statement (assignment, expression, free, etc.) that
     /// appears outside of any function body.
     Stmt(Stmt),
@@ -68,6 +72,10 @@ pub struct FnDef {
     pub return_type: Option<Type>,
     /// Function body.
     pub body: Block,
+    /// Whether this is an async function.
+    pub is_async: bool,
+    /// Optional where clause.
+    pub where_clause: Option<WhereClause>,
     /// Source span.
     pub span: Span,
 }
@@ -88,10 +96,12 @@ pub struct Param {
 pub struct StructDef {
     /// Struct name.
     pub name: String,
-    /// Optional generic type parameters (e.g. `<T>`).
-    pub type_params: Vec<String>,
+    /// Generic type parameters with optional bounds.
+    pub type_params: Vec<TypeParam>,
     /// Fields: (name, type).
     pub fields: Vec<StructField>,
+    /// Optional where clause.
+    pub where_clause: Option<WhereClause>,
     /// Source span.
     pub span: Span,
 }
@@ -112,10 +122,12 @@ pub struct StructField {
 pub struct EnumDef {
     /// Enum name.
     pub name: String,
-    /// Optional generic type parameters.
-    pub type_params: Vec<String>,
+    /// Generic type parameters with optional bounds.
+    pub type_params: Vec<TypeParam>,
     /// Enum variants.
     pub variants: Vec<EnumVariant>,
+    /// Optional where clause.
+    pub where_clause: Option<WhereClause>,
     /// Source span.
     pub span: Span,
 }
@@ -197,6 +209,88 @@ pub struct ModuleDef {
     pub items: Vec<Item>,
     /// Source span.
     pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// Trait & Impl definitions
+// ---------------------------------------------------------------------------
+
+/// Trait definition: `trait Name<T> { … }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitDef {
+    /// Trait name.
+    pub name: String,
+    /// Generic type parameters with optional bounds.
+    pub type_params: Vec<TypeParam>,
+    /// Associated type declarations.
+    pub associated_types: Vec<String>,
+    /// Associated constant declarations.
+    pub associated_consts: Vec<AssocConst>,
+    /// Required method signatures (no body).
+    pub required_methods: Vec<FnDef>,
+    /// Provided method implementations (with body).
+    pub provided_methods: Vec<FnDef>,
+    /// Optional where clause.
+    pub where_clause: Option<WhereClause>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Associated constant in a trait: `const NAME: Type [= expr];`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssocConst {
+    /// Constant name.
+    pub name: String,
+    /// Type annotation.
+    pub ty: Type,
+    /// Optional default value.
+    pub value: Option<Expr>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImplBlock {
+    /// Optional trait name being implemented.
+    pub trait_name: Option<String>,
+    /// The target type for the impl.
+    pub target_type: Type,
+    /// Method implementations.
+    pub methods: Vec<FnDef>,
+    /// Optional where clause.
+    pub where_clause: Option<WhereClause>,
+    /// Source span.
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// Type parameters & Where clauses
+// ---------------------------------------------------------------------------
+
+/// A type parameter with optional trait bounds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeParam {
+    /// Parameter name.
+    pub name: String,
+    /// Trait bounds on this parameter.
+    pub bounds: Vec<Type>,
+}
+
+/// A where clause with predicates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhereClause {
+    /// Individual predicates.
+    pub predicates: Vec<WherePredicate>,
+}
+
+/// A single where predicate: `T: Trait + AnotherTrait`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WherePredicate {
+    /// The type name being constrained.
+    pub type_name: String,
+    /// Trait bounds.
+    pub bounds: Vec<Type>,
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +697,60 @@ pub enum Expr {
         end: Box<Expr>,
         span: Span,
     },
+    /// Format string: `f"hello {name} world"`
+    FormatStr {
+        parts: Vec<FormatStrPart>,
+        span: Span,
+    },
+    /// Closure: `|args| expr` or `|args| { stmts }`
+    Closure {
+        params: Vec<Param>,
+        body: ClosureBody,
+        capture_kind: CaptureKind,
+        span: Span,
+    },
+    /// Await expression: `expr.await`
+    Await {
+        expr: Box<Expr>,
+        span: Span,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Format string parts
+// ---------------------------------------------------------------------------
+
+/// A part of a format string — either a literal text segment or an interpolated expression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FormatStrPart {
+    /// Literal text segment.
+    Lit(String),
+    /// Interpolated expression.
+    Expr(Expr),
+}
+
+// ---------------------------------------------------------------------------
+// Closure types
+// ---------------------------------------------------------------------------
+
+/// The body of a closure — either a single expression or a block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClosureBody {
+    /// Single expression body: `|x| x + 1`
+    Expr(Box<Expr>),
+    /// Block body: `|x| { let y = x + 1; y }`
+    Block(Block),
+}
+
+/// How a closure captures variables from its environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureKind {
+    /// `move` closure — takes ownership of captured variables.
+    Move,
+    /// `ref` closure — captures by reference.
+    Ref,
+    /// Auto-determined capture mode (default).
+    Auto,
 }
 
 // ---------------------------------------------------------------------------

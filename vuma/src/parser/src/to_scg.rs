@@ -261,6 +261,43 @@ impl AstToScg {
                 self.add_data_flow_edges(&s.value, id, scg);
                 Ok(id)
             }
+            Item::TraitDef(t) => {
+                let methods_str: Vec<String> = t.required_methods.iter()
+                    .chain(t.provided_methods.iter())
+                    .map(|m| m.name.clone())
+                    .collect();
+                let id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        operation: format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
+                        result_type: None,
+                    }),
+                    self.span_to_pp(&t.span),
+                );
+                default_region.add_node(id);
+                Ok(id)
+            }
+            Item::ImplBlock(i) => {
+                let target_str = i.target_type.to_string();
+                let trait_str = i.trait_name.as_deref().unwrap_or("");
+                let methods_str: Vec<String> = i.methods.iter()
+                    .map(|m| m.name.clone())
+                    .collect();
+                let id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        operation: format!("impl {}{} for {} {{ {} }}",
+                            trait_str,
+                            if trait_str.is_empty() { "" } else { " " },
+                            target_str,
+                            methods_str.join(", ")),
+                        result_type: None,
+                    }),
+                    self.span_to_pp(&i.span),
+                );
+                default_region.add_node(id);
+                Ok(id)
+            }
         }
     }
 
@@ -1614,6 +1651,9 @@ impl AstToScg {
                 self.collect_uses(start, uses);
                 self.collect_uses(end, uses);
             }
+            Expr::FormatStr { .. } => {}
+            Expr::Closure { .. } => {}
+            Expr::Await { .. } => {}
         }
     }
 
@@ -1745,6 +1785,9 @@ impl AstToScg {
             Expr::Allocate { .. } => "ptr".to_string(),
             Expr::Null { .. } => "null".to_string(),
             Expr::Range { .. } => "range".to_string(),
+            Expr::FormatStr { .. } => "str".to_string(),
+            Expr::Closure { .. } => "closure".to_string(),
+            Expr::Await { .. } => "future".to_string(),
         }
     }
 
@@ -1879,6 +1922,9 @@ impl AstToScg {
             Expr::Range { start, end, .. } => {
                 format!("{}..{}", self.expr_to_string(start), self.expr_to_string(end))
             }
+            Expr::FormatStr { .. } => "f\"…\"".to_string(),
+            Expr::Closure { .. } => "|…| …".to_string(),
+            Expr::Await { expr, .. } => format!("{}.await", self.expr_to_string(expr)),
         }
     }
 

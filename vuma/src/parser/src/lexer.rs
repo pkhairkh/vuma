@@ -350,6 +350,20 @@ pub enum TokenKind {
     Mut,
     /// `ref`
     Ref,
+    /// `Option` type keyword
+    OptionKw,
+    /// `Some` variant keyword
+    SomeKw,
+    /// `None` variant keyword
+    NoneKw,
+    /// `Result` type keyword
+    ResultKw,
+    /// `Ok` variant keyword
+    OkKw,
+    /// `Err` variant keyword
+    ErrKw,
+    /// Format string literal: `f"..."`
+    FormatStr,
 
     // ---- Doc comments (preserved as tokens) --------------------------------
     /// `///` outer doc comment
@@ -494,6 +508,13 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Static => write!(f, "'static'"),
             TokenKind::Mut => write!(f, "'mut'"),
             TokenKind::Ref => write!(f, "'ref'"),
+            TokenKind::OptionKw => write!(f, "'Option'"),
+            TokenKind::SomeKw => write!(f, "'Some'"),
+            TokenKind::NoneKw => write!(f, "'None'"),
+            TokenKind::ResultKw => write!(f, "'Result'"),
+            TokenKind::OkKw => write!(f, "'Ok'"),
+            TokenKind::ErrKw => write!(f, "'Err'"),
+            TokenKind::FormatStr => write!(f, "format string"),
 
             // Doc comments
             TokenKind::DocComment => write!(f, "doc comment"),
@@ -586,6 +607,14 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         // Type operators
         "sizeof" => Some(TokenKind::Sizeof),
         "alignof" => Some(TokenKind::Alignof),
+
+        // Option/Result sugar
+        "Option" => Some(TokenKind::OptionKw),
+        "Some" => Some(TokenKind::SomeKw),
+        "None" => Some(TokenKind::NoneKw),
+        "Result" => Some(TokenKind::ResultKw),
+        "Ok" => Some(TokenKind::OkKw),
+        "Err" => Some(TokenKind::ErrKw),
 
         _ => None,
     }
@@ -817,6 +846,15 @@ impl<'src> Lexer<'src> {
                 if second == Some('"') || second == Some('#') {
                     self.bump(); // consume 'r'
                     return self.lex_raw_string(start, line, column);
+                }
+                return self.lex_ident(start, line, column);
+            }
+
+            // Format-string prefix `f"…"`
+            'f' => {
+                if self.peek_next(1) == Some('"') {
+                    self.bump(); // consume 'f'
+                    return self.lex_format_string(start, line, column);
                 }
                 return self.lex_ident(start, line, column);
             }
@@ -1415,6 +1453,57 @@ impl<'src> Lexer<'src> {
         }
 
         self.make_token(TokenKind::RawStr, start, line, column)
+    }
+
+    /// Lex a format string: `f"…{expr}…"`
+    ///
+    /// The 'f' prefix has already been consumed. The content (between the
+    /// quotes) is stored in the lexeme, including `{` and `}` markers.
+    /// The parser is responsible for splitting into parts.
+    fn lex_format_string(&mut self, start: usize, line: usize, column: usize) -> Token {
+        // 'f' already consumed; expect opening "
+        if self.chars.peek() != Some(&'"') {
+            self.push_error("expected '\"' after format string prefix 'f'",
+                Span::new(start, self.offset));
+            return self.make_token(TokenKind::Error, start, line, column);
+        }
+        self.bump(); // consume opening "
+
+        // Read until closing ", handling escape sequences and { } braces
+        loop {
+            match self.chars.peek() {
+                Some(&'"') => {
+                    self.bump(); // consume closing "
+                    break;
+                }
+                Some('\\') => {
+                    self.bump(); // consume backslash
+                    if self.chars.peek().is_some() {
+                        self.bump(); // consume escaped character
+                    }
+                }
+                Some(&'{') => {
+                    self.bump(); // consume {
+                    // If {{, it's an escaped brace, not an interpolation
+                    if self.chars.peek() == Some(&'}') {
+                        // Empty {} — just consume the } and continue
+                        self.bump();
+                    }
+                    // Otherwise the } will be consumed as part of the expression
+                }
+                Some(&'}') => {
+                    self.bump(); // consume }
+                }
+                Some(_) => { self.bump(); }
+                None => {
+                    self.push_error("unterminated format string literal",
+                        Span::new(start, self.offset));
+                    break;
+                }
+            }
+        }
+
+        self.make_token(TokenKind::FormatStr, start, line, column)
     }
 
     /// Lex an identifier or keyword.
@@ -2330,5 +2419,131 @@ mod tests {
         let (tokens, errors) = lex(source);
         assert!(errors.len() >= 2, "should collect multiple errors, got {}", errors.len());
         assert!(tokens.iter().filter(|t| t.kind == TokenKind::Error).count() >= 2);
+    }
+
+    // =========================================================================
+    // REGRESSION / STRESS TESTS
+    // =========================================================================
+
+    // ---- Reg Test 1: Long identifier (1000+ chars) ----
+    #[test]
+    fn lex_long_identifier() {
+        let long_name = "a".repeat(1000);
+        let source = format!("let {} = 1;", long_name);
+        let (tokens, errors) = lex(source.as_str());
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
+        assert_eq!(tokens[1].lexeme.len(), 1000);
+    }
+
+    // ---- Reg Test 2: Deep nesting of block comments ----
+    #[test]
+    fn lex_deeply_nested_comments() {
+        let mut source = String::from("let x = 1; ");
+        for _ in 0..20 {
+            source.push_str("/* ");
+        }
+        source.push_str("nested ");
+        for _ in 0..20 {
+            source.push_str("*/ ");
+        }
+        source.push_str("let y = 2;");
+        let (tokens, errors) = lex(&source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        let kinds = kinds(&tokens);
+        assert_eq!(kinds, vec![
+            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number, TokenKind::Semicolon,
+            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number, TokenKind::Semicolon,
+        ]);
+    }
+
+    // ---- Reg Test 3: Emoji in strings ----
+    #[test]
+    fn lex_emoji_in_strings() {
+        let source = r#""hello 🌍🎉""#;
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert!(tokens[0].lexeme.contains("🌍"));
+        assert!(tokens[0].lexeme.contains("🎉"));
+    }
+
+    // ---- Reg Test 4: Null bytes in source (lexer should not panic) ----
+    #[test]
+    fn lex_null_byte_no_panic() {
+        let source = "let x = \0;";
+        let (tokens, errors) = lex(source);
+        // Lexer should produce something (Error token for null byte) and not panic
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Let));
+        // Null byte may produce an error token
+        let _ = errors; // just ensuring it doesn't panic
+    }
+
+    // ---- Reg Test 5: BOM at start of source ----
+    #[test]
+    fn lex_bom_at_start() {
+        let source = "\u{FEFF}let x = 1;";
+        let (tokens, errors) = lex(source);
+        // BOM should be treated as whitespace or unknown, but lexer must not crash
+        let _ = (tokens, errors);
+    }
+
+    // ---- Reg Test 6: Unterminated string (stress) ----
+    #[test]
+    fn lex_unterminated_string_recovery() {
+        let source = r#"let x = "unterminated"#;
+        let (tokens, errors) = lex(source);
+        assert!(!errors.is_empty(), "should report unterminated string");
+        // Should still have let and x
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Ident);
+    }
+
+    // ---- Reg Test 7: Consecutive operators without spaces ----
+    #[test]
+    fn lex_consecutive_operators() {
+        let source = "+-*/%&|^!===!=<=>=<<>>&&||";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        let kinds = kinds(&tokens);
+        assert!(kinds.contains(&TokenKind::Plus));
+        assert!(kinds.contains(&TokenKind::Minus));
+        assert!(kinds.contains(&TokenKind::Star));
+        assert!(kinds.contains(&TokenKind::EqEq));
+        assert!(kinds.contains(&TokenKind::Ne));
+        assert!(kinds.contains(&TokenKind::AndAnd));
+        assert!(kinds.contains(&TokenKind::OrOr));
+    }
+
+    // ---- Reg Test 8: Numbers with many underscores ----
+    #[test]
+    fn lex_numbers_many_underscores() {
+        let source = "1_2_3_4_5_6_7_8_9_0";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(tokens[0].kind, TokenKind::Number);
+        assert_eq!(tokens[0].lexeme, "1_2_3_4_5_6_7_8_9_0");
+    }
+
+    // ---- Reg Test 9: Very long hex literal ----
+    #[test]
+    fn lex_very_long_hex_literal() {
+        let hex_digits = "F".repeat(64);
+        let source = format!("0x{}", hex_digits);
+        let (tokens, errors) = lex(source.as_str());
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(tokens[0].kind, TokenKind::Address);
+        assert_eq!(tokens[0].lexeme.len(), 2 + 64); // "0x" + digits
+    }
+
+    // ---- Reg Test 10: Float edge cases ----
+    #[test]
+    fn lex_float_edge_cases() {
+        let source = "0.0 1e308 0e0 1.0e+0 2.5e-10";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        for t in tokens.iter().filter(|t| !t.is_eof()) {
+            assert_eq!(t.kind, TokenKind::Float, "expected Float, got {:?} for '{}'", t.kind, t.lexeme);
+        }
     }
 }
