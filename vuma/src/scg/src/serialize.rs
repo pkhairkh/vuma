@@ -97,15 +97,38 @@ const DEPLOYMENT_TARGET_CUSTOM: u32 = 5;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeserializeError {
     /// The data does not start with the expected magic bytes.
-    InvalidMagic { expected: Vec<u8>, found: Vec<u8> },
+    InvalidMagic {
+        /// The expected magic bytes.
+        expected: Vec<u8>,
+        /// The magic bytes actually found.
+        found: Vec<u8>,
+    },
     /// The format version is not supported by this implementation.
-    UnsupportedVersion { version: u32, min_supported: u32 },
+    UnsupportedVersion {
+        /// The version number found in the data.
+        version: u32,
+        /// The minimum version supported by this implementation.
+        min_supported: u32,
+    },
     /// An unexpected end of input was reached.
-    UnexpectedEof { context: String },
+    UnexpectedEof {
+        /// Description of what was being read when EOF was encountered.
+        context: String,
+    },
     /// A value was out of the valid range for its type.
-    InvalidValue { field: String, value: String },
+    InvalidValue {
+        /// Name of the field that had the invalid value.
+        field: String,
+        /// String representation of the invalid value.
+        value: String,
+    },
     /// A string could not be decoded as valid UTF-8.
-    InvalidUtf8 { context: String, source: String },
+    InvalidUtf8 {
+        /// Description of what was being read when the invalid UTF-8 was encountered.
+        context: String,
+        /// The underlying UTF-8 error message.
+        source: String,
+    },
     /// An I/O error occurred during deserialization.
     IoError(String),
     /// A JSON serialization/deserialization error.

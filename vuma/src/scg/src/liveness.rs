@@ -11,10 +11,10 @@
 //! analysis determines which values are "live" (may be needed later) at each
 //! program point.
 //!
-//! - **live_in[n]**: the set of values live at the entry of node `n`.
+//! - **live_in\[n\]**: the set of values live at the entry of node `n`.
 //!   A value `v` is live-in at `n` if `n` uses `v` or `v` is live-out at `n`
 //!   and `v` is not defined by `n`.
-//! - **live_out[n]**: the set of values live at the exit of node `n`.
+//! - **live_out\[n\]**: the set of values live at the exit of node `n`.
 //!   A value `v` is live-out at `n` if `v` is live-in at any successor of `n`.
 //!
 //! # Dataflow Equations

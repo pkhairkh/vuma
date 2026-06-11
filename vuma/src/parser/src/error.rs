@@ -243,11 +243,11 @@ pub enum ParseErrorKind {
     InvalidCompoundOp,
 
     // -- Legacy aliases (kept for backward compat) ---------------------------
-    /// Alias for [`InvalidSyntax`] — a required semicolon separator is missing.
+    /// Alias for [`Self::InvalidSyntax`] — a required semicolon separator is missing.
     MissingSemicolon,
-    /// Alias for [`InvalidSyntax`] — an address literal (0x...) is malformed.
+    /// Alias for [`Self::InvalidSyntax`] — an address literal (0x...) is malformed.
     InvalidAddress,
-    /// Alias for [`UndefinedReference`] — a variable name was used before
+    /// Alias for [`Self::UndefinedReference`] — a variable name was used before
     /// definition.
     UndefinedVariable,
 }

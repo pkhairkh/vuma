@@ -43,10 +43,11 @@
 //! - **VumaIoError**: VUMA-specific I/O error type with BD annotations.
 //! - **VumaIoResult**: Result alias for VUMA I/O operations.
 
+use crate::error::{VumaErrorChain, VumaErrorKind};
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
+use std::io::{BufRead as StdBufRead, Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
 use std::os::unix::io::AsRawFd;
 
 // ---------------------------------------------------------------------------
@@ -160,6 +161,94 @@ impl fmt::Display for VumaIoError {
 }
 
 impl std::error::Error for VumaIoError {}
+
+impl From<VumaIoError> for std::io::Error {
+    fn from(err: VumaIoError) -> Self {
+        let kind = match err.kind {
+            VumaIoErrorKind::NotOpen => std::io::ErrorKind::NotConnected,
+            VumaIoErrorKind::CapabilityDenied => std::io::ErrorKind::PermissionDenied,
+            VumaIoErrorKind::UnexpectedEof => std::io::ErrorKind::UnexpectedEof,
+            VumaIoErrorKind::WriteFailed => std::io::ErrorKind::WriteZero,
+            VumaIoErrorKind::ReadFailed => std::io::ErrorKind::Other,
+            VumaIoErrorKind::BufferEmpty => std::io::ErrorKind::WouldBlock,
+            VumaIoErrorKind::BufferFull => std::io::ErrorKind::WouldBlock,
+            VumaIoErrorKind::InvalidInput => std::io::ErrorKind::InvalidInput,
+            VumaIoErrorKind::MmioError => std::io::ErrorKind::Other,
+            VumaIoErrorKind::UartError => std::io::ErrorKind::Other,
+            VumaIoErrorKind::Other => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, err.message)
+    }
+}
+
+impl From<std::io::Error> for VumaIoError {
+    fn from(err: std::io::Error) -> Self {
+        let kind = match err.kind() {
+            std::io::ErrorKind::NotFound => VumaIoErrorKind::NotOpen,
+            std::io::ErrorKind::PermissionDenied => VumaIoErrorKind::CapabilityDenied,
+            std::io::ErrorKind::UnexpectedEof => VumaIoErrorKind::UnexpectedEof,
+            std::io::ErrorKind::InvalidInput => VumaIoErrorKind::InvalidInput,
+            std::io::ErrorKind::TimedOut => VumaIoErrorKind::Other,
+            _ => VumaIoErrorKind::Other,
+        };
+        VumaIoError::new(kind, err.to_string(), CapD::new(vec![]))
+    }
+}
+
+impl From<VumaIoError> for VumaErrorChain {
+    fn from(err: VumaIoError) -> Self {
+        let kind = match err.kind {
+            VumaIoErrorKind::NotOpen => VumaErrorKind::NotFound,
+            VumaIoErrorKind::CapabilityDenied => VumaErrorKind::PermissionDenied,
+            VumaIoErrorKind::UnexpectedEof => VumaErrorKind::Io,
+            VumaIoErrorKind::WriteFailed => VumaErrorKind::Io,
+            VumaIoErrorKind::ReadFailed => VumaErrorKind::Io,
+            VumaIoErrorKind::BufferEmpty => VumaErrorKind::Io,
+            VumaIoErrorKind::BufferFull => VumaErrorKind::Io,
+            VumaIoErrorKind::InvalidInput => VumaErrorKind::InvalidArgument,
+            VumaIoErrorKind::MmioError => VumaErrorKind::Io,
+            VumaIoErrorKind::UartError => VumaErrorKind::Io,
+            VumaIoErrorKind::Other => VumaErrorKind::Io,
+        };
+        VumaErrorChain::new(kind, err.message)
+    }
+}
+
+impl From<crate::thread::VumaThreadError> for VumaIoError {
+    fn from(e: crate::thread::VumaThreadError) -> Self {
+        let kind = match &e {
+            crate::thread::VumaThreadError::Panicked(_) => VumaIoErrorKind::Other,
+            crate::thread::VumaThreadError::AlreadyJoined => VumaIoErrorKind::NotOpen,
+            crate::thread::VumaThreadError::SpawnFailed(_) => VumaIoErrorKind::Other,
+            crate::thread::VumaThreadError::InvalidConfig(_) => VumaIoErrorKind::InvalidInput,
+        };
+        VumaIoError::new(kind, e.to_string(), CapD::new(vec![]))
+    }
+}
+
+impl From<crate::env::VumaEnvError> for VumaIoError {
+    fn from(e: crate::env::VumaEnvError) -> Self {
+        let kind = match &e {
+            crate::env::VumaEnvError::NotPresent => VumaIoErrorKind::NotOpen,
+            crate::env::VumaEnvError::NotUnicode(_) => VumaIoErrorKind::InvalidInput,
+        };
+        VumaIoError::new(kind, e.to_string(), CapD::new(vec![]))
+    }
+}
+
+impl From<crate::fs::VumaIoError> for VumaIoError {
+    fn from(e: crate::fs::VumaIoError) -> Self {
+        let kind = match e.kind {
+            VumaErrorKind::NotFound => VumaIoErrorKind::NotOpen,
+            VumaErrorKind::PermissionDenied => VumaIoErrorKind::CapabilityDenied,
+            VumaErrorKind::InvalidArgument => VumaIoErrorKind::InvalidInput,
+            VumaErrorKind::Timeout => VumaIoErrorKind::Other,
+            VumaErrorKind::OutOfMemory => VumaIoErrorKind::Other,
+            _ => VumaIoErrorKind::Other,
+        };
+        VumaIoError::new(kind, e.message, CapD::new(vec![]))
+    }
+}
 
 /// Result alias for VUMA I/O operations.
 pub type VumaIoResult<T> = Result<T, VumaIoError>;
@@ -452,9 +541,30 @@ impl<R: VumaReader> VumaReader for VumaBufReader<R> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VumaBufWriter<W>
-// ---------------------------------------------------------------------------
+impl<R: VumaReader> StdRead for VumaBufReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        VumaReader::read(self, buf).map_err(std::io::Error::from)
+    }
+}
+
+impl<R: VumaReader> StdBufRead for VumaBufReader<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.pos >= self.filled {
+            self.pos = 0;
+            self.filled = 0;
+            let n = self
+                .inner
+                .read(&mut self.buf)
+                .map_err(std::io::Error::from)?;
+            self.filled = n;
+        }
+        Ok(&self.buf[self.pos..self.filled])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.pos = std::cmp::min(self.pos + amt, self.filled);
+    }
+}
 
 /// Default buffer capacity for `VumaBufWriter`.
 const BUF_WRITER_CAP: usize = 8192;
@@ -814,6 +924,21 @@ impl fmt::Display for VumaStdin {
     }
 }
 
+impl fmt::Debug for VumaStdin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VumaStdin")
+            .field("fd", &self.fd)
+            .field("bare_metal", &self.bare_metal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StdRead for VumaStdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        VumaReader::read(self, buf).map_err(std::io::Error::from)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VumaStdout
 // ---------------------------------------------------------------------------
@@ -1005,6 +1130,25 @@ impl fmt::Display for VumaStdout {
     }
 }
 
+impl fmt::Debug for VumaStdout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VumaStdout")
+            .field("fd", &self.fd)
+            .field("bare_metal", &self.bare_metal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StdWrite for VumaStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        VumaWriter::write(self, buf).map_err(std::io::Error::from)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        VumaWriter::flush(self).map_err(std::io::Error::from)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VumaStderr
 // ---------------------------------------------------------------------------
@@ -1184,6 +1328,25 @@ impl fmt::Display for VumaStderr {
         } else {
             write!(f, "VumaStderr {{ mode: linux, fd: {} }}", self.fd)
         }
+    }
+}
+
+impl fmt::Debug for VumaStderr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VumaStderr")
+            .field("fd", &self.fd)
+            .field("bare_metal", &self.bare_metal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StdWrite for VumaStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        VumaWriter::write(self, buf).map_err(std::io::Error::from)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        VumaWriter::flush(self).map_err(std::io::Error::from)
     }
 }
 
@@ -1517,6 +1680,111 @@ impl fmt::Display for VumaFile {
             "VumaFile {{ fd: {}, path: {}, mode: {}, platform: {} }}",
             self.fd, self.path, self.mode, mode_str
         )
+    }
+}
+
+impl StdRead for VumaFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.is_open {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "file is not open",
+            ));
+        }
+        if self.mode == FileMode::Write {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file lacks Read capability (opened in Write mode)",
+            ));
+        }
+        if self.bare_metal {
+            // Bare-metal: return zeros and advance position.
+            let to_read = std::cmp::min(buf.len(), 512);
+            buf[..to_read].fill(0);
+            self.position += to_read as u64;
+            Ok(to_read)
+        } else {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let n = inner.read(buf)?;
+            self.position += n as u64;
+            Ok(n)
+        }
+    }
+}
+
+impl StdWrite for VumaFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.is_open {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "file is not open",
+            ));
+        }
+        if self.mode == FileMode::Read {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file lacks Write capability (opened in Read mode)",
+            ));
+        }
+        if self.bare_metal {
+            // Bare-metal: pretend we wrote and advance position.
+            let written = buf.len();
+            self.position += written as u64;
+            Ok(written)
+        } else {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let n = inner.write(buf)?;
+            self.position += n as u64;
+            Ok(n)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.flush()?;
+        }
+        Ok(())
+    }
+}
+
+impl StdSeek for VumaFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        if !self.is_open {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "file is not open",
+            ));
+        }
+        if self.bare_metal {
+            let new_pos = match pos {
+                SeekFrom::Start(offset) => offset,
+                SeekFrom::Current(offset) => {
+                    (self.position as i64 + offset).max(0) as u64
+                }
+                SeekFrom::End(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "cannot seek from end on bare-metal",
+                    ));
+                }
+            };
+            self.position = new_pos;
+            Ok(new_pos)
+        } else {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let result = inner.seek(pos)?;
+            self.position = result;
+            Ok(result)
+        }
     }
 }
 
@@ -2729,5 +2997,39 @@ mod tests {
             }
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+
+    // --- Tests for cross-domain From conversions ---
+
+    #[test]
+    fn test_from_thread_error_to_vuma_io_error() {
+        let thread_err = crate::thread::VumaThreadError::AlreadyJoined;
+        let io_err: VumaIoError = thread_err.into();
+        assert_eq!(io_err.kind(), VumaIoErrorKind::NotOpen);
+
+        let thread_err2 = crate::thread::VumaThreadError::InvalidConfig("bad stack".to_string());
+        let io_err2: VumaIoError = thread_err2.into();
+        assert_eq!(io_err2.kind(), VumaIoErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_from_env_error_to_vuma_io_error() {
+        let env_err = crate::env::VumaEnvError::NotPresent;
+        let io_err: VumaIoError = env_err.into();
+        assert_eq!(io_err.kind(), VumaIoErrorKind::NotOpen);
+
+        let env_err2 = crate::env::VumaEnvError::NotUnicode("BAD_VAR".to_string());
+        let io_err2: VumaIoError = env_err2.into();
+        assert_eq!(io_err2.kind(), VumaIoErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_from_fs_io_error_to_vuma_io_error() {
+        let fs_err = crate::fs::VumaIoError::new(
+            crate::error::VumaErrorKind::PermissionDenied,
+            "access denied",
+        );
+        let io_err: VumaIoError = fs_err.into();
+        assert_eq!(io_err.kind(), VumaIoErrorKind::CapabilityDenied);
     }
 }

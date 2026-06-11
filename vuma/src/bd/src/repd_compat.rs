@@ -49,31 +49,77 @@ pub enum CompatibilityKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncompatibilityReason {
     /// Total sizes differ.
-    SizeMismatch { size1: u64, size2: u64 },
+    SizeMismatch {
+        /// Size of the first RepD in bytes.
+        size1: u64,
+        /// Size of the second RepD in bytes.
+        size2: u64,
+    },
     /// Alignments are incompatible (neither divides the other).
-    AlignmentIncompatible { align1: u64, align2: u64 },
+    AlignmentIncompatible {
+        /// Alignment of the first RepD.
+        align1: u64,
+        /// Alignment of the second RepD.
+        align2: u64,
+    },
     /// Different top-level constructors (e.g., Struct vs Array).
     ConstructorMismatch,
     /// Struct field counts differ.
-    FieldCountMismatch { count1: usize, count2: usize },
+    FieldCountMismatch {
+        /// Field count of the first struct.
+        count1: usize,
+        /// Field count of the second struct.
+        count2: usize,
+    },
     /// Field at the given index is incompatible.
     FieldIncompatible {
+        /// Zero-based field index where the mismatch was found.
         index: usize,
+        /// Why the field is incompatible.
         reason: Box<IncompatibilityReason>,
     },
     /// Array element counts differ.
-    ArrayCountMismatch { count1: u64, count2: u64 },
+    ArrayCountMismatch {
+        /// Element count of the first array.
+        count1: u64,
+        /// Element count of the second array.
+        count2: u64,
+    },
     /// Enum variant counts differ.
-    EnumVariantCountMismatch { count1: usize, count2: usize },
+    EnumVariantCountMismatch {
+        /// Variant count of the first enum.
+        count1: usize,
+        /// Variant count of the second enum.
+        count2: usize,
+    },
     /// Enum variant tag mismatch.
-    EnumTagMismatch { index: usize, tag1: u64, tag2: u64 },
+    EnumTagMismatch {
+        /// Zero-based variant index where the mismatch was found.
+        index: usize,
+        /// Discriminant of the first variant.
+        tag1: u64,
+        /// Discriminant of the second variant.
+        tag2: u64,
+    },
     /// Union alternative counts differ.
-    UnionAltCountMismatch { count1: usize, count2: usize },
+    UnionAltCountMismatch {
+        /// Alternative count of the first union.
+        count1: usize,
+        /// Alternative count of the second union.
+        count2: usize,
+    },
     /// Function parameter counts differ.
-    ParamCountMismatch { count1: usize, count2: usize },
+    ParamCountMismatch {
+        /// Parameter count of the first function.
+        count1: usize,
+        /// Parameter count of the second function.
+        count2: usize,
+    },
     /// A nested incompatibility with context.
     Nested {
+        /// Description of the surrounding context.
         context: &'static str,
+        /// The underlying incompatibility reason.
         reason: Box<IncompatibilityReason>,
     },
     /// Generic catch-all.

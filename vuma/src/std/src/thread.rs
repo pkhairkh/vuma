@@ -274,6 +274,14 @@ pub struct VumaJoinHandle<T> {
     vuma_thread: VumaThread,
 }
 
+impl<T> fmt::Debug for VumaJoinHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VumaJoinHandle")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> VumaJoinHandle<T> {
     /// Wait for the thread to finish and return its result.
     ///
@@ -343,6 +351,7 @@ impl<T> VumaJoinHandle<T> {
 ///
 /// - CapD: { Read, Write, Execute }
 /// - SyncEdge: new → spawn (Seq)
+#[derive(Debug)]
 pub struct VumaThreadBuilder {
     /// Optional thread name.
     name: Option<String>,

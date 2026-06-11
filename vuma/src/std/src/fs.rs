@@ -27,7 +27,7 @@ use crate::error::{VumaErrorChain, VumaErrorKind, VumaResult};
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{Read as StdRead, Write as StdWrite};
+use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ use std::path::Path;
 /// A filesystem-specific I/O error.
 ///
 /// Wraps `std::io::Error` with VUMA BD annotations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VumaIoError {
     /// The underlying I/O error kind.
     pub kind: VumaErrorKind,
@@ -85,6 +85,39 @@ impl std::error::Error for VumaIoError {}
 impl From<VumaIoError> for VumaErrorChain {
     fn from(e: VumaIoError) -> Self {
         VumaErrorChain::new(e.kind, e.message)
+    }
+}
+
+impl From<std::io::Error> for VumaIoError {
+    fn from(e: std::io::Error) -> Self {
+        let kind = match e.kind() {
+            std::io::ErrorKind::NotFound => VumaErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied => VumaErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut => VumaErrorKind::Timeout,
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                VumaErrorKind::InvalidArgument
+            }
+            std::io::ErrorKind::OutOfMemory => VumaErrorKind::OutOfMemory,
+            _ => VumaErrorKind::Io,
+        };
+        Self {
+            kind,
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<VumaIoError> for std::io::Error {
+    fn from(e: VumaIoError) -> Self {
+        let kind = match e.kind {
+            VumaErrorKind::NotFound => std::io::ErrorKind::NotFound,
+            VumaErrorKind::PermissionDenied => std::io::ErrorKind::PermissionDenied,
+            VumaErrorKind::Timeout => std::io::ErrorKind::TimedOut,
+            VumaErrorKind::InvalidArgument => std::io::ErrorKind::InvalidInput,
+            VumaErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
+            _ => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, e.message)
     }
 }
 
@@ -375,6 +408,53 @@ impl VumaFile {
 }
 
 // ---------------------------------------------------------------------------
+// VumaFile: std::io::Read + Write + Seek
+// ---------------------------------------------------------------------------
+
+impl StdRead for VumaFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let f = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+            })?;
+        f.read(buf)
+    }
+}
+
+impl StdWrite for VumaFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let f = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+            })?;
+        f.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(f) = self.inner.as_mut() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+impl StdSeek for VumaFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let f = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+            })?;
+        f.seek(pos)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VumaDir
 // ---------------------------------------------------------------------------
 
@@ -387,6 +467,12 @@ impl VumaFile {
 pub struct VumaDir {
     /// The underlying directory iterator.
     inner: std::fs::ReadDir,
+}
+
+impl fmt::Debug for VumaDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VumaDir").finish_non_exhaustive()
+    }
 }
 
 impl VumaDir {
@@ -707,5 +793,70 @@ mod tests {
     fn test_open_nonexistent_returns_error() {
         let result = VumaFile::open("/tmp/vuma_nonexistent_12345");
         assert!(result.is_err());
+    }
+
+    // --- Tests for new trait implementations ---
+
+    #[test]
+    fn test_vuma_file_std_read_trait() {
+        let dir = test_dir("std_read");
+        let path = dir.join("std_read_test.txt");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"hello std::io::Read").unwrap();
+        }
+        let mut f = VumaFile::open(&path).unwrap();
+        let mut buf = [0u8; 64];
+        let n = StdRead::read(&mut f, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"hello std::io::Read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vuma_file_std_write_trait() {
+        let dir = test_dir("std_write");
+        let path = dir.join("std_write_test.txt");
+        let mut f = VumaFile::create(&path).unwrap();
+        let n = StdWrite::write(&mut f, b"hello from std::io::Write").unwrap();
+        assert_eq!(n, 24);
+        StdWrite::flush(&mut f).unwrap();
+        // Read back separately with a new VumaFile
+        let mut f2 = VumaFile::open(&path).unwrap();
+        let mut buf = [0u8; 64];
+        let n = StdRead::read(&mut f2, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"hello from std::io::Write");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vuma_file_std_seek_trait() {
+        let dir = test_dir("std_seek");
+        let path = dir.join("std_seek_test.txt");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(b"0123456789").unwrap();
+        }
+        let mut f = VumaFile::open(&path).unwrap();
+        // Seek to offset 5
+        let pos = StdSeek::seek(&mut f, SeekFrom::Start(5)).unwrap();
+        assert_eq!(pos, 5);
+        let mut buf = [0u8; 5];
+        let n = StdRead::read(&mut f, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"56789");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vuma_io_error_from_std_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let vuma_err: VumaIoError = io_err.into();
+        assert_eq!(vuma_err.kind, VumaErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_vuma_io_error_into_std_io_error() {
+        let vuma_err = VumaIoError::new(VumaErrorKind::PermissionDenied, "denied");
+        let io_err: std::io::Error = vuma_err.into();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }

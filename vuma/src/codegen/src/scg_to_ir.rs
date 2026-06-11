@@ -92,22 +92,34 @@ pub struct ScgFunction {
 /// An SCG function parameter.
 #[derive(Debug, Clone)]
 pub struct ScgParam {
+    /// Parameter name.
     pub name: String,
+    /// Parameter type.
     pub ty: ScgType,
 }
 
 /// A lightweight type representation in the SCG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScgType {
+    /// Signed 8-bit integer.
     I8,
+    /// Signed 16-bit integer.
     I16,
+    /// Signed 32-bit integer.
     I32,
+    /// Signed 64-bit integer.
     I64,
+    /// Unsigned 8-bit integer.
     U8,
+    /// Unsigned 16-bit integer.
     U16,
+    /// Unsigned 32-bit integer.
     U32,
+    /// Unsigned 64-bit integer.
     U64,
+    /// Pointer-sized unsigned integer.
     Ptr,
+    /// No value (unit type).
     Void,
 }
 

@@ -382,13 +382,21 @@ pub trait Backend: Send + Sync + 'static {
 /// Enumeration of all supported backend architectures.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BackendKind {
+    /// ARM 64-bit (AArch64).
     AArch64,
+    /// RISC-V 64-bit.
     RiscV64,
+    /// WebAssembly 32-bit.
     Wasm32,
+    /// LoongArch 64-bit.
     LoongArch64,
+    /// x86-64.
     X86_64,
+    /// ARM 32-bit.
     Arm32,
+    /// MIPS 64-bit.
     Mips64,
+    /// PowerPC 64-bit.
     PowerPC64,
 }
 

@@ -9,33 +9,56 @@ use crate::backend::{Endianness, OutputFormat, RegClass};
 /// A complete machine-readable description of a target ISA.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetDesc {
+    /// ISA name in lowercase (e.g., `"aarch64"`, `"riscv64"`).
     pub name: &'static str,
+    /// LLVM-style target triple (e.g., `"aarch64-unknown-linux-gnu"`).
     pub triple: &'static str,
+    /// ELF `e_machine` value (0 for non-ELF targets like Wasm).
     pub elf_machine: u16,
+    /// Default base address for the `.text` section.
     pub base_addr: u64,
+    /// Pointer width in bytes (4 for 32-bit, 8 for 64-bit).
     pub pointer_width: usize,
+    /// Byte order of the target.
     pub endianness: Endianness,
+    /// Binary output format produced by the backend.
     pub output_format: OutputFormat,
+    /// Register file description.
     pub registers: Vec<RegDesc>,
+    /// Calling convention details.
     pub calling_convention: CallingConventionDesc,
+    /// Instruction category metadata.
     pub instruction_categories: Vec<InstCategoryDesc>,
 }
 
 /// Description of a single register.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegDesc {
+    /// Register name (e.g., `"X0"`, `"RAX"`, `"x10"`).
     pub name: &'static str,
+    /// Register class (GPR, SIMD/FP, Condition, Special).
     pub class: RegClass,
+    /// Register index within its class (0-based).
     pub index: usize,
+    /// Whether this register is available for the register allocator.
     pub is_allocatable: bool,
+    /// Whether this register always reads as zero (e.g., RISC-V `x0`).
     pub is_hardwired_zero: bool,
+    /// Whether this register serves as the stack pointer.
     pub is_stack_pointer: bool,
+    /// Whether this register serves as the frame pointer.
     pub is_frame_pointer: bool,
+    /// Whether this register holds the return address (link register).
     pub is_link_register: bool,
+    /// Whether this register holds the TOC (table of contents) pointer.
     pub is_toc_pointer: bool,
+    /// Whether this register must be preserved across function calls.
     pub is_callee_saved: bool,
+    /// Whether this register is used for passing arguments.
     pub is_arg_reg: bool,
+    /// For argument registers, the position in the argument list (0-based).
     pub arg_position: Option<usize>,
+    /// Whether this register is used for returning values.
     pub is_return_reg: bool,
 }
 
@@ -172,23 +195,36 @@ impl RegDesc {
 /// Description of a calling convention.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallingConventionDesc {
+    /// Calling convention name (e.g., `"aapcs64"`, `"lp64d"`, `"systemv"`).
     pub name: &'static str,
+    /// GPR indices used for integer arguments, in order.
     pub int_arg_regs: Vec<usize>,
+    /// FPR indices used for floating-point arguments, in order.
     pub fp_arg_regs: Vec<usize>,
+    /// GPR indices used for integer return values, in order.
     pub int_return_regs: Vec<usize>,
+    /// FPR indices used for floating-point return values, in order.
     pub fp_return_regs: Vec<usize>,
+    /// GPR indices that are callee-saved.
     pub callee_saved_gprs: Vec<usize>,
+    /// FPR indices that are callee-saved.
     pub callee_saved_fps: Vec<usize>,
+    /// Required stack alignment in bytes.
     pub stack_alignment: usize,
+    /// Whether the ISA uses a link register (vs pushing return address on stack).
     pub has_link_register: bool,
+    /// Whether branches have delay slots (MIPS only).
     pub has_branch_delay_slots: bool,
+    /// Whether the ISA uses a TOC (table of contents) pointer (PPC64).
     pub has_toc_pointer: bool,
 }
 
 /// Description of an instruction category.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstCategoryDesc {
+    /// Category name (e.g., `"arithmetic"`, `"branch"`, `"load_store"`).
     pub name: &'static str,
+    /// Instruction mnemonics belonging to this category.
     pub insts: Vec<&'static str>,
 }
 

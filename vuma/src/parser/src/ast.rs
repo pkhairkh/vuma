@@ -799,9 +799,19 @@ pub struct ExprStmt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     /// Variable reference.
-    Var { name: String, span: Span },
+    Var {
+        /// The variable name.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
     /// Literal value.
-    Lit { value: Lit, span: Span },
+    Lit {
+        /// The literal value.
+        value: Lit,
+        /// Source span.
+        span: Span,
+    },
     /// Binary operation: `lhs op rhs`
     BinOp {
         /// The binary operator.
@@ -832,19 +842,35 @@ pub enum Expr {
         span: Span,
     },
     /// Address-of: `@expr`
-    AddressOf { expr: Box<Expr>, span: Span },
+    AddressOf {
+        /// The expression whose address is taken.
+        expr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Dereference: `*expr`
-    Deref { expr: Box<Expr>, span: Span },
+    Deref {
+        /// The expression being dereferenced.
+        expr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Pointer offset: `ptr + offset` (sugar for pointer arithmetic)
     Offset {
+        /// The base pointer expression.
         base: Box<Expr>,
+        /// The byte offset expression.
         offset: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Type cast: `expr as Type`
     Cast {
+        /// The expression being cast.
         expr: Box<Expr>,
+        /// The target type.
         target_type: Type,
+        /// Source span.
         span: Span,
     },
     /// Index access: `expr[index]`
@@ -893,9 +919,19 @@ pub enum Expr {
         span: Span,
     },
     /// `sizeof(Type)`
-    Sizeof { ty: Type, span: Span },
+    Sizeof {
+        /// The type whose size is queried.
+        ty: Type,
+        /// Source span.
+        span: Span,
+    },
     /// `alignof(Type)`
-    Alignof { ty: Type, span: Span },
+    Alignof {
+        /// The type whose alignment is queried.
+        ty: Type,
+        /// Source span.
+        span: Span,
+    },
     /// Type ascription: `expr: Type`
     TypeAscription {
         /// The ascribed expression.
@@ -906,9 +942,19 @@ pub enum Expr {
         span: Span,
     },
     /// Async block: `async { … }`
-    Async { body: Block, span: Span },
+    Async {
+        /// The async block body.
+        body: Block,
+        /// Source span.
+        span: Span,
+    },
     /// Spawn expression: `spawn expr`
-    Spawn { expr: Box<Expr>, span: Span },
+    Spawn {
+        /// The expression to spawn as a concurrent task.
+        expr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Allocate expression: `allocate(size)` used as an expression
     Allocate {
         /// The size in bytes to allocate.
@@ -917,7 +963,10 @@ pub enum Expr {
         span: Span,
     },
     /// Null literal: `null`
-    Null { span: Span },
+    Null {
+        /// Source span.
+        span: Span,
+    },
     /// Range expression: `start..end`
     Range {
         /// Range start (inclusive).
@@ -953,7 +1002,10 @@ pub enum Expr {
         span: Span,
     },
     /// An uninitialized binding (`let x;`).
-    Uninitialized { span: Span },
+    Uninitialized {
+        /// Source span.
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

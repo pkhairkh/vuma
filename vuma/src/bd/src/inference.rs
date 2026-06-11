@@ -48,32 +48,54 @@ pub enum InferenceError {
     CycleDetected,
     /// RepD incompatibility between two nodes connected by an edge.
     RepDIncompatible {
+        /// Source node of the incompatible edge.
         source: NodeId,
+        /// Target node of the incompatible edge.
         target: NodeId,
+        /// String representation of the source RepD.
         source_repd: String,
+        /// String representation of the target RepD.
         target_repd: String,
     },
     /// CapD violation: a required capability is not present.
     CapDViolation {
+        /// The node where the violation was detected.
         node: NodeId,
+        /// The capability that was required but absent.
         required: Capability,
+        /// String representation of the actual CapD found.
         actual: String,
     },
     /// RelD inconsistency detected (e.g., contradictory temporal relations).
-    RelDInconsistent { node: NodeId, detail: String },
+    RelDInconsistent {
+        /// The node where the inconsistency was detected.
+        node: NodeId,
+        /// Human-readable description of the inconsistency.
+        detail: String,
+    },
     /// A node could not have its BD inferred (unreachable / uninitialized).
     UninferredNode(NodeId),
     /// Security downgrade detected without declassification.
     SecurityDowngrade {
+        /// Source node of the downgrade edge.
         source: NodeId,
+        /// Target node of the downgrade edge.
         target: NodeId,
+        /// Security level of the source node.
         source_level: u8,
+        /// Security level of the target node.
         target_level: u8,
     },
     /// Circular Outlives relation detected.
-    CircularOutlives { node: NodeId },
+    CircularOutlives {
+        /// A node involved in the circular outlives relation.
+        node: NodeId,
+    },
     /// Maximum iteration count exceeded during fixed-point solving.
-    MaxIterationsExceeded { iterations: u32 },
+    MaxIterationsExceeded {
+        /// The number of iterations attempted before giving up.
+        iterations: u32,
+    },
 }
 
 impl fmt::Display for InferenceError {
@@ -219,11 +241,26 @@ impl UsageContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BDConstraint {
     /// Source RepD must be compatible with target RepD.
-    RepDCompatibility { source: NodeId, target: NodeId },
+    RepDCompatibility {
+        /// Source node of the constrained edge.
+        source: NodeId,
+        /// Target node of the constrained edge.
+        target: NodeId,
+    },
     /// Target CapD must be a weakening of source CapD.
-    CapDWeakening { source: NodeId, target: NodeId },
+    CapDWeakening {
+        /// Source node of the constrained edge.
+        source: NodeId,
+        /// Target node of the constrained edge.
+        target: NodeId,
+    },
     /// Source RelD must refine to target RelD.
-    RelDRefinement { source: NodeId, target: NodeId },
+    RelDRefinement {
+        /// Source node of the constrained edge.
+        source: NodeId,
+        /// Target node of the constrained edge.
+        target: NodeId,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -502,11 +502,17 @@ impl fmt::Display for DependencyRel {
 /// A single detailed relation from one of the six categories.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DetailedRelation {
+    /// Temporal ordering relation (e.g., happens-before, sequential).
     Temporal(TemporalRel),
+    /// Structural containment or layout relation.
     Structural(StructuralRel),
+    /// Security-level relation (e.g., flows-to, declassification).
     Security(SecurityRel),
+    /// Ownership transfer or borrowing relation.
     Ownership(OwnershipRel),
+    /// Lifetime scoping or outlives relation.
     Lifetime(LifetimeRel),
+    /// Data or control dependency relation.
     Dependency(DependencyRel),
 }
 

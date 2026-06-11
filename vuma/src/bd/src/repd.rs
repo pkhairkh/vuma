@@ -124,8 +124,8 @@ impl fmt::Display for BDConstraint {
 
 /// A **Representation Descriptor** — describes the memory shape of a value.
 ///
-/// Two `RepD`s are [`compatible`] when they can safely alias the same memory,
-/// and one [`subsumes`] the other when it is at least as permissive.
+/// Two `RepD`s are [`RepD::compatible`] when they can safely alias the same memory,
+/// and one [`RepD::subsumes`] the other when it is at least as permissive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepD {
     /// Raw byte sequence.
@@ -324,7 +324,7 @@ impl RepD {
     ///
     /// A `Byte` representation with matching size/alignment subsumes anything.
     /// A `Generic` subsumes any RepD satisfying its constraints.
-    /// Structurally, subsumption follows the same rules as [`compatible`]
+    /// Structurally, subsumption follows the same rules as [`Self::compatible`]
     /// but is directed (not symmetric).
     pub fn subsumes(&self, other: &RepD) -> bool {
         // Byte with matching size/alignment subsumes all.

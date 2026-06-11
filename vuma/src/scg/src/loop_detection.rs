@@ -28,7 +28,7 @@
 //!
 //! # Why a Separate Dominator Computation?
 //!
-//! The general-purpose [`compute_dominators`] in the `dominance` module
+//! The general-purpose [`crate::dominance::compute_dominators`] in the `dominance` module
 //! operates on **all** edges (including `DataFlow`, `Derivation`, etc.).
 //! Loop detection must reason about control-flow reachability only: a
 //! DataFlow edge from outside a loop into the loop body does **not** mean

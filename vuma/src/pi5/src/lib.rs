@@ -16,6 +16,8 @@
 //! | [`gpio`]    | GPIO pin configuration and I/O                  |
 //! | [`uart`]    | PL011 UART serial driver                        |
 //! | [`timer`]   | ARM Generic Timer (CNTPCT_EL0 / CNTFRQ_EL0)    |
+//! | [`mailbox`] | BCM2712 VideoCore mailbox (property messages)   |
+//! | [`power`]   | Power management (device power, reboot, off)    |
 //! | [`smp`]     | Multi-core start-up and inter-core messaging    |
 //!
 //! # Feature flags
@@ -51,9 +53,11 @@ pub mod boot;
 pub mod exception;
 pub mod gic;
 pub mod gpio;
+pub mod mailbox;
 pub mod mmio;
 pub mod mmu;
 pub mod platform;
+pub mod power;
 #[cfg(target_arch = "aarch64")]
 pub mod smp;
 #[cfg(target_arch = "aarch64")]

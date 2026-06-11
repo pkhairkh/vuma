@@ -212,25 +212,51 @@ impl fmt::Display for BDConstraint {
 pub enum UnificationError {
     /// Representation descriptors have incompatible constructors or fields.
     IncompatibleRepD {
+        /// String representation of the first RepD.
         repd1: String,
+        /// String representation of the second RepD.
         repd2: String,
+        /// Why the two RepDs are incompatible.
         reason: String,
     },
     /// Capability descriptors cannot be reconciled (empty meet with
     /// non-empty inputs).
-    IncompatibleCapD { capd1: String, capd2: String },
+    IncompatibleCapD {
+        /// String representation of the first CapD.
+        capd1: String,
+        /// String representation of the second CapD.
+        capd2: String,
+    },
     /// Relational descriptors are internally inconsistent when composed.
-    InconsistentRelD { reld1: String, reld2: String },
+    InconsistentRelD {
+        /// String representation of the first RelD.
+        reld1: String,
+        /// String representation of the second RelD.
+        reld2: String,
+    },
     /// Occurs check failed — would create an infinite type.
-    OccursCheckFailed { var: BDVariable, term: String },
+    OccursCheckFailed {
+        /// The variable that occurs within the term.
+        var: BDVariable,
+        /// The term in which the variable was found.
+        term: String,
+    },
     /// A variable has conflicting bindings that cannot be reconciled.
     ConflictingBinding {
+        /// The variable with conflicting bindings.
         var: BDVariable,
+        /// String representation of the existing binding.
         existing: String,
+        /// String representation of the proposed binding.
         proposed: String,
     },
     /// A subtyping constraint is violated: left does not refine right.
-    SubtypeViolation { sub: String, sup: String },
+    SubtypeViolation {
+        /// String representation of the subtype.
+        sub: String,
+        /// String representation of the supertype.
+        sup: String,
+    },
     /// General unification failure with a descriptive message.
     Failed(String),
 }

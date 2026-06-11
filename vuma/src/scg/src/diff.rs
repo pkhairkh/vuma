@@ -290,7 +290,12 @@ pub enum DiffError {
     /// An edge with the given ID already exists (cannot add duplicate).
     DuplicateEdge(EdgeId),
     /// An edge's source or target node does not exist.
-    InvalidEdgeEndpoints { source: NodeId, target: NodeId },
+    InvalidEdgeEndpoints {
+        /// The source node of the invalid edge.
+        source: NodeId,
+        /// The target node of the invalid edge.
+        target: NodeId,
+    },
     /// The diff cannot be applied in its current state (e.g., dependency
     /// ordering issue).
     CannotApply(String),

@@ -33,7 +33,12 @@ pub enum SCGError {
     /// A region with the given `RegionId` was not found.
     RegionNotFound(RegionId),
     /// The specified source or target node for an edge does not exist.
-    InvalidEdgeEndpoints { source: NodeId, target: NodeId },
+    InvalidEdgeEndpoints {
+        /// The source node of the invalid edge.
+        source: NodeId,
+        /// The target node of the invalid edge.
+        target: NodeId,
+    },
 }
 
 impl std::fmt::Display for SCGError {

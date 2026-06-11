@@ -71,7 +71,9 @@ pub enum WeakeningError {
     },
     /// The target is not below the source in the lattice for both dimensions.
     BothViolations {
+        /// Capabilities in the target that are absent from the source.
         extra_caps: Vec<Capability>,
+        /// Conditions present in the source but absent from the target.
         removed_conditions: Vec<Condition>,
     },
 }
@@ -140,7 +142,9 @@ pub enum StrengtheningError {
     },
     /// Both capability and condition violations are present.
     BothViolations {
+        /// Capabilities in the target not present in the source.
         missing_caps: Vec<Capability>,
+        /// Conditions present in the source but absent from the target.
         relaxed_conditions: Vec<Condition>,
     },
 }

@@ -342,6 +342,20 @@ impl From<&str> for VumaErrorChain {
     }
 }
 
+impl From<VumaErrorChain> for std::io::Error {
+    fn from(err: VumaErrorChain) -> Self {
+        let kind = match err.kind {
+            VumaErrorKind::NotFound => std::io::ErrorKind::NotFound,
+            VumaErrorKind::PermissionDenied => std::io::ErrorKind::PermissionDenied,
+            VumaErrorKind::Timeout => std::io::ErrorKind::TimedOut,
+            VumaErrorKind::InvalidArgument => std::io::ErrorKind::InvalidInput,
+            VumaErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
+            _ => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, err.message)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -460,5 +474,16 @@ mod tests {
         }
         assert_eq!(succeed().unwrap(), 42);
         assert!(fail().is_err());
+    }
+
+    #[test]
+    fn test_from_error_chain_to_std_io_error() {
+        let err = VumaErrorChain::new(VumaErrorKind::NotFound, "file missing");
+        let io_err: std::io::Error = err.into();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+
+        let err2 = VumaErrorChain::new(VumaErrorKind::PermissionDenied, "denied");
+        let io_err2: std::io::Error = err2.into();
+        assert_eq!(io_err2.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
