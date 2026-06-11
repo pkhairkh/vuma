@@ -809,7 +809,7 @@ mod tests {
         let path = dir.join("std_write_test.txt");
         let mut f = VumaFile::create(&path).unwrap();
         let n = StdWrite::write(&mut f, b"hello from std::io::Write").unwrap();
-        assert_eq!(n, 24);
+        assert_eq!(n, 25);
         StdWrite::flush(&mut f).unwrap();
         // Read back separately with a new VumaFile
         let mut f2 = VumaFile::open(&path).unwrap();

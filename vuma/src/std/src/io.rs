@@ -2407,6 +2407,7 @@ impl UdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as StdRead, Write as StdWrite};
 
     // --- Original tests (preserved) ---
 
@@ -2542,9 +2543,9 @@ mod tests {
         let mut stdout = VumaStdout::new();
         assert!(stdout.capd().has(CapFlag::Write));
         assert!(!stdout.capd().has(CapFlag::Read));
-        let n = stdout.write(b"hello").unwrap();
+        let n = StdWrite::write(&mut stdout, b"hello").unwrap();
         assert_eq!(n, 5);
-        stdout.flush().unwrap();
+        StdWrite::flush(&mut stdout).unwrap();
     }
 
     // Test 4: VumaFile read/write with capability enforcement
@@ -2599,7 +2600,7 @@ mod tests {
         assert_eq!(reader.buffer_size(), 0);
 
         let mut buf = [0u8; 10];
-        let n = reader.read(&mut buf).unwrap();
+        let n = StdRead::read(&mut reader, &mut buf).unwrap();
         assert_eq!(n, 10);
         assert_eq!(&buf, b"Hello, Vum");
 
@@ -2638,13 +2639,13 @@ mod tests {
         // Bare-metal read may fail if no data is available, but should
         // return the correct error kind.
         let mut buf = [0u8; 4];
-        let result = stdin.read(&mut buf);
+        let result = StdRead::read(&mut stdin, &mut buf);
         // In the x86_64 simulation, uart_rx_ready() returns true and
         // read_uart_byte() returns Ok(0), so the read succeeds with
         // data. On real bare-metal hardware with no UART input, it
         // would return UartError instead.
         if result.is_err() {
-            assert_eq!(result.unwrap_err().kind(), VumaIoErrorKind::UartError);
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Other);
         } else {
             // Simulation path: read returns Ok with zero bytes
             assert!(
@@ -2662,9 +2663,9 @@ mod tests {
         assert!(stdout.capd().has(CapFlag::Write));
 
         // Writing to bare-metal UART should succeed (simulated).
-        let n = stdout.write(b"test").unwrap();
+        let n = StdWrite::write(&mut stdout, b"test").unwrap();
         assert_eq!(n, 4);
-        stdout.flush().unwrap();
+        StdWrite::flush(&mut stdout).unwrap();
     }
 
     // Test 10: VumaFile bare-metal mode
@@ -2720,7 +2721,7 @@ mod tests {
     #[test]
     fn test_vuma_writer_write_all() {
         let mut stdout = VumaStdout::new();
-        stdout.write_all(b"hello world").unwrap();
+        StdWrite::write_all(&mut stdout, b"hello world").unwrap();
     }
 
     // Test 13: VumaIoErrorKind Display
@@ -2814,9 +2815,9 @@ mod tests {
         assert!(stderr.capd().has(CapFlag::Write));
         assert!(!stderr.capd().has(CapFlag::Read));
         // Write to stderr — this goes to the real stderr fd.
-        let n = stderr.write(b"vuma-stderr-test\n").unwrap();
+        let n = StdWrite::write(&mut stderr, b"vuma-stderr-test\n").unwrap();
         assert_eq!(n, 17);
-        stderr.flush().unwrap();
+        StdWrite::flush(&mut stderr).unwrap();
     }
 
     // Test 20: VumaStderr bare-metal mode
@@ -2825,9 +2826,9 @@ mod tests {
         let mut stderr = VumaStderr::new_bare_metal(0x1D0A_0000);
         assert!(stderr.bare_metal);
         assert!(stderr.capd().has(CapFlag::Write));
-        let n = stderr.write(b"test").unwrap();
+        let n = StdWrite::write(&mut stderr, b"test").unwrap();
         assert_eq!(n, 4);
-        stderr.flush().unwrap();
+        StdWrite::flush(&mut stderr).unwrap();
     }
 
     // Test 21: VumaFile real write, seek, and read round-trip
@@ -2879,9 +2880,9 @@ mod tests {
         // Write bytes to real stdout — this should not error.
         // The output may appear in test logs, but the write should succeed.
         let data = b"vuma-stdout-test\n";
-        let n = stdout.write(data).unwrap();
+        let n = StdWrite::write(&mut stdout, data).unwrap();
         assert_eq!(n, data.len());
-        stdout.flush().unwrap();
+        StdWrite::flush(&mut stdout).unwrap();
     }
 
     // Test 24: VumaFile open non-existent file returns error
@@ -2933,9 +2934,9 @@ mod tests {
         fn test_libc_stdout_write() {
             let mut stdout = VumaStdout::new();
             let data = b"vuma-libc-stdout-test\n";
-            let n = stdout.write(data).unwrap();
+            let n = StdWrite::write(&mut stdout, data).unwrap();
             assert_eq!(n, data.len());
-            stdout.flush().unwrap();
+            StdWrite::flush(&mut stdout).unwrap();
         }
 
         #[test]
@@ -2944,13 +2945,13 @@ mod tests {
             let data = b"vuma-libc-stderr-test\n";
             let n = stderr.write(data).unwrap();
             assert_eq!(n, data.len());
-            stderr.flush().unwrap();
+            StdWrite::flush(&mut stderr).unwrap();
         }
 
         #[test]
         fn test_libc_stdout_write_empty() {
             let mut stdout = VumaStdout::new();
-            let n = stdout.write(b"").unwrap();
+            let n = StdWrite::write(&mut stdout, b"").unwrap();
             assert_eq!(n, 0);
         }
 
@@ -2976,7 +2977,7 @@ mod tests {
         fn test_libc_legacy_stdout_write() {
             let mut stdout = Stdout::new();
             let data = b"vuma-legacy-stdout-test\n";
-            let n = stdout.write(data).unwrap();
+            let n = StdWrite::write(&mut stdout, data).unwrap();
             assert_eq!(n, data.len());
         }
 

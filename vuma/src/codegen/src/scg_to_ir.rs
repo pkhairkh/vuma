@@ -1750,7 +1750,10 @@ mod tests {
     fn test_if_without_else() {
         let scg = func_scg(
             "test_if_no_else",
-            vec![],
+            vec![ScgParam {
+                name: "flag".into(),
+                ty: ScgType::I64,
+            }], // define "flag" as a parameter
             vec![
                 ScgStatement::Control(ControlNode::If {
                     cond: ScgExpr::Var("flag".into()),

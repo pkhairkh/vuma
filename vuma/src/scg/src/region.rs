@@ -1897,7 +1897,11 @@ mod tests {
         );
 
         let regions = infer_regions(&scg);
-        assert_eq!(regions.len(), 1, "should have one region for the unpaired alloc");
+        assert_eq!(
+            regions.len(),
+            1,
+            "should have one region for the unpaired alloc"
+        );
 
         let region = &regions[0];
         // Because dealloc_node is Option<NodeId> (None for unpaired), the
@@ -1935,10 +1939,15 @@ mod tests {
             }),
             pp(),
         );
-        scg2.add_edge(alloc2, dealloc2, EdgeKind::ControlFlow).unwrap();
+        scg2.add_edge(alloc2, dealloc2, EdgeKind::ControlFlow)
+            .unwrap();
 
         let regions2 = infer_regions(&scg2);
-        assert_eq!(regions2.len(), 1, "should have one region for the paired alloc");
+        assert_eq!(
+            regions2.len(),
+            1,
+            "should have one region for the paired alloc"
+        );
 
         let region2 = &regions2[0];
         // Because dealloc_node is Option<NodeId> (Some for paired), the
