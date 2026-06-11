@@ -131,6 +131,12 @@ pub enum Judgment {
         region: RegionId,
     },
 
+    /// A region is dead (freed and no longer accessible).
+    Dead {
+        /// The identifier of the dead region.
+        region: RegionId,
+    },
+
     /// A resource is held under exclusive (mutable) access.
     Exclusive {
         /// The resource under exclusive access.
@@ -145,6 +151,15 @@ pub enum Judgment {
         count: usize,
     },
 
+    /// Two resources do not conflict (their exclusive access regions are
+    /// non-overlapping).
+    NoConflict {
+        /// The first resource.
+        resource_a: ResourceId,
+        /// The second resource.
+        resource_b: ResourceId,
+    },
+
     /// A pointer is derived from another pointer within a specific region.
     Derived {
         /// The derived pointer.
@@ -157,6 +172,17 @@ pub enum Judgment {
 
     /// An access at `(pointer + offset)` of `size` bytes is within bounds.
     InBounds {
+        /// The base pointer.
+        pointer: PointerId,
+        /// The byte offset from the pointer.
+        offset: i64,
+        /// The size of the access in bytes.
+        size: i64,
+    },
+
+    /// Bounds are preserved for an access: the access lies within the
+    /// region's known bounds.
+    BoundsPreserved {
         /// The base pointer.
         pointer: PointerId,
         /// The byte offset from the pointer.
@@ -181,12 +207,31 @@ pub enum Judgment {
         to_capd: CapDKind,
     },
 
+    /// A cast (type reinterpretation) is valid for the given resource and
+    /// capability derivation.
+    CastValid {
+        /// The resource being cast.
+        resource: ResourceId,
+        /// The capability kind before the cast.
+        from_capd: CapDKind,
+        /// The capability kind after the cast.
+        to_capd: CapDKind,
+    },
+
     /// Event A is ordered before event B in the happens-before relation.
     TemporalOrder {
         /// The earlier event.
         event_a: EventId,
         /// The later event.
         event_b: EventId,
+    },
+
+    /// A general-purpose assumption expressed as a free-form description.
+    /// Used when a structured judgment form is not available for the
+    /// particular assumption being made.
+    Assumption {
+        /// Human-readable description of the assumption.
+        description: String,
     },
 }
 
@@ -200,10 +245,15 @@ impl Judgment {
             Judgment::Allocated { region } => format!("region {} is allocated", region),
             Judgment::Live { region } => format!("region {} is live", region),
             Judgment::Freed { region } => format!("region {} is freed", region),
+            Judgment::Dead { region } => format!("region {} is dead", region),
             Judgment::Exclusive { resource } => format!("exclusive access to {}", resource),
             Judgment::Shared { resource, count } => {
                 format!("shared access to {} (count={})", resource, count)
             }
+            Judgment::NoConflict {
+                resource_a,
+                resource_b,
+            } => format!("no conflict between {} and {}", resource_a, resource_b),
             Judgment::Derived {
                 pointer,
                 from,
@@ -214,6 +264,11 @@ impl Judgment {
                 offset,
                 size,
             } => format!("inbounds {} offset={} size={}", pointer, offset, size),
+            Judgment::BoundsPreserved {
+                pointer,
+                offset,
+                size,
+            } => format!("bounds preserved: inbounds {} offset={} size={}", pointer, offset, size),
             Judgment::Initialized { variable } => format!("variable {} is initialized", variable),
             Judgment::PreservesCapD {
                 resource,
@@ -223,9 +278,18 @@ impl Judgment {
                 "preserves CapD for {}: {} -> {}",
                 resource, from_capd, to_capd
             ),
+            Judgment::CastValid {
+                resource,
+                from_capd,
+                to_capd,
+            } => format!(
+                "cast is valid: preserves CapD for {}: {} -> {}",
+                resource, from_capd, to_capd
+            ),
             Judgment::TemporalOrder { event_a, event_b } => {
                 format!("{} happens before {}", event_a, event_b)
             }
+            Judgment::Assumption { description } => description.clone(),
         }
     }
 }
@@ -262,6 +326,46 @@ mod tests {
             region: RegionId(1),
         };
         assert_eq!(j.to_statement(), "region region#1 is freed");
+    }
+
+    #[test]
+    fn test_dead_statement() {
+        let j = Judgment::Dead {
+            region: RegionId(1),
+        };
+        assert_eq!(j.to_statement(), "region region#1 is dead");
+    }
+
+    #[test]
+    fn test_no_conflict_statement() {
+        let j = Judgment::NoConflict {
+            resource_a: ResourceId(1),
+            resource_b: ResourceId(2),
+        };
+        assert_eq!(j.to_statement(), "no conflict between resource#1 and resource#2");
+    }
+
+    #[test]
+    fn test_bounds_preserved_statement() {
+        let j = Judgment::BoundsPreserved {
+            pointer: PointerId(3),
+            offset: 16,
+            size: 4,
+        };
+        assert_eq!(j.to_statement(), "bounds preserved: inbounds pointer#3 offset=16 size=4");
+    }
+
+    #[test]
+    fn test_cast_valid_statement() {
+        let j = Judgment::CastValid {
+            resource: ResourceId(2),
+            from_capd: CapDKind::ReadWrite,
+            to_capd: CapDKind::Read,
+        };
+        assert_eq!(
+            j.to_statement(),
+            "cast is valid: preserves CapD for resource#2: readwrite -> read"
+        );
     }
 
     #[test]

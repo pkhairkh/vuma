@@ -388,11 +388,11 @@ impl ProofChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proof::{Goal, ProofContext, Target};
+    use crate::proof::{Goal, InvariantName, ProofContext, RegionId, Target};
     use crate::rules::InferenceRule;
 
     fn dummy_goal() -> Goal {
-        Goal::new("liveness", Target::Region(1), ProofContext::new("test"))
+        Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("test"))
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
         // Build a trivial proof from the goal and check it.
         let mut proof = Proof::new(goal.clone());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::assumption(1, goal.invariant.clone()),
+            fact: Fact::assumption(1, goal.invariant.to_string()),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -551,7 +551,7 @@ mod tests {
     /// Computes a simple fingerprint for a goal using FNV-1a.
     fn goal_fingerprint(goal: &Goal) -> u64 {
         let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in goal.invariant.bytes() {
+        for byte in goal.invariant.to_string().bytes() {
             hash ^= byte as u64;
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn check_proof_cached_returns_valid() {
-        let goal = Goal::new("liveness", Target::Region(1), ProofContext::new("test"));
+        let goal = Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("test"));
         let mut cache = ProofCache::new();
         let result = check_proof_cached(&goal, &mut cache);
         assert!(result.is_discharged());
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn check_proof_cached_uses_cache() {
-        let goal = Goal::new("exclusivity", Target::Region(2), ProofContext::new("test"));
+        let goal = Goal::new(InvariantName::Exclusivity, Target::Region(RegionId(2)), ProofContext::new("test"));
         let mut cache = ProofCache::new();
         // First call populates the cache.
         let result1 = check_proof_cached(&goal, &mut cache);
@@ -585,8 +585,8 @@ mod tests {
 
     #[test]
     fn check_proof_cached_different_goals() {
-        let goal1 = Goal::new("liveness", Target::Region(1), ProofContext::new("a"));
-        let goal2 = Goal::new("bounds", Target::Region(2), ProofContext::new("b"));
+        let goal1 = Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("a"));
+        let goal2 = Goal::new(InvariantName::Exclusivity, Target::Region(RegionId(2)), ProofContext::new("b"));
         let mut cache = ProofCache::new();
         let r1 = check_proof_cached(&goal1, &mut cache);
         let r2 = check_proof_cached(&goal2, &mut cache);
@@ -606,7 +606,7 @@ mod tests {
 
     // -- Structured judgment checker tests ------------------------------------
 
-    use crate::judgment::{EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId};
+    use crate::judgment::{CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId};
 
     #[test]
     fn test_structured_liveness_intro_proof() {
@@ -747,7 +747,13 @@ mod tests {
         proof.add_step(ProofStep::Infer {
             from: vec![1, 2],
             rule: InferenceRule::ExclusivityElim,
-            conclusion: Fact::derived(3, "no conflict between resource#1 and resource#2"),
+            conclusion: Fact::derived_j(
+                3,
+                Judgment::NoConflict {
+                    resource_a: ResourceId(1),
+                    resource_b: ResourceId(2),
+                },
+            ),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -765,7 +771,10 @@ mod tests {
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessElim,
-            conclusion: Fact::derived(2, "region region#5 is dead"),
+            conclusion: Fact::derived_j(
+                2,
+                Judgment::Dead { region: JRegionId(5) },
+            ),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -815,9 +824,13 @@ mod tests {
         proof.add_step(ProofStep::Infer {
             from: vec![1, 2],
             rule: InferenceRule::BoundsPreservation,
-            conclusion: Fact::derived(
+            conclusion: Fact::derived_j(
                 3,
-                "bounds preserved: inbounds pointer#1 offset=8 size=4 ∧ region r1 has bounds [0, 1024]",
+                Judgment::BoundsPreserved {
+                    pointer: PointerId(1),
+                    offset: 8,
+                    size: 4,
+                },
             ),
         });
         proof.conclude(Conclusion::Proven);

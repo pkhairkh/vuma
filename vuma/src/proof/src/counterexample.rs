@@ -85,12 +85,12 @@ pub struct ViolationPoint {
 impl ViolationPoint {
     /// Create a new violation point.
     pub fn new(
-        invariant: impl Into<String>,
+        invariant: InvariantName,
         description: impl Into<String>,
         location: ProgramPoint,
     ) -> Self {
         Self {
-            invariant: invariant.into(),
+            invariant,
             description: description.into(),
             location,
         }
@@ -136,22 +136,19 @@ impl CounterExample {
     /// implementation this would use SMT-based trace minimization.
     pub fn minimal(&self) -> CounterExample {
         // Try to infer a minimal trace from the violation description.
-        let minimal_step = if self.violation.invariant == "liveness" {
+        let minimal_step = if self.violation.invariant == InvariantName::Liveness {
             // Liveness violation: use-after-free — read after free.
             Some(Step::Free { region: 0 })
-        } else if self.violation.invariant == "exclusivity" {
+        } else if self.violation.invariant == InvariantName::Exclusivity {
             // Exclusivity violation: double write.
             Some(Step::Write {
                 addr: 0,
                 region: 0,
                 value: 0,
             })
-        } else if self.violation.invariant == "bounds_safety" {
-            // Bounds violation: out-of-bounds read.
-            Some(Step::Read {
-                addr: 9999,
-                region: 0,
-            })
+        } else if matches!(self.violation.invariant, InvariantName::Cleanup | InvariantName::Origin | InvariantName::Interpretation) {
+            // Default: an alloc step for other invariant violations.
+            Some(Step::Alloc { region: 0 })
         } else {
             // Default: an alloc step.
             Some(Step::Alloc { region: 0 })
@@ -217,18 +214,18 @@ mod tests {
     #[test]
     fn test_counterexample_from_violation() {
         let violation = ViolationPoint::new(
-            "liveness",
+            InvariantName::Liveness,
             "use after free of region 42",
             0x1000,
         );
         let ce = CounterExample::from_violation("error", violation);
         assert!(ce.is_empty());
-        assert_eq!(ce.violation.invariant, "liveness");
+        assert_eq!(ce.violation.invariant, InvariantName::Liveness);
     }
 
     #[test]
     fn test_counterexample_minimal_liveness() {
-        let violation = ViolationPoint::new("liveness", "use after free", 0x100);
+        let violation = ViolationPoint::new(InvariantName::Liveness, "use after free", 0x100);
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
         assert!(!min.is_empty());
@@ -237,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_counterexample_minimal_exclusivity() {
-        let violation = ViolationPoint::new("exclusivity", "data race", 0x200);
+        let violation = ViolationPoint::new(InvariantName::Exclusivity, "data race", 0x200);
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
         assert!(matches!(min.execution[0], Step::Write { .. }));
@@ -245,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_counterexample_add_step() {
-        let violation = ViolationPoint::new("liveness", "test", 0);
+        let violation = ViolationPoint::new(InvariantName::Liveness, "test", 0);
         let mut ce = CounterExample::from_violation("", violation);
         ce.add_step(Step::Alloc { region: 1 });
         ce.add_step(Step::Free { region: 1 });
@@ -254,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_counterexample_display() {
-        let violation = ViolationPoint::new("liveness", "use after free", 0x100);
+        let violation = ViolationPoint::new(InvariantName::Liveness, "use after free", 0x100);
         let mut ce = CounterExample::from_violation("", violation);
         ce.add_step(Step::Alloc { region: 1 });
         let s = format!("{}", ce);

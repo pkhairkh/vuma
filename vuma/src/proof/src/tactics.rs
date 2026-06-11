@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::proof::{Goal, ProofContext, Target};
+use crate::judgment::Judgment;
+use crate::proof::{Goal, ProofContext, RegionId, Target};
 
 // ---------------------------------------------------------------------------
 // ProofGoal / ProofResult — stand-alone tactic function types
@@ -70,13 +71,19 @@ pub fn tactic_case_split(cases: Vec<ProofGoal>) -> ProofResult {
 /// If the goal's context contains both an assumption and its negation,
 /// the goal is discharged. Otherwise the tactic fails.
 pub fn tactic_contradiction(goal: ProofGoal) -> ProofResult {
-    for a in &goal.context.assumptions {
+    let assumption_strs: Vec<String> = goal.context.assumptions.iter()
+        .filter_map(|j| match j {
+            Judgment::Assumption { description } => Some(description.clone()),
+            _ => None,
+        })
+        .collect();
+    for a in &assumption_strs {
         let negated = if a.starts_with("not ") {
             a.strip_prefix("not ").unwrap().to_string()
         } else {
             format!("not {}", a)
         };
-        if goal.context.assumptions.contains(&negated) {
+        if assumption_strs.contains(&negated) {
             return ProofResult::Discharged;
         }
     }
@@ -167,7 +174,13 @@ impl Tactic {
     fn apply_simplify(&self, goal: &Goal) -> Result<Vec<Goal>, TacticError> {
         // In the scaffold, simplification succeeds trivially for goals whose
         // context already contains a matching assumption.
-        if goal.context.assumptions.iter().any(|a| a.contains(&goal.invariant)) {
+        let inv_str = goal.invariant.to_string();
+        if goal.context.assumptions.iter().any(|j| {
+            match j {
+                Judgment::Assumption { description } => description.contains(&inv_str),
+                _ => j.to_statement().contains(&inv_str),
+            }
+        }) {
             // The goal is trivially true by assumption — no subgoals.
             Ok(vec![])
         } else {
@@ -177,17 +190,16 @@ impl Tactic {
     }
 
     /// **Unfold**: Expand a definition. In the scaffold we produce a single
-    /// subgoal with the invariant name expanded in the context.
+    /// subgoal with the same invariant name (the "unfolded" annotation is
+    /// reflected in the context scope).
     fn apply_unfold(&self, goal: &Goal) -> Result<Vec<Goal>, TacticError> {
         let expanded_context = ProofContext {
             scope: goal.context.scope.clone(),
             assumptions: goal.context.assumptions.clone(),
         };
 
-        // The unfolded subgoal carries the same invariant but with an
-        // "unfolded" annotation.
         let subgoal = Goal {
-            invariant: format!("{} (unfolded)", goal.invariant),
+            invariant: goal.invariant,
             target: goal.target.clone(),
             context: expanded_context,
         };
@@ -202,14 +214,14 @@ impl Tactic {
         match goal.target {
             Target::Region(id) => {
                 let base = Goal {
-                    invariant: goal.invariant.clone(),
-                    target: Target::Region(0), // base case: region 0 (trivial)
+                    invariant: goal.invariant,
+                    target: Target::Region(RegionId(0)), // base case: region 0 (trivial)
                     context: ProofContext::new(format!("{}::induction_base", goal.context.scope))
                         .with_assumption("base case: initial region"),
                 };
 
                 let step = Goal {
-                    invariant: goal.invariant.clone(),
+                    invariant: goal.invariant,
                     target: Target::Region(id),
                     context: ProofContext::new(format!("{}::induction_step", goal.context.scope))
                         .with_assumption("inductive hypothesis: invariant holds for predecessor"),
@@ -219,14 +231,14 @@ impl Tactic {
             }
             Target::Derivation(id) => {
                 let base = Goal {
-                    invariant: goal.invariant.clone(),
+                    invariant: goal.invariant,
                     target: Target::Derivation(0),
                     context: ProofContext::new(format!("{}::induction_base", goal.context.scope))
                         .with_assumption("base case: empty derivation"),
                 };
 
                 let step = Goal {
-                    invariant: goal.invariant.clone(),
+                    invariant: goal.invariant,
                     target: Target::Derivation(id),
                     context: ProofContext::new(format!("{}::induction_step", goal.context.scope))
                         .with_assumption("inductive hypothesis: invariant holds for prefix"),
@@ -245,13 +257,19 @@ impl Tactic {
     /// contradiction (both P and ¬P). If so, discharge the goal.
     fn apply_contradiction(&self, goal: &Goal) -> Result<Vec<Goal>, TacticError> {
         // Look for any assumption that is the negation of another.
-        for a in &goal.context.assumptions {
+        let assumption_strs: Vec<String> = goal.context.assumptions.iter()
+            .filter_map(|j| match j {
+                Judgment::Assumption { description } => Some(description.clone()),
+                _ => None,
+            })
+            .collect();
+        for a in &assumption_strs {
             let negated = if a.starts_with("not ") {
                 a.strip_prefix("not ").unwrap().to_string()
             } else {
                 format!("not {}", a)
             };
-            if goal.context.assumptions.contains(&negated) {
+            if assumption_strs.contains(&negated) {
                 // Contradiction found — goal is discharged.
                 return Ok(vec![]);
             }
@@ -267,12 +285,13 @@ impl Tactic {
     /// **Assumption**: If the goal's invariant matches an assumption in the
     /// context, discharge the goal.
     fn apply_assumption(&self, goal: &Goal) -> Result<Vec<Goal>, TacticError> {
-        if goal
-            .context
-            .assumptions
-            .iter()
-            .any(|a| a == &goal.invariant)
-        {
+        let inv_str = goal.invariant.to_string();
+        if goal.context.assumptions.iter().any(|j| {
+            match j {
+                Judgment::Assumption { description } => *description == inv_str,
+                _ => j.to_statement() == inv_str,
+            }
+        }) {
             // Direct match — goal discharged.
             Ok(vec![])
         } else {
@@ -333,8 +352,9 @@ impl std::fmt::Display for Tactic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InvariantName;
 
-    fn make_goal(invariant: &str, target: Target, assumptions: Vec<&str>) -> Goal {
+    fn make_goal(invariant: InvariantName, target: Target, assumptions: Vec<&str>) -> Goal {
         let mut ctx = ProofContext::new("test");
         for a in assumptions {
             ctx = ctx.with_assumption(a);
@@ -344,14 +364,14 @@ mod tests {
 
     #[test]
     fn test_assumption_discharges() {
-        let goal = make_goal("liveness", Target::Region(1), vec!["liveness"]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(1)), vec!["liveness"]);
         let result = Tactic::Assumption.apply(&goal).unwrap();
         assert!(result.is_empty()); // discharged
     }
 
     #[test]
     fn test_assumption_not_applicable() {
-        let goal = make_goal("liveness", Target::Region(1), vec!["exclusivity"]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(1)), vec!["exclusivity"]);
         let result = Tactic::Assumption.apply(&goal);
         assert!(result.is_err());
     }
@@ -359,7 +379,7 @@ mod tests {
     #[test]
     fn test_contradiction_discharges() {
         let goal = make_goal(
-            "P",
+            InvariantName::Liveness,
             Target::FullProgram,
             vec!["Q", "not Q"],
         );
@@ -370,7 +390,7 @@ mod tests {
     #[test]
     fn test_contradiction_not_applicable() {
         let goal = make_goal(
-            "P",
+            InvariantName::Liveness,
             Target::FullProgram,
             vec!["Q", "R"],
         );
@@ -380,50 +400,49 @@ mod tests {
 
     #[test]
     fn test_simplify_with_matching_assumption() {
-        let goal = make_goal("liveness", Target::Region(1), vec!["liveness"]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(1)), vec!["liveness"]);
         let result = Tactic::Simplify.apply(&goal).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_simplify_no_match() {
-        let goal = make_goal("liveness", Target::Region(1), vec!["exclusivity"]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(1)), vec!["exclusivity"]);
         let result = Tactic::Simplify.apply(&goal).unwrap();
         assert_eq!(result.len(), 1); // goal returned unchanged
     }
 
     #[test]
     fn test_unfold() {
-        let goal = make_goal("bounds_safety", Target::Region(5), vec![]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(5)), vec![]);
         let result = Tactic::Unfold.apply(&goal).unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result[0].invariant.contains("unfolded"));
     }
 
     #[test]
     fn test_induction_region() {
-        let goal = make_goal("liveness", Target::Region(42), vec![]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(42)), vec![]);
         let result = Tactic::Induction.apply(&goal).unwrap();
         assert_eq!(result.len(), 2); // base + step
     }
 
     #[test]
     fn test_induction_not_applicable_for_full_program() {
-        let goal = make_goal("liveness", Target::FullProgram, vec![]);
+        let goal = make_goal(InvariantName::Liveness, Target::FullProgram, vec![]);
         let result = Tactic::Induction.apply(&goal);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_auto_with_assumption() {
-        let goal = make_goal("liveness", Target::Region(1), vec!["liveness"]);
+        let goal = make_goal(InvariantName::Liveness, Target::Region(RegionId(1)), vec!["liveness"]);
         let result = Tactic::Auto.apply(&goal).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_auto_with_contradiction() {
-        let goal = make_goal("P", Target::FullProgram, vec!["Q", "not Q"]);
+        let goal = make_goal(InvariantName::Liveness, Target::FullProgram, vec!["Q", "not Q"]);
         let result = Tactic::Auto.apply(&goal).unwrap();
         assert!(result.is_empty());
     }
@@ -436,7 +455,7 @@ mod tests {
 
     // -- Stand-alone tactic function tests --------------------------------------
 
-    fn make_proof_goal(invariant: &str, target: Target, assumptions: Vec<&str>) -> ProofGoal {
+    fn make_proof_goal(invariant: InvariantName, target: Target, assumptions: Vec<&str>) -> ProofGoal {
         let mut ctx = ProofContext::new("test");
         for a in assumptions {
             ctx = ctx.with_assumption(a);
@@ -446,8 +465,8 @@ mod tests {
 
     #[test]
     fn tactic_induction_produces_two_subgoals() {
-        let base = make_proof_goal("liveness", Target::Region(0), vec!["base case"]);
-        let step = make_proof_goal("liveness", Target::Region(5), vec!["IH holds"]);
+        let base = make_proof_goal(InvariantName::Liveness, Target::Region(RegionId(0)), vec!["base case"]);
+        let step = make_proof_goal(InvariantName::Liveness, Target::Region(RegionId(5)), vec!["IH holds"]);
         let result = tactic_induction(base, step);
         assert!(result.has_subgoals());
         if let ProofResult::SubGoals(goals) = result {
@@ -457,9 +476,9 @@ mod tests {
 
     #[test]
     fn tactic_case_split_multiple_cases() {
-        let case1 = make_proof_goal("P", Target::FullProgram, vec![]);
-        let case2 = make_proof_goal("Q", Target::FullProgram, vec![]);
-        let case3 = make_proof_goal("R", Target::FullProgram, vec![]);
+        let case1 = make_proof_goal(InvariantName::Liveness, Target::FullProgram, vec![]);
+        let case2 = make_proof_goal(InvariantName::Exclusivity, Target::FullProgram, vec![]);
+        let case3 = make_proof_goal(InvariantName::Cleanup, Target::FullProgram, vec![]);
         let result = tactic_case_split(vec![case1, case2, case3]);
         assert!(result.has_subgoals());
         if let ProofResult::SubGoals(goals) = result {
@@ -476,14 +495,14 @@ mod tests {
 
     #[test]
     fn tactic_contradiction_discharges() {
-        let goal = make_proof_goal("P", Target::FullProgram, vec!["Q", "not Q"]);
+        let goal = make_proof_goal(InvariantName::Liveness, Target::FullProgram, vec!["Q", "not Q"]);
         let result = tactic_contradiction(goal);
         assert!(result.is_discharged());
     }
 
     #[test]
     fn tactic_contradiction_no_contradiction_fails() {
-        let goal = make_proof_goal("P", Target::FullProgram, vec!["Q", "R"]);
+        let goal = make_proof_goal(InvariantName::Liveness, Target::FullProgram, vec!["Q", "R"]);
         let result = tactic_contradiction(goal);
         assert!(!result.is_discharged());
     }

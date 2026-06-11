@@ -90,11 +90,11 @@ fn test_full_pipeline_trivial_allocate_free() {
         .map(|(_, o)| *o);
     assert_eq!(scg_bridge_outcome, Some(StageOutcome::Passed), "SCG bridge should pass");
 
-    // Codegen should be skipped (not yet available)
+    // Codegen should be executed (no longer skipped)
     let codegen_outcome = result.stages.iter()
         .find(|(s, _)| *s == PipelineStage::Codegen)
         .map(|(_, o)| *o);
-    assert_eq!(codegen_outcome, Some(StageOutcome::Skipped), "Codegen should be skipped");
+    assert_ne!(codegen_outcome, Some(StageOutcome::Skipped), "Codegen should not be skipped");
 }
 
 // ===========================================================================
@@ -252,7 +252,8 @@ fn test_full_pipeline_detailed_tracking() {
     assert_eq!(stage_outcomes[&PipelineStage::ScgBridge], StageOutcome::Passed);
     assert_eq!(stage_outcomes[&PipelineStage::ScgValidation], StageOutcome::Passed);
     assert_eq!(stage_outcomes[&PipelineStage::IveVerification], StageOutcome::Passed);
-    assert_eq!(stage_outcomes[&PipelineStage::Codegen], StageOutcome::Skipped);
+    assert_ne!(stage_outcomes[&PipelineStage::Codegen], StageOutcome::Skipped,
+        "Codegen should not be skipped");
 
     // Timing should be non-negative (u64 is always >= 0)
     let _ = result.elapsed_ms;
@@ -260,7 +261,8 @@ fn test_full_pipeline_detailed_tracking() {
     // Display should be informative
     let display = format!("{}", result);
     assert!(display.contains("PASS"), "Display should show PASS");
-    assert!(display.contains("SKIP"), "Display should show SKIP for codegen");
+    // Codegen is no longer skipped — it should show PASS or FAIL, not SKIP
+    assert!(!display.contains("SKIP"), "Display should not show SKIP now that codegen is enabled");
 }
 
 // ===========================================================================

@@ -20,24 +20,34 @@
 
 pub mod checker;
 pub mod cleanup_proofs;
+pub mod composition;
 pub mod counterexample;
 pub mod exclusivity_proofs;
 pub mod interpretation_proofs;
 pub mod judgment;
 pub mod liveness_proofs;
+pub mod models;
 pub mod origin_proofs;
 pub mod proof;
 pub mod rules;
+pub mod serialization;
 pub mod tactics;
 
 // Re-export the primary types for convenience
 pub use checker::{CheckResult, ProofChecker};
 pub use counterexample::{CounterExample, Step, ViolationPoint};
-pub use judgment::{CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId, VariableId};
+pub use judgment::{CapDKind, EventId, Judgment, PointerId, RegionId, ResourceId, VariableId};
+pub use models::{
+    Addr, BDKind, Compatibility, DerivationId, LockId, OriginInfo, OriginInfoBuilder,
+    ProofAccess, ProofAccessKind, ProofDerivation, ProofMemOp, ProofMemOpKind, ProofMSG,
+    ProofRegion, ProofRegionStatus, ProofRepD, ProofSCG, ProofSCGEdge, ProofSyncEdge,
+    RepDId, SinkSensitivity, SourceTrust, SyncEdgeId, SyncOrdering, TaintLabelId,
+    valid_reinterpretation,
+};
 pub use proof::{Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 pub use origin_proofs::{
-    DerivationChainProof, OriginInfo, OriginInfoBuilder, OriginProof, OriginTactic, ProofFailure,
-    SinkSensitivity, SourceTrust, TaintLabelId, TaintProof, prove_origin,
+    DerivationChainProof, OriginProof, OriginTactic, ProofFailure as OriginProofFailure,
+    TaintProof, prove_origin,
 };
 pub use rules::InferenceRule;
 pub use tactics::Tactic;

@@ -70,7 +70,7 @@ pub enum InferenceRule {
     /// Premises (1):
     ///   0. `Judgment::Freed { region: R }`
     ///
-    /// Conclusion: "region R is dead" (string-only, no Freed→Dead judgment yet)
+    /// Conclusion: `Judgment::Dead { region: R }`
     LivenessElim,
 
     // -- Exclusivity -------------------------------------------------------
@@ -91,7 +91,7 @@ pub enum InferenceRule {
     ///   1. `Judgment::Exclusive { resource: R2 }`
     ///      (R1 and R2 must be non-overlapping)
     ///
-    /// Conclusion: "no conflict between R1 and R2"
+    /// Conclusion: `Judgment::NoConflict { resource_a: R1, resource_b: R2 }`
     ExclusivityElim,
 
     // -- Derivation --------------------------------------------------------
@@ -112,7 +112,7 @@ pub enum InferenceRule {
     ///   0. `Judgment::InBounds { pointer, offset, size }`
     ///   1. A fact about the pointer's region bounds
     ///
-    /// Conclusion: "bounds preserved: …"
+    /// Conclusion: `Judgment::BoundsPreserved { pointer, offset, size }`
     BoundsPreservation,
 
     // -- Cast --------------------------------------------------------------
@@ -123,7 +123,7 @@ pub enum InferenceRule {
     ///   0. `Judgment::PreservesCapD { resource, from_capd, to_capd }`
     ///   1. A fact about target type layout
     ///
-    /// Conclusion: "cast is valid: …"
+    /// Conclusion: `Judgment::CastValid { resource, from_capd, to_capd }`
     CastValidity,
 
     // -- Temporal ----------------------------------------------------------
@@ -272,12 +272,10 @@ impl InferenceRule {
                 let premise = &facts[0];
                 match premise.judgment.as_ref() {
                     Some(Judgment::Freed { region }) => {
-                        // Freed → "region R is dead" (no Dead judgment variant;
-                        // we use a string conclusion for now).
-                        Ok(Fact::derived(
-                            next_id,
-                            format!("region {} is dead", region),
-                        ))
+                        let j = Judgment::Dead {
+                            region: *region,
+                        };
+                        Ok(Fact::derived_j(next_id, j))
                     }
                     Some(other) => Err(RuleError::PremiseMismatch {
                         index: 0,
@@ -346,10 +344,13 @@ impl InferenceRule {
                     (
                         Some(Judgment::Exclusive { resource: r1 }),
                         Some(Judgment::Exclusive { resource: r2 }),
-                    ) => Ok(Fact::derived(
-                        next_id,
-                        format!("no conflict between {} and {}", r1, r2),
-                    )),
+                    ) => {
+                        let j = Judgment::NoConflict {
+                            resource_a: *r1,
+                            resource_b: *r2,
+                        };
+                        Ok(Fact::derived_j(next_id, j))
+                    }
                     (Some(other), _) | (_, Some(other)) => {
                         let bad_idx = if p0.judgment.is_some()
                             && !matches!(
@@ -494,13 +495,14 @@ impl InferenceRule {
                             size,
                         }),
                         _,
-                    ) => Ok(Fact::derived(
-                        next_id,
-                        format!(
-                            "bounds preserved: inbounds {} offset={} size={} ∧ {}",
-                            pointer, offset, size, p1.statement
-                        ),
-                    )),
+                    ) => {
+                        let j = Judgment::BoundsPreserved {
+                            pointer: *pointer,
+                            offset: *offset,
+                            size: *size,
+                        };
+                        Ok(Fact::derived_j(next_id, j))
+                    }
                     (Some(other), _) => Err(RuleError::PremiseMismatch {
                         index: 0,
                         reason: format!(
@@ -549,13 +551,14 @@ impl InferenceRule {
                             to_capd,
                         }),
                         _,
-                    ) => Ok(Fact::derived(
-                        next_id,
-                        format!(
-                            "cast is valid: preserves CapD for {}: {} -> {} ∧ {}",
-                            resource, from_capd, to_capd, p1.statement
-                        ),
-                    )),
+                    ) => {
+                        let j = Judgment::CastValid {
+                            resource: *resource,
+                            from_capd: from_capd.clone(),
+                            to_capd: to_capd.clone(),
+                        };
+                        Ok(Fact::derived_j(next_id, j))
+                    }
                     (Some(other), _) => Err(RuleError::PremiseMismatch {
                         index: 0,
                         reason: format!(
@@ -821,6 +824,12 @@ mod tests {
         );
         let result = rule.apply(&[premise]).unwrap();
         assert_eq!(result.kind, FactKind::Derived);
+        assert_eq!(
+            result.judgment,
+            Some(Judgment::Dead {
+                region: JRegionId(7)
+            })
+        );
         assert_eq!(result.statement, "region region#7 is dead");
     }
 
@@ -858,6 +867,13 @@ mod tests {
             },
         );
         let result = rule.apply(&[p0, p1]).unwrap();
+        assert_eq!(
+            result.judgment,
+            Some(Judgment::NoConflict {
+                resource_a: ResourceId(1),
+                resource_b: ResourceId(2),
+            })
+        );
         assert!(result.statement.contains("no conflict"));
         assert!(result.statement.contains("resource#1"));
         assert!(result.statement.contains("resource#2"));
@@ -1014,6 +1030,14 @@ mod tests {
         );
         let p1 = Fact::axiom(2, "region r1 has bounds [0, 1024]");
         let result = rule.apply(&[p0, p1]).unwrap();
+        assert_eq!(
+            result.judgment,
+            Some(Judgment::BoundsPreserved {
+                pointer: PointerId(1),
+                offset: 8,
+                size: 4,
+            })
+        );
         assert!(result.statement.contains("bounds preserved"));
         assert!(result.statement.contains("pointer#1"));
     }
@@ -1031,6 +1055,14 @@ mod tests {
         );
         let p1 = Fact::axiom(2, "target type T has layout L_t");
         let result = rule.apply(&[p0, p1]).unwrap();
+        assert_eq!(
+            result.judgment,
+            Some(Judgment::CastValid {
+                resource: ResourceId(1),
+                from_capd: CapDKind::ReadWrite,
+                to_capd: CapDKind::Read,
+            })
+        );
         assert!(result.statement.contains("cast is valid"));
         assert!(result.statement.contains("preserves CapD"));
     }

@@ -6,12 +6,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::judgment::Judgment;
+
+// Re-export RegionId so that `crate::proof::RegionId` still resolves.
+pub use crate::judgment::RegionId;
+
 // ---------------------------------------------------------------------------
 // Identifier types
 // ---------------------------------------------------------------------------
-
-/// Unique identifier for a region in the program's memory model.
-pub type RegionId = u64;
 
 /// Unique identifier for an access (read/write) operation.
 pub type AccessId = u64;
@@ -22,8 +24,33 @@ pub type DerivationId = u64;
 /// Unique identifier for a fact within a proof.
 pub type FactId = u64;
 
-/// Name of an invariant (e.g. "liveness", "exclusivity", "bounds_safety").
-pub type InvariantName = String;
+/// Name of a memory-safety invariant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InvariantName {
+    /// The liveness invariant: every access targets allocated memory.
+    Liveness,
+    /// The exclusivity invariant: conflicting accesses are properly synchronized.
+    Exclusivity,
+    /// The cleanup invariant: every allocation is eventually released.
+    Cleanup,
+    /// The origin invariant: every data value has well-defined provenance.
+    Origin,
+    /// The interpretation invariant: every access respects its RepD.
+    Interpretation,
+}
+
+impl std::fmt::Display for InvariantName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvariantName::Liveness => write!(f, "liveness"),
+            InvariantName::Exclusivity => write!(f, "exclusivity"),
+            InvariantName::Cleanup => write!(f, "cleanup"),
+            InvariantName::Origin => write!(f, "origin"),
+            InvariantName::Interpretation => write!(f, "interpretation"),
+        }
+    }
+}
 
 /// A program point — line/column or offset — used for locating violations.
 pub type ProgramPoint = u64;
@@ -39,7 +66,7 @@ pub struct ProofContext {
     /// Human-readable scope name (e.g. "main::process_buffer").
     pub scope: String,
     /// Assumptions inherited from the enclosing scope.
-    pub assumptions: Vec<String>,
+    pub assumptions: Vec<Judgment>,
 }
 
 impl ProofContext {
@@ -51,9 +78,18 @@ impl ProofContext {
         }
     }
 
-    /// Add an assumption to this context.
+    /// Add an assumption to this context (wraps the string in a
+    /// `Judgment::Assumption`).
     pub fn with_assumption(mut self, assumption: impl Into<String>) -> Self {
-        self.assumptions.push(assumption.into());
+        self.assumptions.push(Judgment::Assumption {
+            description: assumption.into(),
+        });
+        self
+    }
+
+    /// Add a structured judgment as an assumption to this context.
+    pub fn with_judgment_assumption(mut self, judgment: Judgment) -> Self {
+        self.assumptions.push(judgment);
         self
     }
 }
@@ -96,12 +132,12 @@ pub struct Goal {
 impl Goal {
     /// Create a new proof goal.
     pub fn new(
-        invariant: impl Into<String>,
+        invariant: InvariantName,
         target: Target,
         context: ProofContext,
     ) -> Self {
         Self {
-            invariant: invariant.into(),
+            invariant,
             target,
             context,
         }
@@ -393,12 +429,12 @@ mod tests {
     #[test]
     fn test_goal_construction() {
         let goal = Goal::new(
-            "liveness",
-            Target::Region(42),
+            InvariantName::Liveness,
+            Target::Region(RegionId(42)),
             ProofContext::new("main::alloc"),
         );
-        assert_eq!(goal.invariant, "liveness");
-        assert_eq!(goal.target, Target::Region(42));
+        assert_eq!(goal.invariant, InvariantName::Liveness);
+        assert_eq!(goal.target, Target::Region(RegionId(42)));
     }
 
     #[test]
@@ -432,7 +468,7 @@ mod tests {
     #[test]
     fn test_proof_collect_facts() {
         let mut proof = Proof::new(Goal::new(
-            "exclusivity",
+            InvariantName::Exclusivity,
             Target::FullProgram,
             ProofContext::new("top"),
         ));

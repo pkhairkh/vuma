@@ -51,6 +51,7 @@ use vuma_ive::{
     InvariantAggregator, VerificationLevel as IveVerificationLevel,
     AggregatedResult,
 };
+use vuma_bd::{BD, repd::RepD};
 use vuma_cor::{CORuntime, Config as CorConfig};
 use vuma_core::{
     MSG,
@@ -818,13 +819,15 @@ fn resolve_loop(
 ///    Computation whose `operation` string parses as an integer, use it.
 /// 3. Try to parse an integer from the control node's label string.
 ///    Recognised formats: `"match disc == 42"`, `"case 2: 42"`.
-/// 4. Fall back to `0`.
+/// 4. Fall back to `arm_index` — each arm in a match expression receives
+///    a distinct fallback value so that unknown case values don't collide.
 fn extract_case_value(
     branch_id: NodeId,
     cond: &ScgExpr,
     ctrl_label: Option<&str>,
     scg: &SCG,
     edge_idx: &EdgeIndex,
+    arm_index: usize,
 ) -> i64 {
     // Strategy 1: direct integer condition.
     if let ScgExpr::Int(n) = cond {
@@ -882,8 +885,8 @@ fn extract_case_value(
         }
     }
 
-    // Strategy 4: default fallback.
-    0
+    // Strategy 4: fallback to arm_index so each arm gets a distinct value.
+    arm_index as i64
 }
 
 // ── Control flow walk ──────────────────────────────────────────────────
@@ -970,6 +973,7 @@ fn walk_control_flow(
                         // edges to find the constant being compared against.
                         let case_value = extract_case_value(
                             node_id, &cond, ctrl.label.as_deref(), scg, edge_idx,
+                            arms.len(),
                         );
                         arms.push(SwitchArm {
                             value: case_value,
@@ -1142,10 +1146,13 @@ fn convert_node_to_statement(
 ) -> Option<ScgStatement> {
     match &node_data.payload {
         NodePayload::Allocation(alloc) => {
+            let ty = alloc.type_name.as_deref()
+                .and_then(parse_scg_type)
+                .unwrap_or(ScgType::U8);
             Some(ScgStatement::Allocation(AllocationNode::Stack {
                 name: node_var(node_id, "alloc"),
                 size: alloc.size as u32,
-                ty: ScgType::U8,
+                ty,
             }))
         }
 
@@ -1192,10 +1199,14 @@ fn convert_node_to_statement(
         }
 
         NodePayload::Deallocation(_dealloc) => {
-            Some(ScgStatement::Access(AccessNode::Store {
-                ptr: resolve_df_input(node_id, 0, edge_idx),
-                offset: None,
-                value: ScgExpr::Int(0),
+            // Lower deallocation as a proper runtime call rather than
+            // a semantic no-op (`*ptr = 0`).  This ensures the memory
+            // is actually freed at runtime and is more correct than
+            // simply zeroing the pointer.
+            Some(ScgStatement::Call(CallNode {
+                dst: None,
+                func: "__vuma_dealloc".to_string(),
+                args: vec![resolve_df_input(node_id, 0, edge_idx)],
             }))
         }
 
@@ -1225,6 +1236,10 @@ fn convert_node_to_statement(
 
 /// Extract function parameters from DataFlow edges leaving the
 /// FunctionEntry node.
+///
+/// Parameter types are inferred from the target node's payload, which
+/// has been refined by BD inference (via `refine_scg_types_with_bd`).
+/// If no type info is available, defaults to `ScgType::I64`.
 fn extract_function_params(
     entry_id: NodeId,
     scg: &SCG,
@@ -1234,24 +1249,34 @@ fn extract_function_params(
     let mut params = Vec::new();
 
     for (i, edge) in df_edges.iter().enumerate() {
-        let name = if let Some(target_node) = scg.get_node(edge.target) {
+        let (name, ty) = if let Some(target_node) = scg.get_node(edge.target) {
             match &target_node.payload {
                 NodePayload::Allocation(alloc) => {
-                    alloc.type_name.clone().unwrap_or_else(|| format!("param_{}", i))
+                    let name = alloc.type_name.clone().unwrap_or_else(|| format!("param_{}", i));
+                    let ty = alloc.type_name.as_deref()
+                        .and_then(parse_scg_type)
+                        .unwrap_or(ScgType::I64);
+                    (name, ty)
                 }
                 NodePayload::Computation(comp) => {
-                    comp.result_type.clone().unwrap_or_else(|| format!("param_{}", i))
+                    let name = comp.result_type.clone().unwrap_or_else(|| format!("param_{}", i));
+                    let ty = comp.result_type.as_deref()
+                        .and_then(parse_scg_type)
+                        .unwrap_or(ScgType::I64);
+                    (name, ty)
                 }
-                _ => format!("param_{}", i),
+                NodePayload::Cast(cast) => {
+                    let name = format!("param_{}", i);
+                    let ty = parse_scg_type(&cast.to_type).unwrap_or(ScgType::I64);
+                    (name, ty)
+                }
+                _ => (format!("param_{}", i), ScgType::I64),
             }
         } else {
-            format!("param_{}", i)
+            (format!("param_{}", i), ScgType::I64)
         };
 
-        params.push(ScgParam {
-            name,
-            ty: ScgType::I64, // default type; refined by BD inference
-        });
+        params.push(ScgParam { name, ty });
     }
 
     params
@@ -1273,6 +1298,97 @@ fn parse_scg_type(type_str: &str) -> Option<ScgType> {
         "ptr" | "*void" | "*u8" | "*i8" => Some(ScgType::Ptr),
         "void" => Some(ScgType::Void),
         _ => None,
+    }
+}
+
+// ── BD type refinement ─────────────────────────────────────────────────
+
+/// Map a BD `RepD` to the codegen's `ScgType`.
+///
+/// Uses the RepD's size and kind to pick the most specific `ScgType`:
+/// - Pointer RepDs → `ScgType::Ptr`
+/// - Byte RepDs → integer types by size (u8, u16, u32, u64)
+/// - Struct/Array/Enum/Union → `ScgType::Ptr` (passed by reference)
+/// - Generic → `ScgType::I64` (fallback)
+fn repd_to_scg_type(repd: &RepD) -> ScgType {
+    match repd {
+        RepD::Ptr(_) | RepD::Func(_) => ScgType::Ptr,
+        RepD::Byte(byte_rep) => match byte_rep.size {
+            1 => ScgType::U8,
+            2 => ScgType::U16,
+            4 => ScgType::U32,
+            _ => ScgType::U64,
+        },
+        RepD::Struct(_) | RepD::Array(_) | RepD::Enum(_) | RepD::Union(_) => ScgType::Ptr,
+        RepD::Generic { .. } => ScgType::I64,
+    }
+}
+
+/// Convert a `ScgType` to its canonical string name for storing in SCG
+/// node payloads (e.g., `AllocationNode.type_name`, `CastNode.from_type`).
+fn scg_type_to_name(ty: &ScgType) -> &'static str {
+    match ty {
+        ScgType::I8 => "i8",
+        ScgType::I16 => "i16",
+        ScgType::I32 => "i32",
+        ScgType::I64 => "i64",
+        ScgType::U8 => "u8",
+        ScgType::U16 => "u16",
+        ScgType::U32 => "u32",
+        ScgType::U64 => "u64",
+        ScgType::Ptr => "ptr",
+        ScgType::Void => "void",
+    }
+}
+
+/// Refine SCG node type metadata using BD inference results.
+///
+/// After BD inference, each node's `RepD` describes the actual memory
+/// representation.  This function maps those RepDs back to `ScgType`s
+/// and stores the result in the SCG node payloads so that downstream
+/// bridge code (`convert_node_to_statement`, `extract_function_params`)
+/// can pick up the refined types instead of using defaults.
+///
+/// # What is refined
+///
+/// - **Allocation nodes**: `type_name` is set if it was previously `None`.
+/// - **Cast nodes**: `from_type` / `to_type` are updated if they couldn't
+///   previously be parsed by `parse_scg_type`.
+/// - **Computation nodes**: `result_type` is set if it was previously `None`.
+fn refine_scg_types_with_bd(scg: &mut SCG, bd_results: &[(NodeId, BD)]) {
+    let bd_map: HashMap<NodeId, &BD> = bd_results.iter().map(|(id, bd)| (*id, bd)).collect();
+
+    let node_ids: Vec<_> = scg.node_ids().collect();
+    for node_id in node_ids {
+        let Some(bd) = bd_map.get(&node_id) else { continue };
+        let inferred_type = repd_to_scg_type(&bd.repd);
+        let type_name = scg_type_to_name(&inferred_type);
+
+        if let Some(node) = scg.get_node_mut(node_id) {
+            match &mut node.payload {
+                NodePayload::Allocation(alloc)
+                    // Update type_name if it was previously unset.
+                    if alloc.type_name.is_none() => {
+                        alloc.type_name = Some(type_name.to_string());
+                    }
+                NodePayload::Cast(cast) => {
+                    // Update from_type / to_type if they couldn't previously
+                    // be parsed by `parse_scg_type` (i.e., they were opaque
+                    // type names from the AST that don't map directly).
+                    if parse_scg_type(&cast.from_type).is_none() {
+                        cast.from_type = type_name.to_string();
+                    }
+                    if parse_scg_type(&cast.to_type).is_none() {
+                        cast.to_type = type_name.to_string();
+                    }
+                }
+                NodePayload::Computation(comp)
+                    if comp.result_type.is_none() => {
+                        comp.result_type = Some(type_name.to_string());
+                    }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -1564,8 +1680,11 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     // ── Stage 4: BD Inference ─────────────────────────────────────────
     let t = Instant::now();
     let inference_engine = InferenceEngine::new();
-    // Inference is currently placeholder; log but don't fail.
-    let _bd_results = inference_engine.infer_types(&scg);
+    let bd_results = inference_engine.infer_types(&scg);
+    // Apply BD-inferred types to SCG nodes so downstream stages
+    // (MSG construction, IR lowering) use refined types instead of
+    // the defaults (ScgType::I64 for params, ScgType::U8 for allocs).
+    refine_scg_types_with_bd(&mut scg, &bd_results);
     timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 5: MSG Construction ─────────────────────────────────────
@@ -1684,7 +1803,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
             return Err(errors); // Cannot continue without binary.
         }
     };
-    let code_words = binary.len() / 4; // approximate
+    let code_words = count_text_section_instructions(&binary);
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 11: COR Initialization ──────────────────────────────────
@@ -1743,6 +1862,142 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
         },
         cor_runtime,
     })
+}
+
+// ── ELF .text section instruction counting ─────────────────────────────
+
+/// Count the number of ARM64 instructions in the `.text` section of an
+/// ELF binary.
+///
+/// For AArch64, each instruction is 4 bytes.  This function parses the
+/// ELF section headers to find the `.text` section and divides its size
+/// by 4.  If section headers are absent or the binary is too short, it
+/// falls back to `binary.len() / 4`.
+fn count_text_section_instructions(binary: &[u8]) -> usize {
+    // Minimum 64-byte ELF header for 64-bit ELF
+    if binary.len() < 64 {
+        return binary.len() / 4;
+    }
+
+    // Check ELF magic
+    if &binary[0..4] != b"\x7fELF" {
+        return binary.len() / 4;
+    }
+
+    // Check 64-bit ELF (EI_CLASS = 2)
+    if binary[4] != 2 {
+        // 32-bit ELF — different header layout; fall back
+        return binary.len() / 4;
+    }
+
+    // Little-endian (EI_DATA = 1) or big-endian (2)?
+    let le = binary[5] == 1;
+
+    // Read e_shoff (section header table offset) at offset 0x28 (8 bytes)
+    let e_shoff = read_u64_le_or_be(&binary[0x28..0x30], le) as usize;
+    // Read e_shentsize at offset 0x3A (2 bytes)
+    let e_shentsize = read_u16_le_or_be(&binary[0x3A..0x3C], le) as usize;
+    // Read e_shnum at offset 0x3C (2 bytes)
+    let e_shnum = read_u16_le_or_be(&binary[0x3C..0x3E], le) as usize;
+    // Read e_shstrndx at offset 0x3E (2 bytes)
+    let e_shstrndx = read_u16_le_or_be(&binary[0x3E..0x40], le) as usize;
+
+    if e_shoff == 0 || e_shentsize == 0 || e_shnum == 0 {
+        // No section headers — fall back to total size / 4
+        return binary.len() / 4;
+    }
+
+    // Bounds check
+    if e_shoff + e_shstrndx * e_shentsize + e_shentsize > binary.len() {
+        return binary.len() / 4;
+    }
+
+    // Read the section header string table section header (at index e_shstrndx)
+    let shstrtab_hdr_off = e_shoff + e_shstrndx * e_shentsize;
+    if shstrtab_hdr_off + e_shentsize > binary.len() {
+        return binary.len() / 4;
+    }
+
+    // sh_offset at byte 24 in section header (8 bytes for 64-bit ELF)
+    let shstrtab_offset = read_u64_le_or_be(
+        &binary[shstrtab_hdr_off + 24..shstrtab_hdr_off + 32],
+        le,
+    ) as usize;
+    // sh_size at byte 32
+    let shstrtab_size = read_u64_le_or_be(
+        &binary[shstrtab_hdr_off + 32..shstrtab_hdr_off + 40],
+        le,
+    ) as usize;
+
+    if shstrtab_offset + shstrtab_size > binary.len() {
+        return binary.len() / 4;
+    }
+
+    // Iterate section headers to find ".text"
+    for i in 0..e_shnum {
+        let hdr_off = e_shoff + i * e_shentsize;
+        if hdr_off + e_shentsize > binary.len() {
+            break;
+        }
+
+        // sh_name at byte 0 (4 bytes)
+        let sh_name = read_u32_le_or_be(&binary[hdr_off..hdr_off + 4], le) as usize;
+
+        // Read the name from the string table
+        if sh_name < shstrtab_size {
+            let name_start = shstrtab_offset + sh_name;
+            let name_end = binary[name_start..shstrtab_offset + shstrtab_size]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|pos| name_start + pos)
+                .unwrap_or(shstrtab_offset + shstrtab_size);
+
+            if &binary[name_start..name_end] == b".text" {
+                // Found .text section! Read sh_size at byte 32.
+                let sh_size = read_u64_le_or_be(
+                    &binary[hdr_off + 32..hdr_off + 40],
+                    le,
+                ) as usize;
+                return sh_size / 4;
+            }
+        }
+    }
+
+    // .text section not found — fall back
+    binary.len() / 4
+}
+
+/// Read a u16 from a 2-byte slice in the given endianness.
+fn read_u16_le_or_be(bytes: &[u8], le: bool) -> u16 {
+    if le {
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    } else {
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    }
+}
+
+/// Read a u32 from a 4-byte slice in the given endianness.
+fn read_u32_le_or_be(bytes: &[u8], le: bool) -> u32 {
+    if le {
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    } else {
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+}
+
+/// Read a u64 from an 8-byte slice in the given endianness.
+fn read_u64_le_or_be(bytes: &[u8], le: bool) -> u64 {
+    if le {
+        u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    } else {
+        u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    }
 }
 
 /// Incremental compilation: only re-run stages affected by changes

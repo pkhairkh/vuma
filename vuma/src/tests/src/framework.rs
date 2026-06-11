@@ -274,8 +274,6 @@ pub enum CompileError {
     /// `vuma_codegen::CodegenError` is not exposed because the codegen
     /// crate is currently in flux and may not compile).
     Codegen(String),
-    /// The codegen pipeline is not yet available (stub).
-    CodegenNotAvailable,
 }
 
 impl fmt::Display for CompileError {
@@ -290,7 +288,6 @@ impl fmt::Display for CompileError {
             }
             CompileError::ScgConversion(msg) => write!(f, "SCG conversion error: {}", msg),
             CompileError::Codegen(msg) => write!(f, "codegen error: {}", msg),
-            CompileError::CodegenNotAvailable => write!(f, "codegen pipeline not yet available"),
         }
     }
 }
@@ -770,8 +767,12 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
     stages.push((PipelineStage::IveVerification, StageOutcome::Passed));
     let verification_result: Option<AggregatedResult> = Some(aggregated);
 
-    // Stage 6: Codegen (not yet available).
-    stages.push((PipelineStage::Codegen, StageOutcome::Skipped));
+    // Stage 6: Codegen — compile through SCG → IR → ARM64 ELF pipeline.
+    let codegen_outcome = match compile_to_arm64(source) {
+        Ok(_) => StageOutcome::Passed,
+        Err(_) => StageOutcome::Failed,
+    };
+    stages.push((PipelineStage::Codegen, codegen_outcome));
 
     PipelineResult {
         stages,
@@ -1754,9 +1755,10 @@ mod tests {
         assert!(display.contains("SCG conversion error"));
         assert!(display.contains("test error"));
 
-        let err_not_avail = CompileError::CodegenNotAvailable;
-        let display2 = format!("{}", err_not_avail);
-        assert!(display2.contains("not yet available"));
+        let err_codegen = CompileError::Codegen("emit failed".to_string());
+        let display2 = format!("{}", err_codegen);
+        assert!(display2.contains("codegen error"));
+        assert!(display2.contains("emit failed"));
     }
 
     // -----------------------------------------------------------------------
@@ -1798,18 +1800,18 @@ mod tests {
         let source = "region buf = allocate(256); free(buf);";
         let result = verify_program_detailed(source);
 
-        // All stages up to codegen should pass; codegen should be skipped.
-        assert!(result.all_passed(), "Expected all executed stages to pass");
+        // All stages should pass (codegen is now enabled).
+        assert!(result.all_passed(), "Expected all pipeline stages to pass");
         assert!(result.scg.is_some(), "Expected SCG to be constructed");
         assert!(result.verification.is_some(), "Expected verification result");
 
-        // Check that codegen was skipped.
+        // Check that codegen was executed (not skipped).
         let codegen_stage = result.stages.iter().find(|(s, _)| *s == PipelineStage::Codegen);
         assert!(codegen_stage.is_some());
-        assert_eq!(codegen_stage.unwrap().1, StageOutcome::Skipped);
+        assert_ne!(codegen_stage.unwrap().1, StageOutcome::Skipped, "Codegen should not be skipped");
 
-        // Last executed stage should be IveVerification.
-        assert_eq!(result.last_executed_stage(), Some(PipelineStage::IveVerification));
+        // Last executed stage should be Codegen (it is no longer skipped).
+        assert_eq!(result.last_executed_stage(), Some(PipelineStage::Codegen));
     }
 
     // -----------------------------------------------------------------------
@@ -2066,6 +2068,7 @@ mod tests {
         let display = format!("{}", result);
         assert!(display.contains("Pipeline Result"));
         assert!(display.contains("PASS"));
-        assert!(display.contains("SKIP"));
+        // Codegen is now enabled — no stage should be skipped.
+        assert!(!display.contains("SKIP"), "No stage should be SKIP now that codegen is enabled");
     }
 }
