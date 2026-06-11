@@ -27,7 +27,7 @@
 use crate::capd::{CapD, Capability};
 use crate::descriptor::BD;
 use crate::reld::{DepKind, Relation, RelD};
-use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep};
+use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep, BDConstraint as RepDConstraint};
 use hashbrown::{HashMap, HashSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
@@ -1106,6 +1106,27 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
                 .collect(),
             result: Box::new(instantiate_repd(&f.result, type_args)),
         }),
+        RepD::Generic { name, constraints } => {
+            // If the generic name matches a type argument, substitute it.
+            if let Some(substitution) = type_args.get(name) {
+                return substitution.clone();
+            }
+            // Otherwise keep the Generic but recursively instantiate constraints.
+            let new_constraints = constraints
+                .iter()
+                .map(|c| match c {
+                    RepDConstraint::CapDAtLeast(capd) => RepDConstraint::CapDAtLeast(capd.clone()),
+                    RepDConstraint::RepDCompatibleWith(repd) => {
+                        RepDConstraint::RepDCompatibleWith(Box::new(instantiate_repd(repd, type_args)))
+                    }
+                    RepDConstraint::RelDContains(reld) => RepDConstraint::RelDContains(reld.clone()),
+                })
+                .collect();
+            RepD::Generic {
+                name: name.clone(),
+                constraints: new_constraints,
+            }
+        }
     }
 }
 

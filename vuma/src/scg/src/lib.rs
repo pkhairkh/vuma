@@ -52,6 +52,7 @@ pub mod diff;
 pub mod edge;
 pub mod graph;
 pub mod liveness;
+pub mod loop_detection;
 pub mod node;
 pub mod query;
 pub mod region;
@@ -77,7 +78,7 @@ pub use graph::{SCG, SCGError, ValidationResult};
 pub use callgraph::{CallGraph, CallGraphEdge, FunctionId};
 
 // -- Region types --
-pub use region::{DeploymentTarget, RegionId, SCGRegion};
+pub use region::{DeploymentTarget, InferredRegion, RegionAliasAnalysis, RegionId, RegionLifetime, SCGRegion, infer_regions};
 
 // -- Query engine --
 pub use query::{execute, DerivationChain, QueryResult, SCGQuery, find_access_nodes_to_region, find_derivation_chains};
@@ -102,6 +103,9 @@ pub use liveness::{
     LivenessAnalysis, LivenessInfo, UseAfterFree, compute_liveness, find_dead_allocations,
     find_dead_code, find_uninitialized_reads, find_use_after_free,
 };
+
+// -- Loop detection --
+pub use loop_detection::{LoopDetector, LoopNestingTree, NaturalLoop};
 
 // -- Transform passes --
 pub use transform::{

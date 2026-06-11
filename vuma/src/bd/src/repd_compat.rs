@@ -23,6 +23,7 @@
 
 use crate::repd::{
     ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep, POINTER_SIZE,
+    generic_satisfies_constraints,
 };
 
 // ---------------------------------------------------------------------------
@@ -198,6 +199,26 @@ pub fn are_compatible(r1: &RepD, r2: &RepD) -> CompatibilityResult {
     // Fast path: identical RepDs are always compatible.
     if r1 == r2 {
         return CompatibilityResult::yes(CompatibilityKind::Identical);
+    }
+
+    // Generic: compatible with anything satisfying its constraints.
+    if let RepD::Generic { constraints, .. } = r1 {
+        if generic_satisfies_constraints(constraints, r2) {
+            return CompatibilityResult::yes(CompatibilityKind::StructuralMatch);
+        } else {
+            return CompatibilityResult::no(IncompatibilityReason::Other(
+                "generic constraints not satisfied".to_string(),
+            ));
+        }
+    }
+    if let RepD::Generic { constraints, .. } = r2 {
+        if generic_satisfies_constraints(constraints, r1) {
+            return CompatibilityResult::yes(CompatibilityKind::StructuralMatch);
+        } else {
+            return CompatibilityResult::no(IncompatibilityReason::Other(
+                "generic constraints not satisfied".to_string(),
+            ));
+        }
     }
 
     // Size must match for any coexistence.
@@ -945,6 +966,12 @@ pub fn is_subtype(sub: &RepD, sup: &RepD) -> bool {
         if sub.size() == b.size && sub.alignment() > 0 && b.align > 0 && sub.alignment().is_multiple_of(b.align) {
             return true;
         }
+    }
+
+    // Generic: any concrete type satisfying the generic's constraints is a
+    // subtype of the generic.
+    if let RepD::Generic { constraints, .. } = sup {
+        return generic_satisfies_constraints(constraints, sub);
     }
 
     // Structural subtyping: same constructor, covariant in fields.

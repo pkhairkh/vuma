@@ -514,6 +514,12 @@ fn unify_repd_inner(
             }))
         }
 
+        // Generic can be unified with any RepD (substitution).
+        // When unifying a Generic with a concrete RepD, return the concrete one.
+        (RepD::Generic { .. }, other) | (other, RepD::Generic { .. }) => {
+            Ok(other.clone())
+        }
+
         // Different constructors: incompatible.
         _ => Err(UnificationError::IncompatibleRepD {
             repd1: format!("{r1}"),

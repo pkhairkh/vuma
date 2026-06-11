@@ -16,6 +16,8 @@
 //! | `Union`   | Overlapping alternatives (max size/alignment)     |
 //! | `Func`    | Function signature (params → result)              |
 
+use crate::capd::CapD;
+use crate::reld::RelD;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -95,11 +97,35 @@ pub struct FuncRep {
 // RepD enum
 // ---------------------------------------------------------------------------
 
+/// A constraint on a generic type parameter within a `RepD::Generic`.
+///
+/// Each constraint specifies a condition that any concrete type substituted
+/// for the generic must satisfy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BDConstraint {
+    /// The generic must have at least the given capabilities.
+    CapDAtLeast(CapD),
+    /// The generic's representation must be compatible with the given `RepD`.
+    RepDCompatibleWith(Box<RepD>),
+    /// The generic must contain the given relational constraints.
+    RelDContains(RelD),
+}
+
+impl fmt::Display for BDConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BDConstraint::CapDAtLeast(capd) => write!(f, "CapDAtLeast({capd})"),
+            BDConstraint::RepDCompatibleWith(repd) => write!(f, "RepDCompatibleWith({repd})"),
+            BDConstraint::RelDContains(reld) => write!(f, "RelDContains({reld})"),
+        }
+    }
+}
+
 /// A **Representation Descriptor** — describes the memory shape of a value.
 ///
 /// Two `RepD`s are [`compatible`] when they can safely alias the same memory,
 /// and one [`subsumes`] the other when it is at least as permissive.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepD {
     /// Raw byte sequence.
     Byte(ByteRep),
@@ -115,6 +141,65 @@ pub enum RepD {
     Union(UnionRep),
     /// Function signature.
     Func(FuncRep),
+    /// A generic type parameter with a name and optional BD constraints.
+    Generic {
+        /// Name of the type parameter (e.g., "T").
+        name: String,
+        /// Constraints that any concrete substitution must satisfy.
+        constraints: Vec<BDConstraint>,
+    },
+}
+
+impl std::hash::Hash for RepD {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Manual Hash implementation since BDConstraint contains types
+        // (CapD, RelD) that don't implement Hash.
+        std::mem::discriminant(self).hash(state);
+        match self {
+            RepD::Byte(b) => {
+                b.size.hash(state);
+                b.align.hash(state);
+            }
+            RepD::Struct(s) => {
+                for (off, rep) in &s.fields {
+                    off.hash(state);
+                    rep.hash(state);
+                }
+                s.total_size.hash(state);
+                s.align.hash(state);
+            }
+            RepD::Array(a) => {
+                a.element.hash(state);
+                a.count.hash(state);
+            }
+            RepD::Enum(e) => {
+                for (tag, rep) in &e.variants {
+                    tag.hash(state);
+                    rep.hash(state);
+                }
+            }
+            RepD::Ptr(p) => {
+                p.pointee.hash(state);
+            }
+            RepD::Union(u) => {
+                for alt in &u.alternatives {
+                    alt.hash(state);
+                }
+                u.max_size.hash(state);
+                u.max_align.hash(state);
+            }
+            RepD::Func(f) => {
+                for p in &f.params {
+                    p.hash(state);
+                }
+                f.result.hash(state);
+            }
+            RepD::Generic { name, constraints: _ } => {
+                // Hash only the name; constraints contain non-Hash types.
+                name.hash(state);
+            }
+        }
+    }
 }
 
 impl RepD {
@@ -146,6 +231,7 @@ impl RepD {
             RepD::Ptr(_) => POINTER_SIZE,
             RepD::Union(u) => u.max_size,
             RepD::Func(_) => POINTER_SIZE, // function pointer
+            RepD::Generic { .. } => 0, // unknown until substituted
         }
     }
 
@@ -159,6 +245,7 @@ impl RepD {
             RepD::Ptr(_) => POINTER_SIZE,
             RepD::Union(u) => u.max_align,
             RepD::Func(_) => POINTER_SIZE,
+            RepD::Generic { .. } => 1, // minimum alignment
         }
     }
 
@@ -171,7 +258,17 @@ impl RepD {
     ///
     /// At a minimum, compatible representations must agree in size and
     /// alignment. Structural compatibility also requires matching shapes.
+    ///
+    /// A `Generic` RepD is compatible with any RepD that satisfies its
+    /// constraints.
     pub fn compatible(&self, other: &RepD) -> bool {
+        // Generic is compatible with anything satisfying its constraints.
+        if let RepD::Generic { constraints, .. } = self {
+            return generic_satisfies_constraints(constraints, other);
+        }
+        if let RepD::Generic { constraints, .. } = other {
+            return generic_satisfies_constraints(constraints, self);
+        }
         // Size and alignment must agree for safe aliasing.
         if self.size() != other.size() || self.alignment() != other.alignment() {
             return false;
@@ -227,6 +324,7 @@ impl RepD {
     /// i.e. any value described by `other` can be safely viewed through `self`.
     ///
     /// A `Byte` representation with matching size/alignment subsumes anything.
+    /// A `Generic` subsumes any RepD satisfying its constraints.
     /// Structurally, subsumption follows the same rules as [`compatible`]
     /// but is directed (not symmetric).
     pub fn subsumes(&self, other: &RepD) -> bool {
@@ -234,6 +332,10 @@ impl RepD {
         if matches!(self, RepD::Byte(b) if b.size == other.size() && b.align == other.alignment())
         {
             return true;
+        }
+        // Generic subsumes anything satisfying its constraints.
+        if let RepD::Generic { constraints, .. } = self {
+            return generic_satisfies_constraints(constraints, other);
         }
         match (self, other) {
             (RepD::Struct(a), RepD::Struct(b)) => {
@@ -368,6 +470,13 @@ impl fmt::Display for RepD {
                 }
                 write!(f, ") -> {}", fn_.result)
             }
+            RepD::Generic { name, constraints } => {
+                write!(f, "generic({name}")?;
+                for c in constraints {
+                    write!(f, ": {c}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -384,6 +493,35 @@ impl fmt::Display for RepD {
 fn align_to(val: u64, align: u64) -> u64 {
     assert!(align > 0, "align_to: alignment must be non-zero");
     val.div_ceil(align) * align
+}
+
+/// Check whether a concrete `RepD` satisfies the constraints of a `Generic`.
+///
+/// A Generic with no constraints is compatible with anything.  Otherwise,
+/// each constraint must be satisfied:
+/// - `CapDAtLeast(c)`: the generic's capabilities must include `c` (we cannot
+///   check this at the RepD level alone, so we conservatively return `true`).
+/// - `RepDCompatibleWith(r)`: the concrete RepD must be compatible with `r`.
+/// - `RelDContains(r)`: the generic's relations must include `r` (conservatively
+///   `true` at the RepD level).
+pub fn generic_satisfies_constraints(constraints: &[BDConstraint], concrete: &RepD) -> bool {
+    for constraint in constraints {
+        match constraint {
+            BDConstraint::CapDAtLeast(_) => {
+                // Conservatively: we cannot verify CapD from RepD alone.
+                // Return true so compatibility isn't blocked.
+            }
+            BDConstraint::RepDCompatibleWith(required) => {
+                if !concrete.compatible(required) {
+                    return false;
+                }
+            }
+            BDConstraint::RelDContains(_) => {
+                // Conservatively: we cannot verify RelD from RepD alone.
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -438,5 +576,519 @@ mod tests {
             pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
         });
         assert!(byte.subsumes(&ptr));
+    }
+
+    // =======================================================================
+    // New RepD tests — Enhancement 2 (25+) + Generic tests (12+)
+    // =======================================================================
+
+    // -- Struct with nested fields --
+
+    #[test]
+    fn struct_with_nested_fields() {
+        let inner = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let outer = RepD::Struct(StructRep {
+            fields: vec![
+                (0, inner.clone()),
+                (8, RepD::Byte(ByteRep { size: 1, align: 1 })),
+            ],
+            total_size: 12,
+            align: 4,
+        });
+        assert_eq!(outer.size(), 12);
+        assert_eq!(outer.alignment(), 4);
+        assert_eq!(outer.field_offset(0), 0);
+        assert_eq!(outer.field_offset(1), 8);
+    }
+
+    // -- Array with various element types --
+
+    #[test]
+    fn array_byte_elements() {
+        let arr = RepD::Array(ArrayRep {
+            element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count: 10,
+        });
+        assert_eq!(arr.size(), 40);
+        assert_eq!(arr.alignment(), 4);
+    }
+
+    #[test]
+    fn array_ptr_elements() {
+        let arr = RepD::Array(ArrayRep {
+            element: Box::new(RepD::Ptr(PtrRep {
+                pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+            })),
+            count: 5,
+        });
+        assert_eq!(arr.size(), 40);
+        assert_eq!(arr.alignment(), 8);
+    }
+
+    #[test]
+    fn array_struct_elements() {
+        let elem = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 2, align: 2 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let arr = RepD::Array(ArrayRep {
+            element: Box::new(elem),
+            count: 3,
+        });
+        assert_eq!(arr.size(), 24);
+        assert_eq!(arr.alignment(), 4);
+    }
+
+    #[test]
+    fn array_zero_count() {
+        let arr = RepD::Array(ArrayRep {
+            element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count: 0,
+        });
+        assert_eq!(arr.size(), 0);
+    }
+
+    // -- Enum with multiple variants --
+
+    #[test]
+    fn enum_multiple_variants() {
+        let e = RepD::Enum(EnumRep {
+            variants: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (1, RepD::Byte(ByteRep { size: 8, align: 8 })),
+                (2, RepD::Byte(ByteRep { size: 1, align: 1 })),
+            ],
+        });
+        // tag(8) + align_to(max_variant=8, 8) = 8 + 8 = 16
+        assert_eq!(e.size(), 16);
+        assert_eq!(e.alignment(), 8);
+    }
+
+    #[test]
+    fn enum_no_variants() {
+        let e = RepD::Enum(EnumRep { variants: vec![] });
+        // tag(8) + 0
+        assert_eq!(e.size(), 8);
+        assert_eq!(e.alignment(), 8);
+    }
+
+    // -- Ptr size/alignment --
+
+    #[test]
+    fn ptr_size_alignment() {
+        let p = RepD::Ptr(PtrRep {
+            pointee: Box::new(RepD::Byte(ByteRep { size: 16, align: 16 })),
+        });
+        assert_eq!(p.size(), 8);
+        assert_eq!(p.alignment(), 8);
+    }
+
+    #[test]
+    fn ptr_nested_pointee() {
+        let inner = RepD::Ptr(PtrRep {
+            pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+        });
+        let outer = RepD::Ptr(PtrRep {
+            pointee: Box::new(inner),
+        });
+        assert_eq!(outer.size(), 8);
+        assert_eq!(outer.alignment(), 8);
+    }
+
+    // -- Union size is max variant --
+
+    #[test]
+    fn union_size_is_max_variant() {
+        let u = RepD::Union(UnionRep {
+            alternatives: vec![
+                RepD::Byte(ByteRep { size: 4, align: 4 }),
+                RepD::Byte(ByteRep { size: 16, align: 8 }),
+                RepD::Byte(ByteRep { size: 2, align: 2 }),
+            ],
+            max_size: 16,
+            max_align: 8,
+        });
+        assert_eq!(u.size(), 16);
+        assert_eq!(u.alignment(), 8);
+    }
+
+    #[test]
+    fn union_single_alternative() {
+        let u = RepD::Union(UnionRep {
+            alternatives: vec![RepD::Byte(ByteRep { size: 4, align: 4 })],
+            max_size: 4,
+            max_align: 4,
+        });
+        assert_eq!(u.size(), 4);
+        assert_eq!(u.alignment(), 4);
+    }
+
+    // -- Func size/alignment --
+
+    #[test]
+    fn func_size_alignment() {
+        let f = RepD::Func(FuncRep {
+            params: vec![
+                RepD::Byte(ByteRep { size: 4, align: 4 }),
+                RepD::Byte(ByteRep { size: 8, align: 8 }),
+            ],
+            result: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+        });
+        assert_eq!(f.size(), 8); // function pointer
+        assert_eq!(f.alignment(), 8);
+    }
+
+    #[test]
+    fn func_no_params() {
+        let f = RepD::Func(FuncRep {
+            params: vec![],
+            result: Box::new(RepD::Byte(ByteRep { size: 0, align: 1 })),
+        });
+        assert_eq!(f.size(), 8);
+    }
+
+    // -- Zero-size types --
+
+    #[test]
+    fn zero_size_byte() {
+        let z = RepD::Byte(ByteRep { size: 0, align: 1 });
+        assert_eq!(z.size(), 0);
+        assert_eq!(z.alignment(), 1);
+    }
+
+    #[test]
+    fn zero_size_struct() {
+        let z = RepD::Struct(StructRep {
+            fields: vec![],
+            total_size: 0,
+            align: 1,
+        });
+        assert_eq!(z.size(), 0);
+        assert_eq!(z.alignment(), 1);
+    }
+
+    // -- Max alignment --
+
+    #[test]
+    fn max_alignment_128() {
+        let s = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 16, align: 16 })),
+                (16, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 32,
+            align: 16,
+        });
+        assert_eq!(s.alignment(), 16);
+    }
+
+    // -- Deeply nested structs --
+
+    #[test]
+    fn deeply_nested_structs() {
+        let leaf = RepD::Byte(ByteRep { size: 1, align: 1 });
+        let l1 = RepD::Struct(StructRep {
+            fields: vec![(0, leaf)],
+            total_size: 1,
+            align: 1,
+        });
+        let l2 = RepD::Struct(StructRep {
+            fields: vec![(0, l1)],
+            total_size: 1,
+            align: 1,
+        });
+        let l3 = RepD::Struct(StructRep {
+            fields: vec![(0, l2)],
+            total_size: 1,
+            align: 1,
+        });
+        assert_eq!(l3.size(), 1);
+        assert_eq!(l3.alignment(), 1);
+    }
+
+    // -- RepD serialization round-trip --
+
+    #[test]
+    fn byte_serde_roundtrip() {
+        let rep = RepD::Byte(ByteRep { size: 8, align: 8 });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn struct_serde_roundtrip() {
+        let rep = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Ptr(PtrRep {
+                    pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+                })),
+            ],
+            total_size: 12,
+            align: 8,
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn enum_serde_roundtrip() {
+        let rep = RepD::Enum(EnumRep {
+            variants: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (1, RepD::Byte(ByteRep { size: 8, align: 8 })),
+            ],
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn func_serde_roundtrip() {
+        let rep = RepD::Func(FuncRep {
+            params: vec![RepD::Byte(ByteRep { size: 8, align: 8 })],
+            result: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn union_serde_roundtrip() {
+        let rep = RepD::Union(UnionRep {
+            alternatives: vec![
+                RepD::Byte(ByteRep { size: 4, align: 4 }),
+                RepD::Byte(ByteRep { size: 8, align: 8 }),
+            ],
+            max_size: 8,
+            max_align: 8,
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn array_serde_roundtrip() {
+        let rep = RepD::Array(ArrayRep {
+            element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count: 100,
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    #[test]
+    fn ptr_serde_roundtrip() {
+        let rep = RepD::Ptr(PtrRep {
+            pointee: Box::new(RepD::Array(ArrayRep {
+                element: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+                count: 10,
+            })),
+        });
+        let json = serde_json::to_string(&rep).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(rep, back);
+    }
+
+    // -- Compatible/incompatible struct pairs --
+
+    #[test]
+    fn compatible_same_struct_layout() {
+        let a = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let b = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        assert!(a.compatible(&b));
+    }
+
+    #[test]
+    fn incompatible_struct_field_offset_mismatch() {
+        let a = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let b = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (8, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 12,
+            align: 4,
+        });
+        assert!(!a.compatible(&b));
+    }
+
+    // -- Generic tests (12+) --
+
+    #[test]
+    fn generic_no_constraints_compatible_with_anything() {
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        let ptr = RepD::Ptr(PtrRep { pointee: Box::new(byte.clone()) });
+        assert!(g.compatible(&byte));
+        assert!(byte.compatible(&g));
+        assert!(g.compatible(&ptr));
+        assert!(ptr.compatible(&g));
+    }
+
+    #[test]
+    fn generic_size_and_alignment() {
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        assert_eq!(g.size(), 0);
+        assert_eq!(g.alignment(), 1);
+    }
+
+    #[test]
+    fn generic_subsumes_concrete() {
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        assert!(g.subsumes(&byte));
+    }
+
+    #[test]
+    fn generic_with_repd_compatible_constraint_passes() {
+        let constraint = BDConstraint::RepDCompatibleWith(
+            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
+        );
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let byte4 = RepD::Byte(ByteRep { size: 4, align: 4 });
+        assert!(g.compatible(&byte4));
+    }
+
+    #[test]
+    fn generic_with_repd_compatible_constraint_fails() {
+        let constraint = BDConstraint::RepDCompatibleWith(
+            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
+        );
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let byte8 = RepD::Byte(ByteRep { size: 8, align: 8 });
+        assert!(!g.compatible(&byte8));
+    }
+
+    #[test]
+    fn generic_with_capd_constraint_conservatively_passes() {
+        let capd = CapD::empty().strengthen(&[crate::capd::Capability::Read]);
+        let constraint = BDConstraint::CapDAtLeast(capd);
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        // CapDAtLeast is conservatively accepted at the RepD level
+        assert!(g.compatible(&byte));
+    }
+
+    #[test]
+    fn generic_with_reld_constraint_conservatively_passes() {
+        let reld = RelD::empty();
+        let constraint = BDConstraint::RelDContains(reld);
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        // RelDContains is conservatively accepted at the RepD level
+        assert!(g.compatible(&byte));
+    }
+
+    #[test]
+    fn generic_display() {
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        assert_eq!(format!("{g}"), "generic(T)");
+    }
+
+    #[test]
+    fn generic_with_constraints_display() {
+        let constraint = BDConstraint::RepDCompatibleWith(
+            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
+        );
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let displayed = format!("{g}");
+        assert!(displayed.starts_with("generic(T"));
+        assert!(displayed.contains("RepDCompatibleWith"));
+    }
+
+    #[test]
+    fn generic_serde_roundtrip() {
+        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let json = serde_json::to_string(&g).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, back);
+    }
+
+    #[test]
+    fn generic_with_constraint_serde_roundtrip() {
+        let g = RepD::Generic {
+            name: "U".to_string(),
+            constraints: vec![BDConstraint::RepDCompatibleWith(
+                Box::new(RepD::Byte(ByteRep { size: 8, align: 8 }))
+            )],
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        let back: RepD = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, back);
+    }
+
+    #[test]
+    fn generic_two_generics_compatible() {
+        let g1 = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g2 = RepD::Generic { name: "U".to_string(), constraints: vec![] };
+        assert!(g1.compatible(&g2));
+    }
+
+    #[test]
+    fn generic_multiple_constraints() {
+        let constraints = vec![
+            BDConstraint::CapDAtLeast(CapD::empty()),
+            BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))),
+            BDConstraint::RelDContains(RelD::empty()),
+        ];
+        let g = RepD::Generic { name: "T".to_string(), constraints };
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        assert!(g.compatible(&byte));
+        let byte8 = RepD::Byte(ByteRep { size: 8, align: 8 });
+        assert!(!g.compatible(&byte8));
+    }
+
+    #[test]
+    fn bdconstraint_display_capd() {
+        let capd = CapD::empty().strengthen(&[crate::capd::Capability::Read]);
+        let c = BDConstraint::CapDAtLeast(capd);
+        let displayed = format!("{c}");
+        assert!(displayed.starts_with("CapDAtLeast("));
+    }
+
+    #[test]
+    fn bdconstraint_display_reld() {
+        let c = BDConstraint::RelDContains(RelD::empty());
+        let displayed = format!("{c}");
+        assert!(displayed.starts_with("RelDContains("));
     }
 }

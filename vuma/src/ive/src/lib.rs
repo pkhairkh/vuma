@@ -77,8 +77,9 @@ pub use escape::{EscapeKind, analyze_escapes};
 pub use cache::{InvariantViolation as CacheInvariantViolation, Severity as CacheSeverity, VerificationCache, compute_fingerprint};
 pub use verification::{VerificationEngine, VerificationInput};
 pub use interpretation::{
-    AccessEvent, CapDTransitionResult, InterpretationVerifier, InterpretationViolation,
-    LocationId, ProgramPointId, SafetyProof, WriteReadPair,
+    AccessEvent, CapDTransitionResult, InterpretationStrictness,
+    InterpretationVerificationDetail, InterpretationVerifier, InterpretationViolation,
+    LocationId, ProgramPointId, SafetyProof, UnverifiedPair, VerificationWarning, WriteReadPair,
 };
 pub use liveness::{
     EventAction, LivenessInput, LivenessVerificationResult, LivenessVerifier, LivenessViolation,

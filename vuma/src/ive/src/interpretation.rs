@@ -40,6 +40,7 @@ use vuma_bd::repd::{ByteRep, RepD};
 
 use crate::result::{CounterExample, VerificationResult, VerificationStatus};
 
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -91,6 +92,149 @@ pub enum SafetyProof {
         /// The proof steps.
         steps: Vec<String>,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Interpretation Strictness
+// ---------------------------------------------------------------------------
+
+/// Strictness level for the interpretation invariant verifier.
+///
+/// Controls how the verifier handles write-read pairs that lack an
+/// externally-provided BD map (e.g., from the inference engine).
+///
+/// - **Permissive**: Default BDs from the recorded events are acceptable.
+///   Pairs without a BD map pass trivially (current/legacy behavior).
+/// - **Moderate**: Unverified pairs produce a
+///   [`VerificationWarning::MissingBDMap`] and are tracked as unverified,
+///   but verification does not fail outright.
+/// - **Strict**: Unverified pairs produce a verification error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InterpretationStrictness {
+    /// Default BDs are acceptable (current behavior).
+    Permissive,
+    /// Unverified pairs produce warnings.
+    #[default]
+    Moderate,
+    /// Unverified pairs produce errors.
+    Strict,
+}
+
+impl fmt::Display for InterpretationStrictness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InterpretationStrictness::Permissive => write!(f, "Permissive"),
+            InterpretationStrictness::Moderate => write!(f, "Moderate"),
+            InterpretationStrictness::Strict => write!(f, "Strict"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verification Warning
+// ---------------------------------------------------------------------------
+
+/// A warning emitted during interpretation verification.
+///
+/// Unlike violations (which indicate that the invariant is broken),
+/// warnings indicate that verification could not be fully performed
+/// due to missing information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationWarning {
+    /// No BD map was provided for the given write-read pair, so the
+    /// pair's BD compatibility could not be independently verified.
+    MissingBDMap {
+        /// The program point of the write.
+        write_point: ProgramPointId,
+        /// The program point of the read.
+        read_point: ProgramPointId,
+        /// The location being accessed.
+        location: LocationId,
+    },
+}
+
+impl fmt::Display for VerificationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationWarning::MissingBDMap {
+                write_point,
+                read_point,
+                location,
+            } => write!(
+                f,
+                "Missing BD map for write-read pair at {} → {} ({})",
+                write_point, read_point, location
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unverified Pair
+// ---------------------------------------------------------------------------
+
+/// A write-read pair that could not be fully verified due to missing
+/// BD map information.
+///
+/// Unlike violations (which indicate definite invariant breaches),
+/// unverified pairs represent *gaps* in verification coverage — the
+/// invariant might hold, but the verifier cannot confirm it without
+/// an externally-provided BD map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedPair {
+    /// The program point of the write.
+    pub write_node: ProgramPointId,
+    /// The program point of the read.
+    pub read_node: ProgramPointId,
+    /// Why this pair could not be verified.
+    pub reason: String,
+}
+
+impl fmt::Display for UnverifiedPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Unverified pair {} → {}: {}",
+            self.write_node, self.read_node, self.reason
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interpretation Verification Detail
+// ---------------------------------------------------------------------------
+
+/// Detailed result of interpretation verification, including warnings
+/// and unverified pairs that arise from strictness-level checks.
+#[derive(Debug, Clone)]
+pub struct InterpretationVerificationDetail {
+    /// The standard verification result.
+    pub result: VerificationResult,
+    /// Warnings emitted during verification (e.g., missing BD map).
+    pub warnings: Vec<VerificationWarning>,
+    /// Pairs that could not be verified due to missing BD map.
+    pub unverified_pairs: Vec<UnverifiedPair>,
+}
+
+impl InterpretationVerificationDetail {
+    /// Construct a new detail wrapper.
+    pub fn new(result: VerificationResult) -> Self {
+        Self {
+            result,
+            warnings: Vec::new(),
+            unverified_pairs: Vec::new(),
+        }
+    }
+
+    /// Returns `true` if there are any warnings.
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// Returns `true` if there are any unverified pairs.
+    pub fn has_unverified_pairs(&self) -> bool {
+        !self.unverified_pairs.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -350,14 +494,23 @@ pub struct InterpretationVerifier {
     events: Vec<AccessEvent>,
     /// Whether to allow CapD strengthening with a safety proof.
     allow_strengthening_with_proof: bool,
+    /// Strictness level for handling missing BD maps.
+    strictness: InterpretationStrictness,
+    /// Optional externally-provided BD map (from inference engine).
+    /// Maps program points to the BD that the inference engine computed.
+    bd_map: Option<HashMap<ProgramPointId, BD>>,
 }
 
 impl InterpretationVerifier {
     /// Construct a new interpretation verifier.
+    ///
+    /// The default strictness level is [`InterpretationStrictness::Moderate`].
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
             allow_strengthening_with_proof: true,
+            strictness: InterpretationStrictness::Moderate,
+            bd_map: None,
         }
     }
 
@@ -365,6 +518,32 @@ impl InterpretationVerifier {
     pub fn with_strengthening_proof(mut self, allow: bool) -> Self {
         self.allow_strengthening_with_proof = allow;
         self
+    }
+
+    /// Set the interpretation strictness level.
+    pub fn with_strictness(mut self, strictness: InterpretationStrictness) -> Self {
+        self.strictness = strictness;
+        self
+    }
+
+    /// Provide an externally-computed BD map (from the inference engine).
+    ///
+    /// When a BD map is provided, the verifier uses it to look up BDs
+    /// at each program point instead of relying solely on the BDs
+    /// attached to the recorded events.
+    pub fn with_bd_map(mut self, map: HashMap<ProgramPointId, BD>) -> Self {
+        self.bd_map = Some(map);
+        self
+    }
+
+    /// Returns the current strictness level.
+    pub fn strictness(&self) -> InterpretationStrictness {
+        self.strictness
+    }
+
+    /// Returns `true` if a BD map has been provided.
+    pub fn has_bd_map(&self) -> bool {
+        self.bd_map.is_some()
     }
 
     /// Record a write event at the given location with the given BD.
@@ -697,8 +876,27 @@ impl InterpretationVerifier {
     ///
     /// Returns a [`VerificationResult`] indicating whether the interpretation
     /// invariant holds for all recorded write-read pairs.
+    ///
+    /// The strictness level controls how pairs without a BD map are handled:
+    /// - **Permissive**: pairs without a BD map are verified using the BDs
+    ///   from the recorded events (legacy behavior).
+    /// - **Moderate**: pairs without a BD map emit warnings and are tracked
+    ///   as unverified, but do not cause a violation.
+    /// - **Strict**: pairs without a BD map cause a verification error.
     pub fn verify(&self) -> VerificationResult {
+        self.verify_detailed_full().result
+    }
+
+    /// Run the full interpretation invariant verification and return
+    /// detailed results including warnings and unverified pairs.
+    ///
+    /// This is the primary verification entry point that respects the
+    /// strictness level. The simpler [`verify()`] method delegates to this
+    /// and discards the warnings and unverified pairs.
+    pub fn verify_detailed_full(&self) -> InterpretationVerificationDetail {
         let mut violations: Vec<InterpretationViolation> = Vec::new();
+        let mut warnings: Vec<VerificationWarning> = Vec::new();
+        let mut unverified_pairs: Vec<UnverifiedPair> = Vec::new();
         let mut pending_proof_obligations: usize = 0;
 
         // Check for uninitialized reads
@@ -711,6 +909,63 @@ impl InterpretationVerifier {
 
         // Check all write-read pairs
         for pair in self.extract_write_read_pairs() {
+            // Determine whether a BD map is available for this pair.
+            // A pair is considered "verified via BD map" if the bd_map is
+            // present AND contains entries for both the write and read
+            // program points.
+            let has_bd_map_for_pair = match &self.bd_map {
+                Some(map) => {
+                    map.contains_key(&pair.write_point)
+                        && map.contains_key(&pair.read_point)
+                }
+                None => false,
+            };
+
+            if !has_bd_map_for_pair {
+                // No BD map for this pair — strictness determines behavior
+                match self.strictness {
+                    InterpretationStrictness::Permissive => {
+                        // Use event BDs and verify as usual (legacy behavior)
+                    }
+                    InterpretationStrictness::Moderate => {
+                        // Emit warning and track as unverified
+                        warnings.push(VerificationWarning::MissingBDMap {
+                            write_point: pair.write_point.clone(),
+                            read_point: pair.read_point.clone(),
+                            location: pair.location.clone(),
+                        });
+                        unverified_pairs.push(UnverifiedPair {
+                            write_node: pair.write_point.clone(),
+                            read_node: pair.read_point.clone(),
+                            reason: "no BD map provided for this write-read pair"
+                                .to_string(),
+                        });
+                        // Still check with event BDs, but the pair is marked unverified
+                    }
+                    InterpretationStrictness::Strict => {
+                        // Produce a verification error for this unverified pair
+                        unverified_pairs.push(UnverifiedPair {
+                            write_node: pair.write_point.clone(),
+                            read_node: pair.read_point.clone(),
+                            reason: "no BD map provided — strict mode requires BD map"
+                                .to_string(),
+                        });
+                        violations.push(InterpretationViolation::IncompatibleRepD {
+                            write_point: pair.write_point.clone(),
+                            read_point: pair.read_point.clone(),
+                            location: pair.location.clone(),
+                            write_repd: pair.write_bd.repd.clone(),
+                            read_repd: pair.read_bd.repd.clone(),
+                            reason: "strict mode: no BD map provided for write-read pair"
+                                .to_string(),
+                        });
+                        continue; // Skip further checks for this pair in strict mode
+                    }
+                }
+            }
+
+            // If we reach here, either a BD map was available, or we are in
+            // Permissive/Moderate mode and should still check with event BDs.
             if let Err(reason) =
                 Self::check_repd_compatibility(&pair.write_bd.repd, &pair.read_bd.repd)
             {
@@ -805,7 +1060,7 @@ impl InterpretationVerifier {
         }
 
         // Build the verification result
-        if violations.is_empty() && pending_proof_obligations == 0 {
+        let result = if violations.is_empty() && pending_proof_obligations == 0 {
             VerificationResult::new(
                 "interpretation",
                 VerificationStatus::Proven,
@@ -866,6 +1121,12 @@ impl InterpretationVerifier {
                     pending_proof_obligations
                 ),
             )
+        };
+
+        InterpretationVerificationDetail {
+            result,
+            warnings,
+            unverified_pairs,
         }
     }
 
@@ -1016,6 +1277,7 @@ fn repd_kind_name(repd: &RepD) -> String {
         RepD::Ptr(_) => "Ptr".to_string(),
         RepD::Union(_) => "Union".to_string(),
         RepD::Func(_) => "Func".to_string(),
+        RepD::Generic { .. } => "Generic".to_string(),
     }
 }
 
@@ -1614,5 +1876,294 @@ mod tests {
         let a = byte_repd(8, 8);
         let b = byte_repd(8, 8);
         assert!(InterpretationVerifier::detect_type_confusion(&a, &b).is_none());
+    }
+
+    // =======================================================================
+    // Strictness Level Tests
+    // =======================================================================
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 1: Permissive mode — no BD map, matching BDs → Proven
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_permissive_no_bd_map_passes() {
+        let mut verifier = InterpretationVerifier::new()
+            .with_strictness(InterpretationStrictness::Permissive);
+
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+        // No BD map provided — Permissive mode should still pass
+        let result = verifier.verify();
+        assert!(
+            result.is_proven(),
+            "Permissive mode should pass without BD map: {}",
+            result
+        );
+
+        // Detailed result should have no warnings or unverified pairs
+        let detail = verifier.verify_detailed_full();
+        assert!(
+            !detail.has_warnings(),
+            "Permissive mode should not emit warnings: {:?}",
+            detail.warnings
+        );
+        assert!(
+            !detail.has_unverified_pairs(),
+            "Permissive mode should not track unverified pairs: {:?}",
+            detail.unverified_pairs
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 2: Moderate mode — no BD map → warning + unverified pair
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_moderate_no_bd_map_produces_warning() {
+        let mut verifier = InterpretationVerifier::new()
+            .with_strictness(InterpretationStrictness::Moderate);
+
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+        // No BD map provided — Moderate mode should still produce Proven
+        // (because the BDs are compatible), but emit warnings
+        let result = verifier.verify();
+        assert!(
+            result.is_proven(),
+            "Moderate mode should still pass with compatible BDs: {}",
+            result
+        );
+
+        // Detailed result should have warnings and unverified pairs
+        let detail = verifier.verify_detailed_full();
+        assert!(
+            detail.has_warnings(),
+            "Moderate mode should emit MissingBDMap warning: {:?}",
+            detail.warnings
+        );
+        assert!(
+            detail.has_unverified_pairs(),
+            "Moderate mode should track unverified pairs: {:?}",
+            detail.unverified_pairs
+        );
+
+        // Check warning type
+        assert!(matches!(
+            &detail.warnings[0],
+            VerificationWarning::MissingBDMap {
+                write_point: ProgramPointId(1),
+                read_point: ProgramPointId(2),
+                location: LocationId(1),
+            }
+        ));
+
+        // Check unverified pair
+        assert_eq!(detail.unverified_pairs.len(), 1);
+        assert_eq!(detail.unverified_pairs[0].write_node, ProgramPointId(1));
+        assert_eq!(detail.unverified_pairs[0].read_node, ProgramPointId(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 3: Strict mode — no BD map → violation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strict_no_bd_map_produces_violation() {
+        let mut verifier = InterpretationVerifier::new()
+            .with_strictness(InterpretationStrictness::Strict);
+
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+        // No BD map provided — Strict mode should produce a violation
+        let result = verifier.verify();
+        assert!(
+            result.is_violated(),
+            "Strict mode should produce violation without BD map: {}",
+            result
+        );
+
+        // Detailed result should have unverified pairs
+        let detail = verifier.verify_detailed_full();
+        assert!(
+            detail.has_unverified_pairs(),
+            "Strict mode should track unverified pairs: {:?}",
+            detail.unverified_pairs
+        );
+        assert_eq!(detail.unverified_pairs.len(), 1);
+        assert_eq!(detail.unverified_pairs[0].write_node, ProgramPointId(1));
+        assert_eq!(detail.unverified_pairs[0].read_node, ProgramPointId(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 4: With BD map — all strictness levels pass
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_strictness_levels_pass_with_bd_map() {
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        for strictness in [
+            InterpretationStrictness::Permissive,
+            InterpretationStrictness::Moderate,
+            InterpretationStrictness::Strict,
+        ] {
+            let mut verifier = InterpretationVerifier::new()
+                .with_strictness(strictness)
+                .with_bd_map(HashMap::from([
+                    (ProgramPointId(1), bd.clone()),
+                    (ProgramPointId(2), bd.clone()),
+                ]));
+
+            verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+            verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+            let result = verifier.verify();
+            assert!(
+                result.is_proven(),
+                "{:?} mode with BD map should be proven: {}",
+                strictness,
+                result
+            );
+
+            // With a BD map, no warnings or unverified pairs should be produced
+            let detail = verifier.verify_detailed_full();
+            assert!(
+                !detail.has_warnings(),
+                "{:?} mode with BD map should not emit warnings: {:?}",
+                strictness,
+                detail.warnings
+            );
+            assert!(
+                !detail.has_unverified_pairs(),
+                "{:?} mode with BD map should not track unverified pairs: {:?}",
+                strictness,
+                detail.unverified_pairs
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 5: Moderate mode — multiple pairs produce multiple
+    // warnings and unverified pairs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_moderate_multiple_pairs_multiple_warnings() {
+        let mut verifier = InterpretationVerifier::new()
+            .with_strictness(InterpretationStrictness::Moderate);
+
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        // Two write-read pairs, neither has a BD map
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+        verifier.record_write(LocationId(2), bd.clone(), ProgramPointId(3));
+        verifier.record_read(LocationId(2), bd.clone(), ProgramPointId(4));
+
+        let detail = verifier.verify_detailed_full();
+
+        // Should have 2 warnings and 2 unverified pairs
+        assert_eq!(
+            detail.warnings.len(),
+            2,
+            "should have 2 MissingBDMap warnings: {:?}",
+            detail.warnings
+        );
+        assert_eq!(
+            detail.unverified_pairs.len(),
+            2,
+            "should have 2 unverified pairs: {:?}",
+            detail.unverified_pairs
+        );
+
+        // Verify the pairs correspond to the correct program points
+        assert_eq!(detail.unverified_pairs[0].write_node, ProgramPointId(1));
+        assert_eq!(detail.unverified_pairs[0].read_node, ProgramPointId(2));
+        assert_eq!(detail.unverified_pairs[1].write_node, ProgramPointId(3));
+        assert_eq!(detail.unverified_pairs[1].read_node, ProgramPointId(4));
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 6: Default strictness is Moderate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_default_strictness_is_moderate() {
+        let verifier = InterpretationVerifier::new();
+        assert_eq!(
+            verifier.strictness(),
+            InterpretationStrictness::Moderate,
+            "default strictness should be Moderate"
+        );
+        assert!(
+            !verifier.has_bd_map(),
+            "default verifier should not have a BD map"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Strictness Test 7: Strict mode with BD map for only one point —
+    // still unverified
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strict_partial_bd_map_still_unverified() {
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        let mut verifier = InterpretationVerifier::new()
+            .with_strictness(InterpretationStrictness::Strict)
+            // BD map only has the write point, not the read point
+            .with_bd_map(HashMap::from([
+                (ProgramPointId(1), bd.clone()),
+            ]));
+
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+        // Should still produce a violation because the BD map doesn't
+        // cover the read point
+        let result = verifier.verify();
+        assert!(
+            result.is_violated(),
+            "Strict mode with partial BD map should produce violation: {}",
+            result
+        );
+
+        let detail = verifier.verify_detailed_full();
+        assert_eq!(detail.unverified_pairs.len(), 1);
     }
 }

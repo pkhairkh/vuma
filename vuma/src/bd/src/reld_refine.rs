@@ -1297,4 +1297,203 @@ mod tests {
         assert_eq!(format!("{}", dr), "Temporal(during)");
         assert_eq!(dr.category(), "temporal");
     }
+
+    // =======================================================================
+    // New reld_refine tests — Enhancement 3
+    // =======================================================================
+
+    #[test]
+    fn test_outlives_chain_refined() {
+        // Outlives maps to During. Composing two Dures should be consistent.
+        let a = RelDRefined::from_relations([
+            DetailedRelation::Temporal(TemporalRel::During),
+        ]);
+        let b = RelDRefined::from_relations([
+            DetailedRelation::Temporal(TemporalRel::During),
+        ]);
+        let combined = RelDRefined {
+            relations: a.relations.union(&b.relations).cloned().collect(),
+        };
+        assert!(internal_consistent(&combined));
+    }
+
+    #[test]
+    fn test_before_after_contradiction() {
+        assert!(TemporalRel::Before.contradicts(&TemporalRel::After));
+        assert!(TemporalRel::After.contradicts(&TemporalRel::Before));
+        assert!(!TemporalRel::Before.contradicts(&TemporalRel::During));
+    }
+
+    #[test]
+    fn test_before_refines_during_and_concurrent() {
+        assert!(TemporalRel::Before.refines(&TemporalRel::During));
+        assert!(TemporalRel::Before.refines(&TemporalRel::Concurrent));
+        assert!(!TemporalRel::Concurrent.refines(&TemporalRel::Before));
+    }
+
+    #[test]
+    fn test_during_refines_concurrent() {
+        assert!(TemporalRel::During.refines(&TemporalRel::Concurrent));
+        assert!(!TemporalRel::Concurrent.refines(&TemporalRel::During));
+    }
+
+    #[test]
+    fn test_temporal_join_before_after() {
+        // Before and After are incomparable; join = Concurrent
+        assert_eq!(TemporalRel::Before.join(&TemporalRel::After), TemporalRel::Concurrent);
+    }
+
+    #[test]
+    fn test_structural_contains_refines_subset() {
+        assert!(StructuralRel::Contains.refines(&StructuralRel::SubsetOf));
+        assert!(StructuralRel::Contains.refines(&StructuralRel::Aliases));
+        assert!(!StructuralRel::Aliases.refines(&StructuralRel::Contains));
+    }
+
+    #[test]
+    fn test_structural_aliases_disjoint_contradiction() {
+        assert!(StructuralRel::Aliases.contradicts(&StructuralRel::Disjoint));
+        assert!(StructuralRel::Disjoint.contradicts(&StructuralRel::Aliases));
+    }
+
+    #[test]
+    fn test_structural_contains_disjoint_contradiction() {
+        assert!(StructuralRel::Contains.contradicts(&StructuralRel::Disjoint));
+        assert!(StructuralRel::Disjoint.contradicts(&StructuralRel::Contains));
+    }
+
+    #[test]
+    fn test_structural_subset_disjoint_contradiction() {
+        assert!(StructuralRel::SubsetOf.contradicts(&StructuralRel::Disjoint));
+    }
+
+    #[test]
+    fn test_structural_join_contains_aliases() {
+        // Contains refines Aliases, so join = Aliases
+        assert_eq!(
+            StructuralRel::Contains.join(&StructuralRel::Aliases),
+            Some(StructuralRel::Aliases)
+        );
+    }
+
+    #[test]
+    fn test_structural_join_disjoint_incomparable() {
+        // Disjoint is incomparable with Aliases
+        assert_eq!(StructuralRel::Aliases.join(&StructuralRel::Disjoint), None);
+    }
+
+    #[test]
+    fn test_security_trusted_tainted_contradiction() {
+        assert!(SecurityRel::TrustedAs.contradicts(&SecurityRel::TaintedBy));
+        assert!(SecurityRel::TaintedBy.contradicts(&SecurityRel::TrustedAs));
+        // IsolatedFrom and DeclassifiesTo are not contradictory per contradicts()
+        assert!(!SecurityRel::IsolatedFrom.contradicts(&SecurityRel::DeclassifiesTo));
+    }
+
+    #[test]
+    fn test_security_refinement_chain() {
+        assert!(SecurityRel::TrustedAs.refines(&SecurityRel::TaintedBy));
+        assert!(SecurityRel::TaintedBy.refines(&SecurityRel::IsolatedFrom));
+        assert!(SecurityRel::IsolatedFrom.refines(&SecurityRel::DeclassifiesTo));
+        assert!(!SecurityRel::DeclassifiesTo.refines(&SecurityRel::IsolatedFrom));
+    }
+
+    #[test]
+    fn test_security_join_incomparable() {
+        // IsolatedFrom and TaintedBy: TaintedBy refines IsolatedFrom, join = IsolatedFrom
+        assert_eq!(
+            SecurityRel::TaintedBy.join(&SecurityRel::IsolatedFrom),
+            SecurityRel::IsolatedFrom
+        );
+    }
+
+    #[test]
+    fn test_ownership_owned_shared_contradiction() {
+        assert!(OwnershipRel::OwnedBy.contradicts(&OwnershipRel::SharedBy));
+        assert!(OwnershipRel::SharedBy.contradicts(&OwnershipRel::OwnedBy));
+        // OwnedBy and BorrowedBy are not contradictory
+        assert!(!OwnershipRel::OwnedBy.contradicts(&OwnershipRel::BorrowedBy));
+    }
+
+    #[test]
+    fn test_ownership_refinement_chain() {
+        assert!(OwnershipRel::OwnedBy.refines(&OwnershipRel::BorrowedBy));
+        assert!(OwnershipRel::BorrowedBy.refines(&OwnershipRel::SharedBy));
+        assert!(!OwnershipRel::SharedBy.refines(&OwnershipRel::OwnedBy));
+    }
+
+    #[test]
+    fn test_lifetime_refinement_chain() {
+        assert!(LifetimeRel::Static.refines(&LifetimeRel::Outlives));
+        assert!(LifetimeRel::Outlives.refines(&LifetimeRel::ScopedTo));
+        assert!(!LifetimeRel::ScopedTo.refines(&LifetimeRel::Static));
+    }
+
+    #[test]
+    fn test_lifetime_no_contradictions() {
+        assert!(!LifetimeRel::Static.contradicts(&LifetimeRel::Outlives));
+        assert!(!LifetimeRel::Outlives.contradicts(&LifetimeRel::ScopedTo));
+    }
+
+    #[test]
+    fn test_dependency_refinement_detailed() {
+        assert!(DependencyRel::DependsOn.refines(&DependencyRel::ProvidesTo));
+        assert!(!DependencyRel::ProvidesTo.refines(&DependencyRel::DependsOn));
+    }
+
+    #[test]
+    fn test_dependency_no_contradictions() {
+        assert!(!DependencyRel::DependsOn.contradicts(&DependencyRel::ProvidesTo));
+    }
+
+    #[test]
+    fn test_detailed_relation_cross_category_incomparable() {
+        let t = DetailedRelation::Temporal(TemporalRel::Concurrent);
+        let s = DetailedRelation::Structural(StructuralRel::Contains);
+        assert!(!t.refines(&s));
+        assert!(!s.refines(&t));
+        assert!(!t.contradicts(&s));
+    }
+
+    #[test]
+    fn test_reldrefined_empty_from_reld() {
+        let empty = RelD::empty();
+        let refined = RelDRefined::from_reld(&empty);
+        assert!(refined.relations.is_empty());
+    }
+
+    #[test]
+    fn test_reldrefined_from_reld_temporal() {
+        let r = reld_from(vec![Relation::Temporal(TemporalKind::Outlives)]);
+        let refined = RelDRefined::from_reld(&r);
+        assert!(refined.relations.contains(&DetailedRelation::Temporal(TemporalRel::During)));
+    }
+
+    #[test]
+    fn test_reldrefined_from_reld_containment() {
+        let r = reld_from(vec![Relation::Containment]);
+        let refined = RelDRefined::from_reld(&r);
+        assert!(refined.relations.contains(&DetailedRelation::Structural(StructuralRel::Contains)));
+    }
+
+    #[test]
+    fn test_reldrefined_from_reld_equivalence() {
+        let r = reld_from(vec![Relation::Equivalence]);
+        let refined = RelDRefined::from_reld(&r);
+        assert!(refined.relations.contains(&DetailedRelation::Structural(StructuralRel::Aliases)));
+    }
+
+    #[test]
+    fn test_refines_refined_with_multiple_categories() {
+        // sub has both temporal and structural, sup only structural
+        let sub = RelDRefined::from_relations([
+            DetailedRelation::Temporal(TemporalRel::During),
+            DetailedRelation::Structural(StructuralRel::Contains),
+        ]);
+        let sup = RelDRefined::from_relations([
+            DetailedRelation::Structural(StructuralRel::Aliases),
+        ]);
+        // During doesn't cover Aliases, but Contains does
+        assert!(refines_refined(&sub, &sup));
+    }
 }
