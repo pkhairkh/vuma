@@ -1,5 +1,95 @@
 # VUMA Compiler Work Log
 
+## Task W3: BCM2712 SoC Targeting — GIC-400, Exception Handlers, QEMU Targets
+
+**Date**: 2026-03-06
+**Status**: ✅ Completed
+
+### Summary
+
+Updated the VUMA Pi5 bare-metal crate to properly target the BCM2712 SoC
+(Raspberry Pi 5). Added a GIC-400 interrupt controller driver, real exception
+handlers with context save/restore, correct QEMU targets, and fixed the UART
+base address in vuma-std.
+
+### Files Changed
+
+| File | Change | Lines |
+|------|--------|-------|
+| src/pi5/src/gic.rs | NEW: GIC-400 interrupt controller driver with BCM2712 constants, 9 tests | +430 |
+| src/pi5/src/exception.rs | NEW: ExceptionContext, ExceptionType, handler functions, install_handlers(), 7 tests | +380 |
+| src/pi5/src/boot.rs | Replaced spin-loop exception handlers with proper save/call/restore/ERET assembly | ~200 |
+| src/pi5/src/lib.rs | Added `pub mod gic;`, `pub mod exception;` and re-exports | +5 |
+| Makefile | Changed QEMU `-M raspi3b` to `-M raspi4b`; added `x86-64-run` and `riscv64-run` targets | +12 |
+| justfile | Changed QEMU `-M raspi3b` to `-M raspi4b`; added `x86-64-run` and `riscv64-run` targets | +12 |
+| src/std/src/io.rs | Replaced hardcoded `0xFE201000` UART base with BCM2712 platform constants computation | +12 |
+
+### Part 1: GIC-400 Interrupt Controller Driver
+
+Created `src/pi5/src/gic.rs` with:
+
+- `Gic400` struct holding Distributor and CPU Interface base addresses
+- `init()` — full GIC-400 initialisation (disable, set priorities, route SPIs, enable)
+- `enable_irq()` / `disable_irq()` — per-IRQ enable/disable via ISENABLER/ICENABLER
+- `acknowledge_irq()` — reads IAR to get highest-priority pending IRQ
+- `end_of_irq()` — writes EOIR to signal completion
+- `set_priority()` / `get_priority()` — per-IRQ priority via IPRIORITYR
+- `get_pending_irq()` — acknowledges and returns pending IRQ or None
+- `typer_irq_count()` — reads GICD_TYPER for supported IRQ count
+- BCM2712 constants: `GICD_BASE = 0x7C00_4000_1000`, `GICC_BASE = 0x7C00_4001_0000`
+- BCM2712 IRQ assignments: Timer=30, UART=57, GPIO=145–152
+- Pure helper functions: `isenabler_offset_and_bit()`, `icenabler_offset_and_bit()`, `ipriorityr_offset()`, `itargetsr_offset()`, `icfgr_offset()`
+- 9 tests: default/custom bases, interrupt assignments, ISENABLER calc, ICENABLER calc, priority offset, target offset, ICFGR offset, register offsets
+
+### Part 2: Real Exception Handlers
+
+Created `src/pi5/src/exception.rs` with:
+
+- `ExceptionContext` struct (`#[repr(C)]`): x[0..30], spsr, elr, esr, far (280 bytes)
+- `ExceptionType` enum: Synchronous, Irq, Fiq, SError (with Display)
+- `handle_sync()` — parks core (default, overridable)
+- `handle_irq()` — acknowledges and dismisses GIC IRQ
+- `handle_fiq()` — parks core (default)
+- `handle_serror()` — parks core (default)
+- `install_handlers()` — writes VBAR_EL1 (aarch64 only)
+- ESR parsing: `esr_ec()`, `esr_iss()`, `esr_cond()`, `is_data_abort()`, `is_instruction_abort()`
+- 7 tests: context size, default zeros, ESR EC extraction, ESR ISS extraction, ExceptionType display, abort helpers, new() vs default
+
+Updated `src/pi5/src/boot.rs`:
+
+- Replaced 16 spin-loop handler functions with 16 naked assembly handlers
+- Created `exception_entry!` Rust macro that generates save/call/restore/ERET assembly
+- Each handler: allocates 288 bytes on stack, saves x0–x30 + SPSR/ELR/ESR/FAR, calls Rust handler via `bl`, restores everything, ERETs
+- ExceptionContext layout documented in comments with byte offsets
+
+### Part 3: QEMU Targets
+
+Updated Makefile and justfile:
+
+- Changed `-M raspi3b` → `-M raspi4b` in `pi5-debug` and `pi5-run` targets
+- Added `x86-64-run` target: `qemu-system-x86_64 -drive format=raw,file=...`
+- Added `riscv64-run` target: `qemu-system-riscv64 -machine virt -nographic -bios default -kernel ...`
+- Updated `.PHONY` declarations in Makefile
+
+### Part 4: UART Base Address
+
+Updated `src/std/src/io.rs`:
+
+- Replaced hardcoded `UART_PL011_BASE: u64 = 0xFE201000` (BCM2711 Pi 4 address)
+- Added BCM2712 platform constants: `BCM2712_PERIPHERAL_BASE = 0x1C00_0000`, `BCM2712_PERIPHERAL_BASE_HIGH = 0x7C00_0000`, `BCM2712_UART_BASE_OFFSET = 0x010A_0000`
+- Computed `UART_PL011_BASE = BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET` (= 0x1D0A_0000)
+- Updated `EMMC2_BASE` from hardcoded to computed from platform constants
+- Updated all doc comments from "BCM2711" to "BCM2712"
+- Updated test bare_metal addresses from 0xFE201000 to 0x1D0A_0000
+
+### Build Verification
+
+- `cargo clippy -p vuma-pi5 -p vuma-std -- -D warnings`: **0 warnings**
+- `cargo test -p vuma-pi5` (gic + exception + mmio + platform + gpio): **76 tests pass**
+- `cargo test -p vuma-std`: **312 tests pass**
+
+---
+
 ## W3-4: BD+IVE Key Additions
 
 **Date**: 2026-03-05

@@ -47,6 +47,8 @@ extern crate std;
 
 #[cfg(target_arch = "aarch64")]
 pub mod boot;
+pub mod exception;
+pub mod gic;
 pub mod gpio;
 pub mod mmio;
 pub mod platform;
@@ -57,5 +59,7 @@ pub mod timer;
 pub mod uart;
 
 // Re-export commonly used types at the crate root for convenience.
+pub use exception::{ExceptionContext, ExceptionType};
+pub use gic::Gic400;
 pub use mmio::{Address, MmioDevice};
 pub use platform::{Pi5Platform, Platform};

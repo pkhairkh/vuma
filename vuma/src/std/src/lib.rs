@@ -34,6 +34,11 @@ pub mod sync;
 pub mod net;
 pub mod time;
 pub mod process;
+pub mod fs;
+pub mod path;
+pub mod env;
+pub mod thread;
+pub mod error;
 
 // Re-export core BD types for convenience
 pub use primitives::{

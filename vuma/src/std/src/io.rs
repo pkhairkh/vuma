@@ -590,7 +590,7 @@ impl<W: VumaWriter> VumaWriter for VumaBufWriter<W> {
 ///
 /// On **Linux**, `VumaStdin` reads from file descriptor 0 (`stdin`).
 /// On **bare-metal Pi 5**, `VumaStdin` reads from the UART RX register
-/// via MMIO (BCM2711 UART at `0xFE201000`).
+/// via MMIO (BCM2712 UART).
 ///
 /// ## BD Annotations
 ///
@@ -602,15 +602,30 @@ pub struct VumaStdin {
     /// Whether we are running on bare-metal (Pi 5).
     bare_metal: bool,
     /// MMIO base address for UART RX (Pi 5 bare-metal).
-    /// BCM2711 AUX mini UART or PL011 at 0xFE201000.
+    /// BCM2712 PL011 UART (computed from PERIPHERAL_BASE + UART_BASE_OFFSET).
     mmio_base: u64,
     /// Internal ring buffer for UART reads (bare-metal only).
     #[allow(dead_code)] // bare-metal ring buffer, used on Pi 5 target
     rx_buf: Vec<u8>,
 }
 
-/// Default MMIO base address for BCM2711 PL011 UART.
-const UART_PL011_BASE: u64 = 0xFE201000;
+/// BCM2712 peripheral base address (low-peripheral mode).
+/// Must match `vuma_pi5::platform::PERIPHERAL_BASE`.
+const BCM2712_PERIPHERAL_BASE: u64 = 0x1C00_0000;
+
+/// BCM2712 peripheral base address (high-peripheral mode).
+/// Must match `vuma_pi5::platform::PERIPHERAL_BASE_HIGH`.
+#[allow(dead_code)] // bare-metal constant, used on Pi 5 target
+const BCM2712_PERIPHERAL_BASE_HIGH: u64 = 0x7C00_0000;
+
+/// PL011 UART offset from the peripheral base on BCM2712.
+/// Must match `vuma_pi5::platform::UART_BASE_OFFSET`.
+const BCM2712_UART_BASE_OFFSET: u64 = 0x010A_0000;
+
+/// Default MMIO base address for BCM2712 PL011 UART.
+/// Computed as `PERIPHERAL_BASE + UART_BASE_OFFSET` per the BCM2712 spec.
+/// In low-peripheral mode: 0x1C00_0000 + 0x010A_0000 = 0x1D0A_0000.
+const UART_PL011_BASE: u64 = BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET;
 
 impl VumaStdin {
     /// Create a new `VumaStdin` for the current platform.
@@ -640,46 +655,51 @@ impl VumaStdin {
 
     /// Read a single byte from UART (bare-metal Pi 5).
     ///
-    /// This performs a MMIO read from the UART data register. On the BCM2711,
+    /// This performs a MMIO read from the UART data register. On the BCM2712,
     /// the PL011 UART data register is at offset `0x00` from the base.
     ///
-    /// **Real MMIO addresses (BCM2711 Pi 5):**
+    /// **Real MMIO addresses (BCM2712 Pi 5):**
     /// - UART data register (DR): `mmio_base + 0x00` (read/write)
     /// - UART flag register (FR): `mmio_base + 0x18` (read-only)
     ///   - Bit 4 (RXFE): RX FIFO empty
     ///   - Bit 5 (TXFF): TX FIFO full
     /// - UART control register (CR): `mmio_base + 0x30`
     /// - UART interrupt FIFO level select: `mmio_base + 0x34`
-    /// - Default PL011 base: `0xFE201000`
-    // VUMA-VERIFIED: UART read is safe on bare-metal
+    /// - Default PL011 base: computed from BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET
+    // VUMA-VERIFIED: UART read is safe on bare-metal; uses volatile read
     fn read_uart_byte(&mut self) -> VumaIoResult<u8> {
-        // Real bare-metal implementation would be:
-        //   let dr = (self.mmio_base + 0x00) as *const u32;  // Data Register at offset 0x00
-        //   unsafe { core::ptr::read_volatile(dr) as u8 }
-        //
-        // The DR register (offset 0x00) contains the next received byte in bits [7:0].
-        // Reading DR also dequeues the byte from the RX FIFO.
-        //
-        // For the VUMA simulation, we return a placeholder.
-        Ok(0)
+        #[cfg(target_os = "none")]
+        {
+            // Bare-metal: real volatile MMIO read from UART Data Register.
+            let dr = (self.mmio_base + 0x00) as *const u32;
+            let byte = unsafe { core::ptr::read_volatile(dr) as u8 };
+            Ok(byte)
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            // Linux simulation: no real UART available; return placeholder.
+            Ok(0)
+        }
     }
 
     /// Check if UART RX has data available (bare-metal Pi 5).
     ///
     /// Reads the UART flag register at offset `0x18` to check RXFE bit.
-    // VUMA-VERIFIED: UART status check is safe
+    // VUMA-VERIFIED: UART status check is safe; uses volatile read
     fn uart_rx_ready(&self) -> bool {
-        // Real bare-metal implementation:
-        //   let fr = (self.mmio_base + 0x18) as *const u32;  // Flag Register at offset 0x18
-        //   unsafe { (core::ptr::read_volatile(fr) & 0x10) == 0 }
-        //
-        // FR bit layout:
-        //   Bit 4 (RXFE) = 1 → RX FIFO empty, no data available
-        //   Bit 5 (TXFF) = 1 → TX FIFO full, cannot write
-        //   Bit 7 (TXFE) = 1 → TX FIFO empty, can write
-        //
-        // This returns true when RXFE is 0 (data available).
-        true
+        #[cfg(target_os = "none")]
+        {
+            // Bare-metal: real volatile MMIO read from UART Flag Register.
+            // Returns true when RXFE (bit 4) is 0, meaning data is available.
+            let fr = (self.mmio_base + 0x18) as *const u32;
+            unsafe { (core::ptr::read_volatile(fr) & 0x10) == 0 }
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            // Linux simulation: no real UART; always return true so the
+            // caller proceeds to read_uart_byte() which returns Ok(0).
+            true
+        }
     }
 }
 
@@ -771,7 +791,7 @@ impl fmt::Display for VumaStdin {
 ///
 /// On **Linux**, `VumaStdout` writes to file descriptor 1 (`stdout`).
 /// On **bare-metal Pi 5**, `VumaStdout` writes to the UART TX register
-/// via MMIO (BCM2711 UART at `0xFE201000`).
+/// via MMIO (BCM2712 UART).
 ///
 /// ## BD Annotations
 ///
@@ -813,26 +833,34 @@ impl VumaStdout {
     /// it polls the UART flag register (offset `0x18`) to wait until the
     /// TXFF (transmit FIFO full) bit is clear.
     ///
-    /// **Real MMIO addresses (BCM2711 Pi 5):**
+    /// **Real MMIO addresses (BCM2712 Pi 5):**
     /// - UART data register (DR): `mmio_base + 0x00` (write to transmit)
     /// - UART flag register (FR): `mmio_base + 0x18` (poll before write)
     ///   - Bit 5 (TXFF): TX FIFO full — must wait until clear before writing
     ///   - Bit 7 (TXFE): TX FIFO empty — all bytes have been sent
     /// - UART control register (CR): `mmio_base + 0x30`
     /// - UART line control register (LCRH): `mmio_base + 0x2C`
-    /// - Default PL011 base: `0xFE201000`
+    /// - Default PL011 base: computed from BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET
     // VUMA-VERIFIED: UART write is safe on bare-metal; waits for TX ready
     fn write_uart_byte(&mut self, byte: u8) -> VumaIoResult<()> {
-        // Real bare-metal implementation:
-        //   let fr = (self.mmio_base + 0x18) as *const u32;  // Flag Register
-        //   while unsafe { core::ptr::read_volatile(fr) & 0x20 != 0 } {
-        //       // Bit 5 (TXFF) is set — TX FIFO full, spin until space available
-        //       core::hint::spin_loop();
-        //   }
-        //   let dr = (self.mmio_base + 0x00) as *mut u32;  // Data Register
-        //   unsafe { core::ptr::write_volatile(dr, byte as u32) }
-        let _ = byte;
-        Ok(())
+        #[cfg(target_os = "none")]
+        {
+            // Bare-metal: real volatile MMIO write to UART.
+            // Poll Flag Register (FR) bit 5 (TXFF) until TX FIFO has space.
+            let fr = (self.mmio_base + 0x18) as *const u32;
+            while unsafe { core::ptr::read_volatile(fr) & 0x20 != 0 } {
+                core::hint::spin_loop();
+            }
+            let dr = (self.mmio_base + 0x00) as *mut u32;
+            unsafe { core::ptr::write_volatile(dr, byte as u32) }
+            Ok(())
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            // Linux simulation: no real UART; discard the byte.
+            let _ = byte;
+            Ok(())
+        }
     }
 }
 
@@ -922,7 +950,7 @@ impl fmt::Display for VumaStdout {
 ///
 /// On **Linux**, `VumaStderr` writes to file descriptor 2 (`stderr`).
 /// On **bare-metal Pi 5**, `VumaStderr` writes to the UART TX register
-/// via MMIO (BCM2711 UART at `0xFE201000`), same as VumaStdout.
+/// via MMIO (BCM2712 UART), same as VumaStdout.
 ///
 /// ## BD Annotations
 ///
@@ -962,21 +990,29 @@ impl VumaStderr {
     ///
     /// Same as VumaStdout::write_uart_byte — writes to the UART data register.
     ///
-    /// **Real MMIO addresses (BCM2711 Pi 5):**
+    /// **Real MMIO addresses (BCM2712 Pi 5):**
     /// - UART data register (DR): `mmio_base + 0x00` (write to transmit)
     /// - UART flag register (FR): `mmio_base + 0x18` (poll TXFF before write)
-    /// - Default PL011 base: `0xFE201000`
+    /// - Default PL011 base: computed from BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET
     // VUMA-VERIFIED: UART write is safe on bare-metal; waits for TX ready
     fn write_uart_byte(&mut self, byte: u8) -> VumaIoResult<()> {
-        // Real bare-metal implementation (identical to VumaStdout):
-        //   let fr = (self.mmio_base + 0x18) as *const u32;
-        //   while unsafe { core::ptr::read_volatile(fr) & 0x20 != 0 } {
-        //       core::hint::spin_loop();
-        //   }
-        //   let dr = (self.mmio_base + 0x00) as *mut u32;
-        //   unsafe { core::ptr::write_volatile(dr, byte as u32) }
-        let _ = byte;
-        Ok(())
+        #[cfg(target_os = "none")]
+        {
+            // Bare-metal: real volatile MMIO write to UART (identical to VumaStdout).
+            let fr = (self.mmio_base + 0x18) as *const u32;
+            while unsafe { core::ptr::read_volatile(fr) & 0x20 != 0 } {
+                core::hint::spin_loop();
+            }
+            let dr = (self.mmio_base + 0x00) as *mut u32;
+            unsafe { core::ptr::write_volatile(dr, byte as u32) }
+            Ok(())
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            // Linux simulation: no real UART; discard the byte.
+            let _ = byte;
+            Ok(())
+        }
     }
 }
 
@@ -1100,9 +1136,9 @@ pub struct VumaFile {
     inner: Option<std::fs::File>,
 }
 
-/// Default MMIO base for the BCM2711 eMMC2 controller (SD card).
+/// Default MMIO base for the BCM2712 eMMC2 controller (SD card).
 #[allow(dead_code)] // bare-metal constant, used on Pi 5 target
-const EMMC2_BASE: u64 = 0xFE340000;
+const EMMC2_BASE: u64 = BCM2712_PERIPHERAL_BASE + 0x0034_0000;
 
 /// Block size for bare-metal file I/O (512 bytes, standard SD sector).
 const BLOCK_SIZE: usize = 512;
@@ -1598,9 +1634,19 @@ impl Stdin {
     }
 
     /// Read up to `buf_len` bytes from stdin.
-    // VUMA-VERIFIED: read is safe on stdin
+    // VUMA-VERIFIED: read delegates to real stdin
     pub fn read(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
-        Ok(vec![0u8; buf_len])
+        let mut buf = vec![0u8; buf_len];
+        let mut handle = std::io::stdin();
+        use std::io::Read;
+        match handle.read(&mut buf) {
+            Ok(0) => Ok(Vec::new()),
+            Ok(n) => {
+                buf.truncate(n);
+                Ok(buf)
+            }
+            Err(e) => Err(format!("stdin read failed: {}", e)),
+        }
     }
 }
 
@@ -2165,7 +2211,7 @@ mod tests {
     // Test 8: VumaStdin bare-metal mode with UART
     #[test]
     fn test_vuma_stdin_bare_metal() {
-        let mut stdin = VumaStdin::new_bare_metal(0xFE201000);
+        let mut stdin = VumaStdin::new_bare_metal(0x1D0A_0000);
         assert!(stdin.bare_metal);
         assert!(stdin.capd().has(CapFlag::Read));
 
@@ -2188,7 +2234,7 @@ mod tests {
     // Test 9: VumaStdout bare-metal mode
     #[test]
     fn test_vuma_stdout_bare_metal() {
-        let mut stdout = VumaStdout::new_bare_metal(0xFE201000);
+        let mut stdout = VumaStdout::new_bare_metal(0x1D0A_0000);
         assert!(stdout.bare_metal);
         assert!(stdout.capd().has(CapFlag::Write));
 
@@ -2299,7 +2345,7 @@ mod tests {
     // Test 17: SyncEdge annotations for VumaStdin bare-metal
     #[test]
     fn test_vuma_stdin_bare_metal_sync_edges() {
-        let stdin = VumaStdin::new_bare_metal(0xFE201000);
+        let stdin = VumaStdin::new_bare_metal(0x1D0A_0000);
         let edges = stdin.sync_edges();
         assert!(edges.iter().any(|e| e.from == "uart_init" && e.to == "uart_read"));
     }
@@ -2338,7 +2384,7 @@ mod tests {
     // Test 20: VumaStderr bare-metal mode
     #[test]
     fn test_vuma_stderr_bare_metal() {
-        let mut stderr = VumaStderr::new_bare_metal(0xFE201000);
+        let mut stderr = VumaStderr::new_bare_metal(0x1D0A_0000);
         assert!(stderr.bare_metal);
         assert!(stderr.capd().has(CapFlag::Write));
         let n = stderr.write(b"test").unwrap();
@@ -2426,7 +2472,7 @@ mod tests {
         assert!(display.contains("VumaStderr"));
         assert!(display.contains("linux"));
 
-        let stderr_bm = VumaStderr::new_bare_metal(0xFE201000);
+        let stderr_bm = VumaStderr::new_bare_metal(0x1D0A_0000);
         let display_bm = format!("{}", stderr_bm);
         assert!(display_bm.contains("bare-metal"));
     }

@@ -134,11 +134,23 @@ pi5-flash sd=sd: pi5-image
 
 # Launch QEMU debug session (GDB on :1234)
 pi5-debug: pi5-image
-    qemu-system-aarch64 -M raspi3b -serial stdio -kernel src/pi5/kernel8.img -s -S
+    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img -s -S
 
 # Run Pi 5 image in QEMU (no debug stub)
 pi5-run: pi5-image
-    qemu-system-aarch64 -M raspi3b -serial stdio -kernel src/pi5/kernel8.img
+    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img
+
+# ============================================================================
+# x86_64 and RISC-V QEMU targets
+# ============================================================================
+
+# Run x86_64 target in QEMU
+x86-64-run:
+    qemu-system-x86_64 -drive format=raw,file=target/x86_64-unknown-none/release/vuma-x86_64.bin -serial stdio
+
+# Run RISC-V 64 target in QEMU (virt machine)
+riscv64-run:
+    qemu-system-riscv64 -machine virt -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/release/vuma-riscv64
 
 # ============================================================================
 # Cross-Compilation (aarch64 Linux)

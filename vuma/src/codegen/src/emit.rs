@@ -56,6 +56,7 @@
 use std::collections::HashMap;
 
 use crate::arm64::{Condition, Instruction, Operand, Register};
+use crate::backend::BackendKind;
 use crate::ir::*;
 use crate::regalloc::RegAllocator;
 use crate::CodegenError;
@@ -85,6 +86,24 @@ const ELFOSABI_STANDALONE: u8 = 255;
 
 /// Machine type: AArch64.
 const EM_AARCH64: u16 = 183;
+
+/// Machine type: x86-64.
+const EM_X86_64: u16 = 62;
+
+/// Machine type: RISC-V.
+const EM_RISCV: u16 = 243;
+
+/// Machine type: MIPS.
+const EM_MIPS: u16 = 8;
+
+/// Machine type: PowerPC 64-bit.
+const EM_PPC64: u16 = 21;
+
+/// Machine type: LoongArch.
+const EM_LOONGARCH: u16 = 258;
+
+/// Machine type: ARM (32-bit).
+const EM_ARM: u16 = 40;
 
 /// ELF type: executable.
 const ET_EXEC: u16 = 2;
@@ -154,6 +173,138 @@ const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
 const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
 
 // ---------------------------------------------------------------------------
+// x86-64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_X86_64_64 — 64-bit absolute relocation.
+#[allow(dead_code)]
+const R_X86_64_64: u32 = 1;
+/// R_X86_64_PC32 — 32-bit PC-relative relocation.
+#[allow(dead_code)]
+const R_X86_64_PC32: u32 = 2;
+/// R_X86_64_PLT32 — 32-bit PLT-relative relocation (call).
+const R_X86_64_PLT32: u32 = 4;
+/// R_X86_64_32 — 32-bit absolute relocation (zero-extended).
+#[allow(dead_code)]
+const R_X86_64_32: u32 = 10;
+/// R_X86_64_32S — 32-bit absolute relocation (sign-extended).
+#[allow(dead_code)]
+const R_X86_64_32S: u32 = 11;
+
+// ---------------------------------------------------------------------------
+// RISC-V64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_RISCV_JAL — JAL instruction relocation.
+#[allow(dead_code)]
+const R_RISCV_JAL: u32 = 2;
+/// R_RISCV_BRANCH — Conditional branch relocation.
+#[allow(dead_code)]
+const R_RISCV_BRANCH: u32 = 16;
+/// R_RISCV_CALL — CALL pseudo-instruction relocation (AUIPC + JALR).
+const R_RISCV_CALL: u32 = 18;
+/// R_RISCV_CALL_PLT — CALL PLT pseudo-instruction relocation.
+#[allow(dead_code)]
+const R_RISCV_CALL_PLT: u32 = 19;
+/// R_RISCV_PCREL_HI20 — PC-relative high 20 bits.
+#[allow(dead_code)]
+const R_RISCV_PCREL_HI20: u32 = 23;
+/// R_RISCV_PCREL_LO12_I — PC-relative low 12 bits (I-type).
+#[allow(dead_code)]
+const R_RISCV_PCREL_LO12_I: u32 = 24;
+/// R_RISCV_HI20 — Absolute high 20 bits.
+#[allow(dead_code)]
+const R_RISCV_HI20: u32 = 26;
+/// R_RISCV_LO12_I — Absolute low 12 bits (I-type).
+#[allow(dead_code)]
+const R_RISCV_LO12_I: u32 = 27;
+
+// ---------------------------------------------------------------------------
+// MIPS64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_MIPS_32 — 32-bit absolute relocation.
+#[allow(dead_code)]
+const R_MIPS_32: u32 = 2;
+/// R_MIPS_26 — 26-bit jump target relocation.
+const R_MIPS_26: u32 = 4;
+/// R_MIPS_HI16 — High 16 bits of an address.
+#[allow(dead_code)]
+const R_MIPS_HI16: u32 = 5;
+/// R_MIPS_LO16 — Low 16 bits of an address.
+#[allow(dead_code)]
+const R_MIPS_LO16: u32 = 6;
+/// R_MIPS_GPREL16 — GP-relative 16-bit relocation.
+#[allow(dead_code)]
+const R_MIPS_GPREL16: u32 = 7;
+/// R_MIPS_CALL16 — 16-bit call through GOT.
+#[allow(dead_code)]
+const R_MIPS_CALL16: u32 = 11;
+/// R_MIPS_64 — 64-bit absolute relocation.
+#[allow(dead_code)]
+const R_MIPS_64: u32 = 18;
+
+// ---------------------------------------------------------------------------
+// PowerPC64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_PPC64_REL24 — 24-bit PC-relative branch relocation (call).
+const R_PPC64_REL24: u32 = 10;
+/// R_PPC64_REL32 — 32-bit PC-relative relocation.
+#[allow(dead_code)]
+const R_PPC64_REL32: u32 = 26;
+/// R_PPC64_ADDR32 — 32-bit absolute address relocation.
+#[allow(dead_code)]
+const R_PPC64_ADDR32: u32 = 20;
+/// R_PPC64_ADDR64 — 64-bit absolute address relocation.
+#[allow(dead_code)]
+const R_PPC64_ADDR64: u32 = 38;
+
+// ---------------------------------------------------------------------------
+// LoongArch64 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_LARCH_PCALA_HI20 — PC-relative high 20 bits for PCALA.
+#[allow(dead_code)]
+const R_LARCH_PCALA_HI20: u32 = 44;
+/// R_LARCH_PCALA_LO12 — PC-relative low 12 bits for PCALA.
+#[allow(dead_code)]
+const R_LARCH_PCALA_LO12: u32 = 45;
+/// R_LARCH_B26 — 26-bit branch relocation.
+const R_LARCH_B26: u32 = 69;
+/// R_LARCH_32 — 32-bit absolute relocation.
+#[allow(dead_code)]
+const R_LARCH_32: u32 = 77;
+/// R_LARCH_64 — 64-bit absolute relocation.
+#[allow(dead_code)]
+const R_LARCH_64: u32 = 79;
+/// R_LARCH_CALL36 — CALL36 relocation (36-bit call).
+#[allow(dead_code)]
+const R_LARCH_CALL36: u32 = 89;
+
+// ---------------------------------------------------------------------------
+// ARM32 Relocation Types
+// ---------------------------------------------------------------------------
+
+/// R_ARM_ABS32 — 32-bit absolute relocation.
+#[allow(dead_code)]
+const R_ARM_ABS32: u32 = 2;
+/// R_ARM_REL32 — 32-bit PC-relative relocation.
+#[allow(dead_code)]
+const R_ARM_REL32: u32 = 3;
+/// R_ARM_CALL — BL call relocation (PC-relative 24-bit).
+const R_ARM_CALL: u32 = 28;
+/// R_ARM_JUMP24 — B jump relocation (PC-relative 24-bit).
+#[allow(dead_code)]
+const R_ARM_JUMP24: u32 = 29;
+/// R_ARM_MOVW_ABS_NC — MOVW absolute (lower 16 bits).
+#[allow(dead_code)]
+const R_ARM_MOVW_ABS_NC: u32 = 43;
+/// R_ARM_MOVT_ABS — MOVT absolute (upper 16 bits).
+#[allow(dead_code)]
+const R_ARM_MOVT_ABS: u32 = 44;
+
+// ---------------------------------------------------------------------------
 // EmitConfig
 // ---------------------------------------------------------------------------
 
@@ -205,6 +356,8 @@ pub struct EmitConfig {
     pub format: OutputFormat,
     /// Target platform (Linux or bare-metal Pi 5).
     pub target: Target,
+    /// Target backend / ISA architecture.
+    pub backend: BackendKind,
     /// Base virtual address for the text segment.
     pub base_addr: u64,
     /// Name of the entry-point function (default: "main").
@@ -223,6 +376,7 @@ impl EmitConfig {
         Self {
             format: OutputFormat::ELF,
             target: Target::Linux,
+            backend: BackendKind::AArch64,
             base_addr: BASE_ADDR_LINUX,
             entry_name: "main".to_string(),
             section_headers: true,
@@ -236,6 +390,7 @@ impl EmitConfig {
         Self {
             format: OutputFormat::Raw,
             target: Target::BareMetal,
+            backend: BackendKind::AArch64,
             base_addr: BASE_ADDR_BARE,
             entry_name: "_start".to_string(),
             section_headers: false,
@@ -249,6 +404,7 @@ impl EmitConfig {
         Self {
             format: OutputFormat::ELF,
             target: Target::BareMetal,
+            backend: BackendKind::AArch64,
             base_addr: BASE_ADDR_BARE,
             entry_name: "_start".to_string(),
             section_headers: true,
@@ -262,6 +418,22 @@ impl EmitConfig {
         Self {
             format: OutputFormat::Obj,
             target: Target::Linux,
+            backend: BackendKind::AArch64,
+            base_addr: 0,
+            entry_name: String::new(),
+            section_headers: true,
+            symbol_table: true,
+            debug_info: false,
+        }
+    }
+
+    /// Create a new configuration for a relocatable object file targeting a
+    /// specific ISA backend.
+    pub fn relocatable_obj_for(backend: BackendKind) -> Self {
+        Self {
+            format: OutputFormat::Obj,
+            target: Target::Linux,
+            backend,
             base_addr: 0,
             entry_name: String::new(),
             section_headers: true,
@@ -1017,6 +1189,42 @@ fn compute_frame_size(func: &IRFunction) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// ISA-aware relocation helpers
+// ---------------------------------------------------------------------------
+
+/// Return the ELF `e_machine` value for the given backend kind.
+fn em_machine_for_backend(backend: BackendKind) -> u16 {
+    match backend {
+        BackendKind::AArch64 => EM_AARCH64,
+        BackendKind::X86_64 => EM_X86_64,
+        BackendKind::RiscV64 => EM_RISCV,
+        BackendKind::Mips64 => EM_MIPS,
+        BackendKind::PowerPC64 => EM_PPC64,
+        BackendKind::LoongArch64 => EM_LOONGARCH,
+        BackendKind::Arm32 => EM_ARM,
+        BackendKind::Wasm32 => EM_AARCH64, // Wasm doesn't produce native ELF
+    }
+}
+
+/// Return the call relocation type for the given backend kind.
+///
+/// Each ISA uses a different relocation type for inter-function call
+/// instructions. This function maps the backend to the appropriate ELF
+/// relocation constant.
+fn call_reloc_type_for_backend(backend: BackendKind) -> u32 {
+    match backend {
+        BackendKind::AArch64 => R_AARCH64_CALL26,
+        BackendKind::X86_64 => R_X86_64_PLT32,
+        BackendKind::RiscV64 => R_RISCV_CALL,
+        BackendKind::Mips64 => R_MIPS_26,
+        BackendKind::PowerPC64 => R_PPC64_REL24,
+        BackendKind::LoongArch64 => R_LARCH_B26,
+        BackendKind::Arm32 => R_ARM_CALL,
+        BackendKind::Wasm32 => R_AARCH64_CALL26, // Wasm doesn't produce native ELF
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level emission functions
 // ---------------------------------------------------------------------------
 
@@ -1102,13 +1310,14 @@ pub fn emit_elf(
     };
 
     // Build .rela.text entries for ET_REL objects.
+    let call_reloc_type = call_reloc_type_for_backend(config.backend);
     if is_obj {
         for reloc in &all_call_relocs {
             let sym_idx = sym_name_to_idx.get(&reloc.target_func).copied().unwrap_or(0);
             rela_entries.push(RelaEntry::new(
                 reloc.text_byte_offset,
                 sym_idx,
-                R_AARCH64_CALL26,
+                call_reloc_type,
                 0,
             ));
         }
@@ -1158,7 +1367,8 @@ pub fn emit_elf(
 
     let e_type = if is_obj { ET_REL } else { ET_EXEC };
     elf.extend_from_slice(&e_type.to_le_bytes());
-    elf.extend_from_slice(&EM_AARCH64.to_le_bytes());
+    let e_machine = em_machine_for_backend(config.backend);
+    elf.extend_from_slice(&e_machine.to_le_bytes());
     elf.extend_from_slice(&(1u32).to_le_bytes());
     elf.extend_from_slice(&entry_point.to_le_bytes());
     elf.extend_from_slice(&elf_header_size.to_le_bytes());
@@ -1326,6 +1536,16 @@ pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>
     resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
     let _ = config; // base_addr used implicitly via relocation math
     Ok(text_section)
+}
+
+/// Emit a relocatable ELF object file (ET_REL) for the specified ISA backend.
+///
+/// Convenience wrapper around [`emit_elf`] with `OutputFormat::Obj` and the
+/// given backend kind. The resulting object file contains `.rela.text` entries
+/// using the appropriate relocation type for the target ISA.
+pub fn emit_obj(functions: &[IRFunction], data_sections: &[DataSection], backend: BackendKind) -> Result<Vec<u8>> {
+    let config = EmitConfig::relocatable_obj_for(backend);
+    emit_elf(functions, data_sections, &config)
 }
 
 // ---------------------------------------------------------------------------
@@ -2034,6 +2254,315 @@ mod tests {
         assert_eq!(R_AARCH64_JUMP26, 282);
         assert_eq!(R_AARCH64_ADR_PREL_PG_HI21, 275);
         assert_eq!(R_AARCH64_LDST64_ABS_LO12_NC, 286);
+    }
+
+    // -----------------------------------------------------------------------
+    // x86-64 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn x86_64_relocation_constants() {
+        assert_eq!(R_X86_64_64, 1);
+        assert_eq!(R_X86_64_PC32, 2);
+        assert_eq!(R_X86_64_PLT32, 4);
+        assert_eq!(R_X86_64_32, 10);
+        assert_eq!(R_X86_64_32S, 11);
+    }
+
+    #[test]
+    fn emit_obj_x86_64_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::X86_64).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_X86_64, "x86-64 object file must have EM_X86_64");
+    }
+
+    #[test]
+    fn emit_obj_x86_64_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::X86_64).unwrap();
+        // Parse .rela.text entries and verify R_X86_64_PLT32 relocation type.
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_X86_64_PLT32,
+                        "expected R_X86_64_PLT32 (4), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RISC-V64 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn riscv64_relocation_constants() {
+        assert_eq!(R_RISCV_CALL, 18);
+        assert_eq!(R_RISCV_CALL_PLT, 19);
+        assert_eq!(R_RISCV_PCREL_HI20, 23);
+        assert_eq!(R_RISCV_PCREL_LO12_I, 24);
+        assert_eq!(R_RISCV_HI20, 26);
+        assert_eq!(R_RISCV_LO12_I, 27);
+        assert_eq!(R_RISCV_JAL, 2);
+        assert_eq!(R_RISCV_BRANCH, 16);
+    }
+
+    #[test]
+    fn emit_obj_riscv64_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::RiscV64).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_RISCV, "RISC-V64 object file must have EM_RISCV");
+    }
+
+    #[test]
+    fn emit_obj_riscv64_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::RiscV64).unwrap();
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_RISCV_CALL,
+                        "expected R_RISCV_CALL (18), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MIPS64 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mips64_relocation_constants() {
+        assert_eq!(R_MIPS_26, 4);
+        assert_eq!(R_MIPS_32, 2);
+        assert_eq!(R_MIPS_64, 18);
+        assert_eq!(R_MIPS_HI16, 5);
+        assert_eq!(R_MIPS_LO16, 6);
+        assert_eq!(R_MIPS_CALL16, 11);
+        assert_eq!(R_MIPS_GPREL16, 7);
+    }
+
+    #[test]
+    fn emit_obj_mips64_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::Mips64).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_MIPS, "MIPS64 object file must have EM_MIPS");
+    }
+
+    #[test]
+    fn emit_obj_mips64_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::Mips64).unwrap();
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_MIPS_26,
+                        "expected R_MIPS_26 (4), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PowerPC64 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ppc64_relocation_constants() {
+        assert_eq!(R_PPC64_ADDR64, 38);
+        assert_eq!(R_PPC64_ADDR32, 20);
+        assert_eq!(R_PPC64_REL24, 10);
+        assert_eq!(R_PPC64_REL32, 26);
+    }
+
+    #[test]
+    fn emit_obj_ppc64_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::PowerPC64).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_PPC64, "PPC64 object file must have EM_PPC64");
+    }
+
+    #[test]
+    fn emit_obj_ppc64_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::PowerPC64).unwrap();
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_PPC64_REL24,
+                        "expected R_PPC64_REL24 (10), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LoongArch64 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loongarch64_relocation_constants() {
+        assert_eq!(R_LARCH_64, 79);
+        assert_eq!(R_LARCH_32, 77);
+        assert_eq!(R_LARCH_B26, 69);
+        assert_eq!(R_LARCH_PCALA_HI20, 44);
+        assert_eq!(R_LARCH_PCALA_LO12, 45);
+        assert_eq!(R_LARCH_CALL36, 89);
+    }
+
+    #[test]
+    fn emit_obj_loongarch64_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::LoongArch64).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_LOONGARCH, "LoongArch64 object file must have EM_LOONGARCH");
+    }
+
+    #[test]
+    fn emit_obj_loongarch64_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::LoongArch64).unwrap();
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_LARCH_B26,
+                        "expected R_LARCH_B26 (69), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ARM32 relocation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn arm32_relocation_constants() {
+        assert_eq!(R_ARM_CALL, 28);
+        assert_eq!(R_ARM_JUMP24, 29);
+        assert_eq!(R_ARM_MOVW_ABS_NC, 43);
+        assert_eq!(R_ARM_MOVT_ABS, 44);
+        assert_eq!(R_ARM_REL32, 3);
+        assert_eq!(R_ARM_ABS32, 2);
+    }
+
+    #[test]
+    fn emit_obj_arm32_machine_type() {
+        let funcs = vec![make_return_function("main")];
+        let elf = emit_obj(&funcs, &[], BackendKind::Arm32).unwrap();
+        let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
+        assert_eq!(e_machine, EM_ARM, "ARM32 object file must have EM_ARM");
+    }
+
+    #[test]
+    fn emit_obj_arm32_relocation_type() {
+        let helper = make_return_function("helper");
+        let caller = make_calling_function("main", "helper");
+        let elf = emit_obj(&[helper, caller], &[], BackendKind::Arm32).unwrap();
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
+        for i in 0..e_shnum as usize {
+            let sh_off = e_shoff as usize + i * 64;
+            let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
+            if sh_type == SHT_RELA {
+                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
+                let num_entries = sh_size as usize / 24;
+                for j in 0..num_entries {
+                    let ent_off = sh_offset as usize + j * 24;
+                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let r_type = (info & 0xFFFFFFFF) as u32;
+                    assert_eq!(r_type, R_ARM_CALL,
+                        "expected R_ARM_CALL (28), got {}", r_type);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ISA-aware helper function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn em_machine_for_backend_mapping() {
+        assert_eq!(em_machine_for_backend(BackendKind::AArch64), EM_AARCH64);
+        assert_eq!(em_machine_for_backend(BackendKind::X86_64), EM_X86_64);
+        assert_eq!(em_machine_for_backend(BackendKind::RiscV64), EM_RISCV);
+        assert_eq!(em_machine_for_backend(BackendKind::Mips64), EM_MIPS);
+        assert_eq!(em_machine_for_backend(BackendKind::PowerPC64), EM_PPC64);
+        assert_eq!(em_machine_for_backend(BackendKind::LoongArch64), EM_LOONGARCH);
+        assert_eq!(em_machine_for_backend(BackendKind::Arm32), EM_ARM);
+    }
+
+    #[test]
+    fn call_reloc_type_for_backend_mapping() {
+        assert_eq!(call_reloc_type_for_backend(BackendKind::AArch64), R_AARCH64_CALL26);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::X86_64), R_X86_64_PLT32);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::RiscV64), R_RISCV_CALL);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::Mips64), R_MIPS_26);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::PowerPC64), R_PPC64_REL24);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::LoongArch64), R_LARCH_B26);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32), R_ARM_CALL);
     }
 }
 

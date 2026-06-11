@@ -2,6 +2,36 @@
 
 ---
 
+Task ID: W1
+Agent: ELF Relocation Support
+Task: Add ELF relocation support for 6 ISAs (x86_64, RISC-V64, MIPS64, PPC64, LoongArch64, ARM32) to the VUMA codegen emit module
+
+Work Log:
+1. **Read existing AArch64 relocation infrastructure**: Studied emit.rs to understand the existing R_AARCH64_CALL26/R_AARCH64_JUMP26/R_AARCH64_ADR_PREL_PG_HI21/R_AARCH64_LDST64_ABS_LO12_NC constants, the RelaEntry struct, and how .rela.text entries are generated in `emit_elf()` when `OutputFormat::Obj` is selected.
+2. **Added EM_* machine type constants**: Added EM_X86_64=62, EM_RISCV=243, EM_MIPS=8, EM_PPC64=21, EM_LOONGARCH=258, EM_ARM=40 alongside the existing EM_AARCH64=183.
+3. **Added relocation type constants for all 6 ISAs**:
+   - x86_64: R_X86_64_64=1, R_X86_64_PC32=2, R_X86_64_PLT32=4, R_X86_64_32=10, R_X86_64_32S=11
+   - RISC-V64: R_RISCV_CALL=18, R_RISCV_CALL_PLT=19, R_RISCV_PCREL_HI20=23, R_RISCV_PCREL_LO12_I=24, R_RISCV_HI20=26, R_RISCV_LO12_I=27, R_RISCV_JAL=2, R_RISCV_BRANCH=16
+   - MIPS64: R_MIPS_26=4, R_MIPS_32=2, R_MIPS_64=18, R_MIPS_HI16=5, R_MIPS_LO16=6, R_MIPS_CALL16=11, R_MIPS_GPREL16=7
+   - PowerPC64: R_PPC64_ADDR64=38, R_PPC64_ADDR32=20, R_PPC64_REL24=10, R_PPC64_REL32=26
+   - LoongArch64: R_LARCH_64=79, R_LARCH_32=77, R_LARCH_B26=69, R_LARCH_PCALA_HI20=44, R_LARCH_PCALA_LO12=45, R_LARCH_CALL36=89
+   - ARM32: R_ARM_CALL=28, R_ARM_JUMP24=29, R_ARM_MOVW_ABS_NC=43, R_ARM_MOVT_ABS=44, R_ARM_REL32=3, R_ARM_ABS32=2
+4. **Added `backend` field to EmitConfig**: New `backend: BackendKind` field defaults to `BackendKind::AArch64` in all existing constructors. Added `EmitConfig::relocatable_obj_for(backend)` constructor for ISA-specific object file emission.
+5. **Added ISA-aware helper functions**: `em_machine_for_backend()` maps BackendKind to ELF e_machine value; `call_reloc_type_for_backend()` maps BackendKind to the appropriate call relocation type constant.
+6. **Modified `emit_elf()`**: Replaced hardcoded `EM_AARCH64` with `em_machine_for_backend(config.backend)` for the ELF header e_machine field; replaced hardcoded `R_AARCH64_CALL26` with `call_reloc_type_for_backend(config.backend)` for .rela.text entries.
+7. **Created `emit_obj()` function**: New public function `emit_obj(functions, data_sections, backend)` wraps `emit_elf()` with `OutputFormat::Obj` and the specified backend kind.
+8. **Added 16 new tests**: 2+ tests per ISA (constants test + machine type test + relocation type test for each), plus 2 cross-ISA helper mapping tests. All tests parse actual ELF bytes to verify the e_machine field and .rela.text relocation type.
+
+Files Modified:
+- `/home/z/my-project/vuma/src/codegen/src/emit.rs` — Added EM_* constants (6), relocation type constants (33 total), BackendKind import, backend field in EmitConfig, relocatable_obj_for() constructor, em_machine_for_backend() helper, call_reloc_type_for_backend() helper, emit_obj() function, ISA-aware e_machine/reloc_type in emit_elf(), 16 new tests
+
+Verification:
+- `cargo clippy -p vuma-codegen -- -D warnings`: 0 warnings, 0 errors
+- `cargo test -p vuma-codegen --lib -- -q`: 695 tests passed, 0 failed
+- `cargo test -p vuma-codegen -- emit::tests -q`: 44 emit tests passed, 0 failed
+
+---
+
 Task ID: W0-T7
 Agent: Core Module Re-enabler
 Task: Re-enable disabled access_analysis module and fix hardcoded match/switch case extraction in pipeline

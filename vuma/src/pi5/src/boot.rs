@@ -21,10 +21,12 @@
 //! # Exception vector table
 //!
 //! The full AArch64 vector table contains 16 entries grouped by exception
-//! level and stack pointer selection. This module defines handler stubs for
-//! all entries; they currently spin-loop so the system halts visibly rather
-//! than executing undefined instructions.
+//! level and stack pointer selection. Each entry branches to a proper
+//! assembly handler that saves the full CPU context, calls the
+//! corresponding Rust handler in [`exception`](crate::exception),
+//! restores context, and executes `ERET`.
 
+use crate::exception::ExceptionContext;
 use crate::platform::{PERIPHERAL_BASE, UART_BASE_OFFSET};
 use crate::smp::CoreId;
 use crate::uart::Uart;
@@ -330,119 +332,213 @@ pub unsafe extern "C" fn exception_vector_table() {
 }
 
 // ---------------------------------------------------------------------------
-// Individual exception handler stubs
+// Exception handler entry points (naked assembly)
 // ---------------------------------------------------------------------------
+//
+// Each handler is a naked function that:
+//   1. Allocates 288 bytes on the stack (ExceptionContext = 280, + 8 padding).
+//   2. Saves x0–x30 to the first 248 bytes.
+//   3. Reads and saves SPSR_EL1, ELR_EL1, ESR_EL1, FAR_EL1.
+//   4. Calls the Rust handler with a pointer to the ExceptionContext.
+//   5. Restores SPSR_EL1, ELR_EL1, ESR_EL1, FAR_EL1.
+//   6. Restores x0–x30.
+//   7. Deallocates the stack frame and executes ERET.
+//
+// ExceptionContext layout (all u64, #[repr(C)]):
+//   Offset   Field
+//   0x000    x0       x1
+//   0x010    x2       x3
+//   0x020    x4       x5
+//   0x030    x6       x7
+//   0x040    x8       x9
+//   0x050    x10      x11
+//   0x060    x12      x13
+//   0x070    x14      x15
+//   0x080    x16      x17
+//   0x090    x18      x19
+//   0x0A0    x20      x21
+//   0x0B0    x22      x23
+//   0x0C0    x24      x25
+//   0x0D0    x26      x27
+//   0x0E0    x28      x29
+//   0x0F0    x30      (pad)
+//   0x0F8    spsr
+//   0x100    elr
+//   0x108    esr
+//   0x110    far
+//   Total: 280 bytes → 288 with 16-byte alignment padding.
+
+/// Stack frame size for `ExceptionContext` (280 bytes), rounded up to
+/// the next 16-byte alignment boundary (288 bytes) per AAPCS.
+const EXCEPTION_CTX_SIZE: usize = 288;
+
+/// Rust macro that generates the inline assembly for an exception handler
+/// entry point. The `$handler` path is the Rust function to call with
+/// a `*mut ExceptionContext` argument in x0.
+macro_rules! exception_entry {
+    ($handler:path) => {
+        core::arch::asm!(
+            // ---- Save context ----
+            "sub sp, sp, #288",
+
+            // Save x0–x30 (pairs of stp)
+            "stp x0, x1,   [sp, #0x00]",
+            "stp x2, x3,   [sp, #0x10]",
+            "stp x4, x5,   [sp, #0x20]",
+            "stp x6, x7,   [sp, #0x30]",
+            "stp x8, x9,   [sp, #0x40]",
+            "stp x10, x11, [sp, #0x50]",
+            "stp x12, x13, [sp, #0x60]",
+            "stp x14, x15, [sp, #0x70]",
+            "stp x16, x17, [sp, #0x80]",
+            "stp x18, x19, [sp, #0x90]",
+            "stp x20, x21, [sp, #0xA0]",
+            "stp x22, x23, [sp, #0xB0]",
+            "stp x24, x25, [sp, #0xC0]",
+            "stp x26, x27, [sp, #0xD0]",
+            "stp x28, x29, [sp, #0xE0]",
+            "str x30,      [sp, #0xF0]",
+
+            // Save SPSR_EL1, ELR_EL1, ESR_EL1, FAR_EL1
+            "mrs x0, spsr_el1",
+            "mrs x1, elr_el1",
+            "mrs x2, esr_el1",
+            "mrs x3, far_el1",
+            "stp x0, x1, [sp, #0xF8]",
+            "stp x2, x3, [sp, #0x108]",
+
+            // ---- Call Rust handler ----
+            "mov x0, sp",
+            "bl {handler}",
+
+            // ---- Restore context ----
+            // Restore SPSR_EL1, ELR_EL1, ESR_EL1, FAR_EL1
+            "ldp x2, x3, [sp, #0x108]",
+            "ldp x0, x1, [sp, #0xF8]",
+            "msr spsr_el1, x0",
+            "msr elr_el1, x1",
+            "msr esr_el1, x2",
+            "msr far_el1, x3",
+
+            // Restore x0–x30
+            "ldp x28, x29, [sp, #0xE0]",
+            "ldp x26, x27, [sp, #0xD0]",
+            "ldp x24, x25, [sp, #0xC0]",
+            "ldp x22, x23, [sp, #0xB0]",
+            "ldp x20, x21, [sp, #0xA0]",
+            "ldp x18, x19, [sp, #0x90]",
+            "ldp x16, x17, [sp, #0x80]",
+            "ldp x14, x15, [sp, #0x70]",
+            "ldp x12, x13, [sp, #0x60]",
+            "ldp x10, x11, [sp, #0x50]",
+            "ldp x8, x9,   [sp, #0x40]",
+            "ldp x6, x7,   [sp, #0x30]",
+            "ldp x4, x5,   [sp, #0x20]",
+            "ldp x2, x3,   [sp, #0x10]",
+            "ldp x0, x1,   [sp], #288",
+
+            // Return from exception
+            "eret",
+            handler = sym $handler,
+            options(noreturn)
+        )
+    };
+}
 
 /// Handler for synchronous exceptions at EL1 using SP0.
-fn sync_el1_sp0_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn sync_el1_sp0_handler() {
+    exception_entry!(crate::exception::handle_sync)
 }
 
 /// Handler for IRQ exceptions at EL1 using SP0.
-fn irq_el1_sp0_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn irq_el1_sp0_handler() {
+    exception_entry!(crate::exception::handle_irq)
 }
 
 /// Handler for FIQ exceptions at EL1 using SP0.
-fn fiq_el1_sp0_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn fiq_el1_sp0_handler() {
+    exception_entry!(crate::exception::handle_fiq)
 }
 
 /// Handler for SError exceptions at EL1 using SP0.
-fn serror_el1_sp0_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn serror_el1_sp0_handler() {
+    exception_entry!(crate::exception::handle_serror)
 }
 
 /// Handler for synchronous exceptions at EL1 using SPx.
-fn sync_el1_spx_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn sync_el1_spx_handler() {
+    exception_entry!(crate::exception::handle_sync)
 }
 
 /// Handler for IRQ exceptions at EL1 using SPx.
-fn irq_el1_spx_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn irq_el1_spx_handler() {
+    exception_entry!(crate::exception::handle_irq)
 }
 
 /// Handler for FIQ exceptions at EL1 using SPx.
-fn fiq_el1_spx_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn fiq_el1_spx_handler() {
+    exception_entry!(crate::exception::handle_fiq)
 }
 
 /// Handler for SError exceptions at EL1 using SPx.
-fn serror_el1_spx_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn serror_el1_spx_handler() {
+    exception_entry!(crate::exception::handle_serror)
 }
 
 /// Handler for synchronous exceptions from lower EL (AArch64).
-fn sync_el0_aarch64_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn sync_el0_aarch64_handler() {
+    exception_entry!(crate::exception::handle_sync)
 }
 
 /// Handler for IRQ exceptions from lower EL (AArch64).
-fn irq_el0_aarch64_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn irq_el0_aarch64_handler() {
+    exception_entry!(crate::exception::handle_irq)
 }
 
 /// Handler for FIQ exceptions from lower EL (AArch64).
-fn fiq_el0_aarch64_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn fiq_el0_aarch64_handler() {
+    exception_entry!(crate::exception::handle_fiq)
 }
 
 /// Handler for SError exceptions from lower EL (AArch64).
-fn serror_el0_aarch64_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn serror_el0_aarch64_handler() {
+    exception_entry!(crate::exception::handle_serror)
 }
 
 /// Handler for synchronous exceptions from lower EL (AArch32).
-fn sync_el0_aarch32_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn sync_el0_aarch32_handler() {
+    exception_entry!(crate::exception::handle_sync)
 }
 
 /// Handler for IRQ exceptions from lower EL (AArch32).
-fn irq_el0_aarch32_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn irq_el0_aarch32_handler() {
+    exception_entry!(crate::exception::handle_irq)
 }
 
 /// Handler for FIQ exceptions from lower EL (AArch32).
-fn fiq_el0_aarch32_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn fiq_el0_aarch32_handler() {
+    exception_entry!(crate::exception::handle_fiq)
 }
 
 /// Handler for SError exceptions from lower EL (AArch32).
-fn serror_el0_aarch32_handler() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+#[naked]
+unsafe extern "C" fn serror_el0_aarch32_handler() {
+    exception_entry!(crate::exception::handle_serror)
 }
 
 // ---------------------------------------------------------------------------
