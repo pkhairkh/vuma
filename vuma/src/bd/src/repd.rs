@@ -1147,4 +1147,43 @@ mod tests {
         let displayed = format!("{c}");
         assert!(displayed.starts_with("RelDContains("));
     }
+
+    // -- Error path tests for field_offset / field_rep --
+
+    #[test]
+    fn field_offset_returns_error_for_non_struct() {
+        let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
+        let result = byte.field_offset(0);
+        assert!(result.is_err(), "field_offset on Byte should return Err");
+    }
+
+    #[test]
+    fn field_rep_returns_error_for_out_of_bounds() {
+        let s = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 1, align: 1 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let result = s.field_rep(999);
+        assert!(result.is_err(), "field_rep with out-of-bounds index should return Err");
+    }
+
+    #[test]
+    fn repd_generic_creation() {
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
+        assert_eq!(g.size(), 0); // unknown until substituted
+        assert_eq!(g.alignment(), 1); // minimum alignment
+        if let RepD::Generic { name, constraints } = &g {
+            assert_eq!(name, "T");
+            assert!(constraints.is_empty());
+        } else {
+            panic!("expected Generic variant");
+        }
+    }
 }

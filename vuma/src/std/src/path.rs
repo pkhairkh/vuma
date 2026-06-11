@@ -473,4 +473,53 @@ mod tests {
         assert_eq!(PathComponent::ParentDir.to_string(), "..");
         assert_eq!(PathComponent::Normal("foo".to_string()).to_string(), "foo");
     }
+
+    /// Verify that joining two path components produces the expected result.
+    #[test]
+    fn test_path_join_two_components() {
+        let base = VumaPath::new("/home/user");
+        let other = VumaPath::new("documents");
+        let joined = base.join(&other);
+        assert_eq!(
+            joined.as_path().as_str(),
+            "/home/user/documents",
+            "joining two path components should produce a combined path"
+        );
+
+        // Join with an absolute path should replace the base.
+        let abs = VumaPath::new("/etc");
+        let joined_abs = base.join(&abs);
+        assert_eq!(
+            joined_abs.as_path().as_str(),
+            "/etc",
+            "joining with an absolute path should replace the base"
+        );
+    }
+
+    /// Verify that parent path extraction works correctly.
+    #[test]
+    fn test_path_parent() {
+        // Nested path should return its parent directory.
+        let p = VumaPath::new("/home/user/docs");
+        let parent = p.parent().expect("should have a parent");
+        assert_eq!(
+            parent.as_str(),
+            "/home/user",
+            "parent of /home/user/docs should be /home/user"
+        );
+
+        // Root has no parent.
+        let root = VumaPath::new("/");
+        assert!(
+            root.parent().is_none(),
+            "root path should have no parent"
+        );
+
+        // Single-component relative path has no parent (resolves to "").
+        let single = VumaPath::new("file.txt");
+        assert!(
+            single.parent().is_none() || single.parent().unwrap().as_str().is_empty(),
+            "single-component relative path should have no meaningful parent"
+        );
+    }
 }

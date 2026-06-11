@@ -61,7 +61,7 @@ pub enum ProofFailure {
 // ---------------------------------------------------------------------------
 
 /// Proof that every data value has well-defined provenance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OriginProof {
     pub proof: Proof,
     pub verified_regions: Vec<RegionId>,
@@ -82,7 +82,7 @@ impl OriginProof {
 }
 
 /// Proof that a derivation chain terminates at a valid region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DerivationChainProof {
     pub proof: Proof,
     pub derivation_id: u64,
@@ -104,7 +104,7 @@ impl DerivationChainProof {
 }
 
 /// Proof that tainted data does not flow to sensitive sinks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaintProof {
     pub proof: Proof,
     pub tainted_sources: Vec<RegionId>,

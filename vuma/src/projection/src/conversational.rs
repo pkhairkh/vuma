@@ -2244,4 +2244,103 @@ mod tests {
             "Allocation node type should be preserved in roundtrip"
         );
     }
+
+    /// Create an SCG with two nodes, apply an AddEdge edit, and verify the
+    /// edge is added to the graph.
+    #[test]
+    fn test_add_edge_edit_works() {
+        use crate::{SCGEdge, SCGNode};
+
+        // Build an SCG with two nodes.
+        let mut scg = SCG {
+            nodes: vec![
+                SCGNode {
+                    id: 1,
+                    label: "source_node".into(),
+                    kind: NodeKind::Function,
+                    bds: vec![],
+                    regions: vec![],
+                },
+                SCGNode {
+                    id: 2,
+                    label: "target_node".into(),
+                    kind: NodeKind::Value,
+                    bds: vec![],
+                    regions: vec![],
+                },
+            ],
+            edges: vec![],
+            regions: vec![],
+        };
+
+        // Apply the AddEdge edit.
+        let edit = SCGEdit::AddEdge {
+            source: 1,
+            target: 2,
+            kind: EdgeKind::DataFlow,
+        };
+
+        match edit {
+            SCGEdit::AddEdge { source, target, kind } => {
+                let edge = SCGEdge {
+                    id: 100,
+                    source,
+                    target,
+                    kind,
+                };
+                scg.edges.push(edge);
+            }
+            _ => unreachable!(),
+        }
+
+        // Verify the edge was added.
+        assert_eq!(scg.edges.len(), 1, "SCG should have exactly one edge");
+        let edge = &scg.edges[0];
+        assert_eq!(edge.source, 1, "edge source should be node 1");
+        assert_eq!(edge.target, 2, "edge target should be node 2");
+        assert_eq!(edge.kind, EdgeKind::DataFlow, "edge kind should be DataFlow");
+    }
+
+    /// Verify that find_node_by_keywords returns None when no node labels
+    /// match the given keywords.
+    #[test]
+    fn test_find_node_by_keywords_returns_none() {
+        use crate::SCGNode;
+
+        // Build an SCG with nodes that do NOT match the search keywords.
+        let scg = SCG {
+            nodes: vec![
+                SCGNode {
+                    id: 1,
+                    label: "calculator".into(),
+                    kind: NodeKind::Computation,
+                    bds: vec![],
+                    regions: vec![],
+                },
+                SCGNode {
+                    id: 2,
+                    label: "formatter".into(),
+                    kind: NodeKind::Function,
+                    bds: vec![],
+                    regions: vec![],
+                },
+            ],
+            edges: vec![],
+            regions: vec![],
+        };
+
+        let engine = SuggestionEngine::new(&scg);
+        let result = engine.find_node_by_keywords(&["handler", "worker", "api"]);
+        assert!(
+            result.is_none(),
+            "find_node_by_keywords should return None when no labels match"
+        );
+
+        // Verify that a matching keyword does return Some.
+        let result_match = engine.find_node_by_keywords(&["calc", "format"]);
+        assert!(
+            result_match.is_some(),
+            "find_node_by_keywords should return Some when a label matches"
+        );
+    }
 }

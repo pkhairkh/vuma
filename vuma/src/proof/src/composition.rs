@@ -535,6 +535,110 @@ mod tests {
         }
     }
 
+    /// An empty ProofBundle should report all invariants as NotAttempted
+    /// via the `status()` method.
+    #[test]
+    fn test_proof_bundle_status_empty() {
+        let bundle = ProofBundle::new();
+        let statuses = bundle.status();
+        assert_eq!(statuses.len(), 5, "should have 5 invariant statuses");
+        for (name, status) in &statuses {
+            assert_eq!(
+                status,
+                &InvariantStatus::NotAttempted,
+                "{:?} should be NotAttempted in empty bundle",
+                name
+            );
+        }
+    }
+
+    /// Serialize and deserialize each ProofEnvelope variant and verify
+    /// round-trip correctness.
+    #[test]
+    fn test_serialization_roundtrip_all_types() {
+        use crate::serialization::ProofEnvelope;
+
+        // --- Generic(Proof) ---
+        let generic_proof = make_simple_proof_for_serialization();
+        let env_generic = ProofEnvelope::Generic(generic_proof.clone());
+        let json = env_generic.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Generic(p) = rt {
+            assert_eq!(p, generic_proof);
+        } else {
+            panic!("expected Generic variant after round-trip");
+        }
+
+        // --- Liveness ---
+        let liveness = make_liveness_proof();
+        let env_liveness = ProofEnvelope::Liveness(liveness.clone());
+        let json = env_liveness.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Liveness(p) = rt {
+            assert_eq!(p, liveness);
+        } else {
+            panic!("expected Liveness variant after round-trip");
+        }
+
+        // --- Exclusivity ---
+        let exclusivity = make_exclusivity_proof();
+        let env_excl = ProofEnvelope::Exclusivity(exclusivity.clone());
+        let json = env_excl.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Exclusivity(p) = rt {
+            assert_eq!(p, exclusivity);
+        } else {
+            panic!("expected Exclusivity variant after round-trip");
+        }
+
+        // --- Cleanup ---
+        let cleanup = make_cleanup_proof();
+        let env_cleanup = ProofEnvelope::Cleanup(cleanup.clone());
+        let json = env_cleanup.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Cleanup(p) = rt {
+            assert_eq!(p, cleanup);
+        } else {
+            panic!("expected Cleanup variant after round-trip");
+        }
+
+        // --- Origin ---
+        let origin = make_origin_proof();
+        let env_origin = ProofEnvelope::Origin(origin.clone());
+        let json = env_origin.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Origin(p) = rt {
+            assert_eq!(p, origin);
+        } else {
+            panic!("expected Origin variant after round-trip");
+        }
+
+        // --- Interpretation ---
+        let interp = make_interpretation_proof();
+        let env_interp = ProofEnvelope::Interpretation(interp.clone());
+        let json = env_interp.to_json_string().unwrap();
+        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
+        if let ProofEnvelope::Interpretation(p) = rt {
+            assert_eq!(p, interp);
+        } else {
+            panic!("expected Interpretation variant after round-trip");
+        }
+    }
+
+    /// Helper: create a simple Proof for serialization round-trip tests.
+    fn make_simple_proof_for_serialization() -> Proof {
+        let mut proof = Proof::new(Goal::new(
+            InvariantName::Liveness,
+            Target::Region(RegionId(42)),
+            ProofContext::new("test::serialization_roundtrip"),
+        ));
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom(0, "region is allocated"),
+        });
+        proof.conclude(Conclusion::Proven);
+        proof
+    }
+
     /// Create a liveness proof that has a fact containing "region region#1 is
     /// live", which should discharge the corresponding assumption in the
     /// origin proof.

@@ -3235,6 +3235,64 @@ mod tests {
         );
         assert_eq!(imm, 0x4242424242424242);
     }
+
+    /// Verify that ARM64 CLZ instruction emission produces a non-zero
+    /// encoded word, confirming the instruction is properly lowered.
+    #[test]
+    fn test_arm64_clz_emission_exists() {
+        use crate::arm64::Instruction;
+
+        // Encode CLZ X0, X1 — the encoded value should be non-zero.
+        let clz = Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        let encoded = clz.encode().expect("CLZ encoding should succeed");
+        assert_ne!(
+            encoded, 0,
+            "CLZ instruction encoding should produce a non-zero word"
+        );
+
+        // The ARM64 CLZ encoding base is 0xDAC01000 (CLZ X0, X0).
+        // Any valid CLZ encoding must have the upper bits set.
+        assert_ne!(
+            encoded & 0xFFE00000,
+            0,
+            "CLZ encoding should have the ARM64 CLZ opcode bits set"
+        );
+    }
+
+    /// Verify that WasmSectionNotFound error is returned as a proper
+    /// CodegenError variant (not a panic).
+    #[test]
+    fn test_wasm32_error_not_panic() {
+        let err = CodegenError::WasmSectionNotFound {
+            section: "code".to_string(),
+        };
+
+        // Verify it's a proper error that can be constructed and matched.
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("code"),
+            "error message should mention the section name"
+        );
+        assert!(
+            msg.contains("WASM section not found"),
+            "error message should describe the error"
+        );
+
+        // Verify the error can be used in a Result context without panicking.
+        let result: Result<()> = Err(CodegenError::WasmSectionNotFound {
+            section: "data".to_string(),
+        });
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(
+                matches!(e, CodegenError::WasmSectionNotFound { .. }),
+                "should be WasmSectionNotFound variant"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

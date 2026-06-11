@@ -6025,4 +6025,65 @@ fn diag_fn_nested_generic_type() {
             eprintln!("DIAG2 item: {:?}", item);
         }
     }
+
+    // ---- New tests: empty function, unsafe block, loop ----
+
+    #[test]
+    fn test_parse_empty_function_body() {
+        let source = "fn foo() {}";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert_eq!(program.items.len(), 1);
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.name, "foo");
+                assert!(f.body.statements.is_empty(), "empty function body should have no statements");
+                assert_eq!(f.params.len(), 0);
+                assert!(f.return_type.is_none());
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unsafe_block() {
+        let source = "unsafe { let x = 1; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert_eq!(program.items.len(), 1);
+        match &program.items[0] {
+            Item::Stmt(stmt) => {
+                assert!(
+                    matches!(stmt, Stmt::UnsafeBlock { .. }),
+                    "expected Stmt::UnsafeBlock, got {:?}",
+                    stmt
+                );
+                if let Stmt::UnsafeBlock { body, .. } = stmt {
+                    assert_eq!(body.statements.len(), 1);
+                }
+            }
+            other => panic!("expected Stmt item, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_loop_keyword() {
+        let source = "loop { break; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert_eq!(program.items.len(), 1);
+        match &program.items[0] {
+            Item::Stmt(stmt) => {
+                assert!(
+                    matches!(stmt, Stmt::Loop(_)),
+                    "expected Stmt::Loop, got {:?}",
+                    stmt
+                );
+                if let Stmt::Loop(loop_stmt) = stmt {
+                    assert_eq!(loop_stmt.body.statements.len(), 1);
+                }
+            }
+            other => panic!("expected Stmt item, got {:?}", other),
+        }
+    }
 }

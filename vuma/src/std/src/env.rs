@@ -247,4 +247,45 @@ mod tests {
         let err: VumaErrorChain = VumaEnvError::NotPresent.into();
         assert_eq!(err.kind(), VumaErrorKind::NotFound);
     }
+
+    /// Verify that getting a nonexistent environment variable returns None.
+    #[test]
+    fn test_env_get_nonexistent() {
+        let result = var("VUMA_DOES_NOT_EXIST_ABC_99999");
+        assert!(
+            matches!(result, Err(VumaEnvError::NotPresent)),
+            "getting a nonexistent env var should return NotPresent error"
+        );
+
+        let result_os = var_os("VUMA_DOES_NOT_EXIST_ABC_99999");
+        assert!(
+            result_os.is_none(),
+            "var_os for nonexistent key should return None"
+        );
+    }
+
+    /// Verify that set_var and var round-trip correctly.
+    #[test]
+    fn test_env_set_and_get() {
+        let key = "VUMA_TEST_SET_GET_KEY";
+        // Ensure clean state
+        remove_var(key);
+
+        // Set a value and verify we can get it back.
+        set_var(key, "hello_vuma");
+        let val = var(key).expect("should be able to read back the set value");
+        assert_eq!(val, "hello_vuma", "set+get round-trip should return the same value");
+
+        // Overwrite and verify the new value.
+        set_var(key, "updated_value");
+        let val2 = var(key).expect("should read updated value");
+        assert_eq!(val2, "updated_value", "overwriting should update the value");
+
+        // Clean up.
+        remove_var(key);
+        assert!(
+            matches!(var(key), Err(VumaEnvError::NotPresent)),
+            "after remove_var, the key should no longer exist"
+        );
+    }
 }
