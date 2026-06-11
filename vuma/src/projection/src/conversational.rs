@@ -50,6 +50,7 @@
 
 use crate::diff::SCGDiff;
 use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCG};
+use vuma_scg;
 
 // ── SCG Edit operations ───────────────────────────────────────────────────────
 
@@ -386,6 +387,77 @@ impl<'a> SuggestionEngine<'a> {
         }
         0 // no match found — placeholder
     }
+}
+
+// ── Conversational session from real SCG ──────────────────────────────────────
+
+/// A conversational session wrapping a projection-side SCG that was created
+/// from a real `vuma-scg` SCG.
+///
+/// This struct owns the projection SCG and provides convenience methods for
+/// querying the conversational projection engine without the caller needing
+/// to manage the conversion manually.
+#[derive(Debug, Clone)]
+pub struct ConversationalSession {
+    /// The projection-side SCG converted from a real vuma-scg SCG.
+    scg: SCG,
+    /// The projection engine used for generating descriptions.
+    projection: ConversationalProjection,
+}
+
+impl ConversationalSession {
+    /// Create a new conversational session from a projection SCG.
+    pub fn new(scg: SCG) -> Self {
+        Self {
+            scg,
+            projection: ConversationalProjection::new(),
+        }
+    }
+
+    /// Create a new conversational session with the given verbosity.
+    pub fn with_verbosity(scg: SCG, verbosity: Verbosity) -> Self {
+        Self {
+            scg,
+            projection: ConversationalProjection::with_verbosity(verbosity),
+        }
+    }
+
+    /// Render the entire SCG as a natural-language description.
+    pub fn render(&self) -> String {
+        self.projection.render_scg(&self.scg)
+    }
+
+    /// Explain a specific node.
+    pub fn explain_node(&self, node_id: NodeId) -> String {
+        self.projection.explain_node(&self.scg, node_id)
+    }
+
+    /// Explain a specific region.
+    pub fn explain_region(&self, region_id: RegionId) -> String {
+        self.projection.explain_region(&self.scg, region_id)
+    }
+
+    /// Ask a query about the SCG in natural language.
+    ///
+    /// Currently this renders the full SCG description. In the future this
+    /// could be backed by an LLM for more targeted answers.
+    pub fn query(&self, _query: &str) -> String {
+        self.render()
+    }
+
+    /// Get a reference to the underlying projection SCG.
+    pub fn scg(&self) -> &SCG {
+        &self.scg
+    }
+}
+
+/// Create a conversational session from a real vuma-scg SCG.
+///
+/// This converts the real SCG into the projection's lightweight representation
+/// and wraps it in a [`ConversationalSession`] for convenient querying.
+pub fn session_from_scg(scg: vuma_scg::SCG) -> ConversationalSession {
+    let proj_scg = crate::scg_adapter::from_scg(&scg);
+    ConversationalSession::new(proj_scg)
 }
 
 /// The conversational projection engine.
@@ -2017,5 +2089,149 @@ mod tests {
         let proj = ConversationalProjection::new();
         let fix = proj.suggest_fix(&violation);
         assert!(fix.contains("region") || fix.contains("coherence"));
+    }
+
+    // ── Test 21: session from real vuma-scg SCG ────────────────────────
+
+    #[test]
+    fn test_session_from_real_scg() {
+        let rid = vuma_scg::RegionId::new(1);
+        let mut real_scg = vuma_scg::SCG::new();
+
+        // Add an allocation node
+        let alloc_id = real_scg.add_node(
+            vuma_scg::NodeType::Allocation,
+            vuma_scg::NodePayload::Allocation(vuma_scg::AllocationNode {
+                size: 256,
+                align: 16,
+                region_id: rid,
+                type_name: Some("MyBuffer".to_string()),
+            }),
+            vuma_scg::ProgramPoint {
+                file: Some("main.vu".to_string()),
+                line: Some(10),
+                column: Some(5),
+                offset: None,
+            },
+        );
+
+        // Add a computation node
+        let comp_id = real_scg.add_node(
+            vuma_scg::NodeType::Computation,
+            vuma_scg::NodePayload::Computation(vuma_scg::ComputationNode {
+                operation: "write_buffer".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            vuma_scg::ProgramPoint {
+                file: Some("main.vu".to_string()),
+                line: Some(11),
+                column: Some(3),
+                offset: None,
+            },
+        );
+
+        // Add an edge
+        real_scg
+            .add_edge(alloc_id, comp_id, vuma_scg::EdgeKind::DataFlow)
+            .unwrap();
+
+        // Create a session from the real SCG
+        let session = super::session_from_scg(real_scg);
+
+        // Verify the session works
+        let desc = session.render();
+        assert!(
+            desc.contains("node") || desc.contains("Node"),
+            "Expected node description, got: {}",
+            desc
+        );
+
+        // Ask a query
+        let answer = session.query("describe the graph");
+        assert!(!answer.is_empty(), "Query answer should not be empty");
+
+        // Explain a node by its projection ID
+        let node_desc = session.explain_node(alloc_id.as_u64());
+        assert!(
+            node_desc.contains("alloc") || node_desc.contains("MyBuffer") || node_desc.contains("Allocation"),
+            "Expected allocation node description, got: {}",
+            node_desc
+        );
+    }
+
+    // ── Test 22: conversational roundtrip ───────────────────────────────
+
+    #[test]
+    fn test_conversational_roundtrip() {
+        // Create a real SCG, convert to projection, get description,
+        // then convert back to real SCG and verify structural equivalence.
+        let rid = vuma_scg::RegionId::new(1);
+        let mut real_scg = vuma_scg::SCG::new();
+
+        let alloc_id = real_scg.add_node(
+            vuma_scg::NodeType::Allocation,
+            vuma_scg::NodePayload::Allocation(vuma_scg::AllocationNode {
+                size: 128,
+                align: 8,
+                region_id: rid,
+                type_name: Some("DataBlock".to_string()),
+            }),
+            vuma_scg::ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
+        );
+
+        let dealloc_id = real_scg.add_node(
+            vuma_scg::NodeType::Deallocation,
+            vuma_scg::NodePayload::Deallocation(vuma_scg::DeallocationNode {
+                allocation_node: alloc_id,
+                region_id: rid,
+            }),
+            vuma_scg::ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
+        );
+
+        real_scg
+            .add_edge(alloc_id, dealloc_id, vuma_scg::EdgeKind::Derivation)
+            .unwrap();
+
+        // Convert to projection
+        let proj_scg = crate::scg_adapter::from_scg(&real_scg);
+
+        // Get conversational output
+        let session = super::ConversationalSession::new(proj_scg.clone());
+        let desc = session.render();
+        assert!(!desc.is_empty(), "Conversational output should not be empty");
+
+        // Convert back to real SCG
+        let roundtrip_scg = crate::scg_adapter::to_scg(&proj_scg);
+
+        // Verify structural equivalence: same number of nodes and edges
+        assert_eq!(
+            roundtrip_scg.node_count(),
+            real_scg.node_count(),
+            "Node count should be preserved in roundtrip"
+        );
+        assert_eq!(
+            roundtrip_scg.edge_count(),
+            real_scg.edge_count(),
+            "Edge count should be preserved in roundtrip"
+        );
+
+        // Verify node types are preserved where possible
+        let orig_alloc_type = real_scg.get_node(alloc_id).map(|n| n.node_type.clone());
+        let rt_alloc_type = roundtrip_scg.get_node(alloc_id).map(|n| n.node_type.clone());
+        assert_eq!(
+            orig_alloc_type, rt_alloc_type,
+            "Allocation node type should be preserved in roundtrip"
+        );
     }
 }

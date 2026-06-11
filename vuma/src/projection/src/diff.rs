@@ -34,6 +34,7 @@
 
 use crate::{BdKind, NodeId, NodeKind, SCG, SCGEdge, SCGNode};
 use colored::*;
+use vuma_scg;
 
 // ── Diff data structures ──────────────────────────────────────────────────────
 
@@ -1271,6 +1272,16 @@ pub fn project_diff_visual(diff: &SCGDiff) -> String {
 /// Convenience wrapper around [`DiffProjection::project_diff_conversational`].
 pub fn project_diff_conversational(diff: &SCGDiff) -> String {
     DiffProjection::default().project_diff_conversational(diff)
+}
+
+/// Compute the diff between two real vuma-scg SCGs.
+///
+/// Converts both SCGs to the projection crate's lightweight representation,
+/// then delegates to [`DiffProjection::compute_diff`].
+pub fn diff_scg(old: &vuma_scg::SCG, new: &vuma_scg::SCG) -> SCGDiff {
+    let old_proj = crate::scg_adapter::from_scg(old);
+    let new_proj = crate::scg_adapter::from_scg(new);
+    DiffProjection::default().compute_diff(&old_proj, &new_proj)
 }
 
 #[cfg(test)]

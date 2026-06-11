@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use crate::conversational::{ConversationalProjection, SCGEdit};
 use crate::textual::TextualProjection;
 use crate::{BdKind, EdgeId, EdgeKind, NodeId, NodeKind, SCG};
+use vuma_scg;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -1090,6 +1091,39 @@ impl BidirectionalProjection {
             other => other,
         }
     }
+}
+
+// ── Real vuma-scg support ──────────────────────────────────────────────────────
+
+/// Apply an SCG edit to a real vuma-scg SCG, returning the modified SCG.
+///
+/// Converts to the projection representation, applies the edit via the
+/// bidirectional projection engine, then converts back.
+pub fn apply_edit_to_scg(
+    scg: &vuma_scg::SCG,
+    edit: SCGEdit,
+) -> Result<vuma_scg::SCG, EditError> {
+    let mut proj_scg = crate::scg_adapter::from_scg(scg);
+    let proj = BidirectionalProjection::new();
+    proj.apply_single_edit(&mut proj_scg, edit)?;
+    Ok(crate::scg_adapter::to_scg(&proj_scg))
+}
+
+/// Validate an edit against a real vuma-scg SCG without applying it.
+pub fn validate_scg_edit(
+    scg: &vuma_scg::SCG,
+    edit: &SCGEdit,
+) -> Result<bool, EditError> {
+    let proj_scg = crate::scg_adapter::from_scg(scg);
+    let proj = BidirectionalProjection::new();
+    proj.validate_edit(&proj_scg, edit)
+}
+
+/// Validate the well-formedness of a real vuma-scg SCG.
+pub fn validate_real_scg(scg: &vuma_scg::SCG) -> Result<(), EditError> {
+    let proj_scg = crate::scg_adapter::from_scg(scg);
+    let proj = BidirectionalProjection::new();
+    proj.validate_scg_wellformedness(&proj_scg)
 }
 
 // ── Legacy BidirectionalEditor (backward-compatible) ─────────────────────────

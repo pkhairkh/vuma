@@ -28,7 +28,9 @@
 pub mod bidirectional;
 pub mod conversational;
 pub mod diff;
+pub mod scg_adapter;
 pub mod textual;
+pub mod verification;
 pub mod visual;
 
 // ── Re-exports ───────────────────────────────────────────────────────────────
@@ -38,8 +40,8 @@ pub use bidirectional::{
     SemanticFlag, VisualEdit,
 };
 pub use conversational::{
-    AIExplainerOutput, AggregatedResult, ConversationalProjection, SCGEdit, SuggestionEngine, Verbosity, Violation,
-    ViolationSeverity,
+    AIExplainerOutput, AggregatedResult, ConversationalProjection, ConversationalSession, SCGEdit, SuggestionEngine, Verbosity, Violation,
+    ViolationSeverity, session_from_scg,
 };
 pub use diff::{ChangeGroup, DiffProjection, ImpactLevel, SCGDiff, project_diff, project_diff_conversational, project_diff_visual};
 pub use textual::{ProjectionStyle, TemplateEngine, TextualConfig, TextualProjection};

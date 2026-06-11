@@ -49,6 +49,7 @@
 //! ```
 
 use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCG, SCGDiff, SCGNode};
+use vuma_scg;
 
 // ── Projection style ─────────────────────────────────────────────────────────
 
@@ -955,6 +956,21 @@ pub fn project_textual_diff(scg: &SCG, diff: &SCGDiff) -> String {
     out
 }
 
+// ── Real SCG rendering (via adapter) ──────────────────────────────────────────
+
+/// Render a real vuma-scg SCG to text format.
+///
+/// This function accepts a `vuma_scg::SCG` (the full graph type from the
+/// `vuma-scg` crate) and renders it using the textual projection engine.
+/// Internally, the adapter layer (`crate::scg_adapter`) converts the real
+/// SCG into the projection crate's lightweight placeholder representation,
+/// which is then rendered by [`project_textual`].
+pub fn render_scg(scg: &vuma_scg::SCG) -> String {
+    // Use the adapter to convert, then render
+    let proj_scg = crate::scg_adapter::from_scg(scg);
+    project_textual(&proj_scg)
+}
+
 // ── Utility functions ─────────────────────────────────────────────────────────
 
 /// Returns a short tag for a [`BdKind`], used in detailed output.
@@ -1494,5 +1510,68 @@ mod tests {
         let out = proj.project_full(&scg);
         // With indent_width=2, lines should use 2-space groups
         assert!(out.contains("  // ─"));
+    }
+
+    // ── Real SCG round-trip test ───────────────────────────────────────
+
+    #[test]
+    fn test_render_real_scg() {
+        use vuma_scg::{
+            SCG, NodeType, NodePayload, ComputationNode, AllocationNode, DeallocationNode,
+            ProgramPoint, EdgeKind as ScgEdgeKind, RegionId as ScgRegionId, DeploymentTarget,
+        };
+
+        let rid = ScgRegionId::new(1);
+
+        // Build a real vuma-scg SCG with 3 nodes
+        let mut scg = SCG::new();
+
+        // Add a region
+        let mut region = vuma_scg::SCGRegion::new(rid, DeploymentTarget::Heap);
+
+        let n1 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 256,
+                align: 16,
+                region_id: rid,
+                type_name: Some("MyBuffer".to_string()),
+            }),
+            ProgramPoint { file: None, line: None, column: None, offset: None },
+        );
+        region.add_node(n1);
+
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "process_buffer".to_string(),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            ProgramPoint { file: None, line: None, column: None, offset: None },
+        );
+
+        let n3 = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: n1,
+                region_id: rid,
+            }),
+            ProgramPoint { file: None, line: None, column: None, offset: None },
+        );
+        region.add_node(n3);
+
+        scg.add_region(region);
+        scg.add_edge(n1, n2, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n3, ScgEdgeKind::ControlFlow).unwrap();
+
+        // Render using the adapter
+        let output = super::render_scg(&scg);
+
+        // Verify the output contains expected text from the 3 nodes
+        assert!(output.contains("MyBuffer"), "output should contain allocation label");
+        assert!(output.contains("process_buffer"), "output should contain computation label");
+        assert!(output.contains("dealloc"), "output should contain deallocation label");
+        assert!(output.contains("region_1"), "output should contain region name");
     }
 }
