@@ -501,8 +501,10 @@ impl IRBuilder {
                 self.lower_call(call, ir_func, names)?;
             }
             ScgStatement::Return(vals) => {
-                let ir_vals: Vec<IRValue> =
-                    vals.iter().map(|e| self.resolve_expr(e, names)).collect();
+                let ir_vals: Vec<IRValue> = vals
+                    .iter()
+                    .map(|e| self.resolve_expr(e, names))
+                    .collect::<Result<Vec<_>>>()?;
                 // Emit a Ret instruction and set the terminator.
                 ir_func.current_block().push(IRInstruction::Ret {
                     values: ir_vals.clone(),
@@ -559,8 +561,9 @@ impl IRBuilder {
     /// inserts phi nodes at the merge point for any variable that was
     /// defined in *both* the then and else branches.  A variable that was
     /// only defined in one branch keeps the vreg from that branch (the
-    /// other branch's value comes from the pre-if definition, or Immediate(0)
-    /// if it was never defined before).
+    /// other branch's value comes from the pre-if definition).  If a
+    /// variable is not defined in either branch *or* the pre-if scope, an
+    /// error is returned.
     fn lower_if(
         &mut self,
         cond: &ScgExpr,
@@ -576,7 +579,7 @@ impl IRBuilder {
         // Snapshot the name-to-vreg map before the if.
         let names_before = names.clone();
 
-        let cond_val = self.resolve_expr(cond, names);
+        let cond_val = self.resolve_expr(cond, names)?;
 
         let false_block = if else_body.is_some() {
             else_label.clone()
@@ -677,15 +680,13 @@ impl IRBuilder {
             let phis_to_insert: Vec<(String, u32, u32)> = all_modified
                 .iter()
                 .filter_map(|name| {
-                    let then_vreg = then_defs
-                        .get(name)
-                        .or_else(|| names_before.get(name).copied());
-                    let else_vreg = else_defs
-                        .get(name)
-                        .or_else(|| names_before.get(name).copied());
                     // Only insert phi if defined in both branches
                     if then_defs.is_defined(name) && else_defs.is_defined(name) {
-                        Some((name.clone(), then_vreg.unwrap_or(0), else_vreg.unwrap_or(0)))
+                        // then_defs / else_defs are guaranteed to have the value
+                        // because is_defined() returned true for both.
+                        let then_vreg = then_defs.get(name).unwrap();
+                        let else_vreg = else_defs.get(name).unwrap();
+                        Some((name.clone(), then_vreg, else_vreg))
                     } else {
                         None
                     }
@@ -874,7 +875,7 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        let disc_val = self.resolve_expr(discriminant, names);
+        let disc_val = self.resolve_expr(discriminant, names)?;
         let merge_label = self.alloc_label("switch_merge");
 
         // Snapshot names before the switch for phi insertion later.
@@ -988,7 +989,7 @@ impl IRBuilder {
                 let vreg = arm_defs
                     .get(name)
                     .or_else(|| names_before.get(name).copied())
-                    .unwrap_or(0);
+                    .ok_or_else(|| crate::CodegenError::UnknownVariable { name: name.clone() })?;
                 incoming.push((IRValue::Register(vreg), arm_exit_labels[i].clone()));
             }
 
@@ -996,7 +997,7 @@ impl IRBuilder {
             let default_vreg = default_defs
                 .get(name)
                 .or_else(|| names_before.get(name).copied())
-                .unwrap_or(0);
+                .ok_or_else(|| crate::CodegenError::UnknownVariable { name: name.clone() })?;
             incoming.push((IRValue::Register(default_vreg), default_exit_label.clone()));
 
             let phi_dst = self.alloc_vreg();
@@ -1044,7 +1045,7 @@ impl IRBuilder {
                 size_expr,
                 ty: _,
             } => {
-                let size_val = self.resolve_expr(size_expr, names);
+                let size_val = self.resolve_expr(size_expr, names)?;
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);
@@ -1075,10 +1076,10 @@ impl IRBuilder {
     ) -> Result<()> {
         match access {
             AccessNode::Load { dst, ptr, offset } => {
-                let ptr_val = self.resolve_expr(ptr, names);
+                let ptr_val = self.resolve_expr(ptr, names)?;
                 let addr_val = match offset {
                     Some(off) => {
-                        let off_val = self.resolve_expr(off, names);
+                        let off_val = self.resolve_expr(off, names)?;
                         let addr_reg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
                         ir_func.current_block().push(IRInstruction::Offset {
@@ -1099,11 +1100,11 @@ impl IRBuilder {
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
-                let ptr_val = self.resolve_expr(ptr, names);
-                let val = self.resolve_expr(value, names);
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let val = self.resolve_expr(value, names)?;
                 let addr_val = match offset {
                     Some(off) => {
-                        let off_val = self.resolve_expr(off, names);
+                        let off_val = self.resolve_expr(off, names)?;
                         let addr_reg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
                         ir_func.current_block().push(IRInstruction::Offset {
@@ -1135,7 +1136,7 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        let src_val = self.resolve_expr(&cast.src, names);
+        let src_val = self.resolve_expr(&cast.src, names)?;
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &cast.dst));
         names.insert(cast.dst.clone(), dst_vreg);
@@ -1164,8 +1165,8 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        let lhs_val = self.resolve_expr(&comp.lhs, names);
-        let rhs_val = self.resolve_expr(&comp.rhs, names);
+        let lhs_val = self.resolve_expr(&comp.lhs, names)?;
+        let rhs_val = self.resolve_expr(&comp.rhs, names)?;
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
@@ -1306,7 +1307,7 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        let operand_val = self.resolve_expr(&unary.operand, names);
+        let operand_val = self.resolve_expr(&unary.operand, names)?;
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &unary.dst));
         names.insert(unary.dst.clone(), dst_vreg);
@@ -1335,7 +1336,7 @@ impl IRBuilder {
             .args
             .iter()
             .map(|e| self.resolve_expr(e, names))
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let dst = match &call.dst {
             Some(name) => {
@@ -1379,23 +1380,26 @@ impl IRBuilder {
     /// immediates; labels are passed through.  Floating-point literals are
     /// represented as immediates with the bits reinterpreted (the downstream
     /// emitter must handle this correctly).
-    fn resolve_expr(&self, expr: &ScgExpr, names: &HashMap<String, u32>) -> IRValue {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodegenError::UnknownVariable`] if the expression is a
+    /// `ScgExpr::Var` whose name is not present in the `names` map.
+    fn resolve_expr(&self, expr: &ScgExpr, names: &HashMap<String, u32>) -> Result<IRValue> {
         match expr {
             ScgExpr::Var(name) => {
                 if let Some(&vreg) = names.get(name) {
-                    IRValue::Register(vreg)
+                    Ok(IRValue::Register(vreg))
                 } else {
-                    // Unknown variable — use 0 as a placeholder.
-                    log::warn!("unknown variable '{}' in SCG, substituting 0", name);
-                    IRValue::Immediate(0)
+                    Err(crate::CodegenError::UnknownVariable { name: name.clone() })
                 }
             }
-            ScgExpr::Int(v) => IRValue::Immediate(*v),
+            ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),
             ScgExpr::Float(f) => {
                 // Reinterpret the f64 bits as i64 for the immediate.
-                IRValue::Immediate(f.to_bits() as i64)
+                Ok(IRValue::Immediate(f.to_bits() as i64))
             }
-            ScgExpr::Label(name) => IRValue::Label(name.clone()),
+            ScgExpr::Label(name) => Ok(IRValue::Label(name.clone())),
         }
     }
 
@@ -1607,6 +1611,7 @@ impl Default for IRBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CodegenError;
 
     /// Helper: build an Scg from a list of ScgNodes.
     fn scg_from_nodes(nodes: Vec<ScgNode>) -> Scg {
@@ -3029,5 +3034,82 @@ mod tests {
             add_count >= 1,
             "should have at least one Add in the loop body"
         );
+    }
+
+    /// Verify that referencing an unknown variable in an SCG produces
+    /// [`CodegenError::UnknownVariable`] instead of silently substituting 0.
+    #[test]
+    fn test_unknown_variable_returns_error() {
+        // Build a minimal SCG with a function whose body references an
+        // undefined variable in a Return statement.
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_unknown".to_string(),
+                params: vec![],
+                results: vec![ScgType::I32],
+                body: vec![ScgStatement::Return(vec![ScgExpr::Var(
+                    "undefined_var".to_string(),
+                )])],
+            })],
+        };
+
+        let mut builder = IRBuilder::new();
+        let result = builder.convert(&scg);
+
+        match result {
+            Err(CodegenError::UnknownVariable { name }) => {
+                assert_eq!(
+                    name, "undefined_var",
+                    "error should reference the unknown variable name"
+                );
+            }
+            other => {
+                panic!(
+                    "expected Err(CodegenError::UnknownVariable {{ .. }}), got {:?}",
+                    other
+                );
+            }
+        }
+    }
+
+    /// Verify that a Computation node referencing an unknown variable
+    /// also returns [`CodegenError::UnknownVariable`].
+    #[test]
+    fn test_unknown_variable_in_computation_returns_error() {
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_unknown_comp".to_string(),
+                params: vec![ScgParam {
+                    name: "x".to_string(),
+                    ty: ScgType::I32,
+                }],
+                results: vec![ScgType::I32],
+                body: vec![ScgStatement::Computation(ComputationNode {
+                    dst: "result".to_string(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("x".to_string()),
+                    rhs: ScgExpr::Var("y".to_string()), // undefined
+                    tail_call: false,
+                })],
+            })],
+        };
+
+        let mut builder = IRBuilder::new();
+        let result = builder.convert(&scg);
+
+        match result {
+            Err(CodegenError::UnknownVariable { name }) => {
+                assert_eq!(
+                    name, "y",
+                    "error should reference the unknown variable 'y'"
+                );
+            }
+            other => {
+                panic!(
+                    "expected Err(CodegenError::UnknownVariable {{ .. }}), got {:?}",
+                    other
+                );
+            }
+        }
     }
 }

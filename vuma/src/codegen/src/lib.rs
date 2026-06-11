@@ -104,6 +104,10 @@ pub enum CodegenError {
     /// ELF emission error.
     #[error("ELF emission error: {0}")]
     ElfError(String),
+
+    /// An unknown variable was referenced during SCG → IR translation.
+    #[error("unknown variable '{name}' referenced in SCG")]
+    UnknownVariable { name: String },
 }
 
 /// Convenience alias for results in this crate.

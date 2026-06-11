@@ -17,6 +17,7 @@
 //! | `Func`    | Function signature (params → result)              |
 
 use crate::capd::CapD;
+use crate::error_reporting::BdError;
 use crate::reld::RelD;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -383,34 +384,44 @@ impl RepD {
 
     /// Returns the byte offset of the field at the given index (struct only).
     ///
-    /// # Panics
-    ///
-    /// Panics if `self` is not a `Struct` or the index is out of bounds.
-    pub fn field_offset(&self, index: usize) -> u64 {
+    /// Returns `Err(BdError::InvalidOperation)` if `self` is not a `Struct`
+    /// or the index is out of bounds.
+    pub fn field_offset(&self, index: usize) -> Result<u64, BdError> {
         match self {
             RepD::Struct(s) => s
                 .fields
                 .get(index)
                 .map(|(off, _)| *off)
-                .unwrap_or_else(|| panic!("field_offset: index {index} out of bounds")),
-            other => panic!("field_offset: expected Struct, got {other}"),
+                .ok_or_else(|| BdError::InvalidOperation {
+                    operation: format!("field_offset({index})"),
+                    detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
+                }),
+            other => Err(BdError::InvalidOperation {
+                operation: format!("field_offset({index})"),
+                detail: format!("expected Struct, got {other}"),
+            }),
         }
     }
 
     /// Returns a reference to the representation of the field at the given
     /// index (struct only).
     ///
-    /// # Panics
-    ///
-    /// Panics if `self` is not a `Struct` or the index is out of bounds.
-    pub fn field_rep(&self, index: usize) -> &RepD {
+    /// Returns `Err(BdError::InvalidOperation)` if `self` is not a `Struct`
+    /// or the index is out of bounds.
+    pub fn field_rep(&self, index: usize) -> Result<&RepD, BdError> {
         match self {
             RepD::Struct(s) => s
                 .fields
                 .get(index)
                 .map(|(_, rep)| rep)
-                .unwrap_or_else(|| panic!("field_rep: index {index} out of bounds")),
-            other => panic!("field_rep: expected Struct, got {other}"),
+                .ok_or_else(|| BdError::InvalidOperation {
+                    operation: format!("field_rep({index})"),
+                    detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
+                }),
+            other => Err(BdError::InvalidOperation {
+                operation: format!("field_rep({index})"),
+                detail: format!("expected Struct, got {other}"),
+            }),
         }
     }
 }
@@ -545,9 +556,9 @@ mod tests {
             total_size: 8,
             align: 4,
         });
-        assert_eq!(s.field_offset(0), 0);
-        assert_eq!(s.field_offset(1), 4);
-        assert_eq!(s.field_rep(1).size(), 1);
+        assert_eq!(s.field_offset(0).unwrap(), 0);
+        assert_eq!(s.field_offset(1).unwrap(), 4);
+        assert_eq!(s.field_rep(1).unwrap().size(), 1);
     }
 
     #[test]
@@ -599,8 +610,8 @@ mod tests {
         });
         assert_eq!(outer.size(), 12);
         assert_eq!(outer.alignment(), 4);
-        assert_eq!(outer.field_offset(0), 0);
-        assert_eq!(outer.field_offset(1), 8);
+        assert_eq!(outer.field_offset(0).unwrap(), 0);
+        assert_eq!(outer.field_offset(1).unwrap(), 8);
     }
 
     // -- Array with various element types --

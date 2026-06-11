@@ -2688,18 +2688,31 @@ fn lower_ir_instr_la64(
             ));
         }
 
-        IRInstr::Alloc { dst, size: _ } => {
+        IRInstr::Alloc { dst, size } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // addi.d d, $fp, 0 (point to frame pointer area)
+            let neg_size = -(*size as i32);
+            // addi.d $sp, $sp, -size (decrement stack pointer)
             result.push(emit_alloc_instr(
                 Instruction::AddiD {
-                    rd: d,
-                    rj: Gpr::Fp,
-                    imm12: 0,
+                    rd: Gpr::Sp,
+                    rj: Gpr::Sp,
+                    imm12: neg_size,
                 },
-                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
             ));
+            // add.d d, $sp, $r0 (copy new SP to destination)
+            if d != Gpr::Sp {
+                result.push(emit_alloc_instr(
+                    Instruction::AddD {
+                        rd: d,
+                        rj: Gpr::Sp,
+                        rk: Gpr::R0,
+                    },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Ret { values } => {
@@ -2888,8 +2901,14 @@ fn lower_ir_instr_la64(
             ));
         }
 
-        IRInstr::Free { ptr: _ } | IRInstr::Phi { .. } => {
-            // Placeholder: NOP
+        IRInstr::Free { ptr: _ } => {
+            // Free is not directly implementable as a single instruction;
+            // emit a break to catch any accidental execution at runtime.
+            result.push(emit_alloc_instr(Instruction::Break, vec![], vec![]));
+        }
+
+        IRInstr::Phi { .. } => {
+            // Phi nodes are eliminated by SSA deconstruction; emit NOP.
             result.push(emit_alloc_instr(Instruction::Nop, vec![], vec![]));
         }
     }

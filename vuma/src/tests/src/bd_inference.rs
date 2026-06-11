@@ -216,32 +216,32 @@ fn test_infer_struct_repd() {
     assert_eq!(struct_repd.size(), 24);
     assert_eq!(struct_repd.alignment(), 8);
     assert_eq!(
-        struct_repd.field_offset(0),
+        struct_repd.field_offset(0).unwrap(),
         0,
         "field 0 (x) should be at offset 0"
     );
     assert_eq!(
-        struct_repd.field_offset(1),
+        struct_repd.field_offset(1).unwrap(),
         8,
         "field 1 (y) should be at offset 8"
     );
     assert_eq!(
-        struct_repd.field_offset(2),
+        struct_repd.field_offset(2).unwrap(),
         16,
         "field 2 (z) should be at offset 16"
     );
     assert_eq!(
-        struct_repd.field_rep(0).size(),
+        struct_repd.field_rep(0).unwrap().size(),
         8,
         "field x should be 8 bytes"
     );
     assert_eq!(
-        struct_repd.field_rep(1).size(),
+        struct_repd.field_rep(1).unwrap().size(),
         8,
         "field y should be 8 bytes"
     );
     assert_eq!(
-        struct_repd.field_rep(2).size(),
+        struct_repd.field_rep(2).unwrap().size(),
         8,
         "field z should be 8 bytes"
     );

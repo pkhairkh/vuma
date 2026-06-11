@@ -4197,29 +4197,42 @@ impl Backend for RiscV64Backend {
                     }
 
                     // ── Alloc ────────────────────────────────────────────────
-                    IRInstr::Alloc { dst, size: _ } => {
+                    IRInstr::Alloc { dst, size } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::T0);
-                        // Alloc is handled by the frame layout; point d to the
-                        // stack allocation area via ADDI d, s0, offset.
-                        // Use the frame pointer (s0) with a zero offset as a
-                        // placeholder — the real offset is computed by stack-layout.
-                        Instruction::Addi {
-                            rd: d,
-                            rs1: Gpr::S0,
-                            imm: 0,
+                        // Stack allocation: decrement SP by the allocation size,
+                        // then copy the new SP into the destination register.
+                        let neg_size = -(*size as i32);
+                        let mut code = Vec::new();
+                        // ADDI sp, sp, -size
+                        code.extend(
+                            Instruction::Addi {
+                                rd: Gpr::Sp,
+                                rs1: Gpr::Sp,
+                                imm: neg_size,
+                            }
+                            .encode(),
+                        );
+                        // ADDI d, sp, 0  (move new SP to destination)
+                        if d != Gpr::Sp {
+                            code.extend(
+                                Instruction::Addi {
+                                    rd: d,
+                                    rs1: Gpr::Sp,
+                                    imm: 0,
+                                }
+                                .encode(),
+                            );
                         }
-                        .encode()
-                        .to_vec()
+                        code
                     }
 
                     // ── Free ─────────────────────────────────────────────────
                     IRInstr::Free { ptr } => {
-                        // Free is lowered to a runtime call via ECALL.
-                        // Move the pointer to a0, then ECALL (the runtime
-                        // interprets the syscall number in a7).
+                        // Free is lowered to a Linux brk syscall (a7 = 214) via ECALL.
+                        // Move the pointer to a0, set a7 = 214 (Linux brk), then ECALL.
                         let (p, mut code) = resolve_gpr(ptr, &vreg_map, Gpr::T3);
                         if p != Gpr::A0 {
                             code.extend(
@@ -4231,12 +4244,12 @@ impl Backend for RiscV64Backend {
                                 .encode(),
                             );
                         }
-                        // a7 = syscall number for free (placeholder: 0)
+                        // a7 = 214 (Linux brk syscall for heap deallocation)
                         code.extend(
                             Instruction::Addi {
                                 rd: Gpr::A7,
                                 rs1: Gpr::Zero,
-                                imm: 0,
+                                imm: 214,
                             }
                             .encode(),
                         );
@@ -6198,5 +6211,176 @@ mod tests {
         let word = u32::from_le_bytes(jal_instr.encode());
         let decoded = Instruction::decode(word).expect("JAL should decode");
         assert!(format!("{}", decoded).starts_with("jal"));
+    }
+
+    // ── Alloc / Free ISel Tests ────────────────────────────────────────
+
+    /// Helper: build a minimal IR function with one block and the given
+    /// instructions, then run allocate_registers and return the result.
+    fn isel_func(name: &str, instrs: Vec<IRInstr>) -> AllocatedFunction {
+        use std::collections::HashSet;
+        let backend = RiscV64Backend::new();
+        let func = IRFunction {
+            name: name.to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![crate::ir::IRBlock {
+                label: "entry".to_string(),
+                instructions: instrs,
+                terminator: crate::ir::IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        };
+        backend.allocate_registers(&func).unwrap()
+    }
+
+    #[test]
+    fn test_isel_alloc_emits_addi_sp() {
+        let result = isel_func(
+            "alloc_test",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 32,
+            }],
+        );
+        let instrs = &result.blocks[0].instructions;
+        // Alloc should emit ADDI sp, sp, -32 (not ADDI d, s0, 0)
+        // There should be at least two addi instructions involving sp:
+        // one from the prologue and one from the alloc itself.
+        let addi_sp_count = instrs
+            .iter()
+            .filter(|i| {
+                i.opcode == "addi"
+                    && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                    && i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+            })
+            .count();
+        assert!(
+            addi_sp_count >= 2,
+            "expected at least 2 addi sp instructions (prologue + alloc), found {addi_sp_count}"
+        );
+        // The alloc-specific addi sp, sp, -32 should not encode as a NOP
+        // Find instructions that write sp with an addi and check they're not all zero.
+        let alloc_addi_sp: Vec<_> = instrs
+            .iter()
+            .filter(|i| {
+                i.opcode == "addi"
+                    && i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+            })
+            .collect();
+        // At least one of these (the alloc one) should have a non-zero immediate
+        let has_nonzero = alloc_addi_sp.iter().any(|i| {
+            let encoded = &i.encoded;
+            if encoded.len() >= 4 {
+                let word = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+                // Extract the immediate field from I-type: bits [31:20]
+                let imm = ((word as i32) >> 20) as i32;
+                imm != 0
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_nonzero,
+            "alloc addi sp, sp, -size should have a non-zero immediate"
+        );
+    }
+
+    #[test]
+    fn test_isel_alloc_dst_gets_sp() {
+        let result = isel_func(
+            "alloc_dst_test",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 16,
+            }],
+        );
+        let instrs = &result.blocks[0].instructions;
+        // After the alloc, there should be an addi that reads sp and writes to
+        // the destination register (copying sp to dst).
+        let has_sp_copy = instrs.iter().any(|i| {
+            i.opcode == "addi"
+                && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                && !i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                && !i.writes.is_empty()
+        });
+        assert!(
+            has_sp_copy,
+            "alloc should emit ADDI d, sp, 0 to copy SP to destination"
+        );
+    }
+
+    #[test]
+    fn test_isel_free_emits_brk_syscall() {
+        let result = isel_func(
+            "free_test",
+            vec![IRInstr::Free {
+                ptr: IRValue::Register(0),
+            }],
+        );
+        let instrs = &result.blocks[0].instructions;
+        // Free should be lowered to a single AllocatedInstruction with opcode "free"
+        // whose encoded bytes contain: ADDI a0, p, 0; ADDI a7, zero, 214; ECALL
+        let free_instrs: Vec<_> = instrs
+            .iter()
+            .filter(|i| i.opcode == "free")
+            .collect();
+        assert!(
+            !free_instrs.is_empty(),
+            "free should emit an instruction with opcode 'free'"
+        );
+
+        // The encoded bytes should contain at least 3 instructions (12 bytes):
+        //   ADDI a0, p, 0  (or skipped if p == a0)
+        //   ADDI a7, zero, 214
+        //   ECALL
+        let free_encoded = &free_instrs[0].encoded;
+        assert!(
+            free_encoded.len() >= 8,
+            "free should emit at least ADDI a7 + ECALL (8 bytes), got {} bytes",
+            free_encoded.len()
+        );
+
+        // Scan the encoded bytes for the ADDI a7, zero, 214 instruction.
+        // I-type: imm[31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+        // ADDI: funct3=0, opcode=0b0010011
+        // a7=17, zero=0
+        let mut found_brk_syscall = false;
+        for chunk in free_encoded.chunks_exact(4) {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let opcode = word & 0x7F;
+            let rd = ((word >> 7) & 0x1F) as u8;
+            let funct3 = (word >> 12) & 0x7;
+            let rs1 = ((word >> 15) & 0x1F) as u8;
+            let imm = ((word as i32) >> 20) as i32;
+            // ADDI: opcode=0x13, funct3=0, rd=a7(17), rs1=zero(0), imm=214
+            if opcode == 0x13 && funct3 == 0 && rd == 17 && rs1 == 0 && imm == 214 {
+                found_brk_syscall = true;
+            }
+        }
+        assert!(
+            found_brk_syscall,
+            "free should emit ADDI a7, zero, 214 (Linux brk syscall)"
+        );
+
+        // Verify there's no ADDI a7, zero, 0 (the old placeholder)
+        for chunk in free_encoded.chunks_exact(4) {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let opcode = word & 0x7F;
+            let rd = ((word >> 7) & 0x1F) as u8;
+            let funct3 = (word >> 12) & 0x7;
+            let rs1 = ((word >> 15) & 0x1F) as u8;
+            let imm = ((word as i32) >> 20) as i32;
+            if opcode == 0x13 && funct3 == 0 && rd == 17 && rs1 == 0 {
+                assert_ne!(
+                    imm, 0,
+                    "free should not emit ADDI a7, zero, 0 (old placeholder); should use imm=214"
+                );
+            }
+        }
     }
 }

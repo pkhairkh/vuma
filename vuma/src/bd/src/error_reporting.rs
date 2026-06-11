@@ -66,7 +66,74 @@ pub enum BdError {
         /// Detail message.
         detail: String,
     },
+    /// Invalid operation on a RepD — e.g., field access on a non-Struct variant,
+    /// or field index out of bounds.
+    InvalidOperation {
+        /// Description of the invalid operation.
+        operation: String,
+        /// Detail message explaining why it failed.
+        detail: String,
+    },
 }
+
+impl fmt::Display for BdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BdError::Inference(e) => write!(f, "BD inference error: {e}"),
+            BdError::Unification(e) => write!(f, "BD unification error: {e}"),
+            BdError::TraitIncompatible {
+                trait_requires,
+                impl_provides,
+            } => write!(
+                f,
+                "trait compatibility error: requires [{trait_requires}], provides [{impl_provides}]"
+            ),
+            BdError::RepDIncompatible {
+                expected,
+                actual,
+                location,
+            } => {
+                if let Some(loc) = location {
+                    write!(f, "RepD incompatibility at {loc}: expected {expected}, got {actual}")
+                } else {
+                    write!(f, "RepD incompatibility: expected {expected}, got {actual}")
+                }
+            }
+            BdError::CapDMissing {
+                required,
+                location,
+            } => {
+                if let Some(loc) = location {
+                    write!(f, "CapD violation at {loc}: missing {required:?}")
+                } else {
+                    write!(f, "CapD violation: missing {required:?}")
+                }
+            }
+            BdError::RelDInconsistent { detail, location } => {
+                if let Some(loc) = location {
+                    write!(f, "RelD inconsistency at {loc}: {detail}")
+                } else {
+                    write!(f, "RelD inconsistency: {detail}")
+                }
+            }
+            BdError::GenericInstantiation { param_name, reason } => {
+                write!(f, "generic instantiation error: parameter '{param_name}': {reason}")
+            }
+            BdError::Incremental { failed_nodes } => {
+                let nodes: Vec<String> = failed_nodes.iter().map(|n| format!("NodeId({n})")).collect();
+                write!(f, "incremental re-inference error: failed for nodes [{}]", nodes.join(", "))
+            }
+            BdError::WideningFailed { detail } => {
+                write!(f, "widening convergence failure: {detail}")
+            }
+            BdError::InvalidOperation { operation, detail } => {
+                write!(f, "invalid operation: {operation}: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BdError {}
 
 /// A source location for error reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +275,9 @@ pub fn format_bd_error(error: &BdError, source: &str) -> String {
         }
         BdError::WideningFailed { detail } => {
             format!("widening convergence failure{location_str}: {detail}")
+        }
+        BdError::InvalidOperation { operation, detail } => {
+            format!("invalid operation: {operation}: {detail}")
         }
     };
 

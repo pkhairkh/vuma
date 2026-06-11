@@ -1276,12 +1276,12 @@ mod tests {
         let s2 = struct_of(vec![(0, byte(4, 8)), (4, byte(4, 8))], 8, 8);
         let m = meet(&s1, &s2).unwrap();
         // Each field's meet should have the stricter alignment.
-        if let RepD::Struct(s) = m {
-            assert_eq!(s.fields[0].1.alignment(), 8);
-            assert_eq!(s.fields[1].1.alignment(), 8);
-        } else {
-            panic!("expected struct");
-        }
+        let s = match &m {
+            RepD::Struct(s) => s,
+            other => panic!("expected struct, got {other}"),
+        };
+        assert_eq!(s.fields[0].1.alignment(), 8);
+        assert_eq!(s.fields[1].1.alignment(), 8);
     }
 
     // Test 14: meet — incompatible constructors → None ------------------------
@@ -1521,12 +1521,12 @@ mod tests {
         let a1 = array(byte(4, 4), 10);
         let a2 = array(byte(4, 8), 10);
         let m = meet(&a1, &a2).unwrap();
-        if let RepD::Array(a) = m {
-            assert_eq!(a.element.alignment(), 8);
-            assert_eq!(a.count, 10);
-        } else {
-            panic!("expected array");
-        }
+        let a = match &m {
+            RepD::Array(a) => a,
+            other => panic!("expected array, got {other}"),
+        };
+        assert_eq!(a.element.alignment(), 8);
+        assert_eq!(a.count, 10);
     }
 
     // Test 33: join — array element-wise --------------------------------------
@@ -1536,12 +1536,12 @@ mod tests {
         let a1 = array(byte(4, 8), 5);
         let a2 = array(byte(4, 4), 5);
         let j = join(&a1, &a2).unwrap();
-        if let RepD::Array(a) = j {
-            assert_eq!(a.element.alignment(), 4);
-            assert_eq!(a.count, 5);
-        } else {
-            panic!("expected array");
-        }
+        let a = match &j {
+            RepD::Array(a) => a,
+            other => panic!("expected array, got {other}"),
+        };
+        assert_eq!(a.element.alignment(), 4);
+        assert_eq!(a.count, 5);
     }
 
     // Test 34: join — different sizes → None ----------------------------------
@@ -1581,11 +1581,11 @@ mod tests {
         let e1 = enum_of(vec![(0, byte(4, 4))]);
         let e2 = enum_of(vec![(0, byte(4, 8))]);
         let m = meet(&e1, &e2).unwrap();
-        if let RepD::Enum(e) = m {
-            assert_eq!(e.variants[0].1.alignment(), 8);
-        } else {
-            panic!("expected enum");
-        }
+        let e = match &m {
+            RepD::Enum(e) => e,
+            other => panic!("expected enum, got {other}"),
+        };
+        assert_eq!(e.variants[0].1.alignment(), 8);
     }
 
     // Test 38: are_compatible — alignment compatible (one divides other) ------

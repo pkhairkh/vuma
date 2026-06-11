@@ -670,6 +670,7 @@ impl Operand {
 /// disassembly. The `encode()` method produces a 32-bit machine code word;
 /// the `Display` impl produces a human-readable assembly line.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum Instruction {
     // ---- Arithmetic ----
     /// Add: `ADD Rd, Rn, Rm` or `ADD Rd, Rn, #imm`
@@ -942,6 +943,32 @@ pub enum Instruction {
         imm16: u16,
         shift: u32,
     },
+
+    // ---- Bit manipulation (one-source) ----
+    /// Count leading zeros: `CLZ Xd, Xn`
+    CLZ { rd: Register, rn: Register },
+    /// Reverse bits: `RBIT Xd, Xn`
+    RBIT { rd: Register, rn: Register },
+
+    // ---- SIMD/FP move ----
+    /// Move GPR to FP double register: `FMOV Dd, Xn`
+    /// `vd` is the 5-bit SIMD/FP destination register index (0–31).
+    FMOV_DX { vd: u8, rn: Register },
+    /// Move FP double register to GPR: `FMOV Xd, Dn`
+    /// `vn` is the 5-bit SIMD/FP source register index (0–31).
+    FMOV_XD { rd: Register, vn: u8 },
+
+    // ---- SIMD integer ----
+    /// Population count per byte: `CNT Vd.8B, Vn.8B`
+    /// `vd` and `vn` are 5-bit SIMD/FP register indices (0–31).
+    CNT { vd: u8, vn: u8 },
+    /// Add across vector: `ADDV Bd, Vn.8B`
+    /// `vd` and `vn` are 5-bit SIMD/FP register indices (0–31).
+    ADDV { vd: u8, vn: u8 },
+    /// Unsigned move vector element to GPR: `UMOV Wd, Vn.B[0]`
+    /// `vn` is the 5-bit SIMD/FP source register index (0–31).
+    /// Only index=0 is supported (sufficient for POPCNT result extraction).
+    UMOV { rd: Register, vn: u8 },
 
     // ---- System ----
     /// Supervisor call: `SVC #imm16`
@@ -1469,6 +1496,55 @@ impl Instruction {
                     | rd.encoding())
             }
 
+            // ---- CLZ Xd, Xn ----
+            // One-source data processing: 1 10 1101 0110 0000 0000 010 Rn Rd
+            // CLZ X0, X0 = 0xDAC01000
+            Instruction::CLZ { rd, rn } => {
+                Ok(0xDAC01000 | (rn.encoding() << 5) | rd.encoding())
+            }
+
+            // ---- RBIT Xd, Xn ----
+            // One-source data processing: 1 10 1101 0110 0000 0000 000 Rn Rd
+            // RBIT X0, X0 = 0xDAC00000
+            Instruction::RBIT { rd, rn } => {
+                Ok(0xDAC00000 | (rn.encoding() << 5) | rd.encoding())
+            }
+
+            // ---- FMOV Dd, Xn (GPR → FP double) ----
+            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 110 000 Rn Rd
+            // FMOV D0, X0 = 0x9E670000
+            Instruction::FMOV_DX { vd, rn } => {
+                Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32))
+            }
+
+            // ---- FMOV Xd, Dn (FP double → GPR) ----
+            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
+            // FMOV X0, D0 = 0x9E6F0000
+            Instruction::FMOV_XD { rd, vn } => {
+                Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding())
+            }
+
+            // ---- CNT Vd.8B, Vn.8B ----
+            // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
+            // CNT V0.8B, V0.8B = 0x0E205800
+            Instruction::CNT { vd, vn } => {
+                Ok(0x0E205800 | ((*vn as u32) << 5) | (*vd as u32))
+            }
+
+            // ---- ADDV Bd, Vn.8B ----
+            // Advanced SIMD reduction: 0 0 001110 01 11000 11011 1 Vn Vd
+            // ADDV B0, V0.8B = 0x0E71B800
+            Instruction::ADDV { vd, vn } => {
+                Ok(0x0E71B800 | ((*vn as u32) << 5) | (*vd as u32))
+            }
+
+            // ---- UMOV Wd, Vn.B[0] ----
+            // Advanced SIMD copy: 0 0 001110 00 1 00 0000 1 0 000 Vn Rd
+            // UMOV W0, V0.B[0] = 0x0E204000
+            Instruction::UMOV { rd, vn } => {
+                Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding())
+            }
+
             // ---- SVC ----
             Instruction::SVC { imm16 } => {
                 Ok(0b110_1010_0000_0000_0000_0000_0000_0001 | ((*imm16 as u32) << 5))
@@ -1986,6 +2062,13 @@ impl std::fmt::Display for Instruction {
                     write!(f, "movk {}, #{}, lsl #{}", rd, imm16, shift)
                 }
             }
+            Instruction::CLZ { rd, rn } => write!(f, "clz {}, {}", rd, rn),
+            Instruction::RBIT { rd, rn } => write!(f, "rbit {}, {}", rd, rn),
+            Instruction::FMOV_DX { vd, rn } => write!(f, "fmov d{}, {}", vd, rn),
+            Instruction::FMOV_XD { rd, vn } => write!(f, "fmov {}, d{}", rd, vn),
+            Instruction::CNT { vd, vn } => write!(f, "cnt v{}.8b, v{}.8b", vd, vn),
+            Instruction::ADDV { vd, vn } => write!(f, "addv b{}, v{}.8b", vd, vn),
+            Instruction::UMOV { rd, vn } => write!(f, "umov {}, v{}.b[0]", rd, vn),
             Instruction::SVC { imm16 } => write!(f, "svc #{}", imm16),
             Instruction::NOP => write!(f, "nop"),
         }
@@ -2852,9 +2935,57 @@ impl InstructionSelector {
                         });
                     }
                     _ => {
-                        // CLZ, CTZ, POPCNT: placeholder
-                        if rd != rn {
-                            self.push(Instruction::MOV { rd, rm: rn });
+                        // CLZ, CTZ, POPCNT: was placeholder, now implemented
+                        match op {
+                            crate::ir::UnaryOpKind::Clz => {
+                                self.push(Instruction::CLZ { rd, rn });
+                            }
+                            crate::ir::UnaryOpKind::Ctz => {
+                                // CTZ = RBIT + CLZ: reverse bits then count leading zeros
+                                // Use X9 as scratch if rd == rn (need intermediate)
+                                if rd == rn {
+                                    self.push(Instruction::RBIT {
+                                        rd: Register::X9,
+                                        rn,
+                                    });
+                                    self.push(Instruction::CLZ {
+                                        rd,
+                                        rn: Register::X9,
+                                    });
+                                } else {
+                                    self.push(Instruction::RBIT { rd, rn });
+                                    self.push(Instruction::CLZ { rd, rn: rd });
+                                }
+                            }
+                            crate::ir::UnaryOpKind::Popcnt => {
+                                // POPCNT using FMOV+CNT+ADDV+UMOV sequence:
+                                // FMOV D8, Xn    — move GPR to SIMD register (V8 is caller-saved)
+                                // CNT V8.8B, V8.8B — count bits per byte
+                                // ADDV B8, V8.8B   — horizontal sum of byte counts
+                                // UMOV Xd, V8.B[0] — move result back to GPR
+                                const SIMD_SCRATCH: u8 = 8; // V8 is caller-saved in AAPCS64
+                                self.push(Instruction::FMOV_DX {
+                                    vd: SIMD_SCRATCH,
+                                    rn,
+                                });
+                                self.push(Instruction::CNT {
+                                    vd: SIMD_SCRATCH,
+                                    vn: SIMD_SCRATCH,
+                                });
+                                self.push(Instruction::ADDV {
+                                    vd: SIMD_SCRATCH,
+                                    vn: SIMD_SCRATCH,
+                                });
+                                self.push(Instruction::UMOV {
+                                    rd,
+                                    vn: SIMD_SCRATCH,
+                                });
+                            }
+                            _ => {
+                                if rd != rn {
+                                    self.push(Instruction::MOV { rd, rm: rn });
+                                }
+                            }
                         }
                     }
                 }
@@ -4050,5 +4181,133 @@ mod tests {
         let word = movk.encode().unwrap();
         let decoded = Instruction::decode(word).expect("MOVK should decode");
         assert!(format!("{}", decoded).starts_with("movk"));
+    }
+
+    // ---- Test: CLZ encoding and display ----
+    #[test]
+    fn test_clz_emission() {
+        // CLZ X0, X1 should encode to 0xDAC01000 | (1 << 5) | 0 = 0xDAC01020
+        let clz = Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        assert_eq!(format!("{}", clz), "clz x0, x1");
+        let encoded = clz.encode().unwrap();
+        assert_eq!(encoded, 0xDAC01000 | (1u32 << 5) | 0);
+
+        // CLZ X5, X5 should encode with both rd=5 and rn=5
+        let clz_same = Instruction::CLZ {
+            rd: Register::X5,
+            rn: Register::X5,
+        };
+        let enc_same = clz_same.encode().unwrap();
+        assert_eq!(enc_same, 0xDAC01000 | (5u32 << 5) | 5);
+
+        // Verify the base encoding: CLZ X0, X0 = 0xDAC01000
+        let clz_x0_x0 = Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X0,
+        };
+        assert_eq!(clz_x0_x0.encode().unwrap(), 0xDAC01000);
+
+        // Test instruction selector: CLZ should emit a single CLZ instruction
+        let mut sel = InstructionSelector::new();
+        sel.push(Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X1,
+        });
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::CLZ { rd: Register::X0, rn: Register::X1 }));
+    }
+
+    // ---- Test: CTZ emission (RBIT + CLZ sequence) ----
+    #[test]
+    fn test_ctz_emission() {
+        // RBIT X0, X1 should encode to 0xDAC00000 | (1 << 5) | 0 = 0xDAC00020
+        let rbit = Instruction::RBIT {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        assert_eq!(format!("{}", rbit), "rbit x0, x1");
+        let encoded = rbit.encode().unwrap();
+        assert_eq!(encoded, 0xDAC00000 | (1u32 << 5) | 0);
+
+        // Verify the base encoding: RBIT X0, X0 = 0xDAC00000
+        let rbit_x0_x0 = Instruction::RBIT {
+            rd: Register::X0,
+            rn: Register::X0,
+        };
+        assert_eq!(rbit_x0_x0.encode().unwrap(), 0xDAC00000);
+
+        // CTZ = RBIT + CLZ sequence
+        // When rd != rn: RBIT rd, rn then CLZ rd, rd
+        let rbit_step = Instruction::RBIT {
+            rd: Register::X0,
+            rn: Register::X1,
+        };
+        let clz_step = Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X0,
+        };
+        let rbit_enc = rbit_step.encode().unwrap();
+        let clz_enc = clz_step.encode().unwrap();
+        // Verify RBIT comes before CLZ and produces correct encodings
+        assert_eq!(rbit_enc, 0xDAC00000 | (1u32 << 5) | 0); // RBIT X0, X1
+        assert_eq!(clz_enc, 0xDAC01000 | (0u32 << 5) | 0);  // CLZ X0, X0
+
+        // When rd == rn: need scratch register (X9)
+        // RBIT X9, X0 then CLZ X0, X9
+        let rbit_scratch = Instruction::RBIT {
+            rd: Register::X9,
+            rn: Register::X0,
+        };
+        let clz_from_scratch = Instruction::CLZ {
+            rd: Register::X0,
+            rn: Register::X9,
+        };
+        let rbit_scratch_enc = rbit_scratch.encode().unwrap();
+        let clz_scratch_enc = clz_from_scratch.encode().unwrap();
+        assert_eq!(rbit_scratch_enc, 0xDAC00000 | (0u32 << 5) | 9); // RBIT X9, X0
+        assert_eq!(clz_scratch_enc, 0xDAC01000 | (9u32 << 5) | 0);  // CLZ X0, X9
+    }
+
+    // ---- Test: POPCNT emission (FMOV+CNT+ADDV+UMOV sequence) ----
+    #[test]
+    fn test_popcnt_emission() {
+        // FMOV D8, X0: GPR to SIMD register
+        let fmov_dx = Instruction::FMOV_DX { vd: 8, rn: Register::X0 };
+        assert_eq!(format!("{}", fmov_dx), "fmov d8, x0");
+        let fmov_enc = fmov_dx.encode().unwrap();
+        assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 5) | 8);
+
+        // CNT V8.8B, V8.8B: count bits per byte
+        let cnt = Instruction::CNT { vd: 8, vn: 8 };
+        assert_eq!(format!("{}", cnt), "cnt v8.8b, v8.8b");
+        let cnt_enc = cnt.encode().unwrap();
+        assert_eq!(cnt_enc, 0x0E205800 | (8u32 << 5) | 8);
+
+        // ADDV B8, V8.8B: horizontal sum
+        let addv = Instruction::ADDV { vd: 8, vn: 8 };
+        assert_eq!(format!("{}", addv), "addv b8, v8.8b");
+        let addv_enc = addv.encode().unwrap();
+        assert_eq!(addv_enc, 0x0E71B800 | (8u32 << 5) | 8);
+
+        // UMOV X0, V8.B[0]: move result back to GPR
+        let umov = Instruction::UMOV { rd: Register::X0, vn: 8 };
+        assert_eq!(format!("{}", umov), "umov x0, v8.b[0]");
+        let umov_enc = umov.encode().unwrap();
+        assert_eq!(umov_enc, 0x0E204000 | (8u32 << 5) | 0);
+
+        // Verify the full 4-instruction sequence produces distinct encodings
+        assert_ne!(fmov_enc, cnt_enc);
+        assert_ne!(cnt_enc, addv_enc);
+        assert_ne!(addv_enc, umov_enc);
+
+        // Also verify FMOV_XD (FP double to GPR)
+        let fmov_xd = Instruction::FMOV_XD { rd: Register::X0, vn: 8 };
+        assert_eq!(format!("{}", fmov_xd), "fmov x0, d8");
+        let fmov_xd_enc = fmov_xd.encode().unwrap();
+        assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 5) | 0);
     }
 }

@@ -682,14 +682,49 @@ impl Emitter {
                             rm: Register::X9,
                         })?;
                     }
-                    UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                        log::warn!(
-                            "unary op {:?} not yet implemented, emitting MOV XZR placeholder",
-                            op
-                        );
-                        self.emit_instruction(Instruction::MOV {
+                    UnaryOpKind::Clz => {
+                        // CLZ Xd, Xn — count leading zeros (native ARM64 instruction)
+                        self.emit_instruction(Instruction::CLZ { rd, rn })?;
+                    }
+                    UnaryOpKind::Ctz => {
+                        // CTZ = RBIT + CLZ: reverse bits then count leading zeros.
+                        // Use X9 as scratch if rd == rn (need intermediate result).
+                        if rd == rn {
+                            self.emit_instruction(Instruction::RBIT {
+                                rd: Register::X9,
+                                rn,
+                            })?;
+                            self.emit_instruction(Instruction::CLZ {
+                                rd,
+                                rn: Register::X9,
+                            })?;
+                        } else {
+                            self.emit_instruction(Instruction::RBIT { rd, rn })?;
+                            self.emit_instruction(Instruction::CLZ { rd, rn: rd })?;
+                        }
+                    }
+                    UnaryOpKind::Popcnt => {
+                        // POPCNT via FMOV+CNT+ADDV+UMOV sequence:
+                        // FMOV D8, Xn        — move GPR value to SIMD register (V8 is caller-saved)
+                        // CNT V8.8B, V8.8B   — count bits per byte
+                        // ADDV B8, V8.8B     — horizontal sum of byte counts
+                        // UMOV Xd, V8.B[0]   — move result back to GPR (zero-extends to 64 bits)
+                        const SIMD_SCRATCH: u8 = 8; // V8 is caller-saved in AAPCS64
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: SIMD_SCRATCH,
+                            rn,
+                        })?;
+                        self.emit_instruction(Instruction::CNT {
+                            vd: SIMD_SCRATCH,
+                            vn: SIMD_SCRATCH,
+                        })?;
+                        self.emit_instruction(Instruction::ADDV {
+                            vd: SIMD_SCRATCH,
+                            vn: SIMD_SCRATCH,
+                        })?;
+                        self.emit_instruction(Instruction::UMOV {
                             rd,
-                            rm: Register::XZR,
+                            vn: SIMD_SCRATCH,
                         })?;
                     }
                 }

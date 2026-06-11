@@ -3199,22 +3199,50 @@ impl Backend for Arm32Backend {
                         ));
                         code
                     }
-                    crate::ir::IRInstr::Alloc { dst, size: _ } => {
+                    crate::ir::IRInstr::Alloc { dst, size } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::R0);
-                        // Point to frame area: ADD d, R11, #0
-                        encode_dp_imm(
-                            Condition::Al,
-                            DP_ADD,
-                            false,
-                            Gpr::R11.encoding(),
-                            d.encoding(),
-                            0,
-                            0,
-                        )
-                        .to_vec()
+                        let mut code = Vec::new();
+                        // SUB SP, SP, #size (decrement stack pointer)
+                        let size_val = *size as u32;
+                        if let Some((rotate, imm8)) = try_encode_arm_imm(size_val) {
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al,
+                                DP_SUB,
+                                false,
+                                Gpr::R13.encoding(),
+                                Gpr::R13.encoding(),
+                                rotate,
+                                imm8,
+                            ));
+                        } else {
+                            // For sizes that don't fit in ARM rotated-immediate, use a
+                            // scratch register to hold the value.
+                            code.extend_from_slice(&load_immediate_arm32(Gpr::R12, size_val));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al,
+                                DP_SUB,
+                                false,
+                                Gpr::R13.encoding(),
+                                Gpr::R13.encoding(),
+                                Gpr::R12.encoding(),
+                            ));
+                        }
+                        // ADD d, SP, #0 (copy new SP to destination)
+                        if d != Gpr::R13 {
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al,
+                                DP_ADD,
+                                false,
+                                Gpr::R13.encoding(),
+                                d.encoding(),
+                                0,
+                                0,
+                            ));
+                        }
+                        code
                     }
                     crate::ir::IRInstr::Call { dst, func: _, args } => {
                         let mut code = Vec::new();
@@ -3440,8 +3468,10 @@ impl Backend for Arm32Backend {
                         load_immediate_arm32(d, 0)
                     }
                     crate::ir::IRInstr::Free { ptr: _ } => {
-                        // Free is lowered to a runtime call; emit a NOP as placeholder
-                        Instruction::Nop.encode().to_vec()
+                        // Free is not directly implementable as a single instruction;
+                        // emit an undefined instruction (UDF) to trap if executed.
+                        // UDF encoding: condition=AL, imm12=0, opcode=0b1111=0xE7F000F0
+                        0xE7F000F0u32.to_le_bytes().to_vec()
                     }
                     crate::ir::IRInstr::Phi { .. } => {
                         // Phi nodes are eliminated during register allocation; no code to emit

@@ -292,7 +292,7 @@ impl InferredRegion {
 /// An alloc/dealloc pair discovered in the SCG.
 struct AllocPair {
     alloc_node: NodeId,
-    dealloc_node: NodeId,
+    dealloc_node: Option<NodeId>,
 }
 
 /// Infers memory regions from the SCG by pairing allocation and
@@ -334,7 +334,7 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
                 if alloc_set.contains(&dealloc.allocation_node) {
                     pairs.push(AllocPair {
                         alloc_node: dealloc.allocation_node,
-                        dealloc_node: node.id,
+                        dealloc_node: Some(node.id),
                     });
                     matched_allocs.insert(dealloc.allocation_node);
                 }
@@ -355,8 +355,9 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
     let mut region_node_sets: Vec<(AllocPair, Vec<NodeId>)> = Vec::new();
 
     for pair in &pairs {
-        let reachable_from_alloc = bfs_forward(scg, pair.alloc_node, Some(pair.dealloc_node));
-        let reaching_dealloc = bfs_backward(scg, pair.dealloc_node, Some(pair.alloc_node));
+        let dealloc = pair.dealloc_node.expect("paired AllocPair must have dealloc_node");
+        let reachable_from_alloc = bfs_forward(scg, pair.alloc_node, Some(dealloc));
+        let reaching_dealloc = bfs_backward(scg, dealloc, Some(pair.alloc_node));
 
         // Nodes in the region: reachable from alloc AND can reach dealloc
         let reachable_set: HashSet<NodeId> = reachable_from_alloc.into_iter().collect();
@@ -380,7 +381,7 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
         region_node_sets.push((
             AllocPair {
                 alloc_node: alloc_id,
-                dealloc_node: alloc_id, // placeholder; won't be used as Scoped
+                dealloc_node: None,
             },
             reachable,
         ));
@@ -395,12 +396,12 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
         next_id += 1;
 
         let is_paired =
-            alloc_set.contains(&pair.alloc_node) && pair.dealloc_node != pair.alloc_node;
+            alloc_set.contains(&pair.alloc_node) && pair.dealloc_node.is_some();
 
         let lifetime = if is_paired {
             RegionLifetime::Scoped {
                 alloc: pair.alloc_node,
-                dealloc: pair.dealloc_node,
+                dealloc: pair.dealloc_node.expect("is_paired guarantees dealloc_node"),
             }
         } else {
             RegionLifetime::Unknown
@@ -408,7 +409,7 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
 
         // Exit nodes: for paired regions, the dealloc node; for unpaired, empty.
         let exit_nodes = if is_paired {
-            vec![pair.dealloc_node]
+            vec![pair.dealloc_node.expect("is_paired guarantees dealloc_node")]
         } else {
             Vec::new()
         };
