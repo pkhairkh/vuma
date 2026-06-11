@@ -75,6 +75,8 @@ pub mod graph;
 #[cfg(test)]
 pub mod pi5_hardware;
 #[cfg(test)]
+pub mod sha256d;
+#[cfg(test)]
 pub mod trivial;
 
 // Re-export the helper macros from the framework module.
