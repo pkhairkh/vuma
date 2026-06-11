@@ -37,7 +37,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Instant;
+
+// ---------------------------------------------------------------------------
+// Mutex poisoning recovery helper
+// ---------------------------------------------------------------------------
+
+/// Locks a `Mutex<T>`, recovering from poisoning if necessary.
+///
+/// If a thread panicked while holding the lock, the Mutex becomes
+/// "poisoned" and normal `lock().unwrap()` would panic. This helper
+/// instead recovers the guard by extracting the inner data from the
+/// `PoisonError`, allowing the runtime to continue operating with
+/// the last consistent state.
+///
+/// This is appropriate for profiling data where a stale but valid
+/// snapshot is preferable to a runtime crash.
+fn lock_profile<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ---------------------------------------------------------------------------
 // Pi 5 Hardware Performance Counters (PMU)
@@ -534,27 +553,27 @@ impl ProfileCollector {
 
     /// Records an execution of the given SCG node.
     pub fn record_access(&self, node_id: NodeId) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         data.record_access(node_id);
         self.sample_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records an execution of the given node with timing information.
     pub fn record_access_timed(&self, node_id: NodeId, time_ns: u64) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         data.record_access_timed(node_id, time_ns);
         self.sample_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a traversal of the given SCG edge.
     pub fn record_edge(&self, edge_id: EdgeId) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         data.record_edge(edge_id);
     }
 
     /// Records a full [`ProfileSample`].
     pub fn record_sample(&self, sample: &ProfileSample) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         data.record_access_timed(sample.node_id, sample.execution_time_ns);
         if let Some(ref pmu) = sample.pmu {
             data.record_pmu(sample.node_id, pmu);
@@ -564,7 +583,7 @@ impl ProfileCollector {
 
     /// Records PMU counter values for a node.
     pub fn record_pmu(&self, node_id: NodeId, pmu: &Pi5PmuCounters) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         data.record_pmu(node_id, pmu);
     }
 
@@ -592,12 +611,12 @@ impl ProfileCollector {
     /// This clones the internal `ProfileData`, so the caller gets a
     /// consistent view while the collector continues to accumulate.
     pub fn snapshot(&self) -> ProfileData {
-        self.data.lock().unwrap().clone()
+        lock_profile(&self.data).clone()
     }
 
     /// Resets all collected profile data.
     pub fn reset(&self) {
-        let mut data = self.data.lock().unwrap();
+        let mut data = lock_profile(&self.data);
         *data = ProfileData::new();
         self.sample_count.store(0, Ordering::Relaxed);
         let _ = self.epoch; // epoch stays the same — timestamps remain monotonic
@@ -972,5 +991,69 @@ mod tests {
         assert_eq!(node_pmu.instruction_count, 240);
         assert_eq!(node_pmu.cache_misses, 15);
         assert_eq!(node_pmu.branch_misses, 5);
+    }
+
+    #[test]
+    fn test_profile_mutex_recovery() {
+        // Simulate Mutex poisoning and verify that lock_profile recovers.
+        //
+        // When a thread panics while holding a Mutex, the Mutex becomes
+        // "poisoned". The lock_profile helper recovers from this by
+        // calling into_inner() on the PoisonError, which gives access
+        // to the data even after a panic.
+
+        use std::sync::Arc;
+        use std::thread;
+
+        let collector = Arc::new(ProfileCollector::new());
+
+        // Record some data before the panic.
+        collector.record_access(1);
+        collector.record_access(2);
+
+        // Spawn a thread that panics while holding the lock.
+        // We do this by manually poisoning a separate Mutex that shares
+        // the same pattern, since we can't directly poison the
+        // ProfileCollector's internal Mutex from outside.
+        //
+        // Instead, we test the lock_profile helper directly with a
+        // controlled Mutex.
+        let test_mutex: Arc<Mutex<ProfileData>> = Arc::new(Mutex::new(ProfileData::new()));
+        {
+            let m = Arc::clone(&test_mutex);
+            let handle = thread::spawn(move || {
+                let _guard = m.lock().unwrap();
+                // Panic while holding the lock to poison the Mutex.
+                panic!("intentional panic to poison mutex");
+            });
+            // The thread panicked, so the Mutex should be poisoned.
+            let _ = handle.join();
+        }
+
+        // Verify the Mutex is poisoned — normal lock().unwrap() would panic.
+        assert!(
+            test_mutex.is_poisoned(),
+            "Mutex should be poisoned after thread panic"
+        );
+
+        // Now verify that lock_profile recovers from the poisoning.
+        let guard = lock_profile(&test_mutex);
+        // We should be able to read the data.
+        assert!(guard.call_counts.is_empty());
+
+        // We should also be able to mutate the data through the recovered guard.
+        guard.record_access(42);
+        drop(guard);
+
+        // Verify the mutation was applied.
+        let guard = lock_profile(&test_mutex);
+        assert_eq!(guard.call_counts.get(&42).copied().unwrap_or(0), 1);
+
+        // Also verify that ProfileCollector itself would recover:
+        // The collector's internal lock_profile calls will recover
+        // from poisoning if it ever occurs.
+        // We can't easily poison the collector's internal Mutex from
+        // outside, but we verify the helper function works correctly
+        // above.
     }
 }

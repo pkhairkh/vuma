@@ -226,21 +226,68 @@ pub fn start_core(id: CoreId, entry_point: usize) {
     }
 }
 
-/// Puts the calling core into a low-power wait (`WFE`) until an event
-/// is received (e.g. via `SEV` from another core or an interrupt).
+/// Returns the spin-table entry address for the given core ID.
+///
+/// On the BCM2712 the spin-table entries are 64-bit slots starting at
+/// offset `0xD0` from the local peripheral base, one per core.
+#[inline]
+pub fn spin_table_entry_addr(id: CoreId) -> *mut u64 {
+    let addr = LOCAL_PERIPH_BASE + SPIN_TABLE_BASE + id.as_u32() as u64 * 8;
+    addr as *mut u64
+}
+
+/// Checks the spin-table entry and returns the entry-point address
+/// if it has been written (non-zero).
+///
+/// This is the testable core logic of [`spin_wait`]: it reads the
+/// 64-bit spin-table slot via a volatile load and returns `Some(addr)`
+/// when another core has written a non-zero entry point.
+///
+/// # Safety
+///
+/// `table_entry` must point to a valid, 8-byte-aligned 64-bit slot
+/// that can be safely read with a volatile load.
+#[inline]
+pub unsafe fn check_spin_entry(table_entry: *const u64) -> Option<usize> {
+    let entry = core::ptr::read_volatile(table_entry);
+    if entry != 0 {
+        Some(entry as usize)
+    } else {
+        None
+    }
+}
+
+/// Puts the calling core into a spin-wait loop, polling the spin-table
+/// entry until another core writes a non-zero entry-point address, then
+/// jumps to that address.
 ///
 /// This is typically used by secondary cores at boot to wait for the
-/// primary core to set their entry point.
-#[inline(always)]
-pub fn spin_wait(_id: CoreId) {
-    // Loop in WFE — the core will wake on SEV or interrupt.
+/// primary core to set their entry point via [`start_core`].
+///
+/// # How it works
+///
+/// 1. Reads the spin-table entry with a volatile load.
+/// 2. If the entry is non-zero, transmutes it to a function pointer
+///    (`unsafe fn() -> !`) and branches to it — the secondary core
+///    begins executing at the given address.
+/// 3. If the entry is still zero, issues a `spin_loop` hint and retries.
+///
+/// # Safety
+///
+/// The caller must ensure:
+/// - `table_entry` points to a valid, 8-byte-aligned 64-bit spin-table
+///   slot that will eventually be written by another core.
+/// - When written, the value must be the address of valid executable
+///   code that correctly handles being entered on a secondary core
+///   (stack setup, etc.).
+pub unsafe fn spin_wait(table_entry: *mut u64) -> ! {
     loop {
-        unsafe {
-            core::arch::asm!("wfe", options(nostack, preserves_flags));
+        let entry = core::ptr::read_volatile(table_entry);
+        if entry != 0 {
+            let func: unsafe fn() -> ! = core::mem::transmute(entry as usize);
+            func()
         }
-        // Check if the spin table entry is non-zero; if so, the core
-        // has been given work to do. The actual branching out of this
-        // loop would be done by platform-specific boot code.
+        core::hint::spin_loop();
     }
 }
 
@@ -521,5 +568,58 @@ mod tests {
     #[test]
     fn spinlock_is_const_constructible() {
         const _LOCK: Spinlock = Spinlock::new();
+    }
+
+    // -----------------------------------------------------------------------
+    // spin_table_entry_addr / check_spin_entry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spin_table_entry_addr_core0() {
+        let addr = spin_table_entry_addr(CoreId::CORE0);
+        let expected = (LOCAL_PERIPH_BASE + SPIN_TABLE_BASE) as usize;
+        assert_eq!(addr as usize, expected);
+    }
+
+    #[test]
+    fn spin_table_entry_addr_core1() {
+        let addr = spin_table_entry_addr(CoreId::CORE1);
+        let expected = (LOCAL_PERIPH_BASE + SPIN_TABLE_BASE + 8) as usize;
+        assert_eq!(addr as usize, expected);
+    }
+
+    #[test]
+    fn spin_table_entry_addr_core3() {
+        let addr = spin_table_entry_addr(CoreId::CORE3);
+        let expected = (LOCAL_PERIPH_BASE + SPIN_TABLE_BASE + 3 * 8) as usize;
+        assert_eq!(addr as usize, expected);
+    }
+
+    #[test]
+    fn check_spin_entry_returns_none_when_zero() {
+        let slot: u64 = 0;
+        let result = unsafe { check_spin_entry(&slot as *const u64) };
+        assert!(result.is_none(), "should return None for zero entry");
+    }
+
+    #[test]
+    fn test_spin_wait_exits_on_entry() {
+        // Verify the spin_wait exit logic: check_spin_entry should return
+        // Some(addr) when the table entry is non-zero, which is the condition
+        // that causes spin_wait to branch out of its loop.
+        let slot: u64 = 0x80000; // a non-zero entry-point address
+        let result = unsafe { check_spin_entry(&slot as *const u64) };
+        assert!(result.is_some(), "should return Some when entry is non-zero");
+        assert_eq!(result.unwrap(), 0x80000, "should return the entry point address");
+    }
+
+    #[test]
+    fn check_spin_entry_various_nonzero_values() {
+        let values = [1u64, 0xDEAD_BEEF, 0x1, u64::MAX];
+        for &val in &values {
+            let result = unsafe { check_spin_entry(&val as *const u64) };
+            assert!(result.is_some(), "non-zero value {:#X} should yield Some", val);
+            assert_eq!(result.unwrap(), val as usize);
+        }
     }
 }

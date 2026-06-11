@@ -3206,7 +3206,7 @@ impl Backend for Arm32Backend {
                             .unwrap_or(Gpr::R0);
                         let mut code = Vec::new();
                         // SUB SP, SP, #size (decrement stack pointer)
-                        let size_val = *size as u32;
+                        let size_val = *size;
                         if let Some((rotate, imm8)) = try_encode_arm_imm(size_val) {
                             code.extend_from_slice(&encode_dp_imm(
                                 Condition::Al,

@@ -47,7 +47,7 @@ use crate::mmio::{mmio_read, mmio_write};
 /// touching real hardware. Each test must call [`mock_mmio::reset`]
 /// before use to start from a clean state.
 #[cfg(test)]
-mod mock_mmio {
+pub(crate) mod mock_mmio {
     use crate::mmio::Address;
     use std::cell::RefCell;
     use std::collections::HashMap;

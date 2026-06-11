@@ -351,9 +351,9 @@ impl BidirectionalProjection {
     /// Applies a visual edit to the SCG.
     ///
     /// Translates a [`VisualEdit`] into SCG-level operations, validates them,
-    /// checks for conflicts, and applies them. Some visual edits (AddEdge,
-    /// RemoveEdge, MoveNode) are handled directly since the [`SCGEdit`] type
-    /// does not have corresponding variants.
+    /// checks for conflicts, and applies them. Some visual edits (RemoveEdge,
+    /// MoveNode) are still handled directly since the [`SCGEdit`] type does not
+    /// have corresponding variants for those.
     pub fn apply_visual_edit(&mut self, scg: &mut SCG, edit: VisualEdit) -> EditResult<()> {
         match &edit {
             // ── AddEdge: handled directly ───────────────────────────────────
@@ -557,6 +557,36 @@ impl BidirectionalProjection {
                 Ok(false)
             }
 
+            SCGEdit::AddEdge {
+                source,
+                target,
+                kind,
+            } => {
+                if scg.get_node(*source).is_none() {
+                    return Err(EditError::InvalidSCG {
+                        reason: format!("source node {} does not exist", source),
+                    });
+                }
+                if scg.get_node(*target).is_none() {
+                    return Err(EditError::InvalidSCG {
+                        reason: format!("target node {} does not exist", target),
+                    });
+                }
+                if scg
+                    .edges
+                    .iter()
+                    .any(|e| e.source == *source && e.target == *target && e.kind == *kind)
+                {
+                    return Err(EditError::InvalidSCG {
+                        reason: format!(
+                            "edge from {} to {} (kind {:?}) already exists",
+                            source, target, kind
+                        ),
+                    });
+                }
+                Ok(false)
+            }
+
             SCGEdit::ChangeBD {
                 node_id,
                 bd_name,
@@ -706,6 +736,9 @@ impl BidirectionalProjection {
             SCGEdit::AddNode { label, .. } => format!("node_label:{}", label),
             SCGEdit::RemoveNode { node_id } => format!("node:{}", node_id),
             SCGEdit::ModifyEdge { edge_id, .. } => format!("edge:{}", edge_id),
+            SCGEdit::AddEdge {
+                source, target, kind, ..
+            } => format!("edge_new:{}:{}:{:?}", source, target, kind),
             SCGEdit::ChangeBD {
                 node_id, bd_name, ..
             } => {
@@ -771,6 +804,21 @@ impl BidirectionalProjection {
                 }
             }
 
+            SCGEdit::AddEdge {
+                source,
+                target,
+                kind,
+            } => {
+                let new_id = scg.edges.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                scg.edges.push(crate::SCGEdge {
+                    id: new_id,
+                    source,
+                    target,
+                    kind,
+                });
+                Ok(())
+            }
+
             SCGEdit::ChangeBD {
                 node_id,
                 bd_name,
@@ -801,6 +849,11 @@ impl BidirectionalProjection {
     }
 
     /// Translates a [`VisualEdit`] into one or more [`SCGEdit`] operations.
+    ///
+    /// Most visual edits now map directly to [`SCGEdit`] variants including
+    /// [`SCGEdit::AddEdge`]. Only `RemoveEdge` and `MoveNode` are still
+    /// handled directly in [`apply_visual_edit`](Self::apply_visual_edit)
+    /// because there is no corresponding `SCGEdit` variant.
     fn translate_visual_edit(&self, scg: &SCG, edit: &VisualEdit) -> EditResult<Vec<SCGEdit>> {
         match edit {
             VisualEdit::AddNode { label, kind, bds } => Ok(vec![SCGEdit::AddNode {
@@ -850,21 +903,12 @@ impl BidirectionalProjection {
                         ),
                     });
                 }
-                // For AddEdge we add the edge directly via a specialized path
-                // since SCGEdit doesn't have an AddEdge variant.
-                // We use ModifyEdge with a new ID as a workaround — but actually
-                // the cleanest approach is to add the edge directly in the
-                // apply_visual_edit path. However, we can represent it as a
-                // custom internal edit.
-                // Since SCGEdit doesn't have AddEdge, we handle this specially
-                // by returning a marker that the caller handles.
-                // For now we return an empty vec and handle it in apply_visual_edit.
-                // Actually, let's handle it by directly appending the edge
-                // inside apply_visual_edit when we encounter this case.
-                // We'll use a sentinel approach: return the edge info and let
-                // apply_visual_edit add it.
-                // Simpler: we'll just handle it inline in apply_visual_edit.
-                Ok(vec![]) // handled specially in apply_visual_edit
+                // Use the SCGEdit::AddEdge variant.
+                Ok(vec![SCGEdit::AddEdge {
+                    source: *source,
+                    target: *target,
+                    kind: *kind,
+                }])
             }
 
             VisualEdit::RemoveEdge { edge_id } => {
@@ -1377,10 +1421,12 @@ mod tests {
 
     #[test]
     fn conflict_detected_across_sources() {
+        // Use a node labeled "handler" so that find_node_by_keywords
+        // returns Some(1) when the intent mentions "thread-safe".
         let mut scg = SCG {
             nodes: vec![SCGNode {
                 id: 1,
-                label: "auth".into(),
+                label: "handler".into(),
                 kind: NodeKind::Function,
                 bds: vec![BehaviouralDescriptor {
                     id: 100,
@@ -1408,7 +1454,7 @@ mod tests {
         // Now: conversational edit tries to change a BD on node 1 — this
         // should conflict because node 1's BDs were already modified by
         // the visual source.
-        let result2 = proj.apply_conversational_edit(&mut scg, "make auth thread-safe");
+        let result2 = proj.apply_conversational_edit(&mut scg, "make handler thread-safe");
         assert!(result2.is_err());
         match result2.unwrap_err() {
             EditError::Conflict {

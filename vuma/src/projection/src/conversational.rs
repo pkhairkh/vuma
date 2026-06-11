@@ -83,6 +83,15 @@ pub enum SCGEdit {
         /// New target node, if changed.
         new_target: Option<NodeId>,
     },
+    /// Add a new directed edge between two existing nodes.
+    AddEdge {
+        /// Source node ID.
+        source: NodeId,
+        /// Target node ID.
+        target: NodeId,
+        /// Kind of the edge.
+        kind: EdgeKind,
+    },
     /// Change a behavioural descriptor on a node.
     ChangeBD {
         /// ID of the node whose BD is being changed.
@@ -284,12 +293,14 @@ impl<'a> SuggestionEngine<'a> {
                 kind: NodeKind::Effect,
                 bds: vec!["SideEffect".into()],
             });
-            edits.push(SCGEdit::ChangeBD {
-                node_id: target,
-                bd_name: "Bounded".into(),
-                bd_kind: BdKind::Capability,
-                add: true,
-            });
+            if let Some(node_id) = target {
+                edits.push(SCGEdit::ChangeBD {
+                    node_id,
+                    bd_name: "Bounded".into(),
+                    bd_kind: BdKind::Capability,
+                    add: true,
+                });
+            }
         }
 
         // Thread safety
@@ -299,18 +310,20 @@ impl<'a> SuggestionEngine<'a> {
         {
             let target =
                 self.find_node_by_keywords(&["handler", "worker", "task", "thread", "pool"]);
-            edits.push(SCGEdit::ChangeBD {
-                node_id: target,
-                bd_name: "Send".into(),
-                bd_kind: BdKind::Capability,
-                add: true,
-            });
-            edits.push(SCGEdit::ChangeBD {
-                node_id: target,
-                bd_name: "Sync".into(),
-                bd_kind: BdKind::Capability,
-                add: true,
-            });
+            if let Some(node_id) = target {
+                edits.push(SCGEdit::ChangeBD {
+                    node_id,
+                    bd_name: "Send".into(),
+                    bd_kind: BdKind::Capability,
+                    add: true,
+                });
+                edits.push(SCGEdit::ChangeBD {
+                    node_id,
+                    bd_name: "Sync".into(),
+                    bd_kind: BdKind::Capability,
+                    add: true,
+                });
+            }
         }
 
         // 2FA / two-factor authentication
@@ -333,30 +346,33 @@ impl<'a> SuggestionEngine<'a> {
 
         // Remove / delete
         if intent_lower.contains("remove") || intent_lower.contains("delete") {
-            let target = self.find_node_by_keywords(&["unused", "deprecated", "old"]);
-            edits.push(SCGEdit::RemoveNode { node_id: target });
+            if let Some(node_id) = self.find_node_by_keywords(&["unused", "deprecated", "old"]) {
+                edits.push(SCGEdit::RemoveNode { node_id });
+            }
         }
 
         // Memory safety
         if intent_lower.contains("memory safe") || intent_lower.contains("no leak") {
-            let target = self.find_node_by_keywords(&["alloc", "pool", "buffer", "region"]);
-            edits.push(SCGEdit::ChangeBD {
-                node_id: target,
-                bd_name: "NoLeak".into(),
-                bd_kind: BdKind::Safety,
-                add: true,
-            });
+            if let Some(node_id) = self.find_node_by_keywords(&["alloc", "pool", "buffer", "region"]) {
+                edits.push(SCGEdit::ChangeBD {
+                    node_id,
+                    bd_name: "NoLeak".into(),
+                    bd_kind: BdKind::Safety,
+                    add: true,
+                });
+            }
         }
 
         // Parallelism
         if intent_lower.contains("parallel") || intent_lower.contains("concurrent") {
-            let target = self.find_node_by_keywords(&["map", "reduce", "fold", "process"]);
-            edits.push(SCGEdit::ChangeBD {
-                node_id: target,
-                bd_name: "Send".into(),
-                bd_kind: BdKind::Capability,
-                add: true,
-            });
+            if let Some(node_id) = self.find_node_by_keywords(&["map", "reduce", "fold", "process"]) {
+                edits.push(SCGEdit::ChangeBD {
+                    node_id,
+                    bd_name: "Send".into(),
+                    bd_kind: BdKind::Capability,
+                    add: true,
+                });
+            }
             edits.push(SCGEdit::AddNode {
                 label: "sync_barrier".into(),
                 kind: NodeKind::Merge,
@@ -378,19 +394,17 @@ impl<'a> SuggestionEngine<'a> {
 
     /// Find a node in the SCG whose label contains any of the given keywords.
     ///
-    /// Returns the first matching node's ID, or 0 if no match is found.
-    /// The caller can use 0 as a placeholder node ID for operations that
-    /// need a target but don't have an exact match.
-    fn find_node_by_keywords(&self, keywords: &[&str]) -> NodeId {
+    /// Returns the first matching node's ID, or `None` if no match is found.
+    fn find_node_by_keywords(&self, keywords: &[&str]) -> Option<NodeId> {
         for node in &self.scg.nodes {
             let label_lower = node.label.to_lowercase();
             for kw in keywords {
                 if label_lower.contains(kw) {
-                    return node.id;
+                    return Some(node.id);
                 }
             }
         }
-        0 // no match found — placeholder
+        None
     }
 }
 
@@ -1994,7 +2008,20 @@ mod tests {
     #[test]
     fn suggest_thread_safety() {
         let proj = ConversationalProjection::new();
-        let scg = SCG::empty();
+        // Use an SCG with a node whose label matches the "handler" keyword
+        // so that find_node_by_keywords returns Some(_) and ChangeBD edits
+        // are generated.
+        let scg = SCG {
+            nodes: vec![crate::SCGNode {
+                id: 1,
+                label: "auth_handler".into(),
+                kind: crate::NodeKind::Function,
+                bds: vec![],
+                regions: vec![],
+            }],
+            edges: vec![],
+            regions: vec![],
+        };
         let edits = proj.suggest_modification(&scg, "make auth_handler thread-safe");
         assert!(edits
             .iter()

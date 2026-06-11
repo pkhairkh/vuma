@@ -11,6 +11,7 @@
 //! |-------------|-------------------------------------------------|
 //! | [`boot`]    | Bare-metal boot, exception vectors, FDT parsing |
 //! | [`mmio`]    | Memory-mapped I/O, barriers, `MmioDevice` trait |
+//! | [`mmu`]     | MMU and page table initialization              |
 //! | [`platform`]| Platform constants, memory map, `Platform` trait|
 //! | [`gpio`]    | GPIO pin configuration and I/O                  |
 //! | [`uart`]    | PL011 UART serial driver                        |
@@ -51,6 +52,7 @@ pub mod exception;
 pub mod gic;
 pub mod gpio;
 pub mod mmio;
+pub mod mmu;
 pub mod platform;
 #[cfg(target_arch = "aarch64")]
 pub mod smp;

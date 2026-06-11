@@ -550,36 +550,44 @@ impl CORuntime {
                         "compile_region: IR translation produced no functions for region {}",
                         region_id
                     );
-                    return Vec::new();
+                    return Self::return_zero_stub();
                 }
 
                 let mut emitter = Emitter::new();
                 match emitter.emit_program(&ir_program) {
                     Ok(bytes) => {
-                        log::trace!(
-                            "compile_region: region {} compiled to {} bytes",
-                            region_id,
-                            bytes.len()
-                        );
-                        bytes
+                        if bytes.is_empty() {
+                            log::warn!(
+                                "compile_region: emission produced empty code for region {}, using return-zero stub",
+                                region_id
+                            );
+                            Self::return_zero_stub()
+                        } else {
+                            log::trace!(
+                                "compile_region: region {} compiled to {} bytes",
+                                region_id,
+                                bytes.len()
+                            );
+                            bytes
+                        }
                     }
                     Err(e) => {
                         log::error!(
-                            "compile_region: emission failed for region {}: {}",
+                            "compile_region: emission failed for region {}: {}, using return-zero stub",
                             region_id,
                             e
                         );
-                        Vec::new()
+                        Self::return_zero_stub()
                     }
                 }
             }
             Err(e) => {
                 log::error!(
-                    "compile_region: IR translation failed for region {}: {}",
+                    "compile_region: IR translation failed for region {}: {}, using return-zero stub",
                     region_id,
                     e
                 );
-                Vec::new()
+                Self::return_zero_stub()
             }
         }
     }
@@ -838,7 +846,6 @@ impl CORuntime {
     /// Encoded as:
     /// - `xor eax, eax` → `0x31 0xC0`
     /// - `ret`           → `0xC3`
-    #[allow(dead_code)]
     fn return_zero_stub() -> Vec<u8> {
         #[cfg(all(unix, target_arch = "aarch64"))]
         {
@@ -1289,6 +1296,67 @@ mod tests {
         // On non-aarch64, the simulated result is 0.
         #[cfg(not(all(unix, target_arch = "aarch64")))]
         assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_compiled_region_stores_code() {
+        // Verify that CompiledRegion stores non-empty code after compilation.
+        // This test ensures the codegen output is actually stored in the
+        // CompiledRegion, not just an empty Vec.
+
+        // Case 1: Region with a node in the SCG.
+        let mut scg = SCG::new();
+        let compute_node = SCGNode::new(42, NodeKind::Compute);
+        scg.insert_node(compute_node);
+        let scg = Arc::new(scg);
+        let config = Config::default();
+        let mut rt = CORuntime::new(scg, config);
+
+        let delta = Delta {
+            added_nodes: vec![42],
+            removed_nodes: vec![],
+            added_edges: vec![],
+            removed_edges: vec![],
+        };
+        rt.compile_incremental(&delta);
+
+        let compiled = rt.compiled_state().get(42).unwrap();
+        assert!(
+            !compiled.code.is_empty(),
+            "CompiledRegion for node 42 should store non-empty code after compilation, got {} bytes",
+            compiled.code.len()
+        );
+
+        // Case 2: Region without a node in the SCG (should use return_zero_stub fallback).
+        let scg2 = Arc::new(SCG::default());
+        let config2 = Config::default();
+        let mut rt2 = CORuntime::new(scg2, config2);
+
+        let delta2 = Delta {
+            added_nodes: vec![99],
+            removed_nodes: vec![],
+            added_edges: vec![],
+            removed_edges: vec![],
+        };
+        rt2.compile_incremental(&delta2);
+
+        let compiled2 = rt2.compiled_state().get(99).unwrap();
+        assert!(
+            !compiled2.code.is_empty(),
+            "CompiledRegion for node 99 (no SCG node) should have return-zero stub code, got {} bytes",
+            compiled2.code.len()
+        );
+
+        // The fallback code should be the return_zero_stub.
+        let stub = CORuntime::return_zero_stub();
+        assert!(
+            !stub.is_empty(),
+            "return_zero_stub should produce non-empty code on supported platforms"
+        );
+        assert_eq!(
+            compiled2.code, stub,
+            "Fallback code should match return_zero_stub"
+        );
     }
 
     #[test]

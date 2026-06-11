@@ -128,39 +128,165 @@ impl CounterExample {
         }
     }
 
-    /// Construct a minimal counterexample — a single-step trace that directly
-    /// demonstrates the violation.
+    /// Construct a minimal counterexample by applying delta-debugging style
+    /// trace minimization.
     ///
-    /// The "minimal" counterexample is a scaffolding placeholder: it creates
-    /// the shortest possible trace (typically a single alloc/free/read/write
-    /// step) that would lead to the described violation. In a full
-    /// implementation this would use SMT-based trace minimization.
+    /// Starting from the violation point, traces backwards through the proof
+    /// steps to find a minimal set of steps that still produce the violation.
+    /// Steps that don't contribute to the violation are removed using a
+    /// delta-debugging approach:
+    ///
+    /// 1. Collect all steps from the counterexample.
+    /// 2. Start with all steps as "necessary".
+    /// 3. For each step, try removing it and check if the violation still
+    ///    holds.
+    /// 4. If yes, mark it as unnecessary and keep it removed.
+    /// 5. Return the minimized set.
     pub fn minimal(&self) -> CounterExample {
-        // Try to infer a minimal trace from the violation description.
-        let minimal_step = if self.violation.invariant == InvariantName::Liveness {
-            // Liveness violation: use-after-free — read after free.
-            Some(Step::Free { region: 0 })
-        } else if self.violation.invariant == InvariantName::Exclusivity {
-            // Exclusivity violation: double write.
-            Some(Step::Write {
-                addr: 0,
-                region: 0,
-                value: 0,
-            })
-        } else if matches!(
-            self.violation.invariant,
-            InvariantName::Cleanup | InvariantName::Origin | InvariantName::Interpretation
-        ) {
-            // Default: an alloc step for other invariant violations.
-            Some(Step::Alloc { region: 0 })
-        } else {
-            // Default: an alloc step.
-            Some(Step::Alloc { region: 0 })
-        };
+        // If the trace is empty, produce a minimal trace from the violation.
+        if self.execution.is_empty() {
+            return CounterExample {
+                execution: self.infer_minimal_trace(),
+                violation: self.violation.clone(),
+            };
+        }
+
+        // Delta-debugging: try removing each step one by one. If the
+        // violation still holds after removal, the step is unnecessary.
+        let mut necessary: Vec<Step> = self.execution.clone();
+
+        let mut i = 0;
+        while i < necessary.len() {
+            let candidate: Vec<Step> = necessary
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != i)
+                .map(|(_, s)| s.clone())
+                .collect();
+
+            if self.violation_still_holds(&candidate) {
+                // The step at index i is unnecessary — keep it removed.
+                necessary = candidate;
+                // Don't increment i: the next element has shifted into
+                // position i, so we re-check the same index.
+            } else {
+                // The step is necessary; move on to the next one.
+                i += 1;
+            }
+        }
 
         CounterExample {
-            execution: minimal_step.into_iter().collect(),
+            execution: necessary,
             violation: self.violation.clone(),
+        }
+    }
+
+    /// Check whether the violation is still demonstrated by the given subset
+    /// of steps.
+    ///
+    /// A violation still holds if the reduced trace contains at least one
+    /// step that is *relevant* to the violated invariant — i.e. the step
+    /// type matches the invariant category and the trace can still reach the
+    /// violation point.
+    fn violation_still_holds(&self, steps: &[Step]) -> bool {
+        if steps.is_empty() {
+            return false;
+        }
+
+        match self.violation.invariant {
+            InvariantName::Liveness => {
+                // Liveness (use-after-free): need a Free followed by a Read
+                // or Write referencing the same region, or at minimum a Free
+                // step that demonstrates the liveness issue.
+                let has_free = steps.iter().any(|s| matches!(s, Step::Free { .. }));
+                if !has_free {
+                    return false;
+                }
+                // Check if there's a Read/Write after a Free on the same
+                // region — if so, the violation is clearly demonstrated.
+                let free_regions: std::collections::HashSet<u64> = steps
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Free { region } => Some(*region),
+                        _ => None,
+                    })
+                    .collect();
+                let has_post_free_access = steps.iter().any(|s| match s {
+                    Step::Read { region, .. } => free_regions.contains(region),
+                    Step::Write { region, .. } => free_regions.contains(region),
+                    _ => false,
+                });
+                has_post_free_access || steps.len() == 1
+            }
+            InvariantName::Exclusivity => {
+                // Exclusivity (data race): need at least a Write step that
+                // demonstrates conflicting access.
+                steps.iter().any(|s| matches!(s, Step::Write { .. }))
+            }
+            InvariantName::Cleanup => {
+                // Cleanup: need an Alloc without a corresponding Free.
+                let alloc_regions: std::collections::HashSet<u64> = steps
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Alloc { region } => Some(*region),
+                        _ => None,
+                    })
+                    .collect();
+                let free_regions: std::collections::HashSet<u64> = steps
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Free { region } => Some(*region),
+                        _ => None,
+                    })
+                    .collect();
+                // Violation holds if there's an alloc without a matching free.
+                !alloc_regions.is_empty() && !alloc_regions.is_subset(&free_regions)
+            }
+            InvariantName::Origin | InvariantName::Interpretation => {
+                // Origin / Interpretation: violation holds as long as the
+                // trace is non-empty — any step could contribute to the
+                // provenance or representation issue.
+                !steps.is_empty()
+            }
+        }
+    }
+
+    /// Infer a minimal trace from the violation type when the original
+    /// execution trace is empty.
+    fn infer_minimal_trace(&self) -> Vec<Step> {
+        match self.violation.invariant {
+            InvariantName::Liveness => {
+                // Use-after-free: Free then Read on the same region.
+                vec![
+                    Step::Free { region: 0 },
+                    Step::Read {
+                        addr: 0,
+                        region: 0,
+                    },
+                ]
+            }
+            InvariantName::Exclusivity => {
+                // Data race: two writes to the same address.
+                vec![
+                    Step::Write {
+                        addr: 0,
+                        region: 0,
+                        value: 1,
+                    },
+                    Step::Write {
+                        addr: 0,
+                        region: 0,
+                        value: 2,
+                    },
+                ]
+            }
+            InvariantName::Cleanup => {
+                // Leak: alloc without free.
+                vec![Step::Alloc { region: 0 }]
+            }
+            InvariantName::Origin | InvariantName::Interpretation => {
+                vec![Step::Alloc { region: 0 }]
+            }
         }
     }
 
@@ -247,7 +373,9 @@ mod tests {
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
         assert!(!min.is_empty());
+        // For an empty trace, infer_minimal_trace produces [Free, Read].
         assert!(matches!(min.execution[0], Step::Free { .. }));
+        assert_eq!(min.execution.len(), 2);
     }
 
     #[test]
@@ -255,7 +383,33 @@ mod tests {
         let violation = ViolationPoint::new(InvariantName::Exclusivity, "data race", 0x200);
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
+        // For an empty trace, infer_minimal_trace produces two Write steps.
         assert!(matches!(min.execution[0], Step::Write { .. }));
+        assert_eq!(min.execution.len(), 2);
+    }
+
+    #[test]
+    fn test_minimal_counterexample_removes_unnecessary_steps() {
+        // Create a counterexample with 5 steps where 2 are unnecessary.
+        //
+        // For a Liveness violation, only the Free and a subsequent Read on the
+        // same region are necessary. An Alloc, a Branch, and a Write to a
+        // different region are unnecessary.
+        let violation = ViolationPoint::new(InvariantName::Liveness, "use after free", 0x100);
+        let mut ce = CounterExample::from_violation("err", violation);
+        ce.add_step(Step::Alloc { region: 1 }); // unnecessary
+        ce.add_step(Step::Free { region: 1 }); // necessary
+        ce.add_step(Step::Branch { taken: true }); // unnecessary
+        ce.add_step(Step::Read { addr: 0x10, region: 1 }); // necessary
+        ce.add_step(Step::Write { addr: 0x20, region: 99, value: 0 }); // unnecessary
+
+        assert_eq!(ce.len(), 5);
+
+        let min = ce.minimal();
+        // After minimization, only Free and Read on the same region remain.
+        assert_eq!(min.execution.len(), 2);
+        assert!(matches!(min.execution[0], Step::Free { region: 1 }));
+        assert!(matches!(min.execution[1], Step::Read { region: 1, .. }));
     }
 
     #[test]

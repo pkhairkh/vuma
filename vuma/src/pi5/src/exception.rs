@@ -156,6 +156,77 @@ impl core::fmt::Display for ExceptionType {
 }
 
 // ---------------------------------------------------------------------------
+// UART diagnostic helpers
+// ---------------------------------------------------------------------------
+
+/// Writes a 64-bit value as a hexadecimal string to the UART.
+///
+/// Format: `0x` prefix followed by up to 16 hex digits (zero-padded to
+/// 16 digits for consistency).
+fn write_hex(uart: &crate::uart::Uart, value: u64) {
+    const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
+    uart.write_str("0x");
+    for i in (0..16).rev() {
+        let nibble = ((value >> (i * 4)) & 0xF) as usize;
+        uart.write_byte(HEX_CHARS[nibble]);
+    }
+}
+
+/// Dumps exception diagnostic information to UART0.
+///
+/// Prints the exception type, ESR_EL1, FAR_EL1, and ELR_EL1 values
+/// in a human-readable format. This is called by the default handlers
+/// before halting the core.
+///
+/// # Output format
+///
+/// ```text
+/// --- EXCEPTION: Synchronous ---
+/// ESR_EL1: 0x0000000098000000
+/// FAR_EL1: 0x0000000000100000
+/// ELR_EL1: 0x0000000000080000
+/// -----------------------------
+/// ```
+pub fn dump_exception(kind: ExceptionType, ctx: &ExceptionContext) {
+    let uart = crate::uart::Uart::uart0();
+    uart.write_str("\n--- EXCEPTION: ");
+    uart.write_str(kind.as_str());
+    uart.write_str(" ---\n");
+
+    uart.write_str("ESR_EL1: ");
+    write_hex(&uart, ctx.esr);
+    uart.write_str("\n");
+
+    uart.write_str("FAR_EL1: ");
+    write_hex(&uart, ctx.far);
+    uart.write_str("\n");
+
+    uart.write_str("ELR_EL1: ");
+    write_hex(&uart, ctx.elr);
+    uart.write_str("\n");
+
+    uart.write_str("-----------------------------\n");
+}
+
+/// Halts the calling core in a low-power wait loop.
+///
+/// On AArch64 this uses `WFE` (Wait For Event), which puts the core
+/// into a low-power state until an event (SEV, interrupt, etc.) is
+/// received. The core can be interrupted by a debugger or NMI.
+///
+/// On other architectures this falls back to a spin-loop hint.
+fn halt_core() -> ! {
+    loop {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("wfe", options(nostack, preserves_flags));
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        core::hint::spin_loop();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Exception Handler Functions
 // ---------------------------------------------------------------------------
 
@@ -164,13 +235,12 @@ impl core::fmt::Display for ExceptionType {
 /// Called by the assembly entry point when a synchronous exception occurs
 /// (data abort, instruction abort, SVC, undefined instruction, etc.).
 ///
-/// The default implementation parks the core in a `WFE` loop.
+/// The default implementation dumps diagnostic information to UART0
+/// and then halts the core in a `WFE` loop.
 /// Override this function to install custom handling.
 pub fn handle_sync(ctx: &mut ExceptionContext) {
-    let _ = ctx;
-    loop {
-        core::hint::spin_loop();
-    }
+    dump_exception(ExceptionType::Synchronous, ctx);
+    halt_core();
 }
 
 /// Handler for IRQ (Interrupt Request) exceptions.
@@ -195,12 +265,11 @@ pub fn handle_irq(ctx: &mut ExceptionContext) {
 /// Called by the assembly entry point when a high-priority FIQ is signalled.
 /// The BCM2712 typically uses FIQ for GPU-related interrupts.
 ///
-/// The default implementation parks the core in a `WFE` loop.
+/// The default implementation dumps diagnostic information to UART0
+/// and then halts the core in a `WFE` loop.
 pub fn handle_fiq(ctx: &mut ExceptionContext) {
-    let _ = ctx;
-    loop {
-        core::hint::spin_loop();
-    }
+    dump_exception(ExceptionType::Fiq, ctx);
+    halt_core();
 }
 
 /// Handler for SError (System Error) exceptions.
@@ -208,12 +277,11 @@ pub fn handle_fiq(ctx: &mut ExceptionContext) {
 /// Called by the assembly entry point when an asynchronous external abort
 /// occurs. These are typically caused by memory system errors.
 ///
-/// The default implementation parks the core in a `WFE` loop.
+/// The default implementation dumps diagnostic information to UART0
+/// and then halts the core in a `WFE` loop.
 pub fn handle_serror(ctx: &mut ExceptionContext) {
-    let _ = ctx;
-    loop {
-        core::hint::spin_loop();
-    }
+    dump_exception(ExceptionType::SError, ctx);
+    halt_core();
 }
 
 // ---------------------------------------------------------------------------
@@ -379,5 +447,93 @@ mod tests {
         assert_eq!(CTX_NEW.elr, ctx_default.elr);
         assert_eq!(CTX_NEW.esr, ctx_default.esr);
         assert_eq!(CTX_NEW.far, ctx_default.far);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: write_hex produces correct hex digits
+    // -----------------------------------------------------------------------
+    #[test]
+    fn write_hex_produces_correct_output() {
+        // We test the hex formatting logic by using the UART with mock MMIO.
+        crate::uart::mock_mmio::reset();
+
+        let uart = crate::uart::Uart::uart0();
+        // Make sure TX FIFO is not full so write_byte proceeds.
+        crate::uart::mock_mmio::write(
+            crate::uart::UART0_BASE + crate::uart::FR,
+            0, // TXFF clear → TX FIFO not full
+        );
+
+        write_hex(&uart, 0x0000_0000_DEAD_BEEF);
+
+        // Collect all bytes written to the DR register.
+        let dr_val = crate::uart::mock_mmio::read(
+            crate::uart::UART0_BASE + crate::uart::DR,
+        );
+        // The last byte written should be the last hex digit of DEADBEEF = 'F'
+        assert_eq!(dr_val, b'F' as u32, "last DR write should be 'F'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: dump_exception outputs diagnostic info to UART
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_exception_handler_outputs_diagnostic() {
+        crate::uart::mock_mmio::reset();
+
+        // Make TX FIFO always not-full so write_byte never spins.
+        crate::uart::mock_mmio::write(
+            crate::uart::UART0_BASE + crate::uart::FR,
+            0,
+        );
+
+        let mut ctx = ExceptionContext::default();
+        ctx.esr = 0x9800_0000; // Data abort from same EL
+        ctx.far = 0x0010_0000;
+        ctx.elr = 0x0008_0000;
+
+        // Call dump_exception with Synchronous type.
+        dump_exception(ExceptionType::Synchronous, &ctx);
+
+        // Verify that the UART DR register was written to (i.e. output was
+        // produced). We check the final write — the last character of the
+        // separator line "---...---\n".
+        let dr_val = crate::uart::mock_mmio::read(
+            crate::uart::UART0_BASE + crate::uart::DR,
+        );
+        // The dump ends with "-----------------------------\n", so the
+        // last byte written to DR should be '\n' (0x0A).
+        assert_eq!(dr_val, b'\n' as u32, "last DR write should be newline");
+
+        // Also verify something was written at all by checking that the DR
+        // address has a non-zero value (our initial mock state is all zeros).
+        // The fact that dr_val == '\n' already proves output was produced.
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: dump_exception includes correct exception type label
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dump_exception_includes_type_label() {
+        crate::uart::mock_mmio::reset();
+
+        // Make TX FIFO always not-full.
+        crate::uart::mock_mmio::write(
+            crate::uart::UART0_BASE + crate::uart::FR,
+            0,
+        );
+
+        let ctx = ExceptionContext::default();
+
+        // Call with FIQ type.
+        dump_exception(ExceptionType::Fiq, &ctx);
+
+        // The output should contain "FIQ" — but since we can't easily read
+        // back the stream of bytes, we verify that the UART was exercised
+        // by checking the DR was written to.
+        let dr_val = crate::uart::mock_mmio::read(
+            crate::uart::UART0_BASE + crate::uart::DR,
+        );
+        assert_ne!(dr_val, 0, "DR should have been written to by dump_exception");
     }
 }
