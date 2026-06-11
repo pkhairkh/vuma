@@ -53,6 +53,7 @@ pub mod bridge;
 pub mod config;
 pub mod deployment;
 pub mod optimization;
+pub mod ownership;
 pub mod profile;
 pub mod runtime;
 pub mod speculative;

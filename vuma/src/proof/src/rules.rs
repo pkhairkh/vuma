@@ -242,7 +242,7 @@ impl InferenceRule {
                 match premise.judgment.as_ref() {
                     Some(Judgment::Allocated { region }) => {
                         let j = Judgment::Live {
-                            region: region.clone(),
+                            region: *region,
                         };
                         Ok(Fact::derived_j(next_id, j))
                     }
@@ -309,7 +309,7 @@ impl InferenceRule {
                     // judgments (the lock grants exclusive access).
                     Some(Judgment::Exclusive { resource }) => {
                         let j = Judgment::Exclusive {
-                            resource: resource.clone(),
+                            resource: *resource,
                         };
                         Ok(Fact::derived_j(next_id, j))
                     }
@@ -433,9 +433,9 @@ impl InferenceRule {
                             });
                         }
                         let j = Judgment::Derived {
-                            pointer: a.clone(),
-                            from: c.clone(),
-                            region: r1.clone(),
+                            pointer: *a,
+                            from: *c,
+                            region: *r1,
                         };
                         Ok(Fact::derived_j(next_id, j))
                     }
@@ -621,8 +621,8 @@ impl InferenceRule {
                             });
                         }
                         let j = Judgment::TemporalOrder {
-                            event_a: a.clone(),
-                            event_b: c.clone(),
+                            event_a: *a,
+                            event_b: *c,
                         };
                         Ok(Fact::derived_j(next_id, j))
                     }
@@ -682,7 +682,7 @@ impl std::fmt::Display for InferenceRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::judgment::CapDKind;
+    use crate::judgment::{CapDKind, EventId, PointerId, RegionId as JRegionId, ResourceId};
     use crate::proof::FactKind;
 
     // -- Legacy string-based tests (backward compatibility) ----------------
@@ -783,7 +783,7 @@ mod tests {
         let premise = Fact::axiom_j(
             1,
             Judgment::Allocated {
-                region: "r42".into(),
+                region: JRegionId(42),
             },
         );
         let result = rule.apply(&[premise]).unwrap();
@@ -791,10 +791,10 @@ mod tests {
         assert_eq!(
             result.judgment,
             Some(Judgment::Live {
-                region: "r42".into()
+                region: JRegionId(42)
             })
         );
-        assert_eq!(result.statement, "region r42 is live");
+        assert_eq!(result.statement, "region region#42 is live");
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod tests {
         let premise = Fact::axiom_j(
             1,
             Judgment::Freed {
-                region: "r42".into(),
+                region: JRegionId(42),
             },
         );
         let err = rule.apply(&[premise]).unwrap_err();
@@ -816,12 +816,12 @@ mod tests {
         let premise = Fact::checked_j(
             1,
             Judgment::Freed {
-                region: "r7".into(),
+                region: JRegionId(7),
             },
         );
         let result = rule.apply(&[premise]).unwrap();
         assert_eq!(result.kind, FactKind::Derived);
-        assert_eq!(result.statement, "region r7 is dead");
+        assert_eq!(result.statement, "region region#7 is dead");
     }
 
     #[test]
@@ -830,14 +830,14 @@ mod tests {
         let premise = Fact::axiom_j(
             1,
             Judgment::Exclusive {
-                resource: "lock_L_region_R".into(),
+                resource: ResourceId(10),
             },
         );
         let result = rule.apply(&[premise]).unwrap();
         assert_eq!(
             result.judgment,
             Some(Judgment::Exclusive {
-                resource: "lock_L_region_R".into()
+                resource: ResourceId(10)
             })
         );
     }
@@ -848,19 +848,19 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::Exclusive {
-                resource: "region_A".into(),
+                resource: ResourceId(1),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::Exclusive {
-                resource: "region_B".into(),
+                resource: ResourceId(2),
             },
         );
         let result = rule.apply(&[p0, p1]).unwrap();
         assert!(result.statement.contains("no conflict"));
-        assert!(result.statement.contains("region_A"));
-        assert!(result.statement.contains("region_B"));
+        assert!(result.statement.contains("resource#1"));
+        assert!(result.statement.contains("resource#2"));
     }
 
     #[test]
@@ -869,31 +869,31 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::Derived {
-                pointer: "p_a".into(),
-                from: "p_b".into(),
-                region: "r1".into(),
+                pointer: PointerId(1),
+                from: PointerId(2),
+                region: JRegionId(1),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::Derived {
-                pointer: "p_b".into(),
-                from: "p_c".into(),
-                region: "r1".into(),
+                pointer: PointerId(2),
+                from: PointerId(3),
+                region: JRegionId(1),
             },
         );
         let result = rule.apply(&[p0, p1]).unwrap();
         assert_eq!(
             result.judgment,
             Some(Judgment::Derived {
-                pointer: "p_a".into(),
-                from: "p_c".into(),
-                region: "r1".into(),
+                pointer: PointerId(1),
+                from: PointerId(3),
+                region: JRegionId(1),
             })
         );
         assert_eq!(
             result.statement,
-            "p_a derives from p_c in region r1"
+            "pointer#1 derives from pointer#3 in region region#1"
         );
     }
 
@@ -903,17 +903,17 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::Derived {
-                pointer: "p_a".into(),
-                from: "p_b".into(),
-                region: "r1".into(),
+                pointer: PointerId(1),
+                from: PointerId(2),
+                region: JRegionId(1),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::Derived {
-                pointer: "p_x".into(), // mismatch: p_b != p_x
-                from: "p_c".into(),
-                region: "r1".into(),
+                pointer: PointerId(9), // mismatch: PointerId(2) != PointerId(9)
+                from: PointerId(3),
+                region: JRegionId(1),
             },
         );
         let err = rule.apply(&[p0, p1]).unwrap_err();
@@ -929,17 +929,17 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::Derived {
-                pointer: "p_a".into(),
-                from: "p_b".into(),
-                region: "r1".into(),
+                pointer: PointerId(1),
+                from: PointerId(2),
+                region: JRegionId(1),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::Derived {
-                pointer: "p_b".into(),
-                from: "p_c".into(),
-                region: "r2".into(), // different region
+                pointer: PointerId(2),
+                from: PointerId(3),
+                region: JRegionId(2), // different region
             },
         );
         let err = rule.apply(&[p0, p1]).unwrap_err();
@@ -955,26 +955,26 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::TemporalOrder {
-                event_a: "e1".into(),
-                event_b: "e2".into(),
+                event_a: EventId(1),
+                event_b: EventId(2),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::TemporalOrder {
-                event_a: "e2".into(),
-                event_b: "e3".into(),
+                event_a: EventId(2),
+                event_b: EventId(3),
             },
         );
         let result = rule.apply(&[p0, p1]).unwrap();
         assert_eq!(
             result.judgment,
             Some(Judgment::TemporalOrder {
-                event_a: "e1".into(),
-                event_b: "e3".into(),
+                event_a: EventId(1),
+                event_b: EventId(3),
             })
         );
-        assert_eq!(result.statement, "e1 happens before e3");
+        assert_eq!(result.statement, "event#1 happens before event#3");
     }
 
     #[test]
@@ -983,15 +983,15 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::TemporalOrder {
-                event_a: "e1".into(),
-                event_b: "e2".into(),
+                event_a: EventId(1),
+                event_b: EventId(2),
             },
         );
         let p1 = Fact::derived_j(
             2,
             Judgment::TemporalOrder {
-                event_a: "e5".into(), // mismatch: e2 != e5
-                event_b: "e3".into(),
+                event_a: EventId(5), // mismatch: EventId(2) != EventId(5)
+                event_b: EventId(3),
             },
         );
         let err = rule.apply(&[p0, p1]).unwrap_err();
@@ -1007,7 +1007,7 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::InBounds {
-                pointer: "ptr".into(),
+                pointer: PointerId(1),
                 offset: 8,
                 size: 4,
             },
@@ -1015,7 +1015,7 @@ mod tests {
         let p1 = Fact::axiom(2, "region r1 has bounds [0, 1024]");
         let result = rule.apply(&[p0, p1]).unwrap();
         assert!(result.statement.contains("bounds preserved"));
-        assert!(result.statement.contains("ptr"));
+        assert!(result.statement.contains("pointer#1"));
     }
 
     #[test]
@@ -1024,7 +1024,7 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::PreservesCapD {
-                resource: "mem_r1".into(),
+                resource: ResourceId(1),
                 from_capd: CapDKind::ReadWrite,
                 to_capd: CapDKind::Read,
             },

@@ -9368,3 +9368,91 @@ Files Modified:
 Verification:
 - `cargo clippy -p vuma-ive -- -D warnings`: 0 warnings, 0 errors
 - `cargo test -p vuma-ive -- -q`: 226 tests passed, 0 failed (including 7 new strictness tests)
+
+
+---
+
+## Task ID: W7
+Agent: COR Runtime Hardening
+Task: Add x86_64 JIT execution path and Region-Based Ownership Tracking to vuma-cor
+
+### Improvement 1: x86_64 JIT Execution
+
+**Changes to `/home/z/my-project/vuma/src/cor/src/runtime.rs`:**
+
+1. **Added `execute_code_x86_64()` function** — New `#[cfg(all(unix, target_arch = "x86_64"))]` function that follows the same mmap + mprotect + transmute + call + munmap pattern as `execute_code_aarch64()`. Uses `PROT_READ | PROT_WRITE | PROT_EXEC` for mprotect (RWX) to support x86_64 JIT scenarios. The x86_64 SystemV ABI returns results in RAX, which maps naturally to `extern "C" fn() -> i64`.
+
+2. **Updated `execute_code()` dispatch** — Replaced the single `#[cfg(not(all(unix, target_arch = "aarch64")))]` fallback with a three-way dispatch:
+   - `#[cfg(all(unix, target_arch = "aarch64"))]` → `execute_code_aarch64(code)`
+   - `#[cfg(all(unix, target_arch = "x86_64"))]` → `execute_code_x86_64(code)`
+   - `#[cfg(not(any(...)))]` → returns `Ok(0)` (simulated execution for unsupported platforms)
+
+3. **Fixed discarded return value** — Changed `let _ = result;` to `let _result = execute_code(&code)?;` followed by `log::trace!("execute: region {} returned {}", region, _result);` so the return value is logged instead of silently discarded.
+
+4. **Made `return_zero_stub()` architecture-aware** — Previously emitted only ARM64 machine code (8 bytes). Now emits correct native stub for the current architecture:
+   - AArch64: `MOV X0, XZR; RET` (8 bytes)
+   - x86_64: `xor eax, eax; ret` (3 bytes)
+   - Other: empty vec
+
+5. **Updated `return_zero_stub_is_valid_arm64` test** — Renamed to `return_zero_stub_is_valid_native` and made architecture-aware with `#[cfg]` blocks for each target.
+
+### Improvement 2: Region-Based Ownership Tracking
+
+**Created `/home/z/my-project/vuma/src/cor/src/ownership.rs`:**
+
+1. **`OwnershipTracker` struct** — Central tracker with:
+   - `regions: HashMap<RegionId, RegionState>` — per-region ownership state
+   - `access_log: Vec<AccessRecord>` — log of all access attempts
+
+2. **`RegionState` struct** — Per-region state with:
+   - `id: RegionId`
+   - `owner: Option<ThreadId>`
+   - `access_mode: AccessMode` (Free, SharedRead, ExclusiveWrite)
+   - `readers: Vec<ThreadId>`
+   - `waiting_threads: Vec<WaitingThread>`
+
+3. **`AccessMode` enum** — Free, SharedRead, ExclusiveWrite
+
+4. **`AccessRecord` struct** — Records region, thread, is_write, granted
+
+5. **`WaitingThread` struct** — Thread waiting for access with is_write flag
+
+6. **`DataRace` struct** — Detected data race with region, thread_a, thread_b, access_records
+
+7. **`OwnershipError` enum** — Conflict, NotHeld, NotTracked variants with thiserror
+
+8. **Methods on `OwnershipTracker`:**
+   - `register_region()` / `unregister_region()` / `is_tracked()` / `get_region()` / `region_count()`
+   - `acquire_read()` — blocking acquire of shared read; blocks on ExclusiveWrite
+   - `acquire_write()` — blocking acquire of exclusive write; supports read-to-write upgrade if sole reader
+   - `try_acquire_read()` / `try_acquire_write()` — non-blocking variants (no waiting list)
+   - `release()` — releases access; grants waiting threads via `grant_waiters()`
+   - `detect_data_races()` — scans access log for conflicting granted accesses from different threads
+   - `access_log()` / `access_log_len()` / `clear_access_log()`
+
+9. **20 tests** covering all functionality (minimum 10 required):
+   - register_and_track_region, unregister_region, acquire_read_on_free_region
+   - multiple_readers_shared_access, acquire_write_on_free_region, write_blocked_by_readers
+   - read_blocked_by_writer, release_write_grants_waiting_reader, release_last_reader_grants_waiting_writer
+   - try_acquire_read_success, try_acquire_read_blocked_by_writer, try_acquire_write_success
+   - try_acquire_write_blocked_by_reader, upgrade_read_to_write, release_unheld_region_errors
+   - detect_data_race_write_vs_read, no_data_race_two_reads, access_log_records_granted_and_denied
+   - clear_access_log, double_register_is_noop, release_one_reader_keeps_shared_read, idempotent_acquire_write
+
+**Integration with CORuntime:**
+- Added `ownership_tracker: OwnershipTracker` field to `CORuntime` struct
+- Added `ownership_tracker()` and `ownership_tracker_mut()` accessor methods
+- Initialized in `CORuntime::new()` as `OwnershipTracker::new()`
+
+**Updated `/home/z/my-project/vuma/src/cor/src/lib.rs`:**
+- Added `pub mod ownership;` declaration
+
+**Also fixed workspace issue:**
+- Fixed `/home/z/my-project/vuma/src/projection/Cargo.toml` — corrected `vuma-scg` and `vuma-bd` paths from `../../scg`/`../../bd` to `../scg`/`../bd`
+
+### Verification
+```
+cargo clippy -p vuma-cor -- -D warnings: 0 warnings, 0 errors
+cargo test -p vuma-cor -- -q: 100 tests passed, 0 failed (including 20 ownership tests)
+```
+

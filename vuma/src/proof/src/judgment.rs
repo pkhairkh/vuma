@@ -8,6 +8,72 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Typed ID newtypes
+// ---------------------------------------------------------------------------
+
+/// Unique identifier for a memory region.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegionId(pub u64);
+
+/// Unique identifier for a resource (lock, buffer, etc.).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(pub u64);
+
+/// Unique identifier for a pointer derivation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PointerId(pub u64);
+
+/// Unique identifier for a variable.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VariableId(pub u64);
+
+/// Unique identifier for an event in the happens-before relation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EventId(pub u64);
+
+impl std::fmt::Display for RegionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "region#{}", self.0)
+    }
+}
+
+impl std::fmt::Display for ResourceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "resource#{}", self.0)
+    }
+}
+
+impl std::fmt::Display for PointerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pointer#{}", self.0)
+    }
+}
+
+impl std::fmt::Display for VariableId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "variable#{}", self.0)
+    }
+}
+
+impl std::fmt::Display for EventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "event#{}", self.0)
+    }
+}
+
+impl From<u64> for RegionId {
+    fn from(v: u64) -> Self {
+        RegionId(v)
+    }
+}
+
+impl From<RegionId> for u64 {
+    fn from(v: RegionId) -> Self {
+        v.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CapDKind
 // ---------------------------------------------------------------------------
 
@@ -49,32 +115,32 @@ impl std::fmt::Display for CapDKind {
 pub enum Judgment {
     /// A region has been allocated and is available for use.
     Allocated {
-        /// The name/identifier of the allocated region.
-        region: String,
+        /// The identifier of the allocated region.
+        region: RegionId,
     },
 
     /// A region is live (allocated and not yet freed).
     Live {
-        /// The name/identifier of the live region.
-        region: String,
+        /// The identifier of the live region.
+        region: RegionId,
     },
 
     /// A region has been freed and its memory returned to the allocator.
     Freed {
-        /// The name/identifier of the freed region.
-        region: String,
+        /// The identifier of the freed region.
+        region: RegionId,
     },
 
     /// A resource is held under exclusive (mutable) access.
     Exclusive {
         /// The resource under exclusive access.
-        resource: String,
+        resource: ResourceId,
     },
 
     /// A resource is shared among `count` readers.
     Shared {
         /// The shared resource.
-        resource: String,
+        resource: ResourceId,
         /// The number of active shared holders.
         count: usize,
     },
@@ -82,17 +148,17 @@ pub enum Judgment {
     /// A pointer is derived from another pointer within a specific region.
     Derived {
         /// The derived pointer.
-        pointer: String,
+        pointer: PointerId,
         /// The source pointer from which it was derived.
-        from: String,
+        from: PointerId,
         /// The region containing both pointers.
-        region: String,
+        region: RegionId,
     },
 
     /// An access at `(pointer + offset)` of `size` bytes is within bounds.
     InBounds {
         /// The base pointer.
-        pointer: String,
+        pointer: PointerId,
         /// The byte offset from the pointer.
         offset: i64,
         /// The size of the access in bytes.
@@ -101,14 +167,14 @@ pub enum Judgment {
 
     /// A variable has been initialized with a defined value.
     Initialized {
-        /// The name of the initialized variable.
-        variable: String,
+        /// The identifier of the initialized variable.
+        variable: VariableId,
     },
 
     /// A transformation preserves a capability derivation property.
     PreservesCapD {
         /// The resource whose capability is preserved.
-        resource: String,
+        resource: ResourceId,
         /// The capability kind before the transformation.
         from_capd: CapDKind,
         /// The capability kind after the transformation.
@@ -118,9 +184,9 @@ pub enum Judgment {
     /// Event A is ordered before event B in the happens-before relation.
     TemporalOrder {
         /// The earlier event.
-        event_a: String,
+        event_a: EventId,
         /// The later event.
-        event_b: String,
+        event_b: EventId,
     },
 }
 
@@ -177,92 +243,95 @@ mod tests {
     #[test]
     fn test_allocated_statement() {
         let j = Judgment::Allocated {
-            region: "r1".into(),
+            region: RegionId(1),
         };
-        assert_eq!(j.to_statement(), "region r1 is allocated");
+        assert_eq!(j.to_statement(), "region region#1 is allocated");
     }
 
     #[test]
     fn test_live_statement() {
         let j = Judgment::Live {
-            region: "r1".into(),
+            region: RegionId(1),
         };
-        assert_eq!(j.to_statement(), "region r1 is live");
+        assert_eq!(j.to_statement(), "region region#1 is live");
     }
 
     #[test]
     fn test_freed_statement() {
         let j = Judgment::Freed {
-            region: "r1".into(),
+            region: RegionId(1),
         };
-        assert_eq!(j.to_statement(), "region r1 is freed");
+        assert_eq!(j.to_statement(), "region region#1 is freed");
     }
 
     #[test]
     fn test_exclusive_statement() {
         let j = Judgment::Exclusive {
-            resource: "lock_L".into(),
+            resource: ResourceId(10),
         };
-        assert_eq!(j.to_statement(), "exclusive access to lock_L");
+        assert_eq!(j.to_statement(), "exclusive access to resource#10");
     }
 
     #[test]
     fn test_shared_statement() {
         let j = Judgment::Shared {
-            resource: "buf".into(),
+            resource: ResourceId(5),
             count: 3,
         };
-        assert_eq!(j.to_statement(), "shared access to buf (count=3)");
+        assert_eq!(j.to_statement(), "shared access to resource#5 (count=3)");
     }
 
     #[test]
     fn test_derived_statement() {
         let j = Judgment::Derived {
-            pointer: "p".into(),
-            from: "q".into(),
-            region: "r1".into(),
+            pointer: PointerId(1),
+            from: PointerId(2),
+            region: RegionId(1),
         };
-        assert_eq!(j.to_statement(), "p derives from q in region r1");
+        assert_eq!(
+            j.to_statement(),
+            "pointer#1 derives from pointer#2 in region region#1"
+        );
     }
 
     #[test]
     fn test_inbounds_statement() {
         let j = Judgment::InBounds {
-            pointer: "p".into(),
+            pointer: PointerId(3),
             offset: 16,
             size: 4,
         };
-        assert_eq!(j.to_statement(), "inbounds p offset=16 size=4");
+        assert_eq!(j.to_statement(), "inbounds pointer#3 offset=16 size=4");
     }
 
     #[test]
     fn test_initialized_statement() {
         let j = Judgment::Initialized {
-            variable: "x".into(),
+            variable: VariableId(7),
         };
-        assert_eq!(j.to_statement(), "variable x is initialized");
+        assert_eq!(j.to_statement(), "variable variable#7 is initialized");
     }
 
     #[test]
     fn test_preserves_capd_statement() {
         let j = Judgment::PreservesCapD {
-            resource: "mem".into(),
+            resource: ResourceId(2),
             from_capd: CapDKind::ReadWrite,
             to_capd: CapDKind::Read,
         };
         assert_eq!(
             j.to_statement(),
-            "preserves CapD for mem: readwrite -> read"
+            "preserves CapD for resource#2: readwrite -> read"
         );
     }
 
     #[test]
     fn test_temporal_order_statement() {
         let j = Judgment::TemporalOrder {
-            event_a: "e1".into(),
-            event_b: "e2".into(),
+            event_a: EventId(1),
+            event_b: EventId(2),
         };
-        assert_eq!(j.to_statement(), "e1 happens before e2");
+        assert_eq!(j.to_statement(), "event#1 happens before event#2");
     }
 
     #[test]
@@ -276,8 +345,25 @@ mod tests {
     #[test]
     fn test_judgment_display() {
         let j = Judgment::Allocated {
-            region: "r1".into(),
+            region: RegionId(1),
         };
-        assert_eq!(format!("{}", j), "region r1 is allocated");
+        assert_eq!(format!("{}", j), "region region#1 is allocated");
+    }
+
+    #[test]
+    fn test_id_display_formats() {
+        assert_eq!(format!("{}", RegionId(0)), "region#0");
+        assert_eq!(format!("{}", ResourceId(1)), "resource#1");
+        assert_eq!(format!("{}", PointerId(2)), "pointer#2");
+        assert_eq!(format!("{}", VariableId(3)), "variable#3");
+        assert_eq!(format!("{}", EventId(4)), "event#4");
+    }
+
+    #[test]
+    fn test_region_id_from_u64() {
+        let rid: RegionId = 42.into();
+        assert_eq!(rid, RegionId(42));
+        let val: u64 = rid.into();
+        assert_eq!(val, 42);
     }
 }

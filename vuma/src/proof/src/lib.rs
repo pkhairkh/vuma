@@ -33,7 +33,7 @@ pub mod tactics;
 // Re-export the primary types for convenience
 pub use checker::{CheckResult, ProofChecker};
 pub use counterexample::{CounterExample, Step, ViolationPoint};
-pub use judgment::{CapDKind, Judgment};
+pub use judgment::{CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId, VariableId};
 pub use proof::{Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 pub use origin_proofs::{
     DerivationChainProof, OriginInfo, OriginInfoBuilder, OriginProof, OriginTactic, ProofFailure,

@@ -16,6 +16,7 @@
 use crate::config::Config;
 use crate::deployment::DeploymentPlanner;
 use crate::optimization::{OptimizationEngine, OptimizationResult, ProfileReport};
+use crate::ownership::OwnershipTracker;
 use crate::profile::ProfileData;
 use crate::speculative::SpeculativeOptimizer;
 use crate::types::{CompiledRegion, Delta, NodeKind, RegionId, SCG};
@@ -161,6 +162,9 @@ pub struct CORuntime {
 
     /// Profile-guided optimization engine.
     optimization_engine: OptimizationEngine,
+
+    /// Region-based ownership tracker.
+    ownership_tracker: OwnershipTracker,
 }
 
 impl CORuntime {
@@ -181,6 +185,7 @@ impl CORuntime {
             speculative_optimizer: SpeculativeOptimizer::new(),
             deployment_planner,
             optimization_engine,
+            ownership_tracker: OwnershipTracker::new(),
         }
     }
 
@@ -322,8 +327,8 @@ impl CORuntime {
 
         // Execute the compiled code via memory-mapped execution.
         let code = compiled.code.clone();
-        let result = execute_code(&code)?;
-        let _ = result; // The return value is recorded but not propagated.
+        let _result = execute_code(&code)?;
+        log::trace!("execute: region {} returned {}", region, _result);
 
         Ok(())
     }
@@ -475,6 +480,16 @@ impl CORuntime {
     /// Returns a reference to the optimization engine.
     pub fn optimization_engine(&self) -> &OptimizationEngine {
         &self.optimization_engine
+    }
+
+    /// Returns a reference to the ownership tracker.
+    pub fn ownership_tracker(&self) -> &OwnershipTracker {
+        &self.ownership_tracker
+    }
+
+    /// Returns a mutable reference to the ownership tracker.
+    pub fn ownership_tracker_mut(&mut self) -> &mut OwnershipTracker {
+        &mut self.ownership_tracker
     }
 
     /// Returns a reference to the SCG.
@@ -777,9 +792,11 @@ impl CORuntime {
         }
     }
 
-    /// Returns the ARM64 machine code for a minimal "return 0" stub.
+    /// Returns the machine code for a minimal "return 0" stub for the
+    /// current architecture.
     ///
-    /// The stub is:
+    /// # AArch64
+    ///
     /// ```asm
     /// MOV X0, XZR    ; return 0
     /// RET
@@ -788,14 +805,40 @@ impl CORuntime {
     /// Encoded as two 32-bit little-endian instruction words:
     /// - `MOV X0, XZR` → `0xAA1F03E0`
     /// - `RET`         → `0xD65F03C0`
+    ///
+    /// # x86_64
+    ///
+    /// ```asm
+    /// xor eax, eax   ; return 0
+    /// ret
+    /// ```
+    ///
+    /// Encoded as:
+    /// - `xor eax, eax` → `0x31 0xC0`
+    /// - `ret`           → `0xC3`
     #[allow(dead_code)]
     fn return_zero_stub() -> Vec<u8> {
-        let mov_x0_xzr: u32 = 0xAA1F03E0;
-        let ret: u32 = 0xD65F03C0;
-        let mut bytes = Vec::with_capacity(8);
-        bytes.extend_from_slice(&mov_x0_xzr.to_le_bytes());
-        bytes.extend_from_slice(&ret.to_le_bytes());
-        bytes
+        #[cfg(all(unix, target_arch = "aarch64"))]
+        {
+            let mov_x0_xzr: u32 = 0xAA1F03E0;
+            let ret: u32 = 0xD65F03C0;
+            let mut bytes = Vec::with_capacity(8);
+            bytes.extend_from_slice(&mov_x0_xzr.to_le_bytes());
+            bytes.extend_from_slice(&ret.to_le_bytes());
+            bytes
+        }
+
+        #[cfg(all(unix, target_arch = "x86_64"))]
+        {
+            // xor eax, eax  → 31 C0
+            // ret            → C3
+            vec![0x31, 0xC0, 0xC3]
+        }
+
+        #[cfg(not(any(all(unix, target_arch = "aarch64"), all(unix, target_arch = "x86_64"))))]
+        {
+            Vec::new()
+        }
     }
 }
 
@@ -831,16 +874,18 @@ pub enum RuntimeError {
 // Memory-mapped code execution
 // ---------------------------------------------------------------------------
 
-/// Executes ARM64 machine code by mapping it into executable memory.
+/// Executes machine code by mapping it into executable memory.
 ///
 /// On AArch64 Unix systems, this uses `mmap` to create an anonymous memory
 /// region, copies the code into it, sets the region to read+execute with
 /// `mprotect`, calls the code as a function `extern "C" fn() -> i64`, and
 /// unmaps the memory when done.
 ///
-/// On non-AArch64 or non-Unix systems, execution is simulated and 0 is
-/// returned. This allows the COR to be tested on x86_64 development
-/// machines while still running real code on the Pi 5 target.
+/// On x86_64 Unix systems, the same mmap + mprotect pattern is used.
+/// The x86_64 SystemV ABI returns the result in RAX.
+///
+/// On other architectures or non-Unix systems, execution is simulated and
+/// 0 is returned.
 fn execute_code(code: &[u8]) -> Result<i64, RuntimeError> {
     if code.is_empty() {
         return Ok(0);
@@ -851,10 +896,14 @@ fn execute_code(code: &[u8]) -> Result<i64, RuntimeError> {
         execute_code_aarch64(code)
     }
 
-    #[cfg(not(all(unix, target_arch = "aarch64")))]
+    #[cfg(all(unix, target_arch = "x86_64"))]
+    {
+        execute_code_x86_64(code)
+    }
+
+    #[cfg(not(any(all(unix, target_arch = "aarch64"), all(unix, target_arch = "x86_64"))))]
     {
         let _ = code;
-        // Simulated execution on non-AArch64 hosts: return 0.
         Ok(0)
     }
 }
@@ -901,6 +950,69 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
         }
 
         // Call the compiled code as a function: extern "C" fn() -> i64.
+        let func: extern "C" fn() -> i64 = std::mem::transmute(mem);
+        let result = func();
+
+        // Unmap the executable memory.
+        libc::munmap(mem, aligned_len);
+
+        Ok(result)
+    }
+}
+
+/// x86_64 Unix implementation of code execution using mmap + mprotect.
+///
+/// Follows the same pattern as [`execute_code_aarch64`]: allocate anonymous
+/// memory with `mmap`, copy the machine code in, set the region to
+/// read+write+execute with `mprotect`, transmute to a function pointer, call
+/// it, and `munmap` when done. The x86_64 SystemV ABI returns the result in
+/// RAX, which maps naturally to the `extern "C" fn() -> i64` signature.
+#[cfg(all(unix, target_arch = "x86_64"))]
+fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
+    use std::ptr;
+
+    let len = code.len();
+    // Page-align the allocation size.
+    let page_size = 4096usize;
+    #[allow(clippy::manual_div_ceil)]
+    let aligned_len = ((len + page_size - 1) / page_size) * page_size;
+
+    unsafe {
+        // Allocate anonymous memory with read + write (so we can copy code in).
+        let mem = libc::mmap(
+            ptr::null_mut(),
+            aligned_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+
+        if mem == libc::MAP_FAILED {
+            return Err(RuntimeError::ExecutionFailed(
+                0,
+                "mmap failed".to_string(),
+            ));
+        }
+
+        // Copy the machine code into the mapped region.
+        ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
+
+        // Set the region to read + write + execute.
+        // x86_64 requires W+X for some JIT scenarios; we use RWX here
+        // to match the AArch64 pattern (R+X) but also allow the write
+        // flag for self-modifying code scenarios on x86_64.
+        let mprotect_result = libc::mprotect(mem, aligned_len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        if mprotect_result != 0 {
+            libc::munmap(mem, aligned_len);
+            return Err(RuntimeError::ExecutionFailed(
+                0,
+                "mprotect failed".to_string(),
+            ));
+        }
+
+        // Call the compiled code as a function: extern "C" fn() -> i64.
+        // x86_64 SystemV ABI: result is returned in RAX.
         let func: extern "C" fn() -> i64 = std::mem::transmute(mem);
         let result = func();
 
@@ -1082,20 +1194,38 @@ mod tests {
     }
 
     #[test]
-    fn return_zero_stub_is_valid_arm64() {
+    fn return_zero_stub_is_valid_native() {
         let stub = CORuntime::return_zero_stub();
-        // Should be exactly 8 bytes (2 ARM64 instructions).
-        assert_eq!(stub.len(), 8);
-        // First instruction: MOV X0, XZR (0xAA1F03E0 in little-endian).
-        assert_eq!(stub[0], 0xE0);
-        assert_eq!(stub[1], 0x03);
-        assert_eq!(stub[2], 0x1F);
-        assert_eq!(stub[3], 0xAA);
-        // Second instruction: RET (0xD65F03C0 in little-endian).
-        assert_eq!(stub[4], 0xC0);
-        assert_eq!(stub[5], 0x03);
-        assert_eq!(stub[6], 0x5F);
-        assert_eq!(stub[7], 0xD6);
+
+        #[cfg(all(unix, target_arch = "aarch64"))]
+        {
+            // Should be exactly 8 bytes (2 ARM64 instructions).
+            assert_eq!(stub.len(), 8);
+            // First instruction: MOV X0, XZR (0xAA1F03E0 in little-endian).
+            assert_eq!(stub[0], 0xE0);
+            assert_eq!(stub[1], 0x03);
+            assert_eq!(stub[2], 0x1F);
+            assert_eq!(stub[3], 0xAA);
+            // Second instruction: RET (0xD65F03C0 in little-endian).
+            assert_eq!(stub[4], 0xC0);
+            assert_eq!(stub[5], 0x03);
+            assert_eq!(stub[6], 0x5F);
+            assert_eq!(stub[7], 0xD6);
+        }
+
+        #[cfg(all(unix, target_arch = "x86_64"))]
+        {
+            // Should be exactly 3 bytes (xor eax, eax + ret).
+            assert_eq!(stub.len(), 3);
+            assert_eq!(stub[0], 0x31);
+            assert_eq!(stub[1], 0xC0);
+            assert_eq!(stub[2], 0xC3);
+        }
+
+        #[cfg(not(any(all(unix, target_arch = "aarch64"), all(unix, target_arch = "x86_64"))))]
+        {
+            assert!(stub.is_empty());
+        }
     }
 
     #[test]

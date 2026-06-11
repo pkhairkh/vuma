@@ -606,18 +606,18 @@ mod tests {
 
     // -- Structured judgment checker tests ------------------------------------
 
-    use crate::judgment::Judgment;
+    use crate::judgment::{EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId};
 
     #[test]
     fn test_structured_liveness_intro_proof() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Allocated { region: "r1".into() }),
+            fact: Fact::axiom_j(1, Judgment::Allocated { region: JRegionId(1) }),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived_j(2, Judgment::Live { region: "r1".into() }),
+            conclusion: Fact::derived_j(2, Judgment::Live { region: JRegionId(1) }),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -630,13 +630,13 @@ mod tests {
     fn test_structured_liveness_intro_judgment_mismatch() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Allocated { region: "r1".into() }),
+            fact: Fact::axiom_j(1, Judgment::Allocated { region: JRegionId(1) }),
         });
         // Claim the conclusion is Live for r2, but the rule will produce Live for r1
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived_j(2, Judgment::Live { region: "r2".into() }),
+            conclusion: Fact::derived_j(2, Judgment::Live { region: JRegionId(2) }),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -655,9 +655,9 @@ mod tests {
             fact: Fact::axiom_j(
                 1,
                 Judgment::Derived {
-                    pointer: "p_a".into(),
-                    from: "p_b".into(),
-                    region: "r1".into(),
+                    pointer: PointerId(1),
+                    from: PointerId(2),
+                    region: JRegionId(1),
                 },
             ),
         });
@@ -665,9 +665,9 @@ mod tests {
             fact: Fact::axiom_j(
                 2,
                 Judgment::Derived {
-                    pointer: "p_b".into(),
-                    from: "p_c".into(),
-                    region: "r1".into(),
+                    pointer: PointerId(2),
+                    from: PointerId(3),
+                    region: JRegionId(1),
                 },
             ),
         });
@@ -677,9 +677,9 @@ mod tests {
             conclusion: Fact::derived_j(
                 3,
                 Judgment::Derived {
-                    pointer: "p_a".into(),
-                    from: "p_c".into(),
-                    region: "r1".into(),
+                    pointer: PointerId(1),
+                    from: PointerId(3),
+                    region: JRegionId(1),
                 },
             ),
         });
@@ -697,8 +697,8 @@ mod tests {
             fact: Fact::axiom_j(
                 1,
                 Judgment::TemporalOrder {
-                    event_a: "e1".into(),
-                    event_b: "e2".into(),
+                    event_a: EventId(1),
+                    event_b: EventId(2),
                 },
             ),
         });
@@ -706,8 +706,8 @@ mod tests {
             fact: Fact::axiom_j(
                 2,
                 Judgment::TemporalOrder {
-                    event_a: "e2".into(),
-                    event_b: "e3".into(),
+                    event_a: EventId(2),
+                    event_b: EventId(3),
                 },
             ),
         });
@@ -717,8 +717,8 @@ mod tests {
             conclusion: Fact::derived_j(
                 3,
                 Judgment::TemporalOrder {
-                    event_a: "e1".into(),
-                    event_b: "e3".into(),
+                    event_a: EventId(1),
+                    event_b: EventId(3),
                 },
             ),
         });
@@ -735,13 +735,13 @@ mod tests {
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 1,
-                Judgment::Exclusive { resource: "region_A".into() },
+                Judgment::Exclusive { resource: ResourceId(1) },
             ),
         });
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 2,
-                Judgment::Exclusive { resource: "region_B".into() },
+                Judgment::Exclusive { resource: ResourceId(2) },
             ),
         });
         proof.add_step(ProofStep::Infer {
@@ -760,7 +760,7 @@ mod tests {
     fn test_structured_liveness_elim_proof() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::checked_j(1, Judgment::Freed { region: "r5".into() }),
+            fact: Fact::checked_j(1, Judgment::Freed { region: JRegionId(5) }),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
@@ -779,7 +779,7 @@ mod tests {
         // Try to apply LivenessIntro to a Freed judgment — should fail.
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Freed { region: "r1".into() }),
+            fact: Fact::axiom_j(1, Judgment::Freed { region: JRegionId(1) }),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
@@ -803,7 +803,7 @@ mod tests {
             fact: Fact::derived_j(
                 1,
                 Judgment::InBounds {
-                    pointer: "ptr".into(),
+                    pointer: PointerId(1),
                     offset: 8,
                     size: 4,
                 },
@@ -833,7 +833,7 @@ mod tests {
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 1,
-                Judgment::Exclusive { resource: "lock_L_region_R".into() },
+                Judgment::Exclusive { resource: ResourceId(10) },
             ),
         });
         proof.add_step(ProofStep::Infer {
@@ -841,7 +841,7 @@ mod tests {
             rule: InferenceRule::ExclusivityIntro,
             conclusion: Fact::derived_j(
                 2,
-                Judgment::Exclusive { resource: "lock_L_region_R".into() },
+                Judgment::Exclusive { resource: ResourceId(10) },
             ),
         });
         proof.conclude(Conclusion::Proven);
