@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   check:
@@ -57,3 +58,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: "! grep -rn 'TODO\\|FIXME\\|todo!\\|unimplemented!' src/ --include='*.rs'"
+
+  pi5-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-03-01
+          targets: aarch64-unknown-none
+      - run: cargo build -p vuma-pi5 --target aarch64-unknown-none

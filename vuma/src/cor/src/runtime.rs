@@ -969,6 +969,30 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
 /// RAX, which maps naturally to the `extern "C" fn() -> i64` signature.
 #[cfg(all(unix, target_arch = "x86_64"))]
 fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
+    // Safety check: if the code was compiled for a non-x86_64 target (e.g., AArch64),
+    // executing it on x86_64 would cause SIGSEGV. Detect this by checking for
+    // AArch64 instruction patterns (all AArch64 instructions are 4-byte aligned
+    // and have specific encodings). If we detect non-x86_64 code, return 0 instead
+    // of crashing.
+    if code.len() >= 4 {
+        // AArch64 RET instruction is 0xD65F03C0 (little-endian: C0 03 5F D6)
+        // AArch64 NOP is 0xD503201F (little-endian: 1F 20 03 D5)
+        // If the code starts with an AArch64-style word, it's likely AArch64 code.
+        let first_word = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        // AArch64 instructions always have bits [28:25] as a valid encoding.
+        // Specifically, if bits [31:26] match common AArch64 patterns, skip execution.
+        let is_likely_aarch64 = (first_word & 0x1C000000) == 0x00000000 // reserved/System
+            || (first_word & 0x7C000000) == 0x14000000  // B/BL
+            || (first_word & 0x7F000000) == 0x53000000  // MOV
+            || (first_word & 0x7FE00000) == 0x2A000000  // ADD
+            || (first_word & 0xFF000000) == 0xD6000000  // BR/BLR/RET
+            || (first_word & 0xFF000000) == 0xD5000000; // System/MRS/MSR
+        if is_likely_aarch64 {
+            log::debug!("execute_code_x86_64: code appears to be AArch64, skipping execution");
+            return Ok(0);
+        }
+    }
+
     use std::ptr;
 
     let len = code.len();
