@@ -39,9 +39,105 @@
 //! - ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile
 //! - <https://developer.arm.com/documentation/ddi0487/latest>
 
-use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator, IRValue};
+use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator, IRType, IRValue};
 use crate::CodegenError;
 use crate::Result;
+
+// ---------------------------------------------------------------------------
+// Register Width
+// ---------------------------------------------------------------------------
+
+/// ARM64 register width — selects between 64-bit X registers and 32-bit W
+/// sub-registers.
+///
+/// On AArch64, the 5-bit register encoding is the same for Xn and Wn; the
+/// instruction's **sf** bit (bit 31) or **size** field (bits 31:30) selects
+/// the operand width. Using W registers gives automatic 32-bit wrapping
+/// arithmetic, which is required for algorithms like SHA-256 that operate on
+/// `u32` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RegWidth {
+    /// 32-bit W registers (W0–W30, WZR, WSP).
+    W32,
+    /// 64-bit X registers (X0–X30, XZR, SP) — default.
+    X64,
+}
+
+impl RegWidth {
+    /// Returns `true` if this is a 32-bit register width.
+    pub fn is_32bit(&self) -> bool {
+        matches!(self, RegWidth::W32)
+    }
+
+    /// Returns the **sf** bit value for this width (bit 31 of the encoding).
+    ///
+    /// - `X64` → 1
+    /// - `W32` → 0
+    pub fn sf_bit(&self) -> u32 {
+        match self {
+            RegWidth::X64 => 1,
+            RegWidth::W32 => 0,
+        }
+    }
+
+    /// Returns the register size in bits (64 or 32).
+    pub fn bits(&self) -> u32 {
+        match self {
+            RegWidth::X64 => 64,
+            RegWidth::W32 => 32,
+        }
+    }
+
+    /// Returns the register size in bytes (8 or 4).
+    pub fn bytes(&self) -> u32 {
+        self.bits() / 8
+    }
+
+    /// Returns the log2 scale for unsigned-offset load/store encoding.
+    ///
+    /// - `X64` → 3 (offset is divided by 8 for 64-bit LDR/STR)
+    /// - `W32` → 2 (offset is divided by 4 for 32-bit LDR/STR)
+    pub fn scale(&self) -> u32 {
+        match self {
+            RegWidth::X64 => 3,
+            RegWidth::W32 => 2,
+        }
+    }
+
+    /// Returns the mask value used in UBFM/SBFM for the `imms` field
+    /// (register size - 1).
+    pub fn size_minus_1(&self) -> u32 {
+        match self {
+            RegWidth::X64 => 63,
+            RegWidth::W32 => 31,
+        }
+    }
+
+    /// Derive the register width from an optional IR type.
+    ///
+    /// Returns `W32` for `I32`/`U32` types, `X64` otherwise (including `None`).
+    pub fn from_ir_type(ty: Option<&IRType>) -> RegWidth {
+        match ty {
+            Some(IRType::I32) | Some(IRType::U32) => RegWidth::W32,
+            _ => RegWidth::X64,
+        }
+    }
+}
+
+impl Default for RegWidth {
+    fn default() -> Self {
+        RegWidth::X64
+    }
+}
+
+impl std::fmt::Display for RegWidth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegWidth::W32 => write!(f, "w32"),
+            RegWidth::X64 => write!(f, "x64"),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Register
@@ -136,7 +232,7 @@ impl Register {
         }
     }
 
-    /// Returns the standard assembly name for this register.
+    /// Returns the standard assembly name for this register (64-bit X name).
     pub fn asm_name(&self) -> &'static str {
         match self {
             Register::X0 => "x0",
@@ -172,6 +268,56 @@ impl Register {
             Register::X30 => "x30",
             Register::SP => "sp",
             Register::XZR => "xzr",
+        }
+    }
+
+    /// Returns the 32-bit W-register assembly name for this register.
+    ///
+    /// `SP` maps to `wsp` and `XZR` maps to `wzr`; all others map from
+    /// `Xn` to `Wn`.
+    pub fn w_name(&self) -> &'static str {
+        match self {
+            Register::X0 => "w0",
+            Register::X1 => "w1",
+            Register::X2 => "w2",
+            Register::X3 => "w3",
+            Register::X4 => "w4",
+            Register::X5 => "w5",
+            Register::X6 => "w6",
+            Register::X7 => "w7",
+            Register::X8 => "w8",
+            Register::X9 => "w9",
+            Register::X10 => "w10",
+            Register::X11 => "w11",
+            Register::X12 => "w12",
+            Register::X13 => "w13",
+            Register::X14 => "w14",
+            Register::X15 => "w15",
+            Register::X16 => "w16",
+            Register::X17 => "w17",
+            Register::X18 => "w18",
+            Register::X19 => "w19",
+            Register::X20 => "w20",
+            Register::X21 => "w21",
+            Register::X22 => "w22",
+            Register::X23 => "w23",
+            Register::X24 => "w24",
+            Register::X25 => "w25",
+            Register::X26 => "w26",
+            Register::X27 => "w27",
+            Register::X28 => "w28",
+            Register::X29 => "w29",
+            Register::X30 => "w30",
+            Register::SP => "wsp",
+            Register::XZR => "wzr",
+        }
+    }
+
+    /// Returns the assembly name for this register at the given width.
+    pub fn name_for_width(&self, width: RegWidth) -> &'static str {
+        match width {
+            RegWidth::X64 => self.asm_name(),
+            RegWidth::W32 => self.w_name(),
         }
     }
 
@@ -756,6 +902,20 @@ pub enum Instruction {
         offset: i32,
     },
 
+    // ---- Load / Store (32-bit) ----
+    /// Load register (32-bit, zero-extended): `LDR Wt, [addr]`
+    LDR_W {
+        rt: Register,
+        rn: Register,
+        offset: i32,
+    },
+    /// Store register (32-bit): `STR Wt, [addr]`
+    STR_W {
+        rt: Register,
+        rn: Register,
+        offset: i32,
+    },
+
     // ---- Load / Store (sub-word) ----
     /// Load byte (zero-extended): `LDRB Wt, [addr]`
     LDRB {
@@ -1099,33 +1259,95 @@ impl Instruction {
                     | rd.encoding()),
             },
 
-            // ---- LDR (unsigned offset) ----
+            // ---- LDR (unsigned offset, 64-bit) ----
             Instruction::LDR { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 8 == 0 {
                     let imm12 = (*offset as u32) / 8;
-                    Ok(0b1111_1001_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b1111_1001_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "LDR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "LDR with offset {} not yet supported (must be non-negative multiple of 8)",
+                        "LDR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
                         offset
                     )))
                 }
             }
 
-            // ---- STR (unsigned offset) ----
+            // ---- STR (unsigned offset, 64-bit) ----
             Instruction::STR { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 8 == 0 {
                     let imm12 = (*offset as u32) / 8;
-                    Ok(0b1111_1000_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b1111_1000_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "STR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "STR with offset {} not yet supported",
+                        "STR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
+                        offset
+                    )))
+                }
+            }
+
+            // ---- LDR_W (32-bit, unsigned offset) ----
+            // LDR Wt: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+            Instruction::LDR_W { rt, rn, offset } => {
+                if *offset >= 0 && *offset % 4 == 0 {
+                    let imm12 = (*offset as u32) / 4;
+                    if imm12 <= 4095 {
+                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "LDR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
+                } else {
+                    Err(CodegenError::EncodingError(format!(
+                        "LDR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+                        offset
+                    )))
+                }
+            }
+
+            // ---- STR_W (32-bit, unsigned offset) ----
+            // STR Wt: 1 0 1 1 1 0 0 0 01 imm12 Rn Rt  (imm12 = offset/4)
+            Instruction::STR_W { rt, rn, offset } => {
+                if *offset >= 0 && *offset % 4 == 0 {
+                    let imm12 = (*offset as u32) / 4;
+                    if imm12 <= 4095 {
+                        Ok(0b1011_1000_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "STR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
+                } else {
+                    Err(CodegenError::EncodingError(format!(
+                        "STR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
                         offset
                     )))
                 }
@@ -1136,13 +1358,20 @@ impl Instruction {
             Instruction::LDRB { rt, rn, offset } => {
                 if *offset >= 0 {
                     let imm12 = *offset as u32;
-                    Ok(0b0011_1001_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b0011_1001_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "LDRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "LDRB with negative offset {} not yet supported",
+                        "LDRB with negative offset {} not supported; use address computation instead",
                         offset
                     )))
                 }
@@ -1153,13 +1382,20 @@ impl Instruction {
             Instruction::LDRH { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 2 == 0 {
                     let imm12 = (*offset as u32) / 2;
-                    Ok(0b0111_1001_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b0111_1001_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "LDRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "LDRH with offset {} not yet supported (must be non-negative multiple of 2)",
+                        "LDRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
                         offset
                     )))
                 }
@@ -1170,13 +1406,20 @@ impl Instruction {
             Instruction::LDRSW { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
-                    Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "LDRSW offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "LDRSW with offset {} not yet supported (must be non-negative multiple of 4)",
+                        "LDRSW with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
                         offset
                     )))
                 }
@@ -1187,13 +1430,20 @@ impl Instruction {
             Instruction::STRB { rt, rn, offset } => {
                 if *offset >= 0 {
                     let imm12 = *offset as u32;
-                    Ok(0b0011_1000_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b0011_1000_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "STRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "STRB with negative offset {} not yet supported",
+                        "STRB with negative offset {} not supported; use address computation instead",
                         offset
                     )))
                 }
@@ -1204,13 +1454,20 @@ impl Instruction {
             Instruction::STRH { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 2 == 0 {
                     let imm12 = (*offset as u32) / 2;
-                    Ok(0b0111_1000_0100_0000_0000_0000_0000_0000
-                        | (imm12 << 10)
-                        | (rn.encoding() << 5)
-                        | rt.encoding())
+                    if imm12 <= 4095 {
+                        Ok(0b0111_1000_0100_0000_0000_0000_0000_0000
+                            | (imm12 << 10)
+                            | (rn.encoding() << 5)
+                            | rt.encoding())
+                    } else {
+                        Err(CodegenError::EncodingError(format!(
+                            "STRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+                            offset, imm12
+                        )))
+                    }
                 } else {
                     Err(CodegenError::EncodingError(format!(
-                        "STRH with offset {} not yet supported (must be non-negative multiple of 2)",
+                        "STRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
                         offset
                     )))
                 }
@@ -1539,6 +1796,371 @@ impl Instruction {
             // ---- NOP ----
             // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
             Instruction::NOP => Ok(0xD503201F),
+        }
+    }
+
+    /// Encode this instruction with a specific register width.
+    ///
+    /// For instructions that support 32-bit W-register mode (arithmetic,
+    /// logical, shift, move, load/store, compare, conditional select, and
+    /// bitfield operations), the `width` parameter controls whether the
+    /// sf bit (bit 31) or size field (bits 31:30) is set for 32-bit or
+    /// 64-bit operation.
+    ///
+    /// For instructions that do not have a width variant (branches, system,
+    /// SIMD, etc.), the width parameter is ignored and the default 64-bit
+    /// encoding is used.
+    ///
+    /// Using `RegWidth::W32` produces instructions that operate on W
+    /// sub-registers, giving automatic 32-bit wrapping arithmetic — essential
+    /// for algorithms like SHA-256 that require `u32` modular arithmetic.
+    pub fn encode_with_width(&self, width: RegWidth) -> Result<u32> {
+        let sf = width.sf_bit();
+        match self {
+            // ---- ADD (shifted register): sf 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            Instruction::ADD { rd, rn, rm } => match rm {
+                Operand::Reg { reg, shift } => {
+                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+                    Ok((sf << 31)
+                        | 0b00_0101_1000_0000_0000_0000_0000_0000
+                        | (hw << 22)
+                        | (reg.encoding() << 16)
+                        | (imm6 << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
+                Operand::Imm12(imm) => Ok((sf << 31)
+                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
+                    | ((*imm as u32) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()),
+            },
+
+            // ---- SUB (shifted register): sf 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            Instruction::SUB { rd, rn, rm } => match rm {
+                Operand::Reg { reg, shift } => {
+                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+                    Ok((sf << 31)
+                        | 0b01_0101_1000_0000_0000_0000_0000_0000
+                        | (hw << 22)
+                        | (reg.encoding() << 16)
+                        | (imm6 << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
+                Operand::Imm12(imm) => Ok((sf << 31)
+                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
+                    | (1 << 30)
+                    | ((*imm as u32) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()),
+            },
+
+            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
+            // MADD: sf 0 0 1 1 0 1 1 000 Rm 0 Ra Rn Rd
+            Instruction::MUL { rd, rn, rm } => Ok((sf << 31)
+                | 0b00_1101_1000_0000_0111_1100_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- SDIV ----
+            Instruction::SDIV { rd, rn, rm } => Ok((sf << 31)
+                | 0b00_1101_1000_0000_0000_1100_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- UDIV ----
+            Instruction::UDIV { rd, rn, rm } => Ok((sf << 31)
+                | 0b00_1101_1000_0000_0000_1000_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- AND (shifted register) ----
+            Instruction::AND { rd, rn, rm } => Ok((sf << 31)
+                | 0b00_0101_0000_0000_0000_0000_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- ORR (shifted register) ----
+            Instruction::ORR { rd, rn, rm } => Ok((sf << 31)
+                | 0b01_0101_0000_0000_0000_0000_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- EOR (shifted register) ----
+            Instruction::EOR { rd, rn, rm } => Ok((sf << 31)
+                | 0b10_0101_0000_0000_0000_0000_0000_0000
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- LSL (shifted register or UBFM immediate) ----
+            Instruction::LSL { rd, rn, rm } => match rm {
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                    | (ShiftKind::LSL.encoding() << 22)
+                    | (reg.encoding() << 16)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()),
+                Operand::Imm12(imm) => {
+                    // LSL Rd, Rn, #shift = UBFM Rd, Rn, #(size-shift), #(size-1-shift)
+                    let size = width.bits();
+                    let shift_val = *imm as u32;
+                    let n_bit = if size == 64 { 1u32 } else { 0 };
+                    let immr = (size - shift_val) & (size - 1);
+                    let imms = (size - 1 - shift_val) & (size - 1);
+                    Ok((sf << 31)
+                        | (n_bit << 22)
+                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                        | (immr << 16)
+                        | (imms << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
+            },
+
+            // ---- LSR (shifted register or UBFM immediate) ----
+            Instruction::LSR { rd, rn, rm } => match rm {
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                    | (ShiftKind::LSR.encoding() << 22)
+                    | (reg.encoding() << 16)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()),
+                Operand::Imm12(imm) => {
+                    // LSR Rd, Rn, #shift = UBFM Rd, Rn, #shift, #(size-1)
+                    let size = width.bits();
+                    let n_bit = if size == 64 { 1u32 } else { 0 };
+                    let immr = *imm as u32;
+                    let imms = size - 1;
+                    Ok((sf << 31)
+                        | (n_bit << 22)
+                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                        | (immr << 16)
+                        | (imms << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
+            },
+
+            // ---- ASR (shifted register or SBFM immediate) ----
+            Instruction::ASR { rd, rn, rm } => match rm {
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                    | (ShiftKind::ASR.encoding() << 22)
+                    | (reg.encoding() << 16)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()),
+                Operand::Imm12(imm) => {
+                    // ASR Rd, Rn, #shift = SBFM Rd, Rn, #shift, #(size-1)
+                    let size = width.bits();
+                    let n_bit = if size == 64 { 1u32 } else { 0 };
+                    let immr = *imm as u32;
+                    let imms = size - 1;
+                    Ok((sf << 31)
+                        | (n_bit << 22)
+                        | 0b0001_0010_0000_0000_0000_0000_0000_0000
+                        | (immr << 16)
+                        | (imms << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
+            },
+
+            // ---- LDR (unsigned offset) ----
+            // LDR Wt: size=10, opc=01 → 0b10_111_0_01_01
+            // LDR Xt: size=11, opc=01 → 0b11_111_0_01_01
+            Instruction::LDR { rt, rn, offset } => {
+                let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
+                let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
+                if *offset >= 0 && (*offset as u32) % align == 0 {
+                    let imm12 = (*offset as u32) / align;
+                    Ok((sf << 31)
+                        | 0b11_100_0100_0000_0000_0000_0000_0000
+                        | (imm12 << 10)
+                        | (rn.encoding() << 5)
+                        | rt.encoding())
+                } else {
+                    Err(CodegenError::EncodingError(format!(
+                        "LDR with offset {} not yet supported (must be non-negative multiple of {})",
+                        offset, align
+                    )))
+                }
+            }
+
+            // ---- STR (unsigned offset) ----
+            // STR Wt: size=10, opc=00 → 0b10_111_0_00_01
+            // STR Xt: size=11, opc=00 → 0b11_111_0_00_01
+            Instruction::STR { rt, rn, offset } => {
+                let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
+                let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
+                if *offset >= 0 && (*offset as u32) % align == 0 {
+                    let imm12 = (*offset as u32) / align;
+                    Ok((sf << 31)
+                        | 0b11_100_0000_0000_0000_0000_0000_0000
+                        | (imm12 << 10)
+                        | (rn.encoding() << 5)
+                        | rt.encoding())
+                } else {
+                    Err(CodegenError::EncodingError(format!(
+                        "STR with offset {} not yet supported (must be non-negative multiple of {})",
+                        offset, align
+                    )))
+                }
+            }
+
+            // ---- CMP (alias for SUBS XZR/WZR, Rn, Rm) ----
+            Instruction::CMP { rn, rm } => match rm {
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+                    | 0b11_0101_1000_0000_0000_0000_0001_1111
+                    | (reg.encoding() << 16)
+                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => Ok((sf << 31)
+                    | 0b111_0001_0000_0000_0000_0000_0001_1111
+                    | ((*imm as u32) << 10)
+                    | (rn.encoding() << 5)),
+            },
+
+            // ---- CMN (alias for ADDS XZR/WZR, Rn, Rm) ----
+            Instruction::CMN { rn, rm } => match rm {
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+                    | 0b01_0101_1000_0000_0000_0000_0001_1111
+                    | (reg.encoding() << 16)
+                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => Ok((sf << 31)
+                    | 0b0001_0001_0000_0000_0000_0000_0001_1111
+                    | ((*imm as u32) << 10)
+                    | (rn.encoding() << 5)),
+            },
+
+            // ---- TST (alias for ANDS XZR/WZR, Rn, Rm) ----
+            Instruction::TST { rn, rm } => Ok((sf << 31)
+                | 0b11_0101_0000_0000_0000_0000_0001_1111
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)),
+
+            // ---- CSEL ----
+            Instruction::CSEL { rd, rn, rm, cond } => Ok((sf << 31)
+                | 0x0A800000u32
+                | (rm.encoding() << 16)
+                | (cond.encoding() << 12)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
+            Instruction::CSET { rd, cond } => Ok((sf << 31)
+                | 0x0A800000u32
+                | (Register::XZR.encoding() << 16)
+                | (cond.invert().encoding() << 12)
+                | (Register::XZR.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- MSUB: Rd = Ra - Rn * Rm ----
+            Instruction::MSUB { rd, rn, rm, ra } => Ok((sf << 31)
+                | 0x1B000000u32
+                | (rm.encoding() << 16)
+                | (ra.encoding() << 10)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- UBFM (unsigned bitfield move) ----
+            // UBFM: sf 0 0 1 0 0 1 1 0 N immr imms Rn Rd
+            // N = sf for 64-bit, 0 for 32-bit
+            Instruction::UBFM { rd, rn, immr, imms } => {
+                let n_bit = sf; // N bit matches sf for valid UBFM
+                Ok((sf << 31)
+                    | (n_bit << 22)
+                    | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                    | ((*immr & 0x3F) << 16)
+                    | ((*imms & 0x3F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
+            // ---- SBFM (signed bitfield move) ----
+            // SBFM: sf 0 0 1 0 0 1 1 0 N immr imms Rn Rd
+            Instruction::SBFM { rd, rn, immr, imms } => {
+                let n_bit = sf;
+                Ok((sf << 31)
+                    | (n_bit << 22)
+                    | 0b0001_0010_0000_0000_0000_0000_0000_0000
+                    | ((*immr & 0x3F) << 16)
+                    | ((*imms & 0x3F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
+            // ---- MOV (alias for ORR Xd/Wd, XZR/WZR, Xm/Wm) ----
+            Instruction::MOV { rd, rm } => Ok((sf << 31)
+                | 0b01_0101_0000_0000_0000_0011_1110_0000
+                | (rm.encoding() << 16)
+                | rd.encoding()),
+
+            // ---- MOVZ ----
+            Instruction::MOVZ { rd, imm16, shift } => {
+                let hw = *shift / 16;
+                Ok((sf << 31)
+                    | 0b0101_0010_1000_0000_0000_0000_0000_0000
+                    | (hw << 21)
+                    | ((*imm16 as u32) << 5)
+                    | rd.encoding())
+            }
+
+            // ---- MOVK ----
+            Instruction::MOVK { rd, imm16, shift } => {
+                let hw = *shift / 16;
+                Ok((sf << 31)
+                    | 0b0111_0010_1000_0000_0000_0000_0000_0000
+                    | (hw << 21)
+                    | ((*imm16 as u32) << 5)
+                    | rd.encoding())
+            }
+
+            // ---- CLZ Rd, Rn ----
+            // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 010 Rn Rd
+            Instruction::CLZ { rd, rn } => Ok((sf << 31)
+                | 0b10_1101_0110_0000_0000_010_00000_00000
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- RBIT Rd, Rn ----
+            // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 000 Rn Rd
+            Instruction::RBIT { rd, rn } => Ok((sf << 31)
+                | 0b10_1101_0110_0000_0000_000_00000_00000
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- CBZ ----
+            Instruction::CBZ { rt, offset } => {
+                let imm19 = (*offset) >> 2;
+                Ok((sf << 31)
+                    | 0b011_0100_0000_0000_0000_0000_0000_0000
+                    | (((imm19 as u32) & 0x7FFFF) << 5)
+                    | rt.encoding())
+            }
+
+            // ---- CBNZ ----
+            Instruction::CBNZ { rt, offset } => {
+                let imm19 = (*offset) >> 2;
+                Ok((sf << 31)
+                    | 0b011_0101_0000_0000_0000_0000_0000_0000
+                    | (((imm19 as u32) & 0x7FFFF) << 5)
+                    | rt.encoding())
+            }
+
+            // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
+            // This is always a 64-bit destination (widening), so sf=1, N=1
+            Instruction::SXTW { rd, rn } => Ok(0b1001_0011_0100_0000_0111_1100_0000_0000
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- All other instructions: fall back to default 64-bit encoding ----
+            _ => self.encode(),
         }
     }
 
@@ -1955,6 +2577,8 @@ impl std::fmt::Display for Instruction {
             Instruction::ASR { rd, rn, rm } => write!(f, "asr {}, {}, {}", rd, rn, rm),
             Instruction::LDR { rt, rn, offset } => write!(f, "ldr {}, [{}, #{}]", rt, rn, offset),
             Instruction::STR { rt, rn, offset } => write!(f, "str {}, [{}, #{}]", rt, rn, offset),
+            Instruction::LDR_W { rt, rn, offset } => write!(f, "ldr w{}, [{}, #{}]", rt.encoding(), rn, offset),
+            Instruction::STR_W { rt, rn, offset } => write!(f, "str w{}, [{}, #{}]", rt.encoding(), rn, offset),
             Instruction::LDRB { rt, rn, offset } => write!(f, "ldrb {}, [{}, #{}]", rt, rn, offset),
             Instruction::LDRH { rt, rn, offset } => write!(f, "ldrh {}, [{}, #{}]", rt, rn, offset),
             Instruction::LDRSW { rt, rn, offset } => {
@@ -2108,6 +2732,28 @@ impl std::fmt::Display for Operand {
 pub struct InstructionSelector {
     /// Accumulated instructions for the current selection context.
     instructions: Vec<Instruction>,
+}
+
+/// Map an `IRType` to the appropriate `MemorySize` for load/store selection.
+///
+/// - U8/I8 → Byte
+/// - U16/I16 → HalfWord
+/// - U32/I32 → Word
+/// - U64/I64/Ptr/Func → DoubleWord
+/// - F32 → Word
+/// - F64 → DoubleWord
+/// - Other types default to DoubleWord
+pub fn ir_type_to_memory_size(ty: &IRType) -> MemorySize {
+    match ty {
+        IRType::U8 | IRType::I8 => MemorySize::Byte,
+        IRType::U16 | IRType::I16 => MemorySize::HalfWord,
+        IRType::U32 | IRType::I32 | IRType::F32 => MemorySize::Word,
+        IRType::U64 | IRType::I64 | IRType::Ptr | IRType::Func | IRType::F64 => {
+            MemorySize::DoubleWord
+        }
+        // Default to 64-bit for structs, arrays, and void
+        _ => MemorySize::DoubleWord,
+    }
 }
 
 impl InstructionSelector {
@@ -2367,7 +3013,12 @@ impl InstructionSelector {
                         rn: *base,
                         offset: off,
                     },
-                    MemorySize::Word | MemorySize::DoubleWord => Instruction::LDR {
+                    MemorySize::Word => Instruction::LDR_W {
+                        rt,
+                        rn: *base,
+                        offset: off,
+                    },
+                    MemorySize::DoubleWord => Instruction::LDR {
                         rt,
                         rn: *base,
                         offset: off,
@@ -2400,7 +3051,12 @@ impl InstructionSelector {
                         rn: *base,
                         offset: 0,
                     },
-                    MemorySize::Word | MemorySize::DoubleWord => Instruction::LDR {
+                    MemorySize::Word => Instruction::LDR_W {
+                        rt,
+                        rn: *base,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::LDR {
                         rt,
                         rn: *base,
                         offset: 0,
@@ -2426,7 +3082,12 @@ impl InstructionSelector {
                         rn: *base,
                         offset: 0,
                     },
-                    MemorySize::Word | MemorySize::DoubleWord => Instruction::LDR {
+                    MemorySize::Word => Instruction::LDR_W {
+                        rt,
+                        rn: *base,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::LDR {
                         rt,
                         rn: *base,
                         offset: 0,
@@ -2475,7 +3136,12 @@ impl InstructionSelector {
                         rn: temp,
                         offset: 0,
                     },
-                    MemorySize::Word | MemorySize::DoubleWord => Instruction::LDR {
+                    MemorySize::Word => Instruction::LDR_W {
+                        rt,
+                        rn: temp,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::LDR {
                         rt,
                         rn: temp,
                         offset: 0,
@@ -2519,12 +3185,17 @@ impl InstructionSelector {
                         rn: *base,
                         offset: off,
                     },
-                    MemorySize::Word | MemorySize::DoubleWord => Instruction::STR {
+                    MemorySize::Word => Instruction::STR_W {
                         rt,
                         rn: *base,
                         offset: off,
                     },
-                    MemorySize::SignedWord => Instruction::STR {
+                    MemorySize::DoubleWord => Instruction::STR {
+                        rt,
+                        rn: *base,
+                        offset: off,
+                    },
+                    MemorySize::SignedWord => Instruction::STR_W {
                         rt,
                         rn: *base,
                         offset: off,
@@ -2549,7 +3220,12 @@ impl InstructionSelector {
                         rn: *base,
                         offset: 0,
                     },
-                    _ => Instruction::STR {
+                    MemorySize::Word | MemorySize::SignedWord => Instruction::STR_W {
+                        rt,
+                        rn: *base,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::STR {
                         rt,
                         rn: *base,
                         offset: 0,
@@ -2569,7 +3245,12 @@ impl InstructionSelector {
                         rn: *base,
                         offset: 0,
                     },
-                    _ => Instruction::STR {
+                    MemorySize::Word | MemorySize::SignedWord => Instruction::STR_W {
+                        rt,
+                        rn: *base,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::STR {
                         rt,
                         rn: *base,
                         offset: 0,
@@ -2611,7 +3292,12 @@ impl InstructionSelector {
                         rn: temp,
                         offset: 0,
                     },
-                    _ => Instruction::STR {
+                    MemorySize::Word | MemorySize::SignedWord => Instruction::STR_W {
+                        rt,
+                        rn: temp,
+                        offset: 0,
+                    },
+                    MemorySize::DoubleWord => Instruction::STR {
                         rt,
                         rn: temp,
                         offset: 0,
@@ -2764,7 +3450,7 @@ impl InstructionSelector {
         resolve: &dyn Fn(&IRValue) -> Register,
     ) -> Result<()> {
         match instr {
-            IRInstr::BinOp { op, dst, lhs, rhs } => {
+            IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);
                 let rm = match rhs {
@@ -2847,29 +3533,53 @@ impl InstructionSelector {
                 }
             }
 
-            IRInstr::Load { dst, addr } => {
+            IRInstr::Load { dst, addr, offset, ty } => {
                 let rt = resolve(dst);
                 let rn = resolve(addr);
+                let mem_size = ir_type_to_memory_size(ty);
                 self.select_load(
                     rt,
                     &AddressingMode::UnsignedOffset {
                         base: rn,
-                        offset: 0,
+                        offset: *offset as u32,
                     },
-                    MemorySize::DoubleWord,
+                    mem_size,
                 )?;
+                // For signed byte/halfword loads, sign-extend after loading.
+                match ty {
+                    IRType::I8 => {
+                        // SXTB: SBFM Xd, Xn, #0, #7
+                        self.push(Instruction::SBFM {
+                            rd: rt,
+                            rn: rt,
+                            immr: 0,
+                            imms: 7,
+                        });
+                    }
+                    IRType::I16 => {
+                        // SXTH: SBFM Xd, Xn, #0, #15
+                        self.push(Instruction::SBFM {
+                            rd: rt,
+                            rn: rt,
+                            immr: 0,
+                            imms: 15,
+                        });
+                    }
+                    _ => {}
+                }
             }
 
-            IRInstr::Store { value, addr } => {
+            IRInstr::Store { value, addr, offset, ty } => {
                 let rt = resolve(value);
                 let rn = resolve(addr);
+                let mem_size = ir_type_to_memory_size(ty);
                 self.select_store(
                     rt,
                     &AddressingMode::UnsignedOffset {
                         base: rn,
-                        offset: 0,
+                        offset: *offset as u32,
                     },
-                    MemorySize::DoubleWord,
+                    mem_size,
                 )?;
             }
 
@@ -2890,7 +3600,7 @@ impl InstructionSelector {
                 self.select_cast(*kind, rd, rn, false, false);
             }
 
-            IRInstr::UnaryOp { op, dst, operand } => {
+            IRInstr::UnaryOp { op, dst, operand, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(operand);
                 match op {
@@ -3007,7 +3717,7 @@ impl InstructionSelector {
             }
 
             // Dedicated arithmetic instructions — lower same as BinOp.
-            IRInstr::Add { dst, lhs, rhs } => {
+            IRInstr::Add { dst, lhs, rhs, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);
                 let rm = match rhs {
@@ -3022,7 +3732,7 @@ impl InstructionSelector {
                 };
                 self.push(Instruction::ADD { rd, rn, rm });
             }
-            IRInstr::Sub { dst, lhs, rhs } => {
+            IRInstr::Sub { dst, lhs, rhs, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);
                 let rm = match rhs {
@@ -3037,7 +3747,7 @@ impl InstructionSelector {
                 };
                 self.push(Instruction::SUB { rd, rn, rm });
             }
-            IRInstr::Mul { dst, lhs, rhs } => {
+            IRInstr::Mul { dst, lhs, rhs, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);
                 let rm = Operand::reg(resolve(rhs));
@@ -3049,7 +3759,7 @@ impl InstructionSelector {
                     })?,
                 });
             }
-            IRInstr::Div { dst, lhs, rhs } => {
+            IRInstr::Div { dst, lhs, rhs, .. } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);
                 let rm = Operand::reg(resolve(rhs));
@@ -3066,7 +3776,7 @@ impl InstructionSelector {
                 kind: _,
                 dst,
                 lhs,
-                rhs,
+                rhs, ty: _,
             } => {
                 let rd = resolve(dst);
                 let rn = resolve(lhs);

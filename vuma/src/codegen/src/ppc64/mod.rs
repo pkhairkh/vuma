@@ -1725,7 +1725,7 @@ fn lower_ir_instr_ppc64(
     let mut result = Vec::new();
 
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs } => {
+        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R12, &mut result);
@@ -1952,7 +1952,7 @@ fn lower_ir_instr_ppc64(
             }
         }
 
-        IRInstr::Add { dst, lhs, rhs } => {
+        IRInstr::Add { dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R12, &mut result);
@@ -1970,7 +1970,7 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Sub { dst, lhs, rhs } => {
+        IRInstr::Sub { dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R12, &mut result);
@@ -1988,7 +1988,7 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Mul { dst, lhs, rhs } => {
+        IRInstr::Mul { dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R12, &mut result);
@@ -2006,7 +2006,7 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Div { dst, lhs, rhs } => {
+        IRInstr::Div { dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R12, &mut result);
@@ -2024,7 +2024,7 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::UnaryOp { op, dst, operand } => {
+        IRInstr::UnaryOp { op, dst, operand, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let s = resolve_gpr_ppc64(operand, vreg_map, Gpr::R11, &mut result);
             match op {
@@ -2136,7 +2136,7 @@ fn lower_ir_instr_ppc64(
             kind,
             dst,
             lhs,
-            rhs,
+            rhs, ty: _,
         } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R11, &mut result);
@@ -2144,7 +2144,7 @@ fn lower_ir_instr_ppc64(
             result.extend(lower_cmp_ppc64(kind, d, l, r));
         }
 
-        IRInstr::Load { dst, addr } => {
+        IRInstr::Load { dst, addr, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R11, &mut result);
             result.push(emit_alloc_instr(
@@ -2158,7 +2158,7 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Store { value, addr } => {
+        IRInstr::Store { value, addr, .. } => {
             let v = resolve_gpr_ppc64(value, vreg_map, Gpr::R11, &mut result);
             let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R12, &mut result);
             result.push(emit_alloc_instr(
@@ -2317,7 +2317,7 @@ fn lower_ir_instr_ppc64(
             dst,
             cond,
             true_val,
-            false_val,
+            false_val, ty: _,
         } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R11, &mut result);
@@ -2428,20 +2428,20 @@ impl Backend for PPC64Backend {
 
                 let values: Vec<&IRValue> = match instr {
                     IRInstr::BinOp { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
-                    IRInstr::Add { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Sub { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Mul { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Div { dst, lhs, rhs } => vec![dst, lhs, rhs],
+                    IRInstr::Add { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Sub { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Mul { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Div { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
                     IRInstr::UnaryOp { dst, operand, .. } => vec![dst, operand],
-                    IRInstr::Load { dst, addr } => vec![dst, addr],
-                    IRInstr::Store { value, addr } => vec![value, addr],
+                    IRInstr::Load { dst, addr, .. } => vec![dst, addr],
+                    IRInstr::Store { value, addr, .. } => vec![value, addr],
                     IRInstr::Alloc { dst, .. } => vec![dst],
                     IRInstr::Cast { dst, src, .. } => vec![dst, src],
                     IRInstr::Select {
                         dst,
                         cond,
                         true_val,
-                        false_val,
+                        false_val, ty: _,
                     } => vec![dst, cond, true_val, false_val],
                     IRInstr::Offset { dst, base, offset } => vec![dst, base, offset],
                     IRInstr::GetAddress { dst, .. } => vec![dst],

@@ -1094,20 +1094,28 @@ impl fmt::Display for CastKind {
 /// A single IR instruction.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IRInstr {
-    /// Load a value from memory: `dst = load addr`
+    /// Load a value from memory: `dst = load addr + offset`
     Load {
         /// Destination register.
         dst: IRValue,
-        /// Source address register.
+        /// Source address register (base).
         addr: IRValue,
+        /// Byte offset from the base address.
+        offset: i32,
+        /// Type of the value being loaded (determines memory access size).
+        ty: IRType,
     },
 
-    /// Store a value to memory: `store value, addr`
+    /// Store a value to memory: `store value, addr + offset`
     Store {
         /// Value to store.
         value: IRValue,
-        /// Target address register.
+        /// Target address register (base).
         addr: IRValue,
+        /// Byte offset from the base address.
+        offset: i32,
+        /// Type of the value being stored (determines memory access size).
+        ty: IRType,
     },
 
     /// Binary operation: `dst = lhs op rhs`
@@ -1120,6 +1128,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the operation result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 
     /// Unary operation: `dst = op operand`
@@ -1130,6 +1141,9 @@ pub enum IRInstr {
         dst: IRValue,
         /// Operand value.
         operand: IRValue,
+        /// Type of the operation result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 
     /// Function call: `dst = call func_name(args…)`
@@ -1204,6 +1218,9 @@ pub enum IRInstr {
         true_val: IRValue,
         /// Value when condition is false.
         false_val: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 
     // ── Dedicated arithmetic instructions ────────────────────────────
@@ -1215,6 +1232,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
     /// Subtract: `dst = lhs - rhs`
     Sub {
@@ -1224,6 +1244,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
     /// Multiply: `dst = lhs * rhs`
     Mul {
@@ -1233,6 +1256,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
     /// Divide: `dst = lhs / rhs`
     Div {
@@ -1242,6 +1268,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 
     // ── Comparison ──────────────────────────────────────────────────
@@ -1255,6 +1284,9 @@ pub enum IRInstr {
         lhs: IRValue,
         /// Right-hand side operand.
         rhs: IRValue,
+        /// Type of the operands (determines 32-bit vs 64-bit comparison).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 
     // ── Instruction-level control flow ───────────────────────────────
@@ -1349,7 +1381,7 @@ impl IRInstr {
             IRInstr::Select {
                 cond,
                 true_val,
-                false_val,
+                false_val, ty: _,
                 ..
             } => {
                 let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
@@ -1367,12 +1399,24 @@ impl IRInstr {
 impl fmt::Display for IRInstr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IRInstr::Load { dst, addr } => write!(f, "{} = load {}", dst, addr),
-            IRInstr::Store { value, addr } => write!(f, "store {}, {}", value, addr),
-            IRInstr::BinOp { op, dst, lhs, rhs } => {
+            IRInstr::Load { dst, addr, offset, ty } => {
+                if *offset != 0 {
+                    write!(f, "{} = load [{} + {}] ({})", dst, addr, offset, ty)
+                } else {
+                    write!(f, "{} = load {} ({})", dst, addr, ty)
+                }
+            }
+            IRInstr::Store { value, addr, offset, ty } => {
+                if *offset != 0 {
+                    write!(f, "store {}, [{} + {}] ({})", value, addr, offset, ty)
+                } else {
+                    write!(f, "store {}, {} ({})", value, addr, ty)
+                }
+            }
+            IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
                 write!(f, "{} = {} {}, {}", dst, op, lhs, rhs)
             }
-            IRInstr::UnaryOp { op, dst, operand } => {
+            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
                 write!(f, "{} = {} {}", dst, op, operand)
             }
             IRInstr::Call { dst, func, args } => {
@@ -1409,19 +1453,19 @@ impl fmt::Display for IRInstr {
                 dst,
                 cond,
                 true_val,
-                false_val,
+                false_val, ty: _,
             } => {
                 write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
             }
-            IRInstr::Add { dst, lhs, rhs } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
-            IRInstr::Sub { dst, lhs, rhs } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
-            IRInstr::Mul { dst, lhs, rhs } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
-            IRInstr::Div { dst, lhs, rhs } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
+            IRInstr::Add { dst, lhs, rhs, ty: _ } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
+            IRInstr::Sub { dst, lhs, rhs, ty: _ } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
+            IRInstr::Mul { dst, lhs, rhs, ty: _ } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
+            IRInstr::Div { dst, lhs, rhs, ty: _ } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
             IRInstr::Cmp {
                 kind,
                 dst,
                 lhs,
-                rhs,
+                rhs, ty: _,
             } => {
                 write!(f, "{} = {} {}, {}", dst, kind, lhs, rhs)
             }

@@ -1894,11 +1894,11 @@ fn lower_ir_instr(
     let mut result = Vec::new();
 
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs } => {
+        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
             result.extend(lower_binop(op, dst, lhs, rhs, vreg_map));
         }
 
-        IRInstr::Add { dst, lhs, rhs } => {
+        IRInstr::Add { dst, lhs, rhs, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
@@ -1918,7 +1918,7 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Sub { dst, lhs, rhs } => {
+        IRInstr::Sub { dst, lhs, rhs, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
@@ -1938,7 +1938,7 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Mul { dst, lhs, rhs } => {
+        IRInstr::Mul { dst, lhs, rhs, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
@@ -1967,7 +1967,7 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Div { dst, lhs, rhs } => {
+        IRInstr::Div { dst, lhs, rhs, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
@@ -1996,7 +1996,7 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Load { dst, addr } => {
+        IRInstr::Load { dst, addr, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let addr_reg = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
             let ld = Instruction::Ld {
@@ -2012,7 +2012,7 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Store { value, addr } => {
+        IRInstr::Store { value, addr, .. } => {
             let val_reg = map_vreg_to_gpr(vreg_id(value), None, vreg_map);
             let addr_reg = map_vreg_to_gpr(vreg_id(addr), None, vreg_map);
             let sd = Instruction::Sd {
@@ -2148,7 +2148,7 @@ fn lower_ir_instr(
             dst,
             cond,
             true_val,
-            false_val,
+            false_val, ty: _,
         } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let cond_reg = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
@@ -2225,7 +2225,7 @@ fn lower_ir_instr(
             kind,
             dst,
             lhs,
-            rhs,
+            rhs, ty: _,
         } => {
             let _dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let _lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
@@ -2245,7 +2245,7 @@ fn lower_ir_instr(
             result.extend(lower_binop(&binop_kind, dst, lhs, rhs, vreg_map));
         }
 
-        IRInstr::UnaryOp { op, dst, operand } => {
+        IRInstr::UnaryOp { op, dst, operand, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let src_reg = map_vreg_to_gpr(vreg_id(operand), None, vreg_map);
             match op {

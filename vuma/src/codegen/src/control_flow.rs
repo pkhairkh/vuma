@@ -19,7 +19,7 @@
 //!   and performs loop unrolling.
 
 use crate::backend::{AArch64TargetInfo, TargetInfo};
-use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
+use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -234,6 +234,7 @@ impl SwitchLowerer {
             dst: adj.clone(),
             lhs: discr.clone(),
             rhs: offset_val,
+            ty: None,
         });
 
         // Bounds check: if adj > range, go to default.
@@ -244,6 +245,7 @@ impl SwitchLowerer {
             dst: oob.clone(),
             lhs: adj.clone(),
             rhs: range_val,
+            ty: None,
         });
 
         let dispatch_label = next_label(label_counter, "jt_dispatch_");
@@ -278,6 +280,7 @@ impl SwitchLowerer {
                 dst: cmp_result.clone(),
                 lhs: adj.clone(),
                 rhs: IRValue::Immediate(idx_i64),
+            ty: None,
             });
 
             let target_label = target_map
@@ -376,6 +379,7 @@ impl SwitchLowerer {
                 dst: cmp.clone(),
                 lhs: discr.clone(),
                 rhs: IRValue::Immediate(targets[0].0),
+            ty: None,
             });
             block.terminator = IRTerminator::Branch {
                 cond: cmp,
@@ -397,6 +401,7 @@ impl SwitchLowerer {
             dst: cmp.clone(),
             lhs: discr.clone(),
             rhs: IRValue::Immediate(median_val),
+            ty: None,
         });
 
         // Left side: values < median_val → targets[0..mid]
@@ -461,6 +466,7 @@ impl SwitchLowerer {
                 dst: cmp.clone(),
                 lhs: discr.clone(),
                 rhs: IRValue::Immediate(*value),
+            ty: None,
             });
 
             if is_last {
@@ -1005,6 +1011,7 @@ impl TailCallLowerer {
                     cond: IRValue::Immediate(1),
                     true_val: arg.clone(),
                     false_val: arg.clone(),
+            ty: None,
                 });
                 // Note: we don't replace arg[i] here because the TailCall
                 // terminator carries the original args. The emitter should
@@ -1261,6 +1268,8 @@ impl CoroutineLowerer {
         instrs.push(IRInstr::Store {
             value: IRValue::Immediate(CoroutineState::Running as i64),
             addr: state_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         // Store initial yield_index = 0.
@@ -1273,6 +1282,8 @@ impl CoroutineLowerer {
         instrs.push(IRInstr::Store {
             value: IRValue::Immediate(0),
             addr: yi_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         log::debug!(
@@ -1326,6 +1337,8 @@ impl CoroutineLowerer {
                     instrs.push(IRInstr::Store {
                         value: live_val.clone(),
                         addr: slot_addr,
+                        offset: 0,
+                        ty: IRType::I64,
                     });
                 }
             }
@@ -1341,6 +1354,8 @@ impl CoroutineLowerer {
         instrs.push(IRInstr::Store {
             value: IRValue::Immediate(yield_point.index as i64),
             addr: yi_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         // Set state to Suspended.
@@ -1353,6 +1368,8 @@ impl CoroutineLowerer {
         instrs.push(IRInstr::Store {
             value: IRValue::Immediate(CoroutineState::Suspended as i64),
             addr: state_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         log::debug!(
@@ -1403,6 +1420,8 @@ impl CoroutineLowerer {
         entry_block.push(IRInstr::Load {
             dst: yield_index.clone(),
             addr: yi_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         // Set state to Running.
@@ -1415,6 +1434,8 @@ impl CoroutineLowerer {
         entry_block.push(IRInstr::Store {
             value: IRValue::Immediate(CoroutineState::Running as i64),
             addr: state_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
 
         // Also reload live values from spill slots for the appropriate
@@ -1464,6 +1485,8 @@ impl CoroutineLowerer {
         completed_block.push(IRInstr::Store {
             value: IRValue::Immediate(CoroutineState::Completed as i64),
             addr: state_field_addr,
+            offset: 0,
+            ty: IRType::I64,
         });
         completed_block.terminator = IRTerminator::Return(vec![IRValue::Immediate(0)]);
 
@@ -1501,6 +1524,8 @@ impl CoroutineLowerer {
                         reload_block.push(IRInstr::Load {
                             dst: loaded,
                             addr: slot_addr,
+                            offset: 0,
+                            ty: IRType::I64,
                         });
                     }
                 }
@@ -2243,6 +2268,7 @@ fn estimate_trip_count(
             dst: _,
             lhs,
             rhs: IRValue::Immediate(upper_bound),
+            ty: _,
         } = instr
         {
             // Find the initial value of the phi source.
@@ -2702,6 +2728,8 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
+        ty: None,
+            ty: None,
         });
         func.blocks[2].terminator = IRTerminator::Jump("loop_header".to_string());
 

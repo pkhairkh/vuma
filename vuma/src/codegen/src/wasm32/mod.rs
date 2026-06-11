@@ -1609,7 +1609,7 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
 /// Lower a single IR instruction.
 fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), BackendError> {
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs } => {
+        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
             let ty = wasm_type_for_binop(op, lhs, rhs);
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
@@ -1699,7 +1699,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::UnaryOp { op, dst, operand } => {
+        IRInstr::UnaryOp { op, dst, operand, .. } => {
             // Determine the Wasm type of the operand for type-aware lowering.
             // For register operands, we infer the type from context; for
             // immediates, we check if the value fits in i32.
@@ -1775,7 +1775,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Load { dst, addr } => {
+        IRInstr::Load { dst, addr, offset: _, ty: _ } => {
             ctx.push_value(addr, Some(&IRType::I32));
             ctx.emit(WasmInstr::I32Load {
                 align: 2,
@@ -1788,7 +1788,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Store { value, addr } => {
+        IRInstr::Store { value, addr, offset: _, ty: _ } => {
             ctx.push_value(addr, Some(&IRType::I32));
             ctx.push_value(value, None);
             ctx.emit(WasmInstr::I32Store {
@@ -1894,7 +1894,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             dst,
             cond,
             true_val,
-            false_val,
+            false_val, ty: _,
         } => {
             ctx.push_value(cond, None);
             ctx.push_value(true_val, None);
@@ -1907,7 +1907,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Add { dst, lhs, rhs } => {
+        IRInstr::Add { dst, lhs, rhs, .. } => {
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
             ctx.emit(WasmInstr::I32Add);
@@ -1918,7 +1918,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Sub { dst, lhs, rhs } => {
+        IRInstr::Sub { dst, lhs, rhs, .. } => {
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
             ctx.emit(WasmInstr::I32Sub);
@@ -1929,7 +1929,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Mul { dst, lhs, rhs } => {
+        IRInstr::Mul { dst, lhs, rhs, .. } => {
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
             ctx.emit(WasmInstr::I32Mul);
@@ -1940,7 +1940,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Div { dst, lhs, rhs } => {
+        IRInstr::Div { dst, lhs, rhs, .. } => {
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
             ctx.emit(WasmInstr::I32DivS);
@@ -1955,7 +1955,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             kind,
             dst,
             lhs,
-            rhs,
+            rhs, ty: _,
         } => {
             ctx.push_value(lhs, None);
             ctx.push_value(rhs, None);
@@ -3166,10 +3166,14 @@ mod tests {
                 IRInstr::Load {
                     dst: IRValue::Register(1),
                     addr: IRValue::Register(0),
+                    offset: 0,
+                    ty: IRType::I64,
                 },
                 IRInstr::Store {
                     value: IRValue::Register(1),
                     addr: IRValue::Register(0),
+                    offset: 0,
+                    ty: IRType::I64,
                 },
             ],
         );

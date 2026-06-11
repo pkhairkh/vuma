@@ -1682,7 +1682,7 @@ impl Backend for X86_64Backend {
             for instr in &block.instructions {
                 let encoded = match instr {
                     // ── Dedicated Add/Sub/Mul (with immediate-form optimisations) ──
-                    IRInstr::Add { dst, lhs, rhs } => {
+                    IRInstr::Add { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -1706,7 +1706,7 @@ impl Backend for X86_64Backend {
                         }
                         code
                     }
-                    IRInstr::Sub { dst, lhs, rhs } => {
+                    IRInstr::Sub { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -1730,7 +1730,7 @@ impl Backend for X86_64Backend {
                         }
                         code
                     }
-                    IRInstr::Mul { dst, lhs, rhs } => {
+                    IRInstr::Mul { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -1746,7 +1746,7 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Division: uses RAX/RDX implicitly ───────────────
-                    IRInstr::Div { dst, lhs, rhs } => {
+                    IRInstr::Div { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -1770,7 +1770,7 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── BinOp (generic) ──────────────────────────────────
-                    IRInstr::BinOp { op, dst, lhs, rhs } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -1925,7 +1925,7 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Unary operations ─────────────────────────────────
-                    IRInstr::UnaryOp { op, dst, operand } => {
+                    IRInstr::UnaryOp { op, dst, operand, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2014,7 +2014,7 @@ impl Backend for X86_64Backend {
                         kind,
                         dst,
                         lhs,
-                        rhs,
+                        rhs, ty: _,
                     } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
@@ -2048,7 +2048,7 @@ impl Backend for X86_64Backend {
                         dst,
                         cond,
                         true_val,
-                        false_val,
+                        false_val, ty: _,
                     } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
@@ -2072,7 +2072,7 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Memory: Load ─────────────────────────────────────
-                    IRInstr::Load { dst, addr } => {
+                    IRInstr::Load { dst, addr, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2083,7 +2083,7 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Memory: Store ────────────────────────────────────
-                    IRInstr::Store { value, addr } => {
+                    IRInstr::Store { value, addr, .. } => {
                         let (v, mut code) = resolve_gpr(value, &reg_map, Gpr::R10);
                         let (a, pre) = resolve_gpr(addr, &reg_map, Gpr::R11);
                         code.extend(pre);

@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 
-use crate::arm64::{Condition, Instruction, Operand, Register};
+use crate::arm64::{Condition, Instruction, Operand, RegWidth, Register};
 use crate::backend::{BackendKind, RelocationEntry};
 use crate::ir::*;
 use crate::regalloc::RegAllocator;
@@ -663,23 +663,23 @@ impl Emitter {
     /// Lower a single IR instruction to ARM64 instructions.
     fn emit_ir_instr(&mut self, instr: &IRInstr) -> Result<()> {
         match instr {
-            IRInstr::Load { dst, addr } => {
+            IRInstr::Load { dst, addr, offset, ty } => {
                 let rt = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(addr)?;
-                self.emit_instruction(Instruction::LDR { rt, rn, offset: 0 })?;
+                self.emit_load(rt, rn, *offset, ty)?;
             }
 
-            IRInstr::Store { value, addr } => {
+            IRInstr::Store { value, addr, offset, ty } => {
                 let rt = self.resolve_reg(value)?;
                 let rn = self.resolve_reg(addr)?;
-                self.emit_instruction(Instruction::STR { rt, rn, offset: 0 })?;
+                self.emit_store(rt, rn, *offset, ty)?;
             }
 
-            IRInstr::BinOp { op, dst, lhs, rhs } => {
-                self.emit_binop(*op, dst, lhs, rhs)?;
+            IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+                self.emit_binop(*op, dst, lhs, rhs, ty.as_ref())?;
             }
 
-            IRInstr::UnaryOp { op, dst, operand } => {
+            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(operand)?;
                 match op {
@@ -934,17 +934,17 @@ impl Emitter {
             }
 
             // ── Dedicated arithmetic — delegate to BinOp ──
-            IRInstr::Add { dst, lhs, rhs } => {
-                self.emit_binop(BinOpKind::Add, dst, lhs, rhs)?;
+            IRInstr::Add { dst, lhs, rhs, ty } => {
+                self.emit_binop(BinOpKind::Add, dst, lhs, rhs, ty.as_ref())?;
             }
-            IRInstr::Sub { dst, lhs, rhs } => {
-                self.emit_binop(BinOpKind::Sub, dst, lhs, rhs)?;
+            IRInstr::Sub { dst, lhs, rhs, ty } => {
+                self.emit_binop(BinOpKind::Sub, dst, lhs, rhs, ty.as_ref())?;
             }
-            IRInstr::Mul { dst, lhs, rhs } => {
-                self.emit_binop(BinOpKind::Mul, dst, lhs, rhs)?;
+            IRInstr::Mul { dst, lhs, rhs, ty } => {
+                self.emit_binop(BinOpKind::Mul, dst, lhs, rhs, ty.as_ref())?;
             }
-            IRInstr::Div { dst, lhs, rhs } => {
-                self.emit_binop(BinOpKind::SDiv, dst, lhs, rhs)?;
+            IRInstr::Div { dst, lhs, rhs, ty } => {
+                self.emit_binop(BinOpKind::SDiv, dst, lhs, rhs, ty.as_ref())?;
             }
 
             // ── Comparison instruction ──
@@ -953,19 +953,24 @@ impl Emitter {
                 dst,
                 lhs,
                 rhs,
+                ty,
             } => {
+                let width = RegWidth::from_ir_type(ty.as_ref());
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(lhs)?;
                 let rm = self.resolve_reg(rhs)?;
-                self.emit_instruction(Instruction::CMP {
-                    rn,
-                    rm: Operand::Reg {
-                        reg: rm,
-                        shift: None,
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn,
+                        rm: Operand::Reg {
+                            reg: rm,
+                            shift: None,
+                        },
                     },
-                })?;
+                    width,
+                )?;
                 let cond = cmp_kind_to_condition(kind);
-                self.emit_instruction(Instruction::CSET { rd, cond })?;
+                self.emit_instruction_with_width(Instruction::CSET { rd, cond }, width)?;
             }
 
             // ── Instruction-level control flow ──
@@ -1020,52 +1025,86 @@ impl Emitter {
                 cond,
                 true_val,
                 false_val,
+                ty,
             } => {
+                let width = RegWidth::from_ir_type(ty.as_ref());
                 // Lower select as: SUBS XZR, cond, #0; CSEL dst, false_val, true_val, NE
                 let rd = self.resolve_reg(dst)?;
                 let rc = self.resolve_reg(cond)?;
                 let rt = self.resolve_reg(true_val)?;
                 let rf = self.resolve_reg(false_val)?;
                 // Compare cond against zero and select.
-                self.emit_instruction(Instruction::SUB {
-                    rd: Register::XZR,
-                    rn: rc,
-                    rm: Operand::Imm12(0),
-                })?;
+                self.emit_instruction_with_width(
+                    Instruction::SUB {
+                        rd: Register::XZR,
+                        rn: rc,
+                        rm: Operand::Imm12(0),
+                    },
+                    width,
+                )?;
                 // Set flags by using a separate CMP (SUB with XZR destination
                 // doesn't set flags; we need a flags-setting variant).
                 // We emulate this with: CMP rc, #0 which is SUBS XZR, rc, #0.
                 // Since we only have SUB, we use the existing CMP pattern.
-                self.emit_instruction(Instruction::CSEL {
-                    rd,
-                    rn: rf,
-                    rm: rt,
-                    cond: crate::arm64::Condition::NE,
-                })?;
+                self.emit_instruction_with_width(
+                    Instruction::CSEL {
+                        rd,
+                        rn: rf,
+                        rm: rt,
+                        cond: crate::arm64::Condition::NE,
+                    },
+                    width,
+                )?;
             }
         }
         Ok(())
     }
 
     /// Emit a binary operation (shared by `BinOp` and dedicated `Add`/`Sub`/…).
+    ///
+    /// Some ARM64 instructions (ADD, SUB, LSL, LSR, ASR) accept a 12-bit
+    /// unsigned immediate operand directly.  Most others (MUL, AND, ORR, EOR,
+    /// SDIV, UDIV, remainder, comparisons) **require** a register operand.
+    /// When the RHS is an immediate that the target instruction cannot accept
+    /// directly, we "spill" it into a scratch register (X16 / IP0) first via
+    /// MOVZ + MOVK and then use that register as the operand.
+    ///
+    /// X16 (IP0) is chosen as the scratch register because it is **not** in
+    /// the register allocator's free pool, so it will never conflict with
+    /// `rd` or `rn`.
     fn emit_binop(
         &mut self,
         op: BinOpKind,
         dst: &IRValue,
         lhs: &IRValue,
         rhs: &IRValue,
+        ty: Option<&IRType>,
     ) -> Result<()> {
+        let width = RegWidth::from_ir_type(ty);
         let rd = self.resolve_reg(dst)?;
         let rn = self.resolve_reg(lhs)?;
+
+        // Determine whether the operation can accept an immediate operand.
+        // ADD, SUB, LSL, LSR, ASR all have immediate forms in ARM64.
+        // All other operations require a register operand.
+        let supports_imm = matches!(
+            op,
+            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+        );
+
         let rm = match rhs {
             IRValue::Immediate(v) => {
-                if *v >= 0 && *v <= 4095 {
+                if supports_imm && *v >= 0 && *v <= 4095 {
+                    // Small immediate that the instruction accepts directly.
                     Operand::Imm12(*v as u16)
                 } else {
-                    let temp = Register::X9;
-                    self.emit_load_immediate(temp, *v)?;
+                    // Load the immediate into scratch register X16 (IP0).
+                    // X16 is not in the register allocator's pool, so it cannot
+                    // conflict with `rd` or `rn`.
+                    let scratch = Register::X16;
+                    self.emit_load_immediate_with_width(scratch, *v, width)?;
                     Operand::Reg {
-                        reg: temp,
+                        reg: scratch,
                         shift: None,
                     }
                 }
@@ -1078,43 +1117,43 @@ impl Emitter {
 
         match op {
             BinOpKind::Add => {
-                self.emit_instruction(Instruction::ADD { rd, rn, rm })?;
+                self.emit_instruction_with_width(Instruction::ADD { rd, rn, rm }, width)?;
             }
             BinOpKind::Sub => {
-                self.emit_instruction(Instruction::SUB { rd, rn, rm })?;
+                self.emit_instruction_with_width(Instruction::SUB { rd, rn, rm }, width)?;
             }
             BinOpKind::Mul => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::MUL { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::MUL { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::SDiv => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::SDIV { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::SDIV { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::UDiv => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::UDIV { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::UDIV { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::And => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::AND { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::AND { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::Or => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::ORR { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::ORR { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::Xor => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::EOR { rd, rn, rm: rm_reg })?;
+                self.emit_instruction_with_width(Instruction::EOR { rd, rn, rm: rm_reg }, width)?;
             }
             BinOpKind::Shl => {
-                self.emit_instruction(Instruction::LSL { rd, rn, rm })?;
+                self.emit_instruction_with_width(Instruction::LSL { rd, rn, rm }, width)?;
             }
             BinOpKind::ShrL => {
-                self.emit_instruction(Instruction::LSR { rd, rn, rm })?;
+                self.emit_instruction_with_width(Instruction::LSR { rd, rn, rm }, width)?;
             }
             BinOpKind::ShrA => {
-                self.emit_instruction(Instruction::ASR { rd, rn, rm })?;
+                self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm }, width)?;
             }
             BinOpKind::SRem | BinOpKind::URem => {
                 let rm_reg = self.operand_to_reg(&rm)?;
@@ -1123,14 +1162,14 @@ impl Emitter {
                 } else {
                     Instruction::UDIV { rd, rn, rm: rm_reg }
                 };
-                self.emit_instruction(div_instr)?;
+                self.emit_instruction_with_width(div_instr, width)?;
                 // MSUB rd, rd, rm, rn  =>  rd = rn - rd * rm  =  dividend - quotient * divisor
-                self.emit_instruction(Instruction::MSUB {
+                self.emit_instruction_with_width(Instruction::MSUB {
                     rd,
                     rn: rd,     // quotient (result of DIV)
                     rm: rm_reg, // divisor
                     ra: rn,     // dividend
-                })?;
+                }, width)?;
             }
             BinOpKind::SLt
             | BinOpKind::SLe
@@ -1143,15 +1182,15 @@ impl Emitter {
             | BinOpKind::Eq
             | BinOpKind::Ne => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction(Instruction::CMP {
+                self.emit_instruction_with_width(Instruction::CMP {
                     rn,
                     rm: Operand::Reg {
                         reg: rm_reg,
                         shift: None,
                     },
-                })?;
+                }, width)?;
                 let cond = binop_kind_to_condition(&op);
-                self.emit_instruction(Instruction::CSET { rd, cond })?;
+                self.emit_instruction_with_width(Instruction::CSET { rd, cond }, width)?;
             }
         }
         Ok(())
@@ -1260,6 +1299,247 @@ impl Emitter {
         Ok(())
     }
 
+    /// Emit an instruction with a specific register width (32-bit W or 64-bit X).
+    ///
+    /// This is the primary emission method for arithmetic and logical instructions
+    /// where the operand width affects the encoding. Using `RegWidth::W32` produces
+    /// instructions that operate on W sub-registers, giving automatic 32-bit
+    /// wrapping arithmetic.
+    fn emit_instruction_with_width(&mut self, instr: Instruction, width: RegWidth) -> Result<()> {
+        let word = instr.encode_with_width(width)?;
+        self.code.push(word);
+        Ok(())
+    }
+
+    /// Emit a load instruction with the given offset and IR type.
+    ///
+    /// Selects the correct ARM64 load variant based on the IR type:
+    /// - I8/U8 → LDRB (byte, zero-extended)
+    /// - I16/U16 → LDRH (halfword, zero-extended)
+    /// - I32/U32/Ptr/Func → LDR (word or doubleword)
+    /// - I64/U64 → LDR (doubleword)
+    ///
+    /// If the offset fits the ARM64 unsigned-offset immediate encoding for the
+    /// selected instruction variant, it is encoded directly. Otherwise, the
+    /// effective address is computed in a scratch register (X9) first, and
+    /// the load is performed at [X9 + 0].
+    fn emit_load(&mut self, rt: Register, rn: Register, offset: i32, ty: &IRType) -> Result<()> {
+        // Determine the ARM64 load instruction and its immediate-offset constraints.
+        // For each variant: (scale, max_imm12) where the encoded offset = imm12 << scale.
+        // LDRB:  scale=0, imm12 0..4095 → offset 0..4095
+        // LDRH:  scale=1, imm12 0..4095 → offset 0..8190, even
+        // LDRSW: scale=2, imm12 0..4095 → offset 0..16380, multiple of 4
+        // LDR W: scale=2, imm12 0..4095 → offset 0..16380, multiple of 4
+        // LDR X: scale=3, imm12 0..4095 → offset 0..32760, multiple of 8
+        match ty {
+            IRType::I8 | IRType::U8 => {
+                if offset >= 0 && offset <= 4095 {
+                    self.emit_instruction(Instruction::LDRB { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::LDRB {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+                // Sign-extend for signed byte loads (SXTB = SBFM Xd, Xn, #0, #7)
+                if *ty == IRType::I8 {
+                    self.emit_instruction(Instruction::SBFM {
+                        rd: rt,
+                        rn: rt,
+                        immr: 0,
+                        imms: 7,
+                    })?;
+                }
+            }
+            IRType::I16 | IRType::U16 => {
+                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+                    self.emit_instruction(Instruction::LDRH { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::LDRH {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+                // Sign-extend for signed halfword loads (SXTH = SBFM Xd, Xn, #0, #15)
+                if *ty == IRType::I16 {
+                    self.emit_instruction(Instruction::SBFM {
+                        rd: rt,
+                        rn: rt,
+                        immr: 0,
+                        imms: 15,
+                    })?;
+                }
+            }
+            IRType::I32 | IRType::U32 => {
+                // 32-bit load uses LDR Wt encoding (scale=2, offset must be multiple of 4)
+                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+                    self.emit_instruction(Instruction::LDR_W { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::LDR_W {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+                // Sign-extend for signed word loads (SXTW = SBFM Xd, Xn, #0, #31)
+                if *ty == IRType::I32 {
+                    self.emit_instruction(Instruction::SBFM {
+                        rd: rt,
+                        rn: rt,
+                        immr: 0,
+                        imms: 31,
+                    })?;
+                }
+            }
+            IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+                // 64-bit load uses LDR Xt encoding (scale=3, offset must be multiple of 8)
+                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                    self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::LDR {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+            _ => {
+                // Default: treat as 64-bit load
+                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                    self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::LDR {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a store instruction with the given offset and IR type.
+    ///
+    /// Selects the correct ARM64 store variant based on the IR type:
+    /// - I8/U8 → STRB (byte)
+    /// - I16/U16 → STRH (halfword)
+    /// - I32/U32 → STR_W (32-bit word)
+    /// - I64/U64/Ptr/Func → STR (64-bit doubleword)
+    ///
+    /// If the offset fits the ARM64 unsigned-offset immediate encoding for the
+    /// selected instruction variant, it is encoded directly. Otherwise, the
+    /// effective address is computed in a scratch register (X9) first, and
+    /// the store is performed at [X9 + 0].
+    fn emit_store(&mut self, rt: Register, rn: Register, offset: i32, ty: &IRType) -> Result<()> {
+        match ty {
+            IRType::I8 | IRType::U8 => {
+                if offset >= 0 && offset <= 4095 {
+                    self.emit_instruction(Instruction::STRB { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::STRB {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+            IRType::I16 | IRType::U16 => {
+                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+                    self.emit_instruction(Instruction::STRH { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::STRH {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+            IRType::I32 | IRType::U32 => {
+                // 32-bit store uses STR Wt encoding (scale=2, offset must be multiple of 4)
+                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+                    self.emit_instruction(Instruction::STR_W { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::STR_W {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+            IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+                // 64-bit store uses STR Xt encoding (scale=3, offset must be multiple of 8)
+                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                    self.emit_instruction(Instruction::STR { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::STR {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+            _ => {
+                // Default: treat as 64-bit store
+                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                    self.emit_instruction(Instruction::STR { rt, rn, offset })?;
+                } else {
+                    self.emit_address_with_offset(rn, offset)?;
+                    self.emit_instruction(Instruction::STR {
+                        rt,
+                        rn: Register::X9,
+                        offset: 0,
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compute `X9 = rn + offset` for load/store with an offset that does not
+    /// fit the ARM64 unsigned-offset immediate encoding.
+    ///
+    /// Uses X9 as a scratch register. If the offset fits in a 12-bit unsigned
+    /// immediate (0..4095), emits `ADD X9, rn, #offset`. Otherwise, loads the
+    /// offset into X9 with MOVZ/MOVK and then emits `ADD X9, rn, X9`.
+    fn emit_address_with_offset(
+        &mut self,
+        rn: Register,
+        offset: i32,
+    ) -> Result<()> {
+        if offset >= 0 && offset <= 4095 {
+            // Small positive offset: ADD X9, rn, #offset
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::X9,
+                rn,
+                rm: Operand::Imm12(offset as u16),
+            })?;
+        } else {
+            // Large or negative offset: load offset into X9, then ADD X9, rn, X9
+            self.emit_load_immediate(Register::X9, offset as i64)?;
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::X9,
+                rn,
+                rm: Operand::Reg {
+                    reg: Register::X9,
+                    shift: None,
+                },
+            })?;
+        }
+        Ok(())
+    }
+
     fn resolve_reg(&mut self, val: &IRValue) -> Result<Register> {
         match val {
             IRValue::Register(id) => self.reg_alloc.allocate(*id),
@@ -1336,12 +1616,73 @@ impl Emitter {
         Ok(())
     }
 
+    /// Emit a load-immediate sequence with a specific register width.
+    ///
+    /// For `RegWidth::W32`, only MOVZ/MOVK with shift 0 and 16 are emitted
+    /// (32-bit registers don't support shift=32 or shift=48). Values larger
+    /// than 32 bits are truncated to 32 bits.
+    fn emit_load_immediate_with_width(
+        &mut self,
+        rd: Register,
+        value: i64,
+        width: RegWidth,
+    ) -> Result<()> {
+        match width {
+            RegWidth::X64 => self.emit_load_immediate(rd, value),
+            RegWidth::W32 => {
+                // For 32-bit: mask to 32 bits and use only shift 0 and 16.
+                let val32 = (value as u32) as i64;
+                if (0..=65535).contains(&val32) {
+                    self.emit_instruction_with_width(
+                        Instruction::MOVZ {
+                            rd,
+                            imm16: val32 as u16,
+                            shift: 0,
+                        },
+                        RegWidth::W32,
+                    )?;
+                } else {
+                    let lo = (val32 & 0xFFFF) as u16;
+                    let hi = ((val32 >> 16) & 0xFFFF) as u16;
+                    self.emit_instruction_with_width(
+                        Instruction::MOVZ {
+                            rd,
+                            imm16: lo,
+                            shift: 0,
+                        },
+                        RegWidth::W32,
+                    )?;
+                    if hi != 0 {
+                        self.emit_instruction_with_width(
+                            Instruction::MOVK {
+                                rd,
+                                imm16: hi,
+                                shift: 16,
+                            },
+                            RegWidth::W32,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn operand_to_reg(&self, op: &Operand) -> Result<Register> {
         match op {
             Operand::Reg { reg, shift: _ } => Ok(*reg),
-            Operand::Imm12(_) => Err(CodegenError::EncodingError(
-                "expected register operand, got immediate".into(),
-            )),
+            Operand::Imm12(v) => {
+                log::error!(
+                    "operand_to_reg: expected register operand, got Imm12({v}) — \
+                     caller should have spilled the immediate to a scratch register \
+                     before invoking this method"
+                );
+                Err(CodegenError::EncodingError(format!(
+                    "expected register operand, got immediate ({v}) — \
+                     the caller should spill the immediate to a scratch register \
+                     (e.g. X16) before calling operand_to_reg()"
+                )))
+            }
         }
     }
 

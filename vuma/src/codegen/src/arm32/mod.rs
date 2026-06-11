@@ -2553,7 +2553,7 @@ impl Backend for Arm32Backend {
         for block in &func.blocks {
             for instr in &block.instructions {
                 let encoded = match instr {
-                    crate::ir::IRInstr::Add { dst, lhs, rhs } => {
+                    crate::ir::IRInstr::Add { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2629,7 +2629,7 @@ impl Backend for Arm32Backend {
                             code
                         }
                     }
-                    crate::ir::IRInstr::Sub { dst, lhs, rhs } => {
+                    crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2704,7 +2704,7 @@ impl Backend for Arm32Backend {
                             code
                         }
                     }
-                    crate::ir::IRInstr::Mul { dst, lhs, rhs } => {
+                    crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2733,7 +2733,7 @@ impl Backend for Arm32Backend {
                         ));
                         code
                     }
-                    crate::ir::IRInstr::Div { dst, lhs, rhs } => {
+                    crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -2775,7 +2775,7 @@ impl Backend for Arm32Backend {
                         }
                         code
                     }
-                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs } => {
+                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3064,7 +3064,7 @@ impl Backend for Arm32Backend {
                         }
                         code
                     }
-                    crate::ir::IRInstr::UnaryOp { op, dst, operand } => {
+                    crate::ir::IRInstr::UnaryOp { op, dst, operand, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3114,8 +3114,8 @@ impl Backend for Arm32Backend {
                         kind,
                         dst,
                         lhs,
-                        rhs,
-                    } => {
+                        rhs, ty: _,
+                    .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3163,7 +3163,7 @@ impl Backend for Arm32Backend {
                         ));
                         code
                     }
-                    crate::ir::IRInstr::Load { dst, addr } => {
+                    crate::ir::IRInstr::Load { dst, addr, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3182,7 +3182,7 @@ impl Backend for Arm32Backend {
                         ));
                         code
                     }
-                    crate::ir::IRInstr::Store { value, addr } => {
+                    crate::ir::IRInstr::Store { value, addr, .. } => {
                         let (v, mut code) = resolve_gpr_arm32(value, &reg_map, Gpr::R12);
                         let (a, pre) = resolve_gpr_arm32(addr, &reg_map, Gpr::R3);
                         code.extend_from_slice(&pre);
@@ -3331,7 +3331,7 @@ impl Backend for Arm32Backend {
                         dst,
                         cond,
                         true_val,
-                        false_val,
+                        false_val, ty: _,
                     } => {
                         // dst = if cond != 0 { true_val } else { false_val }
                         // Lowered as: MOV dst, false_val; CMP cond, #0; MOVNE dst, true_val

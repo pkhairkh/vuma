@@ -34,24 +34,30 @@ fn substitute_value(val: &IRValue, map: &HashMap<u32, IRValue>) -> IRValue {
 fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
     let sv = |v: &IRValue| substitute_value(v, map);
     match instr {
-        IRInstr::Load { dst, addr } => IRInstr::Load {
+        IRInstr::Load { dst, addr, offset, ty } => IRInstr::Load {
             dst: sv(dst),
             addr: sv(addr),
+            offset: *offset,
+            ty: ty.clone(),
         },
-        IRInstr::Store { value, addr } => IRInstr::Store {
+        IRInstr::Store { value, addr, offset, ty } => IRInstr::Store {
             value: sv(value),
             addr: sv(addr),
+            offset: *offset,
+            ty: ty.clone(),
         },
-        IRInstr::BinOp { op, dst, lhs, rhs } => IRInstr::BinOp {
+        IRInstr::BinOp { op, dst, lhs, rhs, ty } => IRInstr::BinOp {
             op: *op,
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
-        IRInstr::UnaryOp { op, dst, operand } => IRInstr::UnaryOp {
+        IRInstr::UnaryOp { op, dst, operand, ty } => IRInstr::UnaryOp {
             op: *op,
             dst: sv(dst),
             operand: sv(operand),
+            ty: ty.clone(),
         },
         IRInstr::Call { dst, func, args } => IRInstr::Call {
             dst: dst.as_ref().map(&sv),
@@ -86,42 +92,50 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             cond,
             true_val,
             false_val,
+            ty,
         } => IRInstr::Select {
             dst: sv(dst),
             cond: sv(cond),
             true_val: sv(true_val),
             false_val: sv(false_val),
+            ty: ty.clone(),
         },
-        IRInstr::Add { dst, lhs, rhs } => IRInstr::Add {
+        IRInstr::Add { dst, lhs, rhs, ty } => IRInstr::Add {
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
-        IRInstr::Sub { dst, lhs, rhs } => IRInstr::Sub {
+        IRInstr::Sub { dst, lhs, rhs, ty } => IRInstr::Sub {
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
-        IRInstr::Mul { dst, lhs, rhs } => IRInstr::Mul {
+        IRInstr::Mul { dst, lhs, rhs, ty } => IRInstr::Mul {
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
-        IRInstr::Div { dst, lhs, rhs } => IRInstr::Div {
+        IRInstr::Div { dst, lhs, rhs, ty } => IRInstr::Div {
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
         IRInstr::Cmp {
             kind,
             dst,
             lhs,
             rhs,
+            ty,
         } => IRInstr::Cmp {
             kind: *kind,
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
+            ty: ty.clone(),
         },
         IRInstr::Ret { values } => IRInstr::Ret {
             values: values.iter().map(sv).collect(),
@@ -550,38 +564,38 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
 /// eliminated, or `None` if it cannot be folded.
 fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs } => {
+        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
             let result = try_fold_binop(*op, l, r)?;
             Some((dst_id, result))
         }
-        IRInstr::UnaryOp { op, dst, operand } => {
+        IRInstr::UnaryOp { op, dst, operand, .. } => {
             let o = operand.as_immediate()?;
             let dst_id = dst.as_register()?;
             let result = try_fold_unaryop(*op, o)?;
             Some((dst_id, result))
         }
-        IRInstr::Add { dst, lhs, rhs } => {
+        IRInstr::Add { dst, lhs, rhs, .. } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
             Some((dst_id, l.wrapping_add(r)))
         }
-        IRInstr::Sub { dst, lhs, rhs } => {
+        IRInstr::Sub { dst, lhs, rhs, .. } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
             Some((dst_id, l.wrapping_sub(r)))
         }
-        IRInstr::Mul { dst, lhs, rhs } => {
+        IRInstr::Mul { dst, lhs, rhs, .. } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
             Some((dst_id, l.wrapping_mul(r)))
         }
-        IRInstr::Div { dst, lhs, rhs } => {
+        IRInstr::Div { dst, lhs, rhs, .. } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             if r == 0 {
@@ -594,7 +608,7 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             kind,
             dst,
             lhs,
-            rhs,
+            rhs, ty: _,
         } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
@@ -822,6 +836,7 @@ pub fn inline_small(
                                     cond: IRValue::Immediate(1),
                                     true_val: ret_val.clone(),
                                     false_val: ret_val,
+                                    ty: None,
                                 });
                             }
                         }
@@ -867,6 +882,7 @@ pub fn inline_small(
                     cond: IRValue::Immediate(1),
                     true_val: rv.clone(),
                     false_val: rv.clone(),
+                    ty: None,
                 });
             }
             cont_block.instructions.extend(suffix_instrs);

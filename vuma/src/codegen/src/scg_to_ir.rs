@@ -948,6 +948,7 @@ impl IRBuilder {
                 dst: IRValue::Register(cond_vreg),
                 lhs: disc_val.clone(),
                 rhs: IRValue::Immediate(arm.value),
+                ty: None,
             });
             ir_func.current_block().push(IRInstruction::CondBranch {
                 cond: IRValue::Register(cond_vreg),
@@ -1125,19 +1126,26 @@ impl IRBuilder {
         match access {
             AccessNode::Load { dst, ptr, offset } => {
                 let ptr_val = self.resolve_expr(ptr, names)?;
-                let addr_val = match offset {
+                let (addr_val, byte_offset) = match offset {
                     Some(off) => {
-                        let off_val = self.resolve_expr(off, names)?;
-                        let addr_reg = self.alloc_vreg();
-                        ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
-                        ir_func.current_block().push(IRInstruction::Offset {
-                            dst: IRValue::Register(addr_reg),
-                            base: ptr_val,
-                            offset: off_val,
-                        });
-                        IRValue::Register(addr_reg)
+                        // If the offset is a constant, we can embed it directly
+                        // in the Load instruction. Otherwise, compute the address
+                        // with an Offset instruction and use offset 0.
+                        if let ScgExpr::Int(off_val) = off {
+                            (ptr_val, *off_val as i32)
+                        } else {
+                            let off_val = self.resolve_expr(off, names)?;
+                            let addr_reg = self.alloc_vreg();
+                            ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
+                            ir_func.current_block().push(IRInstruction::Offset {
+                                dst: IRValue::Register(addr_reg),
+                                base: ptr_val,
+                                offset: off_val,
+                            });
+                            (IRValue::Register(addr_reg), 0)
+                        }
                     }
-                    None => ptr_val,
+                    None => (ptr_val, 0),
                 };
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
@@ -1145,28 +1153,36 @@ impl IRBuilder {
                 ir_func.current_block().push(IRInstruction::Load {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
+                    offset: byte_offset,
+                    ty: IRType::I64,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
                 let ptr_val = self.resolve_expr(ptr, names)?;
                 let val = self.resolve_expr(value, names)?;
-                let addr_val = match offset {
+                let (addr_val, byte_offset) = match offset {
                     Some(off) => {
-                        let off_val = self.resolve_expr(off, names)?;
-                        let addr_reg = self.alloc_vreg();
-                        ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
-                        ir_func.current_block().push(IRInstruction::Offset {
-                            dst: IRValue::Register(addr_reg),
-                            base: ptr_val,
-                            offset: off_val,
-                        });
-                        IRValue::Register(addr_reg)
+                        if let ScgExpr::Int(off_val) = off {
+                            (ptr_val, *off_val as i32)
+                        } else {
+                            let off_val = self.resolve_expr(off, names)?;
+                            let addr_reg = self.alloc_vreg();
+                            ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
+                            ir_func.current_block().push(IRInstruction::Offset {
+                                dst: IRValue::Register(addr_reg),
+                                base: ptr_val,
+                                offset: off_val,
+                            });
+                            (IRValue::Register(addr_reg), 0)
+                        }
                     }
-                    None => ptr_val,
+                    None => (ptr_val, 0),
                 };
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
+                    offset: byte_offset,
+                    ty: IRType::I64,
                 });
             }
         }
@@ -1227,6 +1243,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::Sub => {
@@ -1234,6 +1251,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::Mul => {
@@ -1241,6 +1259,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::SDiv | BinOpKind::UDiv => {
@@ -1248,6 +1267,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             // Comparison operations → dedicated Cmp instruction.
@@ -1257,6 +1277,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::SLe => {
@@ -1265,6 +1286,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::SGt => {
@@ -1273,6 +1295,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::SGe => {
@@ -1281,6 +1304,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::ULt => {
@@ -1289,6 +1313,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::ULe => {
@@ -1297,6 +1322,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::UGt => {
@@ -1305,6 +1331,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::UGe => {
@@ -1313,6 +1340,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::Eq => {
@@ -1321,6 +1349,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             BinOpKind::Ne => {
@@ -1329,6 +1358,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
             _ => {
@@ -1337,6 +1367,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
+                    ty: None,
                 });
             }
         }
@@ -1364,6 +1395,7 @@ impl IRBuilder {
             op: unary.op,
             dst: IRValue::Register(dst_vreg),
             operand: operand_val,
+            ty: None,
         });
 
         Ok(())
@@ -2297,6 +2329,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
+            ty: None,
                     op: UnaryOpKind::Not,
                     ..
                 }
@@ -2332,6 +2365,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
+            ty: None,
                     op: UnaryOpKind::Clz,
                     ..
                 }
@@ -3025,6 +3059,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
+            ty: None,
                     op: UnaryOpKind::Popcnt,
                     ..
                 }

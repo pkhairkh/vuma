@@ -3453,20 +3453,20 @@ fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
         for instr in &block.instructions {
             let values: Vec<&IRValue> = match instr {
                 IRInstr::BinOp { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
-                IRInstr::Add { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                IRInstr::Sub { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                IRInstr::Mul { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                IRInstr::Div { dst, lhs, rhs } => vec![dst, lhs, rhs],
+                IRInstr::Add { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                IRInstr::Sub { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                IRInstr::Mul { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                IRInstr::Div { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
                 IRInstr::UnaryOp { dst, operand, .. } => vec![dst, operand],
-                IRInstr::Load { dst, addr } => vec![dst, addr],
-                IRInstr::Store { value, addr } => vec![value, addr],
+                IRInstr::Load { dst, addr, .. } => vec![dst, addr],
+                IRInstr::Store { value, addr, .. } => vec![value, addr],
                 IRInstr::Alloc { dst, .. } => vec![dst],
                 IRInstr::Cast { dst, src, .. } => vec![dst, src],
                 IRInstr::Select {
                     dst,
                     cond,
                     true_val,
-                    false_val,
+                    false_val, ty: _,
                 } => vec![dst, cond, true_val, false_val],
                 IRInstr::Offset { dst, base, offset } => vec![dst, base, offset],
                 IRInstr::GetAddress { dst, .. } => vec![dst],
@@ -3519,20 +3519,20 @@ impl Backend for RiscV64Backend {
 
                 let values: Vec<&IRValue> = match instr {
                     IRInstr::BinOp { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
-                    IRInstr::Add { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Sub { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Mul { dst, lhs, rhs } => vec![dst, lhs, rhs],
-                    IRInstr::Div { dst, lhs, rhs } => vec![dst, lhs, rhs],
+                    IRInstr::Add { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Sub { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Mul { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+                    IRInstr::Div { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
                     IRInstr::UnaryOp { dst, operand, .. } => vec![dst, operand],
-                    IRInstr::Load { dst, addr } => vec![dst, addr],
-                    IRInstr::Store { value, addr } => vec![value, addr],
+                    IRInstr::Load { dst, addr, .. } => vec![dst, addr],
+                    IRInstr::Store { value, addr, .. } => vec![value, addr],
                     IRInstr::Alloc { dst, .. } => vec![dst],
                     IRInstr::Cast { dst, src, .. } => vec![dst, src],
                     IRInstr::Select {
                         dst,
                         cond,
                         true_val,
-                        false_val,
+                        false_val, ty: _,
                     } => vec![dst, cond, true_val, false_val],
                     IRInstr::Offset { dst, base, offset } => vec![dst, base, offset],
                     IRInstr::GetAddress { dst, .. } => vec![dst],
@@ -3619,7 +3619,7 @@ impl Backend for RiscV64Backend {
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
                     // ── Dedicated Add/Sub/Mul/Div ──────────────────────────
-                    IRInstr::Add { dst, lhs, rhs } => {
+                    IRInstr::Add { dst, lhs, rhs, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3692,7 +3692,7 @@ impl Backend for RiscV64Backend {
                         }
                         code
                     }
-                    IRInstr::Sub { dst, lhs, rhs } => {
+                    IRInstr::Sub { dst, lhs, rhs, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3720,7 +3720,7 @@ impl Backend for RiscV64Backend {
                         );
                         code
                     }
-                    IRInstr::Mul { dst, lhs, rhs } => {
+                    IRInstr::Mul { dst, lhs, rhs, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3748,7 +3748,7 @@ impl Backend for RiscV64Backend {
                         );
                         code
                     }
-                    IRInstr::Div { dst, lhs, rhs } => {
+                    IRInstr::Div { dst, lhs, rhs, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -3778,7 +3778,7 @@ impl Backend for RiscV64Backend {
                     }
 
                     // ── BinOp (generic) ──────────────────────────────────────
-                    IRInstr::BinOp { op, dst, lhs, rhs } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -4076,7 +4076,7 @@ impl Backend for RiscV64Backend {
                     }
 
                     // ── Unary operations ─────────────────────────────────────
-                    IRInstr::UnaryOp { op, dst, operand } => {
+                    IRInstr::UnaryOp { op, dst, operand, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -4139,7 +4139,7 @@ impl Backend for RiscV64Backend {
                         kind,
                         dst,
                         lhs,
-                        rhs,
+                        rhs, ty: _,
                     } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
@@ -4163,7 +4163,7 @@ impl Backend for RiscV64Backend {
                     }
 
                     // ── Memory: Load ─────────────────────────────────────────
-                    IRInstr::Load { dst, addr } => {
+                    IRInstr::Load { dst, addr, .. } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
@@ -4181,7 +4181,7 @@ impl Backend for RiscV64Backend {
                     }
 
                     // ── Memory: Store ────────────────────────────────────────
-                    IRInstr::Store { value, addr } => {
+                    IRInstr::Store { value, addr, .. } => {
                         let (v, mut code) = resolve_gpr(value, &vreg_map, Gpr::T3);
                         let (a, pre) = resolve_gpr(addr, &vreg_map, Gpr::T4);
                         code.extend(pre);
@@ -4313,7 +4313,7 @@ impl Backend for RiscV64Backend {
                         dst,
                         cond,
                         true_val,
-                        false_val,
+                        false_val, ty: _,
                     } => {
                         let d = vreg_map
                             .get(&dst.as_register().unwrap_or(0))
