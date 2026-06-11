@@ -154,9 +154,7 @@ fn build_runtime_from_vuma_scg() -> CORuntime {
         .collect();
     let delta = Delta {
         added_nodes: all_node_ids,
-        removed_nodes: Vec::new(),
-        added_edges: Vec::new(),
-        removed_edges: Vec::new(),
+        ..Delta::empty()
     };
     rt.compile_incremental(&delta);
     rt
@@ -217,9 +215,7 @@ fn build_rich_cor_runtime() -> CORuntime {
     // Compile all nodes.
     let delta = Delta {
         added_nodes: vec![1, 10, 20, 30, 40],
-        removed_nodes: Vec::new(),
-        added_edges: Vec::new(),
-        removed_edges: Vec::new(),
+        ..Delta::empty()
     };
     rt.compile_incremental(&delta);
     rt
@@ -316,9 +312,7 @@ fn test_e2e_cor_compile_incremental() {
     // Add new nodes via a delta.
     let new_delta = Delta {
         added_nodes: vec![900, 901],
-        removed_nodes: Vec::new(),
-        added_edges: Vec::new(),
-        removed_edges: Vec::new(),
+        ..Delta::empty()
     };
 
     let recompiled = rt.compile_incremental(&new_delta);

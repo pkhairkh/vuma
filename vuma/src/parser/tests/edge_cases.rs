@@ -288,3 +288,53 @@ fn edge_garbage_hex_like() {
 fn edge_null_bytes_in_source() {
     assert_no_panic("let x = \0;");
 }
+
+// ---- New edge-case tests: empty function body, nested let, unsafe, loop ----
+
+#[test]
+fn test_parse_empty_function_body() {
+    let mut parser = Parser::new("fn foo() {}");
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "empty function body should parse successfully");
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 1, "should have exactly one item");
+}
+
+#[test]
+fn test_parse_nested_let_bindings() {
+    let source = "fn f() { let x = 1; let y = x; let z = y; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "nested let bindings should parse successfully"
+    );
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 1, "should have exactly one function");
+}
+
+#[test]
+fn test_parse_unsafe_block() {
+    // `unsafe` is a keyword; the parser should handle it without panicking.
+    let source = "fn f() { unsafe { let x = 1; } }";
+    assert_no_panic(source);
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "unsafe block inside function should parse without fatal error"
+    );
+}
+
+#[test]
+fn test_parse_loop_keyword() {
+    let source = "fn f() { loop { break; } }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "loop with break should parse successfully"
+    );
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 1, "should have exactly one function");
+}

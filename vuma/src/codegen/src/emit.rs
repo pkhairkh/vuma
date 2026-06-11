@@ -56,7 +56,7 @@
 use std::collections::HashMap;
 
 use crate::arm64::{Condition, Instruction, Operand, Register};
-use crate::backend::BackendKind;
+use crate::backend::{BackendKind, RelocationEntry};
 use crate::ir::*;
 use crate::regalloc::RegAllocator;
 use crate::CodegenError;
@@ -545,6 +545,12 @@ pub struct Emitter {
     label_offsets: HashMap<String, usize>,
     /// Inter-function call relocations for the current function.
     call_relocs: Vec<CallRelocation>,
+    /// Relocation entries using the `RelocationEntry` infrastructure.
+    ///
+    /// Each entry records a byte offset within the function's encoded output
+    /// where a symbolic reference must be resolved, the target symbol name,
+    /// and the ISA-specific relocation type (e.g., `"R_AARCH64_CALL26"`).
+    relocations: Vec<RelocationEntry>,
     /// Name of the function currently being emitted.
     current_func_name: String,
     /// Byte offset of the current function within the text section (set externally).
@@ -562,6 +568,7 @@ impl Emitter {
             fixups: Vec::new(),
             label_offsets: HashMap::new(),
             call_relocs: Vec::new(),
+            relocations: Vec::new(),
             current_func_name: String::new(),
             func_text_offset: 0,
             frame_size: 0,
@@ -580,6 +587,7 @@ impl Emitter {
         self.fixups.clear();
         self.label_offsets.clear();
         self.call_relocs.clear();
+        self.relocations.clear();
         self.current_func_name = func.name.clone();
         self.reg_alloc.reset();
 
@@ -626,6 +634,17 @@ impl Emitter {
         self.apply_fixups()?;
 
         Ok(self.code.clone())
+    }
+
+    /// Returns the relocation entries recorded during emission of the current
+    /// function.
+    ///
+    /// Each `RelocationEntry` records a byte offset within the function's
+    /// encoded output where a symbolic reference must be resolved, the target
+    /// symbol name, and the ISA-specific relocation type (e.g.,
+    /// `"R_AARCH64_CALL26"`).
+    pub fn relocations(&self) -> &[RelocationEntry] {
+        &self.relocations
     }
 
     /// Emit instructions for a single IR basic block.
@@ -762,9 +781,16 @@ impl Emitter {
 
                 // BL — record a relocation for later patching.
                 let bl_word_idx = self.code.len();
+                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
                 self.call_relocs.push(CallRelocation {
-                    text_byte_offset: self.func_text_offset + (bl_word_idx as u64) * 4,
+                    text_byte_offset: bl_byte_offset,
                     target_func: target_name.clone(),
+                });
+                // Register a RelocationEntry so the linker can patch this BL.
+                self.relocations.push(RelocationEntry {
+                    offset: bl_byte_offset,
+                    symbol: target_name.clone(),
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
                 });
                 self.emit_instruction(Instruction::BL { offset: 0 })?;
 
@@ -804,9 +830,15 @@ impl Emitter {
                 }
                 // BL __vuma_free
                 let bl_word_idx = self.code.len();
+                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
                 self.call_relocs.push(CallRelocation {
-                    text_byte_offset: self.func_text_offset + (bl_word_idx as u64) * 4,
+                    text_byte_offset: bl_byte_offset,
                     target_func: "__vuma_free".to_string(),
+                });
+                self.relocations.push(RelocationEntry {
+                    offset: bl_byte_offset,
+                    symbol: "__vuma_free".to_string(),
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
                 });
                 self.emit_instruction(Instruction::BL { offset: 0 })?;
             }
@@ -858,9 +890,15 @@ impl Emitter {
                     .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
                 self.emit_load_immediate(Register::X0, name_hash as i64)?;
                 let bl_word_idx = self.code.len();
+                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
                 self.call_relocs.push(CallRelocation {
-                    text_byte_offset: self.func_text_offset + (bl_word_idx as u64) * 4,
+                    text_byte_offset: bl_byte_offset,
                     target_func: "__vuma_getaddr".to_string(),
+                });
+                self.relocations.push(RelocationEntry {
+                    offset: bl_byte_offset,
+                    symbol: "__vuma_getaddr".to_string(),
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
                 });
                 self.emit_instruction(Instruction::BL { offset: 0 })?;
                 if rd != Register::X0 {
@@ -3079,6 +3117,123 @@ mod tests {
             R_LARCH_B26
         );
         assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32), R_ARM_CALL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Codegen backend instruction emission tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that a BL instruction is emitted for function calls on ARM64.
+    #[test]
+    fn test_arm64_call_emission() {
+        let mut func = IRFunction::new("caller");
+        func.current_block().push(IRInstr::Call {
+            dst: None,
+            func: "callee".to_string(),
+            args: vec![],
+        });
+        func.current_block().terminator = IRTerminator::Return(vec![]);
+
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func).unwrap();
+
+        // Find a BL instruction (opcode bits [31:26] = 0b100101) in the output.
+        let mut found_bl = false;
+        for word in &code {
+            if (word >> 26) == 0b100101 {
+                found_bl = true;
+                break;
+            }
+        }
+        assert!(found_bl, "expected a BL instruction for the function call");
+    }
+
+    /// Verify that a relocation is registered for forward calls (calls to
+    /// functions whose address is not yet known at emit time).
+    #[test]
+    fn test_arm64_relocation_for_forward_call() {
+        let mut func = IRFunction::new("caller");
+        func.current_block().push(IRInstr::Call {
+            dst: None,
+            func: "forward_func".to_string(),
+            args: vec![],
+        });
+        func.current_block().push(IRInstr::Call {
+            dst: None,
+            func: "another_func".to_string(),
+            args: vec![],
+        });
+        func.current_block().terminator = IRTerminator::Return(vec![]);
+
+        let mut emitter = Emitter::new();
+        let _code = emitter.emit_function(&func).unwrap();
+
+        let relocs = emitter.relocations();
+        assert_eq!(relocs.len(), 2, "expected 2 relocations for 2 calls");
+
+        // First relocation should target forward_func.
+        assert_eq!(relocs[0].symbol, "forward_func");
+        assert_eq!(relocs[0].reloc_type, "R_AARCH64_CALL26");
+
+        // Second relocation should target another_func.
+        assert_eq!(relocs[1].symbol, "another_func");
+        assert_eq!(relocs[1].reloc_type, "R_AARCH64_CALL26");
+
+        // Offsets should be distinct and 4-byte aligned.
+        assert_eq!(relocs[0].offset % 4, 0);
+        assert_eq!(relocs[1].offset % 4, 0);
+        assert!(relocs[1].offset > relocs[0].offset);
+    }
+
+    /// Verify that the RISC-V64 ADDI instruction encodes correctly.
+    #[test]
+    fn test_riscv64_alu_immediate() {
+        use crate::riscv64::{Gpr, Instruction};
+
+        // ADDI x5, x10, 42  →  addi t0, a0, 42
+        let instr = Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::A0,
+            imm: 42,
+        };
+        let bytes = instr.encode();
+        assert_eq!(bytes.len(), 4);
+
+        // Decode the word and verify fields.
+        let word = u32::from_le_bytes(bytes);
+        let opcode = word & 0x7F;
+        let rd = (word >> 7) & 0x1F;
+        let funct3 = (word >> 12) & 0x7;
+        let rs1 = (word >> 15) & 0x1F;
+        let imm = (word >> 20) & 0xFFF;
+
+        assert_eq!(opcode, 0b0010011, "ADDI opcode");
+        assert_eq!(rd, Gpr::T0 as u32, "destination register");
+        assert_eq!(funct3, 0b000, "ADDI funct3");
+        assert_eq!(rs1, Gpr::A0 as u32, "source register");
+        assert_eq!(imm, 42, "immediate value");
+    }
+
+    /// Verify that the x86-64 MOV r64, imm64 instruction encodes correctly.
+    #[test]
+    fn test_x86_64_mov_immediate() {
+        use crate::x86_64::{encode_mov_reg_imm64, Gpr};
+
+        // MOV rax, 0x4242424242424242
+        let code = encode_mov_reg_imm64(Gpr::Rax, 0x4242424242424242);
+        assert!(!code.is_empty());
+
+        // Should start with REX.W prefix (0x48 for RAX, which doesn't need REX.B).
+        assert_eq!(code[0], 0x48, "REX.W prefix");
+
+        // Opcode for MOV r64, imm64 is B8+rd.
+        assert_eq!(code[1], 0xB8, "MOV rax, imm64 opcode");
+
+        // The 8-byte immediate should follow.
+        let imm = u64::from_le_bytes(
+            code[2..10].try_into().expect("8 bytes for immediate"),
+        );
+        assert_eq!(imm, 0x4242424242424242);
     }
 }
 

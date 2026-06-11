@@ -241,12 +241,22 @@ impl CORuntime {
         }
 
         log::info!(
-            "compile_incremental: +{} nodes, -{} nodes, +{} edges, -{} edges",
+            "compile_incremental: +{} nodes, -{} nodes, ~{} modified nodes, +{} edges, -{} edges, ~{} modified edges, ~{} region changes",
             delta.added_nodes.len(),
             delta.removed_nodes.len(),
+            delta.modified_nodes.len(),
             delta.added_edges.len(),
             delta.removed_edges.len(),
+            delta.modified_edges.len(),
+            delta.region_changes.len(),
         );
+
+        if !delta.modified_nodes.is_empty() || !delta.modified_edges.is_empty() {
+            log::info!(
+                "compile_incremental: field-level changes: {} total field changes",
+                delta.total_field_changes(),
+            );
+        }
 
         // 1. Determine which existing regions overlap with the delta.
         // 2. Invalidate those regions in compiled_state.
@@ -268,6 +278,29 @@ impl CORuntime {
             self.compiled_state.remove(region_id);
         }
 
+        // Modified nodes: their regions must be recompiled because field-level
+        // changes (e.g. is_inlined, unroll_factor) affect code generation.
+        for modification in &delta.modified_nodes {
+            let region_id = modification.node_id as RegionId;
+            // Log the individual field changes for diagnostics.
+            for change in &modification.field_changes {
+                log::debug!(
+                    "compile_incremental: node {} field '{}' changed: {} -> {}",
+                    modification.node_id,
+                    change.field_name,
+                    change.old_value,
+                    change.new_value,
+                );
+            }
+            if self.compiled_state.is_compiled(region_id) {
+                self.compiled_state.remove(region_id);
+                let code = self.compile_region(region_id);
+                let compiled = CompiledRegion { region_id, code };
+                self.compiled_state.insert(compiled);
+                recompiled.push(region_id);
+            }
+        }
+
         // Edge changes may require recompilation of affected regions.
         // When an edge is added or removed, the regions connected by
         // that edge may have different control/data flow and must be
@@ -287,6 +320,34 @@ impl CORuntime {
                 let target_region = self.find_region_for_node(edge.target);
 
                 // Invalidate and recompile any affected regions.
+                for region_id in source_region.into_iter().chain(target_region) {
+                    if self.compiled_state.is_compiled(region_id) {
+                        self.compiled_state.remove(region_id);
+                        let code = self.compile_region(region_id);
+                        let compiled = CompiledRegion { region_id, code };
+                        self.compiled_state.insert(compiled);
+                        recompiled.push(region_id);
+                    }
+                }
+            }
+        }
+
+        // Modified edges: their connected regions must be recompiled because
+        // field-level changes (e.g. weight) affect optimization decisions.
+        for modification in &delta.modified_edges {
+            let edge_id = modification.edge_id as crate::types::EdgeId;
+            for change in &modification.field_changes {
+                log::debug!(
+                    "compile_incremental: edge {} field '{}' changed: {} -> {}",
+                    modification.edge_id,
+                    change.field_name,
+                    change.old_value,
+                    change.new_value,
+                );
+            }
+            if let Some(edge) = self.scg.edges.get(&edge_id) {
+                let source_region = self.find_region_for_node(edge.source);
+                let target_region = self.find_region_for_node(edge.target);
                 for region_id in source_region.into_iter().chain(target_region) {
                     if self.compiled_state.is_compiled(region_id) {
                         self.compiled_state.remove(region_id);
@@ -1102,9 +1163,7 @@ mod tests {
 
         let delta = Delta {
             added_nodes: vec![10, 20],
-            removed_nodes: vec![],
-            added_edges: vec![],
-            removed_edges: vec![],
+            ..Delta::empty()
         };
 
         let recompiled = rt.compile_incremental(&delta);
@@ -1121,9 +1180,7 @@ mod tests {
 
         let delta = Delta {
             added_nodes: vec![42],
-            removed_nodes: vec![],
-            added_edges: vec![],
-            removed_edges: vec![],
+            ..Delta::empty()
         };
 
         let recompiled = rt.compile_incremental(&delta);
@@ -1157,9 +1214,7 @@ mod tests {
 
         let delta = Delta {
             added_nodes: vec![100],
-            removed_nodes: vec![],
-            added_edges: vec![],
-            removed_edges: vec![],
+            ..Delta::empty()
         };
 
         let recompiled = rt.compile_incremental(&delta);
@@ -1314,9 +1369,7 @@ mod tests {
 
         let delta = Delta {
             added_nodes: vec![42],
-            removed_nodes: vec![],
-            added_edges: vec![],
-            removed_edges: vec![],
+            ..Delta::empty()
         };
         rt.compile_incremental(&delta);
 
@@ -1334,9 +1387,7 @@ mod tests {
 
         let delta2 = Delta {
             added_nodes: vec![99],
-            removed_nodes: vec![],
-            added_edges: vec![],
-            removed_edges: vec![],
+            ..Delta::empty()
         };
         rt2.compile_incremental(&delta2);
 

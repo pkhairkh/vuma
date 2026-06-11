@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn speculative_inlining_apply() {
-        let mut inliner = SpeculativeInlining::new();
+        let inliner = SpeculativeInlining::new();
         let decision = InlineDecision {
             call_site: 10,
             callee: 20,

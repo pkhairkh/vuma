@@ -1846,9 +1846,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
         let all_node_ids: Vec<u64> = scg.node_ids().map(|id| id.as_u64()).collect();
         let delta = vuma_cor::types::Delta {
             added_nodes: all_node_ids,
-            removed_nodes: Vec::new(),
-            added_edges: Vec::new(),
-            removed_edges: Vec::new(),
+            ..vuma_cor::types::Delta::empty()
         };
         let recompiled = rt.compile_incremental(&delta);
         log::info!(

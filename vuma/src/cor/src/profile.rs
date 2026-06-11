@@ -1037,7 +1037,7 @@ mod tests {
         );
 
         // Now verify that lock_profile recovers from the poisoning.
-        let guard = lock_profile(&test_mutex);
+        let mut guard = lock_profile(&test_mutex);
         // We should be able to read the data.
         assert!(guard.call_counts.is_empty());
 
