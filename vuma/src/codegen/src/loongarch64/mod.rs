@@ -509,6 +509,8 @@ const OPC_PCADDU18I: u32 = 0x0F;
 
 const OPC_EXT_W_H: u32 = 0x000005A;
 const OPC_EXT_W_B: u32 = 0x000005B;
+/// CLO.D (count leading ones, doubleword): opcode 0x00000014 in 2R format.
+const OPC_CLO_D: u32 = 0x00000014;
 
 #[allow(dead_code)]
 const OPC_REVB_2H: u32 = 0x0000060;
@@ -736,6 +738,8 @@ pub enum Instruction {
     ExtWH { rd: Gpr, rj: Gpr },
     /// Sign-extend Byte to Word: `ext.w.b rd, rj`
     ExtWB { rd: Gpr, rj: Gpr },
+    /// Count Leading Ones, Doubleword: `clo.d rd, rj`
+    CloD { rd: Gpr, rj: Gpr },
 
     // ── FP Load/Store (2RI12) ───────────────────────────────────────
     /// Load Float Word to FP: `fld.s fd, rj, si12`
@@ -1026,6 +1030,9 @@ impl Instruction {
             Instruction::ExtWB { rd, rj } => {
                 encode_2r(OPC_EXT_W_B, rj.encoding(), rd.encoding())
             }
+            Instruction::CloD { rd, rj } => {
+                encode_2r(OPC_CLO_D, rj.encoding(), rd.encoding())
+            }
 
             // ── FP Load/Store (2RI12) ─────────────────────────────
             Instruction::FldS { fd, rj, imm12 } => {
@@ -1154,6 +1161,7 @@ impl Instruction {
             Instruction::ScD { .. } => "sc.d",
             Instruction::ExtWH { .. } => "ext.w.h",
             Instruction::ExtWB { .. } => "ext.w.b",
+            Instruction::CloD { .. } => "clo.d",
             Instruction::FldS { .. } => "fld.s",
             Instruction::FldD { .. } => "fld.d",
             Instruction::FstS { .. } => "fst.s",
@@ -1246,6 +1254,7 @@ impl fmt::Display for Instruction {
             Instruction::ScD { rd, rj, imm14 } => write!(f, "sc.d {}, {}, {}", rd, rj, imm14),
             Instruction::ExtWH { rd, rj } => write!(f, "ext.w.h {}, {}", rd, rj),
             Instruction::ExtWB { rd, rj } => write!(f, "ext.w.b {}, {}", rd, rj),
+            Instruction::CloD { rd, rj } => write!(f, "clo.d {}, {}", rd, rj),
             Instruction::FldS { fd, rj, imm12 } => write!(f, "fld.s {}, {}, {}", fd, rj, imm12),
             Instruction::FldD { fd, rj, imm12 } => write!(f, "fld.d {}, {}, {}", fd, rj, imm12),
             Instruction::FstS { fd, rj, imm12 } => write!(f, "fst.s {}, {}, {}", fd, rj, imm12),
@@ -2129,13 +2138,17 @@ fn lower_ir_instr_la64(
                     // Count leading zeros using clo.d + adjustment
                     // LoongArch has no direct clz; use clo.d (count leading ones) on
                     // the inverted value: clz(x) = clo(~x)
-                    // For now, emit: nor d, $r0, s; then a placeholder
+                    // Emit: nor d, $r0, s; then clo.d d, d
                     result.push(emit_alloc_instr(
                         Instruction::Nor { rd: d, rj: Gpr::R0, rk: s },
                         vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
-                    // TODO: actual clo.d when Instruction enum gains it
+                    result.push(emit_alloc_instr(
+                        Instruction::CloD { rd: d, rj: d },
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
                 }
                 UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
                     // Placeholder: move operand to dst
@@ -2508,6 +2521,7 @@ impl Backend for LoongArch64Backend {
             callee_saved,
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 
@@ -2921,6 +2935,7 @@ mod tests {
                 callee_saved: vec![],
                 spill_slots: 0,
                 code_size: 4,
+                relocations: Vec::new(),
             }],
             total_code_size: 4,
             total_data_size: 0,

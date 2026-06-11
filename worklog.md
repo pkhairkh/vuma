@@ -2,6 +2,29 @@
 
 ---
 
+Task ID: W0-T7
+Agent: Core Module Re-enabler
+Task: Re-enable disabled access_analysis module and fix hardcoded match/switch case extraction in pipeline
+
+Work Log:
+1. **Identified commented-out module**: Found `// pub mod access_analysis; // compile errors from other agent` in `/home/z/my-project/vuma/src/vuma/src/lib.rs` (line 51)
+2. **Verified source file exists**: `access_analysis.rs` already existed with full implementation (853 lines) including types (AccessPattern, FalseSharing, WorkingSetInfo, StreamingPattern, AccessHistogram) and public API functions (analyze_access_patterns, detect_false_sharing, compute_working_set, detect_streaming_patterns, compute_access_histogram) with comprehensive tests
+3. **Re-enabled the module**: Changed `// pub mod access_analysis; // compile errors from other agent` → `pub mod access_analysis;` — compiled cleanly with no errors
+4. **Fixed hardcoded case_value in pipeline.rs**: Found `let case_value = 0i64; // default; real extraction from cond` at line 868 in `/home/z/my-project/vuma/src/pipeline.rs`. Replaced with call to new `extract_case_value()` function that:
+   - Strategy 1: Returns `n` directly if `cond` is `ScgExpr::Int(n)`
+   - Strategy 2: Traces DataFlow edges back to the equality comparison node, extracts the RHS constant operand
+   - Strategy 3: Parses the case value from the control node's label string (handles "match disc == 42" and "case N: 42" formats)
+   - Strategy 4: Falls back to 0 (default)
+5. **Fixed pre-existing compilation errors in vuma-ive constraint.rs**: The file had references to `ModelState` and `check_against`/`negate` methods on constraint types that were defined later in the same file, causing order-of-declaration issues. The file also had duplicate definitions from a previous incomplete edit. Rewrote the entire file cleanly to eliminate duplicates and ensure proper declaration order.
+6. **Verified**: `cargo test -p vuma-core -- -q` — 281 unit tests + 7 doc tests pass (0 failures). `cargo check --workspace` — 0 errors (only warnings in vuma-codegen and vuma-tests).
+
+Files Modified:
+- `/home/z/my-project/vuma/src/vuma/src/lib.rs` — Uncommented `pub mod access_analysis;`
+- `/home/z/my-project/vuma/src/pipeline.rs` — Added `extract_case_value()` function (~90 lines), replaced hardcoded `0i64` with call to it
+- `/home/z/my-project/vuma/src/ive/src/constraint.rs` — Rewrote to eliminate duplicate definitions and ensure proper `ModelState`/method declaration order
+
+---
+
 Task ID: fix-clippy-codegen
 Agent: Clippy Fix Agent
 Task: Fix ALL clippy warnings in vuma-codegen
@@ -539,9 +562,30 @@ Updated the VUMA security model specification (`docs/specs/security-model-spec.m
 - Implement `verify_security_properties()` in the IVE
 - Implement `check_pac_compliance()` and `check_mte_compliance()` as IVE passes
 - Implement `capd_to_pte_attributes()` in the ARM64 code generator
-- Add integration tests for the graduated security verdict computation
-- Add formal proofs for the PTE mapping consistency (W^X, BTI+executable, MTE+writable)
-- Extend the glossary (Appendix B) with new terms: PTEAttributes, SecurityVerdict, CrossLayerViolation
+
+---
+
+Task ID: W0-T2
+Agent: Clippy Collapsible Match Fixer
+Task: Fix 3 "collapsible if" clippy warnings in x86_64 disasm.rs
+
+Work Log:
+- Ran `cargo clippy -p vuma-codegen 2>&1 | grep "collapsible"` and identified 3 `collapsible_match` warnings in `src/codegen/src/x86_64/disasm.rs`
+- All 3 warnings were in the `decode_modrm_mem` function's `disp` match block (lines 165-199)
+- Warning 1 (line 168): `0 => { if rm_raw == 5 { if adv + 4 <= bytes.len() { ... } else { 0 } } else { 0 } }` — nested if inside match arm 0
+- Warning 2 (line 181): `1 => { if adv < bytes.len() { ... } else { 0 } }` — nested if inside match arm 1
+- Warning 3 (line 190): `2 => { if adv + 4 <= bytes.len() { ... } else { 0 } }` — nested if inside match arm 2
+- Restructured all 3 match arms to use pattern guards:
+  - `0 if rm_raw == 5 && adv + 4 <= bytes.len() => { ... }` with fallback `0 | 1 | 2 | _ => 0`
+  - `1 if adv < bytes.len() => { ... }` with fallback covered by catch-all
+  - `2 if adv + 4 <= bytes.len() => { ... }` with fallback covered by catch-all
+
+Files Modified:
+- src/codegen/src/x86_64/disasm.rs (3 fixes in decode_modrm_mem)
+
+Verification:
+- `cargo clippy -p vuma-codegen 2>&1 | grep "collapsible"` — ZERO collapsible_match warnings
+- `cargo test -p vuma-codegen -- -q` — 675 tests passed, 0 failed
 
 ## Task W2-A13: Example Programs Update
 **Date:** 2026-03-06
@@ -8927,3 +8971,194 @@ Files Modified:
 Verification:
 - cargo clippy -p vuma-codegen -- -D warnings: 0 warnings, 0 errors
 - cargo test -p vuma-codegen: 610 passed, 0 failed
+
+---
+Task ID: W0-T1
+Agent: Code Agent
+Task: Fix 3 dead-code warnings in disassemblers
+
+Work Log:
+- Read arm32/disasm.rs: identified `sign_extend_12` (line 95) is unused — ARM32 load/store offsets use the U (up/down) bit for sign, not sign-extension of the 12-bit immediate field, so this function is not applicable to the current decode path
+- Read loongarch64/disasm.rs: identified `fpr_from_bits` (line 81) is unused — FP instruction decoding not yet implemented in the disassembler; identified `sign_extend_20` (line 135) is unused — upper-immediate instructions (LU12I.W, LU32I.D, PCADDU12I, PCADDU18I) not yet decoded by the disassembler
+- Added `#[allow(dead_code)]` with explanatory comments to all three functions since none can be wired into current decode paths (they are helpers for future instruction set extensions)
+- Verified with `cargo clippy -p vuma-codegen 2>&1 | grep "dead_code"` — zero dead_code warnings
+- Ran `cargo test -p vuma-codegen -- -q` — 675 tests passed, 0 failed
+
+Stage Summary:
+- All 3 dead_code warnings eliminated via `#[allow(dead_code)]` with rationale comments
+- ARM32 sign_extend_12: kept for potential media/DSP extension use; ARM32 uses U-bit for offset sign
+- LoongArch64 fpr_from_bits: kept for future FP instruction decode implementation
+- LoongArch64 sign_extend_20: kept for future upper-immediate instruction decode implementation
+- Zero dead_code warnings from clippy, all 675 tests pass
+
+---
+
+## Task ID: W0-T5
+**Agent:** W0-T5 Agent
+**Task:** Make `loop` a reserved keyword and add `unsafe` block parsing in the VUMA parser
+
+### PART 1: Make `loop` a reserved keyword
+
+**Problem**: `loop` was tokenized as `TokenKind::Ident` and then matched by string comparison (`lexeme == "loop"`), meaning a variable named `loop` could shadow the keyword.
+
+**Changes**:
+
+1. **lexer.rs** — Added `TokenKind::Loop` variant to the `TokenKind` enum (after `Continue`), added `"loop" => Some(TokenKind::Loop)` to the `keyword_kind()` function, and added `TokenKind::Loop => write!(f, "'loop'")` to the `Display` impl.
+
+2. **parser.rs** — Changed `parse_stmt()` to match on `TokenKind::Loop` directly (like `TokenKind::Break` and `TokenKind::Continue`) instead of matching on `TokenKind::Ident` with string comparison. Removed the `TokenKind::Ident` branch's `"loop" => self.parse_loop_stmt()` fallback. Updated `parse_loop_stmt()` comment to remove "loop is tokenized as Ident". Added `TokenKind::Loop` to `is_name_keyword()`. Added `Stmt::UnsafeBlock { span, .. } => *span` to the `span()` impl on `Stmt`.
+
+3. **error.rs** — Added `"loop"` to the `VUMA_KEYWORDS` list for "did you mean?" suggestions.
+
+### PART 2: Add `unsafe` block parsing
+
+**Problem**: The lexer already had `TokenKind::Unsafe` but the parser didn't produce an `UnsafeBlock` AST node.
+
+**Changes**:
+
+1. **ast.rs** — Added `UnsafeBlock { body: Block, span: Span }` variant to the `Stmt` enum (after `Loop`). Uses `Block` instead of `Box<Stmt>` for cleaner semantics and consistency with `SyncBlock`.
+
+2. **parser.rs** — Added `TokenKind::Unsafe => self.parse_unsafe_block()` case in the `parse_stmt()` match. Added `parse_unsafe_block()` method that expects `TokenKind::Unsafe`, then parses a block, and returns `Stmt::UnsafeBlock { body, span }`.
+
+3. **to_scg.rs** — Added `Stmt::UnsafeBlock { body, span }` handler in `convert_stmt_in_region()` that:
+   - Emits an `unsafe_enter` Effect node
+   - Converts the inner body block
+   - Links `unsafe_enter` → first body node → ... → last body node → `unsafe_exit` via ControlFlow edges
+   - Adds Annotation edges from all body nodes to `unsafe_exit` to mark them as requiring unsafe verification
+   - Also added `UnsafeBlock` case to `collect_stmt_uses()` to propagate variable uses through unsafe blocks
+
+### Verification
+
+```
+cargo test -p vuma-parser -- -q
+running 277 tests — 277 passed, 0 failed
+
+cargo test -p vuma-parser --test edge_cases -q
+running 32 tests — 32 passed, 0 failed
+
+cargo check -p vuma-parser -p vuma-scg
+Finished `dev` profile [unoptimized + debuginfo] — 0 errors
+```
+
+Note: `cargo check --workspace` has pre-existing errors in `vuma-ive` (missing `ModelState` type and methods) unrelated to this task.
+
+---
+
+## Task ID: W0-T4
+**Agent:** W0-T4 Fix Agent
+**Task:** Fix `let x;` uninitialized variable handling in VUMA parser
+
+### Problem
+When a `let x;` statement was encountered without an initializer, the parser silently replaced it with `Expr::Lit { value: Lit::Bool(false), span: Span::synthetic() }` instead of properly representing an uninitialized variable.
+
+### Changes Made
+
+#### Step 1: Added `Uninitialized` variant to `Expr` enum in `ast.rs`
+Added the following variant to the `Expr` enum:
+```rust
+/// An uninitialized binding (`let x;`).
+Uninitialized { span: Span },
+```
+
+#### Step 2: Updated `parse_let_stmt()` in `parser.rs`
+Changed the else branch from:
+```rust
+Expr::Lit {
+    value: Lit::Bool(false),
+    span: Span::synthetic(),
+}
+```
+To:
+```rust
+Expr::Uninitialized { span: Span::new(self.current.span.start, self.current.span.start) }
+```
+
+#### Step 3: Updated `Expr::span()` in `parser.rs`
+Added the `Uninitialized` case to the match:
+```rust
+Expr::Uninitialized { span } => *span,
+```
+
+#### Step 4: Updated `to_scg.rs` — all `Expr` match statements
+- **`collect_uses()`**: Added `Expr::Uninitialized { .. } => {}`
+- **`infer_expr_type()`**: Added `Expr::Uninitialized { .. } => "uninitialized".to_string()`
+- **`expr_to_string()`**: Added `Expr::Uninitialized { .. } => "<uninitialized>".to_string()`
+- **`Stmt::Let` handling**: Added special case for uninitialized bindings:
+  - Description is `"let x"` (not `"let x = <uninitialized>"`)
+  - Emits a separate `uninitialized` computation node with a DataFlow edge to the let node
+
+#### Step 5: Added 2 tests for uninitialized variable parsing
+1. `parse_let_uninitialized` — verifies `let x;` produces `Expr::Uninitialized`
+2. `parse_let_initialized_still_works` — verifies `let x = 5;` still produces `Expr::Lit(Int(5))`
+
+#### Additional fixes (pre-existing errors blocking `cargo check --workspace`)
+- Fixed `vuma-codegen/src/x86_64/mod.rs`: Added missing `relocations: Vec::new()` field in `AllocatedFunction` initialization
+- Fixed `vuma-tests/src/framework.rs`: Changed `use vuma_scg {` to `use vuma_scg::{` (missing `::`)
+
+### Files Modified
+| File | Description |
+|------|-------------|
+| `src/parser/src/ast.rs` | Added `Uninitialized { span: Span }` variant to `Expr` enum |
+| `src/parser/src/parser.rs` | Updated `parse_let_stmt()` to use `Expr::Uninitialized`; updated `Expr::span()` match; added 2 tests |
+| `src/parser/src/to_scg.rs` | Updated `collect_uses()`, `infer_expr_type()`, `expr_to_string()` for `Uninitialized`; added uninitialized node emission in `Stmt::Let` handling |
+| `src/codegen/src/x86_64/mod.rs` | Added missing `relocations` field |
+| `src/tests/src/framework.rs` | Fixed syntax error in `use` statement |
+
+### Verification
+```
+cargo test -p vuma-parser -- -q
+running 277 tests — 277 passed, 0 failed
+
+cargo test -p vuma-parser parse_let_uninitialized parse_let_initialized_still_works -- -q
+2/2 passed
+
+cargo check --workspace
+Finished `dev` profile — 0 errors
+```
+
+---
+
+Task ID: W0-T6
+Agent: x86_64 ISel Gap Fixer
+Task: Fix known ISel gaps in the x86_64 backend of the VUMA compiler
+
+Work Log:
+
+1. **Added `RelocationEntry` struct to `backend.rs`**: New shared struct with `offset: u64`, `symbol: String`, `reloc_type: String` fields and `#[serde(default)]` on the new `relocations` field in `AllocatedFunction` for backward compatibility.
+
+2. **Updated all backend `AllocatedFunction` constructors** across 8 files (backend.rs, wasm32, riscv64, ppc64, mips64, arm32, loongarch64, x86_64) to include `relocations: Vec::new()`.
+
+3. **Fixed `IRInstr::Free`** (was `encode_nop()`):
+   - Tracks which virtual registers are defined by `Alloc` instructions (stack allocations) via `stack_alloc_vregs: HashSet<u32>`
+   - Stack allocations: Free is a no-op (stack cleaned up on function return), emits empty code
+   - Heap allocations: emits `mov rdi, <ptr_reg>` + `call __vuma_free` with `encode_call_rel32(0)` and records an `R_X86_64_PLT32` `RelocationEntry` pointing to the 4-byte rel32 offset field
+
+4. **Fixed `IRInstr::GetAddress`** (was bare `encode_mov_reg_imm64(d, 0)`):
+   - Added clear comment: "Address will be resolved by R_X86_64_64 relocation at link time"
+   - Records an `R_X86_64_64` `RelocationEntry` pointing to the 8-byte immediate field (offset = byte_offset + 2, accounting for REX prefix + opcode)
+
+5. **Fixed `IRInstr::Branch`** (was `encode_jmp_rel32(0)` with vague comment):
+   - Updated comment to: "JMP rel32 — branch offset patched by R_X86_64_PLT32 relocation during linking"
+
+6. **Fixed `IRInstr::CondBranch`** (was placeholder offsets with no relocation comments):
+   - Updated JNZ comment: "JNZ rel32 — branch offset patched by R_X86_64_PLT32 relocation during linking"
+   - Updated JMP comment: "JMP rel32 — branch offset patched by R_X86_64_PLT32 relocation during linking"
+
+7. **Added x86_64 relocation type constants**: `R_X86_64_64` and `R_X86_64_PLT32` as module-level `&str` constants.
+
+8. **Added byte offset tracking**: `byte_offset` variable tracks the running byte position during `allocate_registers` so relocation entries can reference exact byte positions within the function's encoded output.
+
+Files Modified:
+- `src/codegen/src/backend.rs` — Added `RelocationEntry` struct; added `relocations: Vec<RelocationEntry>` field to `AllocatedFunction` with `#[serde(default)]`
+- `src/codegen/src/x86_64/mod.rs` — Fixed Free, GetAddress, Branch, CondBranch; added relocation type constants and byte offset tracking
+- `src/codegen/src/wasm32/mod.rs` — Added `relocations: Vec::new()` (2 places)
+- `src/codegen/src/riscv64.rs` — Added `relocations: Vec::new()`
+- `src/codegen/src/ppc64/mod.rs` — Added `relocations: Vec::new()`
+- `src/codegen/src/mips64/mod.rs` — Added `relocations: Vec::new()`
+- `src/codegen/src/arm32/mod.rs` — Added `relocations: Vec::new()` (2 places)
+- `src/codegen/src/loongarch64/mod.rs` — Added `relocations: Vec::new()` (2 places)
+
+Verification:
+```
+cargo test -p vuma-codegen -- -q
+running 675 tests — 675 passed, 0 failed
+```

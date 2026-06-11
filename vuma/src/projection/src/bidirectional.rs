@@ -439,7 +439,7 @@ impl BidirectionalProjection {
         scg: &mut SCG,
         instruction: &str,
     ) -> EditResult<()> {
-        let suggestions = self.conversational.suggest_modification(instruction);
+        let suggestions = self.conversational.suggest_modification(scg, instruction);
         if suggestions.is_empty() {
             return Err(EditError::NoConversationalMatch {
                 instruction: instruction.to_string(),

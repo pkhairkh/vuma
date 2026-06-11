@@ -338,6 +338,8 @@ pub enum TokenKind {
     Break,
     /// `continue`
     Continue,
+    /// `loop`
+    Loop,
     /// `where`
     Where,
     /// `impl`
@@ -506,6 +508,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Alignof => write!(f, "'alignof'"),
             TokenKind::Break => write!(f, "'break'"),
             TokenKind::Continue => write!(f, "'continue'"),
+            TokenKind::Loop => write!(f, "'loop'"),
             TokenKind::Where => write!(f, "'where'"),
             TokenKind::Impl => write!(f, "'impl'"),
             TokenKind::Trait => write!(f, "'trait'"),
@@ -556,6 +559,7 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "enum" => Some(TokenKind::Enum),
         "break" => Some(TokenKind::Break),
         "continue" => Some(TokenKind::Continue),
+        "loop" => Some(TokenKind::Loop),
 
         // Type system
         "type" => Some(TokenKind::Type),

@@ -38,11 +38,11 @@ pub use bidirectional::{
     SemanticFlag, VisualEdit,
 };
 pub use conversational::{
-    AIExplainerOutput, AggregatedResult, ConversationalProjection, SCGEdit, Verbosity, Violation,
+    AIExplainerOutput, AggregatedResult, ConversationalProjection, SCGEdit, SuggestionEngine, Verbosity, Violation,
     ViolationSeverity,
 };
 pub use diff::{ChangeGroup, DiffProjection, ImpactLevel, SCGDiff, project_diff, project_diff_conversational, project_diff_visual};
-pub use textual::{ProjectionStyle, TextualConfig, TextualProjection};
+pub use textual::{ProjectionStyle, TemplateEngine, TextualConfig, TextualProjection};
 pub use visual::VisualProjection;
 
 // ── Placeholder types ────────────────────────────────────────────────────────

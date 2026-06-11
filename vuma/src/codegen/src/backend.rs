@@ -105,6 +105,25 @@ pub enum FrameSlotKind {
 }
 
 // ---------------------------------------------------------------------------
+// RelocationEntry
+// ---------------------------------------------------------------------------
+
+/// A relocation entry for patching encoded code at link time.
+///
+/// Each entry records a byte offset within the function's encoded output where
+/// a symbolic reference must be resolved, the name of the target symbol, and
+/// the ISA-specific relocation type (e.g., `"R_X86_64_PLT32"`, `"R_X86_64_64"`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RelocationEntry {
+    /// Byte offset within the function's encoded code where the relocation applies.
+    pub offset: u64,
+    /// Name of the target symbol.
+    pub symbol: String,
+    /// Relocation type (ISA-specific, e.g., "R_X86_64_PLT32", "R_X86_64_64").
+    pub reloc_type: String,
+}
+
+// ---------------------------------------------------------------------------
 // AllocatedInstruction
 // ---------------------------------------------------------------------------
 
@@ -155,6 +174,9 @@ pub struct AllocatedFunction {
     pub spill_slots: usize,
     /// Byte size of the encoded function body.
     pub code_size: usize,
+    /// Relocation entries for this function.
+    #[serde(default)]
+    pub relocations: Vec<RelocationEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1053,7 @@ impl Backend for AArch64Backend {
             callee_saved: vec![],
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 

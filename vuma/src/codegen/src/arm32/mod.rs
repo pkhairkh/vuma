@@ -2221,6 +2221,7 @@ impl Backend for Arm32Backend {
             callee_saved,
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 
@@ -2563,6 +2564,7 @@ mod tests {
                 callee_saved: vec![],
                 spill_slots: 0,
                 code_size: 4,
+                relocations: Vec::new(),
             }],
             total_code_size: 4,
             total_data_size: 0,

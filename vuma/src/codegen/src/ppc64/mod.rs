@@ -2335,6 +2335,7 @@ impl Backend for PPC64Backend {
             callee_saved,
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 

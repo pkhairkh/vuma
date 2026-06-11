@@ -48,7 +48,7 @@
 //! ```
 
 pub mod access;
-// pub mod access_analysis; // compile errors from other agent
+pub mod access_analysis;
 pub mod address;
 pub mod derivation;
 pub mod invariant_exclusivity;

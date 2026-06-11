@@ -1994,6 +1994,7 @@ impl Backend for Wasm32Backend {
             callee_saved: vec![],
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 
@@ -2681,6 +2682,7 @@ mod tests {
                 callee_saved: vec![],
                 spill_slots: 0,
                 code_size: 3,
+                relocations: Vec::new(),
             }],
             total_code_size: 3,
             total_data_size: 0,

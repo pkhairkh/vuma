@@ -933,7 +933,7 @@ pub const VUMA_KEYWORDS: &[&str] = &[
     "struct", "enum", "match", "unsafe", "safe", "bd", "repd", "capd", "reld",
     "import", "export", "mod", "use", "self", "super", "async", "await",
     "spawn", "lock", "unlock", "channel", "send", "recv", "true", "false",
-    "as", "sizeof", "alignof",
+    "as", "sizeof", "alignof", "loop",
 ];
 
 /// Suggest a keyword similar to `input` using Levenshtein distance.

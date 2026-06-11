@@ -78,6 +78,9 @@ fn gpr_from_bits(bits: u32) -> Gpr {
     }
 }
 
+// NOTE: FP instruction decoding is not yet implemented in the disassembler.
+// Kept for use when FP instruction decode paths are added.
+#[allow(dead_code)]
 fn fpr_from_bits(bits: u32) -> Fpr {
     match bits {
         0 => Fpr::F0,
@@ -132,6 +135,10 @@ fn sign_extend_16(val: u32) -> i32 {
     }
 }
 
+// NOTE: Upper-immediate instructions (LU12I.W, LU32I.D, PCADDU12I,
+// PCADDU18I) are not yet decoded by the disassembler. Kept for use when
+// those decode paths are added.
+#[allow(dead_code)]
 fn sign_extend_20(val: u32) -> i32 {
     if val & 0x80000 != 0 {
         (val | 0xFFF00000) as i32

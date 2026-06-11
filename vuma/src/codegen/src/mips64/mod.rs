@@ -2300,6 +2300,7 @@ impl Backend for Mips64Backend {
             callee_saved: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 

@@ -641,7 +641,7 @@ pub fn compute_working_set(msg: &MSG) -> WorkingSetInfo {
     }
 
     // Sort hot regions by descending access count.
-    hot_regions.sort_by(|a, b| b.1.cmp(&a.1));
+    hot_regions.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     WorkingSetInfo {
         total_bytes,
@@ -811,7 +811,7 @@ pub fn compute_access_histogram(msg: &MSG) -> AccessHistogram {
 
         // Sort by descending count for hot_offsets.
         let mut hot_offsets: Vec<(u64, usize)> = offset_counts.into_iter().collect();
-        hot_offsets.sort_by(|a, b| b.1.cmp(&a.1));
+        hot_offsets.sort_by_key(|b| std::cmp::Reverse(b.1));
         // Keep top 16 hot spots.
         hot_offsets.truncate(16);
 

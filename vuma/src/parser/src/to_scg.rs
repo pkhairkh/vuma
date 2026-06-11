@@ -473,7 +473,11 @@ impl AstToScg {
             Stmt::Let(l) => {
                 // Enhanced: if type annotation is present, propagate size/align.
                 let result_type = l.ty.as_ref().map(|t| t.to_string());
-                let desc = format!("let {} = {}", l.name, self.expr_to_string(&l.value));
+                let desc = if matches!(&l.value, Expr::Uninitialized { .. }) {
+                    format!("let {}", l.name)
+                } else {
+                    format!("let {} = {}", l.name, self.expr_to_string(&l.value))
+                };
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
@@ -484,6 +488,21 @@ impl AstToScg {
                 region.add_node(id);
                 self.define_var(&l.name, id);
                 self.add_data_flow_edges(&l.value, id, scg);
+
+                // If the RHS is uninitialized → emit a computation node
+                // representing the uninitialized state.
+                if let Expr::Uninitialized { span } = &l.value {
+                    let uninit_id = scg.add_node(
+                        NodeType::Computation,
+                        NodePayload::Computation(ComputationNode {
+                            operation: "uninitialized".to_string(),
+                            result_type: result_type.clone(),
+                        tail_call: false }),
+                        self.span_to_pp(span),
+                    );
+                    region.add_node(uninit_id);
+                    let _ = scg.add_edge(uninit_id, id, EdgeKind::DataFlow);
+                }
 
                 // If the RHS is a function call — emit FunctionEntry/Return.
                 if let Expr::Call { callee, args, .. } = &l.value {
@@ -954,6 +973,54 @@ impl AstToScg {
                 let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
 
                 Ok(header_id)
+            }
+
+            // Unsafe block → Effect node marking unsafe verification + inner body
+            Stmt::UnsafeBlock { body, span } => {
+                // Emit an Effect node marking this as an unsafe region
+                let unsafe_id = scg.add_node(
+                    NodeType::Effect,
+                    NodePayload::Effect(EffectNode {
+                        effect_kind: "unsafe_enter".to_string(),
+                        is_observable: false,
+                    }),
+                    self.span_to_pp(span),
+                );
+                region.add_node(unsafe_id);
+
+                // Convert the inner body statements
+                self.push_scope();
+                let body_ids = self.convert_block_ids(body, scg, region)?;
+                self.pop_scope();
+
+                // Link unsafe_enter to first body node
+                if let Some(&first_body) = body_ids.first() {
+                    let _ = scg.add_edge(unsafe_id, first_body, EdgeKind::ControlFlow);
+                }
+
+                // Emit unsafe_exit effect node
+                let exit_id = scg.add_node(
+                    NodeType::Effect,
+                    NodePayload::Effect(EffectNode {
+                        effect_kind: "unsafe_exit".to_string(),
+                        is_observable: false,
+                    }),
+                    self.span_to_pp(span),
+                );
+                region.add_node(exit_id);
+
+                // Link last body node to unsafe_exit
+                if let Some(&last_body) = body_ids.last() {
+                    let _ = scg.add_edge(last_body, exit_id, EdgeKind::ControlFlow);
+                }
+
+                // Annotation edges from body nodes to unsafe_exit — marks them
+                // as requiring unsafe verification.
+                for &bid in &body_ids {
+                    let _ = scg.add_edge(bid, exit_id, EdgeKind::Annotation);
+                }
+
+                Ok(unsafe_id)
             }
 
             // Match statement → Switch/Branch + Join decision tree
@@ -2190,6 +2257,7 @@ impl AstToScg {
             Expr::FormatStr { .. } => {}
             Expr::Closure { .. } => {}
             Expr::Await { .. } => {}
+            Expr::Uninitialized { .. } => {}
         }
     }
 
@@ -2204,6 +2272,11 @@ impl AstToScg {
             Stmt::Return(r) => {
                 if let Some(v) = &r.value {
                     self.collect_uses(v, uses);
+                }
+            }
+            Stmt::UnsafeBlock { body, .. } => {
+                for s in &body.statements {
+                    self.collect_stmt_uses(s, uses);
                 }
             }
             _ => {}
@@ -2324,6 +2397,7 @@ impl AstToScg {
             Expr::FormatStr { .. } => "str".to_string(),
             Expr::Closure { .. } => "closure".to_string(),
             Expr::Await { .. } => "future".to_string(),
+            Expr::Uninitialized { .. } => "uninitialized".to_string(),
         }
     }
 
@@ -2461,6 +2535,7 @@ impl AstToScg {
             Expr::FormatStr { .. } => "f\"…\"".to_string(),
             Expr::Closure { .. } => "|…| …".to_string(),
             Expr::Await { expr, .. } => format!("{}.await", self.expr_to_string(expr)),
+            Expr::Uninitialized { .. } => "<uninitialized>".to_string(),
         }
     }
 

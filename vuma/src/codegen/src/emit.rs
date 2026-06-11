@@ -2060,7 +2060,7 @@ mod tests {
 // - Extended emit_ir_instr to handle all IRInstr variants including Add, Sub,
 //   Mul, Div, Cmp, Ret, Branch, CondBranch.
 // - Extended BinOpKind match to handle comparison operators (SLt..Ne) with
-//   CMP instruction emission (CSET TODO).
+//   CMP instruction emission (CSET via CSINC).
 // - Added 15 tests covering: ELF header validity, machine type, exec type,
 //   section headers, symbol table, raw binary, call relocation, EmitConfig
 //   defaults, obj file type, bare-metal OSABI, data sections, legacy

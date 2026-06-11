@@ -52,6 +52,96 @@ use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCG, SCGDiff, SCGNode}
 
 // ── Projection style ─────────────────────────────────────────────────────────
 
+/// A template engine supporting `{{variable}}` interpolation syntax.
+///
+/// Users can define custom formatting templates that control how SCG nodes
+/// and their behavioural descriptors are rendered in the textual projection.
+/// Template variables are enclosed in double curly braces and are replaced
+/// with the corresponding value at rendering time.
+///
+/// # Supported Variables
+///
+/// | Variable          | Description                                    |
+/// |-------------------|------------------------------------------------|
+/// | `{{label}}`       | The node's human-readable label                |
+/// | `{{kind}}`        | The node kind (Function, Value, Effect, etc.)  |
+/// | `{{capabilities}}`| Comma-separated list of capability BD names     |
+/// | `{{memory}}`      | Memory layout descriptors                      |
+/// | `{{relations}}`   | Relational BD descriptors                      |
+/// | `{{safety}}`      | Safety BD descriptors                          |
+/// | `{{custom}}`      | Custom BD descriptors                          |
+/// | `{{all_bds}}`     | All BD names, regardless of kind               |
+///
+/// # Example
+///
+/// ```
+/// use vuma_projection::textual::TemplateEngine;
+///
+/// let engine = TemplateEngine::new("fn {{label}}() -> {{kind}}");
+/// let result = engine.render(&[("label", "my_func"), ("kind", "i32")]);
+/// assert_eq!(result, "fn my_func() -> i32");
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TemplateEngine {
+    /// The template string with `{{variable}}` placeholders.
+    template: String,
+}
+
+impl TemplateEngine {
+    /// Create a new template engine with the given template string.
+    pub fn new(template: impl Into<String>) -> Self {
+        Self { template: template.into() }
+    }
+
+    /// Render the template by substituting the provided key-value pairs.
+    ///
+    /// Each `{{key}}` in the template is replaced with the corresponding
+    /// value from `vars`. Unknown variables are replaced with an empty
+    /// string.
+    pub fn render(&self, vars: &[(&str, &str)]) -> String {
+        let mut result = self.template.clone();
+        for (key, value) in vars {
+            let placeholder = format!("{{{{{}}}}}", key);
+            result = result.replace(&placeholder, value);
+        }
+        // Replace any remaining unsubstituted variables with empty string
+        let mut start = 0;
+        while let Some(pos) = result[start..].find("{{") {
+            let abs_pos = start + pos;
+            if let Some(end) = result[abs_pos..].find("}}") {
+                // Remove the unsubstituted variable
+                result.replace_range(abs_pos..abs_pos + end + 2, "");
+                start = abs_pos;
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Create a signature template for a node.
+    ///
+    /// Default: `"fn {{label}}() -> {{kind}}"`
+    pub fn default_signature_template() -> Self {
+        Self::new("fn {{label}}() -> {{kind}}")
+    }
+
+    /// Create a capability display template.
+    ///
+    /// Default: `"@{{capabilities}}"`
+    pub fn default_capability_template() -> Self {
+        Self::new("@{{capabilities}}")
+    }
+}
+
+impl Default for TemplateEngine {
+    fn default() -> Self {
+        Self::new("fn {{label}}() -> {{kind}}")
+    }
+}
+
+// ── Projection style ─────────────────────────────────────────────────────────
+
 /// The language style used for textual projection output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ProjectionStyle {
@@ -82,6 +172,14 @@ pub struct TextualConfig {
     pub language_style: ProjectionStyle,
     /// Number of spaces per indentation level.
     pub indent_width: usize,
+    /// User-defined template for node signatures (Custom style only).
+    /// Supports {{variable}} syntax. When set, this overrides the
+    /// default rendering for `ProjectionStyle::Custom`.
+    pub signature_template: Option<TemplateEngine>,
+    /// User-defined template for capability display (Custom style only).
+    /// Supports {{variable}} syntax. When set, this overrides the
+    /// default rendering for capabilities in `ProjectionStyle::Custom`.
+    pub capability_template: Option<TemplateEngine>,
 }
 
 impl Default for TextualConfig {
@@ -93,6 +191,8 @@ impl Default for TextualConfig {
             max_nesting_depth: 4,
             language_style: ProjectionStyle::RustLike,
             indent_width: 4,
+            signature_template: None,
+            capability_template: None,
         }
     }
 }
@@ -283,8 +383,17 @@ impl TextualProjection {
             ProjectionStyle::RustLike => self.format_rust_signature(node),
             ProjectionStyle::CLike => self.format_c_signature(node),
             ProjectionStyle::Custom => {
-                // TODO: Allow user-defined formatting templates.
-                self.format_rust_signature(node)
+                // Use user-defined formatting template if available,
+                // otherwise fall back to Rust-like style.
+                if let Some(ref template) = self.config.signature_template {
+                    let kind_str = format!("{:?}", node.kind);
+                    template.render(&[
+                        ("label", &node.label),
+                        ("kind", &kind_str),
+                    ])
+                } else {
+                    self.format_rust_signature(node)
+                }
             }
         }
     }
@@ -392,8 +501,16 @@ impl TextualProjection {
                         lines.push(format!("    __attribute__(({}))", caps.join(", ")));
                     }
                     ProjectionStyle::Custom => {
-                        // TODO: Custom template for capability display.
-                        lines.push(format!("    @{}", caps.join(" + ")));
+                        // Use user-defined capability template if available,
+                        // otherwise fall back to Rust-like style.
+                        if let Some(ref template) = self.config.capability_template {
+                            let caps_str = caps.join(", ");
+                            lines.push(template.render(&[
+                                ("capabilities", &caps_str),
+                            ]));
+                        } else {
+                            lines.push(format!("    @{}", caps.join(" + ")));
+                        }
                     }
                 }
             }

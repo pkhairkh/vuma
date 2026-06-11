@@ -785,6 +785,94 @@ fn resolve_loop(
     (body_target.unwrap_or(header_id), exit_target)
 }
 
+// ── Match/switch case-value extraction ──────────────────────────────────
+
+/// Extract the integer case value for a match/switch arm from the branch
+/// condition and surrounding SCG context.
+///
+/// A match arm `42 => body` produces a branch whose condition is typically
+/// the result of an equality comparison `disc == 42`. This function traces
+/// back through the DataFlow edges to find the constant operand, which is
+/// the case value from the AST's MatchArm pattern.
+///
+/// Extraction strategy (in priority order):
+///
+/// 1. If `cond` is already an `ScgExpr::Int(n)`, return `n`.
+/// 2. Trace the first DataFlow edge of the Branch back to its source node.
+///    If the source is a Computation node with an equality operation
+///    (`eq` / `==`), inspect its second DataFlow input — the RHS of the
+///    comparison is the case value. If that RHS source node is a
+///    Computation whose `operation` string parses as an integer, use it.
+/// 3. Try to parse an integer from the control node's label string.
+///    Recognised formats: `"match disc == 42"`, `"case 2: 42"`.
+/// 4. Fall back to `0`.
+fn extract_case_value(
+    branch_id: NodeId,
+    cond: &ScgExpr,
+    ctrl_label: Option<&str>,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> i64 {
+    // Strategy 1: direct integer condition.
+    if let ScgExpr::Int(n) = cond {
+        return *n;
+    }
+
+    // Strategy 2: trace back through the equality comparison node.
+    let df_inputs = edge_idx.incoming_df(branch_id);
+    if let Some(df_edge) = df_inputs.first() {
+        let cond_source = df_edge.source;
+        if let Some(source_node) = scg.get_node(cond_source) {
+            if let NodePayload::Computation(comp) = &source_node.payload {
+                let is_eq = comp.operation == "eq" || comp.operation == "==";
+                if is_eq {
+                    // The RHS of the equality is the case value.
+                    let rhs_inputs = edge_idx.incoming_df(cond_source);
+                    if rhs_inputs.len() >= 2 {
+                        let rhs_source = rhs_inputs[1].source;
+                        if let Some(rhs_node) = scg.get_node(rhs_source) {
+                            // The RHS node might be a Computation whose
+                            // operation string is a literal integer.
+                            if let NodePayload::Computation(rhs_comp) = &rhs_node.payload {
+                                if let Ok(val) = rhs_comp.operation.parse::<i64>() {
+                                    return val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 3: parse from the control node label.
+    if let Some(label) = ctrl_label {
+        // Format: "match <disc> == <value>"
+        if let Some(idx) = label.find("==") {
+            let after_eq = label[idx + 2..].trim();
+            // Take the first token (stop at whitespace / punctuation)
+            let token = after_eq.split(|c: char| c.is_whitespace() || c == ')').next().unwrap_or(after_eq);
+            if let Ok(val) = token.parse::<i64>() {
+                return val;
+            }
+        }
+        // Format: "case <idx>: <value>"
+        if label.starts_with("case ") {
+            let parts: Vec<&str> = label.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let value_str = parts[1].trim();
+                let token = value_str.split(|c: char| c.is_whitespace() || c == ')').next().unwrap_or(value_str);
+                if let Ok(val) = token.parse::<i64>() {
+                    return val;
+                }
+            }
+        }
+    }
+
+    // Strategy 4: default fallback.
+    0
+}
+
 // ── Control flow walk ──────────────────────────────────────────────────
 
 /// Walk control flow starting from `start`, producing `ScgStatement`s.
@@ -858,14 +946,18 @@ fn walk_control_flow(
                             arm_stop.insert(join);
                         }
 
-                        // For now, generate a simple switch from the then arm
+                        // Generate a simple switch from the then arm
                         // with a discriminant expression.
                         let then_body_stmts =
                             walk_control_flow(then_tgt, scg, edge_idx, consumed, &arm_stop);
 
-                        // Try to extract a case value from the condition.
-                        // If the condition is "disc == value", extract the value.
-                        let case_value = 0i64; // default; real extraction from cond
+                        // Extract the case value from the AST's MatchArm pattern.
+                        // The branch condition for a match arm is typically
+                        // `disc == value`. We trace back through the DataFlow
+                        // edges to find the constant being compared against.
+                        let case_value = extract_case_value(
+                            node_id, &cond, ctrl.label.as_deref(), scg, edge_idx,
+                        );
                         arms.push(SwitchArm {
                             value: case_value,
                             body: then_body_stmts,

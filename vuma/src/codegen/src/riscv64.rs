@@ -2670,6 +2670,7 @@ impl Backend for RiscV64Backend {
             callee_saved,
             spill_slots: 0,
             code_size,
+            relocations: Vec::new(),
         })
     }
 

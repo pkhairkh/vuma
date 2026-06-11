@@ -163,37 +163,21 @@ fn decode_modrm_mem(
     }
 
     let disp = match mod_bits {
-        0 => {
-            // RBP/R13 with mod=0 needs disp32
-            if rm_raw == 5 {
-                if adv + 4 <= bytes.len() {
-                    let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
-                    adv += 4;
-                    d
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
+        // RBP/R13 with mod=0 needs disp32
+        0 if rm_raw == 5 && adv + 4 <= bytes.len() => {
+            let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
+            adv += 4;
+            d
         }
-        1 => {
-            if adv < bytes.len() {
-                let d = bytes[adv] as i8 as i32;
-                adv += 1;
-                d
-            } else {
-                0
-            }
+        1 if adv < bytes.len() => {
+            let d = bytes[adv] as i8 as i32;
+            adv += 1;
+            d
         }
-        2 => {
-            if adv + 4 <= bytes.len() {
-                let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
-                adv += 4;
-                d
-            } else {
-                0
-            }
+        2 if adv + 4 <= bytes.len() => {
+            let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
+            adv += 4;
+            d
         }
         _ => 0,
     };

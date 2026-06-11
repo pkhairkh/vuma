@@ -426,6 +426,8 @@ pub enum Stmt {
     For(ForStmt),
     /// Infinite loop: `loop { … }`
     Loop(LoopStmt),
+    /// An unsafe block (`unsafe { ... }`).
+    UnsafeBlock { body: Block, span: Span },
     /// Pattern match: `match expr { arms }`
     Match(MatchStmt),
     /// Sync block: `sync { … }`
@@ -813,6 +815,8 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// An uninitialized binding (`let x;`).
+    Uninitialized { span: Span },
 }
 
 // ---------------------------------------------------------------------------

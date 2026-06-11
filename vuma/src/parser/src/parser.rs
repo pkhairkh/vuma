@@ -877,25 +877,20 @@ impl<'src> Parser<'src> {
             TokenKind::Region => {
                 self.parse_assign_or_expr_stmt()
             }
-            // Break and Continue are now proper keywords
+            // Break, Continue, and Loop are now proper keywords
             TokenKind::Break => self.parse_break_stmt(),
             TokenKind::Continue => self.parse_continue_stmt(),
-            // Handle Ident-based keywords and type-ascription declarations
+            TokenKind::Loop => self.parse_loop_stmt(),
+            // Unsafe block
+            TokenKind::Unsafe => self.parse_unsafe_block(),
+            // Handle Ident-based type-ascription declarations
             TokenKind::Ident => {
-                let lexeme = self.current.lexeme.as_str();
-                match lexeme {
-                    "loop" => self.parse_loop_stmt(),
-                    "break" => self.parse_break_stmt(),
-                    "continue" => self.parse_continue_stmt(),
-                    _ => {
-                        // Check for type-ascription declaration: `name: type = expr;`
-                        let next = self.peek_next();
-                        if next.kind == TokenKind::Colon {
-                            self.parse_type_ascription_decl()
-                        } else {
-                            self.parse_assign_or_expr_stmt()
-                        }
-                    }
+                // Check for type-ascription declaration: `name: type = expr;`
+                let next = self.peek_next();
+                if next.kind == TokenKind::Colon {
+                    self.parse_type_ascription_decl()
+                } else {
+                    self.parse_assign_or_expr_stmt()
                 }
             }
             _ => {
@@ -923,11 +918,8 @@ impl<'src> Parser<'src> {
             self.advance();
             self.parse_expr()?
         } else {
-            // `let x;` without initializer — use a placeholder
-            Expr::Lit {
-                value: Lit::Bool(false),
-                span: Span::synthetic(),
-            }
+            // `let x;` without initializer — properly represented as Uninitialized
+            Expr::Uninitialized { span: Span::new(self.current.span.start, self.current.span.start) }
         };
 
         self.expect(TokenKind::Semicolon)?;
@@ -1129,16 +1121,26 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    /// `loop` `{` <block> `}`  ("loop" is tokenized as Ident)
+    /// `loop` `{` <block> `}`
     fn parse_loop_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
-        // "loop" is tokenized as Ident
         self.advance(); // consume 'loop'
         let body = self.parse_block()?;
         Ok(Stmt::Loop(LoopStmt {
             body,
             span: Span::new(start, self.current.span.end),
         }))
+    }
+
+    /// `unsafe` `{` <stmt>* `}`
+    fn parse_unsafe_block(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::Unsafe)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::UnsafeBlock {
+            body,
+            span: Span::new(start, self.current.span.end),
+        })
     }
 
     /// `match` <expr> `{` <arms> `}`
@@ -2409,6 +2411,7 @@ impl<'src> Parser<'src> {
                 | TokenKind::Trait
                 | TokenKind::Static
                 | TokenKind::Const
+                | TokenKind::Loop
                 | TokenKind::OptionKw
                 | TokenKind::SomeKw
                 | TokenKind::NoneKw
@@ -2753,6 +2756,7 @@ impl Expr {
             Expr::FormatStr { span, .. } => *span,
             Expr::Closure { span, .. } => *span,
             Expr::Await { span, .. } => *span,
+            Expr::Uninitialized { span } => *span,
         }
     }
 }
@@ -2777,6 +2781,7 @@ impl Stmt {
             Stmt::While(s) => s.span,
             Stmt::For(s) => s.span,
             Stmt::Loop(s) => s.span,
+            Stmt::UnsafeBlock { span, .. } => *span,
             Stmt::Match(s) => s.span,
             Stmt::Sync(s) => s.span,
             Stmt::Return(s) => s.span,
@@ -5827,6 +5832,57 @@ fn process(buf: *Buffer) -> u32 {
                         assert!(m.arms[0].guard.is_some(), "first arm should have a guard");
                     }
                     other => panic!("expected Match, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // ---- Test: Uninitialized variable binding (`let x;`) ----
+    #[test]
+    fn parse_let_uninitialized() {
+        let source = "fn test() { let x; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.body.statements.len(), 1);
+                match &f.body.statements[0] {
+                    Stmt::Let(l) => {
+                        assert_eq!(l.name, "x");
+                        assert!(
+                            matches!(&l.value, Expr::Uninitialized { .. }),
+                            "expected Expr::Uninitialized, got {:?}",
+                            l.value
+                        );
+                    }
+                    other => panic!("expected Let stmt, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // ---- Test: Initialized variable binding (`let x = 5;`) still works ----
+    #[test]
+    fn parse_let_initialized_still_works() {
+        let source = "fn test() { let x = 5; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.body.statements.len(), 1);
+                match &f.body.statements[0] {
+                    Stmt::Let(l) => {
+                        assert_eq!(l.name, "x");
+                        match &l.value {
+                            Expr::Lit { value: Lit::Int(n), .. } => {
+                                assert_eq!(*n, 5);
+                            }
+                            other => panic!("expected Expr::Lit(Int(5)), got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Let stmt, got {:?}", other),
                 }
             }
             other => panic!("expected FnDef, got {:?}", other),

@@ -33,7 +33,7 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, PhysicalReg, RegClass, TargetInfo, X86_64TargetInfo,
+    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
 use std::collections::HashMap;
@@ -1286,6 +1286,13 @@ fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
     (total + 15) & !15
 }
 
+// ── x86_64 ELF Relocation Types ─────────────────────────────────────────
+
+/// R_X86_64_64 — S + A, 64-bit absolute relocation.
+const R_X86_64_64: &str = "R_X86_64_64";
+/// R_X86_64_PLT32 — L + A - P, 32-bit PC-relative PLT relocation for calls/jumps.
+const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
+
 // ── ISel helpers ─────────────────────────────────────────────────────────
 
 /// Resolve an IRValue to a physical GPR.
@@ -1381,13 +1388,20 @@ impl Backend for X86_64Backend {
         let func_name = func.name.clone();
         let frame_size = x86_64_compute_frame_size(func);
 
-        // Collect all virtual register IDs
+        // Collect all virtual register IDs and track which ones are defined
+        // by Alloc instructions (stack allocations, so Free on them is a no-op).
         let mut vreg_ids: Vec<u32> = Vec::new();
+        let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for block in &func.blocks {
             for instr in &block.instructions {
                 for id in instr.defined_regs() {
                     if !vreg_ids.contains(&id) {
                         vreg_ids.push(id);
+                    }
+                }
+                if let IRInstr::Alloc { dst, .. } = instr {
+                    if let Some(id) = dst.as_register() {
+                        stack_alloc_vregs.insert(id);
                     }
                 }
             }
@@ -1408,30 +1422,40 @@ impl Backend for X86_64Backend {
 
         // Generate prologue
         let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
+        let mut relocations: Vec<RelocationEntry> = Vec::new();
+        // Running byte offset within the function's encoded output, used to
+        // compute relocation offsets.
+        let mut byte_offset: usize = 0;
 
         // push rbp
+        let push_rbp = encode_push(Gpr::Rbp);
+        byte_offset += push_rbp.len();
         encoded_instrs.push(AllocatedInstruction {
             opcode: "push".to_string(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rbp.encoding() as u32)],
             writes: vec![],
-            encoded: encode_push(Gpr::Rbp),
+            encoded: push_rbp,
         });
 
         // mov rbp, rsp
+        let mov_rbp_rsp = encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp);
+        byte_offset += mov_rbp_rsp.len();
         encoded_instrs.push(AllocatedInstruction {
             opcode: "mov".to_string(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
             writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rbp.encoding() as u32)],
-            encoded: encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp),
+            encoded: mov_rbp_rsp,
         });
 
         // sub rsp, frame_size
         if frame_size > 0 {
+            let sub_rsp = encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32);
+            byte_offset += sub_rsp.len();
             encoded_instrs.push(AllocatedInstruction {
                 opcode: "sub".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
                 writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
-                encoded: encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32),
+                encoded: sub_rsp,
             });
         }
 
@@ -1760,10 +1784,23 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── GetAddress ───────────────────────────────────────
-                    IRInstr::GetAddress { dst, name: _ } => {
+                    IRInstr::GetAddress { dst, name } => {
                         let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
-                        // Placeholder: load 0 as the address (relocation needed at link time)
-                        encode_mov_reg_imm64(d, 0)
+                        // Address will be resolved by R_X86_64_64 relocation at link time.
+                        // The mov r64, imm64 instruction is 10 bytes: 2-byte prefix+opcode
+                        // followed by an 8-byte immediate.  Record a relocation for the
+                        // 8-byte immediate field so the linker can patch it with the
+                        // actual symbol address.
+                        let code = encode_mov_reg_imm64(d, 0);
+                        // Offset of the 8-byte immediate within the instruction:
+                        //   REX prefix (1 byte) + opcode (1 byte) = 2 bytes
+                        let imm_offset = byte_offset + 2;
+                        relocations.push(RelocationEntry {
+                            offset: imm_offset as u64,
+                            symbol: name.clone(),
+                            reloc_type: R_X86_64_64.to_string(),
+                        });
+                        code
                     }
 
                     // ── Alloc ────────────────────────────────────────────
@@ -1775,9 +1812,35 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Free ─────────────────────────────────────────────
-                    IRInstr::Free { ptr: _ } => {
-                        // Free is lowered to a runtime call; emit NOP for now
-                        encode_nop()
+                    IRInstr::Free { ptr } => {
+                        // If the pointer is a stack allocation (from Alloc), Free is
+                        // a no-op — the stack is cleaned up on function return.
+                        // If it's a heap allocation, emit a call to __vuma_free.
+                        let is_stack = ptr.as_register()
+                            .map(|id| stack_alloc_vregs.contains(&id))
+                            .unwrap_or(false);
+                        if is_stack {
+                            // Stack allocation — no-op, nothing to free
+                            Vec::new()
+                        } else {
+                            // Heap allocation — call __vuma_free(ptr)
+                            let mut code = Vec::new();
+                            // Move the pointer address to RDI (SystemV first argument register)
+                            let (p, pre) = resolve_gpr(ptr, &reg_map, Gpr::R10);
+                            code.extend(pre);
+                            if p != Gpr::Rdi {
+                                code.extend(encode_mov_reg_reg(Gpr::Rdi, p));
+                            }
+                            // CALL rel32 — needs R_X86_64_PLT32 relocation for __vuma_free
+                            let call_offset = byte_offset + code.len() + 1; // +1 for the 0xE8 opcode byte
+                            code.extend(encode_call_rel32(0));
+                            relocations.push(RelocationEntry {
+                                offset: call_offset as u64,
+                                symbol: "__vuma_free".to_string(),
+                                reloc_type: R_X86_64_PLT32.to_string(),
+                            });
+                            code
+                        }
                     }
 
                     // ── Cast / Conversion ────────────────────────────────
@@ -1860,7 +1923,8 @@ impl Backend for X86_64Backend {
 
                     // ── Control: Branch (unconditional) ──────────────────
                     IRInstr::Branch { target: _ } => {
-                        // JMP rel32 — offset will need relocation at link time
+                        // JMP rel32 — branch offset patched by R_X86_64_PLT32
+                        // relocation during linking
                         encode_jmp_rel32(0)
                     }
 
@@ -1869,9 +1933,11 @@ impl Backend for X86_64Backend {
                         let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
                         // Test cond != 0; JNZ to true_target; JMP to false_target
                         code.extend(encode_test_reg_reg(c, c));
-                        // JNZ rel32 — placeholder offset
+                        // JNZ rel32 — branch offset patched by R_X86_64_PLT32
+                        // relocation during linking
                         code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
-                        // JMP rel32 — placeholder offset for false target
+                        // JMP rel32 — branch offset patched by R_X86_64_PLT32
+                        // relocation during linking
                         code.extend(encode_jmp_rel32(0));
                         code
                     }
@@ -1913,6 +1979,7 @@ impl Backend for X86_64Backend {
                 };
 
                 if !encoded.is_empty() {
+                    byte_offset += encoded.len();
                     encoded_instrs.push(AllocatedInstruction {
                         opcode: format!("{:?}", instr).split_whitespace().next().unwrap_or("unknown").to_string(),
                         reads: vec![],
@@ -1936,6 +2003,7 @@ impl Backend for X86_64Backend {
             callee_saved,
             spill_slots: 0,
             code_size,
+            relocations,
         })
     }
 
