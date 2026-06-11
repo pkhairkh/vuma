@@ -131,7 +131,7 @@ fn sha256_init_k(k: Address) {
     write_u32_be(k, 52,  2162078206);   // 0x80deb1fe
     write_u32_be(k, 56,  2614888103);   // 0x9bdc06a7
     write_u32_be(k, 60,  3248222580);   // 0xc19bf174
-    write_u32_be(k, 64,  3839395250);   // 0xe49b69c1
+    write_u32_be(k, 64,  3835390401);   // 0xe49b69c1
     write_u32_be(k, 68,  4022224774);   // 0xefbe4786
     write_u32_be(k, 72,  264347078);    // 0x0fc19dc6
     write_u32_be(k, 76,  604807628);    // 0x240ca1cc
