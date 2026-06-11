@@ -246,7 +246,10 @@ pub fn from_scg_node(data: &vuma_scg::NodeData) -> SCGNode {
 /// - For `Allocation`, `Deallocation`, and `Access` nodes, the payload uses
 ///   placeholder values for fields not present in the projection type.
 ///   The first region ID from `node.regions` is used as `region_id` if available.
-pub fn to_scg_node(node: &SCGNode) -> vuma_scg::NodeData {
+/// - For `Deallocation` nodes, `allocation_node` is resolved by searching
+///   `edges` for an incoming [`EdgeKind::Derivation`] edge from an
+///   [`NodeKind::Allocation`] node. Falls back to `NodeId::new(0)` if none found.
+pub fn to_scg_node(node: &SCGNode, edges: &[SCGEdge], nodes: &[SCGNode]) -> vuma_scg::NodeData {
     let node_type = node_kind_to_node_type(&node.kind);
     let default_region = node
         .regions
@@ -269,8 +272,21 @@ pub fn to_scg_node(node: &SCGNode) -> vuma_scg::NodeData {
             type_name: Some(node.label.clone()),
         }),
         NodeKind::Deallocation => {
+            // Look up the corresponding allocation node: find an incoming
+            // Derivation edge whose source is an Allocation node.
+            let alloc_node_id = edges
+                .iter()
+                .filter(|e| e.target == node.id && e.kind == EdgeKind::Derivation)
+                .find_map(|e| {
+                    nodes
+                        .iter()
+                        .find(|n| n.id == e.source && n.kind == NodeKind::Allocation)
+                        .map(|n| vuma_scg::NodeId::new(n.id))
+                })
+                .unwrap_or(vuma_scg::NodeId::new(u64::MAX));
+
             vuma_scg::NodePayload::Deallocation(vuma_scg::DeallocationNode {
-                allocation_node: vuma_scg::NodeId::new(0), // placeholder
+                allocation_node: alloc_node_id,
                 region_id: default_region,
             })
         }
@@ -443,7 +459,7 @@ pub fn to_scg(scg: &SCG) -> vuma_scg::SCG {
 
     // Add all nodes first (edges require both endpoints to exist)
     for node in &scg.nodes {
-        let data = to_scg_node(node);
+        let data = to_scg_node(node, &scg.edges, &scg.nodes);
         let _ = real.add_node_with_id(data.id, data.node_type, data.payload, data.program_point);
         // Copy annotation if present
         if let Some(ref ann) = data.annotation {
@@ -499,7 +515,7 @@ mod tests {
         };
 
         // projection → real
-        let real_node = to_scg_node(&original);
+        let real_node = to_scg_node(&original, &[], &[]);
         assert_eq!(real_node.id.as_u64(), 42);
         assert_eq!(real_node.node_type, vuma_scg::NodeType::Computation);
 
@@ -526,7 +542,7 @@ mod tests {
             bds: vec![],
             regions: vec![],
         };
-        let real_func = to_scg_node(&func_node);
+        let real_func = to_scg_node(&func_node, &[], &[]);
         let rt_func = from_scg_node(&real_func);
         assert_eq!(rt_func.id, 7);
         assert_eq!(rt_func.kind, NodeKind::Function);
@@ -540,7 +556,7 @@ mod tests {
             bds: vec![],
             regions: vec![],
         };
-        let real_merge = to_scg_node(&merge_node);
+        let real_merge = to_scg_node(&merge_node, &[], &[]);
         let rt_merge = from_scg_node(&real_merge);
         assert_eq!(rt_merge.id, 15);
         assert_eq!(rt_merge.kind, NodeKind::Merge);

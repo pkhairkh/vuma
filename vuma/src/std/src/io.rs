@@ -606,7 +606,8 @@ impl<W: VumaWriter> VumaWriter for VumaBufWriter<W> {
 /// - SyncEdge: uart_read → process (Seq) on bare-metal; fd_read → process (Seq) on Linux
 pub struct VumaStdin {
     /// Platform file descriptor (0 on Linux; unused on bare-metal).
-    fd: i32,
+    /// Used by os-linux syscall path.
+    pub fd: i32,
     /// Whether we are running on bare-metal (Pi 5).
     bare_metal: bool,
     /// MMIO base address for UART RX (Pi 5 bare-metal).
@@ -747,15 +748,33 @@ impl VumaReader for VumaStdin {
             }
             Ok(i)
         } else {
-            // Linux: read from real stdin via std::io::stdin().
-            let mut handle = std::io::stdin();
-            match handle.read(buf) {
-                Ok(n) => Ok(n),
-                Err(e) => Err(VumaIoError::new(
-                    VumaIoErrorKind::ReadFailed,
-                    format!("stdin read failed: {}", e),
-                    self.capd(),
-                )),
+            // Linux: read from stdin.
+            #[cfg(feature = "os-linux")]
+            {
+                let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                if ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    Err(VumaIoError::new(
+                        VumaIoErrorKind::ReadFailed,
+                        format!("libc::read failed on fd {}: {}", self.fd, err),
+                        self.capd(),
+                    ))
+                } else {
+                    Ok(ret as usize)
+                }
+            }
+            #[cfg(not(feature = "os-linux"))]
+            {
+                log::warn!("VumaStdin::read: no OS backend");
+                let mut handle = std::io::stdin();
+                match handle.read(buf) {
+                    Ok(n) => Ok(n),
+                    Err(e) => Err(VumaIoError::new(
+                        VumaIoErrorKind::ReadFailed,
+                        format!("stdin read failed: {}", e),
+                        self.capd(),
+                    )),
+                }
             }
         }
     }
@@ -811,7 +830,8 @@ impl fmt::Display for VumaStdin {
 /// - SyncEdge: process → uart_write (Seq) on bare-metal; process → fd_write (Seq) on Linux
 pub struct VumaStdout {
     /// Platform file descriptor (1 on Linux; unused on bare-metal).
-    fd: i32,
+    /// Used by os-linux syscall path.
+    pub fd: i32,
     /// Whether we are running on bare-metal (Pi 5).
     bare_metal: bool,
     /// MMIO base address for UART TX (Pi 5 bare-metal).
@@ -893,29 +913,56 @@ impl VumaWriter for VumaStdout {
             }
             Ok(buf.len())
         } else {
-            // Linux: write to real stdout via std::io::stdout().
-            let mut handle = std::io::stdout();
-            match handle.write(buf) {
-                Ok(n) => Ok(n),
-                Err(e) => Err(VumaIoError::new(
-                    VumaIoErrorKind::WriteFailed,
-                    format!("stdout write failed: {}", e),
-                    self.capd(),
-                )),
+            // Linux: write to stdout.
+            #[cfg(feature = "os-linux")]
+            {
+                let ret = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len()) };
+                if ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("libc::write failed on fd {}: {}", self.fd, err),
+                        self.capd(),
+                    ))
+                } else {
+                    Ok(ret as usize)
+                }
+            }
+            #[cfg(not(feature = "os-linux"))]
+            {
+                log::warn!("VumaStdout::write: no OS backend");
+                let mut handle = std::io::stdout();
+                match handle.write(buf) {
+                    Ok(n) => Ok(n),
+                    Err(e) => Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("stdout write failed: {}", e),
+                        self.capd(),
+                    )),
+                }
             }
         }
     }
 
     fn flush(&mut self) -> VumaIoResult<()> {
         if !self.bare_metal {
-            // Linux: flush real stdout.
-            let mut handle = std::io::stdout();
-            if let Err(e) = handle.flush() {
-                return Err(VumaIoError::new(
-                    VumaIoErrorKind::WriteFailed,
-                    format!("stdout flush failed: {}", e),
-                    self.capd(),
-                ));
+            #[cfg(feature = "os-linux")]
+            {
+                // libc::write is unbuffered at the OS level; no explicit flush
+                // needed. For file-backed fds one could call libc::fsync, but
+                // stdout (fd 1) is typically a pipe/tty where fsync would fail.
+            }
+            #[cfg(not(feature = "os-linux"))]
+            {
+                // Linux: flush real stdout.
+                let mut handle = std::io::stdout();
+                if let Err(e) = handle.flush() {
+                    return Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("stdout flush failed: {}", e),
+                        self.capd(),
+                    ));
+                }
             }
         }
         // On bare-metal, UART writes are unbuffered (each byte goes directly
@@ -974,7 +1021,8 @@ impl fmt::Display for VumaStdout {
 /// - SyncEdge: process → uart_write (Seq) on bare-metal; process → fd_write (Seq) on Linux
 pub struct VumaStderr {
     /// Platform file descriptor (2 on Linux; unused on bare-metal).
-    fd: i32,
+    /// Used by os-linux syscall path.
+    pub fd: i32,
     /// Whether we are running on bare-metal (Pi 5).
     bare_metal: bool,
     /// MMIO base address for UART TX (Pi 5 bare-metal).
@@ -1049,29 +1097,55 @@ impl VumaWriter for VumaStderr {
             }
             Ok(buf.len())
         } else {
-            // Linux: write to real stderr via std::io::stderr().
-            let mut handle = std::io::stderr();
-            match handle.write(buf) {
-                Ok(n) => Ok(n),
-                Err(e) => Err(VumaIoError::new(
-                    VumaIoErrorKind::WriteFailed,
-                    format!("stderr write failed: {}", e),
-                    self.capd(),
-                )),
+            // Linux: write to stderr.
+            #[cfg(feature = "os-linux")]
+            {
+                let ret = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len()) };
+                if ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("libc::write failed on fd {}: {}", self.fd, err),
+                        self.capd(),
+                    ))
+                } else {
+                    Ok(ret as usize)
+                }
+            }
+            #[cfg(not(feature = "os-linux"))]
+            {
+                log::warn!("VumaStderr::write: no OS backend");
+                let mut handle = std::io::stderr();
+                match handle.write(buf) {
+                    Ok(n) => Ok(n),
+                    Err(e) => Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("stderr write failed: {}", e),
+                        self.capd(),
+                    )),
+                }
             }
         }
     }
 
     fn flush(&mut self) -> VumaIoResult<()> {
         if !self.bare_metal {
-            // Linux: flush real stderr.
-            let mut handle = std::io::stderr();
-            if let Err(e) = handle.flush() {
-                return Err(VumaIoError::new(
-                    VumaIoErrorKind::WriteFailed,
-                    format!("stderr flush failed: {}", e),
-                    self.capd(),
-                ));
+            #[cfg(feature = "os-linux")]
+            {
+                // libc::write is unbuffered at the OS level; no explicit flush
+                // needed for stderr (fd 2).
+            }
+            #[cfg(not(feature = "os-linux"))]
+            {
+                // Linux: flush real stderr.
+                let mut handle = std::io::stderr();
+                if let Err(e) = handle.flush() {
+                    return Err(VumaIoError::new(
+                        VumaIoErrorKind::WriteFailed,
+                        format!("stderr flush failed: {}", e),
+                        self.capd(),
+                    ));
+                }
             }
         }
         // On bare-metal, UART writes are unbuffered.
@@ -1629,9 +1703,9 @@ impl fmt::Display for File {
 ///
 /// - CapD: { Read }
 pub struct Stdin {
-    /// Simulated file descriptor.
-    #[allow(dead_code)] // placeholder for future OS integration
-    fd: i32,
+    /// File descriptor used by os-linux syscall path.
+    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    pub fd: i32,
 }
 
 impl Stdin {
@@ -1657,15 +1731,31 @@ impl Stdin {
     // VUMA-VERIFIED: read delegates to real stdin
     pub fn read(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
         let mut buf = vec![0u8; buf_len];
-        let mut handle = std::io::stdin();
-        use std::io::Read;
-        match handle.read(&mut buf) {
-            Ok(0) => Ok(Vec::new()),
-            Ok(n) => {
-                buf.truncate(n);
+        #[cfg(feature = "os-linux")]
+        {
+            let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                Err(format!("libc::read failed on fd {}: {}", self.fd, err))
+            } else if ret == 0 {
+                Ok(Vec::new())
+            } else {
+                buf.truncate(ret as usize);
                 Ok(buf)
             }
-            Err(e) => Err(format!("stdin read failed: {}", e)),
+        }
+        #[cfg(not(feature = "os-linux"))]
+        {
+            let mut handle = std::io::stdin();
+            use std::io::Read;
+            match handle.read(&mut buf) {
+                Ok(0) => Ok(Vec::new()),
+                Ok(n) => {
+                    buf.truncate(n);
+                    Ok(buf)
+                }
+                Err(e) => Err(format!("stdin read failed: {}", e)),
+            }
         }
     }
 }
@@ -1685,9 +1775,9 @@ impl Default for Stdin {
 ///
 /// - CapD: { Write }
 pub struct Stdout {
-    /// Simulated file descriptor.
-    #[allow(dead_code)] // placeholder for future OS integration
-    fd: i32,
+    /// File descriptor used by os-linux syscall path.
+    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    pub fd: i32,
 }
 
 impl Stdout {
@@ -1710,9 +1800,23 @@ impl Stdout {
     }
 
     /// Write the given bytes to stdout.
-    // VUMA-VERIFIED: write is safe on stdout
+    // VUMA-VERIFIED: write delegates to real stdout
     pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
-        Ok(data.len())
+        #[cfg(feature = "os-linux")]
+        {
+            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+            } else {
+                Ok(ret as usize)
+            }
+        }
+        #[cfg(not(feature = "os-linux"))]
+        {
+            log::warn!("Stdout::write: no OS backend");
+            Ok(data.len())
+        }
     }
 }
 
@@ -1728,9 +1832,9 @@ impl Default for Stdout {
 ///
 /// - CapD: { Write }
 pub struct Stderr {
-    /// Simulated file descriptor.
-    #[allow(dead_code)] // placeholder for future OS integration
-    fd: i32,
+    /// File descriptor used by os-linux syscall path.
+    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    pub fd: i32,
 }
 
 impl Stderr {
@@ -1753,9 +1857,23 @@ impl Stderr {
     }
 
     /// Write the given bytes to stderr.
-    // VUMA-VERIFIED: write is safe on stderr
+    // VUMA-VERIFIED: write delegates to real stderr
     pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
-        Ok(data.len())
+        #[cfg(feature = "os-linux")]
+        {
+            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+            } else {
+                Ok(ret as usize)
+            }
+        }
+        #[cfg(not(feature = "os-linux"))]
+        {
+            log::warn!("Stderr::write: no OS backend");
+            Ok(data.len())
+        }
     }
 }
 
@@ -2529,5 +2647,87 @@ mod tests {
         let stderr_bm = VumaStderr::new_bare_metal(0x1D0A_0000);
         let display_bm = format!("{}", stderr_bm);
         assert!(display_bm.contains("bare-metal"));
+    }
+
+    // --- os-linux feature-gated tests ---
+
+    #[cfg(feature = "os-linux")]
+    mod os_linux {
+        use super::*;
+
+        #[test]
+        fn test_libc_stdout_write() {
+            let mut stdout = VumaStdout::new();
+            let data = b"vuma-libc-stdout-test\n";
+            let n = stdout.write(data).unwrap();
+            assert_eq!(n, data.len());
+            stdout.flush().unwrap();
+        }
+
+        #[test]
+        fn test_libc_stderr_write() {
+            let mut stderr = VumaStderr::new();
+            let data = b"vuma-libc-stderr-test\n";
+            let n = stderr.write(data).unwrap();
+            assert_eq!(n, data.len());
+            stderr.flush().unwrap();
+        }
+
+        #[test]
+        fn test_libc_stdout_write_empty() {
+            let mut stdout = VumaStdout::new();
+            let n = stdout.write(b"").unwrap();
+            assert_eq!(n, 0);
+        }
+
+        #[test]
+        fn test_libc_stdout_fd_is_1() {
+            let stdout = VumaStdout::new();
+            assert_eq!(stdout.fd, 1);
+        }
+
+        #[test]
+        fn test_libc_stdin_fd_is_0() {
+            let stdin = VumaStdin::new();
+            assert_eq!(stdin.fd, 0);
+        }
+
+        #[test]
+        fn test_libc_stderr_fd_is_2() {
+            let stderr = VumaStderr::new();
+            assert_eq!(stderr.fd, 2);
+        }
+
+        #[test]
+        fn test_libc_legacy_stdout_write() {
+            let mut stdout = Stdout::new();
+            let data = b"vuma-legacy-stdout-test\n";
+            let n = stdout.write(data).unwrap();
+            assert_eq!(n, data.len());
+        }
+
+        #[test]
+        fn test_libc_legacy_stderr_write() {
+            let mut stderr = Stderr::new();
+            let data = b"vuma-legacy-stderr-test\n";
+            let n = stderr.write(data).unwrap();
+            assert_eq!(n, data.len());
+        }
+
+        #[test]
+        fn test_libc_vuma_file_write_and_read() {
+            let tmp = std::env::temp_dir().join("vuma_test_libc_io.txt");
+            let _ = std::fs::remove_file(&tmp);
+            {
+                let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::ReadWrite).unwrap();
+                let written = f.write(b"libc I/O roundtrip").unwrap();
+                assert_eq!(written, 18);
+                f.seek(0).unwrap();
+                let data = f.read(18).unwrap();
+                assert_eq!(&data, b"libc I/O roundtrip");
+                f.close().unwrap();
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }

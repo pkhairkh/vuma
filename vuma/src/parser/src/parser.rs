@@ -63,25 +63,43 @@ const ITEM_STARTERS: &[TokenKind] = &[
 ];
 
 /// Compound-assignment token kinds mapped to their operators.
-fn compound_op_from_token(kind: TokenKind) -> Option<CompoundOp> {
+///
+/// Returns `Err(ParseError)` for invalid tokens instead of panicking,
+/// so that callers can propagate the error cleanly with `?`.
+fn compound_op_from_token(kind: TokenKind, span: Span) -> Result<CompoundOp, ParseError> {
     match kind {
-        TokenKind::PlusEq => Some(CompoundOp::Add),
-        TokenKind::MinusEq => Some(CompoundOp::Sub),
-        TokenKind::StarEq => Some(CompoundOp::Mul),
-        TokenKind::SlashEq => Some(CompoundOp::Div),
-        TokenKind::PercentEq => Some(CompoundOp::Mod),
-        TokenKind::AmpEq => Some(CompoundOp::BitAnd),
-        TokenKind::PipeEq => Some(CompoundOp::BitOr),
-        TokenKind::CaretEq => Some(CompoundOp::BitXor),
-        TokenKind::ShlEq => Some(CompoundOp::Shl),
-        TokenKind::ShrEq => Some(CompoundOp::Shr),
-        _ => None,
+        TokenKind::PlusEq => Ok(CompoundOp::Add),
+        TokenKind::MinusEq => Ok(CompoundOp::Sub),
+        TokenKind::StarEq => Ok(CompoundOp::Mul),
+        TokenKind::SlashEq => Ok(CompoundOp::Div),
+        TokenKind::PercentEq => Ok(CompoundOp::Mod),
+        TokenKind::AmpEq => Ok(CompoundOp::BitAnd),
+        TokenKind::PipeEq => Ok(CompoundOp::BitOr),
+        TokenKind::CaretEq => Ok(CompoundOp::BitXor),
+        TokenKind::ShlEq => Ok(CompoundOp::Shl),
+        TokenKind::ShrEq => Ok(CompoundOp::Shr),
+        _ => Err(ParseError::invalid_compound_op(
+            format!("expected compound assignment operator, found {:?}", kind),
+            span,
+        )),
     }
 }
 
 /// Check if a token kind is a compound assignment operator.
 fn is_compound_assign(kind: TokenKind) -> bool {
-    compound_op_from_token(kind).is_some()
+    matches!(
+        kind,
+        TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::AmpEq
+            | TokenKind::PipeEq
+            | TokenKind::CaretEq
+            | TokenKind::ShlEq
+            | TokenKind::ShrEq
+    )
 }
 
 impl<'src> Parser<'src> {
@@ -994,7 +1012,7 @@ impl<'src> Parser<'src> {
 
         // Compound assignment: `expr += value;`, `expr -= value;`, etc.
         if is_compound_assign(self.current.kind) {
-            let op = compound_op_from_token(self.current.kind).unwrap();
+            let op = compound_op_from_token(self.current.kind, self.current.span)?;
             self.advance(); // consume compound op
             let value = self.parse_expr()?;
             self.expect(TokenKind::Semicolon)?;

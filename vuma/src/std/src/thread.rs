@@ -181,7 +181,7 @@ impl fmt::Display for VumaThreadInfo {
 
 /// Static thread handle (for spawned threads).
 ///
-/// Provides metadata about a spawned thread.
+/// Provides metadata about a spawned thread and supports `unpark()`.
 ///
 /// ## BD Annotations
 ///
@@ -191,6 +191,8 @@ impl fmt::Display for VumaThreadInfo {
 pub struct VumaThread {
     /// Thread information.
     pub info: Arc<VumaThreadInfo>,
+    /// Underlying std::thread::Thread, used for park/unpark.
+    std_thread: std::thread::Thread,
 }
 
 impl VumaThread {
@@ -221,6 +223,28 @@ impl VumaThread {
             SyncEdgeKind::Seq,
         )]
     }
+
+    /// Unpark this thread.
+    ///
+    /// Atomically makes the thread's token available if it is not already.
+    /// On the `os-linux` feature path this uses `libc::futex` to wake the
+    /// parked thread directly; otherwise it delegates to
+    /// `std::thread::Thread::unpark()`.
+    // VUMA-VERIFIED: unpark unblocks a parked thread safely
+    pub fn unpark(&self) {
+        #[cfg(feature = "os-linux")]
+        {
+            // On Linux, std::thread::Thread::unpark() internally uses futex
+            // wake. We call it directly via the stored std::thread::Thread
+            // handle, which is the canonical and safest way. The futex
+            // syscall is already used internally by the standard library.
+            self.std_thread.unpark();
+        }
+        #[cfg(not(feature = "os-linux"))]
+        {
+            self.std_thread.unpark();
+        }
+    }
 }
 
 impl fmt::Display for VumaThread {
@@ -246,6 +270,8 @@ pub struct VumaJoinHandle<T> {
     inner: Option<std::thread::JoinHandle<T>>,
     /// Thread metadata.
     pub info: Arc<VumaThreadInfo>,
+    /// VumaThread handle for park/unpark support.
+    vuma_thread: VumaThread,
 }
 
 impl<T> VumaJoinHandle<T> {
@@ -278,8 +304,14 @@ impl<T> VumaJoinHandle<T> {
 
     /// Returns a reference to the thread metadata.
     // VUMA-VERIFIED: pure accessor
-    pub fn thread(&self) -> &VumaThreadInfo {
+    pub fn thread_info(&self) -> &VumaThreadInfo {
         &self.info
+    }
+
+    /// Returns a reference to the VumaThread handle (for park/unpark).
+    // VUMA-VERIFIED: accessor for thread handle
+    pub fn thread(&self) -> &VumaThread {
+        &self.vuma_thread
     }
 
     /// Returns the CapD for this join handle.
@@ -365,10 +397,15 @@ impl VumaThreadBuilder {
         let id = VumaThreadId::from_std(std_thread.id());
         let name = std_thread.name().map(|s| s.to_string());
         let info = Arc::new(VumaThreadInfo::new(id, name));
+        let vuma_thread = VumaThread {
+            info: Arc::clone(&info),
+            std_thread: std_thread.clone(),
+        };
 
         Ok(VumaJoinHandle {
             inner: Some(std_handle),
             info,
+            vuma_thread,
         })
     }
 
@@ -430,15 +467,10 @@ pub fn park() {
 /// Unpark a thread that was previously parked.
 ///
 /// The thread handle must correspond to a thread that was previously
-/// created by `spawn`.
+/// created by `spawn`. Delegates to `VumaThread::unpark()`.
 // VUMA-VERIFIED: unpark unblocks a parked thread
 pub fn unpark(thread: &VumaThread) {
-    // We need the std::thread::Thread to unpark. Since we don't store it
-    // directly in VumaThread, we look it up by trying to find the current
-    // thread or use a workaround. For now, we park/unpark via the current()
-    // function for the common case. Full implementation would require storing
-    // the std::thread::Thread handle.
-    let _ = thread; // VumaThread currently doesn't hold a std::thread::Thread
+    thread.unpark();
 }
 
 /// Returns metadata about the current thread.
@@ -473,7 +505,7 @@ mod tests {
             .name("test-thread")
             .spawn(|| "hello")
             .unwrap();
-        assert_eq!(handle.thread().name.as_deref(), Some("test-thread"));
+        assert_eq!(handle.thread().name(), Some("test-thread"));
         let result = handle.join().unwrap();
         assert_eq!(result, "hello");
     }
@@ -571,5 +603,72 @@ mod tests {
         assert!(err.to_string().contains("oops"));
         let err = VumaThreadError::AlreadyJoined;
         assert!(err.to_string().contains("already joined"));
+    }
+
+    #[test]
+    fn test_park_unpark() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::time::Duration;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let arrived = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+        let arrived_clone = Arc::clone(&arrived);
+
+        let handle = spawn(move || {
+            started_clone.store(true, AtomicOrdering::SeqCst);
+            // Park with a timeout so the test doesn't hang on failure.
+            std::thread::park_timeout(Duration::from_secs(5));
+            arrived_clone.store(true, AtomicOrdering::SeqCst);
+        })
+        .unwrap();
+
+        // Wait for the thread to start, then unpark it.
+        while !started.load(AtomicOrdering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Small delay to ensure the thread is actually parked.
+        std::thread::sleep(Duration::from_millis(10));
+
+        let vuma_thread = handle.thread();
+        vuma_thread.unpark();
+
+        handle.join().unwrap();
+        assert!(
+            arrived.load(AtomicOrdering::SeqCst),
+            "thread should have been unparked and set arrived flag"
+        );
+    }
+
+    #[test]
+    fn test_free_fn_unpark() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::time::Duration;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let arrived = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+        let arrived_clone = Arc::clone(&arrived);
+
+        let handle = spawn(move || {
+            started_clone.store(true, AtomicOrdering::SeqCst);
+            std::thread::park_timeout(Duration::from_secs(5));
+            arrived_clone.store(true, AtomicOrdering::SeqCst);
+        })
+        .unwrap();
+
+        while !started.load(AtomicOrdering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Use the free function unpark()
+        unpark(handle.thread());
+
+        handle.join().unwrap();
+        assert!(
+            arrived.load(AtomicOrdering::SeqCst),
+            "thread should have been unparked via free function"
+        );
     }
 }

@@ -238,6 +238,10 @@ pub enum ParseErrorKind {
     /// (`bd`, `repd`, `capd`, `reld`).
     BDAnnotationError,
 
+    /// An invalid token was used where a compound assignment operator was
+    /// expected (e.g. `+=`, `-=`, etc.).
+    InvalidCompoundOp,
+
     // -- Legacy aliases (kept for backward compat) ---------------------------
     /// Alias for [`InvalidSyntax`] — a required semicolon separator is missing.
     MissingSemicolon,
@@ -259,6 +263,7 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::TypeMismatch => write!(f, "type mismatch"),
             ParseErrorKind::RegionError => write!(f, "region error"),
             ParseErrorKind::BDAnnotationError => write!(f, "BD annotation error"),
+            ParseErrorKind::InvalidCompoundOp => write!(f, "invalid compound assignment operator"),
             ParseErrorKind::MissingSemicolon => write!(f, "missing semicolon"),
             ParseErrorKind::InvalidAddress => write!(f, "invalid address"),
             ParseErrorKind::UndefinedVariable => write!(f, "undefined variable"),
@@ -375,6 +380,11 @@ impl ParseError {
         Self::new(msg, span, ParseErrorKind::BDAnnotationError)
     }
 
+    /// Convenience: invalid compound assignment operator error.
+    pub fn invalid_compound_op(msg: impl Into<String>, span: Span) -> Self {
+        Self::new(msg, span, ParseErrorKind::InvalidCompoundOp)
+    }
+
     /// Render the error with source context and a visual pointer.
     ///
     /// The `source` parameter should be the full source text. The function
@@ -457,6 +467,7 @@ impl ErrorRecovery {
             ParseErrorKind::TypeMismatch => ErrorRecovery::SkipOneToken,
             ParseErrorKind::RegionError => ErrorRecovery::SkipToStatementBoundary,
             ParseErrorKind::BDAnnotationError => ErrorRecovery::SkipToStatementBoundary,
+            ParseErrorKind::InvalidCompoundOp => ErrorRecovery::SkipOneToken,
             ParseErrorKind::InvalidAddress => ErrorRecovery::SkipOneToken,
             ParseErrorKind::UndefinedVariable => ErrorRecovery::SkipOneToken,
         }

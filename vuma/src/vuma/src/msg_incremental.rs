@@ -368,6 +368,9 @@ pub enum DeltaError {
     AccessToDeadRegion(AccessId, RegionId),
     /// A sync edge references a non-existent access.
     DanglingSyncEdgeAccess(SyncEdgeId, AccessId),
+    /// A dealloc (or undo-dealloc) delta targets a region that does not
+    /// exist in the MSG, so the real address and size cannot be resolved.
+    AllocationNotFound(RegionId),
 }
 
 impl fmt::Display for DeltaError {
@@ -392,6 +395,9 @@ impl fmt::Display for DeltaError {
             }
             DeltaError::DanglingSyncEdgeAccess(seid, aid) => {
                 write!(f, "sync edge {} references missing access {}", seid, aid)
+            }
+            DeltaError::AllocationNotFound(id) => {
+                write!(f, "allocation not found for region {}", id)
             }
         }
     }
@@ -607,9 +613,17 @@ pub fn apply_delta(msg: &mut MSG, delta: MSGDelta) -> DeltaResult {
     for region in delta.regions.modified {
         let id = region.id;
         if msg.region(id).is_none() {
+            // A region modification that targets a non-existent
+            // region cannot be applied.
             result.warnings.push(DeltaError::RegionNotFound(id));
             continue;
         }
+
+        // Apply the modification. Since compute_scg_delta now resolves
+        // real base/size/alloc_point from the MSG (returning an error if
+        // the region is not found), and compute_delta always produces
+        // fully-populated deltas, the incoming region carries complete
+        // data and we can use it directly.
         msg.add_region(region); // insert replaces
         result.invalidated_regions.push(id);
     }
@@ -856,7 +870,11 @@ impl ExtractId for SyncEdgeId {
 ///
 /// Complexity: O(|δ| × log N) where δ is the number of changed nodes
 /// and N is the total number of nodes.
-pub fn compute_scg_delta(old_scg: &SCGSnapshot, new_scg: &SCGSnapshot) -> MSGDelta {
+pub fn compute_scg_delta(
+    old_scg: &SCGSnapshot,
+    new_scg: &SCGSnapshot,
+    msg: &MSG,
+) -> Result<MSGDelta, DeltaError> {
     let mut delta = MSGDelta::new();
 
     let old_ids: HashSet<u64> = old_scg.nodes.keys().copied().collect();
@@ -865,14 +883,14 @@ pub fn compute_scg_delta(old_scg: &SCGSnapshot, new_scg: &SCGSnapshot) -> MSGDel
     // Added nodes: in new but not in old.
     for node_id in new_ids.difference(&old_ids) {
         if let Some(node) = new_scg.get_node(*node_id) {
-            add_node_to_delta(&mut delta, node);
+            add_node_to_delta(&mut delta, node, msg)?;
         }
     }
 
     // Removed nodes: in old but not in new.
     for node_id in old_ids.difference(&new_ids) {
         if let Some(node) = old_scg.get_node(*node_id) {
-            remove_node_from_delta(&mut delta, node);
+            remove_node_from_delta(&mut delta, node, msg)?;
         }
     }
 
@@ -881,16 +899,25 @@ pub fn compute_scg_delta(old_scg: &SCGSnapshot, new_scg: &SCGSnapshot) -> MSGDel
         let old_node = old_scg.get_node(*node_id).unwrap();
         let new_node = new_scg.get_node(*node_id).unwrap();
         if nodes_differ(old_node, new_node) {
-            remove_node_from_delta(&mut delta, old_node);
-            add_node_to_delta(&mut delta, new_node);
+            remove_node_from_delta(&mut delta, old_node, msg)?;
+            add_node_to_delta(&mut delta, new_node, msg)?;
         }
     }
 
-    delta
+    Ok(delta)
 }
 
 /// Add the effects of an SCG node to the delta (spec §5.2 rules).
-fn add_node_to_delta(delta: &mut MSGDelta, node: &SCGNode) {
+///
+/// For Dealloc nodes, the real `base`, `size`, and `alloc_point` are
+/// resolved from the MSG (the SCG snapshot does not carry allocation
+/// metadata). If the region is not found in the MSG, returns
+/// [`DeltaError::AllocationNotFound`].
+fn add_node_to_delta(
+    delta: &mut MSGDelta,
+    node: &SCGNode,
+    msg: &MSG,
+) -> Result<(), DeltaError> {
     match node {
         SCGNode::Alloc {
             region_id,
@@ -915,14 +942,20 @@ fn add_node_to_delta(delta: &mut MSGDelta, node: &SCGNode) {
             ..
         } => {
             // Modification: set region status to Freed.
+            // Look up the real allocation metadata from the MSG so the
+            // delta carries the true base/size rather than placeholders.
+            let existing = msg
+                .region(*region_id)
+                .cloned()
+                .ok_or(DeltaError::AllocationNotFound(*region_id))?;
             delta.regions.modify(Region {
                 id: *region_id,
-                base: Address::from(0u64), // placeholder; apply_delta replaces
-                size: 0,                   // placeholder
+                base: existing.base,
+                size: existing.size,
                 status: RegionStatus::Freed,
-                alloc_point: free_point.clone(),
+                alloc_point: existing.alloc_point,
                 free_point: Some(free_point.clone()),
-                owner_context: None,
+                owner_context: existing.owner_context,
             });
         }
         SCGNode::Access {
@@ -996,24 +1029,39 @@ fn add_node_to_delta(delta: &mut MSGDelta, node: &SCGNode) {
             ));
         }
     }
+    Ok(())
 }
 
 /// Record the removal of an SCG node in the delta.
-fn remove_node_from_delta(delta: &mut MSGDelta, node: &SCGNode) {
+///
+/// For Dealloc node removals (undo-dealloc: region goes back to Allocated),
+/// the real `base`, `size`, and `alloc_point` are resolved from the MSG.
+/// If the region is not found, returns [`DeltaError::AllocationNotFound`].
+fn remove_node_from_delta(
+    delta: &mut MSGDelta,
+    node: &SCGNode,
+    msg: &MSG,
+) -> Result<(), DeltaError> {
     match node {
         SCGNode::Alloc { region_id, .. } => {
             delta.regions.remove(region_id.0);
         }
         SCGNode::Dealloc { region_id, .. } => {
             // Removing a dealloc means the region should go back to Allocated.
+            // Look up the real allocation metadata from the MSG so the
+            // delta carries the true base/size rather than placeholders.
+            let existing = msg
+                .region(*region_id)
+                .cloned()
+                .ok_or(DeltaError::AllocationNotFound(*region_id))?;
             delta.regions.modify(Region {
                 id: *region_id,
-                base: Address::from(0u64),
-                size: 0,
+                base: existing.base,
+                size: existing.size,
                 status: RegionStatus::Allocated,
-                alloc_point: crate::program_point::ProgramPoint::new("", 0, 0),
+                alloc_point: existing.alloc_point,
                 free_point: None,
-                owner_context: None,
+                owner_context: existing.owner_context,
             });
         }
         SCGNode::Access { access_id, .. } => {
@@ -1029,6 +1077,7 @@ fn remove_node_from_delta(delta: &mut MSGDelta, node: &SCGNode) {
             delta.sync_edges.remove(edge_id.0);
         }
     }
+    Ok(())
 }
 
 /// Check if two SCG nodes differ in content.
@@ -1785,7 +1834,10 @@ mod tests {
             alloc_point: dummy_pp(2),
         });
 
-        let delta = compute_scg_delta(&old, &new);
+        // The MSG is needed so that compute_scg_delta can resolve real
+        // base/size for dealloc-related deltas.
+        let msg = MSG::new();
+        let delta = compute_scg_delta(&old, &new, &msg).unwrap();
         assert_eq!(delta.regions.added.len(), 1);
         assert_eq!(delta.regions.added[0].id, RegionId(2));
         assert_eq!(delta.regions.removed.len(), 1);
@@ -2092,5 +2144,170 @@ mod tests {
         assert_eq!(old.access_count(), 1);
         assert_eq!(old.region_count(), 1);
         assert_eq!(old.derivation_count(), 1);
+    }
+
+    // =======================================================================
+    // Test 28: Dealloc delta uses real address, not placeholder
+    // =======================================================================
+
+    #[test]
+    fn dealloc_delta_uses_real_address_not_placeholder() {
+        // Set up an MSG with an allocated region at a known address.
+        let mut msg = MSG::new();
+        msg.add_region(Region {
+            id: RegionId(42),
+            base: Address::from(0xDEAD_0000_u64),
+            size: 0x1000,
+            status: RegionStatus::Allocated,
+            alloc_point: dummy_pp(10),
+            free_point: None,
+            owner_context: Some("MyStruct".to_string()),
+        });
+
+        // Build SCG snapshots: old has the alloc, new adds a dealloc.
+        let mut old_scg = SCGSnapshot::new();
+        old_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(42),
+            base: Address::from(0xDEAD_0000_u64),
+            size: 0x1000,
+            alloc_point: dummy_pp(10),
+        });
+
+        let mut new_scg = SCGSnapshot::new();
+        new_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(42),
+            base: Address::from(0xDEAD_0000_u64),
+            size: 0x1000,
+            alloc_point: dummy_pp(10),
+        });
+        new_scg.add_node(SCGNode::Dealloc {
+            node_id: 2,
+            region_id: RegionId(42),
+            free_point: dummy_pp(20),
+        });
+
+        let delta = compute_scg_delta(&old_scg, &new_scg, &msg).unwrap();
+
+        // The dealloc should produce a region modification (not an addition).
+        assert_eq!(delta.regions.modified.len(), 1);
+        let freed = &delta.regions.modified[0];
+        assert_eq!(freed.id, RegionId(42));
+
+        // CRITICAL: the delta must carry the real address and size from the
+        // MSG — never Address::from(0u64) or size: 0.
+        assert_eq!(freed.base, Address::from(0xDEAD_0000_u64));
+        assert_eq!(freed.size, 0x1000);
+        assert_eq!(freed.status, RegionStatus::Freed);
+        assert_eq!(freed.alloc_point, dummy_pp(10));
+        assert_eq!(freed.free_point, Some(dummy_pp(20)));
+        assert_eq!(freed.owner_context, Some("MyStruct".to_string()));
+
+        // Applying the delta should correctly mark the region as Freed.
+        let result = apply_delta(&mut msg, delta);
+        assert!(result.success);
+        let region = msg.region(RegionId(42)).unwrap();
+        assert_eq!(region.status, RegionStatus::Freed);
+        assert_eq!(region.base, Address::from(0xDEAD_0000_u64));
+        assert_eq!(region.size, 0x1000);
+    }
+
+    // =======================================================================
+    // Test 29: Undo-dealloc delta uses real address
+    // =======================================================================
+
+    #[test]
+    fn undo_dealloc_delta_uses_real_address() {
+        // Set up an MSG with a Freed region at a known address.
+        let mut msg = MSG::new();
+        msg.add_region(Region {
+            id: RegionId(7),
+            base: Address::from(0xBEEF_0000_u64),
+            size: 0x200,
+            status: RegionStatus::Freed,
+            alloc_point: dummy_pp(5),
+            free_point: Some(dummy_pp(15)),
+            owner_context: None,
+        });
+
+        // Old SCG has both alloc and dealloc; new SCG only has alloc
+        // (i.e., the dealloc is being undone).
+        let mut old_scg = SCGSnapshot::new();
+        old_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(7),
+            base: Address::from(0xBEEF_0000_u64),
+            size: 0x200,
+            alloc_point: dummy_pp(5),
+        });
+        old_scg.add_node(SCGNode::Dealloc {
+            node_id: 2,
+            region_id: RegionId(7),
+            free_point: dummy_pp(15),
+        });
+
+        let mut new_scg = SCGSnapshot::new();
+        new_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(7),
+            base: Address::from(0xBEEF_0000_u64),
+            size: 0x200,
+            alloc_point: dummy_pp(5),
+        });
+
+        let delta = compute_scg_delta(&old_scg, &new_scg, &msg).unwrap();
+
+        // The undo-dealloc should produce a region modification back to Allocated.
+        assert_eq!(delta.regions.modified.len(), 1);
+        let restored = &delta.regions.modified[0];
+        assert_eq!(restored.id, RegionId(7));
+
+        // Must carry the real address and size — never placeholders.
+        assert_eq!(restored.base, Address::from(0xBEEF_0000_u64));
+        assert_eq!(restored.size, 0x200);
+        assert_eq!(restored.status, RegionStatus::Allocated);
+        assert_eq!(restored.alloc_point, dummy_pp(5));
+        assert!(restored.free_point.is_none());
+    }
+
+    // =======================================================================
+    // Test 30: Dealloc delta for missing region returns AllocationNotFound
+    // =======================================================================
+
+    #[test]
+    fn dealloc_delta_missing_region_returns_allocation_not_found() {
+        // Empty MSG — the region doesn't exist.
+        let msg = MSG::new();
+
+        let mut old_scg = SCGSnapshot::new();
+        old_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(99),
+            base: Address::from(0x1000_u64),
+            size: 0x100,
+            alloc_point: dummy_pp(1),
+        });
+
+        let mut new_scg = SCGSnapshot::new();
+        new_scg.add_node(SCGNode::Alloc {
+            node_id: 1,
+            region_id: RegionId(99),
+            base: Address::from(0x1000_u64),
+            size: 0x100,
+            alloc_point: dummy_pp(1),
+        });
+        new_scg.add_node(SCGNode::Dealloc {
+            node_id: 2,
+            region_id: RegionId(99),
+            free_point: dummy_pp(10),
+        });
+
+        let result = compute_scg_delta(&old_scg, &new_scg, &msg);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            DeltaError::AllocationNotFound(RegionId(99))
+        );
     }
 }

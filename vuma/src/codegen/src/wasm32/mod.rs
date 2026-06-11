@@ -2697,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_memory_section() {
+    fn test_wasm_memory_section() -> crate::Result<()> {
         let mut builder = WasmModuleBuilder::new();
         builder.add_memory(WasmLimits {
             min: 1,
@@ -2712,11 +2712,13 @@ mod tests {
             let (size, size_len) = decode_unsigned_leb128(&module[offset..]);
             offset += size_len;
             if section_id == SECTION_MEMORY {
-                return; // Found memory section
+                return Ok(()); // Found memory section
             }
             offset += size as usize;
         }
-        panic!("Memory section not found");
+        Err(crate::CodegenError::WasmSectionNotFound {
+            section: "Memory".to_string(),
+        })
     }
 
     // ── Complete .wasm module generation test ──────────────────────

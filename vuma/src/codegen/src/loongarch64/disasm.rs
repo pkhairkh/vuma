@@ -78,9 +78,6 @@ fn gpr_from_bits(bits: u32) -> Gpr {
     }
 }
 
-// NOTE: FP instruction decoding is not yet implemented in the disassembler.
-// Kept for use when FP instruction decode paths are added.
-#[allow(dead_code)]
 fn fpr_from_bits(bits: u32) -> Fpr {
     match bits {
         0 => Fpr::F0,
@@ -383,6 +380,63 @@ impl Instruction {
                     rk: gpr_from_bits(rk),
                 })
             }
+            // ── FP Arithmetic (3R) ──────────────────────────────
+            0x0100 => {
+                return Ok(Instruction::FaddS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0101 => {
+                return Ok(Instruction::FaddD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0102 => {
+                return Ok(Instruction::FsubS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0103 => {
+                return Ok(Instruction::FsubD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0104 => {
+                return Ok(Instruction::FmulS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0105 => {
+                return Ok(Instruction::FmulD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0106 => {
+                return Ok(Instruction::FdivS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
+            0x0107 => {
+                return Ok(Instruction::FdivD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                })
+            }
             _ => {}
         }
 
@@ -567,6 +621,35 @@ impl Instruction {
                     imm12: sign_extend_12(imm12_raw),
                 })
             }
+            // FP Load/Store
+            0x0AB => {
+                return Ok(Instruction::FldS {
+                    fd: fpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0AC => {
+                return Ok(Instruction::FldD {
+                    fd: fpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0AD => {
+                return Ok(Instruction::FstS {
+                    fd: fpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0AE => {
+                return Ok(Instruction::FstD {
+                    fd: fpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
             _ => {}
         }
 
@@ -674,6 +757,58 @@ impl Instruction {
                 return Ok(Instruction::ExtWB {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
+                })
+            }
+            // FP Move: fmov.s fd, fj
+            0x000004E => {
+                return Ok(Instruction::FmovS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                })
+            }
+            // FP Move: fmov.d fd, fj
+            0x000004F => {
+                return Ok(Instruction::FmovD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                })
+            }
+            // FP Move: movfr2gr.d rd, fj
+            0x0000052 => {
+                return Ok(Instruction::FmovGr2FprD {
+                    rd: gpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                })
+            }
+            // FP Move: movgr2fr.d fd, rj
+            0x0000053 => {
+                return Ok(Instruction::FmovFpr2GrD {
+                    fd: fpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                })
+            }
+            _ => {}
+        }
+
+        // 4R format (FP Compare: fcmp.cond.s/d)
+        let opc_4r = (word >> 20) & 0xFFF;
+        let cond = ((word >> 15) & 0x1F) as u8;
+        let cd = (rd & 0x1F) as u8; // condition register destination in rd field
+        match opc_4r {
+            0x0C4 => {
+                return Ok(Instruction::FCmpS {
+                    cond,
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                    cd,
+                })
+            }
+            0x0C5 => {
+                return Ok(Instruction::FCmpD {
+                    cond,
+                    fj: fpr_from_bits(rj),
+                    fk: fpr_from_bits(rk),
+                    cd,
                 })
             }
             _ => {}
@@ -790,5 +925,124 @@ mod tests {
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
+    }
+
+    // ── FP instruction decode tests ───────────────────────────────────
+
+    #[test]
+    fn test_decode_fp_arithmetic_s_d() {
+        use crate::loongarch64::Fpr as F;
+        // Test single-precision FP arithmetic: fadd.s, fsub.s, fmul.s, fdiv.s
+        for instr in [
+            Instruction::FaddS {
+                fd: F::F0,
+                fj: F::F1,
+                fk: F::F2,
+            },
+            Instruction::FsubS {
+                fd: F::F0,
+                fj: F::F1,
+                fk: F::F2,
+            },
+            Instruction::FmulS {
+                fd: F::F3,
+                fj: F::F4,
+                fk: F::F5,
+            },
+            Instruction::FdivS {
+                fd: F::F6,
+                fj: F::F7,
+                fk: F::F8,
+            },
+            // Double-precision FP arithmetic: fadd.d, fsub.d, fmul.d, fdiv.d
+            Instruction::FaddD {
+                fd: F::F0,
+                fj: F::F1,
+                fk: F::F2,
+            },
+            Instruction::FsubD {
+                fd: F::F0,
+                fj: F::F1,
+                fk: F::F2,
+            },
+            Instruction::FmulD {
+                fd: F::F3,
+                fj: F::F4,
+                fk: F::F5,
+            },
+            Instruction::FdivD {
+                fd: F::F6,
+                fj: F::F7,
+                fk: F::F8,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_fp_mov_fcmp() {
+        use crate::loongarch64::Fpr as F;
+        // FP register-to-register move
+        for instr in [
+            Instruction::FmovS {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FmovD {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            // FP compare (CEQ = condition 0x02)
+            Instruction::FCmpS {
+                cond: 0x02,
+                fj: F::F0,
+                fk: F::F1,
+                cd: 0,
+            },
+            Instruction::FCmpD {
+                cond: 0x01,
+                fj: F::F2,
+                fk: F::F3,
+                cd: 1,
+            },
+            // FP load/store
+            Instruction::FldS {
+                fd: F::F0,
+                rj: G::Sp,
+                imm12: 0,
+            },
+            Instruction::FldD {
+                fd: F::F1,
+                rj: G::Sp,
+                imm12: 8,
+            },
+            Instruction::FstS {
+                fd: F::F0,
+                rj: G::Sp,
+                imm12: 0,
+            },
+            Instruction::FstD {
+                fd: F::F1,
+                rj: G::Sp,
+                imm12: 8,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
     }
 }

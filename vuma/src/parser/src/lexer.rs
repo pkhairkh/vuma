@@ -665,6 +665,9 @@ pub struct Lexer<'src> {
     column: usize,
     /// Lookahead token already consumed but not yet handed to the caller.
     peeked: Option<Token>,
+    /// Cached EOF token used as a safe fallback in [`peek`] when the
+    /// peeked buffer is unexpectedly empty (defensive guard against panic).
+    eof_token: Token,
     /// Accumulated lexical errors (for error recovery).
     errors: Vec<ParseError>,
 }
@@ -679,6 +682,7 @@ impl<'src> Lexer<'src> {
             line: 0,
             column: 0,
             peeked: None,
+            eof_token: Token::new(TokenKind::Eof, "", Span::new(0, 0), 0, 0),
             errors: Vec::new(),
         }
     }
@@ -705,7 +709,10 @@ impl<'src> Lexer<'src> {
         if self.peeked.is_none() {
             self.peeked = Some(self.advance());
         }
-        self.peeked.as_ref().unwrap()
+        // Defensive: if `peeked` is still `None` after the branch above
+        // (should never happen), fall back to the cached EOF token instead
+        // of panicking.
+        self.peeked.as_ref().unwrap_or(&self.eof_token)
     }
 
     /// Consume all remaining tokens and return them (including the final Eof).
