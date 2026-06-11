@@ -1458,8 +1458,11 @@ pub enum IRTerminator {
     /// Conditional branch: if `cond` is non-zero, go to `true_block`;
     /// otherwise go to `false_block`.
     Branch {
+        /// Condition value; branches to `true_block` if non-zero.
         cond: IRValue,
+        /// Target block label when the condition is true.
         true_block: String,
+        /// Target block label when the condition is false.
         false_block: String,
     },
     /// Return from the current function with optional values.

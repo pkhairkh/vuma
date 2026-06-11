@@ -6255,8 +6255,10 @@ mod tests {
             .iter()
             .filter(|i| {
                 i.opcode == "addi"
-                    && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
-                    && i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                    && i.reads
+                        .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                    && i.writes
+                        .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
             })
             .count();
         assert!(
@@ -6269,7 +6271,8 @@ mod tests {
             .iter()
             .filter(|i| {
                 i.opcode == "addi"
-                    && i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                    && i.writes
+                        .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
             })
             .collect();
         // At least one of these (the alloc one) should have a non-zero immediate
@@ -6304,8 +6307,11 @@ mod tests {
         // the destination register (copying sp to dst).
         let has_sp_copy = instrs.iter().any(|i| {
             i.opcode == "addi"
-                && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
-                && !i.writes.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                && i.reads
+                    .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+                && !i
+                    .writes
+                    .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
                 && !i.writes.is_empty()
         });
         assert!(
@@ -6325,10 +6331,7 @@ mod tests {
         let instrs = &result.blocks[0].instructions;
         // Free should be lowered to a single AllocatedInstruction with opcode "free"
         // whose encoded bytes contain: ADDI a0, p, 0; ADDI a7, zero, 214; ECALL
-        let free_instrs: Vec<_> = instrs
-            .iter()
-            .filter(|i| i.opcode == "free")
-            .collect();
+        let free_instrs: Vec<_> = instrs.iter().filter(|i| i.opcode == "free").collect();
         assert!(
             !free_instrs.is_empty(),
             "free should emit an instruction with opcode 'free'"

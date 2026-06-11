@@ -216,7 +216,7 @@ impl MailboxMessage {
         self.buffer[2] = TAG_GET_ARM_MEMORY;
         self.buffer[3] = 8; // value buffer size
         self.buffer[4] = 0; // request code
-        // buffer[5] and buffer[6] will be filled by firmware
+                            // buffer[5] and buffer[6] will be filled by firmware
         self.buffer[7] = END_TAG;
     }
 
@@ -231,7 +231,7 @@ impl MailboxMessage {
         self.buffer[2] = TAG_GET_BOARD_SERIAL;
         self.buffer[3] = 8; // value buffer size
         self.buffer[4] = 0; // request code
-        // buffer[5] and buffer[6] will be filled by firmware
+                            // buffer[5] and buffer[6] will be filled by firmware
         self.buffer[7] = END_TAG;
     }
 }
@@ -497,7 +497,10 @@ mod tests {
         // Request code
         assert_eq!(msg.buffer[1], REQUEST_CODE, "request code should be 0");
         // Tag identity
-        assert_eq!(msg.buffer[2], TAG_GET_ARM_MEMORY, "tag should be GET_ARM_MEMORY");
+        assert_eq!(
+            msg.buffer[2], TAG_GET_ARM_MEMORY,
+            "tag should be GET_ARM_MEMORY"
+        );
         // Value buffer size: 8 bytes
         assert_eq!(msg.buffer[3], 8, "value buffer size should be 8");
         // Request/response code
@@ -516,7 +519,10 @@ mod tests {
 
         assert_eq!(msg.buffer[0], 32, "total size should be 32 bytes");
         assert_eq!(msg.buffer[1], REQUEST_CODE, "request code should be 0");
-        assert_eq!(msg.buffer[2], TAG_GET_BOARD_SERIAL, "tag should be GET_BOARD_SERIAL");
+        assert_eq!(
+            msg.buffer[2], TAG_GET_BOARD_SERIAL,
+            "tag should be GET_BOARD_SERIAL"
+        );
         assert_eq!(msg.buffer[3], 8, "value buffer size should be 8");
         assert_eq!(msg.buffer[4], 0, "tag request code should be 0");
         assert_eq!(msg.buffer[7], END_TAG, "end tag should be 0");
@@ -529,11 +535,17 @@ mod tests {
     fn mailbox_message_default_and_response_check() {
         let msg = MailboxMessage::default();
         // All-zero buffer: response code is 0 → not success.
-        assert!(!msg.is_response_success(), "zeroed buffer should not indicate success");
+        assert!(
+            !msg.is_response_success(),
+            "zeroed buffer should not indicate success"
+        );
 
         let mut msg = MailboxMessage::new();
         msg.buffer[1] = RESPONSE_SUCCESS;
-        assert!(msg.is_response_success(), "response success bit should be set");
+        assert!(
+            msg.is_response_success(),
+            "response success bit should be set"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -581,6 +593,9 @@ mod tests {
         let mut msg = MailboxMessage::new();
         msg.init_get_arm_memory();
         let result = send_property_message(&mut msg);
-        assert!(result.is_ok(), "stub send_property_message should return Ok");
+        assert!(
+            result.is_ok(),
+            "stub send_property_message should return Ok"
+        );
     }
 }

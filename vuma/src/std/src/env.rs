@@ -274,7 +274,10 @@ mod tests {
         // Set a value and verify we can get it back.
         set_var(key, "hello_vuma");
         let val = var(key).expect("should be able to read back the set value");
-        assert_eq!(val, "hello_vuma", "set+get round-trip should return the same value");
+        assert_eq!(
+            val, "hello_vuma",
+            "set+get round-trip should return the same value"
+        );
 
         // Overwrite and verify the new value.
         set_var(key, "updated_value");

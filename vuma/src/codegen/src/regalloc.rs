@@ -76,6 +76,7 @@ pub type IRValueId = u32;
 /// - V8–V15: callee-saved (only lower 64 bits, D8–D15, must be preserved)
 /// - V16–V31: caller-saved temporaries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(missing_docs)]
 pub enum SimdFpRegister {
     V0,
     V1,
@@ -229,7 +230,9 @@ impl std::fmt::Display for SimdFpRegister {
 /// SIMD/FP register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PhysReg {
+    /// General-purpose register.
     Gpr(Register),
+    /// SIMD / floating-point register.
     SimdFp(SimdFpRegister),
 }
 
@@ -553,21 +556,21 @@ impl SpillSlot {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SpillCode {
     /// Spill (store) a register to its stack slot.
-    /// `vreg` is the virtual register being spilled.
-    /// `preg` is the physical register holding the value.
-    /// `slot` is the spill slot to store to.
     Spill {
+        /// The virtual register being spilled.
         vreg: IRValueId,
+        /// The physical register holding the value.
         preg: PhysReg,
+        /// The spill slot to store to.
         slot: SpillSlot,
     },
     /// Reload (load) a register from its stack slot.
-    /// `vreg` is the virtual register being reloaded.
-    /// `preg` is the physical register to load into.
-    /// `slot` is the spill slot to load from.
     Reload {
+        /// The virtual register being reloaded.
         vreg: IRValueId,
+        /// The physical register to load into.
         preg: PhysReg,
+        /// The spill slot to load from.
         slot: SpillSlot,
     },
 }
@@ -1815,7 +1818,7 @@ impl Default for RegAllocator {
 
 /// A target-agnostic linear-scan register allocator.
 ///
-/// This allocator is driven by a [`TargetDesc`] from `target_desc.rs`,
+/// This allocator is driven by a [`crate::target_desc::TargetDesc`] from `target_desc.rs`,
 /// which provides the complete register file including which registers are
 /// allocatable, caller-saved, and callee-saved. Any backend (AArch64,
 /// x86_64, RISC-V, etc.) can use this allocator by passing its target
@@ -2436,14 +2439,20 @@ impl GenericSpillSlot {
 pub enum GenericSpillCode {
     /// Spill (store) a register to its stack slot.
     Spill {
+        /// The virtual register being spilled.
         vreg: IRValueId,
+        /// The physical register holding the value.
         preg: crate::backend::PhysicalReg,
+        /// The spill slot to store to.
         slot: GenericSpillSlot,
     },
     /// Reload (load) a register from its stack slot.
     Reload {
+        /// The virtual register being reloaded.
         vreg: IRValueId,
+        /// The physical register to load into.
         preg: crate::backend::PhysicalReg,
+        /// The spill slot to load from.
         slot: GenericSpillSlot,
     },
 }

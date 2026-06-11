@@ -6,7 +6,7 @@
 //! ## Pipeline
 //!
 //! 1. **IR → ARM64 Instructions**: Each IR instruction is pattern-matched and
-//!    lowered to one or more [`Instruction`](crate::arm64::Instruction)
+//!    lowered to one or more [`Instruction`]
 //!    values, with virtual registers replaced by physical registers from the
 //!    register allocator.
 //! 2. **Emit function**: Each IR function is emitted as a sequence of 32-bit
@@ -3230,9 +3230,7 @@ mod tests {
         assert_eq!(code[1], 0xB8, "MOV rax, imm64 opcode");
 
         // The 8-byte immediate should follow.
-        let imm = u64::from_le_bytes(
-            code[2..10].try_into().expect("8 bytes for immediate"),
-        );
+        let imm = u64::from_le_bytes(code[2..10].try_into().expect("8 bytes for immediate"));
         assert_eq!(imm, 0x4242424242424242);
     }
 

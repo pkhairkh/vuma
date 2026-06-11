@@ -33,7 +33,7 @@
 //! ## Instruction Encoding
 //!
 //! ARM instructions are 32 bits, little-endian, with a 4-bit condition code
-//! in bits [31:28]. The `AL` (always) condition is used for unconditional
+//! in bits \[31:28\]. The `AL` (always) condition is used for unconditional
 //! instructions.
 //!
 //! ## References
@@ -254,7 +254,7 @@ impl fmt::Display for Dpr {
 // Condition Codes
 // ===========================================================================
 
-/// ARM condition codes (4-bit encoding in bits [31:28] of every ARM instruction).
+/// ARM condition codes (4-bit encoding in bits \[31:28\] of every ARM instruction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Condition {
     /// Equal / Z set
@@ -980,14 +980,14 @@ pub enum Instruction {
     },
 
     // ── Load/Store Word ──────────────────────────────────────────────
-    /// LDR Rd, [Rn, #offset]
+    /// LDR Rd, \[Rn, #offset\]
     Ldr {
         rd: Gpr,
         rn: Gpr,
         offset: i32,
         cond: Condition,
     },
-    /// STR Rd, [Rn, #offset]
+    /// STR Rd, \[Rn, #offset\]
     Str {
         rd: Gpr,
         rn: Gpr,
@@ -996,14 +996,14 @@ pub enum Instruction {
     },
 
     // ── Load/Store Byte ──────────────────────────────────────────────
-    /// LDRB Rd, [Rn, #offset]
+    /// LDRB Rd, \[Rn, #offset\]
     Ldrb {
         rd: Gpr,
         rn: Gpr,
         offset: i32,
         cond: Condition,
     },
-    /// STRB Rd, [Rn, #offset]
+    /// STRB Rd, \[Rn, #offset\]
     Strb {
         rd: Gpr,
         rn: Gpr,
@@ -1012,14 +1012,14 @@ pub enum Instruction {
     },
 
     // ── Load/Store Halfword ──────────────────────────────────────────
-    /// LDRH Rd, [Rn, #offset]
+    /// LDRH Rd, \[Rn, #offset\]
     Ldrh {
         rd: Gpr,
         rn: Gpr,
         offset: i32,
         cond: Condition,
     },
-    /// STRH Rd, [Rn, #offset]
+    /// STRH Rd, \[Rn, #offset\]
     Strh {
         rd: Gpr,
         rn: Gpr,
@@ -1028,14 +1028,14 @@ pub enum Instruction {
     },
 
     // ── Load/Store Doubleword ────────────────────────────────────────
-    /// LDRD Rd, [Rn, #offset]
+    /// LDRD Rd, \[Rn, #offset\]
     Ldrd {
         rd: Gpr,
         rn: Gpr,
         offset: i32,
         cond: Condition,
     },
-    /// STRD Rd, [Rn, #offset]
+    /// STRD Rd, \[Rn, #offset\]
     Strd {
         rd: Gpr,
         rn: Gpr,
@@ -1044,14 +1044,14 @@ pub enum Instruction {
     },
 
     // ── Load Signed Byte/Halfword ────────────────────────────────────
-    /// LDRSB Rd, [Rn, #offset]
+    /// LDRSB Rd, \[Rn, #offset\]
     Ldrsb {
         rd: Gpr,
         rn: Gpr,
         offset: i32,
         cond: Condition,
     },
-    /// LDRSH Rd, [Rn, #offset]
+    /// LDRSH Rd, \[Rn, #offset\]
     Ldrsh {
         rd: Gpr,
         rn: Gpr,

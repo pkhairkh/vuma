@@ -510,10 +510,7 @@ mod tests {
 
         // Root has no parent.
         let root = VumaPath::new("/");
-        assert!(
-            root.parent().is_none(),
-            "root path should have no parent"
-        );
+        assert!(root.parent().is_none(), "root path should have no parent");
 
         // Single-component relative path has no parent (resolves to "").
         let single = VumaPath::new("file.txt");

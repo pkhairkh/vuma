@@ -1499,51 +1499,37 @@ impl Instruction {
             // ---- CLZ Xd, Xn ----
             // One-source data processing: 1 10 1101 0110 0000 0000 010 Rn Rd
             // CLZ X0, X0 = 0xDAC01000
-            Instruction::CLZ { rd, rn } => {
-                Ok(0xDAC01000 | (rn.encoding() << 5) | rd.encoding())
-            }
+            Instruction::CLZ { rd, rn } => Ok(0xDAC01000 | (rn.encoding() << 5) | rd.encoding()),
 
             // ---- RBIT Xd, Xn ----
             // One-source data processing: 1 10 1101 0110 0000 0000 000 Rn Rd
             // RBIT X0, X0 = 0xDAC00000
-            Instruction::RBIT { rd, rn } => {
-                Ok(0xDAC00000 | (rn.encoding() << 5) | rd.encoding())
-            }
+            Instruction::RBIT { rd, rn } => Ok(0xDAC00000 | (rn.encoding() << 5) | rd.encoding()),
 
             // ---- FMOV Dd, Xn (GPR → FP double) ----
             // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 110 000 Rn Rd
             // FMOV D0, X0 = 0x9E670000
-            Instruction::FMOV_DX { vd, rn } => {
-                Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32))
-            }
+            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32)),
 
             // ---- FMOV Xd, Dn (FP double → GPR) ----
             // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
             // FMOV X0, D0 = 0x9E6F0000
-            Instruction::FMOV_XD { rd, vn } => {
-                Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding())
-            }
+            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding()),
 
             // ---- CNT Vd.8B, Vn.8B ----
             // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
             // CNT V0.8B, V0.8B = 0x0E205800
-            Instruction::CNT { vd, vn } => {
-                Ok(0x0E205800 | ((*vn as u32) << 5) | (*vd as u32))
-            }
+            Instruction::CNT { vd, vn } => Ok(0x0E205800 | ((*vn as u32) << 5) | (*vd as u32)),
 
             // ---- ADDV Bd, Vn.8B ----
             // Advanced SIMD reduction: 0 0 001110 01 11000 11011 1 Vn Vd
             // ADDV B0, V0.8B = 0x0E71B800
-            Instruction::ADDV { vd, vn } => {
-                Ok(0x0E71B800 | ((*vn as u32) << 5) | (*vd as u32))
-            }
+            Instruction::ADDV { vd, vn } => Ok(0x0E71B800 | ((*vn as u32) << 5) | (*vd as u32)),
 
             // ---- UMOV Wd, Vn.B[0] ----
             // Advanced SIMD copy: 0 0 001110 00 1 00 0000 1 0 000 Vn Rd
             // UMOV W0, V0.B[0] = 0x0E204000
-            Instruction::UMOV { rd, vn } => {
-                Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding())
-            }
+            Instruction::UMOV { rd, vn } => Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding()),
 
             // ---- SVC ----
             Instruction::SVC { imm16 } => {
@@ -4218,7 +4204,13 @@ mod tests {
         });
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::CLZ { rd: Register::X0, rn: Register::X1 }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::CLZ {
+                rd: Register::X0,
+                rn: Register::X1
+            }
+        ));
     }
 
     // ---- Test: CTZ emission (RBIT + CLZ sequence) ----
@@ -4254,7 +4246,7 @@ mod tests {
         let clz_enc = clz_step.encode().unwrap();
         // Verify RBIT comes before CLZ and produces correct encodings
         assert_eq!(rbit_enc, 0xDAC00000 | (1u32 << 5) | 0); // RBIT X0, X1
-        assert_eq!(clz_enc, 0xDAC01000 | (0u32 << 5) | 0);  // CLZ X0, X0
+        assert_eq!(clz_enc, 0xDAC01000 | (0u32 << 5) | 0); // CLZ X0, X0
 
         // When rd == rn: need scratch register (X9)
         // RBIT X9, X0 then CLZ X0, X9
@@ -4269,14 +4261,17 @@ mod tests {
         let rbit_scratch_enc = rbit_scratch.encode().unwrap();
         let clz_scratch_enc = clz_from_scratch.encode().unwrap();
         assert_eq!(rbit_scratch_enc, 0xDAC00000 | (0u32 << 5) | 9); // RBIT X9, X0
-        assert_eq!(clz_scratch_enc, 0xDAC01000 | (9u32 << 5) | 0);  // CLZ X0, X9
+        assert_eq!(clz_scratch_enc, 0xDAC01000 | (9u32 << 5) | 0); // CLZ X0, X9
     }
 
     // ---- Test: POPCNT emission (FMOV+CNT+ADDV+UMOV sequence) ----
     #[test]
     fn test_popcnt_emission() {
         // FMOV D8, X0: GPR to SIMD register
-        let fmov_dx = Instruction::FMOV_DX { vd: 8, rn: Register::X0 };
+        let fmov_dx = Instruction::FMOV_DX {
+            vd: 8,
+            rn: Register::X0,
+        };
         assert_eq!(format!("{}", fmov_dx), "fmov d8, x0");
         let fmov_enc = fmov_dx.encode().unwrap();
         assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 5) | 8);
@@ -4294,7 +4289,10 @@ mod tests {
         assert_eq!(addv_enc, 0x0E71B800 | (8u32 << 5) | 8);
 
         // UMOV X0, V8.B[0]: move result back to GPR
-        let umov = Instruction::UMOV { rd: Register::X0, vn: 8 };
+        let umov = Instruction::UMOV {
+            rd: Register::X0,
+            vn: 8,
+        };
         assert_eq!(format!("{}", umov), "umov x0, v8.b[0]");
         let umov_enc = umov.encode().unwrap();
         assert_eq!(umov_enc, 0x0E204000 | (8u32 << 5) | 0);
@@ -4305,7 +4303,10 @@ mod tests {
         assert_ne!(addv_enc, umov_enc);
 
         // Also verify FMOV_XD (FP double to GPR)
-        let fmov_xd = Instruction::FMOV_XD { rd: Register::X0, vn: 8 };
+        let fmov_xd = Instruction::FMOV_XD {
+            rd: Register::X0,
+            vn: 8,
+        };
         assert_eq!(format!("{}", fmov_xd), "fmov x0, d8");
         let fmov_xd_enc = fmov_xd.encode().unwrap();
         assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 5) | 0);

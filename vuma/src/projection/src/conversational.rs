@@ -353,7 +353,9 @@ impl<'a> SuggestionEngine<'a> {
 
         // Memory safety
         if intent_lower.contains("memory safe") || intent_lower.contains("no leak") {
-            if let Some(node_id) = self.find_node_by_keywords(&["alloc", "pool", "buffer", "region"]) {
+            if let Some(node_id) =
+                self.find_node_by_keywords(&["alloc", "pool", "buffer", "region"])
+            {
                 edits.push(SCGEdit::ChangeBD {
                     node_id,
                     bd_name: "NoLeak".into(),
@@ -365,7 +367,8 @@ impl<'a> SuggestionEngine<'a> {
 
         // Parallelism
         if intent_lower.contains("parallel") || intent_lower.contains("concurrent") {
-            if let Some(node_id) = self.find_node_by_keywords(&["map", "reduce", "fold", "process"]) {
+            if let Some(node_id) = self.find_node_by_keywords(&["map", "reduce", "fold", "process"])
+            {
                 edits.push(SCGEdit::ChangeBD {
                     node_id,
                     bd_name: "Send".into(),
@@ -2281,7 +2284,11 @@ mod tests {
         };
 
         match edit {
-            SCGEdit::AddEdge { source, target, kind } => {
+            SCGEdit::AddEdge {
+                source,
+                target,
+                kind,
+            } => {
                 let edge = SCGEdge {
                     id: 100,
                     source,
@@ -2298,7 +2305,11 @@ mod tests {
         let edge = &scg.edges[0];
         assert_eq!(edge.source, 1, "edge source should be node 1");
         assert_eq!(edge.target, 2, "edge target should be node 2");
-        assert_eq!(edge.kind, EdgeKind::DataFlow, "edge kind should be DataFlow");
+        assert_eq!(
+            edge.kind,
+            EdgeKind::DataFlow,
+            "edge kind should be DataFlow"
+        );
     }
 
     /// Verify that find_node_by_keywords returns None when no node labels

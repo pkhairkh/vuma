@@ -414,9 +414,21 @@ impl Delta {
     /// Returns the total number of individual field changes across all
     /// modified nodes and edges.
     pub fn total_field_changes(&self) -> usize {
-        let node_changes: usize = self.modified_nodes.iter().map(|m| m.field_changes.len()).sum();
-        let edge_changes: usize = self.modified_edges.iter().map(|m| m.field_changes.len()).sum();
-        let region_changes: usize = self.region_changes.iter().map(|r| r.field_changes.len()).sum();
+        let node_changes: usize = self
+            .modified_nodes
+            .iter()
+            .map(|m| m.field_changes.len())
+            .sum();
+        let edge_changes: usize = self
+            .modified_edges
+            .iter()
+            .map(|m| m.field_changes.len())
+            .sum();
+        let region_changes: usize = self
+            .region_changes
+            .iter()
+            .map(|r| r.field_changes.len())
+            .sum();
         node_changes + edge_changes + region_changes
     }
 }
@@ -558,13 +570,16 @@ mod tests {
         let changes = diff_nodes(&old, &new);
 
         // Should detect exactly the three changed fields.
-        assert_eq!(changes.len(), 3, "expected 3 field changes, got {:?}", changes);
+        assert_eq!(
+            changes.len(),
+            3,
+            "expected 3 field changes, got {:?}",
+            changes
+        );
 
         // Verify each change.
-        let change_map: std::collections::HashMap<&str, &FieldChange> = changes
-            .iter()
-            .map(|c| (c.field_name.as_str(), c))
-            .collect();
+        let change_map: std::collections::HashMap<&str, &FieldChange> =
+            changes.iter().map(|c| (c.field_name.as_str(), c)).collect();
 
         assert!(change_map.contains_key("is_inlined"));
         assert_eq!(change_map["is_inlined"].old_value, "false");
@@ -605,7 +620,10 @@ mod tests {
         assert_eq!(delta.modified_nodes.len(), 1);
         assert_eq!(delta.modified_nodes[0].node_id, 42);
         assert_eq!(delta.modified_nodes[0].field_changes.len(), 1);
-        assert_eq!(delta.modified_nodes[0].field_changes[0].field_name, "is_inlined");
+        assert_eq!(
+            delta.modified_nodes[0].field_changes[0].field_name,
+            "is_inlined"
+        );
         assert_eq!(delta.total_field_changes(), 1);
 
         // An empty delta should be empty.

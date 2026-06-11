@@ -609,8 +609,15 @@ mod tests {
         // that causes spin_wait to branch out of its loop.
         let slot: u64 = 0x80000; // a non-zero entry-point address
         let result = unsafe { check_spin_entry(&slot as *const u64) };
-        assert!(result.is_some(), "should return Some when entry is non-zero");
-        assert_eq!(result.unwrap(), 0x80000, "should return the entry point address");
+        assert!(
+            result.is_some(),
+            "should return Some when entry is non-zero"
+        );
+        assert_eq!(
+            result.unwrap(),
+            0x80000,
+            "should return the entry point address"
+        );
     }
 
     #[test]
@@ -618,7 +625,11 @@ mod tests {
         let values = [1u64, 0xDEAD_BEEF, 0x1, u64::MAX];
         for &val in &values {
             let result = unsafe { check_spin_entry(&val as *const u64) };
-            assert!(result.is_some(), "non-zero value {:#X} should yield Some", val);
+            assert!(
+                result.is_some(),
+                "non-zero value {:#X} should yield Some",
+                val
+            );
             assert_eq!(result.unwrap(), val as usize);
         }
     }

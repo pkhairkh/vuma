@@ -75,7 +75,7 @@ impl SwitchLowerer {
     /// Analyze switch targets and choose the best lowering strategy.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`choose_strategy_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::choose_strategy_for_target`] with `AArch64TargetInfo`.
     pub fn choose_strategy(targets: &[(i64, String)], default: &str) -> SwitchStrategy {
         Self::choose_strategy_for_target(targets, default, &AArch64TargetInfo)
     }
@@ -134,7 +134,7 @@ impl SwitchLowerer {
     /// Lower a switch to IR blocks using the chosen strategy.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`lower_switch_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::lower_switch_for_target`] with `AArch64TargetInfo`.
     ///
     /// Returns a list of new IR blocks to insert. The first block is the
     /// entry point that should replace the original switch terminator.
@@ -546,12 +546,18 @@ pub struct LandingPad {
 /// Action taken at an exception landing pad.
 #[derive(Debug, Clone)]
 pub enum ExceptionAction {
-    /// Catch an exception of a specific type and branch to `dst`.
-    Catch { dst: String },
+    /// Catch an exception of a specific type and branch to the target block.
+    Catch {
+        /// Target block label for the catch handler.
+        dst: String,
+    },
     /// Run cleanup code (e.g. destructors) without catching.
     Cleanup,
-    /// Only catch exceptions whose type is in `allowed_types`.
-    Filter { allowed_types: Vec<String> },
+    /// Only catch exceptions whose type is in the allowed list.
+    Filter {
+        /// List of exception type names that this filter catches.
+        allowed_types: Vec<String>,
+    },
 }
 
 /// Exception table entry for the `.gcc_except_table` section.
@@ -588,7 +594,7 @@ impl ExceptionLowerer {
     /// 2. A landing pad block that catches and branches to `unwind`
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`lower_invoke_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::lower_invoke_for_target`] with `AArch64TargetInfo`.
     pub fn lower_invoke(
         dst: Option<IRValue>,
         func: &str,
@@ -678,7 +684,7 @@ impl ExceptionLowerer {
     /// Generate the exception table for a function.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`generate_exception_table_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::generate_exception_table_for_target`] with `AArch64TargetInfo`.
     pub fn generate_exception_table(func: &IRFunction) -> Vec<ExceptionTableEntry> {
         Self::generate_exception_table_for_target(func, &AArch64TargetInfo)
     }
@@ -821,7 +827,7 @@ impl TailCallLowerer {
     /// Check if a call at the end of a function can be converted to a tail call.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`is_tail_call_eligible_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::is_tail_call_eligible_for_target`] with `AArch64TargetInfo`.
     pub fn is_tail_call_eligible(
         call_dst: &Option<IRValue>,
         return_vals: &[IRValue],
@@ -923,7 +929,7 @@ impl TailCallLowerer {
     /// callee-saved regs, then jump to the callee.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`lower_tail_call_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::lower_tail_call_for_target`] with `AArch64TargetInfo`.
     pub fn lower_tail_call(func: &str, args: &[IRValue], vreg_counter: &mut u32) -> Vec<IRInstr> {
         Self::lower_tail_call_for_target(func, args, vreg_counter, &AArch64TargetInfo)
     }
@@ -1106,7 +1112,7 @@ impl CoroutineLowerer {
     /// coroutine frame layout.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`analyze_coroutine_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::analyze_coroutine_for_target`] with `AArch64TargetInfo`.
     pub fn analyze_coroutine(func: &IRFunction) -> Option<CoroutineFrame> {
         Self::analyze_coroutine_for_target(func, &AArch64TargetInfo)
     }
@@ -1151,7 +1157,7 @@ impl CoroutineLowerer {
     /// Compute the frame layout given yield points and live values.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`compute_frame_layout_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::compute_frame_layout_for_target`] with `AArch64TargetInfo`.
     pub fn compute_frame_layout(
         yield_points: &[YieldPoint],
         local_vars: &[IRValue],
@@ -1772,7 +1778,7 @@ impl LoopOptimizer {
     /// Check if a loop is eligible for unrolling.
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`is_unrollable_for_target`] with `AArch64TargetInfo`.
+    /// [`Self::is_unrollable_for_target`] with `AArch64TargetInfo`.
     pub fn is_unrollable(loop_info: &LoopInfo, max_unroll_factor: u32) -> bool {
         Self::is_unrollable_for_target(loop_info, max_unroll_factor, &AArch64TargetInfo)
     }

@@ -94,15 +94,15 @@ impl fmt::Display for BdError {
                 location,
             } => {
                 if let Some(loc) = location {
-                    write!(f, "RepD incompatibility at {loc}: expected {expected}, got {actual}")
+                    write!(
+                        f,
+                        "RepD incompatibility at {loc}: expected {expected}, got {actual}"
+                    )
                 } else {
                     write!(f, "RepD incompatibility: expected {expected}, got {actual}")
                 }
             }
-            BdError::CapDMissing {
-                required,
-                location,
-            } => {
+            BdError::CapDMissing { required, location } => {
                 if let Some(loc) = location {
                     write!(f, "CapD violation at {loc}: missing {required:?}")
                 } else {
@@ -117,11 +117,21 @@ impl fmt::Display for BdError {
                 }
             }
             BdError::GenericInstantiation { param_name, reason } => {
-                write!(f, "generic instantiation error: parameter '{param_name}': {reason}")
+                write!(
+                    f,
+                    "generic instantiation error: parameter '{param_name}': {reason}"
+                )
             }
             BdError::Incremental { failed_nodes } => {
-                let nodes: Vec<String> = failed_nodes.iter().map(|n| format!("NodeId({n})")).collect();
-                write!(f, "incremental re-inference error: failed for nodes [{}]", nodes.join(", "))
+                let nodes: Vec<String> = failed_nodes
+                    .iter()
+                    .map(|n| format!("NodeId({n})"))
+                    .collect();
+                write!(
+                    f,
+                    "incremental re-inference error: failed for nodes [{}]",
+                    nodes.join(", ")
+                )
             }
             BdError::WideningFailed { detail } => {
                 write!(f, "widening convergence failure: {detail}")

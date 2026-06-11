@@ -257,13 +257,7 @@ impl CounterExample {
         match self.violation.invariant {
             InvariantName::Liveness => {
                 // Use-after-free: Free then Read on the same region.
-                vec![
-                    Step::Free { region: 0 },
-                    Step::Read {
-                        addr: 0,
-                        region: 0,
-                    },
-                ]
+                vec![Step::Free { region: 0 }, Step::Read { addr: 0, region: 0 }]
             }
             InvariantName::Exclusivity => {
                 // Data race: two writes to the same address.
@@ -400,8 +394,15 @@ mod tests {
         ce.add_step(Step::Alloc { region: 1 }); // unnecessary
         ce.add_step(Step::Free { region: 1 }); // necessary
         ce.add_step(Step::Branch { taken: true }); // unnecessary
-        ce.add_step(Step::Read { addr: 0x10, region: 1 }); // necessary
-        ce.add_step(Step::Write { addr: 0x20, region: 99, value: 0 }); // unnecessary
+        ce.add_step(Step::Read {
+            addr: 0x10,
+            region: 1,
+        }); // necessary
+        ce.add_step(Step::Write {
+            addr: 0x20,
+            region: 99,
+            value: 0,
+        }); // unnecessary
 
         assert_eq!(ce.len(), 5);
 

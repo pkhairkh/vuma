@@ -39,27 +39,47 @@ use vuma_scg::node::{NodeId, NodePayload, NodeType};
 pub enum InferenceError {
     /// The requested node does not exist in the SCG.
     #[error("node not found: {node_id:?}")]
-    NodeNotFound { node_id: NodeId },
+    NodeNotFound {
+        /// The ID of the node that was not found.
+        node_id: NodeId,
+    },
 
     /// The SCG is in an invalid state for inference.
     #[error("invalid SCG: {reason}")]
-    InvalidSCG { reason: String },
+    InvalidSCG {
+        /// A description of why the SCG is invalid.
+        reason: String,
+    },
 
     /// A cycle was detected during BD propagation.
     #[error("cycle detected during BD propagation at node {node_id:?}")]
-    CycleDetected { node_id: NodeId },
+    CycleDetected {
+        /// The node at which the cycle was detected.
+        node_id: NodeId,
+    },
 
     /// Inference could not converge.
     #[error("inference did not converge after {iterations} iterations")]
-    NoConvergence { iterations: usize },
+    NoConvergence {
+        /// The number of iterations completed before giving up.
+        iterations: usize,
+    },
 
     /// One or more BD inference errors occurred.
     #[error("{count} BD inference error(s): {summary}")]
-    BdErrors { count: usize, summary: String },
+    BdErrors {
+        /// The number of BD inference errors that occurred.
+        count: usize,
+        /// A concatenated summary of all BD inference error messages.
+        summary: String,
+    },
 
     /// Topological sort failed (SCG has cycles).
     #[error("SCG is not a DAG: {reason}")]
-    NotADag { reason: String },
+    NotADag {
+        /// A description of why the SCG is not a DAG.
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -204,31 +204,66 @@ pub struct AllocatedProgram {
 pub enum BackendError {
     /// The requested feature is not supported by this ISA.
     #[error("[{isa}] unsupported feature: {feature}")]
-    UnsupportedFeature { isa: &'static str, feature: String },
+    UnsupportedFeature {
+        /// ISA identifier (e.g., "aarch64", "x86_64").
+        isa: &'static str,
+        /// Description of the unsupported feature.
+        feature: String,
+    },
 
     /// Register allocation failed.
     #[error("[{isa}] register allocation failed: {reason}")]
-    RegisterAllocFailed { isa: &'static str, reason: String },
+    RegisterAllocFailed {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Reason for the allocation failure.
+        reason: String,
+    },
 
     /// Instruction encoding failed.
     #[error("[{isa}] encoding error: {reason}")]
-    EncodingError { isa: &'static str, reason: String },
+    EncodingError {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Reason for the encoding failure.
+        reason: String,
+    },
 
     /// Invalid instruction for this target.
     #[error("[{isa}] invalid instruction: {details}")]
-    InvalidInstruction { isa: &'static str, details: String },
+    InvalidInstruction {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Details about why the instruction is invalid.
+        details: String,
+    },
 
     /// ELF / binary emission error.
     #[error("[{isa}] emission error: {reason}")]
-    EmissionError { isa: &'static str, reason: String },
+    EmissionError {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Reason for the emission failure.
+        reason: String,
+    },
 
     /// The target cannot handle this type.
     #[error("[{isa}] unsupported type: {ty}")]
-    UnsupportedType { isa: &'static str, ty: String },
+    UnsupportedType {
+        /// ISA identifier.
+        isa: &'static str,
+        /// The unsupported type name.
+        ty: String,
+    },
 
     /// Generic backend error.
     #[error("[{isa}] {message}")]
-    Other { isa: &'static str, message: String },
+    Other {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Error message.
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

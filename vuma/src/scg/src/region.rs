@@ -355,7 +355,9 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
     let mut region_node_sets: Vec<(AllocPair, Vec<NodeId>)> = Vec::new();
 
     for pair in &pairs {
-        let dealloc = pair.dealloc_node.expect("paired AllocPair must have dealloc_node");
+        let dealloc = pair
+            .dealloc_node
+            .expect("paired AllocPair must have dealloc_node");
         let reachable_from_alloc = bfs_forward(scg, pair.alloc_node, Some(dealloc));
         let reaching_dealloc = bfs_backward(scg, dealloc, Some(pair.alloc_node));
 
@@ -395,13 +397,14 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
         let id = RegionId::new(next_id);
         next_id += 1;
 
-        let is_paired =
-            alloc_set.contains(&pair.alloc_node) && pair.dealloc_node.is_some();
+        let is_paired = alloc_set.contains(&pair.alloc_node) && pair.dealloc_node.is_some();
 
         let lifetime = if is_paired {
             RegionLifetime::Scoped {
                 alloc: pair.alloc_node,
-                dealloc: pair.dealloc_node.expect("is_paired guarantees dealloc_node"),
+                dealloc: pair
+                    .dealloc_node
+                    .expect("is_paired guarantees dealloc_node"),
             }
         } else {
             RegionLifetime::Unknown
@@ -409,7 +412,9 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
 
         // Exit nodes: for paired regions, the dealloc node; for unpaired, empty.
         let exit_nodes = if is_paired {
-            vec![pair.dealloc_node.expect("is_paired guarantees dealloc_node")]
+            vec![pair
+                .dealloc_node
+                .expect("is_paired guarantees dealloc_node")]
         } else {
             Vec::new()
         };
@@ -1864,5 +1869,90 @@ mod tests {
             !analysis.can_merge(&scg, rid_a, rid_b),
             "overlapping lifetime regions that may-alias should not be mergeable"
         );
+    }
+
+    /// Verify that `AllocPair.dealloc_node` is `Option<NodeId>`, not a bare
+    /// `NodeId`. This is critical because unpaired allocations (leaks) have no
+    /// deallocation node, and using a bare `NodeId` would require a sentinel
+    /// value like `NodeId(0)` which could be confused with a real node.
+    #[test]
+    fn test_dealloc_node_is_option() {
+        // We can't directly construct AllocPair (it's private), but we can
+        // verify the design property through the observable behavior:
+        // unpaired allocations produce InferredRegions with Unknown lifetime
+        // and empty exit_nodes, while paired ones produce Scoped lifetime.
+        let mut scg = SCG::new();
+        let rid = RegionId::new(1);
+
+        // Add an allocation with NO matching deallocation
+        let _alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 32,
+                align: 4,
+                region_id: rid,
+                type_name: None,
+            }),
+            pp(),
+        );
+
+        let regions = infer_regions(&scg);
+        assert_eq!(regions.len(), 1, "should have one region for the unpaired alloc");
+
+        let region = &regions[0];
+        // Because dealloc_node is Option<NodeId> (None for unpaired), the
+        // inferred region should have Unknown lifetime and empty exit_nodes.
+        assert!(
+            matches!(region.lifetime, RegionLifetime::Unknown),
+            "unpaired alloc should produce Unknown lifetime, got {:?}",
+            region.lifetime
+        );
+        assert!(
+            region.exit_nodes.is_empty(),
+            "unpaired alloc should have empty exit_nodes, got {:?}",
+            region.exit_nodes
+        );
+
+        // Now add a paired alloc/dealloc and verify the opposite.
+        let mut scg2 = SCG::new();
+        let rid2 = RegionId::new(2);
+
+        let alloc2 = scg2.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64,
+                align: 8,
+                region_id: rid2,
+                type_name: None,
+            }),
+            pp(),
+        );
+        let dealloc2 = scg2.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc2,
+                region_id: rid2,
+            }),
+            pp(),
+        );
+        scg2.add_edge(alloc2, dealloc2, EdgeKind::ControlFlow).unwrap();
+
+        let regions2 = infer_regions(&scg2);
+        assert_eq!(regions2.len(), 1, "should have one region for the paired alloc");
+
+        let region2 = &regions2[0];
+        // Because dealloc_node is Option<NodeId> (Some for paired), the
+        // inferred region should have Scoped lifetime and one exit_node.
+        assert!(
+            matches!(region2.lifetime, RegionLifetime::Scoped { .. }),
+            "paired alloc should produce Scoped lifetime, got {:?}",
+            region2.lifetime
+        );
+        assert_eq!(
+            region2.exit_nodes.len(),
+            1,
+            "paired alloc should have exactly one exit_node"
+        );
+        assert_eq!(region2.exit_nodes[0], dealloc2);
     }
 }

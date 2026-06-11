@@ -413,24 +413,18 @@ impl VumaFile {
 
 impl StdRead for VumaFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let f = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
-            })?;
+        let f = self.inner.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+        })?;
         f.read(buf)
     }
 }
 
 impl StdWrite for VumaFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let f = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
-            })?;
+        let f = self.inner.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+        })?;
         f.write(buf)
     }
 
@@ -444,12 +438,9 @@ impl StdWrite for VumaFile {
 
 impl StdSeek for VumaFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let f = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
-            })?;
+        let f = self.inner.as_mut().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+        })?;
         f.seek(pos)
     }
 }

@@ -90,19 +90,43 @@ impl fmt::Display for Address {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AllocError {
     /// The allocator has run out of memory.
-    OutOfMemory { requested: u64, available: u64 },
+    OutOfMemory {
+        /// Number of bytes requested.
+        requested: u64,
+        /// Number of bytes available.
+        available: u64,
+    },
     /// The requested alignment is not supported.
-    InvalidAlignment { align: u64 },
+    InvalidAlignment {
+        /// The invalid alignment value.
+        align: u64,
+    },
     /// The address to free was not allocated by this allocator.
-    InvalidFree { addr: Address },
+    InvalidFree {
+        /// The address that was passed to free.
+        addr: Address,
+    },
     /// The allocator has not been initialized.
     NotInitialized,
     /// The pointer passed to dealloc does not belong to this allocator.
-    InvalidPointer { ptr: u64 },
+    InvalidPointer {
+        /// The raw pointer value.
+        ptr: u64,
+    },
     /// Size mismatch during dealloc (BD verification failed).
-    SizeMismatch { expected: u64, actual: u64 },
+    SizeMismatch {
+        /// Expected size in bytes.
+        expected: u64,
+        /// Actual size in bytes.
+        actual: u64,
+    },
     /// Alignment mismatch during dealloc (BD verification failed).
-    AlignMismatch { expected: u64, actual: u64 },
+    AlignMismatch {
+        /// Expected alignment in bytes.
+        expected: u64,
+        /// Actual alignment in bytes.
+        actual: u64,
+    },
 }
 
 impl fmt::Display for AllocError {

@@ -1010,7 +1010,7 @@ impl VumaString {
         }
     }
 
-    /// Returns a reference to the underlying Vec<u8>.
+    /// Returns a reference to the underlying `Vec<u8>`.
     // VUMA-VERIFIED: read-only access to backing storage
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.inner.as_ptr(), self.inner.len()) }

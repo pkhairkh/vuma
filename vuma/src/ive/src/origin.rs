@@ -238,11 +238,22 @@ pub enum DerivationKind {
     /// Taking the address of a value: `&x`.
     Direct,
     /// Offset from a base pointer: `ptr.offset(n)`.
-    Offset { by: i64 },
+    Offset {
+        /// The byte offset from the base pointer.
+        by: i64,
+    },
     /// Type cast: `ptr as *mut T`.
-    Cast { from_repr: String, to_repr: String },
+    Cast {
+        /// The source representation before the cast.
+        from_repr: String,
+        /// The target representation after the cast.
+        to_repr: String,
+    },
     /// General pointer arithmetic.
-    Arithmetic { description: String },
+    Arithmetic {
+        /// A human-readable description of the arithmetic operation.
+        description: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

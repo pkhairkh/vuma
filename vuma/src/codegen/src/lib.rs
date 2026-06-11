@@ -107,11 +107,17 @@ pub enum CodegenError {
 
     /// An unknown variable was referenced during SCG → IR translation.
     #[error("unknown variable '{name}' referenced in SCG")]
-    UnknownVariable { name: String },
+    UnknownVariable {
+        /// Name of the unresolved variable.
+        name: String,
+    },
 
     /// A required WASM section was not found during module generation.
     #[error("WASM section not found: {section}")]
-    WasmSectionNotFound { section: String },
+    WasmSectionNotFound {
+        /// Name of the missing WASM section.
+        section: String,
+    },
 }
 
 /// Convenience alias for results in this crate.

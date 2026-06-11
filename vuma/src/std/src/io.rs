@@ -10,8 +10,8 @@
 //!
 //! ## Buffered I/O
 //!
-//! - **VumaBufReader<R>**: Buffered reader that amortizes syscalls.
-//! - **VumaBufWriter<W>**: Buffered writer that batches writes.
+//! - **`VumaBufReader<R>`**: Buffered reader that amortizes syscalls.
+//! - **`VumaBufWriter<W>`**: Buffered writer that batches writes.
 //!
 //! ## Standard Streams (Vuma-prefixed)
 //!
@@ -47,7 +47,9 @@ use crate::error::{VumaErrorChain, VumaErrorKind};
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{BufRead as StdBufRead, Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
+use std::io::{
+    BufRead as StdBufRead, Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite,
+};
 use std::os::unix::io::AsRawFd;
 
 // ---------------------------------------------------------------------------
@@ -1704,10 +1706,12 @@ impl StdRead for VumaFile {
             self.position += to_read as u64;
             Ok(to_read)
         } else {
-            let inner = self
-                .inner
-                .as_mut()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let inner = self.inner.as_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "file inner handle missing",
+                )
+            })?;
             let n = inner.read(buf)?;
             self.position += n as u64;
             Ok(n)
@@ -1735,10 +1739,12 @@ impl StdWrite for VumaFile {
             self.position += written as u64;
             Ok(written)
         } else {
-            let inner = self
-                .inner
-                .as_mut()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let inner = self.inner.as_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "file inner handle missing",
+                )
+            })?;
             let n = inner.write(buf)?;
             self.position += n as u64;
             Ok(n)
@@ -1764,9 +1770,7 @@ impl StdSeek for VumaFile {
         if self.bare_metal {
             let new_pos = match pos {
                 SeekFrom::Start(offset) => offset,
-                SeekFrom::Current(offset) => {
-                    (self.position as i64 + offset).max(0) as u64
-                }
+                SeekFrom::Current(offset) => (self.position as i64 + offset).max(0) as u64,
                 SeekFrom::End(_) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
@@ -1777,10 +1781,12 @@ impl StdSeek for VumaFile {
             self.position = new_pos;
             Ok(new_pos)
         } else {
-            let inner = self
-                .inner
-                .as_mut()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "file inner handle missing"))?;
+            let inner = self.inner.as_mut().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "file inner handle missing",
+                )
+            })?;
             let result = inner.seek(pos)?;
             self.position = result;
             Ok(result)

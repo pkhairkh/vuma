@@ -295,7 +295,10 @@ fn edge_null_bytes_in_source() {
 fn test_parse_empty_function_body() {
     let mut parser = Parser::new("fn foo() {}");
     let result = parser.parse_program();
-    assert!(result.is_ok(), "empty function body should parse successfully");
+    assert!(
+        result.is_ok(),
+        "empty function body should parse successfully"
+    );
     let program = result.unwrap();
     assert_eq!(program.items.len(), 1, "should have exactly one item");
 }
@@ -331,10 +334,7 @@ fn test_parse_loop_keyword() {
     let source = "fn f() { loop { break; } }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
-    assert!(
-        result.is_ok(),
-        "loop with break should parse successfully"
-    );
+    assert!(result.is_ok(), "loop with break should parse successfully");
     let program = result.unwrap();
     assert_eq!(program.items.len(), 1, "should have exactly one function");
 }

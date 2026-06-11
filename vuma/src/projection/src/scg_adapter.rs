@@ -773,4 +773,78 @@ mod tests {
         assert_eq!(roundtripped.regions[0].id, 1);
         assert_eq!(roundtripped.regions[0].nodes.len(), 3);
     }
+
+    /// Verify that when converting a Deallocation node, the allocation_node
+    /// is never `NodeId(0)` — it should be `u64::MAX` (sentinel) or a real
+    /// allocation node ID discovered via a Derivation edge.
+    #[test]
+    fn test_dealloc_node_not_zero() {
+        // Case 1: Deallocation with no Derivation edge — should fall back
+        // to u64::MAX, never 0.
+        let dealloc_no_edge = SCGNode {
+            id: 5,
+            label: "dealloc_buf".to_string(),
+            kind: NodeKind::Deallocation,
+            bds: vec![],
+            regions: vec![],
+        };
+        let real = to_scg_node(&dealloc_no_edge, &[], &[]);
+        if let vuma_scg::NodePayload::Deallocation(d) = &real.payload {
+            assert_ne!(
+                d.allocation_node,
+                vuma_scg::NodeId::new(0),
+                "Deallocation allocation_node should never be NodeId(0); \
+                 expected u64::MAX or a real alloc node ID"
+            );
+            assert_eq!(
+                d.allocation_node,
+                vuma_scg::NodeId::new(u64::MAX),
+                "Deallocation without a Derivation edge should use u64::MAX as sentinel"
+            );
+        } else {
+            panic!("Expected Deallocation payload");
+        }
+
+        // Case 2: Deallocation WITH a Derivation edge from an Allocation node
+        // — allocation_node should be the real allocation node's ID.
+        let alloc_node = SCGNode {
+            id: 10,
+            label: "alloc_buf".to_string(),
+            kind: NodeKind::Allocation,
+            bds: vec![],
+            regions: vec![],
+        };
+        let dealloc_with_edge = SCGNode {
+            id: 20,
+            label: "dealloc_buf".to_string(),
+            kind: NodeKind::Deallocation,
+            bds: vec![],
+            regions: vec![],
+        };
+        let derivation_edge = SCGEdge {
+            id: 100,
+            source: 10,
+            target: 20,
+            kind: EdgeKind::Derivation,
+        };
+        let real = to_scg_node(
+            &dealloc_with_edge,
+            &[derivation_edge],
+            &[alloc_node, dealloc_with_edge.clone()],
+        );
+        if let vuma_scg::NodePayload::Deallocation(d) = &real.payload {
+            assert_ne!(
+                d.allocation_node,
+                vuma_scg::NodeId::new(0),
+                "Deallocation allocation_node should never be NodeId(0)"
+            );
+            assert_eq!(
+                d.allocation_node,
+                vuma_scg::NodeId::new(10),
+                "Deallocation with Derivation edge should resolve to the real alloc node ID"
+            );
+        } else {
+            panic!("Expected Deallocation payload");
+        }
+    }
 }

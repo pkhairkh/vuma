@@ -41,7 +41,7 @@
 //!
 //! Within a function body, SCG statements are lowered in their declared
 //! order.  For graph-based SCGs (from the `vuma-scg` crate), the
-//! [`IRBuilder::build_from_scg`] method walks the SCG in topological order
+//! [`IRBuilder::build`] method walks the SCG in topological order
 //! using petgraph's `toposort`, ensuring that data-flow dependencies are
 //! respected.
 
@@ -167,12 +167,18 @@ pub enum ScgStatement {
 pub enum ControlNode {
     /// `if cond { then } else { else_ }`
     If {
+        /// The condition expression.
         cond: ScgExpr,
+        /// Statements in the then-branch.
         then_body: Vec<ScgStatement>,
+        /// Optional else-branch statements.
         else_body: Option<Vec<ScgStatement>>,
     },
     /// `loop { body }`
-    Loop { body: Vec<ScgStatement> },
+    Loop {
+        /// Loop body statements.
+        body: Vec<ScgStatement>,
+    },
     /// `break` (from inside a loop).
     Break,
     /// `continue` (from inside a loop).
@@ -205,14 +211,20 @@ pub struct SwitchArm {
 pub enum AllocationNode {
     /// Stack allocation (fixed size).
     Stack {
+        /// Name of the allocated variable.
         name: String,
+        /// Size in bytes.
         size: u32,
+        /// Type of the allocation.
         ty: ScgType,
     },
     /// Heap allocation (dynamic size, calls allocator).
     Heap {
+        /// Name of the allocated variable.
         name: String,
+        /// Expression computing the allocation size.
         size_expr: ScgExpr,
+        /// Type of the allocation.
         ty: ScgType,
     },
 }
@@ -222,14 +234,20 @@ pub enum AllocationNode {
 pub enum AccessNode {
     /// Read: `dst = *ptr` or `dst = ptr.field`
     Load {
+        /// Destination variable name.
         dst: String,
+        /// Pointer expression to read from.
         ptr: ScgExpr,
+        /// Optional byte offset from the pointer.
         offset: Option<ScgExpr>,
     },
     /// Write: `*ptr = val` or `ptr.field = val`
     Store {
+        /// Pointer expression to write to.
         ptr: ScgExpr,
+        /// Optional byte offset from the pointer.
         offset: Option<ScgExpr>,
+        /// Value expression to store.
         value: ScgExpr,
     },
 }
@@ -237,20 +255,30 @@ pub enum AccessNode {
 /// Cast / reinterpret node.
 #[derive(Debug, Clone)]
 pub struct CastNode {
+    /// Destination variable name.
     pub dst: String,
+    /// Source expression.
     pub src: ScgExpr,
+    /// Cast kind.
     pub kind: CastKind,
+    /// Source type.
     pub from_ty: ScgType,
+    /// Target type.
     pub to_ty: ScgType,
 }
 
 /// Computation node (binary arithmetic / logic).
 #[derive(Debug, Clone)]
 pub struct ComputationNode {
+    /// Destination variable name.
     pub dst: String,
+    /// Binary operation.
     pub op: BinOpKind,
+    /// Left-hand side expression.
     pub lhs: ScgExpr,
+    /// Right-hand side expression.
     pub rhs: ScgExpr,
+    /// Whether this is a tail call.
     pub tail_call: bool,
 }
 
@@ -263,14 +291,18 @@ pub struct UnaryComputationNode {
     pub op: UnaryOpKind,
     /// The operand expression.
     pub operand: ScgExpr,
+    /// Whether this is a tail call.
     pub tail_call: bool,
 }
 
 /// Function call node.
 #[derive(Debug, Clone)]
 pub struct CallNode {
+    /// Optional destination variable for the return value.
     pub dst: Option<String>,
+    /// Function name to call.
     pub func: String,
+    /// Argument expressions.
     pub args: Vec<ScgExpr>,
 }
 
@@ -290,9 +322,13 @@ pub enum ScgExpr {
 /// SCG data declaration.
 #[derive(Debug, Clone)]
 pub struct ScgData {
+    /// Section name.
     pub name: String,
+    /// Kind of data section.
     pub kind: DataSectionKind,
+    /// Alignment in bytes.
     pub align: u32,
+    /// Raw data bytes.
     pub data: Vec<u8>,
 }
 
@@ -3111,10 +3147,7 @@ mod tests {
 
         match result {
             Err(CodegenError::UnknownVariable { name }) => {
-                assert_eq!(
-                    name, "y",
-                    "error should reference the unknown variable 'y'"
-                );
+                assert_eq!(name, "y", "error should reference the unknown variable 'y'");
             }
             other => {
                 panic!(

@@ -913,11 +913,7 @@ pub fn compute_scg_delta(
 /// resolved from the MSG (the SCG snapshot does not carry allocation
 /// metadata). If the region is not found in the MSG, returns
 /// [`DeltaError::AllocationNotFound`].
-fn add_node_to_delta(
-    delta: &mut MSGDelta,
-    node: &SCGNode,
-    msg: &MSG,
-) -> Result<(), DeltaError> {
+fn add_node_to_delta(delta: &mut MSGDelta, node: &SCGNode, msg: &MSG) -> Result<(), DeltaError> {
     match node {
         SCGNode::Alloc {
             region_id,

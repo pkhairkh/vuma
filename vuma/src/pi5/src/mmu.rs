@@ -59,7 +59,10 @@ pub fn bcm2712_default_regions() -> Vec<MemoryRegion> {
             phys_start: 0x1C00_0000,
             virt_start: 0x1C00_0000,
             size: 0x0020_0000,
-            flags: flags::VALID | flags::PAGE | flags::ACCESSED | flags::DEVICE_nGnRnE
+            flags: flags::VALID
+                | flags::PAGE
+                | flags::ACCESSED
+                | flags::DEVICE_nGnRnE
                 | flags::RW_EL1,
             description: "BCM2712 Peripherals",
         },
@@ -81,7 +84,10 @@ pub fn bcm2712_default_regions() -> Vec<MemoryRegion> {
             phys_start: 0x1000_0000,
             virt_start: 0x1000_0000,
             size: 0x0010_0000,
-            flags: flags::VALID | flags::PAGE | flags::ACCESSED | flags::DEVICE_nGnRnE
+            flags: flags::VALID
+                | flags::PAGE
+                | flags::ACCESSED
+                | flags::DEVICE_nGnRnE
                 | flags::RW_EL1,
             description: "BCM2712 MMIO",
         },
@@ -200,7 +206,11 @@ mod tests {
         // Map address 0x0000_0000 (index 0 in L0)
         table.map_page(0x0000_0000, 0x0000_0000, flags::VALID | flags::PAGE);
         let index0 = ((0x0000_0000u64 >> (PAGE_SHIFT + 9 * 3)) & 0x1FF) as usize;
-        assert_ne!(table.entries[index0], 0, "Entry at index {} should be non-zero", index0);
+        assert_ne!(
+            table.entries[index0], 0,
+            "Entry at index {} should be non-zero",
+            index0
+        );
         assert_eq!(
             table.entries[index0] & flags::VALID,
             flags::VALID,
@@ -254,7 +264,10 @@ mod tests {
         let dram = &regions[1];
         assert_eq!(dram.phys_start, 0x0000_0000);
         assert_eq!(dram.size, 0x4000_0000);
-        assert_eq!(dram.flags & flags::NORMAL_CACHEABLE, flags::NORMAL_CACHEABLE);
+        assert_eq!(
+            dram.flags & flags::NORMAL_CACHEABLE,
+            flags::NORMAL_CACHEABLE
+        );
         assert_eq!(dram.flags & flags::INNER_SHAREABLE, flags::INNER_SHAREABLE);
 
         // Verify MMIO region
@@ -265,10 +278,21 @@ mod tests {
 
         // All regions should have VALID, PAGE, ACCESSED flags
         for region in &regions {
-            assert_ne!(region.flags & flags::VALID, 0, "'{}' missing VALID", region.description);
-            assert_ne!(region.flags & flags::PAGE, 0, "'{}' missing PAGE", region.description);
             assert_ne!(
-                region.flags & flags::ACCESSED, 0,
+                region.flags & flags::VALID,
+                0,
+                "'{}' missing VALID",
+                region.description
+            );
+            assert_ne!(
+                region.flags & flags::PAGE,
+                0,
+                "'{}' missing PAGE",
+                region.description
+            );
+            assert_ne!(
+                region.flags & flags::ACCESSED,
+                0,
                 "'{}' missing ACCESSED",
                 region.description
             );

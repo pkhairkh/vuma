@@ -335,36 +335,53 @@ pub enum InterpretationViolation {
     /// The RepD at the read point is incompatible with the RepD at the write
     /// point (different size, alignment, or incompatible layout).
     IncompatibleRepD {
+        /// The program point where the write occurs.
         write_point: ProgramPointId,
+        /// The program point where the read occurs.
         read_point: ProgramPointId,
+        /// The memory location being written and read.
         location: LocationId,
+        /// The representation descriptor at the write point.
         write_repd: RepD,
+        /// The representation descriptor at the read point.
         read_repd: RepD,
+        /// A human-readable explanation of the incompatibility.
         reason: String,
     },
 
     /// The CapD at the read point strengthens the CapD at the write point
     /// without a valid safety proof.
     InvalidCapDStrengthening {
+        /// The program point where the write occurs.
         write_point: ProgramPointId,
+        /// The program point where the read occurs.
         read_point: ProgramPointId,
+        /// The memory location being accessed.
         location: LocationId,
+        /// The capabilities that were illegally added at the read point.
         added_caps: Vec<Capability>,
     },
 
     /// The capability meet between write and read is empty, meaning no
     /// capability is shared — the read has no authority to access this data.
     EmptyCapabilityMeet {
+        /// The program point where the write occurs.
         write_point: ProgramPointId,
+        /// The program point where the read occurs.
         read_point: ProgramPointId,
+        /// The memory location with no shared capability.
         location: LocationId,
     },
 
     /// Relational constraints are not preserved across the write-read pair.
     RelDNotPreserved {
+        /// The program point where the write occurs.
         write_point: ProgramPointId,
+        /// The program point where the read occurs.
         read_point: ProgramPointId,
+        /// The memory location where relations are not preserved.
         location: LocationId,
+        /// A human-readable explanation of the violation.
         reason: String,
     },
 
@@ -372,25 +389,36 @@ pub enum InterpretationViolation {
     /// fundamentally different interpretation (e.g., pointer read as integer,
     /// float read as struct).
     TypeConfusion {
+        /// The program point where the write occurs.
         write_point: ProgramPointId,
+        /// The program point where the read occurs.
         read_point: ProgramPointId,
+        /// The memory location where the type confusion occurs.
         location: LocationId,
+        /// The kind of representation at the write point.
         write_repd_kind: String,
+        /// The kind of representation at the read point.
         read_repd_kind: String,
     },
 
     /// Pointer reinterpretation: a pointer value is being read as a non-pointer
     /// type (or vice versa) without an explicit cast derivation.
     PointerReinterpretation {
+        /// The program point where the pointer was written.
         write_point: ProgramPointId,
+        /// The program point where the pointer is read as non-pointer.
         read_point: ProgramPointId,
+        /// The memory location being reinterpreted.
         location: LocationId,
+        /// A human-readable explanation of the violation.
         reason: String,
     },
 
     /// A read occurs without any preceding write (reading uninitialized memory).
     UninitializedRead {
+        /// The program point where the uninitialized read occurs.
         read_point: ProgramPointId,
+        /// The memory location being read without a prior write.
         location: LocationId,
     },
 }

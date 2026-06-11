@@ -6037,7 +6037,10 @@ fn diag_fn_nested_generic_type() {
         match &program.items[0] {
             Item::FnDef(f) => {
                 assert_eq!(f.name, "foo");
-                assert!(f.body.statements.is_empty(), "empty function body should have no statements");
+                assert!(
+                    f.body.statements.is_empty(),
+                    "empty function body should have no statements"
+                );
                 assert_eq!(f.params.len(), 0);
                 assert!(f.return_type.is_none());
             }

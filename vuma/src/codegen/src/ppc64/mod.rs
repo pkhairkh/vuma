@@ -31,7 +31,7 @@
 //!
 //! All instructions are 32 bits, fixed-width. PPC64 is bi-endian; the default
 //! for ppc64le is little-endian byte order for both data and instructions.
-//! The primary opcode occupies bits [0:5] (MSB-first bit numbering).
+//! The primary opcode occupies bits \[0:5\] (MSB-first bit numbering).
 //!
 //! ## References
 //!

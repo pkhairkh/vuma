@@ -388,14 +388,15 @@ impl RepD {
     /// or the index is out of bounds.
     pub fn field_offset(&self, index: usize) -> Result<u64, BdError> {
         match self {
-            RepD::Struct(s) => s
-                .fields
-                .get(index)
-                .map(|(off, _)| *off)
-                .ok_or_else(|| BdError::InvalidOperation {
-                    operation: format!("field_offset({index})"),
-                    detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
-                }),
+            RepD::Struct(s) => {
+                s.fields
+                    .get(index)
+                    .map(|(off, _)| *off)
+                    .ok_or_else(|| BdError::InvalidOperation {
+                        operation: format!("field_offset({index})"),
+                        detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
+                    })
+            }
             other => Err(BdError::InvalidOperation {
                 operation: format!("field_offset({index})"),
                 detail: format!("expected Struct, got {other}"),
@@ -410,14 +411,15 @@ impl RepD {
     /// or the index is out of bounds.
     pub fn field_rep(&self, index: usize) -> Result<&RepD, BdError> {
         match self {
-            RepD::Struct(s) => s
-                .fields
-                .get(index)
-                .map(|(_, rep)| rep)
-                .ok_or_else(|| BdError::InvalidOperation {
-                    operation: format!("field_rep({index})"),
-                    detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
-                }),
+            RepD::Struct(s) => {
+                s.fields
+                    .get(index)
+                    .map(|(_, rep)| rep)
+                    .ok_or_else(|| BdError::InvalidOperation {
+                        operation: format!("field_rep({index})"),
+                        detail: format!("index {index} out of bounds ({} fields)", s.fields.len()),
+                    })
+            }
             other => Err(BdError::InvalidOperation {
                 operation: format!("field_rep({index})"),
                 detail: format!("expected Struct, got {other}"),
@@ -1168,7 +1170,10 @@ mod tests {
             align: 4,
         });
         let result = s.field_rep(999);
-        assert!(result.is_err(), "field_rep with out-of-bounds index should return Err");
+        assert!(
+            result.is_err(),
+            "field_rep with out-of-bounds index should return Err"
+        );
     }
 
     #[test]

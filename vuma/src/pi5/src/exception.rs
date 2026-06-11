@@ -467,9 +467,7 @@ mod tests {
         write_hex(&uart, 0x0000_0000_DEAD_BEEF);
 
         // Collect all bytes written to the DR register.
-        let dr_val = crate::uart::mock_mmio::read(
-            crate::uart::UART0_BASE + crate::uart::DR,
-        );
+        let dr_val = crate::uart::mock_mmio::read(crate::uart::UART0_BASE + crate::uart::DR);
         // The last byte written should be the last hex digit of DEADBEEF = 'F'
         assert_eq!(dr_val, b'F' as u32, "last DR write should be 'F'");
     }
@@ -482,10 +480,7 @@ mod tests {
         crate::uart::mock_mmio::reset();
 
         // Make TX FIFO always not-full so write_byte never spins.
-        crate::uart::mock_mmio::write(
-            crate::uart::UART0_BASE + crate::uart::FR,
-            0,
-        );
+        crate::uart::mock_mmio::write(crate::uart::UART0_BASE + crate::uart::FR, 0);
 
         let mut ctx = ExceptionContext::default();
         ctx.esr = 0x9800_0000; // Data abort from same EL
@@ -498,9 +493,7 @@ mod tests {
         // Verify that the UART DR register was written to (i.e. output was
         // produced). We check the final write — the last character of the
         // separator line "---...---\n".
-        let dr_val = crate::uart::mock_mmio::read(
-            crate::uart::UART0_BASE + crate::uart::DR,
-        );
+        let dr_val = crate::uart::mock_mmio::read(crate::uart::UART0_BASE + crate::uart::DR);
         // The dump ends with "-----------------------------\n", so the
         // last byte written to DR should be '\n' (0x0A).
         assert_eq!(dr_val, b'\n' as u32, "last DR write should be newline");
@@ -518,10 +511,7 @@ mod tests {
         crate::uart::mock_mmio::reset();
 
         // Make TX FIFO always not-full.
-        crate::uart::mock_mmio::write(
-            crate::uart::UART0_BASE + crate::uart::FR,
-            0,
-        );
+        crate::uart::mock_mmio::write(crate::uart::UART0_BASE + crate::uart::FR, 0);
 
         let ctx = ExceptionContext::default();
 
@@ -531,9 +521,10 @@ mod tests {
         // The output should contain "FIQ" — but since we can't easily read
         // back the stream of bytes, we verify that the UART was exercised
         // by checking the DR was written to.
-        let dr_val = crate::uart::mock_mmio::read(
-            crate::uart::UART0_BASE + crate::uart::DR,
+        let dr_val = crate::uart::mock_mmio::read(crate::uart::UART0_BASE + crate::uart::DR);
+        assert_ne!(
+            dr_val, 0,
+            "DR should have been written to by dump_exception"
         );
-        assert_ne!(dr_val, 0, "DR should have been written to by dump_exception");
     }
 }

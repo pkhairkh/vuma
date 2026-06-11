@@ -1181,18 +1181,30 @@ impl Instruction {
             Instruction::CloD { rd, rj } => encode_2r(OPC_CLO_D, rj.encoding(), rd.encoding()),
 
             // ── FP Load/Store (2RI12) ─────────────────────────────
-            Instruction::FldS { fd, rj, imm12 } => {
-                encode_2ri12(OPC_FLD_S, (*imm12 as u32) & 0xFFF, rj.encoding(), fd.encoding())
-            }
-            Instruction::FldD { fd, rj, imm12 } => {
-                encode_2ri12(OPC_FLD_D, (*imm12 as u32) & 0xFFF, rj.encoding(), fd.encoding())
-            }
-            Instruction::FstS { fd, rj, imm12 } => {
-                encode_2ri12(OPC_FST_S, (*imm12 as u32) & 0xFFF, rj.encoding(), fd.encoding())
-            }
-            Instruction::FstD { fd, rj, imm12 } => {
-                encode_2ri12(OPC_FST_D, (*imm12 as u32) & 0xFFF, rj.encoding(), fd.encoding())
-            }
+            Instruction::FldS { fd, rj, imm12 } => encode_2ri12(
+                OPC_FLD_S,
+                (*imm12 as u32) & 0xFFF,
+                rj.encoding(),
+                fd.encoding(),
+            ),
+            Instruction::FldD { fd, rj, imm12 } => encode_2ri12(
+                OPC_FLD_D,
+                (*imm12 as u32) & 0xFFF,
+                rj.encoding(),
+                fd.encoding(),
+            ),
+            Instruction::FstS { fd, rj, imm12 } => encode_2ri12(
+                OPC_FST_S,
+                (*imm12 as u32) & 0xFFF,
+                rj.encoding(),
+                fd.encoding(),
+            ),
+            Instruction::FstD { fd, rj, imm12 } => encode_2ri12(
+                OPC_FST_D,
+                (*imm12 as u32) & 0xFFF,
+                rj.encoding(),
+                fd.encoding(),
+            ),
 
             // ── FP Move GPR<->FPR (2R) ────────────────────────────
             Instruction::FmovGr2FprD { rd, fj } => {
@@ -1229,20 +1241,24 @@ impl Instruction {
             }
 
             // ── FP Move (2R) ──────────────────────────────────────
-            Instruction::FmovS { fd, fj } => {
-                encode_2r(OPC_FMOV_S, fj.encoding(), fd.encoding())
-            }
-            Instruction::FmovD { fd, fj } => {
-                encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding())
-            }
+            Instruction::FmovS { fd, fj } => encode_2r(OPC_FMOV_S, fj.encoding(), fd.encoding()),
+            Instruction::FmovD { fd, fj } => encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding()),
 
             // ── FP Compare (4R-like) ──────────────────────────────
-            Instruction::FCmpS { cond, fj, fk, cd } => {
-                encode_4r(OPC_FCMP_S, (*cond & 0x1F) as u32, fk.encoding(), fj.encoding(), (*cd & 0x1F) as u32)
-            }
-            Instruction::FCmpD { cond, fj, fk, cd } => {
-                encode_4r(OPC_FCMP_D, (*cond & 0x1F) as u32, fk.encoding(), fj.encoding(), (*cd & 0x1F) as u32)
-            }
+            Instruction::FCmpS { cond, fj, fk, cd } => encode_4r(
+                OPC_FCMP_S,
+                (*cond & 0x1F) as u32,
+                fk.encoding(),
+                fj.encoding(),
+                (*cd & 0x1F) as u32,
+            ),
+            Instruction::FCmpD { cond, fj, fk, cd } => encode_4r(
+                OPC_FCMP_D,
+                (*cond & 0x1F) as u32,
+                fk.encoding(),
+                fj.encoding(),
+                (*cd & 0x1F) as u32,
+            ),
 
             // ── No-op / Break ─────────────────────────────────────
             Instruction::Nop => {
@@ -1378,7 +1394,7 @@ fn fcmp_cond_mnemonic(cond: u8) -> &'static str {
         0x06 => "cueq",
         0x07 => "cule",
         0x08 => "cne",
-        0x09 => "clts",  // signed less-than (alternative encoding)
+        0x09 => "clts", // signed less-than (alternative encoding)
         0x0A => "cnes",
         0x0B => "cles",
         0x0C => "cuns",
@@ -1482,8 +1498,22 @@ impl fmt::Display for Instruction {
             Instruction::FdivD { fd, fj, fk } => write!(f, "fdiv.d {}, {}, {}", fd, fj, fk),
             Instruction::FmovS { fd, fj } => write!(f, "fmov.s {}, {}", fd, fj),
             Instruction::FmovD { fd, fj } => write!(f, "fmov.d {}, {}", fd, fj),
-            Instruction::FCmpS { cond, fj, fk, cd } => write!(f, "fcmp.{}.s $c{}, {}, {}", fcmp_cond_mnemonic(*cond), cd, fj, fk),
-            Instruction::FCmpD { cond, fj, fk, cd } => write!(f, "fcmp.{}.d $c{}, {}, {}", fcmp_cond_mnemonic(*cond), cd, fj, fk),
+            Instruction::FCmpS { cond, fj, fk, cd } => write!(
+                f,
+                "fcmp.{}.s $c{}, {}, {}",
+                fcmp_cond_mnemonic(*cond),
+                cd,
+                fj,
+                fk
+            ),
+            Instruction::FCmpD { cond, fj, fk, cd } => write!(
+                f,
+                "fcmp.{}.d $c{}, {}, {}",
+                fcmp_cond_mnemonic(*cond),
+                cd,
+                fj,
+                fk
+            ),
             Instruction::Nop => write!(f, "nop"),
             Instruction::Syscall => write!(f, "syscall"),
             Instruction::Break => write!(f, "break"),

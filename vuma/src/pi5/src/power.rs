@@ -27,7 +27,9 @@
 use crate::mailbox::MailboxError;
 
 #[cfg(target_arch = "aarch64")]
-use crate::mailbox::{send_property_message, MailboxMessage, REQUEST_CODE, END_TAG, TAG_SET_POWER_STATE};
+use crate::mailbox::{
+    send_property_message, MailboxMessage, END_TAG, REQUEST_CODE, TAG_SET_POWER_STATE,
+};
 
 // ---------------------------------------------------------------------------
 // Device power IDs
@@ -264,7 +266,7 @@ pub fn power_off() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mailbox::{MailboxMessage, REQUEST_CODE, END_TAG, TAG_SET_POWER_STATE};
+    use crate::mailbox::{MailboxMessage, END_TAG, REQUEST_CODE, TAG_SET_POWER_STATE};
 
     // -----------------------------------------------------------------------
     // Test 1: Device ID constants have expected values
@@ -341,7 +343,10 @@ mod tests {
         msg.buffer[7] = END_TAG;
 
         assert_eq!(msg.buffer[0], 32, "total size should be 32");
-        assert_eq!(msg.buffer[2], TAG_SET_POWER_STATE, "tag should be SET_POWER_STATE");
+        assert_eq!(
+            msg.buffer[2], TAG_SET_POWER_STATE,
+            "tag should be SET_POWER_STATE"
+        );
         assert_eq!(msg.buffer[3], 8, "value buffer size should be 8");
         assert_eq!(msg.buffer[5], POWER_SD, "device should be SD");
         assert_eq!(msg.buffer[6], 0x3, "desired state should be ON|WAIT");

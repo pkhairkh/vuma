@@ -737,7 +737,10 @@ impl BidirectionalProjection {
             SCGEdit::RemoveNode { node_id } => format!("node:{}", node_id),
             SCGEdit::ModifyEdge { edge_id, .. } => format!("edge:{}", edge_id),
             SCGEdit::AddEdge {
-                source, target, kind, ..
+                source,
+                target,
+                kind,
+                ..
             } => format!("edge_new:{}:{}:{:?}", source, target, kind),
             SCGEdit::ChangeBD {
                 node_id, bd_name, ..

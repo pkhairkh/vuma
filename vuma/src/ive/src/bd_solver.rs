@@ -63,26 +63,37 @@ const DEFAULT_WIDENING_THRESHOLD: usize = 10;
 pub enum SolverError {
     /// The representation descriptors of two nodes are incompatible.
     RepDIncompatible {
+        /// The first node with an incompatible representation.
         node_a: NodeId,
+        /// The second node with an incompatible representation.
         node_b: NodeId,
+        /// The representation descriptor of `node_a`.
         repd_a: RepD,
+        /// The representation descriptor of `node_b`.
         repd_b: RepD,
     },
 
     /// CapD weakening is impossible: narrowing node_a's capabilities would
     /// violate other constraints, and widening node_b would exceed bounds.
     CapDWeakeningFailed {
+        /// The node whose capabilities should be a subset.
         node_a: NodeId,
+        /// The node whose capabilities should be a superset.
         node_b: NodeId,
+        /// The capability descriptor of `node_a`.
         capd_a: CapD,
+        /// The capability descriptor of `node_b`.
         capd_b: CapD,
     },
 
     /// Composing the relations of two nodes yields an inconsistent RelD
     /// (e.g., contradictory temporal constraints).
     RelDRefinementFailed {
+        /// The node whose relations should refine the other's.
         node_a: NodeId,
+        /// The node whose relations should be refined.
         node_b: NodeId,
+        /// The composed relational descriptor that was found inconsistent.
         composed: RelD,
     },
 
@@ -90,17 +101,27 @@ pub enum SolverError {
     /// incompatible (representations don't agree, or composing relations
     /// is inconsistent).
     EqualityViolated {
+        /// The first node in the violated equality constraint.
         node_a: NodeId,
+        /// The second node in the violated equality constraint.
         node_b: NodeId,
+        /// The behavioral descriptor of `node_a`.
         bd_a: BD,
+        /// The behavioral descriptor of `node_b`.
         bd_b: BD,
     },
 
     /// A node referenced in a constraint does not exist in the SCG.
-    NodeNotFound { node: NodeId },
+    NodeNotFound {
+        /// The node ID that was not found in the SCG.
+        node: NodeId,
+    },
 
     /// The solver did not converge within the configured iteration limit.
-    NoConvergence { iterations: usize },
+    NoConvergence {
+        /// The number of iterations attempted before giving up.
+        iterations: usize,
+    },
 }
 
 impl fmt::Display for SolverError {
@@ -176,7 +197,12 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.repd.compatible(&bd_b.repd)`.
     /// If one node has a default (unresolved) RepD and the other is
     /// specific, the default is replaced with the specific one.
-    RepDCompatible { node_a: NodeId, node_b: NodeId },
+    RepDCompatible {
+        /// The first node whose RepD must be compatible.
+        node_a: NodeId,
+        /// The second node whose RepD must be compatible.
+        node_b: NodeId,
+    },
 
     /// **CapD Weakening**: `node_a`'s capabilities must be a subset of
     /// `node_b`'s capabilities (i.e., `node_a` is *weaker* than `node_b`).
@@ -184,7 +210,12 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.capd.is_subset(&bd_b.capd)`.
     /// During solving, `node_b` may be widened (via join) to include
     /// `node_a`'s capabilities.
-    CapDWeakening { node_a: NodeId, node_b: NodeId },
+    CapDWeakening {
+        /// The node whose capabilities must be a subset (weaker).
+        node_a: NodeId,
+        /// The node whose capabilities must be a superset (stronger).
+        node_b: NodeId,
+    },
 
     /// **RelD Refinement**: `node_a`'s relations must refine `node_b`'s
     /// relations (i.e., `node_a` is *more specific* than `node_b`).
@@ -192,14 +223,24 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.reld.refines(&bd_b.reld)`.
     /// During solving, `node_b`'s relations may be added to `node_a`
     /// (via compose) to satisfy the refinement requirement.
-    RelDRefinement { node_a: NodeId, node_b: NodeId },
+    RelDRefinement {
+        /// The node whose relations must refine the other's (more specific).
+        node_a: NodeId,
+        /// The node whose relations must be refined (more general).
+        node_b: NodeId,
+    },
 
     /// **Equality**: `node_a` and `node_b` must have identical BDs.
     ///
     /// Both nodes are set to the meet (greatest lower bound) of their
     /// current BDs. If the RepDs are incompatible, the constraint is
     /// unsatisfiable.
-    Equality { node_a: NodeId, node_b: NodeId },
+    Equality {
+        /// The first node that must have an identical BD.
+        node_a: NodeId,
+        /// The second node that must have an identical BD.
+        node_b: NodeId,
+    },
 }
 
 impl BDConstraint {
