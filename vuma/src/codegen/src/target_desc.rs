@@ -198,6 +198,7 @@ pub struct TargetDescRegistry {
 }
 
 impl TargetDescRegistry {
+    /// Creates a new registry pre-populated with all supported target descriptions.
     pub fn new() -> Self {
         let mut descs = std::collections::HashMap::new();
         descs.insert("aarch64", aarch64_target_desc());
@@ -211,10 +212,12 @@ impl TargetDescRegistry {
         Self { descs }
     }
 
+    /// Looks up a target description by ISA name (e.g., `"aarch64"`).
     pub fn get(&self, name: &str) -> Option<&TargetDesc> {
         self.descs.get(name)
     }
 
+    /// Returns the list of all registered ISA names.
     pub fn isa_names(&self) -> Vec<&'static str> {
         self.descs.keys().copied().collect()
     }

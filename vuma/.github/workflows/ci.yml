@@ -8,45 +8,41 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
   check:
-    name: Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-03-01
-      - name: Cargo check
-        run: cargo check --workspace
+          components: rustfmt, clippy, rust-src
+          targets: aarch64-unknown-linux-gnu, aarch64-unknown-none
+      - run: cargo check --workspace
 
   test:
-    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-03-01
-      - name: Run tests
-        run: cargo test --workspace -- --skip bd_inference_bench
+          components: rustfmt, clippy, rust-src
+          targets: aarch64-unknown-linux-gnu, aarch64-unknown-none
+      - run: cargo test --workspace
 
   clippy:
-    name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-03-01
-          components: clippy
-      - name: Run clippy
-        run: cargo clippy --workspace -- -D warnings
+          components: clippy, rust-src
+      - run: cargo clippy --workspace -- -D warnings
 
   fmt:
-    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,5 +50,10 @@ jobs:
         with:
           toolchain: nightly-2026-03-01
           components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - run: cargo fmt --all -- --check
+
+  no-todo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: "! grep -rn 'TODO\\|FIXME\\|todo!\\|unimplemented!' src/ --include='*.rs'"

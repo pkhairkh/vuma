@@ -9456,3 +9456,25 @@ cargo clippy -p vuma-cor -- -D warnings: 0 warnings, 0 errors
 cargo test -p vuma-cor -- -q: 100 tests passed, 0 failed (including 20 ownership tests)
 ```
 
+
+---
+
+Task ID: W5-T1
+Agent: Typed ID Refactor Agent
+Task: Replace String-typed fields in VUMA proof Judgment enum with typed IDs
+
+Work Log:
+1. **Audited judgment.rs**: Found that typed ID newtypes (RegionId, ResourceId, PointerId, VariableId, EventId) and Display impls were already in place, and the Judgment enum already used typed IDs instead of String fields. The core refactoring from Step 1 and Step 2 had been completed previously.
+2. **Found compilation errors in rules.rs test code**: Lines 1046-1047 used `"e1".into()` and `"e2".into()` for EventId fields in the `test_mixed_judgment_and_string_fails` test. Since EventId is now a newtype `struct EventId(pub u64)`, `From<&str>` is not implemented. Fixed by changing `"e1".into()` → `EventId(1)` and `"e2".into()` → `EventId(2)`.
+3. **Found 3 failing checker tests**: After the typed ID refactoring, the Display representations changed:
+   - `test_structured_exclusivity_elim_proof`: Expected `"no conflict between region_A and region_B"` but rule produces `"no conflict between resource#1 and resource#2"`. Updated conclusion string.
+   - `test_structured_liveness_elim_proof`: Expected `"region r5 is dead"` but rule produces `"region region#5 is dead"`. Updated conclusion string.
+   - `test_structured_bounds_preservation_proof`: Expected `"bounds preserved: inbounds ptr offset=8 size=4 ∧ ..."` but rule produces `"bounds preserved: inbounds pointer#1 offset=8 size=4 ∧ ..."`. Updated conclusion string.
+4. **Verified all 184 tests pass**: `cargo test -p vuma-proof -- -q` — 184 passed, 0 failed.
+
+Files Modified:
+- `/home/z/my-project/vuma/src/proof/src/rules.rs` — Fixed `"e1".into()` → `EventId(1)`, `"e2".into()` → `EventId(2)` in test_mixed_judgment_and_string_fails test
+- `/home/z/my-project/vuma/src/proof/src/checker.rs` — Updated 3 test conclusion strings to match new typed ID Display representations (resource#N, region#N, pointer#N)
+
+Verification:
+- `cargo test -p vuma-proof -- -q`: 184 tests passed, 0 failed

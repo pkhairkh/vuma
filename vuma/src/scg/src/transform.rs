@@ -1000,6 +1000,7 @@ impl Default for PassManager {
 pub struct LoopInvariantCodeMotion;
 
 impl LoopInvariantCodeMotion {
+    /// Creates a new loop-invariant code motion pass.
     pub fn new() -> Self { Self }
 
     /// Returns true if the node type has side effects and must not be hoisted.
@@ -1126,6 +1127,7 @@ impl SCGPass for LoopInvariantCodeMotion {
 pub struct StrengthReduction;
 
 impl StrengthReduction {
+    /// Creates a new strength-reduction pass.
     pub fn new() -> Self { Self }
 
     /// Returns true if `n` is a power of 2 (and n > 0).
@@ -1281,6 +1283,7 @@ impl SCGPass for StrengthReduction {
 pub struct TailCallOptDetection;
 
 impl TailCallOptDetection {
+    /// Creates a new tail-call optimization detection pass.
     pub fn new() -> Self { Self }
 
     /// Check if a computation node represents a function call.
@@ -1365,6 +1368,7 @@ impl SCGPass for TailCallOptDetection {
 pub struct DeadRegionElimination;
 
 impl DeadRegionElimination {
+    /// Creates a new dead region elimination pass.
     pub fn new() -> Self { Self }
 
     /// Find allocation/deallocation pairs and their region IDs.

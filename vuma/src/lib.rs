@@ -38,6 +38,8 @@
 //! }
 //! ```
 
+#![warn(missing_docs)]
+
 pub mod pipeline;
 
 // Re-export the primary pipeline API at the crate root for convenience.

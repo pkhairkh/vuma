@@ -688,6 +688,11 @@ fn is_concrete_violation(e: &ProofFailure) -> bool {
     )
 }
 
+/// Prove the liveness invariant for a program represented as an MSG and SCG.
+///
+/// Tries multiple tactics in order: path enumeration (for acyclic programs),
+/// well-founded ordering, and structural reasoning. Returns a `LivenessProof`
+/// on success or a `ProofFailure` describing the violation on failure.
 pub fn prove_liveness(msg: &MSG, scg: &SCG) -> Result<LivenessProof, ProofFailure> {
     // Try path enumeration first (works for acyclic programs).
     if !scg.has_cycle() {

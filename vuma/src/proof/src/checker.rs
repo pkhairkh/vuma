@@ -747,7 +747,7 @@ mod tests {
         proof.add_step(ProofStep::Infer {
             from: vec![1, 2],
             rule: InferenceRule::ExclusivityElim,
-            conclusion: Fact::derived(3, "no conflict between region_A and region_B"),
+            conclusion: Fact::derived(3, "no conflict between resource#1 and resource#2"),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -765,7 +765,7 @@ mod tests {
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessElim,
-            conclusion: Fact::derived(2, "region r5 is dead"),
+            conclusion: Fact::derived(2, "region region#5 is dead"),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -817,7 +817,7 @@ mod tests {
             rule: InferenceRule::BoundsPreservation,
             conclusion: Fact::derived(
                 3,
-                "bounds preserved: inbounds ptr offset=8 size=4 ∧ region r1 has bounds [0, 1024]",
+                "bounds preserved: inbounds pointer#1 offset=8 size=4 ∧ region r1 has bounds [0, 1024]",
             ),
         });
         proof.conclude(Conclusion::Proven);

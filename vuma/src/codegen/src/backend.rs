@@ -59,6 +59,7 @@ pub struct PhysicalReg {
 }
 
 impl PhysicalReg {
+    /// Creates a new physical register identifier with the given class and index.
     pub fn new(class: RegClass, index: u32) -> Self {
         Self { class, index }
     }

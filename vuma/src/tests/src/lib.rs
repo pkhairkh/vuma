@@ -74,6 +74,8 @@ pub mod codegen;
 pub mod full_pipeline;
 #[cfg(test)]
 pub mod e2e_cor;
+#[cfg(test)]
+pub mod execution_validation;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

@@ -72,7 +72,12 @@ pub enum AttrValue {
     /// Key-value pairs: `#[derive(Debug)]`, `#[cfg(test)]`, `#[allow(dead_code)]`
     List(Vec<String>),
     /// Key = value: `#[repr(C)]` → the `C` part
-    KeyValue { key: String, value: String },
+    KeyValue {
+        /// Attribute key.
+        key: String,
+        /// Attribute value.
+        value: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -426,8 +431,13 @@ pub enum Stmt {
     For(ForStmt),
     /// Infinite loop: `loop { … }`
     Loop(LoopStmt),
-    /// An unsafe block (`unsafe { ... }`).
-    UnsafeBlock { body: Block, span: Span },
+    /// An unsafe block (`unsafe { ... }`)
+    UnsafeBlock {
+        /// Block body.
+        body: Block,
+        /// Source span.
+        span: Span,
+    },
     /// Pattern match: `match expr { arms }`
     Match(MatchStmt),
     /// Sync block: `sync { … }`
@@ -447,9 +457,13 @@ pub enum Stmt {
 /// `let` binding statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LetStmt {
+    /// Bound variable name.
     pub name: String,
+    /// Optional type annotation.
     pub ty: Option<Type>,
+    /// Initializer expression.
     pub value: Expr,
+    /// Source span.
     pub span: Span,
 }
 
@@ -458,8 +472,11 @@ pub struct LetStmt {
 /// The target may be a simple variable or a dereference expression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignStmt {
+    /// The assignment target (variable, deref, field, or index).
     pub target: AssignTarget,
+    /// The value to assign.
     pub value: Expr,
+    /// Source span.
     pub span: Span,
 }
 
@@ -467,13 +484,37 @@ pub struct AssignStmt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AssignTarget {
     /// Simple variable: `x = …`
-    Var { name: String, span: Span },
+    Var {
+        /// Variable name.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
     /// Dereference: `*ptr = …`
-    Deref { expr: Box<Expr>, span: Span },
+    Deref {
+        /// The dereferenced expression.
+        expr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Field access after dereference: `(*ptr).field = …`
-    DerefField { expr: Box<Expr>, field: String, span: Span },
+    DerefField {
+        /// The dereferenced expression.
+        expr: Box<Expr>,
+        /// Field name.
+        field: String,
+        /// Source span.
+        span: Span,
+    },
     /// Offset write: `ptr[offset] = …`
-    Index { expr: Box<Expr>, index: Box<Expr>, span: Span },
+    Index {
+        /// The indexed expression.
+        expr: Box<Expr>,
+        /// The index expression.
+        index: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
 }
 
 /// `allocate(size)` statement.
@@ -498,32 +539,44 @@ pub struct FreeStmt {
 /// within an expression).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessStmt {
+    /// The expression being accessed / dereferenced.
     pub expr: Expr,
+    /// Source span.
     pub span: Span,
 }
 
 /// Standalone cast statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CastStmt {
+    /// The expression being cast.
     pub expr: Expr,
+    /// The target type.
     pub target_type: Type,
+    /// Source span.
     pub span: Span,
 }
 
 /// `if` statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IfStmt {
+    /// The condition expression.
     pub condition: Expr,
+    /// Block executed when condition is true.
     pub then_block: Block,
+    /// Optional else block (may contain another if).
     pub else_block: Option<Block>,
+    /// Source span.
     pub span: Span,
 }
 
 /// `while` loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhileStmt {
+    /// Loop condition.
     pub condition: Expr,
+    /// Loop body.
     pub body: Block,
+    /// Source span.
     pub span: Span,
 }
 
@@ -579,17 +632,53 @@ pub enum MatchPattern {
     /// Wildcard: `_`
     Wildcard(Span),
     /// Literal pattern.
-    Lit { value: Lit, span: Span },
+    Lit {
+        /// The literal value to match.
+        value: Lit,
+        /// Source span.
+        span: Span,
+    },
     /// Identifier / variant name pattern.
-    Ident { name: String, span: Span },
+    Ident {
+        /// The identifier or variant name.
+        name: String,
+        /// Source span.
+        span: Span,
+    },
     /// Struct-like pattern: `Name { field, … }`
-    Struct { name: String, fields: Vec<String>, span: Span },
+    Struct {
+        /// Struct name.
+        name: String,
+        /// Field names to match.
+        fields: Vec<String>,
+        /// Source span.
+        span: Span,
+    },
     /// Enum variant pattern: `Some(v)` or `None`
-    Enum { name: String, binding: Option<String>, span: Span },
+    Enum {
+        /// Variant name.
+        name: String,
+        /// Optional binding for the variant payload.
+        binding: Option<String>,
+        /// Source span.
+        span: Span,
+    },
     /// Range pattern: `1..=10`
-    Range { start: Lit, end: Lit, span: Span },
+    Range {
+        /// Range start literal.
+        start: Lit,
+        /// Range end literal.
+        end: Lit,
+        /// Source span.
+        span: Span,
+    },
     /// Or-pattern: `1 | 2 | 3`
-    Or { patterns: Vec<MatchPattern>, span: Span },
+    Or {
+        /// Alternative patterns.
+        patterns: Vec<MatchPattern>,
+        /// Source span.
+        span: Span,
+    },
 }
 
 /// `sync { … }` block for synchronized access.
@@ -604,7 +693,9 @@ pub struct SyncBlock {
 /// `return` statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReturnStmt {
+    /// Optional return value expression.
     pub value: Option<Expr>,
+    /// Source span.
     pub span: Span,
 }
 
@@ -691,7 +782,9 @@ pub enum BdDirectiveKind {
 /// Expression used as a statement (side-effecting call, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExprStmt {
+    /// The expression being evaluated for its side effects.
     pub expr: Expr,
+    /// Source span.
     pub span: Span,
 }
 
@@ -711,21 +804,31 @@ pub enum Expr {
     Lit { value: Lit, span: Span },
     /// Binary operation: `lhs op rhs`
     BinOp {
+        /// The binary operator.
         op: BinOp,
+        /// Left-hand side operand.
         lhs: Box<Expr>,
+        /// Right-hand side operand.
         rhs: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Unary operation: `op expr`
     UnOp {
+        /// The unary operator.
         op: UnOp,
+        /// The operand expression.
         expr: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Function call: `callee(args)`
     Call {
+        /// The callee expression.
         callee: Box<Expr>,
+        /// Arguments passed to the callee.
         args: Vec<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Address-of: `@expr`
@@ -746,32 +849,47 @@ pub enum Expr {
     },
     /// Index access: `expr[index]`
     Index {
+        /// The expression being indexed.
         expr: Box<Expr>,
+        /// The index expression.
         index: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Struct literal: `TypeName { field: value, … }`
     StructInit {
+        /// Struct type name.
         name: String,
+        /// Field-value pairs.
         fields: Vec<(String, Expr)>,
+        /// Source span.
         span: Span,
     },
     /// Field access: `expr.field`
     FieldAccess {
+        /// The expression whose field is accessed.
         expr: Box<Expr>,
+        /// Field name.
         field: String,
+        /// Source span.
         span: Span,
     },
     /// Namespace / associated function access: `expr::name`
     NamespaceAccess {
+        /// The namespace expression.
         expr: Box<Expr>,
+        /// The associated name.
         name: String,
+        /// Source span.
         span: Span,
     },
     /// Pointer derive: `derive(ptr, region)`
     Derive {
+        /// The source pointer.
         ptr: Box<Expr>,
+        /// The region expression.
         region: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// `sizeof(Type)`
@@ -780,8 +898,11 @@ pub enum Expr {
     Alignof { ty: Type, span: Span },
     /// Type ascription: `expr: Type`
     TypeAscription {
+        /// The ascribed expression.
         expr: Box<Expr>,
+        /// The type annotation.
         ty: Type,
+        /// Source span.
         span: Span,
     },
     /// Async block: `async { … }`
@@ -789,30 +910,46 @@ pub enum Expr {
     /// Spawn expression: `spawn expr`
     Spawn { expr: Box<Expr>, span: Span },
     /// Allocate expression: `allocate(size)` used as an expression
-    Allocate { size: Box<Expr>, span: Span },
+    Allocate {
+        /// The size in bytes to allocate.
+        size: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Null literal: `null`
     Null { span: Span },
     /// Range expression: `start..end`
     Range {
+        /// Range start (inclusive).
         start: Box<Expr>,
+        /// Range end (exclusive).
         end: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// Format string: `f"hello {name} world"`
     FormatStr {
+        /// Parts of the format string.
         parts: Vec<FormatStrPart>,
+        /// Source span.
         span: Span,
     },
     /// Closure: `|args| expr` or `|args| { stmts }`
     Closure {
+        /// Closure parameters.
         params: Vec<Param>,
+        /// Closure body (expression or block).
         body: ClosureBody,
+        /// How the closure captures its environment.
         capture_kind: CaptureKind,
+        /// Source span.
         span: Span,
     },
     /// Await expression: `expr.await`
     Await {
+        /// The expression being awaited.
         expr: Box<Expr>,
+        /// Source span.
         span: Span,
     },
     /// An uninitialized binding (`let x;`).
@@ -952,19 +1089,44 @@ pub enum Type {
     Ptr(Box<Type>),
     /// Region-annotated pointer: `*T @ region`
     RegionPtr {
+        /// The pointed-to type.
         inner: Box<Type>,
+        /// Region name annotation.
         region: String,
     },
     /// Fixed-size array: `[T; N]`
-    Array { element: Box<Type>, size: usize },
+    Array {
+        /// Element type.
+        element: Box<Type>,
+        /// Number of elements.
+        size: usize,
+    },
     /// Struct type: named collection of typed fields.
-    Struct { name: String, fields: Vec<(String, Type)> },
+    Struct {
+        /// Struct name.
+        name: String,
+        /// Ordered field (name, type) pairs.
+        fields: Vec<(String, Type)>,
+    },
     /// Generic type application: `Name<T1, T2, …>`
-    Generic { name: String, args: Vec<Type> },
+    Generic {
+        /// Type name.
+        name: String,
+        /// Generic arguments.
+        args: Vec<Type>,
+    },
     /// Function type: `(params) -> return_type`
-    Func { params: Vec<Type>, return_type: Option<Box<Type>> },
+    Func {
+        /// Parameter types.
+        params: Vec<Type>,
+        /// Optional return type.
+        return_type: Option<Box<Type>>,
+    },
     /// BD annotation type: `#bd(Name)`
-    BdAnnot { name: String },
+    BdAnnot {
+        /// BD annotation name.
+        name: String,
+    },
 }
 
 impl std::fmt::Display for Type {

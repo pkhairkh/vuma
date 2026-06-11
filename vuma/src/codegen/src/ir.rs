@@ -852,18 +852,31 @@ impl fmt::Display for IRValue {
 /// Binary operations supported by the IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BinOpKind {
+    /// Integer addition.
     Add,
+    /// Integer subtraction.
     Sub,
+    /// Integer multiplication.
     Mul,
+    /// Signed integer division.
     SDiv,
+    /// Unsigned integer division.
     UDiv,
+    /// Signed integer remainder.
     SRem,
+    /// Unsigned integer remainder.
     URem,
+    /// Bitwise AND.
     And,
+    /// Bitwise OR.
     Or,
+    /// Bitwise XOR.
     Xor,
+    /// Logical left shift.
     Shl,
+    /// Logical right shift.
     ShrL,
+    /// Arithmetic right shift.
     ShrA,
     /// Signed less-than comparison.
     SLt,
@@ -920,10 +933,15 @@ impl fmt::Display for BinOpKind {
 /// Unary operations supported by the IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum UnaryOpKind {
+    /// Arithmetic negation.
     Neg,
+    /// Bitwise NOT.
     Not,
+    /// Count leading zeros.
     Clz,
+    /// Count trailing zeros.
     Ctz,
+    /// Population count (number of set bits).
     Popcnt,
 }
 
@@ -1074,82 +1092,113 @@ impl fmt::Display for CastKind {
 pub enum IRInstr {
     /// Load a value from memory: `dst = load addr`
     Load {
+        /// Destination register.
         dst: IRValue,
+        /// Source address register.
         addr: IRValue,
     },
 
     /// Store a value to memory: `store value, addr`
     Store {
+        /// Value to store.
         value: IRValue,
+        /// Target address register.
         addr: IRValue,
     },
 
     /// Binary operation: `dst = lhs op rhs`
     BinOp {
+        /// The binary operator.
         op: BinOpKind,
+        /// Destination register.
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
 
     /// Unary operation: `dst = op operand`
     UnaryOp {
+        /// The unary operator.
         op: UnaryOpKind,
+        /// Destination register.
         dst: IRValue,
+        /// Operand value.
         operand: IRValue,
     },
 
     /// Function call: `dst = call func_name(args…)`
     Call {
+        /// Optional destination register for the return value.
         dst: Option<IRValue>,
+        /// Function name.
         func: String,
+        /// Argument values.
         args: Vec<IRValue>,
     },
 
     /// Stack allocation: `dst = alloc size` — reserves `size` bytes on the
     /// stack and returns a pointer in `dst`.
     Alloc {
+        /// Destination register (pointer to allocated space).
         dst: IRValue,
+        /// Size in bytes to allocate.
         size: u32,
     },
 
     /// Heap deallocation: `free ptr` — not directly emitted as an instruction;
     /// lowered to a runtime call.
     Free {
+        /// Pointer to deallocate.
         ptr: IRValue,
     },
 
     /// Type cast / reinterpret: `dst = cast kind src`
     Cast {
+        /// Cast kind.
         kind: CastKind,
+        /// Destination register.
         dst: IRValue,
+        /// Source value.
         src: IRValue,
     },
 
     /// SSA phi node: `dst = phi [(val, block), …]`
     Phi {
+        /// Destination register.
         dst: IRValue,
+        /// Incoming (value, predecessor-block) pairs.
         incoming: Vec<(IRValue, String)>,
     },
 
     /// Compute the address of a data symbol: `dst = getaddress name`
     GetAddress {
+        /// Destination register.
         dst: IRValue,
+        /// Symbol name.
         name: String,
     },
 
     /// Compute `dst = base + offset` (pointer arithmetic).
     Offset {
+        /// Destination register.
         dst: IRValue,
+        /// Base pointer value.
         base: IRValue,
+        /// Offset value.
         offset: IRValue,
     },
 
     /// Conditional select: `dst = if cond != 0 { true_val } else { false_val }`
     Select {
+        /// Destination register.
         dst: IRValue,
+        /// Condition value.
         cond: IRValue,
+        /// Value when condition is true.
         true_val: IRValue,
+        /// Value when condition is false.
         false_val: IRValue,
     },
 
@@ -1157,26 +1206,38 @@ pub enum IRInstr {
 
     /// Add: `dst = lhs + rhs`
     Add {
+        /// Destination register.
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
     /// Subtract: `dst = lhs - rhs`
     Sub {
+        /// Destination register.
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
     /// Multiply: `dst = lhs * rhs`
     Mul {
+        /// Destination register.
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
     /// Divide: `dst = lhs / rhs`
     Div {
+        /// Destination register.
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
 
@@ -1184,9 +1245,13 @@ pub enum IRInstr {
 
     /// Comparison: `dst = cmp kind lhs rhs` — produces 1 or 0.
     Cmp {
+        /// Comparison kind.
         kind: CmpKind,
+        /// Destination register (boolean result).
         dst: IRValue,
+        /// Left-hand side operand.
         lhs: IRValue,
+        /// Right-hand side operand.
         rhs: IRValue,
     },
 
@@ -1194,17 +1259,22 @@ pub enum IRInstr {
 
     /// Return from the current function with optional values.
     Ret {
+        /// Return value registers.
         values: Vec<IRValue>,
     },
     /// Unconditional branch to a label.
     Branch {
+        /// Target label.
         target: String,
     },
     /// Conditional branch: if `cond` is non-zero, go to `true_target`;
     /// otherwise go to `false_target`.
     CondBranch {
+        /// Condition value.
         cond: IRValue,
+        /// Label to branch to when condition is true.
         true_target: String,
+        /// Label to branch to when condition is false.
         false_target: String,
     },
 }

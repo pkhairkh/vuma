@@ -943,6 +943,7 @@ impl WasmFuncBody {
 }
 
 impl WasmModuleBuilder {
+    /// Creates a new Wasm module builder with empty sections.
     pub fn new() -> Self {
         Self::default()
     }

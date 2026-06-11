@@ -38,26 +38,41 @@ pub enum EditError {
     /// The edit range is out of bounds for the projection text.
     #[error("edit range {start}..{end} is out of bounds (text length: {text_len})")]
     OutOfBounds {
+        /// Start of the edit range.
         start: usize,
+        /// End of the edit range (exclusive).
         end: usize,
+        /// Length of the projection text.
         text_len: usize,
     },
 
     /// The edit would produce an invalid SCG (e.g. dangling edge).
     #[error("edit would produce an invalid SCG: {reason}")]
-    InvalidSCG { reason: String },
+    InvalidSCG {
+        /// Reason the SCG would be invalid.
+        reason: String,
+    },
 
     /// The edit could not be parsed from the projection text.
     #[error("failed to parse edit from projection text: {reason}")]
-    ParseFailed { reason: String },
+    ParseFailed {
+        /// Reason the parse failed.
+        reason: String,
+    },
 
     /// A semantic change was detected that requires explicit confirmation.
     #[error("semantic change detected: {description}")]
-    SemanticChange { description: String },
+    SemanticChange {
+        /// Description of the semantic change.
+        description: String,
+    },
 
     /// An unsupported edit operation was attempted.
     #[error("unsupported edit operation: {operation}")]
-    Unsupported { operation: String },
+    Unsupported {
+        /// The unsupported operation name.
+        operation: String,
+    },
 
     /// A conflict was detected: another projection mode already modified the
     /// same SCG element.
@@ -73,11 +88,17 @@ pub enum EditError {
 
     /// The conversational edit produced no actionable suggestions.
     #[error("conversational edit produced no actionable suggestions for: {instruction}")]
-    NoConversationalMatch { instruction: String },
+    NoConversationalMatch {
+        /// The conversational instruction that could not be matched.
+        instruction: String,
+    },
 
     /// A node or edge referenced in the edit does not exist.
     #[error("element not found: {element}")]
-    NotFound { element: String },
+    NotFound {
+        /// The element that was not found.
+        element: String,
+    },
 }
 
 /// Result type for bidirectional editing operations.

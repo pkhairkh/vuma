@@ -240,48 +240,61 @@ pub enum VumaError {
     },
     /// Error converting AST to SCG.
     AstToScg {
+        /// Error message.
         message: String,
     },
     /// SCG validation failed.
     ScgValidation {
+        /// Validation error messages.
         errors: Vec<String>,
     },
     /// SCG → MSG conversion error.
     ScgToMsg {
+        /// The conversion error.
         error: ConversionError,
     },
     /// BD inference error.
     BdInference {
+        /// Node ID where inference failed, if known.
         node_id: Option<u64>,
+        /// Error message.
         message: String,
     },
     /// IVE verification failure (one or more invariants violated).
     Verification {
+        /// The aggregated verification result.
         result: AggregatedResult,
     },
     /// SCG transformation pass error.
     Transform {
+        /// Name of the pass that failed.
         pass_name: String,
+        /// Error messages from the pass.
         errors: Vec<String>,
     },
     /// IR lowering / codegen error.
     Codegen {
+        /// The codegen error.
         error: CodegenError,
     },
     /// Register allocation failure.
     RegisterAlloc {
+        /// Error message.
         message: String,
     },
     /// ELF emission failure.
     Emission {
+        /// Error message.
         message: String,
     },
     /// COR initialization failure.
     CorInit {
+        /// Error message.
         message: String,
     },
     /// A collection of errors accumulated across stages.
     Multi {
+        /// The collected errors.
         errors: Vec<VumaError>,
     },
 }

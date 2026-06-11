@@ -121,6 +121,7 @@ pub const GPIO_CTRL_OFFSET: Address = 0x0000;
 
 /// FUNCSEL field: bits [4:0] of GPIO_CTRL[n].
 pub const FSEL_MASK: u32 = 0x1F;
+/// Bit position of the FUNCSEL field within the GPIO_CTRL register.
 pub const FSEL_SHIFT: u32 = 0;
 
 /// OUTOVER field: bits [13:12] of GPIO_CTRL[n].
@@ -181,6 +182,7 @@ pub const PAD_CTRL_OFFSET: Address = 0x8000;
 
 /// Pull resistor field: bits [23:22] of PAD_CTRL[n].
 pub const PAD_PULL_SHIFT: u32 = 22;
+/// Bitmask for the pull resistor field in PAD_CTRL[n].
 pub const PAD_PULL_MASK: u32 = 0x3 << PAD_PULL_SHIFT;
 
 /// Drive strength field: bits [1:0] of PAD_CTRL[n].
@@ -191,6 +193,7 @@ pub const PAD_PULL_MASK: u32 = 0x3 << PAD_PULL_SHIFT;
 /// - 0b10 = 8 mA
 /// - 0b11 = 12 mA
 pub const PAD_DRIVE_SHIFT: u32 = 0;
+/// Bitmask for the drive strength field in PAD_CTRL[n].
 pub const PAD_DRIVE_MASK: u32 = 0x3 << PAD_DRIVE_SHIFT;
 
 /// Input enable bit: bit [6] of PAD_CTRL[n].

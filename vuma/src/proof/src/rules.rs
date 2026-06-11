@@ -1043,8 +1043,8 @@ mod tests {
         let p0 = Fact::derived_j(
             1,
             Judgment::TemporalOrder {
-                event_a: "e1".into(),
-                event_b: "e2".into(),
+                event_a: EventId(1),
+                event_b: EventId(2),
             },
         );
         let p1 = Fact::derived(2, "event Y happens before event Z");
