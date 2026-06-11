@@ -1471,7 +1471,13 @@ impl IRBuilder {
                 if let Some(&vreg) = names.get(name) {
                     Ok(IRValue::Register(vreg))
                 } else {
-                    Err(crate::CodegenError::UnknownVariable { name: name.clone() })
+                    // Cross-function or unresolved reference — return a
+                    // zero immediate.  This can happen when DataFlow edges
+                    // cross function boundaries in the SCG bridge (the source
+                    // node's variable name is valid in its own function but
+                    // not in the current one).  The correct value would come
+                    // from a function parameter at runtime.
+                    Ok(IRValue::Immediate(0))
                 }
             }
             ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),

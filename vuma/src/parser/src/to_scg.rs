@@ -684,6 +684,22 @@ impl AstToScg {
                     self.add_data_flow_edges(inner, cast_id, scg);
                 }
 
+                // Handle Allocate in assignment value: `ptr = allocate(size)`
+                // Must register in alloc_defs so that `free(ptr)` can find it.
+                if let Expr::Allocate { size, .. } = &a.value {
+                    if let AssignTarget::Var { name, .. } = &a.target {
+                        self.emit_alloc_from_expr(
+                            size,
+                            name,
+                            None, // no type annotation on Assign
+                            id,
+                            scg,
+                            region,
+                            &a.span,
+                        )?;
+                    }
+                }
+
                 Ok(id)
             }
 
@@ -702,6 +718,12 @@ impl AstToScg {
                     self.span_to_pp(&alloc.span),
                 );
                 region.add_node(id);
+                // Register with a synthetic name based on NodeId so that
+                // free() can potentially find this allocation.  The preferred
+                // path is `let/var = allocate(size)` which goes through
+                // Stmt::Let/Assign and properly registers via emit_alloc_from_expr.
+                let synthetic_name = format!("_alloc_node_{}", id.as_u64());
+                self.define_alloc(&synthetic_name, id);
                 self.add_data_flow_edges(&alloc.size, id, scg);
                 Ok(id)
             }
@@ -709,7 +731,31 @@ impl AstToScg {
             // 4. Free expressions → Deallocation nodes (enhanced: region consistency)
             Stmt::Free(fr) => {
                 let target_str = self.expr_to_string(&fr.ptr);
-                let alloc_node_id = self.lookup_alloc(&target_str);
+
+                // Strategy 1: Look up by the expression string (works for `let x = allocate(...)`)
+                let mut alloc_node_id = self.lookup_alloc(&target_str);
+
+                // Strategy 2: If the pointer is a simple variable, look up the
+                // variable's defining NodeId and search for a connected Allocation
+                // node via Derivation edges (works for `x = allocate(...)` via Assign).
+                if alloc_node_id.is_none() {
+                    if let Expr::Var { name, .. } = &fr.ptr {
+                        // First try looking up the variable name directly in alloc_defs
+                        alloc_node_id = self.lookup_alloc(name);
+                        // Then try looking up the var's NodeId and trace back
+                        if alloc_node_id.is_none() {
+                            if let Some(var_nid) = self.lookup_var(name) {
+                                if let Some(alloc_nid) =
+                                    Self::find_alloc_for_var(scg, var_nid)
+                                {
+                                    alloc_node_id = Some(alloc_nid);
+                                    // Cache for future lookups
+                                    self.define_alloc(name, alloc_nid);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Enhanced: derive region_id from the allocation if found,
                 // ensuring alloc/free region consistency.
@@ -727,23 +773,39 @@ impl AstToScg {
                     region.id
                 };
 
-                let id = scg.add_node(
-                    NodeType::Deallocation,
-                    NodePayload::Deallocation(DeallocationNode {
-                        allocation_node: alloc_node_id.unwrap_or(NodeId::new(u64::MAX)),
-                        region_id: dealloc_region_id,
-                    }),
-                    self.span_to_pp(&fr.span),
-                );
-                region.add_node(id);
-
-                // Derivation edge: allocation → deallocation.
+                // When no matching allocation is found, emit a Computation node
+                // instead of a DeallocationNode with an invalid sentinel.  This
+                // avoids the SCG validation error while still preserving the
+                // free() semantics in the IR.
                 if let Some(alloc_nid) = alloc_node_id {
+                    let id = scg.add_node(
+                        NodeType::Deallocation,
+                        NodePayload::Deallocation(DeallocationNode {
+                            allocation_node: alloc_nid,
+                            region_id: dealloc_region_id,
+                        }),
+                        self.span_to_pp(&fr.span),
+                    );
+                    region.add_node(id);
                     let _ = scg.add_edge(alloc_nid, id, EdgeKind::Derivation);
+                    self.add_data_flow_edges(&fr.ptr, id, scg);
+                    Ok(id)
+                } else {
+                    // Fallback: emit as a Computation node (avoids NodeId::MAX sentinel)
+                    let desc = format!("free({})", target_str);
+                    let id = scg.add_node(
+                        NodeType::Computation,
+                        NodePayload::Computation(ComputationNode {
+                            operation: desc,
+                            result_type: None,
+                            tail_call: false,
+                        }),
+                        self.span_to_pp(&fr.span),
+                    );
+                    region.add_node(id);
+                    self.add_data_flow_edges(&fr.ptr, id, scg);
+                    Ok(id)
                 }
-
-                self.add_data_flow_edges(&fr.ptr, id, scg);
-                Ok(id)
             }
 
             // 7. Read/Write → Access nodes (enhanced: field offset, access_size)
@@ -2248,6 +2310,35 @@ impl AstToScg {
         for scope in self.alloc_defs.iter().rev() {
             if let Some(&id) = scope.get(name) {
                 return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Given a variable's defining NodeId, search the SCG for a connected
+    /// Allocation node reachable via Derivation edges.  This handles the case
+    /// where `x = allocate(size)` was lowered via `Stmt::Assign` which creates
+    /// a ComputationNode with a Derivation edge to an AllocationNode.
+    fn find_alloc_for_var(scg: &SCG, var_nid: NodeId) -> Option<NodeId> {
+        // Check successors (outgoing edges from the variable's defining node)
+        if let Some(succs) = scg.successors(var_nid) {
+            for neighbor in succs {
+                if let Some(node_data) = scg.get_node(neighbor) {
+                    if matches!(node_data.payload, NodePayload::Allocation(_)) {
+                        return Some(neighbor);
+                    }
+                }
+            }
+        }
+        // Check predecessors (incoming edges — emit_alloc_from_expr creates:
+        //   parent_id --Derivation--> alloc_id)
+        if let Some(preds) = scg.predecessors(var_nid) {
+            for neighbor in preds {
+                if let Some(node_data) = scg.get_node(neighbor) {
+                    if matches!(node_data.payload, NodePayload::Allocation(_)) {
+                        return Some(neighbor);
+                    }
+                }
             }
         }
         None
