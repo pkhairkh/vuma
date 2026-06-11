@@ -19,9 +19,7 @@
 //!   and performs loop unrolling.
 
 use crate::backend::{AArch64TargetInfo, TargetInfo};
-use crate::ir::{
-    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue,
-};
+use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -121,10 +119,7 @@ impl SwitchLowerer {
 
         // Check density for jump table eligibility.
         if count >= JUMP_TABLE_MIN_TARGETS && Self::is_dense_range(targets) {
-            log::debug!(
-                "SwitchLowerer: {} targets → JumpTable (dense range)",
-                count
-            );
+            log::debug!("SwitchLowerer: {} targets → JumpTable (dense range)", count);
             return SwitchStrategy::JumpTable;
         }
 
@@ -604,7 +599,14 @@ impl ExceptionLowerer {
         label_counter: &mut u32,
     ) -> InvokeLowering {
         Self::lower_invoke_for_target(
-            dst, func, args, normal, unwind, vreg_counter, label_counter, &AArch64TargetInfo,
+            dst,
+            func,
+            args,
+            normal,
+            unwind,
+            vreg_counter,
+            label_counter,
+            &AArch64TargetInfo,
         )
     }
 
@@ -737,8 +739,8 @@ impl ExceptionLowerer {
                         pad_offset = search_offset;
                         break;
                     }
-                    search_offset += (search_block.instructions.len() as u32) * instr_size
-                        + instr_size;
+                    search_offset +=
+                        (search_block.instructions.len() as u32) * instr_size + instr_size;
                 }
 
                 entries.push(ExceptionTableEntry {
@@ -877,9 +879,7 @@ impl TailCallLowerer {
         for block in &func.blocks {
             for instr in &block.instructions {
                 if let IRInstr::Alloc { .. } = instr {
-                    log::debug!(
-                        "TailCallLowerer: ineligible — function has stack allocations"
-                    );
+                    log::debug!("TailCallLowerer: ineligible — function has stack allocations");
                     return false;
                 }
             }
@@ -924,11 +924,7 @@ impl TailCallLowerer {
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
     /// [`lower_tail_call_for_target`] with `AArch64TargetInfo`.
-    pub fn lower_tail_call(
-        func: &str,
-        args: &[IRValue],
-        vreg_counter: &mut u32,
-    ) -> Vec<IRInstr> {
+    pub fn lower_tail_call(func: &str, args: &[IRValue], vreg_counter: &mut u32) -> Vec<IRInstr> {
         Self::lower_tail_call_for_target(func, args, vreg_counter, &AArch64TargetInfo)
     }
 
@@ -976,10 +972,7 @@ impl TailCallLowerer {
         // Detect overlapping argument moves: if any arg i is a register
         // that will be overwritten by the move for arg j (j < i), we need
         // to copy it to a temp first.
-        let arg_regs: Vec<Option<u32>> = args
-            .iter()
-            .map(|a| a.as_register())
-            .collect();
+        let arg_regs: Vec<Option<u32>> = args.iter().map(|a| a.as_register()).collect();
 
         // Simple check: if any arg register index equals the target
         // position of a prior arg, we have a conflict.
@@ -1012,7 +1005,7 @@ impl TailCallLowerer {
                 // use the temp vreg instead. A more complete implementation
                 // would track this mapping.
                 let _ = temp; // Suppress unused warning; in a full impl this
-                               // would be stored in a replacement map.
+                              // would be stored in a replacement map.
             }
         }
 
@@ -1159,7 +1152,10 @@ impl CoroutineLowerer {
     ///
     /// This is the legacy ARM64-compatible entry point. It delegates to
     /// [`compute_frame_layout_for_target`] with `AArch64TargetInfo`.
-    pub fn compute_frame_layout(yield_points: &[YieldPoint], local_vars: &[IRValue]) -> CoroutineFrame {
+    pub fn compute_frame_layout(
+        yield_points: &[YieldPoint],
+        local_vars: &[IRValue],
+    ) -> CoroutineFrame {
         Self::compute_frame_layout_for_target(yield_points, local_vars, &AArch64TargetInfo)
     }
 
@@ -1192,7 +1188,8 @@ impl CoroutineLowerer {
             for val in &yp.live_values {
                 if let Some(reg_id) = val.as_register() {
                     if seen_regs.insert(reg_id) {
-                        let slot_offset = state_field_size + yield_index_field_size
+                        let slot_offset = state_field_size
+                            + yield_index_field_size
                             + (spill_slots.len() as u32) * spill_slot_size;
                         spill_slots.push((format!("vreg_{}", reg_id), slot_offset));
                     }
@@ -1204,14 +1201,16 @@ impl CoroutineLowerer {
         for val in local_vars {
             if let Some(reg_id) = val.as_register() {
                 if seen_regs.insert(reg_id) {
-                    let slot_offset = state_field_size + yield_index_field_size
+                    let slot_offset = state_field_size
+                        + yield_index_field_size
                         + (spill_slots.len() as u32) * spill_slot_size;
                     spill_slots.push((format!("vreg_{}", reg_id), slot_offset));
                 }
             }
         }
 
-        let data_size = state_field_size + yield_index_field_size
+        let data_size = state_field_size
+            + yield_index_field_size
             + (spill_slots.len() as u32) * spill_slot_size;
 
         // Round up to alignment.
@@ -1745,8 +1744,7 @@ impl LoopOptimizer {
                     }
 
                     // Estimate trip count.
-                    let trip_count =
-                        estimate_trip_count(func, header, &body, &label_to_idx);
+                    let trip_count = estimate_trip_count(func, header, &body, &label_to_idx);
 
                     loops.push(LoopInfo {
                         header_block: func.blocks[header].label.clone(),
@@ -1922,10 +1920,7 @@ impl LoopOptimizer {
             if copy_num == 0 {
                 // First copy keeps original labels (we'll rename them).
                 for label in &original_labels {
-                    label_map.insert(
-                        label.clone(),
-                        local_label_map[label].clone(),
-                    );
+                    label_map.insert(label.clone(), local_label_map[label].clone());
                 }
             }
 
@@ -1991,10 +1986,7 @@ impl LoopOptimizer {
 
         // Also rewrite the predecessor of the loop header to jump to the
         // first copy's header instead.
-        let first_copy_header = format!(
-            "{}_unroll0_{}",
-            loop_info.header_block, factor
-        );
+        let first_copy_header = format!("{}_unroll0_{}", loop_info.header_block, factor);
         for block in &mut new_blocks {
             rewrite_terminator_to_target(
                 &mut block.terminator,
@@ -2061,9 +2053,7 @@ fn successor_indices(
     label_to_idx: &HashMap<String, usize>,
 ) -> Vec<usize> {
     match terminator {
-        IRTerminator::Jump(target) => {
-            label_to_idx.get(target).copied().into_iter().collect()
-        }
+        IRTerminator::Jump(target) => label_to_idx.get(target).copied().into_iter().collect(),
         IRTerminator::Branch {
             true_block,
             false_block,
@@ -2092,9 +2082,7 @@ fn successor_indices(
             }
             succs
         }
-        IRTerminator::Invoke {
-            normal, unwind, ..
-        } => {
+        IRTerminator::Invoke { normal, unwind, .. } => {
             let mut succs = Vec::new();
             if let Some(&idx) = label_to_idx.get(normal) {
                 succs.push(idx);
@@ -2104,9 +2092,9 @@ fn successor_indices(
             }
             succs
         }
-        IRTerminator::Return(_)
-        | IRTerminator::Unreachable
-        | IRTerminator::Resume { .. } => Vec::new(),
+        IRTerminator::Return(_) | IRTerminator::Unreachable | IRTerminator::Resume { .. } => {
+            Vec::new()
+        }
         IRTerminator::TailCall { .. } => Vec::new(),
     }
 }
@@ -2256,30 +2244,22 @@ fn estimate_trip_count(
                 // Search for a Phi instruction that defines this register.
                 for block in &func.blocks {
                     for inner_instr in &block.instructions {
-                        if let IRInstr::Phi {
-                            dst,
-                            incoming,
-                        } = inner_instr
-                        {
+                        if let IRInstr::Phi { dst, incoming } = inner_instr {
                             if dst == lhs {
                                 // Found the phi. Look for an initial value
                                 // that comes from outside the loop.
                                 for (val, src_block) in incoming {
-                                    if let Some(&src_idx) =
-                                        label_to_idx.get(src_block)
-                                    {
+                                    if let Some(&src_idx) = label_to_idx.get(src_block) {
                                         if !body_set.contains(&src_idx) {
                                             // Initial value from outside the loop.
                                             if let IRValue::Immediate(init) = val {
-                                                let range =
-                                                    (*upper_bound - init) as u64;
+                                                let range = (*upper_bound - init) as u64;
                                                 // Adjust based on comparison kind.
                                                 let trip = match kind {
-                                                    CmpKind::SLt
-                                                    | CmpKind::ULt
-                                                    | CmpKind::Ne => range,
-                                                    CmpKind::SLe
-                                                    | CmpKind::ULe => range + 1,
+                                                    CmpKind::SLt | CmpKind::ULt | CmpKind::Ne => {
+                                                        range
+                                                    }
+                                                    CmpKind::SLe | CmpKind::ULe => range + 1,
                                                     _ => range,
                                                 };
                                                 if trip > 0 && trip < 1_000_000 {
@@ -2364,11 +2344,7 @@ fn rewrite_terminator_targets(
 /// Rewrite any branch target in a terminator that matches `old_target`
 /// to `new_target`. Used to redirect the pre-header edge to the first
 /// unrolled copy.
-fn rewrite_terminator_to_target(
-    terminator: &mut IRTerminator,
-    old_target: &str,
-    new_target: &str,
-) {
+fn rewrite_terminator_to_target(terminator: &mut IRTerminator, old_target: &str, new_target: &str) {
     match terminator {
         IRTerminator::Jump(target) if target == old_target => {
             *target = new_target.to_string();
@@ -2412,10 +2388,7 @@ mod tests {
 
     #[test]
     fn test_switch_strategy_few_targets() {
-        let targets = vec![
-            (1i64, "one".to_string()),
-            (2, "two".to_string()),
-        ];
+        let targets = vec![(1i64, "one".to_string()), (2, "two".to_string())];
         assert_eq!(
             SwitchLowerer::choose_strategy(&targets, "default"),
             SwitchStrategy::IfElseChain
@@ -2424,9 +2397,7 @@ mod tests {
 
     #[test]
     fn test_switch_strategy_dense() {
-        let targets: Vec<(i64, String)> = (0..20)
-            .map(|i| (i, format!("case_{}", i)))
-            .collect();
+        let targets: Vec<(i64, String)> = (0..20).map(|i| (i, format!("case_{}", i))).collect();
         assert_eq!(
             SwitchLowerer::choose_strategy(&targets, "default"),
             SwitchStrategy::JumpTable
@@ -2453,9 +2424,7 @@ mod tests {
     #[test]
     fn test_is_dense_range() {
         // Dense: 0..10
-        let dense: Vec<(i64, String)> = (0..10)
-            .map(|i| (i, format!("c{}", i)))
-            .collect();
+        let dense: Vec<(i64, String)> = (0..10).map(|i| (i, format!("c{}", i))).collect();
         assert!(SwitchLowerer::is_dense_range(&dense));
 
         // Sparse: 0, 100, 200
@@ -2491,7 +2460,11 @@ mod tests {
         // First block should compare against value 1.
         assert!(matches!(
             &blocks[0].instructions[0],
-            IRInstr::Cmp { kind: CmpKind::Eq, rhs: IRValue::Immediate(1), .. }
+            IRInstr::Cmp {
+                kind: CmpKind::Eq,
+                rhs: IRValue::Immediate(1),
+                ..
+            }
         ));
     }
 
@@ -2524,7 +2497,10 @@ mod tests {
         let first_instr = &blocks[0].instructions[0];
         assert!(matches!(
             first_instr,
-            IRInstr::Cmp { kind: CmpKind::SLt, .. }
+            IRInstr::Cmp {
+                kind: CmpKind::SLt,
+                ..
+            }
         ));
     }
 

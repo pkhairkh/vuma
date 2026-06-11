@@ -229,7 +229,10 @@ impl SpeculativeOptimizer {
             }
         }
         if deopt_count > 0 {
-            log::info!("SpeculativeOptimizer: {} deoptimizations triggered", deopt_count);
+            log::info!(
+                "SpeculativeOptimizer: {} deoptimizations triggered",
+                deopt_count
+            );
         }
         deopt_count
     }
@@ -439,10 +442,9 @@ impl BranchPredictionTable {
             // IDs would come from the graph structure.
             let edge_id = node_id as EdgeId;
             let probability = count as f64 / total_calls as f64;
-            table.predictions.insert(
-                edge_id,
-                BranchPrediction::new(edge_id, probability, count),
-            );
+            table
+                .predictions
+                .insert(edge_id, BranchPrediction::new(edge_id, probability, count));
         }
 
         table
@@ -461,7 +463,11 @@ impl BranchPredictionTable {
     /// Returns all predictions sorted by probability (descending).
     pub fn sorted_by_probability(&self) -> Vec<&BranchPrediction> {
         let mut preds: Vec<&BranchPrediction> = self.predictions.values().collect();
-        preds.sort_by(|a, b| b.probability.partial_cmp(&a.probability).unwrap_or(std::cmp::Ordering::Equal));
+        preds.sort_by(|a, b| {
+            b.probability
+                .partial_cmp(&a.probability)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         preds
     }
 
@@ -544,11 +550,7 @@ impl SpeculativeInlining {
     ///
     /// A call site is considered inlineable when one target accounts for
     /// more than `threshold` fraction of all calls at that site.
-    pub fn analyze(
-        &mut self,
-        profile: &ProfileData,
-        threshold: f64,
-    ) -> Vec<InlineDecision> {
+    pub fn analyze(&mut self, profile: &ProfileData, threshold: f64) -> Vec<InlineDecision> {
         self.decisions.clear();
 
         // For each node with high call count, check if it's a dominant
@@ -709,10 +711,11 @@ impl SpeculativeCodeMotion {
         fallback: CompiledRegion,
     ) -> SpeculativeOpt {
         let assumption = match &decision.kind {
-            CodeMotionKind::HoistInvariant { node, .. } => {
-                Assumption::HotPath(vec![*node])
-            }
-            CodeMotionKind::SinkColdCode { node: _, source_region } => {
+            CodeMotionKind::HoistInvariant { node, .. } => Assumption::HotPath(vec![*node]),
+            CodeMotionKind::SinkColdCode {
+                node: _,
+                source_region,
+            } => {
                 // Sinking cold code is valid as long as the source region
                 // remains hot — i.e. the node is genuinely cold.
                 Assumption::NoContention(*source_region)
@@ -747,7 +750,11 @@ struct Snapshot {
 
 impl Snapshot {
     /// Creates a snapshot of the given regions.
-    fn from_regions(regions: &[(RegionId, CompiledRegion)], node_count: usize, edge_count: usize) -> Self {
+    fn from_regions(
+        regions: &[(RegionId, CompiledRegion)],
+        node_count: usize,
+        edge_count: usize,
+    ) -> Self {
         Snapshot {
             regions: regions.iter().cloned().collect(),
             scg_node_count: node_count,
@@ -931,12 +938,12 @@ impl SpeculativeExecutor {
         );
         self.snapshots.insert(candidate_id, snapshot);
 
-        let opt = self.inliner.apply_inline(decision, optimized_code, fallback);
+        let opt = self
+            .inliner
+            .apply_inline(decision, optimized_code, fallback);
         self.active_opts.insert(candidate_id, opt);
 
-        let result = SpeculationResult::Success {
-            candidate_id,
-        };
+        let result = SpeculationResult::Success { candidate_id };
         self.results.push(result.clone());
         result
     }
@@ -962,12 +969,12 @@ impl SpeculativeExecutor {
         );
         self.snapshots.insert(candidate_id, snapshot);
 
-        let opt = self.code_motion.apply_motion(decision, optimized_code, fallback);
+        let opt = self
+            .code_motion
+            .apply_motion(decision, optimized_code, fallback);
         self.active_opts.insert(candidate_id, opt);
 
-        let result = SpeculationResult::Success {
-            candidate_id,
-        };
+        let result = SpeculationResult::Success { candidate_id };
         self.results.push(result.clone());
         result
     }
@@ -1093,11 +1100,7 @@ impl SpeculativeExecutor {
 
     /// Returns the next candidate ID (one past the highest existing ID).
     fn next_candidate_id(&self) -> u64 {
-        self.active_opts
-            .keys()
-            .max()
-            .map(|&id| id + 1)
-            .unwrap_or(0)
+        self.active_opts.keys().max().map(|&id| id + 1).unwrap_or(0)
     }
 }
 
@@ -1214,12 +1217,7 @@ mod tests {
 
     #[test]
     fn speculation_candidate_meets_threshold() {
-        let candidate = SpeculationCandidate::new(
-            1,
-            CandidateKind::LikelyBranch(42),
-            0.85,
-            100,
-        );
+        let candidate = SpeculationCandidate::new(1, CandidateKind::LikelyBranch(42), 0.85, 100);
         assert!(candidate.meets_threshold(0.7));
         assert!(!candidate.meets_threshold(0.9));
     }
@@ -1299,8 +1297,12 @@ mod tests {
 
         // Node 1 is hot (1000/avg ≈ 3.3x → hoist invariant).
         // Node 3 is cold (5/avg ≈ 0.017x → sink cold code).
-        assert!(decisions.iter().any(|d| matches!(d.kind, CodeMotionKind::HoistInvariant { node: 1, .. })));
-        assert!(decisions.iter().any(|d| matches!(d.kind, CodeMotionKind::SinkColdCode { node: 3, .. })));
+        assert!(decisions
+            .iter()
+            .any(|d| matches!(d.kind, CodeMotionKind::HoistInvariant { node: 1, .. })));
+        assert!(decisions
+            .iter()
+            .any(|d| matches!(d.kind, CodeMotionKind::SinkColdCode { node: 3, .. })));
     }
 
     #[test]
@@ -1308,12 +1310,7 @@ mod tests {
         let mut executor = SpeculativeExecutor::new();
         executor.set_scg_dimensions(100, 200);
 
-        let candidate = SpeculationCandidate::new(
-            0,
-            CandidateKind::LikelyBranch(42),
-            0.9,
-            500,
-        );
+        let candidate = SpeculationCandidate::new(0, CandidateKind::LikelyBranch(42), 0.9, 500);
 
         // Apply the speculation.
         let result = executor.apply_speculation(&candidate, stub_region(500), stub_region(501));
@@ -1333,12 +1330,7 @@ mod tests {
     fn speculative_executor_preserves_valid_on_correct_branch() {
         let mut executor = SpeculativeExecutor::new();
 
-        let candidate = SpeculationCandidate::new(
-            0,
-            CandidateKind::LikelyBranch(42),
-            0.9,
-            500,
-        );
+        let candidate = SpeculationCandidate::new(0, CandidateKind::LikelyBranch(42), 0.9, 500);
 
         executor.apply_speculation(&candidate, stub_region(500), stub_region(501));
         assert_eq!(executor.active_count(), 1);
@@ -1358,7 +1350,9 @@ mod tests {
         let candidates = executor.identify_candidates(&profile);
         // Node 1 dominates; should produce at least one candidate.
         assert!(!candidates.is_empty());
-        assert!(candidates.iter().any(|c| matches!(c.kind, CandidateKind::LikelyBranch(1))));
+        assert!(candidates
+            .iter()
+            .any(|c| matches!(c.kind, CandidateKind::LikelyBranch(1))));
     }
 
     #[test]
@@ -1388,11 +1382,8 @@ mod tests {
                 CodeMotionKind::HoistInvariant { source_region, .. } => *source_region,
                 CodeMotionKind::SinkColdCode { source_region, .. } => *source_region,
             };
-            let motion_result = executor.apply_code_motion(
-                motion,
-                stub_region(region),
-                stub_region(region + 2000),
-            );
+            let motion_result =
+                executor.apply_code_motion(motion, stub_region(region), stub_region(region + 2000));
             assert!(motion_result.is_success());
         }
 
@@ -1416,12 +1407,7 @@ mod tests {
     fn rollback_restores_snapshot_data() {
         let mut executor = SpeculativeExecutor::new();
 
-        let candidate = SpeculationCandidate::new(
-            0,
-            CandidateKind::LikelyBranch(7),
-            0.95,
-            300,
-        );
+        let candidate = SpeculationCandidate::new(0, CandidateKind::LikelyBranch(7), 0.95, 300);
 
         // Apply speculation — snapshot captures fallback region 301.
         executor.apply_speculation(&candidate, stub_region(300), stub_region(301));
@@ -1471,12 +1457,7 @@ mod tests {
         assert!(!executor.is_active(&config));
 
         // Add an opt.
-        let candidate = SpeculationCandidate::new(
-            0,
-            CandidateKind::LikelyBranch(1),
-            0.9,
-            10,
-        );
+        let candidate = SpeculationCandidate::new(0, CandidateKind::LikelyBranch(1), 0.9, 10);
         executor.apply_speculation(&candidate, stub_region(10), stub_region(11));
         assert!(executor.is_active(&config));
 

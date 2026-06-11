@@ -209,15 +209,7 @@ impl Gpr {
     pub fn is_callee_saved(&self) -> bool {
         matches!(
             self,
-            Gpr::S0
-                | Gpr::S1
-                | Gpr::S2
-                | Gpr::S3
-                | Gpr::S4
-                | Gpr::S5
-                | Gpr::S6
-                | Gpr::S7
-                | Gpr::Fp
+            Gpr::S0 | Gpr::S1 | Gpr::S2 | Gpr::S3 | Gpr::S4 | Gpr::S5 | Gpr::S6 | Gpr::S7 | Gpr::Fp
         )
     }
 
@@ -353,14 +345,7 @@ impl Fpr {
     pub fn is_arg_reg(&self) -> bool {
         matches!(
             self,
-            Fpr::F12
-                | Fpr::F13
-                | Fpr::F14
-                | Fpr::F15
-                | Fpr::F16
-                | Fpr::F17
-                | Fpr::F18
-                | Fpr::F19
+            Fpr::F12 | Fpr::F13 | Fpr::F14 | Fpr::F15 | Fpr::F16 | Fpr::F17 | Fpr::F18 | Fpr::F19
         )
     }
 
@@ -451,8 +436,7 @@ fn encode_r_type(opcode: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) ->
 ///
 /// Format: `opcode[31:26] | rs[25:21] | rt[20:16] | imm[15:0]`
 fn encode_i_type(opcode: u32, rs: u32, rt: u32, imm: u32) -> [u8; 4] {
-    let word =
-        ((opcode & 0x3F) << 26) | ((rs & 0x1F) << 21) | ((rt & 0x1F) << 16) | (imm & 0xFFFF);
+    let word = ((opcode & 0x3F) << 26) | ((rs & 0x1F) << 21) | ((rt & 0x1F) << 16) | (imm & 0xFFFF);
     word.to_be_bytes()
 }
 
@@ -689,62 +673,142 @@ impl Instruction {
     pub fn encode(&self) -> [u8; 4] {
         match self {
             // ── R-type: Arithmetic (32-bit) ────────────────────────────
-            Instruction::Add { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_ADD)
-            }
-            Instruction::Addu { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_ADDU)
-            }
-            Instruction::Sub { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SUB)
-            }
-            Instruction::Subu { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SUBU)
-            }
+            Instruction::Add { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_ADD,
+            ),
+            Instruction::Addu { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_ADDU,
+            ),
+            Instruction::Sub { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SUB,
+            ),
+            Instruction::Subu { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SUBU,
+            ),
 
             // ── R-type: Logical ────────────────────────────────────────
-            Instruction::And { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_AND)
-            }
-            Instruction::Or { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_OR)
-            }
-            Instruction::Xor { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_XOR)
-            }
-            Instruction::Nor { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_NOR)
-            }
+            Instruction::And { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_AND,
+            ),
+            Instruction::Or { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_OR,
+            ),
+            Instruction::Xor { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_XOR,
+            ),
+            Instruction::Nor { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_NOR,
+            ),
 
             // ── R-type: Set on Less Than ───────────────────────────────
-            Instruction::Slt { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SLT)
-            }
-            Instruction::Sltu { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SLTU)
-            }
+            Instruction::Slt { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SLT,
+            ),
+            Instruction::Sltu { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SLTU,
+            ),
 
             // ── R-type: Shift (immediate sa) ───────────────────────────
-            Instruction::Sll { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_SLL)
-            }
-            Instruction::Srl { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_SRL)
-            }
-            Instruction::Sra { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_SRA)
-            }
+            Instruction::Sll { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_SLL,
+            ),
+            Instruction::Srl { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_SRL,
+            ),
+            Instruction::Sra { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_SRA,
+            ),
 
             // ── R-type: Shift (variable) ───────────────────────────────
-            Instruction::Sllv { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SLLV)
-            }
-            Instruction::Srlv { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SRLV)
-            }
-            Instruction::Srav { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_SRAV)
-            }
+            Instruction::Sllv { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SLLV,
+            ),
+            Instruction::Srlv { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SRLV,
+            ),
+            Instruction::Srav { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_SRAV,
+            ),
 
             // ── R-type: Multiply/Divide (32-bit) ───────────────────────
             Instruction::Mult { rs, rt } => {
@@ -761,48 +825,94 @@ impl Instruction {
             }
 
             // ── R-type: Move from HI/LO ────────────────────────────────
-            Instruction::Mfhi { rd } => {
-                encode_r_type(OPC_SPECIAL, 0, 0, rd.encoding(), 0, FN_MFHI)
-            }
-            Instruction::Mflo { rd } => {
-                encode_r_type(OPC_SPECIAL, 0, 0, rd.encoding(), 0, FN_MFLO)
-            }
+            Instruction::Mfhi { rd } => encode_r_type(OPC_SPECIAL, 0, 0, rd.encoding(), 0, FN_MFHI),
+            Instruction::Mflo { rd } => encode_r_type(OPC_SPECIAL, 0, 0, rd.encoding(), 0, FN_MFLO),
 
             // ── R-type: Arithmetic (64-bit) ────────────────────────────
-            Instruction::Dadd { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DADD)
-            }
-            Instruction::Dsub { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DSUB)
-            }
-            Instruction::Daddu { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DADDU)
-            }
-            Instruction::Dsubu { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DSUBU)
-            }
+            Instruction::Dadd { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DADD,
+            ),
+            Instruction::Dsub { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DSUB,
+            ),
+            Instruction::Daddu { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DADDU,
+            ),
+            Instruction::Dsubu { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DSUBU,
+            ),
 
             // ── R-type: Shift (64-bit, immediate sa) ───────────────────
-            Instruction::Dsll { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_DSLL)
-            }
-            Instruction::Dsrl { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_DSRL)
-            }
-            Instruction::Dsra { rd, rt, sa } => {
-                encode_r_type(OPC_SPECIAL, 0, rt.encoding(), rd.encoding(), *sa & 0x1F, FN_DSRA)
-            }
+            Instruction::Dsll { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_DSLL,
+            ),
+            Instruction::Dsrl { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_DSRL,
+            ),
+            Instruction::Dsra { rd, rt, sa } => encode_r_type(
+                OPC_SPECIAL,
+                0,
+                rt.encoding(),
+                rd.encoding(),
+                *sa & 0x1F,
+                FN_DSRA,
+            ),
 
             // ── R-type: Shift (64-bit, variable) ──────────────────────
-            Instruction::Dsllv { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DSLLV)
-            }
-            Instruction::Dsrlv { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DSRLV)
-            }
-            Instruction::Dsrav { rd, rt, rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_DSRAV)
-            }
+            Instruction::Dsllv { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DSLLV,
+            ),
+            Instruction::Dsrlv { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DSRLV,
+            ),
+            Instruction::Dsrav { rd, rt, rs } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_DSRAV,
+            ),
 
             // ── R-type: Multiply/Divide (64-bit) ──────────────────────
             Instruction::Dmult { rs, rt } => {
@@ -819,17 +929,25 @@ impl Instruction {
             }
 
             // ── R-type: Conditional Move ───────────────────────────────
-            Instruction::Movz { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_MOVZ)
-            }
-            Instruction::Movn { rd, rs, rt } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), rt.encoding(), rd.encoding(), 0, FN_MOVN)
-            }
+            Instruction::Movz { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_MOVZ,
+            ),
+            Instruction::Movn { rd, rs, rt } => encode_r_type(
+                OPC_SPECIAL,
+                rs.encoding(),
+                rt.encoding(),
+                rd.encoding(),
+                0,
+                FN_MOVN,
+            ),
 
             // ── R-type: Jump Register ──────────────────────────────────
-            Instruction::Jr { rs } => {
-                encode_r_type(OPC_SPECIAL, rs.encoding(), 0, 0, 0, FN_JR)
-            }
+            Instruction::Jr { rs } => encode_r_type(OPC_SPECIAL, rs.encoding(), 0, 0, 0, FN_JR),
             Instruction::Jalr { rd, rs } => {
                 encode_r_type(OPC_SPECIAL, rs.encoding(), 0, rd.encoding(), 0, FN_JALR)
             }
@@ -847,12 +965,18 @@ impl Instruction {
             }
 
             // ── I-type: Immediate Arithmetic (32-bit) ─────────────────
-            Instruction::Addi { rt, rs, imm } => {
-                encode_i_type(OPC_ADDI, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
-            Instruction::Addiu { rt, rs, imm } => {
-                encode_i_type(OPC_ADDIU, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
+            Instruction::Addi { rt, rs, imm } => encode_i_type(
+                OPC_ADDI,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
+            Instruction::Addiu { rt, rs, imm } => encode_i_type(
+                OPC_ADDIU,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
 
             // ── I-type: Immediate Logical ──────────────────────────────
             Instruction::Andi { rt, rs, imm } => {
@@ -866,25 +990,35 @@ impl Instruction {
             }
 
             // ── I-type: Set on Less Than Immediate ─────────────────────
-            Instruction::Slti { rt, rs, imm } => {
-                encode_i_type(OPC_SLTI, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
-            Instruction::Sltiu { rt, rs, imm } => {
-                encode_i_type(OPC_SLTIU, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
+            Instruction::Slti { rt, rs, imm } => encode_i_type(
+                OPC_SLTI,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
+            Instruction::Sltiu { rt, rs, imm } => encode_i_type(
+                OPC_SLTIU,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
 
             // ── I-type: Upper Immediate ────────────────────────────────
-            Instruction::Lui { rt, imm } => {
-                encode_i_type(OPC_LUI, 0, rt.encoding(), *imm & 0xFFFF)
-            }
+            Instruction::Lui { rt, imm } => encode_i_type(OPC_LUI, 0, rt.encoding(), *imm & 0xFFFF),
 
             // ── I-type: Immediate Arithmetic (64-bit) ─────────────────
-            Instruction::Daddi { rt, rs, imm } => {
-                encode_i_type(OPC_DADDI, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
-            Instruction::Daddiu { rt, rs, imm } => {
-                encode_i_type(OPC_DADDIU, rs.encoding(), rt.encoding(), (*imm as u32) & 0xFFFF)
-            }
+            Instruction::Daddi { rt, rs, imm } => encode_i_type(
+                OPC_DADDI,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
+            Instruction::Daddiu { rt, rs, imm } => encode_i_type(
+                OPC_DADDIU,
+                rs.encoding(),
+                rt.encoding(),
+                (*imm as u32) & 0xFFFF,
+            ),
 
             // ── I-type: Branch ─────────────────────────────────────────
             Instruction::Beq { rs, rt, offset } => {
@@ -906,55 +1040,100 @@ impl Instruction {
             }
 
             // ── I-type: Load ───────────────────────────────────────────
-            Instruction::Lb { rt, base, offset } => {
-                encode_i_type(OPC_LB, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Lh { rt, base, offset } => {
-                encode_i_type(OPC_LH, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Lw { rt, base, offset } => {
-                encode_i_type(OPC_LW, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Ld { rt, base, offset } => {
-                encode_i_type(OPC_LD, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Lbu { rt, base, offset } => {
-                encode_i_type(OPC_LBU, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Lhu { rt, base, offset } => {
-                encode_i_type(OPC_LHU, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Lwu { rt, base, offset } => {
-                encode_i_type(OPC_LWU, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
+            Instruction::Lb { rt, base, offset } => encode_i_type(
+                OPC_LB,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lh { rt, base, offset } => encode_i_type(
+                OPC_LH,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lw { rt, base, offset } => encode_i_type(
+                OPC_LW,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Ld { rt, base, offset } => encode_i_type(
+                OPC_LD,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lbu { rt, base, offset } => encode_i_type(
+                OPC_LBU,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lhu { rt, base, offset } => encode_i_type(
+                OPC_LHU,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lwu { rt, base, offset } => encode_i_type(
+                OPC_LWU,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
 
             // ── I-type: Store ──────────────────────────────────────────
-            Instruction::Sb { rt, base, offset } => {
-                encode_i_type(OPC_SB, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Sh { rt, base, offset } => {
-                encode_i_type(OPC_SH, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Sw { rt, base, offset } => {
-                encode_i_type(OPC_SW, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Sd { rt, base, offset } => {
-                encode_i_type(OPC_SD, base.encoding(), rt.encoding(), (*offset as u32) & 0xFFFF)
-            }
+            Instruction::Sb { rt, base, offset } => encode_i_type(
+                OPC_SB,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Sh { rt, base, offset } => encode_i_type(
+                OPC_SH,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Sw { rt, base, offset } => encode_i_type(
+                OPC_SW,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Sd { rt, base, offset } => encode_i_type(
+                OPC_SD,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
 
             // ── I-type: FP Load/Store ──────────────────────────────────
-            Instruction::Lwc1 { ft, base, offset } => {
-                encode_i_type(OPC_LWC1, base.encoding(), ft.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Swc1 { ft, base, offset } => {
-                encode_i_type(OPC_SWC1, base.encoding(), ft.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Ldc1 { ft, base, offset } => {
-                encode_i_type(OPC_LDC1, base.encoding(), ft.encoding(), (*offset as u32) & 0xFFFF)
-            }
-            Instruction::Sdc1 { ft, base, offset } => {
-                encode_i_type(OPC_SDC1, base.encoding(), ft.encoding(), (*offset as u32) & 0xFFFF)
-            }
+            Instruction::Lwc1 { ft, base, offset } => encode_i_type(
+                OPC_LWC1,
+                base.encoding(),
+                ft.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Swc1 { ft, base, offset } => encode_i_type(
+                OPC_SWC1,
+                base.encoding(),
+                ft.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Ldc1 { ft, base, offset } => encode_i_type(
+                OPC_LDC1,
+                base.encoding(),
+                ft.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Sdc1 { ft, base, offset } => encode_i_type(
+                OPC_SDC1,
+                base.encoding(),
+                ft.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
 
             // ── J-type: Jump ───────────────────────────────────────────
             Instruction::J { target } => encode_j_type(OPC_J, *target),
@@ -1135,10 +1314,18 @@ impl fmt::Display for Instruction {
             Instruction::Sh { rt, base, offset } => write!(f, "sh {}, {}({})", rt, offset, base),
             Instruction::Sw { rt, base, offset } => write!(f, "sw {}, {}({})", rt, offset, base),
             Instruction::Sd { rt, base, offset } => write!(f, "sd {}, {}({})", rt, offset, base),
-            Instruction::Lwc1 { ft, base, offset } => write!(f, "lwc1 {}, {}({})", ft, offset, base),
-            Instruction::Swc1 { ft, base, offset } => write!(f, "swc1 {}, {}({})", ft, offset, base),
-            Instruction::Ldc1 { ft, base, offset } => write!(f, "ldc1 {}, {}({})", ft, offset, base),
-            Instruction::Sdc1 { ft, base, offset } => write!(f, "sdc1 {}, {}({})", ft, offset, base),
+            Instruction::Lwc1 { ft, base, offset } => {
+                write!(f, "lwc1 {}, {}({})", ft, offset, base)
+            }
+            Instruction::Swc1 { ft, base, offset } => {
+                write!(f, "swc1 {}, {}({})", ft, offset, base)
+            }
+            Instruction::Ldc1 { ft, base, offset } => {
+                write!(f, "ldc1 {}, {}({})", ft, offset, base)
+            }
+            Instruction::Sdc1 { ft, base, offset } => {
+                write!(f, "sdc1 {}, {}({})", ft, offset, base)
+            }
             Instruction::J { target } => write!(f, "j 0x{:08x}", target),
             Instruction::Jal { target } => write!(f, "jal 0x{:08x}", target),
             Instruction::Nop => write!(f, "nop"),
@@ -1181,9 +1368,9 @@ fn build_minimal_mips64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
-    // e_flags: MIPS flags — MIPS64 N64 ABI.
-    // EF_MIPS_ARCH_64 = 0x6000 (MIPS64 ISA)
-    // EF_MIPS_ABI_O64 = 0x00002000 (O64 ABI — closest to N64 in ELF flags)
+                                                // e_flags: MIPS flags — MIPS64 N64 ABI.
+                                                // EF_MIPS_ARCH_64 = 0x6000 (MIPS64 ISA)
+                                                // EF_MIPS_ABI_O64 = 0x00002000 (O64 ABI — closest to N64 in ELF flags)
     elf.extend_from_slice(&0x8000u32.to_be_bytes()); // e_flags (MIPS64)
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
@@ -1651,11 +1838,7 @@ fn lower_binop(
     // mul/div write to HI/LO, then we need mflo (and possibly mfhi for rem)
     if matches!(
         op,
-        BinOpKind::Mul
-            | BinOpKind::SDiv
-            | BinOpKind::UDiv
-            | BinOpKind::SRem
-            | BinOpKind::URem
+        BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
     ) {
         result.push(AllocatedInstruction {
             opcode: mips_inst.mnemonic().to_string(),
@@ -1711,12 +1894,7 @@ fn lower_ir_instr(
     let mut result = Vec::new();
 
     match instr {
-        IRInstr::BinOp {
-            op,
-            dst,
-            lhs,
-            rhs,
-        } => {
+        IRInstr::BinOp { op, dst, lhs, rhs } => {
             result.extend(lower_binop(op, dst, lhs, rhs, vreg_map));
         }
 
@@ -2043,7 +2221,12 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Cmp { kind, dst, lhs, rhs } => {
+        IRInstr::Cmp {
+            kind,
+            dst,
+            lhs,
+            rhs,
+        } => {
             let _dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let _lhs_reg = map_vreg_to_gpr(vreg_id(lhs), None, vreg_map);
             let _rhs_reg = map_vreg_to_gpr(vreg_id(rhs), None, vreg_map);
@@ -2067,7 +2250,11 @@ fn lower_ir_instr(
             let src_reg = map_vreg_to_gpr(vreg_id(operand), None, vreg_map);
             match op {
                 UnaryOpKind::Neg => {
-                    let neg = Instruction::Dsubu { rd: dst_reg, rs: Gpr::Zero, rt: src_reg };
+                    let neg = Instruction::Dsubu {
+                        rd: dst_reg,
+                        rs: Gpr::Zero,
+                        rt: src_reg,
+                    };
                     result.push(AllocatedInstruction {
                         opcode: "dsubu".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
@@ -2077,7 +2264,11 @@ fn lower_ir_instr(
                 }
                 UnaryOpKind::Not => {
                     // nor dst, src, $zero → dst = ~(src | 0) = ~src
-                    let not = Instruction::Nor { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                    let not = Instruction::Nor {
+                        rd: dst_reg,
+                        rs: src_reg,
+                        rt: Gpr::Zero,
+                    };
                     result.push(AllocatedInstruction {
                         opcode: "nor".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
@@ -2086,7 +2277,11 @@ fn lower_ir_instr(
                     });
                 }
                 UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                    let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                    let mov = Instruction::Daddu {
+                        rd: dst_reg,
+                        rs: src_reg,
+                        rt: Gpr::Zero,
+                    };
                     result.push(AllocatedInstruction {
                         opcode: "daddu".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
@@ -2102,7 +2297,11 @@ fn lower_ir_instr(
                 if let Some(arg_reg) = Gpr::arg_register(i) {
                     let a = map_vreg_to_gpr(vreg_id(arg), None, vreg_map);
                     if a != arg_reg {
-                        let mov = Instruction::Daddu { rd: arg_reg, rs: a, rt: Gpr::Zero };
+                        let mov = Instruction::Daddu {
+                            rd: arg_reg,
+                            rs: a,
+                            rt: Gpr::Zero,
+                        };
                         result.push(AllocatedInstruction {
                             opcode: "daddu".to_string(),
                             reads: vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
@@ -2128,7 +2327,11 @@ fn lower_ir_instr(
             if let Some(d) = dst {
                 let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
                 if d_reg != Gpr::V0 {
-                    let mov = Instruction::Daddu { rd: d_reg, rs: Gpr::V0, rt: Gpr::Zero };
+                    let mov = Instruction::Daddu {
+                        rd: d_reg,
+                        rs: Gpr::V0,
+                        rt: Gpr::Zero,
+                    };
                     result.push(AllocatedInstruction {
                         opcode: "daddu".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::V0.encoding())],
@@ -2140,7 +2343,11 @@ fn lower_ir_instr(
         }
 
         IRInstr::Branch { target: _ } => {
-            let b = Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 };
+            let b = Instruction::Beq {
+                rs: Gpr::Zero,
+                rt: Gpr::Zero,
+                offset: 0,
+            };
             result.push(AllocatedInstruction {
                 opcode: "beq".to_string(),
                 reads: vec![],
@@ -2155,9 +2362,17 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+        IRInstr::CondBranch {
+            cond,
+            true_target: _,
+            false_target: _,
+        } => {
             let c = map_vreg_to_gpr(vreg_id(cond), None, vreg_map);
-            let bnez = Instruction::Bne { rs: c, rt: Gpr::Zero, offset: 8 };
+            let bnez = Instruction::Bne {
+                rs: c,
+                rt: Gpr::Zero,
+                offset: 8,
+            };
             result.push(AllocatedInstruction {
                 opcode: "bne".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
@@ -2170,7 +2385,11 @@ fn lower_ir_instr(
                 writes: vec![],
                 encoded: encode_nop().to_vec(),
             });
-            let beq = Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 };
+            let beq = Instruction::Beq {
+                rs: Gpr::Zero,
+                rt: Gpr::Zero,
+                offset: 0,
+            };
             result.push(AllocatedInstruction {
                 opcode: "beq".to_string(),
                 reads: vec![],
@@ -2788,11 +3007,35 @@ mod tests {
 
     #[test]
     fn test_mnemonic() {
-        assert_eq!(Instruction::Daddu { rd: Gpr::V0, rs: Gpr::A0, rt: Gpr::A1 }.mnemonic(), "daddu");
-        assert_eq!(Instruction::Beq { rs: Gpr::A0, rt: Gpr::Zero, offset: 8 }.mnemonic(), "beq");
+        assert_eq!(
+            Instruction::Daddu {
+                rd: Gpr::V0,
+                rs: Gpr::A0,
+                rt: Gpr::A1
+            }
+            .mnemonic(),
+            "daddu"
+        );
+        assert_eq!(
+            Instruction::Beq {
+                rs: Gpr::A0,
+                rt: Gpr::Zero,
+                offset: 8
+            }
+            .mnemonic(),
+            "beq"
+        );
         assert_eq!(Instruction::Nop.mnemonic(), "nop");
         assert_eq!(Instruction::Syscall { code: 0 }.mnemonic(), "syscall");
-        assert_eq!(Instruction::Dsll { rd: Gpr::T9, rt: Gpr::T9, sa: 16 }.mnemonic(), "dsll");
+        assert_eq!(
+            Instruction::Dsll {
+                rd: Gpr::T9,
+                rt: Gpr::T9,
+                sa: 16
+            }
+            .mnemonic(),
+            "dsll"
+        );
     }
 
     #[test]
@@ -2847,7 +3090,12 @@ mod tests {
         );
         // The alloc daddiu should not be a NOP (0x00000000)
         let alloc_encoded = &alloc_instrs[1].encoded;
-        let word = u32::from_be_bytes([alloc_encoded[0], alloc_encoded[1], alloc_encoded[2], alloc_encoded[3]]);
+        let word = u32::from_be_bytes([
+            alloc_encoded[0],
+            alloc_encoded[1],
+            alloc_encoded[2],
+            alloc_encoded[3],
+        ]);
         assert_ne!(word, 0, "alloc daddiu should not encode as NOP");
     }
 
@@ -2863,7 +3111,10 @@ mod tests {
         let word = u32::from_be_bytes(encoded);
         // dsubu is R-type: opcode=0, rs=$zero(0), rt=$a0(4), rd=$v0(2), sa=0, funct=0x2F
         let expected: u32 = (0 << 26) | (0 << 21) | (4 << 16) | (2 << 11) | (0 << 6) | 0x2F;
-        assert_eq!(word, expected, "neg (dsubu dst, $zero, src) encoding mismatch");
+        assert_eq!(
+            word, expected,
+            "neg (dsubu dst, $zero, src) encoding mismatch"
+        );
     }
 
     #[test]
@@ -2878,7 +3129,10 @@ mod tests {
         let word = u32::from_be_bytes(encoded);
         // nor is R-type: opcode=0, rs=$a0(4), rt=$zero(0), rd=$v0(2), sa=0, funct=0x27
         let expected: u32 = (0 << 26) | (4 << 21) | (0 << 16) | (2 << 11) | (0 << 6) | 0x27;
-        assert_eq!(word, expected, "not (nor dst, src, $zero) encoding mismatch");
+        assert_eq!(
+            word, expected,
+            "not (nor dst, src, $zero) encoding mismatch"
+        );
     }
 
     // ── ISel integration tests ─────────────────────────────────────────
@@ -2908,25 +3162,34 @@ mod tests {
 
     #[test]
     fn test_isel_add_emits_daddu() {
-        let result = isel_func("add_test", vec![IRInstr::Add {
-            dst: IRValue::Register(0),
-            lhs: IRValue::Register(1),
-            rhs: IRValue::Register(2),
-        }]);
+        let result = isel_func(
+            "add_test",
+            vec![IRInstr::Add {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+            }],
+        );
         // Skip prologue (2 instructions: daddiu + sd), look for daddu
         let instrs = &result.blocks[0].instructions;
         // Find a daddu instruction (opcode field starts with "daddu")
         let daddu_count = instrs.iter().filter(|i| i.opcode == "daddu").count();
-        assert!(daddu_count >= 1, "expected at least one daddu, found {daddu_count}");
+        assert!(
+            daddu_count >= 1,
+            "expected at least one daddu, found {daddu_count}"
+        );
     }
 
     #[test]
     fn test_isel_mul_emits_dmult_mflo() {
-        let result = isel_func("mul_test", vec![IRInstr::Mul {
-            dst: IRValue::Register(0),
-            lhs: IRValue::Register(1),
-            rhs: IRValue::Register(2),
-        }]);
+        let result = isel_func(
+            "mul_test",
+            vec![IRInstr::Mul {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         let has_dmult = instrs.iter().any(|i| i.opcode == "dmult");
         let has_mflo = instrs.iter().any(|i| i.opcode == "mflo");
@@ -2936,12 +3199,19 @@ mod tests {
 
     #[test]
     fn test_isel_ret_emits_epilogue() {
-        let result = isel_func("ret_test", vec![IRInstr::Ret {
-            values: vec![IRValue::Register(0)],
-        }]);
+        let result = isel_func(
+            "ret_test",
+            vec![IRInstr::Ret {
+                values: vec![IRValue::Register(0)],
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         // With a frame, Ret should emit: ld $ra, ...; daddiu $sp, ...; jr $ra; nop
-        let has_ld_ra = instrs.iter().any(|i| i.opcode == "ld" && i.reads.contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())));
+        let has_ld_ra = instrs.iter().any(|i| {
+            i.opcode == "ld"
+                && i.reads
+                    .contains(&PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()))
+        });
         let has_jr = instrs.iter().any(|i| i.opcode == "jr");
         let has_nop = instrs.iter().any(|i| i.opcode == "nop");
         assert!(has_ld_ra, "expected ld to restore $ra in epilogue");
@@ -2951,12 +3221,15 @@ mod tests {
 
     #[test]
     fn test_isel_binop_and_emits_and() {
-        let result = isel_func("and_test", vec![IRInstr::BinOp {
-            op: BinOpKind::And,
-            dst: IRValue::Register(0),
-            lhs: IRValue::Register(1),
-            rhs: IRValue::Register(2),
-        }]);
+        let result = isel_func(
+            "and_test",
+            vec![IRInstr::BinOp {
+                op: BinOpKind::And,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         let has_and = instrs.iter().any(|i| i.opcode == "and");
         assert!(has_and, "expected and instruction for BinOp::And");
@@ -2964,22 +3237,31 @@ mod tests {
 
     #[test]
     fn test_isel_free_emits_break() {
-        let result = isel_func("free_test", vec![IRInstr::Free {
-            ptr: IRValue::Register(0),
-        }]);
+        let result = isel_func(
+            "free_test",
+            vec![IRInstr::Free {
+                ptr: IRValue::Register(0),
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         let has_break = instrs.iter().any(|i| i.opcode == "break");
-        assert!(has_break, "expected break instruction for Free (runtime trap)");
+        assert!(
+            has_break,
+            "expected break instruction for Free (runtime trap)"
+        );
     }
 
     #[test]
     fn test_isel_cmp_eq_emits_xor_sltiu() {
-        let result = isel_func("cmp_eq_test", vec![IRInstr::Cmp {
-            kind: CmpKind::Eq,
-            dst: IRValue::Register(0),
-            lhs: IRValue::Register(1),
-            rhs: IRValue::Register(2),
-        }]);
+        let result = isel_func(
+            "cmp_eq_test",
+            vec![IRInstr::Cmp {
+                kind: CmpKind::Eq,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         let has_xor = instrs.iter().any(|i| i.opcode == "xor");
         let has_sltiu = instrs.iter().any(|i| i.opcode == "sltiu");
@@ -2989,10 +3271,19 @@ mod tests {
 
     #[test]
     fn test_isel_load_store_roundtrip() {
-        let result = isel_func("ld_sd_test", vec![
-            IRInstr::Load { dst: IRValue::Register(0), addr: IRValue::Register(1) },
-            IRInstr::Store { value: IRValue::Register(0), addr: IRValue::Register(1) },
-        ]);
+        let result = isel_func(
+            "ld_sd_test",
+            vec![
+                IRInstr::Load {
+                    dst: IRValue::Register(0),
+                    addr: IRValue::Register(1),
+                },
+                IRInstr::Store {
+                    value: IRValue::Register(0),
+                    addr: IRValue::Register(1),
+                },
+            ],
+        );
         let instrs = &result.blocks[0].instructions;
         let has_ld = instrs.iter().any(|i| i.opcode == "ld");
         let has_sd = instrs.iter().any(|i| i.opcode == "sd");
@@ -3002,14 +3293,20 @@ mod tests {
 
     #[test]
     fn test_isel_alloc_emits_daddiu_sp() {
-        let result = isel_func("alloc_test", vec![IRInstr::Alloc {
-            dst: IRValue::Register(0),
-            size: 32,
-        }]);
+        let result = isel_func(
+            "alloc_test",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 32,
+            }],
+        );
         let instrs = &result.blocks[0].instructions;
         // Alloc should emit daddiu $sp, $sp, -32 and daddu dst, $sp, $zero
         let daddiu_count = instrs.iter().filter(|i| i.opcode == "daddiu").count();
-        assert!(daddiu_count >= 2, "expected at least 2 daddiu (prologue + alloc), found {daddiu_count}");
+        assert!(
+            daddiu_count >= 2,
+            "expected at least 2 daddiu (prologue + alloc), found {daddiu_count}"
+        );
     }
 }
 pub mod disasm;

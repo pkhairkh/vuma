@@ -342,7 +342,9 @@ mod tests {
         use crate::reld::{DepKind, Relation};
         let mut trait_reld = RelD::empty();
         trait_reld.relations.insert(Relation::Liveness);
-        trait_reld.relations.insert(Relation::Dependency(DepKind::DataDep));
+        trait_reld
+            .relations
+            .insert(Relation::Dependency(DepKind::DataDep));
         let impl_bd = BD::new(byte_rep(4, 4), read_cap(), trait_reld.clone());
         let trait_bd = BD::new(byte_rep(4, 4), read_cap(), RelD::empty());
         // impl has more relations → refines trait

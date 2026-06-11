@@ -840,10 +840,8 @@ impl LiveRangeComputer {
         }
 
         // Build interval lookup.
-        let interval_map: HashMap<IRValueId, &LiveInterval> = intervals
-            .iter()
-            .map(|i| (i.vreg, i))
-            .collect();
+        let interval_map: HashMap<IRValueId, &LiveInterval> =
+            intervals.iter().map(|i| (i.vreg, i)).collect();
 
         // Try to coalesce each copy.
         for copy in copies {
@@ -1260,9 +1258,7 @@ impl LinearScanAllocator {
             .min_by(|a, b| {
                 // Compare by weight_per_length (4th element), then by end position
                 // (farthest end = less urgent).
-                a.1 .3
-                    .cmp(&b.1 .3)
-                    .then_with(|| b.1 .2.cmp(&a.1 .2))
+                a.1 .3.cmp(&b.1 .3).then_with(|| b.1 .2.cmp(&a.1 .2))
             })
             .map(|(i, _)| i)
             .unwrap();
@@ -1309,7 +1305,12 @@ impl LinearScanAllocator {
         );
 
         // Return the freed register.
-        active.push((interval.vreg, evict_reg, interval.end, interval.weight_per_length()));
+        active.push((
+            interval.vreg,
+            evict_reg,
+            interval.end,
+            interval.weight_per_length(),
+        ));
         Ok(Some(evict_reg))
     }
 
@@ -1351,12 +1352,7 @@ impl LinearScanAllocator {
             let offset = Self::spill_offset(slot_idx, RegClass::SimdFp);
             let slot = SpillSlot::new(slot_idx, offset, RegClass::SimdFp);
 
-            Self::gen_spill_reload(
-                interval,
-                PhysReg::SimdFp(SimdFpRegister::V0),
-                &slot,
-                result,
-            );
+            Self::gen_spill_reload(interval, PhysReg::SimdFp(SimdFpRegister::V0), &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -1365,11 +1361,7 @@ impl LinearScanAllocator {
         let evict_idx = active
             .iter()
             .enumerate()
-            .min_by(|a, b| {
-                a.1 .3
-                    .cmp(&b.1 .3)
-                    .then_with(|| b.1 .2.cmp(&a.1 .2))
-            })
+            .min_by(|a, b| a.1 .3.cmp(&b.1 .3).then_with(|| b.1 .2.cmp(&a.1 .2)))
             .map(|(i, _)| i)
             .unwrap();
 
@@ -1382,12 +1374,7 @@ impl LinearScanAllocator {
             let offset = Self::spill_offset(slot_idx, RegClass::SimdFp);
             let slot = SpillSlot::new(slot_idx, offset, RegClass::SimdFp);
 
-            Self::gen_spill_reload(
-                interval,
-                PhysReg::SimdFp(SimdFpRegister::V0),
-                &slot,
-                result,
-            );
+            Self::gen_spill_reload(interval, PhysReg::SimdFp(SimdFpRegister::V0), &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -1412,7 +1399,12 @@ impl LinearScanAllocator {
             result,
         );
 
-        active.push((interval.vreg, evict_reg, interval.end, interval.weight_per_length()));
+        active.push((
+            interval.vreg,
+            evict_reg,
+            interval.end,
+            interval.weight_per_length(),
+        ));
         Ok(Some(evict_reg))
     }
 
@@ -1478,7 +1470,11 @@ impl LinearScanAllocator {
                 preg,
                 slot: slot.clone(),
             };
-            result.spill_code.entry(def_pos + 1).or_default().push(spill);
+            result
+                .spill_code
+                .entry(def_pos + 1)
+                .or_default()
+                .push(spill);
         }
 
         // Generate a reload before each use.
@@ -1868,10 +1864,7 @@ impl TargetAgnosticRegAlloc {
             if !reg.is_allocatable {
                 continue;
             }
-            let preg = crate::backend::PhysicalReg::new(
-                reg.class,
-                reg.index as u32,
-            );
+            let preg = crate::backend::PhysicalReg::new(reg.class, reg.index as u32);
             match reg.class {
                 crate::backend::RegClass::Gpr => {
                     if reg.is_callee_saved {
@@ -1938,9 +1931,7 @@ impl TargetAgnosticRegAlloc {
         let (mut intervals, _call_positions) = computer.compute(func);
 
         // Sort by start position, then by end position (longer first).
-        intervals.sort_by(|a, b| {
-            a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
-        });
+        intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
         self.allocate_intervals(&intervals)
     }
@@ -1957,9 +1948,7 @@ impl TargetAgnosticRegAlloc {
         }
         let (mut intervals, _call_positions) = computer.compute(func);
 
-        intervals.sort_by(|a, b| {
-            a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
-        });
+        intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
         self.allocate_intervals(&intervals)
     }
@@ -1972,10 +1961,8 @@ impl TargetAgnosticRegAlloc {
         let mut result = RegAllocResult::new();
 
         // Active intervals: (vreg, PhysicalReg, end_pos, weight_per_length)
-        let mut active_gprs: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
-            Vec::new();
-        let mut active_fps: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
-            Vec::new();
+        let mut active_gprs: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> = Vec::new();
+        let mut active_fps: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> = Vec::new();
 
         // Free register pools.
         let mut free_caller_gprs = self.caller_saved_gprs.clone();
@@ -2044,7 +2031,8 @@ impl TargetAgnosticRegAlloc {
         active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
         next_spill_idx: &mut u32,
         result: &mut RegAllocResult,
-    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError> {
+    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError>
+    {
         // If the interval crosses a call, prefer callee-saved.
         let reg = if interval.crosses_call {
             free_callee.pop().or_else(|| free_caller.pop())
@@ -2053,12 +2041,7 @@ impl TargetAgnosticRegAlloc {
         };
 
         if let Some(r) = reg {
-            active.push((
-                interval.vreg,
-                r,
-                interval.end,
-                interval.weight_per_length(),
-            ));
+            active.push((interval.vreg, r, interval.end, interval.weight_per_length()));
             return Ok(Some(r));
         }
 
@@ -2082,7 +2065,8 @@ impl TargetAgnosticRegAlloc {
         free_callee: &mut Vec<crate::backend::PhysicalReg>,
         next_spill_idx: &mut u32,
         result: &mut RegAllocResult,
-    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError> {
+    ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError>
+    {
         if active.is_empty() {
             // Spill the current interval entirely.
             let slot_idx = *next_spill_idx;
@@ -2100,11 +2084,7 @@ impl TargetAgnosticRegAlloc {
         let evict_idx = active
             .iter()
             .enumerate()
-            .min_by(|a, b| {
-                a.1 .3
-                    .cmp(&b.1 .3)
-                    .then_with(|| b.1 .2.cmp(&a.1 .2))
-            })
+            .min_by(|a, b| a.1 .3.cmp(&b.1 .3).then_with(|| b.1 .2.cmp(&a.1 .2)))
             .map(|(i, _)| i)
             .unwrap();
 
@@ -2237,7 +2217,11 @@ impl TargetAgnosticRegAlloc {
                 preg: scratch,
                 slot: slot.clone(),
             };
-            result.spill_code.entry(def_pos + 1).or_default().push(spill);
+            result
+                .spill_code
+                .entry(def_pos + 1)
+                .or_default()
+                .push(spill);
         }
 
         for &use_pos in &interval.use_positions {
@@ -2302,7 +2286,9 @@ impl From<crate::backend::RegClass> for RegClass {
         match class {
             crate::backend::RegClass::Gpr => RegClass::Gpr,
             crate::backend::RegClass::SimdFp => RegClass::SimdFp,
-            crate::backend::RegClass::Condition | crate::backend::RegClass::Special => RegClass::Gpr,
+            crate::backend::RegClass::Condition | crate::backend::RegClass::Special => {
+                RegClass::Gpr
+            }
         }
     }
 }

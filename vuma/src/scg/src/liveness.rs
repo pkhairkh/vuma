@@ -177,8 +177,7 @@ const MAX_ITERATIONS: usize = 10_000;
 fn compute_use_set(scg: &SCG, node_id: NodeId) -> HashSet<NodeId> {
     let mut uses = HashSet::new();
     for edge in scg.edges() {
-        if edge.target == node_id
-            && matches!(edge.kind, EdgeKind::DataFlow | EdgeKind::Derivation)
+        if edge.target == node_id && matches!(edge.kind, EdgeKind::DataFlow | EdgeKind::Derivation)
         {
             uses.insert(edge.source);
         }
@@ -522,7 +521,13 @@ pub fn find_use_after_free(
                     // Find which nodes use the allocation after the deallocation.
                     // These are successors of D that have alloc_id in their live_in.
                     let mut violating_uses: HashSet<NodeId> = HashSet::new();
-                    collect_violating_uses(scg, dealloc_id, alloc_id, liveness, &mut violating_uses);
+                    collect_violating_uses(
+                        scg,
+                        dealloc_id,
+                        alloc_id,
+                        liveness,
+                        &mut violating_uses,
+                    );
 
                     violations.push(UseAfterFree {
                         allocation: alloc_id,
@@ -601,10 +606,7 @@ fn collect_violating_uses_recursive(
 ///
 /// Dead allocations are optimization hints: the allocation is unnecessary
 /// because its result is never meaningfully consumed.
-pub fn find_dead_allocations(
-    scg: &SCG,
-    _liveness: &HashMap<NodeId, LivenessInfo>,
-) -> Vec<NodeId> {
+pub fn find_dead_allocations(scg: &SCG, _liveness: &HashMap<NodeId, LivenessInfo>) -> Vec<NodeId> {
     let mut dead_allocs: Vec<NodeId> = Vec::new();
 
     for node_data in scg.nodes() {
@@ -710,7 +712,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "const".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -731,14 +735,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n3 = scg.add_node(
@@ -787,21 +795,27 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "src".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "left".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "right".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n4 = scg.add_node(
@@ -838,14 +852,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "dead".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "also_dead".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n3 = scg.add_node(
@@ -864,9 +882,18 @@ mod tests {
         let liveness = compute_liveness(&scg);
         let dead = find_dead_code(&scg, &liveness);
 
-        assert!(dead.contains(&n1), "n1 should be dead (its value feeds only dead n2)");
-        assert!(dead.contains(&n2), "n2 should be dead (its value is never used)");
-        assert!(!dead.contains(&n3), "n3 should not be dead (it has side effects)");
+        assert!(
+            dead.contains(&n1),
+            "n1 should be dead (its value feeds only dead n2)"
+        );
+        assert!(
+            dead.contains(&n2),
+            "n2 should be dead (its value is never used)"
+        );
+        assert!(
+            !dead.contains(&n3),
+            "n3 should not be dead (it has side effects)"
+        );
     }
 
     // ── Test 6: Dead code — live computation ───────────────────────────
@@ -878,7 +905,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "live_val".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -894,8 +923,14 @@ mod tests {
         let liveness = compute_liveness(&scg);
         let dead = find_dead_code(&scg, &liveness);
 
-        assert!(!dead.contains(&n1), "n1 should not be dead (it feeds an effect)");
-        assert!(dead.is_empty(), "no dead code when everything feeds an effect");
+        assert!(
+            !dead.contains(&n1),
+            "n1 should not be dead (it feeds an effect)"
+        );
+        assert!(
+            dead.is_empty(),
+            "no dead code when everything feeds an effect"
+        );
     }
 
     // ── Test 7: Allocation/deallocation with Derivation ────────────────
@@ -993,9 +1028,15 @@ mod tests {
         let liveness = compute_liveness(&scg);
         let uninit = find_uninitialized_reads(&scg, &liveness);
 
-        assert!(uninit.contains(&read1), "read1 has no reaching write or allocation");
+        assert!(
+            uninit.contains(&read1),
+            "read1 has no reaching write or allocation"
+        );
         assert!(!uninit.contains(&read2), "read2 has a reaching write");
-        assert!(uninit.contains(&read3), "read3 has no reaching write or allocation");
+        assert!(
+            uninit.contains(&read3),
+            "read3 has no reaching write or allocation"
+        );
     }
 
     // ── Test 9: Use-after-free detection ───────────────────────────────
@@ -1028,19 +1069,26 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "use".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
         scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
-        scg.add_edge(dealloc, use_after, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(dealloc, use_after, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(alloc, use_after, EdgeKind::DataFlow).unwrap();
 
         let liveness = compute_liveness(&scg);
         let violations = find_use_after_free(&scg, &liveness);
 
         // Should detect that alloc's value is used after dealloc
-        assert_eq!(violations.len(), 1, "should find one use-after-free violation");
+        assert_eq!(
+            violations.len(),
+            1,
+            "should find one use-after-free violation"
+        );
         assert_eq!(violations[0].allocation, alloc);
         assert_eq!(violations[0].deallocation, dealloc);
     }
@@ -1076,7 +1124,10 @@ mod tests {
         let liveness = compute_liveness(&scg);
         let violations = find_use_after_free(&scg, &liveness);
 
-        assert!(violations.is_empty(), "no use-after-free when alloc is only used by dealloc");
+        assert!(
+            violations.is_empty(),
+            "no use-after-free when alloc is only used by dealloc"
+        );
     }
 
     // ── Test 11: Dead allocation detection ─────────────────────────────
@@ -1105,7 +1156,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc1, dealloc1, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc1, dealloc1, EdgeKind::Derivation)
+            .unwrap();
 
         // Live allocation: allocated, read, then deallocated
         let alloc2 = scg.add_node(
@@ -1136,9 +1188,12 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc2, read_access, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(read_access, dealloc2, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(alloc2, dealloc2, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc2, read_access, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(read_access, dealloc2, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(alloc2, dealloc2, EdgeKind::Derivation)
+            .unwrap();
 
         let liveness = compute_liveness(&scg);
         let dead = find_dead_allocations(&scg, &liveness);
@@ -1176,7 +1231,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "x".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1191,12 +1248,24 @@ mod tests {
 
         let analysis = LivenessAnalysis::new(&scg);
 
-        assert!(analysis.is_live_out(n1, n1), "n1's value is live at n1's exit");
-        assert!(analysis.is_live_in(n2, n1), "n1's value is live at n2's entry");
-        assert!(!analysis.is_live_in(n1, n1), "n1's value is not live at its own entry (it defines it)");
+        assert!(
+            analysis.is_live_out(n1, n1),
+            "n1's value is live at n1's exit"
+        );
+        assert!(
+            analysis.is_live_in(n2, n1),
+            "n1's value is live at n2's entry"
+        );
+        assert!(
+            !analysis.is_live_in(n1, n1),
+            "n1's value is not live at its own entry (it defines it)"
+        );
 
         let all_live = analysis.all_live_values();
-        assert!(all_live.contains(&n1), "n1 should be in the set of all live values");
+        assert!(
+            all_live.contains(&n1),
+            "n1 should be in the set of all live values"
+        );
     }
 
     // ── Test 14: Control flow edges propagate liveness ─────────────────
@@ -1218,7 +1287,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "compute".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1275,7 +1346,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(rw_access, read_after, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(rw_access, read_after, EdgeKind::ControlFlow)
+            .unwrap();
 
         let liveness = compute_liveness(&scg);
         let uninit = find_uninitialized_reads(&scg, &liveness);
@@ -1325,7 +1397,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -1340,6 +1414,9 @@ mod tests {
 
         let analysis = LivenessAnalysis::new(&scg);
         assert!(analysis.converged, "analysis should converge for a DAG");
-        assert!(analysis.iterations >= 1, "should take at least one iteration");
+        assert!(
+            analysis.iterations >= 1,
+            "should take at least one iteration"
+        );
     }
 }

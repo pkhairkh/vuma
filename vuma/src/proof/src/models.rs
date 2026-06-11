@@ -156,13 +156,11 @@ impl ProofRegion {
     pub fn is_allocated_at(&self, pp: u64) -> bool {
         match self.status {
             ProofRegionStatus::Allocated | ProofRegionStatus::Stack | ProofRegionStatus::Mapped => {
-                self.alloc_point <= pp
-                    && self.free_point.is_none_or(|fp| pp < fp)
+                self.alloc_point <= pp && self.free_point.is_none_or(|fp| pp < fp)
             }
             ProofRegionStatus::Leaked => self.alloc_point <= pp,
             ProofRegionStatus::Freed => {
-                self.alloc_point <= pp
-                    && self.free_point.is_some_and(|fp| pp < fp)
+                self.alloc_point <= pp && self.free_point.is_some_and(|fp| pp < fp)
             }
         }
     }
@@ -1042,8 +1040,14 @@ impl OriginInfoBuilder {
     }
 
     /// Add a sink classification.
-    pub fn sink_classification(mut self, rid: impl Into<RegionId>, sensitivity: SinkSensitivity) -> Self {
-        self.info.sink_classifications.push((rid.into(), sensitivity));
+    pub fn sink_classification(
+        mut self,
+        rid: impl Into<RegionId>,
+        sensitivity: SinkSensitivity,
+    ) -> Self {
+        self.info
+            .sink_classifications
+            .push((rid.into(), sensitivity));
         self
     }
 
@@ -1261,9 +1265,7 @@ impl ProofMSG {
             cumulative_offset += deriv.offset;
             if let Some(rid) = deriv.source_region {
                 let region = self.get_region(rid)?;
-                return Some(
-                    (region.base_addr as i64 + cumulative_offset) as u64,
-                );
+                return Some((region.base_addr as i64 + cumulative_offset) as u64);
             }
             if let Some(did) = deriv.source_derivation {
                 current_id = did;
@@ -1284,22 +1286,34 @@ impl ProofMSG {
 
     /// Return all alloc operations.
     pub fn allocs(&self) -> Vec<&ProofMemOp> {
-        self.ops.iter().filter(|op| op.kind == ProofMemOpKind::Alloc).collect()
+        self.ops
+            .iter()
+            .filter(|op| op.kind == ProofMemOpKind::Alloc)
+            .collect()
     }
 
     /// Return all free operations.
     pub fn frees(&self) -> Vec<&ProofMemOp> {
-        self.ops.iter().filter(|op| op.kind == ProofMemOpKind::Free).collect()
+        self.ops
+            .iter()
+            .filter(|op| op.kind == ProofMemOpKind::Free)
+            .collect()
     }
 
     /// Return all read operations.
     pub fn reads(&self) -> Vec<&ProofMemOp> {
-        self.ops.iter().filter(|op| op.kind == ProofMemOpKind::Read).collect()
+        self.ops
+            .iter()
+            .filter(|op| op.kind == ProofMemOpKind::Read)
+            .collect()
     }
 
     /// Return all write operations.
     pub fn writes(&self) -> Vec<&ProofMemOp> {
-        self.ops.iter().filter(|op| op.kind == ProofMemOpKind::Write).collect()
+        self.ops
+            .iter()
+            .filter(|op| op.kind == ProofMemOpKind::Write)
+            .collect()
     }
 
     /// Return the set of all regions mentioned in the MSG.

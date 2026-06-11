@@ -22,18 +22,17 @@
 //! | 9 | GPIO+UART combined workflow       | GPIO + UART        | Parse → SCG → verify → emit     |
 //! | 10| MMIO write followed by barrier    | System             | Parse → SCG → codegen           |
 
-use vuma_scg::{NodePayload, NodeType};
+use crate::framework::{build_scg_from_source, verify_program};
 use vuma_codegen::{
     arm64::{BarrierOption, Instruction},
+    emit::Emitter,
     ir::{BinOpKind, IRInstr, IRProgram},
     scg_to_ir::{
-        IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
-        ScgStatement, ScgExpr, ComputationNode as CgComputationNode,
-        AccessNode as CgAccessNode,
+        AccessNode as CgAccessNode, ComputationNode as CgComputationNode, IRBuilder, Scg, ScgExpr,
+        ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType,
     },
-    emit::Emitter,
 };
-use crate::framework::{build_scg_from_source, verify_program};
+use vuma_scg::{NodePayload, NodeType};
 
 // ---------------------------------------------------------------------------
 // Helper: Build a Pi 5 MMIO-style SCG from source
@@ -112,8 +111,14 @@ fn build_mmio_write_scg() -> Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "mmio_write".to_string(),
             params: vec![
-                ScgParam { name: "addr".to_string(), ty: ScgType::U64 },
-                ScgParam { name: "value".to_string(), ty: ScgType::U32 },
+                ScgParam {
+                    name: "addr".to_string(),
+                    ty: ScgType::U64,
+                },
+                ScgParam {
+                    name: "value".to_string(),
+                    ty: ScgType::U32,
+                },
             ],
             results: vec![ScgType::Void],
             body: vec![
@@ -133,9 +138,10 @@ fn build_mmio_read_scg() -> Scg {
     Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "mmio_read".to_string(),
-            params: vec![
-                ScgParam { name: "addr".to_string(), ty: ScgType::U64 },
-            ],
+            params: vec![ScgParam {
+                name: "addr".to_string(),
+                ty: ScgType::U64,
+            }],
             results: vec![ScgType::U32],
             body: vec![
                 ScgStatement::Access(CgAccessNode::Load {
@@ -155,9 +161,10 @@ fn build_gpio_set_output_scg() -> Scg {
     Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "gpio_set_output".to_string(),
-            params: vec![
-                ScgParam { name: "pin".to_string(), ty: ScgType::U32 },
-            ],
+            params: vec![ScgParam {
+                name: "pin".to_string(),
+                ty: ScgType::U32,
+            }],
             results: vec![ScgType::Void],
             body: vec![
                 // Compute GPIO base address: PERIPHERAL_BASE + GPIO_OFFSET
@@ -166,7 +173,7 @@ fn build_gpio_set_output_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(GPIO_OFFSET as i64),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Store 0x01 to the GPIO base (simplified: real HW would compute offset from pin)
                 ScgStatement::Access(CgAccessNode::Store {
@@ -185,9 +192,10 @@ fn build_uart_transmit_scg() -> Scg {
     Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "uart_putc".to_string(),
-            params: vec![
-                ScgParam { name: "ch".to_string(), ty: ScgType::U32 },
-            ],
+            params: vec![ScgParam {
+                name: "ch".to_string(),
+                ty: ScgType::U32,
+            }],
             results: vec![ScgType::Void],
             body: vec![
                 // Compute UART base address
@@ -196,7 +204,7 @@ fn build_uart_transmit_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(UART_OFFSET as i64),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Write character to UART Data Register (offset 0)
                 ScgStatement::Access(CgAccessNode::Store {
@@ -215,9 +223,10 @@ fn build_timer_delay_scg() -> Scg {
     Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "timer_delay".to_string(),
-            params: vec![
-                ScgParam { name: "ticks".to_string(), ty: ScgType::U32 },
-            ],
+            params: vec![ScgParam {
+                name: "ticks".to_string(),
+                ty: ScgType::U32,
+            }],
             results: vec![ScgType::Void],
             body: vec![
                 // Compute timer base address
@@ -226,7 +235,7 @@ fn build_timer_delay_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(TIMER_OFFSET as i64),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Read current timer value (offset 4 = CLO register)
                 ScgStatement::Access(CgAccessNode::Load {
@@ -240,7 +249,7 @@ fn build_timer_delay_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Var("current".to_string()),
                     rhs: ScgExpr::Var("ticks".to_string()),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -254,8 +263,14 @@ fn build_smp_mailbox_scg() -> Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "smp_mailbox_send".to_string(),
             params: vec![
-                ScgParam { name: "core_id".to_string(), ty: ScgType::U32 },
-                ScgParam { name: "message".to_string(), ty: ScgType::U32 },
+                ScgParam {
+                    name: "core_id".to_string(),
+                    ty: ScgType::U32,
+                },
+                ScgParam {
+                    name: "message".to_string(),
+                    ty: ScgType::U32,
+                },
             ],
             results: vec![ScgType::Void],
             body: vec![
@@ -265,7 +280,7 @@ fn build_smp_mailbox_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(0x0000_B800),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Write message to mailbox register
                 ScgStatement::Access(CgAccessNode::Store {
@@ -285,8 +300,14 @@ fn build_gpio_uart_combined_scg() -> Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "gpio_then_uart".to_string(),
             params: vec![
-                ScgParam { name: "pin".to_string(), ty: ScgType::U32 },
-                ScgParam { name: "ch".to_string(), ty: ScgType::U32 },
+                ScgParam {
+                    name: "pin".to_string(),
+                    ty: ScgType::U32,
+                },
+                ScgParam {
+                    name: "ch".to_string(),
+                    ty: ScgType::U32,
+                },
             ],
             results: vec![ScgType::Void],
             body: vec![
@@ -296,7 +317,7 @@ fn build_gpio_uart_combined_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(GPIO_OFFSET as i64),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Set GPIO pin
                 ScgStatement::Access(CgAccessNode::Store {
@@ -310,7 +331,7 @@ fn build_gpio_uart_combined_scg() -> Scg {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(PERIPHERAL_BASE as i64),
                     rhs: ScgExpr::Int(UART_OFFSET as i64),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 // Transmit character
                 ScgStatement::Access(CgAccessNode::Store {
@@ -334,7 +355,8 @@ fn compile_scg_to_arm64(scg: &Scg) -> (IRProgram, Vec<u32>) {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let mut emitter = Emitter::new();
-    let code_words = emitter.emit_function(&ir_program.functions[0])
+    let code_words = emitter
+        .emit_function(&ir_program.functions[0])
         .expect("Emission should succeed");
     (ir_program, code_words)
 }
@@ -355,17 +377,31 @@ fn test_gpio_set_output_pipeline() {
         .expect("GPIO set output source should parse");
     assert!(scg.node_count() > 0, "SCG should have nodes");
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification (no violations expected)
     let result = verify_program(gpio_set_output_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "GPIO set output should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "GPIO set output should have no violations"
+    );
 
     // Phase 3: Codegen — build GPIO function SCG → IR → ARM64
     let cg_scg = build_gpio_set_output_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!ir_program.functions.is_empty(), "IR should contain functions");
+    assert!(
+        !ir_program.functions.is_empty(),
+        "IR should contain functions"
+    );
     assert!(!code_words.is_empty(), "ARM64 code should be emitted");
 
     // Verify the emitted code contains a prologue (STP X29, X30)
@@ -389,22 +425,35 @@ fn test_gpio_read_input_pipeline() {
         .expect("GPIO read input source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(gpio_read_input_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
     assert!(violations.is_empty(), "GPIO read should have no violations");
 
     // Phase 3: Codegen — build MMIO read function → ARM64
     let cg_scg = build_mmio_read_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!code_words.is_empty(), "ARM64 code should be emitted for GPIO read");
+    assert!(
+        !code_words.is_empty(),
+        "ARM64 code should be emitted for GPIO read"
+    );
 
     // Verify the IR function has a Load instruction
     let func = &ir_program.functions[0];
     let has_load = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Load { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Load { .. }))
     });
     assert!(has_load, "GPIO read IR should contain a Load instruction");
 }
@@ -422,28 +471,47 @@ fn test_gpio_read_input_pipeline() {
 #[test]
 fn test_uart_transmit_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(uart_transmit_source())
-        .expect("UART transmit source should parse");
+    let scg =
+        build_scg_from_source(uart_transmit_source()).expect("UART transmit source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(uart_transmit_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "UART transmit should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "UART transmit should have no violations"
+    );
 
     // Phase 3: Codegen — build UART transmit function → ARM64
     let cg_scg = build_uart_transmit_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!code_words.is_empty(), "ARM64 code should be emitted for UART transmit");
+    assert!(
+        !code_words.is_empty(),
+        "ARM64 code should be emitted for UART transmit"
+    );
 
     // Verify the IR function has a Store instruction
     let func = &ir_program.functions[0];
     let has_store = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Store { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Store { .. }))
     });
-    assert!(has_store, "UART transmit IR should contain a Store instruction");
+    assert!(
+        has_store,
+        "UART transmit IR should contain a Store instruction"
+    );
 }
 
 // ===========================================================================
@@ -458,16 +526,27 @@ fn test_uart_transmit_pipeline() {
 #[test]
 fn test_uart_receive_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(uart_receive_source())
-        .expect("UART receive source should parse");
+    let scg =
+        build_scg_from_source(uart_receive_source()).expect("UART receive source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(uart_receive_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "UART receive should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "UART receive should have no violations"
+    );
 
     // Phase 3: Build a codegen SCG with two loads (FR + DR)
     let cg_scg = build_mmio_read_scg();
@@ -475,10 +554,16 @@ fn test_uart_receive_pipeline() {
 
     // Verify the IR function has Load instructions
     let func = &ir_program.functions[0];
-    let load_count = func.blocks.iter().flat_map(|b| &b.instructions)
+    let load_count = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
         .filter(|i| matches!(i, IRInstr::Load { .. }))
         .count();
-    assert!(load_count >= 1, "UART receive IR should have at least one Load");
+    assert!(
+        load_count >= 1,
+        "UART receive IR should have at least one Load"
+    );
 }
 
 // ===========================================================================
@@ -493,29 +578,46 @@ fn test_uart_receive_pipeline() {
 #[test]
 fn test_timer_delay_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(timer_delay_source())
-        .expect("Timer delay source should parse");
+    let scg = build_scg_from_source(timer_delay_source()).expect("Timer delay source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(timer_delay_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "Timer delay should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "Timer delay should have no violations"
+    );
 
     // Phase 3: Codegen — build timer delay function → ARM64
     let cg_scg = build_timer_delay_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!code_words.is_empty(), "ARM64 code should be emitted for timer delay");
+    assert!(
+        !code_words.is_empty(),
+        "ARM64 code should be emitted for timer delay"
+    );
 
     // Verify the IR function has Load and Add instructions
     let func = &ir_program.functions[0];
     let has_load = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Load { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Load { .. }))
     });
     let has_add = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Add { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Add { .. }))
     });
     assert!(has_load, "Timer delay IR should contain a Load");
     assert!(has_add, "Timer delay IR should contain an Add");
@@ -532,24 +634,36 @@ fn test_timer_delay_pipeline() {
 #[test]
 fn test_timer_counter_read_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(timer_counter_source())
-        .expect("Timer counter source should parse");
+    let scg =
+        build_scg_from_source(timer_counter_source()).expect("Timer counter source should parse");
     assert!(scg.node_count() > 0);
 
     // Verify the SCG contains at least one Computation node (the read() call
     // is parsed as a function-call expression, producing a Computation node
     // rather than an Access node).
-    let has_computation = scg.nodes().any(|n| matches!(n.node_type, NodeType::Computation));
-    assert!(has_computation, "Timer counter SCG should have a Computation node");
+    let has_computation = scg
+        .nodes()
+        .any(|n| matches!(n.node_type, NodeType::Computation));
+    assert!(
+        has_computation,
+        "Timer counter SCG should have a Computation node"
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(timer_counter_source());
-    assert_eq!(result.per_invariant.len(), 5, "Should check all 5 invariants");
+    assert_eq!(
+        result.per_invariant.len(),
+        5,
+        "Should check all 5 invariants"
+    );
 
     // Phase 3: Codegen
     let cg_scg = build_mmio_read_scg();
     let (_, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!code_words.is_empty(), "Timer counter ARM64 code should be non-empty");
+    assert!(
+        !code_words.is_empty(),
+        "Timer counter ARM64 code should be non-empty"
+    );
 }
 
 // ===========================================================================
@@ -565,25 +679,43 @@ fn test_timer_counter_read_pipeline() {
 #[test]
 fn test_smp_bootstrap_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(smp_bootstrap_source())
-        .expect("SMP bootstrap source should parse");
+    let scg =
+        build_scg_from_source(smp_bootstrap_source()).expect("SMP bootstrap source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(smp_bootstrap_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "SMP bootstrap should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "SMP bootstrap should have no violations"
+    );
 
     // Phase 3: Codegen — build SMP mailbox function → ARM64
     let cg_scg = build_smp_mailbox_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
-    assert!(!code_words.is_empty(), "ARM64 code should be emitted for SMP mailbox");
+    assert!(
+        !code_words.is_empty(),
+        "ARM64 code should be emitted for SMP mailbox"
+    );
 
     // Verify the function has two parameters (core_id, message)
     let func = &ir_program.functions[0];
-    assert_eq!(func.params.len(), 2, "SMP mailbox function should have 2 params");
+    assert_eq!(
+        func.params.len(),
+        2,
+        "SMP mailbox function should have 2 params"
+    );
 }
 
 // ===========================================================================
@@ -599,16 +731,21 @@ fn test_smp_bootstrap_pipeline() {
 #[test]
 fn test_smp_mailbox_pipeline() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(smp_mailbox_source())
-        .expect("SMP mailbox source should parse");
+    let scg = build_scg_from_source(smp_mailbox_source()).expect("SMP mailbox source should parse");
     assert!(scg.node_count() > 0);
 
     // Verify the SCG has at least 2 Allocation nodes (one per region) and
     // Computation nodes for the write()/read() calls.
     // Note: write()/read() are parsed as function-call expressions, producing
     // Computation nodes rather than Access nodes.
-    let alloc_count = scg.nodes().filter(|n| matches!(n.node_type, NodeType::Allocation)).count();
-    assert!(alloc_count >= 2, "SMP mailbox SCG should have at least 2 Allocation nodes");
+    let alloc_count = scg
+        .nodes()
+        .filter(|n| matches!(n.node_type, NodeType::Allocation))
+        .count();
+    assert!(
+        alloc_count >= 2,
+        "SMP mailbox SCG should have at least 2 Allocation nodes"
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(smp_mailbox_source());
@@ -620,7 +757,9 @@ fn test_smp_mailbox_pipeline() {
 
     let func = &ir_program.functions[0];
     let has_store = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Store { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Store { .. }))
     });
     assert!(has_store, "SMP mailbox IR should contain a Store");
     assert!(!code_words.is_empty());
@@ -643,31 +782,54 @@ fn test_gpio_uart_combined_pipeline() {
         .expect("GPIO+UART combined source should parse");
     assert!(scg.node_count() > 0);
     let validation = scg.validate();
-    assert!(validation.is_valid, "SCG should validate: {:?}", validation.errors);
+    assert!(
+        validation.is_valid,
+        "SCG should validate: {:?}",
+        validation.errors
+    );
 
     // Verify the SCG has at least 2 Computation nodes representing the
     // write() calls. Note: write() is parsed as a function-call expression,
     // producing Computation nodes with an operation string containing "write",
     // rather than Access nodes with Write mode.
-    let write_comp_count = scg.nodes()
-        .filter(|n| matches!(&n.payload, NodePayload::Computation(c) if c.operation.contains("write")))
+    let write_comp_count = scg
+        .nodes()
+        .filter(
+            |n| matches!(&n.payload, NodePayload::Computation(c) if c.operation.contains("write")),
+        )
         .count();
-    assert!(write_comp_count >= 2, "Combined workflow should have at least 2 write computation nodes");
+    assert!(
+        write_comp_count >= 2,
+        "Combined workflow should have at least 2 write computation nodes"
+    );
 
     // Phase 2: IVE verification
     let result = verify_program(gpio_uart_combined_source());
-    let violations: Vec<_> = result.per_invariant.iter().filter(|pir| pir.is_fail()).collect();
-    assert!(violations.is_empty(), "Combined workflow should have no violations");
+    let violations: Vec<_> = result
+        .per_invariant
+        .iter()
+        .filter(|pir| pir.is_fail())
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "Combined workflow should have no violations"
+    );
 
     // Phase 3: Codegen — build combined function → ARM64
     let cg_scg = build_gpio_uart_combined_scg();
     let (ir_program, code_words) = compile_scg_to_arm64(&cg_scg);
 
     let func = &ir_program.functions[0];
-    let store_count = func.blocks.iter().flat_map(|b| &b.instructions)
+    let store_count = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
         .filter(|i| matches!(i, IRInstr::Store { .. }))
         .count();
-    assert!(store_count >= 2, "Combined IR should have at least 2 Store instructions");
+    assert!(
+        store_count >= 2,
+        "Combined IR should have at least 2 Store instructions"
+    );
     assert!(!code_words.is_empty());
 }
 
@@ -684,14 +846,18 @@ fn test_gpio_uart_combined_pipeline() {
 #[test]
 fn test_mmio_barrier_code() {
     // Phase 1: Parse → SCG → Verify
-    let scg = build_scg_from_source(mmio_barrier_source())
-        .expect("MMIO barrier source should parse");
+    let scg =
+        build_scg_from_source(mmio_barrier_source()).expect("MMIO barrier source should parse");
     assert!(scg.node_count() > 0);
 
     // Phase 2: Verify ARM64 barrier instruction encoding directly
-    let dsb = Instruction::DSB { option: BarrierOption::SY };
+    let dsb = Instruction::DSB {
+        option: BarrierOption::SY,
+    };
     let isb = Instruction::ISB;
-    let dmb = Instruction::DMB { option: BarrierOption::ISH };
+    let dmb = Instruction::DMB {
+        option: BarrierOption::ISH,
+    };
 
     let dsb_encoded = dsb.encode().expect("DSB SY should encode");
     let isb_encoded = isb.encode().expect("ISB should encode");
@@ -700,7 +866,10 @@ fn test_mmio_barrier_code() {
     assert_ne!(dsb_encoded, 0, "DSB should produce non-zero encoding");
     assert_ne!(isb_encoded, 0, "ISB should produce non-zero encoding");
     assert_ne!(dmb_encoded, 0, "DMB should produce non-zero encoding");
-    assert_ne!(dsb_encoded, isb_encoded, "DSB and ISB should have different encodings");
+    assert_ne!(
+        dsb_encoded, isb_encoded,
+        "DSB and ISB should have different encodings"
+    );
 
     // Phase 3: Build MMIO write SCG and emit ARM64 code
     let cg_scg = build_mmio_write_scg();
@@ -708,10 +877,19 @@ fn test_mmio_barrier_code() {
 
     // The function should have 2 parameters and a Store instruction
     let func = &ir_program.functions[0];
-    assert_eq!(func.params.len(), 2, "MMIO write should have addr + value params");
+    assert_eq!(
+        func.params.len(),
+        2,
+        "MMIO write should have addr + value params"
+    );
     let has_store = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Store { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Store { .. }))
     });
     assert!(has_store, "MMIO write IR should contain a Store");
-    assert!(!code_words.is_empty(), "MMIO write ARM64 code should be non-empty");
+    assert!(
+        !code_words.is_empty(),
+        "MMIO write ARM64 code should be non-empty"
+    );
 }

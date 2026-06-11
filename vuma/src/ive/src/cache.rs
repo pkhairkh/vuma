@@ -24,7 +24,12 @@ pub struct InvariantViolation {
 
 impl InvariantViolation {
     /// Create a new invariant violation.
-    pub fn new(invariant: impl Into<String>, node: NodeId, description: impl Into<String>, severity: Severity) -> Self {
+    pub fn new(
+        invariant: impl Into<String>,
+        node: NodeId,
+        description: impl Into<String>,
+        severity: Severity,
+    ) -> Self {
         Self {
             invariant: invariant.into(),
             node,
@@ -36,7 +41,11 @@ impl InvariantViolation {
 
 impl std::fmt::Display for InvariantViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {} at {}: {}", self.severity, self.invariant, self.node, self.description)
+        write!(
+            f,
+            "[{}] {} at {}: {}",
+            self.severity, self.invariant, self.node, self.description
+        )
     }
 }
 
@@ -67,8 +76,8 @@ impl std::fmt::Display for Severity {
 /// structure of the subgraph, so that any change to the subgraph will
 /// result in a different fingerprint.
 pub fn compute_fingerprint(scg: &SCG, nodes: &[NodeId]) -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
 
@@ -172,12 +181,10 @@ impl VerificationCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vuma_scg::graph::SCG;
-    use vuma_scg::node::{
-        AllocationNode, NodePayload, NodeType, ProgramPoint,
-    };
-    use vuma_scg::region::{RegionId, DeploymentTarget, SCGRegion};
     use vuma_scg::edge::EdgeKind;
+    use vuma_scg::graph::SCG;
+    use vuma_scg::node::{AllocationNode, NodePayload, NodeType, ProgramPoint};
+    use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
 
     fn pp() -> ProgramPoint {
         ProgramPoint {
@@ -191,9 +198,12 @@ mod tests {
     #[test]
     fn test_cache_insert_and_get() {
         let mut cache = VerificationCache::new();
-        let violations = vec![
-            InvariantViolation::new("memory_safety", NodeId::new(1), "leak", Severity::High),
-        ];
+        let violations = vec![InvariantViolation::new(
+            "memory_safety",
+            NodeId::new(1),
+            "leak",
+            Severity::High,
+        )];
         cache.insert(42, violations.clone());
         let result = cache.get(42).unwrap();
         assert_eq!(result.len(), 1);
@@ -229,7 +239,10 @@ mod tests {
         let n1 = scg1.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
@@ -242,14 +255,20 @@ mod tests {
         let n2a = scg2.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
         let n2b = scg2.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 128, align: 8, region_id: rid, type_name: None,
+                size: 128,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
@@ -260,7 +279,10 @@ mod tests {
 
         let fp1 = compute_fingerprint(&scg1, &[n1]);
         let fp2 = compute_fingerprint(&scg2, &[n2a, n2b]);
-        assert_ne!(fp1, fp2, "Different SCGs should have different fingerprints");
+        assert_ne!(
+            fp1, fp2,
+            "Different SCGs should have different fingerprints"
+        );
     }
 
     #[test]
@@ -292,8 +314,24 @@ mod tests {
     #[test]
     fn test_cache_insert_replaces() {
         let mut cache = VerificationCache::new();
-        cache.insert(1, vec![InvariantViolation::new("old", NodeId::new(1), "old", Severity::Low)]);
-        cache.insert(1, vec![InvariantViolation::new("new", NodeId::new(2), "new", Severity::High)]);
+        cache.insert(
+            1,
+            vec![InvariantViolation::new(
+                "old",
+                NodeId::new(1),
+                "old",
+                Severity::Low,
+            )],
+        );
+        cache.insert(
+            1,
+            vec![InvariantViolation::new(
+                "new",
+                NodeId::new(2),
+                "new",
+                Severity::High,
+            )],
+        );
         let result = cache.get(1).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].invariant, "new");
@@ -306,7 +344,10 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );

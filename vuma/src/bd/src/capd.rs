@@ -224,16 +224,8 @@ impl CapD {
     /// * Conditions: union (more restrictive)
     pub fn meet(&self, other: &CapD) -> CapD {
         CapD {
-            caps: self
-                .caps
-                .intersection(&other.caps)
-                .copied()
-                .collect(),
-            conditions: self
-                .conditions
-                .union(&other.conditions)
-                .copied()
-                .collect(),
+            caps: self.caps.intersection(&other.caps).copied().collect(),
+            conditions: self.conditions.union(&other.conditions).copied().collect(),
         }
     }
 
@@ -258,7 +250,10 @@ impl CapD {
     /// satisfied by the context.  Conditions that are not relevant to the
     /// current context are conservatively assumed to be unsatisfied.
     pub fn resolve(&self, context: &Context) -> HashSet<Capability> {
-        let all_conditions_active = self.conditions.iter().all(|c| context.is_condition_active(c));
+        let all_conditions_active = self
+            .conditions
+            .iter()
+            .all(|c| context.is_condition_active(c));
         if all_conditions_active {
             self.caps.clone()
         } else {
@@ -381,7 +376,9 @@ mod tests {
             conditions: HashSet::new(),
         };
         let b = CapD {
-            caps: [Capability::Read, Capability::Execute].into_iter().collect(),
+            caps: [Capability::Read, Capability::Execute]
+                .into_iter()
+                .collect(),
             conditions: HashSet::new(),
         };
         let m = a.meet(&b);

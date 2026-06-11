@@ -377,46 +377,206 @@ pub struct HeaderPin {
 ///   GND (39) (40)  GPIO21
 /// ```
 pub const HEADER_PINS: [HeaderPin; 40] = [
-    HeaderPin { pin:  1, kind: HeaderPinKind::Power3V3, default_func: "3V3" },
-    HeaderPin { pin:  2, kind: HeaderPinKind::Power5V,  default_func: "5V" },
-    HeaderPin { pin:  3, kind: HeaderPinKind::Gpio(2),  default_func: "SDA1" },
-    HeaderPin { pin:  4, kind: HeaderPinKind::Power5V,  default_func: "5V" },
-    HeaderPin { pin:  5, kind: HeaderPinKind::Gpio(3),  default_func: "SCL1" },
-    HeaderPin { pin:  6, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin:  7, kind: HeaderPinKind::Gpio(4),  default_func: "GPCLK0" },
-    HeaderPin { pin:  8, kind: HeaderPinKind::Gpio(14), default_func: "TXD0" },
-    HeaderPin { pin:  9, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 10, kind: HeaderPinKind::Gpio(15), default_func: "RXD0" },
-    HeaderPin { pin: 11, kind: HeaderPinKind::Gpio(17), default_func: "GPIO17" },
-    HeaderPin { pin: 12, kind: HeaderPinKind::Gpio(18), default_func: "PWM0" },
-    HeaderPin { pin: 13, kind: HeaderPinKind::Gpio(27), default_func: "GPIO27" },
-    HeaderPin { pin: 14, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 15, kind: HeaderPinKind::Gpio(22), default_func: "GPIO22" },
-    HeaderPin { pin: 16, kind: HeaderPinKind::Gpio(23), default_func: "GPIO23" },
-    HeaderPin { pin: 17, kind: HeaderPinKind::Power3V3, default_func: "3V3" },
-    HeaderPin { pin: 18, kind: HeaderPinKind::Gpio(24), default_func: "GPIO24" },
-    HeaderPin { pin: 19, kind: HeaderPinKind::Gpio(10), default_func: "MOSI0" },
-    HeaderPin { pin: 20, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 21, kind: HeaderPinKind::Gpio(9),  default_func: "MISO0" },
-    HeaderPin { pin: 22, kind: HeaderPinKind::Gpio(25), default_func: "GPIO25" },
-    HeaderPin { pin: 23, kind: HeaderPinKind::Gpio(11), default_func: "SCLK0" },
-    HeaderPin { pin: 24, kind: HeaderPinKind::Gpio(8),  default_func: "CE0" },
-    HeaderPin { pin: 25, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 26, kind: HeaderPinKind::Gpio(7),  default_func: "CE1" },
-    HeaderPin { pin: 27, kind: HeaderPinKind::Gpio(0),  default_func: "SDA0" },
-    HeaderPin { pin: 28, kind: HeaderPinKind::Gpio(1),  default_func: "SCL0" },
-    HeaderPin { pin: 29, kind: HeaderPinKind::Gpio(5),  default_func: "GPCLK1" },
-    HeaderPin { pin: 30, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 31, kind: HeaderPinKind::Gpio(6),  default_func: "GPCLK2" },
-    HeaderPin { pin: 32, kind: HeaderPinKind::Gpio(12), default_func: "PWM0" },
-    HeaderPin { pin: 33, kind: HeaderPinKind::Gpio(13), default_func: "PWM1" },
-    HeaderPin { pin: 34, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 35, kind: HeaderPinKind::Gpio(19), default_func: "PWM1" },
-    HeaderPin { pin: 36, kind: HeaderPinKind::Gpio(16), default_func: "GPIO16" },
-    HeaderPin { pin: 37, kind: HeaderPinKind::Gpio(26), default_func: "GPIO26" },
-    HeaderPin { pin: 38, kind: HeaderPinKind::Gpio(20), default_func: "GPIO20" },
-    HeaderPin { pin: 39, kind: HeaderPinKind::Ground,   default_func: "GND" },
-    HeaderPin { pin: 40, kind: HeaderPinKind::Gpio(21), default_func: "GPIO21" },
+    HeaderPin {
+        pin: 1,
+        kind: HeaderPinKind::Power3V3,
+        default_func: "3V3",
+    },
+    HeaderPin {
+        pin: 2,
+        kind: HeaderPinKind::Power5V,
+        default_func: "5V",
+    },
+    HeaderPin {
+        pin: 3,
+        kind: HeaderPinKind::Gpio(2),
+        default_func: "SDA1",
+    },
+    HeaderPin {
+        pin: 4,
+        kind: HeaderPinKind::Power5V,
+        default_func: "5V",
+    },
+    HeaderPin {
+        pin: 5,
+        kind: HeaderPinKind::Gpio(3),
+        default_func: "SCL1",
+    },
+    HeaderPin {
+        pin: 6,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 7,
+        kind: HeaderPinKind::Gpio(4),
+        default_func: "GPCLK0",
+    },
+    HeaderPin {
+        pin: 8,
+        kind: HeaderPinKind::Gpio(14),
+        default_func: "TXD0",
+    },
+    HeaderPin {
+        pin: 9,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 10,
+        kind: HeaderPinKind::Gpio(15),
+        default_func: "RXD0",
+    },
+    HeaderPin {
+        pin: 11,
+        kind: HeaderPinKind::Gpio(17),
+        default_func: "GPIO17",
+    },
+    HeaderPin {
+        pin: 12,
+        kind: HeaderPinKind::Gpio(18),
+        default_func: "PWM0",
+    },
+    HeaderPin {
+        pin: 13,
+        kind: HeaderPinKind::Gpio(27),
+        default_func: "GPIO27",
+    },
+    HeaderPin {
+        pin: 14,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 15,
+        kind: HeaderPinKind::Gpio(22),
+        default_func: "GPIO22",
+    },
+    HeaderPin {
+        pin: 16,
+        kind: HeaderPinKind::Gpio(23),
+        default_func: "GPIO23",
+    },
+    HeaderPin {
+        pin: 17,
+        kind: HeaderPinKind::Power3V3,
+        default_func: "3V3",
+    },
+    HeaderPin {
+        pin: 18,
+        kind: HeaderPinKind::Gpio(24),
+        default_func: "GPIO24",
+    },
+    HeaderPin {
+        pin: 19,
+        kind: HeaderPinKind::Gpio(10),
+        default_func: "MOSI0",
+    },
+    HeaderPin {
+        pin: 20,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 21,
+        kind: HeaderPinKind::Gpio(9),
+        default_func: "MISO0",
+    },
+    HeaderPin {
+        pin: 22,
+        kind: HeaderPinKind::Gpio(25),
+        default_func: "GPIO25",
+    },
+    HeaderPin {
+        pin: 23,
+        kind: HeaderPinKind::Gpio(11),
+        default_func: "SCLK0",
+    },
+    HeaderPin {
+        pin: 24,
+        kind: HeaderPinKind::Gpio(8),
+        default_func: "CE0",
+    },
+    HeaderPin {
+        pin: 25,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 26,
+        kind: HeaderPinKind::Gpio(7),
+        default_func: "CE1",
+    },
+    HeaderPin {
+        pin: 27,
+        kind: HeaderPinKind::Gpio(0),
+        default_func: "SDA0",
+    },
+    HeaderPin {
+        pin: 28,
+        kind: HeaderPinKind::Gpio(1),
+        default_func: "SCL0",
+    },
+    HeaderPin {
+        pin: 29,
+        kind: HeaderPinKind::Gpio(5),
+        default_func: "GPCLK1",
+    },
+    HeaderPin {
+        pin: 30,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 31,
+        kind: HeaderPinKind::Gpio(6),
+        default_func: "GPCLK2",
+    },
+    HeaderPin {
+        pin: 32,
+        kind: HeaderPinKind::Gpio(12),
+        default_func: "PWM0",
+    },
+    HeaderPin {
+        pin: 33,
+        kind: HeaderPinKind::Gpio(13),
+        default_func: "PWM1",
+    },
+    HeaderPin {
+        pin: 34,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 35,
+        kind: HeaderPinKind::Gpio(19),
+        default_func: "PWM1",
+    },
+    HeaderPin {
+        pin: 36,
+        kind: HeaderPinKind::Gpio(16),
+        default_func: "GPIO16",
+    },
+    HeaderPin {
+        pin: 37,
+        kind: HeaderPinKind::Gpio(26),
+        default_func: "GPIO26",
+    },
+    HeaderPin {
+        pin: 38,
+        kind: HeaderPinKind::Gpio(20),
+        default_func: "GPIO20",
+    },
+    HeaderPin {
+        pin: 39,
+        kind: HeaderPinKind::Ground,
+        default_func: "GND",
+    },
+    HeaderPin {
+        pin: 40,
+        kind: HeaderPinKind::Gpio(21),
+        default_func: "GPIO21",
+    },
 ];
 
 /// Returns the [`HeaderPin`] description for the given physical pin number
@@ -1056,7 +1216,8 @@ mod tests {
         let oe_clr_addr = MOCK_BASE + RIO_OE_CLR_OFFSET;
         let oe_clr = mock_mmio::read(oe_clr_addr);
         assert_eq!(
-            oe_clr, 1u32 << 17,
+            oe_clr,
+            1u32 << 17,
             "RIO_OE_CLR should have bit 17 set for Input mode"
         );
     }
@@ -1082,7 +1243,8 @@ mod tests {
         let oe_set_addr = MOCK_BASE + RIO_OE_SET_OFFSET;
         let oe_set = mock_mmio::read(oe_set_addr);
         assert_eq!(
-            oe_set, 1u32 << 4,
+            oe_set,
+            1u32 << 4,
             "RIO_OE_SET should have bit 4 set for Output mode"
         );
     }
@@ -1108,7 +1270,8 @@ mod tests {
         let oe_clr_addr = MOCK_BASE + RIO_OE_CLR_OFFSET;
         let oe_clr = mock_mmio::read(oe_clr_addr);
         assert_eq!(
-            oe_clr, 1u32 << 18,
+            oe_clr,
+            1u32 << 18,
             "RIO_OE_CLR should have bit 18 set for AltFunc mode"
         );
     }
@@ -1164,10 +1327,7 @@ mod tests {
 
         let set_addr = MOCK_BASE + RIO_OUT_SET_OFFSET;
         let val = mock_mmio::read(set_addr);
-        assert_eq!(
-            val, 1u32 << 17,
-            "RIO_OUT_SET should have bit 17 written"
-        );
+        assert_eq!(val, 1u32 << 17, "RIO_OUT_SET should have bit 17 written");
 
         // RIO_OUT_CLR should NOT have been written (still 0)
         let clr_addr = MOCK_BASE + RIO_OUT_CLR_OFFSET;
@@ -1188,10 +1348,7 @@ mod tests {
 
         let clr_addr = MOCK_BASE + RIO_OUT_CLR_OFFSET;
         let val = mock_mmio::read(clr_addr);
-        assert_eq!(
-            val, 1u32 << 27,
-            "RIO_OUT_CLR should have bit 27 written"
-        );
+        assert_eq!(val, 1u32 << 27, "RIO_OUT_CLR should have bit 27 written");
 
         // RIO_OUT_SET should NOT have been written
         let set_addr = MOCK_BASE + RIO_OUT_SET_OFFSET;
@@ -1320,15 +1477,27 @@ mod tests {
 
         // Set pull-up
         mock_mmio::write(pad_addr, (GpioPull::PullUp as u32) << PAD_PULL_SHIFT);
-        assert_eq!(pin.read_pull(), GpioPull::PullUp, "read_pull should return PullUp");
+        assert_eq!(
+            pin.read_pull(),
+            GpioPull::PullUp,
+            "read_pull should return PullUp"
+        );
 
         // Set pull-down
         mock_mmio::write(pad_addr, (GpioPull::PullDown as u32) << PAD_PULL_SHIFT);
-        assert_eq!(pin.read_pull(), GpioPull::PullDown, "read_pull should return PullDown");
+        assert_eq!(
+            pin.read_pull(),
+            GpioPull::PullDown,
+            "read_pull should return PullDown"
+        );
 
         // Set none
         mock_mmio::write(pad_addr, 0);
-        assert_eq!(pin.read_pull(), GpioPull::None, "read_pull should return None");
+        assert_eq!(
+            pin.read_pull(),
+            GpioPull::None,
+            "read_pull should return None"
+        );
     }
 
     // ---- Test 14: Bank-1 pin (pin >= 32) addressing ----------------------
@@ -1352,7 +1521,8 @@ mod tests {
         let oe_set_addr = MOCK_BASE + RIO_OE_SET_OFFSET + RIO_BANK_STRIDE;
         let oe_set = mock_mmio::read(oe_set_addr);
         assert_eq!(
-            oe_set, 1u32 << 8,
+            oe_set,
+            1u32 << 8,
             "RIO_OE_SET bank 1 should have bit 8 set (pin 40)"
         );
     }
@@ -1379,10 +1549,7 @@ mod tests {
 
         // Disable
         pwm.disable();
-        assert!(
-            !pwm.is_enabled(),
-            "PWM should be disabled after disable()"
-        );
+        assert!(!pwm.is_enabled(), "PWM should be disabled after disable()");
         let ctrl = mock_mmio::read(MOCK_PWM0_BASE + PWM_CTRL_OFFSET);
         assert_eq!(
             ctrl & PWM_CTRL_ENABLE,
@@ -1430,7 +1597,10 @@ mod tests {
         assert!(pwm.is_msen(), "MSEN should be enabled after enable_msen()");
 
         pwm.disable_msen();
-        assert!(!pwm.is_msen(), "MSEN should be disabled after disable_msen()");
+        assert!(
+            !pwm.is_msen(),
+            "MSEN should be disabled after disable_msen()"
+        );
     }
 
     // ---- Test 18: GpioPin stores pin number and base ---------------------
@@ -1468,8 +1638,8 @@ mod tests {
 
     #[test]
     fn test_gpio_mode_funcsels_encoding() {
-        assert_eq!(GpioMode::Input.funcsels(), FSEL_GPIO);    // 4
-        assert_eq!(GpioMode::Output.funcsels(), FSEL_GPIO);   // 4
+        assert_eq!(GpioMode::Input.funcsels(), FSEL_GPIO); // 4
+        assert_eq!(GpioMode::Output.funcsels(), FSEL_GPIO); // 4
         assert_eq!(GpioMode::AltFunc0.funcsels(), FSEL_ALT0); // 0
         assert_eq!(GpioMode::AltFunc1.funcsels(), FSEL_ALT1); // 1
         assert_eq!(GpioMode::AltFunc2.funcsels(), FSEL_ALT2); // 2
@@ -1791,8 +1961,16 @@ mod tests {
             "Pull should be preserved"
         );
         // Schmitt and input enable should be preserved
-        assert_eq!(pad & PAD_SCHMITT_BIT, PAD_SCHMITT_BIT, "Schmitt should be preserved");
-        assert_eq!(pad & PAD_IN_ENABLE_BIT, PAD_IN_ENABLE_BIT, "Input enable should be preserved");
+        assert_eq!(
+            pad & PAD_SCHMITT_BIT,
+            PAD_SCHMITT_BIT,
+            "Schmitt should be preserved"
+        );
+        assert_eq!(
+            pad & PAD_IN_ENABLE_BIT,
+            PAD_IN_ENABLE_BIT,
+            "Input enable should be preserved"
+        );
     }
 
     // ---- Test 38: Read drive strength round-trip --------------------------
@@ -1802,7 +1980,12 @@ mod tests {
         reset_mock();
         let pin = GpioPin::new(5, MOCK_BASE);
 
-        for strength in [DriveStrength::Ma2, DriveStrength::Ma4, DriveStrength::Ma8, DriveStrength::Ma12] {
+        for strength in [
+            DriveStrength::Ma2,
+            DriveStrength::Ma4,
+            DriveStrength::Ma8,
+            DriveStrength::Ma12,
+        ] {
             pin.set_drive_strength(strength);
             assert_eq!(
                 pin.read_drive_strength(),
@@ -1829,7 +2012,10 @@ mod tests {
             PAD_IN_ENABLE_BIT,
             "Input enable bit should be set"
         );
-        assert!(pin.read_input_enable(), "read_input_enable should return true");
+        assert!(
+            pin.read_input_enable(),
+            "read_input_enable should return true"
+        );
 
         // Disable input
         gpio_set_input_enable(&pin, false);
@@ -1839,7 +2025,10 @@ mod tests {
             0,
             "Input enable bit should be cleared"
         );
-        assert!(!pin.read_input_enable(), "read_input_enable should return false");
+        assert!(
+            !pin.read_input_enable(),
+            "read_input_enable should return false"
+        );
     }
 
     // ---- Test 40: Schmitt trigger on/off ---------------------------------
@@ -1863,11 +2052,7 @@ mod tests {
         // Disable Schmitt
         gpio_set_schmitt(&pin, false);
         let pad = mock_mmio::read(pad_addr);
-        assert_eq!(
-            pad & PAD_SCHMITT_BIT,
-            0,
-            "Schmitt bit should be cleared"
-        );
+        assert_eq!(pad & PAD_SCHMITT_BIT, 0, "Schmitt bit should be cleared");
         assert!(!pin.read_schmitt(), "read_schmitt should return false");
     }
 
@@ -1929,9 +2114,21 @@ mod tests {
             DriveStrength::Ma8 as u32,
             "Drive should be Ma8"
         );
-        assert_eq!(pad & PAD_SCHMITT_BIT, PAD_SCHMITT_BIT, "Schmitt should be on");
-        assert_eq!(pad & PAD_IN_ENABLE_BIT, PAD_IN_ENABLE_BIT, "Input should be enabled");
-        assert_eq!(pad & PAD_SLEW_FAST_BIT, PAD_SLEW_FAST_BIT, "Slew should be fast");
+        assert_eq!(
+            pad & PAD_SCHMITT_BIT,
+            PAD_SCHMITT_BIT,
+            "Schmitt should be on"
+        );
+        assert_eq!(
+            pad & PAD_IN_ENABLE_BIT,
+            PAD_IN_ENABLE_BIT,
+            "Input should be enabled"
+        );
+        assert_eq!(
+            pad & PAD_SLEW_FAST_BIT,
+            PAD_SLEW_FAST_BIT,
+            "Slew should be fast"
+        );
     }
 
     // ---- Test 43: DriveStrength enum repr values -------------------------

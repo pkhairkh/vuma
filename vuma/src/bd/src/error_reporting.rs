@@ -144,24 +144,18 @@ pub fn format_bd_error(error: &BdError, source: &str) -> String {
                 _ => String::new(),
             }
         }
-        BdError::RepDIncompatible { location, .. } => {
-            location
-                .as_ref()
-                .map(|l| format!(" at {l}"))
-                .unwrap_or_default()
-        }
-        BdError::CapDMissing { location, .. } => {
-            location
-                .as_ref()
-                .map(|l| format!(" at {l}"))
-                .unwrap_or_default()
-        }
-        BdError::RelDInconsistent { location, .. } => {
-            location
-                .as_ref()
-                .map(|l| format!(" at {l}"))
-                .unwrap_or_default()
-        }
+        BdError::RepDIncompatible { location, .. } => location
+            .as_ref()
+            .map(|l| format!(" at {l}"))
+            .unwrap_or_default(),
+        BdError::CapDMissing { location, .. } => location
+            .as_ref()
+            .map(|l| format!(" at {l}"))
+            .unwrap_or_default(),
+        BdError::RelDInconsistent { location, .. } => location
+            .as_ref()
+            .map(|l| format!(" at {l}"))
+            .unwrap_or_default(),
         _ => String::new(),
     };
 
@@ -220,7 +214,10 @@ pub fn format_bd_error(error: &BdError, source: &str) -> String {
     // Add source context if we have a line number
     if let Some(line_num) = extract_line_number(error) {
         if let Some(source_line) = source.lines().nth(line_num.saturating_sub(1) as usize) {
-            return format!("{main_msg}\n  --> line {line_num}\n  | {source_line}\n  | {}^", " ".repeat(0));
+            return format!(
+                "{main_msg}\n  --> line {line_num}\n  | {source_line}\n  | {}^",
+                " ".repeat(0)
+            );
         }
     }
 

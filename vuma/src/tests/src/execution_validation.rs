@@ -27,14 +27,14 @@
 //! | 11| wasm_validation     | test_wasm_type_section                  | Type section exists with func type signatures |
 
 use vuma_codegen::{
+    backend::Backend,
     emit::{emit_elf, EmitConfig, Emitter},
     ir::BinOpKind,
     scg_to_ir::{
-        IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType,
-        ComputationNode,
+        ComputationNode, IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement,
+        ScgType,
     },
     wasm32::Wasm32Backend,
-    backend::Backend,
 };
 
 // ===========================================================================
@@ -47,8 +47,14 @@ fn make_add_scg() -> Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "add".to_string(),
             params: vec![
-                ScgParam { name: "a".to_string(), ty: ScgType::I64 },
-                ScgParam { name: "b".to_string(), ty: ScgType::I64 },
+                ScgParam {
+                    name: "a".to_string(),
+                    ty: ScgType::I64,
+                },
+                ScgParam {
+                    name: "b".to_string(),
+                    ty: ScgType::I64,
+                },
             ],
             results: vec![ScgType::I64],
             body: vec![
@@ -79,7 +85,8 @@ fn compile_to_aarch64_words(scg: &Scg) -> Vec<u32> {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let mut emitter = Emitter::new();
-    emitter.emit_function(&ir_program.functions[0])
+    emitter
+        .emit_function(&ir_program.functions[0])
         .expect("Emission should succeed")
 }
 
@@ -146,8 +153,11 @@ mod x86_64_native {
             ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
 
             // Switch to read + write + execute.
-            let mprotect_result =
-                libc::mprotect(mem, aligned_len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+            let mprotect_result = libc::mprotect(
+                mem,
+                aligned_len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
             assert_eq!(mprotect_result, 0, "mprotect failed in test");
 
             // Call the compiled code as a function: extern "C" fn() -> i64.
@@ -175,7 +185,7 @@ mod x86_64_native {
     fn test_x86_64_trivial_return() {
         let code: Vec<u8> = vec![
             0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, // MOV RAX, 42
-            0xC3,                                       // RET
+            0xC3, // RET
         ];
         let result = execute_native(&code);
         assert_eq!(result, 42, "MOV RAX, 42; RET should return 42");
@@ -195,8 +205,8 @@ mod x86_64_native {
     fn test_x86_64_addition() {
         let code: Vec<u8> = vec![
             0x48, 0xC7, 0xC0, 0x0A, 0x00, 0x00, 0x00, // MOV RAX, 10
-            0x48, 0x83, 0xC0, 0x20,                     // ADD RAX, 32
-            0xC3,                                        // RET
+            0x48, 0x83, 0xC0, 0x20, // ADD RAX, 32
+            0xC3, // RET
         ];
         let result = execute_native(&code);
         assert_eq!(result, 42, "10 + 32 should equal 42");
@@ -216,8 +226,8 @@ mod x86_64_native {
     fn test_x86_64_subtraction() {
         let code: Vec<u8> = vec![
             0x48, 0xC7, 0xC0, 0x64, 0x00, 0x00, 0x00, // MOV RAX, 100
-            0x48, 0x83, 0xE8, 0x3A,                     // SUB RAX, 58
-            0xC3,                                        // RET
+            0x48, 0x83, 0xE8, 0x3A, // SUB RAX, 58
+            0xC3, // RET
         ];
         let result = execute_native(&code);
         assert_eq!(result, 42, "100 - 58 should equal 42");
@@ -236,7 +246,7 @@ mod x86_64_native {
     fn test_x86_64_zero_return() {
         let code: Vec<u8> = vec![
             0x31, 0xC0, // XOR EAX, EAX
-            0xC3,       // RET
+            0xC3, // RET
         ];
         let result = execute_native(&code);
         assert_eq!(result, 0, "XOR EAX,EAX; RET should return 0");
@@ -258,8 +268,8 @@ mod x86_64_native {
         let code: Vec<u8> = vec![
             0x48, 0xC7, 0xC0, 0x07, 0x00, 0x00, 0x00, // MOV RAX, 7
             0x48, 0xC7, 0xC1, 0x07, 0x00, 0x00, 0x00, // MOV RCX, 7
-            0x48, 0x0F, 0xAF, 0xC1,                     // IMUL RAX, RCX
-            0xC3,                                        // RET
+            0x48, 0x0F, 0xAF, 0xC1, // IMUL RAX, RCX
+            0xC3, // RET
         ];
         let result = execute_native(&code);
         assert_eq!(result, 49, "7 * 7 should equal 49");
@@ -289,10 +299,18 @@ mod arm64_regression {
         let elf_bytes = compile_to_aarch64_elf(&scg);
 
         // Must have at least 64 bytes (ELF64 header size).
-        assert!(elf_bytes.len() >= 64, "ELF should have at least 64 bytes, got {}", elf_bytes.len());
+        assert!(
+            elf_bytes.len() >= 64,
+            "ELF should have at least 64 bytes, got {}",
+            elf_bytes.len()
+        );
 
         // Check ELF magic.
-        assert_eq!(&elf_bytes[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic should be correct");
+        assert_eq!(
+            &elf_bytes[0..4],
+            &[0x7f, b'E', b'L', b'F'],
+            "ELF magic should be correct"
+        );
 
         // Check ELF class (64-bit).
         assert_eq!(elf_bytes[4], 2, "Should be ELFCLASS64");
@@ -305,7 +323,11 @@ mod arm64_regression {
 
         // Check machine type: EM_AARCH64 = 183.
         let e_machine = u16::from_le_bytes([elf_bytes[18], elf_bytes[19]]);
-        assert_eq!(e_machine, 183, "Machine type should be EM_AARCH64 (183), got {}", e_machine);
+        assert_eq!(
+            e_machine, 183,
+            "Machine type should be EM_AARCH64 (183), got {}",
+            e_machine
+        );
     }
 
     // ---- Test 2: Disassembly validity ----
@@ -328,7 +350,11 @@ mod arm64_regression {
         // depends on frame size, register allocation, and optimization level.
         // Just verify we got some non-zero instructions.
         assert_ne!(first, 0, "First instruction should not be zero");
-        assert!(words.len() >= 3, "Should have at least 3 instructions, got {}", words.len());
+        assert!(
+            words.len() >= 3,
+            "Should have at least 3 instructions, got {}",
+            words.len()
+        );
     }
 
     // ---- Test 3: Prologue/epilogue patterns ----
@@ -354,7 +380,10 @@ mod arm64_regression {
         });
         // STP may not always be present depending on frame layout — SUB SP is also valid.
         let has_sub_sp = words.iter().any(|&w| (w >> 24) == 0xD1);
-        assert!(has_stp || has_sub_sp, "Should contain STP or SUB SP instruction in prologue");
+        assert!(
+            has_stp || has_sub_sp,
+            "Should contain STP or SUB SP instruction in prologue"
+        );
 
         // Check for epilogue: any LDP instruction (load pair register).
         let has_ldp = words.iter().any(|&w| {
@@ -373,9 +402,12 @@ mod arm64_regression {
             op == 0x2A4 || op == 0x2A5 || op == 0x2A6
         }) {
             if let Some(ret_idx) = words.iter().position(|&w| w == 0xD65F03C0) {
-                assert!(stp_idx < ret_idx,
+                assert!(
+                    stp_idx < ret_idx,
                     "Prologue STP should come before RET (STP@{}, RET@{})",
-                    stp_idx, ret_idx);
+                    stp_idx,
+                    ret_idx
+                );
             }
         }
     }
@@ -402,18 +434,27 @@ mod wasm_validation {
         let wasm_bytes = compile_to_wasm(&scg);
 
         // Must have at least 8 bytes (magic + version).
-        assert!(wasm_bytes.len() >= 8,
-            "Wasm binary should have at least 8 bytes, got {}", wasm_bytes.len());
+        assert!(
+            wasm_bytes.len() >= 8,
+            "Wasm binary should have at least 8 bytes, got {}",
+            wasm_bytes.len()
+        );
 
         // Check magic number: 0x00 0x61 0x73 0x6D ("\0asm").
-        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D],
+        assert_eq!(
+            &wasm_bytes[0..4],
+            &[0x00, 0x61, 0x73, 0x6D],
             "Wasm magic should be \\0asm (0x00 0x61 0x73 0x6D), got {:02X?}",
-            &wasm_bytes[0..4]);
+            &wasm_bytes[0..4]
+        );
 
         // Check version: 0x01 0x00 0x00 0x00 (version 1, little-endian).
-        assert_eq!(&wasm_bytes[4..8], &[0x01, 0x00, 0x00, 0x00],
+        assert_eq!(
+            &wasm_bytes[4..8],
+            &[0x01, 0x00, 0x00, 0x00],
             "Wasm version should be 1 (0x01 0x00 0x00 0x00), got {:02X?}",
-            &wasm_bytes[4..8]);
+            &wasm_bytes[4..8]
+        );
     }
 
     // ---- Test 2: Section structure ----
@@ -434,7 +475,10 @@ mod wasm_validation {
         let wasm_bytes = compile_to_wasm(&scg);
 
         // Skip past magic + version (8 bytes).
-        assert!(wasm_bytes.len() > 8, "Wasm binary should have content after header");
+        assert!(
+            wasm_bytes.len() > 8,
+            "Wasm binary should have content after header"
+        );
 
         // Parse sections. Each section is: section_id (1 byte) + size (uLEB128) + content.
         let mut pos = 8usize;
@@ -448,7 +492,8 @@ mod wasm_validation {
             pos += 1;
 
             // Decode section size (unsigned LEB128).
-            let (size, bytes_consumed) = vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
+            let (size, bytes_consumed) =
+                vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
             pos += bytes_consumed;
 
             section_ids.push(section_id);
@@ -462,22 +507,34 @@ mod wasm_validation {
 
         // Sections must be in non-decreasing order.
         for window in section_ids.windows(2) {
-            assert!(window[0] <= window[1],
+            assert!(
+                window[0] <= window[1],
                 "Sections should be in ascending order, but {} came after {}",
-                window[1], window[0]);
+                window[1],
+                window[0]
+            );
         }
 
         // Type section (1) must be present.
-        assert!(section_ids.contains(&1),
-            "Should contain Type section (ID 1), found sections: {:?}", section_ids);
+        assert!(
+            section_ids.contains(&1),
+            "Should contain Type section (ID 1), found sections: {:?}",
+            section_ids
+        );
 
         // Function section (3) must be present.
-        assert!(section_ids.contains(&3),
-            "Should contain Function section (ID 3), found sections: {:?}", section_ids);
+        assert!(
+            section_ids.contains(&3),
+            "Should contain Function section (ID 3), found sections: {:?}",
+            section_ids
+        );
 
         // Code section (10) must be present.
-        assert!(section_ids.contains(&10),
-            "Should contain Code section (ID 10), found sections: {:?}", section_ids);
+        assert!(
+            section_ids.contains(&10),
+            "Should contain Code section (ID 10), found sections: {:?}",
+            section_ids
+        );
     }
 
     // ---- Test 3: Type section ----
@@ -500,7 +557,8 @@ mod wasm_validation {
             let section_id = wasm_bytes[pos];
             pos += 1;
 
-            let (size, bytes_consumed) = vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
+            let (size, bytes_consumed) =
+                vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
             pos += bytes_consumed;
 
             if section_id == 1 {
@@ -511,18 +569,28 @@ mod wasm_validation {
                 let section_end = pos + size as usize;
 
                 // First byte after size is the count of types (uLEB128).
-                assert!(section_start < section_end, "Type section should not be empty");
-                let (num_types, nc) = vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
+                assert!(
+                    section_start < section_end,
+                    "Type section should not be empty"
+                );
+                let (num_types, nc) =
+                    vuma_codegen::wasm32::decode_unsigned_leb128(&wasm_bytes[pos..]);
 
-                assert!(num_types > 0,
-                    "Type section should contain at least one function type, got {}", num_types);
+                assert!(
+                    num_types > 0,
+                    "Type section should contain at least one function type, got {}",
+                    num_types
+                );
 
                 pos += nc;
 
                 // Each type entry starts with the func type tag (0x60).
                 let func_type_tag = wasm_bytes[pos];
-                assert_eq!(func_type_tag, 0x60,
-                    "Function type should start with tag 0x60, got {:#04X}", func_type_tag);
+                assert_eq!(
+                    func_type_tag, 0x60,
+                    "Function type should start with tag 0x60, got {:#04X}",
+                    func_type_tag
+                );
 
                 break; // We've validated the type section.
             }
@@ -531,6 +599,9 @@ mod wasm_validation {
             pos += size as usize;
         }
 
-        assert!(type_section_found, "Should find a Type section (ID 1) in the Wasm binary");
+        assert!(
+            type_section_found,
+            "Should find a Type section (ID 1) in the Wasm binary"
+        );
     }
 }

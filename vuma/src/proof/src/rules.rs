@@ -241,17 +241,12 @@ impl InferenceRule {
                 let premise = &facts[0];
                 match premise.judgment.as_ref() {
                     Some(Judgment::Allocated { region }) => {
-                        let j = Judgment::Live {
-                            region: *region,
-                        };
+                        let j = Judgment::Live { region: *region };
                         Ok(Fact::derived_j(next_id, j))
                     }
                     Some(other) => Err(RuleError::PremiseMismatch {
                         index: 0,
-                        reason: format!(
-                            "expected Allocated judgment, got {:?}",
-                            other
-                        ),
+                        reason: format!("expected Allocated judgment, got {:?}", other),
                     }),
                     None => {
                         // Fallback: string-based matching for backward compat.
@@ -261,8 +256,7 @@ impl InferenceRule {
                                 reason: "expected a fact about region allocation".into(),
                             });
                         }
-                        let conclusion_stmt =
-                            premise.statement.replace("allocated", "live");
+                        let conclusion_stmt = premise.statement.replace("allocated", "live");
                         Ok(Fact::derived(next_id, conclusion_stmt))
                     }
                 }
@@ -272,29 +266,21 @@ impl InferenceRule {
                 let premise = &facts[0];
                 match premise.judgment.as_ref() {
                     Some(Judgment::Freed { region }) => {
-                        let j = Judgment::Dead {
-                            region: *region,
-                        };
+                        let j = Judgment::Dead { region: *region };
                         Ok(Fact::derived_j(next_id, j))
                     }
                     Some(other) => Err(RuleError::PremiseMismatch {
                         index: 0,
-                        reason: format!(
-                            "expected Freed judgment, got {:?}",
-                            other
-                        ),
+                        reason: format!("expected Freed judgment, got {:?}", other),
                     }),
                     None => {
                         if !premise.statement.contains("freed") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 0,
-                                reason:
-                                    "expected a fact about region deallocation (freed)"
-                                        .into(),
+                                reason: "expected a fact about region deallocation (freed)".into(),
                             });
                         }
-                        let conclusion_stmt =
-                            premise.statement.replace("freed", "dead");
+                        let conclusion_stmt = premise.statement.replace("freed", "dead");
                         Ok(Fact::derived(next_id, conclusion_stmt))
                     }
                 }
@@ -324,8 +310,7 @@ impl InferenceRule {
                         {
                             return Err(RuleError::PremiseMismatch {
                                 index: 0,
-                                reason: "expected a fact about lock acquisition"
-                                    .into(),
+                                reason: "expected a fact about lock acquisition".into(),
                             });
                         }
                         let conclusion_stmt = premise
@@ -353,10 +338,7 @@ impl InferenceRule {
                     }
                     (Some(other), _) | (_, Some(other)) => {
                         let bad_idx = if p0.judgment.is_some()
-                            && !matches!(
-                                p0.judgment,
-                                Some(Judgment::Exclusive { .. })
-                            )
+                            && !matches!(p0.judgment, Some(Judgment::Exclusive { .. }))
                         {
                             0
                         } else {
@@ -364,10 +346,7 @@ impl InferenceRule {
                         };
                         Err(RuleError::PremiseMismatch {
                             index: bad_idx,
-                            reason: format!(
-                                "expected Exclusive judgment, got {:?}",
-                                other
-                            ),
+                            reason: format!("expected Exclusive judgment, got {:?}", other),
                         })
                     }
                     (None, None) => {
@@ -375,15 +354,13 @@ impl InferenceRule {
                         if !p0.statement.contains("exclusive access") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 0,
-                                reason: "expected a fact about exclusive access"
-                                    .into(),
+                                reason: "expected a fact about exclusive access".into(),
                             });
                         }
                         if !p1.statement.contains("exclusive access") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 1,
-                                reason: "expected a fact about exclusive access"
-                                    .into(),
+                                reason: "expected a fact about exclusive access".into(),
                             });
                         }
                         Ok(Fact::derived(
@@ -427,10 +404,7 @@ impl InferenceRule {
                         if r1 != r2 {
                             return Err(RuleError::PremiseMismatch {
                                 index: 1,
-                                reason: format!(
-                                    "region mismatch: '{}' != '{}'",
-                                    r1, r2
-                                ),
+                                reason: format!("region mismatch: '{}' != '{}'", r1, r2),
                             });
                         }
                         let j = Judgment::Derived {
@@ -442,10 +416,7 @@ impl InferenceRule {
                     }
                     (Some(other), _) | (_, Some(other)) => {
                         let bad_idx = if p0.judgment.is_some()
-                            && !matches!(
-                                p0.judgment,
-                                Some(Judgment::Derived { .. })
-                            )
+                            && !matches!(p0.judgment, Some(Judgment::Derived { .. }))
                         {
                             0
                         } else {
@@ -453,10 +424,7 @@ impl InferenceRule {
                         };
                         Err(RuleError::PremiseMismatch {
                             index: bad_idx,
-                            reason: format!(
-                                "expected Derived judgment, got {:?}",
-                                other
-                            ),
+                            reason: format!("expected Derived judgment, got {:?}", other),
                         })
                     }
                     (None, None) => {
@@ -505,36 +473,25 @@ impl InferenceRule {
                     }
                     (Some(other), _) => Err(RuleError::PremiseMismatch {
                         index: 0,
-                        reason: format!(
-                            "expected InBounds judgment, got {:?}",
-                            other
-                        ),
+                        reason: format!("expected InBounds judgment, got {:?}", other),
                     }),
                     (None, _) => {
                         // String fallback
-                        if !p0.statement.contains("offset")
-                            && !p0.statement.contains("within")
-                        {
+                        if !p0.statement.contains("offset") && !p0.statement.contains("within") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 0,
-                                reason:
-                                    "expected a fact about an offset within a region"
-                                        .into(),
+                                reason: "expected a fact about an offset within a region".into(),
                             });
                         }
                         if !p1.statement.contains("bounds") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 1,
-                                reason: "expected a fact about region bounds"
-                                    .into(),
+                                reason: "expected a fact about region bounds".into(),
                             });
                         }
                         Ok(Fact::derived(
                             next_id,
-                            format!(
-                                "bounds preserved: ({}) ∧ ({})",
-                                p0.statement, p1.statement
-                            ),
+                            format!("bounds preserved: ({}) ∧ ({})", p0.statement, p1.statement),
                         ))
                     }
                 }
@@ -561,39 +518,25 @@ impl InferenceRule {
                     }
                     (Some(other), _) => Err(RuleError::PremiseMismatch {
                         index: 0,
-                        reason: format!(
-                            "expected PreservesCapD judgment, got {:?}",
-                            other
-                        ),
+                        reason: format!("expected PreservesCapD judgment, got {:?}", other),
                     }),
                     (None, _) => {
                         // String fallback
-                        if !p0.statement.contains("layout")
-                            && !p0.statement.contains("type")
-                        {
+                        if !p0.statement.contains("layout") && !p0.statement.contains("type") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 0,
-                                reason:
-                                    "expected a fact about source type layout"
-                                        .into(),
+                                reason: "expected a fact about source type layout".into(),
                             });
                         }
-                        if !p1.statement.contains("layout")
-                            && !p1.statement.contains("type")
-                        {
+                        if !p1.statement.contains("layout") && !p1.statement.contains("type") {
                             return Err(RuleError::PremiseMismatch {
                                 index: 1,
-                                reason:
-                                    "expected a fact about target type layout"
-                                        .into(),
+                                reason: "expected a fact about target type layout".into(),
                             });
                         }
                         Ok(Fact::derived(
                             next_id,
-                            format!(
-                                "cast is valid: ({}) → ({})",
-                                p0.statement, p1.statement
-                            ),
+                            format!("cast is valid: ({}) → ({})", p0.statement, p1.statement),
                         ))
                     }
                 }
@@ -617,10 +560,7 @@ impl InferenceRule {
                         if b1 != b2 {
                             return Err(RuleError::PremiseMismatch {
                                 index: 1,
-                                reason: format!(
-                                    "temporal chain mismatch: '{}' != '{}'",
-                                    b1, b2
-                                ),
+                                reason: format!("temporal chain mismatch: '{}' != '{}'", b1, b2),
                             });
                         }
                         let j = Judgment::TemporalOrder {
@@ -631,10 +571,7 @@ impl InferenceRule {
                     }
                     (Some(other), _) | (_, Some(other)) => {
                         let bad_idx = if p0.judgment.is_some()
-                            && !matches!(
-                                p0.judgment,
-                                Some(Judgment::TemporalOrder { .. })
-                            )
+                            && !matches!(p0.judgment, Some(Judgment::TemporalOrder { .. }))
                         {
                             0
                         } else {
@@ -642,10 +579,7 @@ impl InferenceRule {
                         };
                         Err(RuleError::PremiseMismatch {
                             index: bad_idx,
-                            reason: format!(
-                                "expected TemporalOrder judgment, got {:?}",
-                                other
-                            ),
+                            reason: format!("expected TemporalOrder judgment, got {:?}", other),
                         })
                     }
                     (None, None) => {
@@ -714,7 +648,10 @@ mod tests {
         let err = rule.apply(&[]).unwrap_err();
         assert!(matches!(
             err,
-            RuleError::ArityMismatch { expected: 1, got: 0 }
+            RuleError::ArityMismatch {
+                expected: 1,
+                got: 0
+            }
         ));
     }
 
@@ -772,10 +709,7 @@ mod tests {
 
     #[test]
     fn test_rule_display() {
-        assert_eq!(
-            format!("{}", InferenceRule::LivenessIntro),
-            "LivenessIntro"
-        );
+        assert_eq!(format!("{}", InferenceRule::LivenessIntro), "LivenessIntro");
     }
 
     // -- Structured judgment tests -----------------------------------------

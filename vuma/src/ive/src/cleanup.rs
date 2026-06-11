@@ -554,7 +554,11 @@ pub struct CleanupReport {
 
 impl CleanupReport {
     /// Create a report from a list of violations.
-    pub fn from_violations(violations: Vec<CleanupViolation>, paths_explored: usize, acquires_checked: usize) -> Self {
+    pub fn from_violations(
+        violations: Vec<CleanupViolation>,
+        paths_explored: usize,
+        acquires_checked: usize,
+    ) -> Self {
         let clean = violations.is_empty();
         Self {
             violations,
@@ -634,9 +638,7 @@ impl CleanupVerifier {
             // Start from all nodes that have no predecessors (entry points)
             let entries: Vec<NodeId> = graph
                 .node_ids()
-                .filter(|&id| {
-                    graph.predecessors_of(id).is_none_or(|p| p.is_empty())
-                })
+                .filter(|&id| graph.predecessors_of(id).is_none_or(|p| p.is_empty()))
                 .collect();
             if entries.is_empty() && graph.node_count() > 0 {
                 // Fallback: start from all nodes
@@ -798,10 +800,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -809,10 +808,7 @@ mod tests {
             },
             pp("test.vu", 2),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 3),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 3));
         let dealloc = graph.add_node(
             OperationKind::Release {
                 resource: res,
@@ -842,10 +838,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -853,10 +846,7 @@ mod tests {
             },
             pp("test.vu", 2),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 3),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 3));
         let ret = graph.add_node(OperationKind::Return, pp("test.vu", 4));
 
         graph.add_edge(entry, alloc).unwrap();
@@ -881,10 +871,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -931,10 +918,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -949,10 +933,7 @@ mod tests {
             },
             pp("test.vu", 3),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 4),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 4));
         let ret = graph.add_node(OperationKind::Return, pp("test.vu", 5));
 
         graph.add_edge(entry, alloc).unwrap();
@@ -978,10 +959,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -996,10 +974,7 @@ mod tests {
             pp("test.vu", 3),
         );
         // Then branch
-        let access_then = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 4),
-        );
+        let access_then = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 4));
         let free_then = graph.add_node(
             OperationKind::Release {
                 resource: res,
@@ -1042,10 +1017,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -1068,10 +1040,7 @@ mod tests {
             pp("test.vu", 4),
         );
         // Else branch — does NOT free (leak!)
-        let passthrough_else = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 5),
-        );
+        let passthrough_else = graph.add_node(OperationKind::Passthrough, pp("test.vu", 5));
         let join = graph.add_node(OperationKind::Join, pp("test.vu", 6));
         let ret = graph.add_node(OperationKind::Return, pp("test.vu", 7));
 
@@ -1101,10 +1070,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -1112,10 +1078,7 @@ mod tests {
             },
             pp("test.vu", 2),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 3),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 3));
         let branch = graph.add_node(
             OperationKind::Branch {
                 condition: "error?".into(),
@@ -1157,7 +1120,11 @@ mod tests {
 
         let verifier = CleanupVerifier::new();
         let report = verifier.verify(&graph);
-        assert!(report.clean, "Expected clean (both paths free), got: {:?}", report.violations);
+        assert!(
+            report.clean,
+            "Expected clean (both paths free), got: {:?}",
+            report.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1168,10 +1135,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -1227,10 +1191,7 @@ mod tests {
         let res1 = ResourceId(1);
         let res2 = ResourceId(2);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc1 = graph.add_node(
             OperationKind::Acquire {
                 resource: res1,
@@ -1245,10 +1206,7 @@ mod tests {
             },
             pp("test.vu", 3),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: res1 },
-            pp("test.vu", 4),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: res1 }, pp("test.vu", 4));
         let free2 = graph.add_node(
             OperationKind::Release {
                 resource: res2,
@@ -1287,10 +1245,7 @@ mod tests {
         let res1 = ResourceId(1);
         let res2 = ResourceId(2);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc1 = graph.add_node(
             OperationKind::Acquire {
                 resource: res1,
@@ -1412,10 +1367,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let fh = ResourceId(10);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let open = graph.add_node(
             OperationKind::Acquire {
                 resource: fh,
@@ -1423,10 +1375,7 @@ mod tests {
             },
             pp("test.vu", 2),
         );
-        let access = graph.add_node(
-            OperationKind::Access { resource: fh },
-            pp("test.vu", 3),
-        );
+        let access = graph.add_node(OperationKind::Access { resource: fh }, pp("test.vu", 3));
         let close = graph.add_node(
             OperationKind::Release {
                 resource: fh,
@@ -1455,10 +1404,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let lock = ResourceId(20);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let lock_acquire = graph.add_node(
             OperationKind::Acquire {
                 resource: lock,
@@ -1505,10 +1451,7 @@ mod tests {
         let mut graph = CleanupGraph::new();
         let res = ResourceId(1);
 
-        let entry = graph.add_node(
-            OperationKind::Passthrough,
-            pp("test.vu", 1),
-        );
+        let entry = graph.add_node(OperationKind::Passthrough, pp("test.vu", 1));
         let alloc = graph.add_node(
             OperationKind::Acquire {
                 resource: res,
@@ -1530,16 +1473,11 @@ mod tests {
             },
             pp("test.vu", 4),
         );
-        let access_after_free = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 5),
-        );
+        let access_after_free =
+            graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 5));
         let ret_a = graph.add_node(OperationKind::Return, pp("test.vu", 6));
         // Branch B: normal use then free
-        let access_b = graph.add_node(
-            OperationKind::Access { resource: res },
-            pp("test.vu", 7),
-        );
+        let access_b = graph.add_node(OperationKind::Access { resource: res }, pp("test.vu", 7));
         let free_b = graph.add_node(
             OperationKind::Release {
                 resource: res,

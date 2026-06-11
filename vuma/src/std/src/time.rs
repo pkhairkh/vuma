@@ -130,7 +130,10 @@ impl Duration {
         let nanos = self.nanos + other.nanos;
         if nanos >= 1_000_000_000 {
             let secs = secs.checked_add(1)?;
-            Some(Duration { secs, nanos: nanos - 1_000_000_000 })
+            Some(Duration {
+                secs,
+                nanos: nanos - 1_000_000_000,
+            })
         } else {
             Some(Duration { secs, nanos })
         }
@@ -143,9 +146,15 @@ impl Duration {
     pub fn checked_sub(&self, other: &Duration) -> Option<Duration> {
         let secs = self.secs.checked_sub(other.secs)?;
         if self.nanos >= other.nanos {
-            Some(Duration { secs, nanos: self.nanos - other.nanos })
+            Some(Duration {
+                secs,
+                nanos: self.nanos - other.nanos,
+            })
         } else if secs > 0 {
-            Some(Duration { secs: secs - 1, nanos: self.nanos + 1_000_000_000 - other.nanos })
+            Some(Duration {
+                secs: secs - 1,
+                nanos: self.nanos + 1_000_000_000 - other.nanos,
+            })
         } else {
             None
         }
@@ -154,7 +163,12 @@ impl Duration {
     /// Returns the CapD for this type.
     // VUMA-VERIFIED: capability descriptor is correct
     pub fn capd(&self) -> CapD {
-        CapD::new(vec![CapFlag::Read, CapFlag::Compare, CapFlag::Hash, CapFlag::Serialize])
+        CapD::new(vec![
+            CapFlag::Read,
+            CapFlag::Compare,
+            CapFlag::Hash,
+            CapFlag::Serialize,
+        ])
     }
 
     /// Returns the RepD for this type.
@@ -345,9 +359,11 @@ impl Instant {
     /// Returns the SyncEdge annotations for this type.
     // VUMA-VERIFIED: synchronization edges model instant ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("instant_now", "instant_elapsed", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "instant_now",
+            "instant_elapsed",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -386,7 +402,9 @@ impl SystemTime {
     /// Create a SystemTime from a Duration since the Unix epoch.
     // VUMA-VERIFIED: constructor is pure
     pub fn from_duration_since_epoch(d: Duration) -> Self {
-        Self { duration_since_epoch: d }
+        Self {
+            duration_since_epoch: d,
+        }
     }
 
     /// Returns the duration since the Unix epoch.
@@ -410,9 +428,11 @@ impl SystemTime {
     /// Returns the SyncEdge annotations for this type.
     // VUMA-VERIFIED: synchronization edges model system time ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("system_now", "system_duration_since_epoch", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "system_now",
+            "system_duration_since_epoch",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -492,7 +512,9 @@ mod tests {
         let elapsed = start.elapsed();
         // elapsed should be >= 0; on a modern system even a tight loop
         // should take some nanoseconds.
-        assert!(elapsed.secs > 0 || elapsed.nanos > 0 || elapsed.is_zero() /* theoretically possible but unlikely */);
+        assert!(
+            elapsed.secs > 0 || elapsed.nanos > 0 || elapsed.is_zero() /* theoretically possible but unlikely */
+        );
     }
 
     #[test]
@@ -501,7 +523,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let elapsed = start.elapsed();
         // After sleeping 50ms, elapsed should be at least 40ms (allowing for some slack)
-        assert!(elapsed.as_millis() >= 40, "elapsed was only {}ms, expected >= 40ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() >= 40,
+            "elapsed was only {}ms, expected >= 40ms",
+            elapsed.as_millis()
+        );
     }
 
     #[test]
@@ -537,7 +563,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let t2 = SystemTime::now();
         // t2 should be strictly after t1
-        assert!(t2.duration_since_epoch().as_secs() > t1.duration_since_epoch().as_secs()
-            || t2.duration_since_epoch().subsec_nanos() > t1.duration_since_epoch().subsec_nanos());
+        assert!(
+            t2.duration_since_epoch().as_secs() > t1.duration_since_epoch().as_secs()
+                || t2.duration_since_epoch().subsec_nanos()
+                    > t1.duration_since_epoch().subsec_nanos()
+        );
     }
 }

@@ -169,7 +169,9 @@ impl OwnershipTracker {
     ///
     /// If the region is already tracked, this is a no-op.
     pub fn register_region(&mut self, region_id: RegionId) {
-        self.regions.entry(region_id).or_insert_with(|| RegionState::new(region_id));
+        self.regions
+            .entry(region_id)
+            .or_insert_with(|| RegionState::new(region_id));
     }
 
     /// Unregisters a region, removing it from tracking.
@@ -202,8 +204,15 @@ impl OwnershipTracker {
     /// # Errors
     ///
     /// Returns [`OwnershipError::NotTracked`] if the region is not tracked.
-    pub fn acquire_read(&mut self, region_id: RegionId, thread: ThreadId) -> Result<(), OwnershipError> {
-        let state = self.regions.get_mut(&region_id).ok_or(OwnershipError::NotTracked(region_id))?;
+    pub fn acquire_read(
+        &mut self,
+        region_id: RegionId,
+        thread: ThreadId,
+    ) -> Result<(), OwnershipError> {
+        let state = self
+            .regions
+            .get_mut(&region_id)
+            .ok_or(OwnershipError::NotTracked(region_id))?;
 
         match state.access_mode {
             AccessMode::Free => {
@@ -273,8 +282,15 @@ impl OwnershipTracker {
     ///
     /// Returns [`OwnershipError::NotTracked`] if the region is not tracked,
     /// or [`OwnershipError::Conflict`] if another thread holds the region.
-    pub fn acquire_write(&mut self, region_id: RegionId, thread: ThreadId) -> Result<(), OwnershipError> {
-        let state = self.regions.get_mut(&region_id).ok_or(OwnershipError::NotTracked(region_id))?;
+    pub fn acquire_write(
+        &mut self,
+        region_id: RegionId,
+        thread: ThreadId,
+    ) -> Result<(), OwnershipError> {
+        let state = self
+            .regions
+            .get_mut(&region_id)
+            .ok_or(OwnershipError::NotTracked(region_id))?;
 
         match state.access_mode {
             AccessMode::Free => {
@@ -362,8 +378,15 @@ impl OwnershipTracker {
     /// Returns `Ok(())` if access was granted, or `Err(OwnershipError)` if
     /// it would need to block. Unlike [`acquire_read`](Self::acquire_read),
     /// this does **not** add the thread to the waiting list.
-    pub fn try_acquire_read(&mut self, region_id: RegionId, thread: ThreadId) -> Result<(), OwnershipError> {
-        let state = self.regions.get_mut(&region_id).ok_or(OwnershipError::NotTracked(region_id))?;
+    pub fn try_acquire_read(
+        &mut self,
+        region_id: RegionId,
+        thread: ThreadId,
+    ) -> Result<(), OwnershipError> {
+        let state = self
+            .regions
+            .get_mut(&region_id)
+            .ok_or(OwnershipError::NotTracked(region_id))?;
 
         match state.access_mode {
             AccessMode::Free => {
@@ -412,8 +435,15 @@ impl OwnershipTracker {
     /// Returns `Ok(())` if access was granted, or `Err(OwnershipError)` if
     /// it would need to block. Unlike [`acquire_write`](Self::acquire_write),
     /// this does **not** add the thread to the waiting list.
-    pub fn try_acquire_write(&mut self, region_id: RegionId, thread: ThreadId) -> Result<(), OwnershipError> {
-        let state = self.regions.get_mut(&region_id).ok_or(OwnershipError::NotTracked(region_id))?;
+    pub fn try_acquire_write(
+        &mut self,
+        region_id: RegionId,
+        thread: ThreadId,
+    ) -> Result<(), OwnershipError> {
+        let state = self
+            .regions
+            .get_mut(&region_id)
+            .ok_or(OwnershipError::NotTracked(region_id))?;
 
         match state.access_mode {
             AccessMode::Free => {
@@ -499,15 +529,22 @@ impl OwnershipTracker {
     /// Returns [`OwnershipError::NotTracked`] if the region is not tracked,
     /// or [`OwnershipError::NotHeld`] if the thread doesn't hold access.
     pub fn release(&mut self, region_id: RegionId, thread: ThreadId) -> Result<(), OwnershipError> {
-        let state = self.regions.get_mut(&region_id).ok_or(OwnershipError::NotTracked(region_id))?;
+        let state = self
+            .regions
+            .get_mut(&region_id)
+            .ok_or(OwnershipError::NotTracked(region_id))?;
 
         match state.access_mode {
-            AccessMode::Free => {
-                Err(OwnershipError::NotHeld { thread, region: region_id })
-            }
+            AccessMode::Free => Err(OwnershipError::NotHeld {
+                thread,
+                region: region_id,
+            }),
             AccessMode::ExclusiveWrite => {
                 if state.owner != Some(thread) {
-                    return Err(OwnershipError::NotHeld { thread, region: region_id });
+                    return Err(OwnershipError::NotHeld {
+                        thread,
+                        region: region_id,
+                    });
                 }
                 state.owner = None;
                 state.access_mode = AccessMode::Free;
@@ -525,7 +562,10 @@ impl OwnershipTracker {
                         }
                         Ok(())
                     }
-                    None => Err(OwnershipError::NotHeld { thread, region: region_id }),
+                    None => Err(OwnershipError::NotHeld {
+                        thread,
+                        region: region_id,
+                    }),
                 }
             }
         }
@@ -608,7 +648,10 @@ impl OwnershipTracker {
         let mut region_accesses: HashMap<RegionId, Vec<&AccessRecord>> = HashMap::new();
         for record in &self.access_log {
             if record.granted {
-                region_accesses.entry(record.region).or_default().push(record);
+                region_accesses
+                    .entry(record.region)
+                    .or_default()
+                    .push(record);
             }
         }
 
@@ -638,7 +681,11 @@ impl OwnershipTracker {
         // Deduplicate: only report one race per (region, thread_a, thread_b) pair.
         let mut seen = std::collections::HashSet::new();
         races.retain(|race| {
-            let key = (race.region, race.thread_a.min(race.thread_b), race.thread_a.max(race.thread_b));
+            let key = (
+                race.region,
+                race.thread_a.min(race.thread_b),
+                race.thread_a.max(race.thread_b),
+            );
             seen.insert(key)
         });
 

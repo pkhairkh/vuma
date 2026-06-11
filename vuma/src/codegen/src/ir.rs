@@ -729,7 +729,11 @@ pub fn compute_stack_layout_with_info(
         for instr in &block.instructions {
             if let IRInstr::Alloc { dst, size } = instr {
                 let size = *size as usize;
-                let align = if size >= 8 { 8usize } else { size.next_power_of_two() };
+                let align = if size >= 8 {
+                    8usize
+                } else {
+                    size.next_power_of_two()
+                };
                 // Align offset.
                 offset = (offset - align as i32) & !(align as i32 - 1);
                 offset -= size as i32;
@@ -1203,7 +1207,6 @@ pub enum IRInstr {
     },
 
     // ── Dedicated arithmetic instructions ────────────────────────────
-
     /// Add: `dst = lhs + rhs`
     Add {
         /// Destination register.
@@ -1242,7 +1245,6 @@ pub enum IRInstr {
     },
 
     // ── Comparison ──────────────────────────────────────────────────
-
     /// Comparison: `dst = cmp kind lhs rhs` — produces 1 or 0.
     Cmp {
         /// Comparison kind.
@@ -1256,7 +1258,6 @@ pub enum IRInstr {
     },
 
     // ── Instruction-level control flow ───────────────────────────────
-
     /// Return from the current function with optional values.
     Ret {
         /// Return value registers.
@@ -1293,7 +1294,11 @@ impl IRInstr {
             | IRInstr::GetAddress { dst, .. }
             | IRInstr::Offset { dst, .. }
             | IRInstr::Select { dst, .. } => dst.as_register().into_iter().collect(),
-            IRInstr::Call { dst, .. } => dst.as_ref().and_then(|v| v.as_register()).into_iter().collect(),
+            IRInstr::Call { dst, .. } => dst
+                .as_ref()
+                .and_then(|v| v.as_register())
+                .into_iter()
+                .collect(),
             IRInstr::Add { dst, .. }
             | IRInstr::Sub { dst, .. }
             | IRInstr::Mul { dst, .. }
@@ -1332,13 +1337,21 @@ impl IRInstr {
             IRInstr::Alloc { .. } | IRInstr::GetAddress { .. } => vec![],
             IRInstr::Free { ptr } => ptr.as_register().into_iter().collect(),
             IRInstr::Cast { src, .. } => src.as_register().into_iter().collect(),
-            IRInstr::Phi { incoming, .. } => incoming.iter().filter_map(|(v, _)| v.as_register()).collect(),
+            IRInstr::Phi { incoming, .. } => incoming
+                .iter()
+                .filter_map(|(v, _)| v.as_register())
+                .collect(),
             IRInstr::Offset { base, offset, .. } => {
                 let mut r = base.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(offset.as_register());
                 r
             }
-            IRInstr::Select { cond, true_val, false_val, .. } => {
+            IRInstr::Select {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => {
                 let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(true_val.as_register());
                 r.extend(false_val.as_register());
@@ -1392,14 +1405,24 @@ impl fmt::Display for IRInstr {
             IRInstr::Offset { dst, base, offset } => {
                 write!(f, "{} = offset {}, {}", dst, base, offset)
             }
-            IRInstr::Select { dst, cond, true_val, false_val } => {
+            IRInstr::Select {
+                dst,
+                cond,
+                true_val,
+                false_val,
+            } => {
                 write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
             }
             IRInstr::Add { dst, lhs, rhs } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
             IRInstr::Sub { dst, lhs, rhs } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
             IRInstr::Mul { dst, lhs, rhs } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
             IRInstr::Div { dst, lhs, rhs } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
-            IRInstr::Cmp { kind, dst, lhs, rhs } => {
+            IRInstr::Cmp {
+                kind,
+                dst,
+                lhs,
+                rhs,
+            } => {
                 write!(f, "{} = {} {}, {}", dst, kind, lhs, rhs)
             }
             IRInstr::Ret { values } => {
@@ -1411,7 +1434,11 @@ impl fmt::Display for IRInstr {
                 write!(f, "ret {}", vals_str)
             }
             IRInstr::Branch { target } => write!(f, "br @{}", target),
-            IRInstr::CondBranch { cond, true_target, false_target } => {
+            IRInstr::CondBranch {
+                cond,
+                true_target,
+                false_target,
+            } => {
                 write!(f, "br {}, @{}, @{}", cond, true_target, false_target)
             }
         }
@@ -1488,7 +1515,9 @@ impl IRTerminator {
                 ..
             } => vec![true_block, false_block],
             IRTerminator::Return(_) | IRTerminator::Unreachable => vec![],
-            IRTerminator::Switch { targets, default, .. } => {
+            IRTerminator::Switch {
+                targets, default, ..
+            } => {
                 let mut labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
                 labels.push(default);
                 labels
@@ -1519,7 +1548,11 @@ impl fmt::Display for IRTerminator {
                 write!(f, "ret {}", vals_str)
             }
             IRTerminator::Unreachable => write!(f, "unreachable"),
-            IRTerminator::Switch { discr, targets, default } => {
+            IRTerminator::Switch {
+                discr,
+                targets,
+                default,
+            } => {
                 let pairs = targets
                     .iter()
                     .map(|(v, l)| format!("{}: @{}", v, l))
@@ -1527,15 +1560,29 @@ impl fmt::Display for IRTerminator {
                     .join(", ");
                 write!(f, "switch {}, [{}] default @{}", discr, pairs, default)
             }
-            IRTerminator::Invoke { dst, func, args, normal, unwind } => {
+            IRTerminator::Invoke {
+                dst,
+                func,
+                args,
+                normal,
+                unwind,
+            } => {
                 let args_str = args
                     .iter()
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(", ");
                 match dst {
-                    Some(d) => write!(f, "invoke {} = @{}({}) normal @{} unwind @{}", d, func, args_str, normal, unwind),
-                    None => write!(f, "invoke @{}({}) normal @{} unwind @{}", func, args_str, normal, unwind),
+                    Some(d) => write!(
+                        f,
+                        "invoke {} = @{}({}) normal @{} unwind @{}",
+                        d, func, args_str, normal, unwind
+                    ),
+                    None => write!(
+                        f,
+                        "invoke @{}({}) normal @{} unwind @{}",
+                        func, args_str, normal, unwind
+                    ),
                 }
             }
             IRTerminator::TailCall { func, args } => {
@@ -1664,7 +1711,9 @@ impl IRFunction {
 
     /// Returns a mutable reference to the current (last) block.
     pub fn current_block(&mut self) -> &mut IRBlock {
-        self.blocks.last_mut().expect("IRFunction must have at least one block")
+        self.blocks
+            .last_mut()
+            .expect("IRFunction must have at least one block")
     }
 
     /// Append a new block and return its index.
@@ -1702,8 +1751,7 @@ impl IRFunction {
         let mut edges: Vec<(usize, usize)> = Vec::new();
         for i in 0..self.blocks.len() {
             self.blocks[i].update_successors_from_terminator();
-            let succ_labels: Vec<String> =
-                self.blocks[i].successors.iter().cloned().collect();
+            let succ_labels: Vec<String> = self.blocks[i].successors.iter().cloned().collect();
             for succ_label in succ_labels {
                 if let Some(&succ_idx) = label_to_idx.get(&succ_label) {
                     edges.push((i, succ_idx));
@@ -1832,7 +1880,11 @@ impl fmt::Display for IRProgram {
             write!(f, "{}", func)?;
         }
         for section in &self.data_sections {
-            writeln!(f, "section {} ({:?}), align {}", section.name, section.kind, section.align)?;
+            writeln!(
+                f,
+                "section {} ({:?}), align {}",
+                section.name, section.kind, section.align
+            )?;
             writeln!(f, "  {} bytes", section.data.len())?;
         }
         Ok(())

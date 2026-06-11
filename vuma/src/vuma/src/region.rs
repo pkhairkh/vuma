@@ -109,7 +109,10 @@ impl Region {
     pub fn is_live(&self) -> bool {
         matches!(
             self.status,
-            RegionStatus::Allocated | RegionStatus::Stack | RegionStatus::Mapped | RegionStatus::Device
+            RegionStatus::Allocated
+                | RegionStatus::Stack
+                | RegionStatus::Mapped
+                | RegionStatus::Device
         )
     }
 }

@@ -299,7 +299,7 @@ impl DwarfBuilder {
         let mut buf = Vec::new();
 
         // Abbrev 1: DW_TAG_COMPILE_UNIT
-        encode_uleb128(&mut buf, 1);              // abbreviation code
+        encode_uleb128(&mut buf, 1); // abbreviation code
         encode_uleb128(&mut buf, DW_TAG_COMPILE_UNIT as u64);
         buf.push(DW_CHILDREN_YES);
         // DW_AT_NAME, DW_FORM_STRING
@@ -377,14 +377,19 @@ impl DwarfBuilder {
 
         // -- Compile Unit DIE (abbrev 1) --
         encode_uleb128(&mut die_buf, 1); // abbrev code
-        // DW_AT_NAME (DW_FORM_STRING)
+                                         // DW_AT_NAME (DW_FORM_STRING)
         write_null_string(&mut die_buf, &self.source_file);
         // DW_AT_LANGUAGE (DW_FORM_DATA2)
         die_buf.extend_from_slice(&DW_LANG_VUMA.to_le_bytes());
         // DW_AT_PRODUCER (DW_FORM_STRING)
         write_null_string(&mut die_buf, &self.producer);
         // DW_AT_LOW_PC (DW_FORM_ADDR)
-        let cu_low_pc = self.subprograms.iter().map(|s| s.start_offset).min().unwrap_or(0);
+        let cu_low_pc = self
+            .subprograms
+            .iter()
+            .map(|s| s.start_offset)
+            .min()
+            .unwrap_or(0);
         die_buf.extend_from_slice(&cu_low_pc.to_le_bytes());
         // DW_AT_HIGH_PC (DW_FORM_DATA4) — offset from low_pc
         let cu_high_pc: u32 = self
@@ -401,7 +406,7 @@ impl DwarfBuilder {
         // -- Subprogram DIEs (abbrev 2) --
         for sub in &self.subprograms {
             encode_uleb128(&mut die_buf, 2); // abbrev code
-            // DW_AT_NAME (DW_FORM_STRING)
+                                             // DW_AT_NAME (DW_FORM_STRING)
             write_null_string(&mut die_buf, &sub.name);
             // DW_AT_LOW_PC (DW_FORM_ADDR)
             die_buf.extend_from_slice(&sub.start_offset.to_le_bytes());
@@ -412,7 +417,7 @@ impl DwarfBuilder {
             // -- Variable DIEs (abbrev 3) — nested inside subprogram --
             for var in &self.variables {
                 encode_uleb128(&mut die_buf, 3); // abbrev code
-                // DW_AT_NAME (DW_FORM_STRING)
+                                                 // DW_AT_NAME (DW_FORM_STRING)
                 write_null_string(&mut die_buf, &var.name);
                 // DW_AT_TYPE (DW_FORM_STRING)
                 write_null_string(&mut die_buf, &var.type_name);
@@ -838,11 +843,14 @@ pub fn append_debug_sections_to_elf(elf: &mut Vec<u8>, debug: &DebugSections) {
     // .debug_abbrev section header
     let mut sh = new_shdr(
         SHT_PROGBITS,
-        0,            // no flags
-        0,            // no virtual address
+        0, // no flags
+        0, // no virtual address
         debug_abbrev_file_offset as u64,
         debug.debug_abbrev.len() as u64,
-        0, 0, 1, 0,
+        0,
+        0,
+        1,
+        0,
     );
     sh.name = debug_abbrev_name_off;
     write_filled_shdr(&mut new_shdrs, &sh);
@@ -854,7 +862,10 @@ pub fn append_debug_sections_to_elf(elf: &mut Vec<u8>, debug: &DebugSections) {
         0,
         debug_info_file_offset as u64,
         debug.debug_info.len() as u64,
-        0, 0, 1, 0,
+        0,
+        0,
+        1,
+        0,
     );
     sh.name = debug_info_name_off;
     write_filled_shdr(&mut new_shdrs, &sh);
@@ -866,7 +877,10 @@ pub fn append_debug_sections_to_elf(elf: &mut Vec<u8>, debug: &DebugSections) {
         0,
         debug_line_file_offset as u64,
         debug.debug_line.len() as u64,
-        0, 0, 1, 0,
+        0,
+        0,
+        1,
+        0,
     );
     sh.name = debug_line_name_off;
     write_filled_shdr(&mut new_shdrs, &sh);
@@ -1017,7 +1031,10 @@ mod tests {
         assert_eq!(code1, 1, "first abbreviation code should be 1");
         // It should be DW_TAG_COMPILE_UNIT
         let (tag1, _) = decode_uleb128(abbrev, n1);
-        assert_eq!(tag1, DW_TAG_COMPILE_UNIT as u64, "first tag should be DW_TAG_COMPILE_UNIT");
+        assert_eq!(
+            tag1, DW_TAG_COMPILE_UNIT as u64,
+            "first tag should be DW_TAG_COMPILE_UNIT"
+        );
     }
 
     // -- Test 2: Debug info has correct DWARF version --
@@ -1043,9 +1060,15 @@ mod tests {
         // After the unit header (4 + 2 + 1 + 1 + 4 = 12 bytes), the first
         // DIE should use abbreviation code 1 (DW_TAG_COMPILE_UNIT).
         let header_size = 12;
-        assert!(info.len() > header_size, "debug_info must have DIEs after header");
+        assert!(
+            info.len() > header_size,
+            "debug_info must have DIEs after header"
+        );
         let (abbrev_code, _) = decode_uleb128(info, header_size);
-        assert_eq!(abbrev_code, 1, "first DIE should be DW_TAG_COMPILE_UNIT (abbrev 1)");
+        assert_eq!(
+            abbrev_code, 1,
+            "first DIE should be DW_TAG_COMPILE_UNIT (abbrev 1)"
+        );
     }
 
     // -- Test 4: Subprogram entries are correct --
@@ -1106,7 +1129,10 @@ mod tests {
                 }
             }
         }
-        assert!(found_end_seq, "line program must contain DW_LNE_END_SEQUENCE");
+        assert!(
+            found_end_seq,
+            "line program must contain DW_LNE_END_SEQUENCE"
+        );
     }
 
     // -- Test 7: Line program contains DW_LNS_COPY opcodes --
@@ -1150,18 +1176,34 @@ mod tests {
         append_debug_sections_to_elf(&mut elf, &sections);
 
         // Verify ELF is still valid.
-        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be intact");
+        assert_eq!(
+            &elf[0..4],
+            &[0x7f, b'E', b'L', b'F'],
+            "ELF magic must be intact"
+        );
         assert!(elf.len() > 64, "ELF must be larger than header");
 
         // Verify section count increased.
         let e_shnum = u16::from_le_bytes([elf[60], elf[61]]);
-        assert_eq!(e_shnum, 11, "expected 11 section headers (8 original + 3 debug)");
+        assert_eq!(
+            e_shnum, 11,
+            "expected 11 section headers (8 original + 3 debug)"
+        );
 
         // Verify debug section names are in the section header string table.
         let elf_str = String::from_utf8_lossy(&elf);
-        assert!(elf_str.contains(".debug_abbrev"), "ELF must contain .debug_abbrev section name");
-        assert!(elf_str.contains(".debug_info"), "ELF must contain .debug_info section name");
-        assert!(elf_str.contains(".debug_line"), "ELF must contain .debug_line section name");
+        assert!(
+            elf_str.contains(".debug_abbrev"),
+            "ELF must contain .debug_abbrev section name"
+        );
+        assert!(
+            elf_str.contains(".debug_info"),
+            "ELF must contain .debug_info section name"
+        );
+        assert!(
+            elf_str.contains(".debug_line"),
+            "ELF must contain .debug_line section name"
+        );
     }
 
     // -- Test 9: Variable location expression (DW_OP_fbreg) --
@@ -1216,9 +1258,18 @@ mod tests {
         let db = DwarfBuilder::new();
         let sections = db.emit_debug_sections();
         // All sections should be non-empty even with no data recorded.
-        assert!(!sections.debug_abbrev.is_empty(), "debug_abbrev should not be empty");
-        assert!(!sections.debug_info.is_empty(), "debug_info should not be empty");
-        assert!(!sections.debug_line.is_empty(), "debug_line should not be empty");
+        assert!(
+            !sections.debug_abbrev.is_empty(),
+            "debug_abbrev should not be empty"
+        );
+        assert!(
+            !sections.debug_info.is_empty(),
+            "debug_info should not be empty"
+        );
+        assert!(
+            !sections.debug_line.is_empty(),
+            "debug_line should not be empty"
+        );
     }
 
     // -- Test 12: Debug info unit type is DW_UT_COMPILE --
@@ -1242,7 +1293,10 @@ mod tests {
 
         // Header: unit_length(4) + version(2) + unit_type(1) + address_size(1)
         assert!(info.len() > 8, "debug_info must have at least 8 bytes");
-        assert_eq!(info[7], ADDRESS_SIZE, "address size should be 8 for AArch64");
+        assert_eq!(
+            info[7], ADDRESS_SIZE,
+            "address size should be 8 for AArch64"
+        );
     }
 
     // -- Test 14: Line program contains DW_LNS_ADVANCE_LINE --

@@ -174,7 +174,9 @@ impl TemporalConstraint {
         } else {
             format!("NOT({})", desc)
         };
-        TemporalConstraint { description: negated }
+        TemporalConstraint {
+            description: negated,
+        }
     }
 }
 
@@ -205,7 +207,9 @@ impl ResourceFlowConstraint {
         } else {
             format!("NOT({})", desc)
         };
-        ResourceFlowConstraint { description: negated }
+        ResourceFlowConstraint {
+            description: negated,
+        }
     }
 }
 
@@ -237,13 +241,13 @@ impl SecurityConstraint {
         } else if let Some(rest) = desc.strip_prefix("No ") {
             format!("{} EXISTS", rest)
         } else if desc.contains(" no ") {
-            desc.replace(" no ", " ")
-                .replace(" no ", " ")
-                + " VIOLATED"
+            desc.replace(" no ", " ").replace(" no ", " ") + " VIOLATED"
         } else {
             format!("NOT({})", desc)
         };
-        SecurityConstraint { description: negated }
+        SecurityConstraint {
+            description: negated,
+        }
     }
 }
 
@@ -269,7 +273,9 @@ impl ComplexityConstraint {
         } else {
             format!("NOT({})", desc)
         };
-        ComplexityConstraint { description: negated }
+        ComplexityConstraint {
+            description: negated,
+        }
     }
 }
 
@@ -294,7 +300,11 @@ impl LivenessConstraint {
             if let Some(pos) = rest.find(" gets ") {
                 format!("some {} does NOT get {}", &rest[..pos], &rest[pos + 6..])
             } else if let Some(pos) = rest.find(" receives ") {
-                format!("some {} does NOT receive{}", &rest[..pos], &rest[pos + 10..])
+                format!(
+                    "some {} does NOT receive{}",
+                    &rest[..pos],
+                    &rest[pos + 10..]
+                )
             } else {
                 format!("some {} does NOT hold", rest)
             }
@@ -305,7 +315,9 @@ impl LivenessConstraint {
         } else {
             format!("NOT({})", desc)
         };
-        LivenessConstraint { description: negated }
+        LivenessConstraint {
+            description: negated,
+        }
     }
 }
 

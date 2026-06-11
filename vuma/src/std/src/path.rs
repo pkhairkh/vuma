@@ -52,11 +52,15 @@ impl PathComponent {
     // VUMA-VERIFIED: conversion preserves semantics
     fn from_std(comp: std::path::Component<'_>) -> Self {
         match comp {
-            std::path::Component::Prefix(p) => PathComponent::Prefix(p.as_os_str().to_string_lossy().to_string()),
+            std::path::Component::Prefix(p) => {
+                PathComponent::Prefix(p.as_os_str().to_string_lossy().to_string())
+            }
             std::path::Component::RootDir => PathComponent::RootDir,
             std::path::Component::CurDir => PathComponent::CurDir,
             std::path::Component::ParentDir => PathComponent::ParentDir,
-            std::path::Component::Normal(s) => PathComponent::Normal(s.to_string_lossy().to_string()),
+            std::path::Component::Normal(s) => {
+                PathComponent::Normal(s.to_string_lossy().to_string())
+            }
         }
     }
 }
@@ -96,7 +100,9 @@ impl VumaPath {
     /// Create a new `VumaPath` from a string.
     // VUMA-VERIFIED: construction is pure
     pub fn new(s: &str) -> Self {
-        Self { inner: s.to_string() }
+        Self {
+            inner: s.to_string(),
+        }
     }
 
     /// Returns the path as a string slice.
@@ -114,7 +120,9 @@ impl VumaPath {
     /// Returns the parent directory of this path, if any.
     // VUMA-VERIFIED: pure query
     pub fn parent(&self) -> Option<VumaPath> {
-        self.as_std_path().parent().map(|p| VumaPath { inner: p.to_string_lossy().to_string() })
+        self.as_std_path().parent().map(|p| VumaPath {
+            inner: p.to_string_lossy().to_string(),
+        })
     }
 
     /// Returns the final component of the path, if any.
@@ -139,14 +147,18 @@ impl VumaPath {
     // VUMA-VERIFIED: produces a valid path
     pub fn with_extension(&self, ext: &str) -> VumaPathBuf {
         let p = self.as_std_path().with_extension(ext);
-        VumaPathBuf { inner: p.to_string_lossy().to_string() }
+        VumaPathBuf {
+            inner: p.to_string_lossy().to_string(),
+        }
     }
 
     /// Returns a new path with the given file name replaced.
     // VUMA-VERIFIED: produces a valid path
     pub fn with_file_name(&self, name: &str) -> VumaPathBuf {
         let p = self.as_std_path().with_file_name(name);
-        VumaPathBuf { inner: p.to_string_lossy().to_string() }
+        VumaPathBuf {
+            inner: p.to_string_lossy().to_string(),
+        }
     }
 
     /// Returns `true` if the path is absolute.
@@ -182,14 +194,19 @@ impl VumaPath {
     /// Returns the path components.
     // VUMA-VERIFIED: pure traversal
     pub fn components(&self) -> Vec<PathComponent> {
-        self.as_std_path().components().map(PathComponent::from_std).collect()
+        self.as_std_path()
+            .components()
+            .map(PathComponent::from_std)
+            .collect()
     }
 
     /// Joins this path with another path.
     // VUMA-VERIFIED: produces a valid path
     pub fn join(&self, other: &VumaPath) -> VumaPathBuf {
         let p = self.as_std_path().join(other.as_std_path());
-        VumaPathBuf { inner: p.to_string_lossy().to_string() }
+        VumaPathBuf {
+            inner: p.to_string_lossy().to_string(),
+        }
     }
 
     /// Returns the CapD for this path.
@@ -246,7 +263,9 @@ impl VumaPathBuf {
     /// Create a new, empty `VumaPathBuf`.
     // VUMA-VERIFIED: construction is pure
     pub fn new() -> Self {
-        Self { inner: String::new() }
+        Self {
+            inner: String::new(),
+        }
     }
 
     /// Create a `VumaPathBuf` from a string.
@@ -278,7 +297,9 @@ impl VumaPathBuf {
     /// Returns a `VumaPath` view of this path buffer.
     // VUMA-VERIFIED: conversion is lossless
     pub fn as_path(&self) -> VumaPath {
-        VumaPath { inner: self.inner.clone() }
+        VumaPath {
+            inner: self.inner.clone(),
+        }
     }
 
     /// Convert this path buffer into a `String`.
@@ -290,7 +311,12 @@ impl VumaPathBuf {
     /// Returns the CapD for this path buffer.
     // VUMA-VERIFIED: capability descriptor is correct
     pub fn capd(&self) -> CapD {
-        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Compare, CapFlag::Serialize])
+        CapD::new(vec![
+            CapFlag::Read,
+            CapFlag::Write,
+            CapFlag::Compare,
+            CapFlag::Serialize,
+        ])
     }
 
     /// Returns the RepD for this path buffer.

@@ -462,11 +462,7 @@ impl fmt::Display for InterpretationViolation {
             Self::UninitializedRead {
                 read_point,
                 location,
-            } => write!(
-                f,
-                "Uninitialized read at {} ({})",
-                read_point, location
-            ),
+            } => write!(f, "Uninitialized read at {} ({})", read_point, location),
         }
     }
 }
@@ -547,12 +543,7 @@ impl InterpretationVerifier {
     }
 
     /// Record a write event at the given location with the given BD.
-    pub fn record_write(
-        &mut self,
-        location: LocationId,
-        bd: BD,
-        point: ProgramPointId,
-    ) {
+    pub fn record_write(&mut self, location: LocationId, bd: BD, point: ProgramPointId) {
         self.events.push(AccessEvent::Write {
             location,
             bd,
@@ -561,12 +552,7 @@ impl InterpretationVerifier {
     }
 
     /// Record a read event at the given location with the given BD.
-    pub fn record_read(
-        &mut self,
-        location: LocationId,
-        bd: BD,
-        point: ProgramPointId,
-    ) {
+    pub fn record_read(&mut self, location: LocationId, bd: BD, point: ProgramPointId) {
         self.events.push(AccessEvent::Read {
             location,
             bd,
@@ -652,7 +638,9 @@ impl InterpretationVerifier {
                 AccessEvent::Write { location, .. } => {
                     written_locations.insert(location.clone());
                 }
-                AccessEvent::Read { location, point, .. } => {
+                AccessEvent::Read {
+                    location, point, ..
+                } => {
                     if !written_locations.contains(location) {
                         uninit_reads.push((location.clone(), point.clone()));
                     }
@@ -674,10 +662,7 @@ impl InterpretationVerifier {
     /// - Structural compatibility (same shape or Byte catch-all)
     /// - The read's RepD must subsume the write's RepD, or they must be
     ///   mutually compatible
-    pub fn check_repd_compatibility(
-        write_repd: &RepD,
-        read_repd: &RepD,
-    ) -> Result<(), String> {
+    pub fn check_repd_compatibility(write_repd: &RepD, read_repd: &RepD) -> Result<(), String> {
         // Size must match
         if write_repd.size() != read_repd.size() {
             return Err(format!(
@@ -717,10 +702,7 @@ impl InterpretationVerifier {
     /// - Same capabilities is safe.
     /// - Strengthening (read has more capabilities) is unsafe without proof.
     /// - Empty meet (no shared capabilities) is a violation.
-    pub fn check_capd_transition(
-        write_capd: &CapD,
-        read_capd: &CapD,
-    ) -> CapDTransitionResult {
+    pub fn check_capd_transition(write_capd: &CapD, read_capd: &CapD) -> CapDTransitionResult {
         let meet = write_capd.meet(read_capd);
 
         // Check for empty meet — no shared capabilities
@@ -768,10 +750,7 @@ impl InterpretationVerifier {
     /// The composed RelD must be internally consistent. Even if the read
     /// refines the write, contradictory temporal constraints in the
     /// composition are still a violation.
-    pub fn check_reld_preservation(
-        write_reld: &RelD,
-        read_reld: &RelD,
-    ) -> Result<(), String> {
+    pub fn check_reld_preservation(write_reld: &RelD, read_reld: &RelD) -> Result<(), String> {
         // The composed RelD must be consistent — contradictory temporal
         // constraints (e.g., Outlives + Succeeds) are always a violation,
         // even if the read refines the write.
@@ -793,10 +772,7 @@ impl InterpretationVerifier {
     /// - A pointer is written and a non-pointer (non-Byte) is read
     /// - A float is written and a non-float is read (structural mismatch)
     /// - A function pointer is written and non-function data is read
-    pub fn detect_type_confusion(
-        write_repd: &RepD,
-        read_repd: &RepD,
-    ) -> Option<(String, String)> {
+    pub fn detect_type_confusion(write_repd: &RepD, read_repd: &RepD) -> Option<(String, String)> {
         // If they are structurally compatible, no type confusion
         if write_repd.compatible(read_repd) {
             return None;
@@ -827,10 +803,7 @@ impl InterpretationVerifier {
             && !matches!(write_repd, RepD::Byte(_))
             && !matches!(read_repd, RepD::Byte(_))
         {
-            return Some((
-                repd_kind_name(write_repd),
-                repd_kind_name(read_repd),
-            ));
+            return Some((repd_kind_name(write_repd), repd_kind_name(read_repd)));
         }
 
         None
@@ -842,22 +815,17 @@ impl InterpretationVerifier {
     /// type unless:
     /// - The read uses Byte representation (raw bytes are universal)
     /// - An explicit cast derivation is in the chain
-    pub fn detect_pointer_reinterpretation(
-        write_repd: &RepD,
-        read_repd: &RepD,
-    ) -> Option<String> {
+    pub fn detect_pointer_reinterpretation(write_repd: &RepD, read_repd: &RepD) -> Option<String> {
         match (write_repd, read_repd) {
             // Pointer → non-pointer (except Byte) is suspicious
             (RepD::Ptr(_write_pointee), RepD::Byte(_)) => None, // OK: reading as raw bytes
-            (RepD::Ptr(_), read) if !matches!(read, RepD::Ptr(_)) => {
-                Some(format!(
-                    "pointer written but read as {}",
-                    repd_kind_name(read)
-                ))
-            }
+            (RepD::Ptr(_), read) if !matches!(read, RepD::Ptr(_)) => Some(format!(
+                "pointer written but read as {}",
+                repd_kind_name(read)
+            )),
             // Non-pointer → pointer is suspicious (might read garbage as address)
-            (_, RepD::Ptr(_)) if !matches!(write_repd, RepD::Ptr(_))
-                && !matches!(write_repd, RepD::Byte(_)) =>
+            (_, RepD::Ptr(_))
+                if !matches!(write_repd, RepD::Ptr(_)) && !matches!(write_repd, RepD::Byte(_)) =>
             {
                 Some(format!(
                     "non-pointer ({}) written but read as pointer",
@@ -915,8 +883,7 @@ impl InterpretationVerifier {
             // program points.
             let has_bd_map_for_pair = match &self.bd_map {
                 Some(map) => {
-                    map.contains_key(&pair.write_point)
-                        && map.contains_key(&pair.read_point)
+                    map.contains_key(&pair.write_point) && map.contains_key(&pair.read_point)
                 }
                 None => false,
             };
@@ -937,8 +904,7 @@ impl InterpretationVerifier {
                         unverified_pairs.push(UnverifiedPair {
                             write_node: pair.write_point.clone(),
                             read_node: pair.read_point.clone(),
-                            reason: "no BD map provided for this write-read pair"
-                                .to_string(),
+                            reason: "no BD map provided for this write-read pair".to_string(),
                         });
                         // Still check with event BDs, but the pair is marked unverified
                     }
@@ -947,8 +913,7 @@ impl InterpretationVerifier {
                         unverified_pairs.push(UnverifiedPair {
                             write_node: pair.write_point.clone(),
                             read_node: pair.read_point.clone(),
-                            reason: "no BD map provided — strict mode requires BD map"
-                                .to_string(),
+                            reason: "no BD map provided — strict mode requires BD map".to_string(),
                         });
                         violations.push(InterpretationViolation::IncompatibleRepD {
                             write_point: pair.write_point.clone(),
@@ -972,10 +937,9 @@ impl InterpretationVerifier {
                 // Check for pointer reinterpretation first (more specific than
                 // generic type confusion), then type confusion, then generic
                 // incompatibility.
-                if let Some(reason) = Self::detect_pointer_reinterpretation(
-                    &pair.write_bd.repd,
-                    &pair.read_bd.repd,
-                ) {
+                if let Some(reason) =
+                    Self::detect_pointer_reinterpretation(&pair.write_bd.repd, &pair.read_bd.repd)
+                {
                     violations.push(InterpretationViolation::PointerReinterpretation {
                         write_point: pair.write_point.clone(),
                         read_point: pair.read_point.clone(),
@@ -1005,8 +969,7 @@ impl InterpretationVerifier {
             }
 
             // Check CapD transition
-            let capd_result =
-                Self::check_capd_transition(&pair.write_bd.capd, &pair.read_bd.capd);
+            let capd_result = Self::check_capd_transition(&pair.write_bd.capd, &pair.read_bd.capd);
             match capd_result {
                 CapDTransitionResult::EmptyMeet => {
                     violations.push(InterpretationViolation::EmptyCapabilityMeet {
@@ -1017,26 +980,24 @@ impl InterpretationVerifier {
                 }
                 CapDTransitionResult::Strengthening { added } => {
                     if !self.allow_strengthening_with_proof {
-                        violations
-                            .push(InterpretationViolation::InvalidCapDStrengthening {
-                                write_point: pair.write_point.clone(),
-                                read_point: pair.read_point.clone(),
-                                location: pair.location.clone(),
-                                added_caps: added,
-                            });
+                        violations.push(InterpretationViolation::InvalidCapDStrengthening {
+                            write_point: pair.write_point.clone(),
+                            read_point: pair.read_point.clone(),
+                            location: pair.location.clone(),
+                            added_caps: added,
+                        });
                     } else {
                         pending_proof_obligations += 1;
                     }
                 }
                 CapDTransitionResult::Incomparable { added, .. } => {
                     if !self.allow_strengthening_with_proof {
-                        violations
-                            .push(InterpretationViolation::InvalidCapDStrengthening {
-                                write_point: pair.write_point.clone(),
-                                read_point: pair.read_point.clone(),
-                                location: pair.location.clone(),
-                                added_caps: added,
-                            });
+                        violations.push(InterpretationViolation::InvalidCapDStrengthening {
+                            write_point: pair.write_point.clone(),
+                            read_point: pair.read_point.clone(),
+                            location: pair.location.clone(),
+                            added_caps: added,
+                        });
                     } else {
                         pending_proof_obligations += 1;
                     }
@@ -1078,8 +1039,7 @@ impl InterpretationVerifier {
             })
         } else if !violations.is_empty() {
             // Hard violations exist
-            let descriptions: Vec<String> =
-                violations.iter().map(|v| v.to_string()).collect();
+            let descriptions: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
             let violation_point = match violations.first() {
                 Some(InterpretationViolation::IncompatibleRepD { read_point, .. })
                 | Some(InterpretationViolation::InvalidCapDStrengthening { read_point, .. })
@@ -1151,10 +1111,9 @@ impl InterpretationVerifier {
             {
                 // Check pointer reinterpretation first (more specific),
                 // then type confusion, then generic incompatibility
-                if let Some(reason) = Self::detect_pointer_reinterpretation(
-                    &pair.write_bd.repd,
-                    &pair.read_bd.repd,
-                ) {
+                if let Some(reason) =
+                    Self::detect_pointer_reinterpretation(&pair.write_bd.repd, &pair.read_bd.repd)
+                {
                     violations.push(InterpretationViolation::PointerReinterpretation {
                         write_point: pair.write_point.clone(),
                         read_point: pair.read_point.clone(),
@@ -1184,8 +1143,7 @@ impl InterpretationVerifier {
             }
 
             // CapD check
-            let capd_result =
-                Self::check_capd_transition(&pair.write_bd.capd, &pair.read_bd.capd);
+            let capd_result = Self::check_capd_transition(&pair.write_bd.capd, &pair.read_bd.capd);
             match capd_result {
                 CapDTransitionResult::EmptyMeet => {
                     violations.push(InterpretationViolation::EmptyCapabilityMeet {
@@ -1342,7 +1300,11 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let result = verifier.verify();
-        assert!(result.is_proven(), "matching BDs should be proven: {}", result);
+        assert!(
+            result.is_proven(),
+            "matching BDs should be proven: {}",
+            result
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1368,7 +1330,11 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let result = verifier.verify();
-        assert!(result.is_violated(), "incompatible RepD should be violated: {}", result);
+        assert!(
+            result.is_violated(),
+            "incompatible RepD should be violated: {}",
+            result
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1394,7 +1360,11 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let result = verifier.verify();
-        assert!(result.is_proven(), "valid CapD weakening should be proven: {}", result);
+        assert!(
+            result.is_proven(),
+            "valid CapD weakening should be proven: {}",
+            result
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1403,8 +1373,7 @@ mod tests {
 
     #[test]
     fn test_invalid_capd_strengthening_fails() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strengthening_proof(false);
+        let mut verifier = InterpretationVerifier::new().with_strengthening_proof(false);
 
         let write_bd = make_bd(
             byte_repd(8, 8),
@@ -1448,10 +1417,7 @@ mod tests {
         );
         let read_bd = make_bd(
             RepD::Struct(StructRep {
-                fields: vec![
-                    (0, byte_repd(4, 4)),
-                    (4, byte_repd(4, 4)),
-                ],
+                fields: vec![(0, byte_repd(4, 4)), (4, byte_repd(4, 4))],
                 total_size: 8,
                 align: 4,
             }),
@@ -1463,9 +1429,9 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let violations = verifier.verify_detailed();
-        let has_type_confusion = violations.iter().any(|v| {
-            matches!(v, InterpretationViolation::TypeConfusion { .. })
-        });
+        let has_type_confusion = violations
+            .iter()
+            .any(|v| matches!(v, InterpretationViolation::TypeConfusion { .. }));
         assert!(
             has_type_confusion,
             "should detect type confusion: {:?}",
@@ -1491,10 +1457,7 @@ mod tests {
         // Reading as a struct (non-pointer, non-byte) from a pointer write
         let read_bd = make_bd(
             RepD::Struct(StructRep {
-                fields: vec![
-                    (0, byte_repd(4, 4)),
-                    (4, byte_repd(4, 4)),
-                ],
+                fields: vec![(0, byte_repd(4, 4)), (4, byte_repd(4, 4))],
                 total_size: 8,
                 align: 4,
             }),
@@ -1506,9 +1469,9 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let violations = verifier.verify_detailed();
-        let has_ptr_reinterp = violations.iter().any(|v| {
-            matches!(v, InterpretationViolation::PointerReinterpretation { .. })
-        });
+        let has_ptr_reinterp = violations
+            .iter()
+            .any(|v| matches!(v, InterpretationViolation::PointerReinterpretation { .. }));
         assert!(
             has_ptr_reinterp,
             "should detect pointer reinterpretation: {:?}",
@@ -1605,7 +1568,11 @@ mod tests {
         );
 
         let result = verifier.verify();
-        assert!(result.is_proven(), "clean program should be proven: {}", result);
+        assert!(
+            result.is_proven(),
+            "clean program should be proven: {}",
+            result
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1626,10 +1593,14 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(1));
 
         let violations = verifier.verify_detailed();
-        let has_uninit = violations.iter().any(|v| {
-            matches!(v, InterpretationViolation::UninitializedRead { .. })
-        });
-        assert!(has_uninit, "should detect uninitialized read: {:?}", violations);
+        let has_uninit = violations
+            .iter()
+            .any(|v| matches!(v, InterpretationViolation::UninitializedRead { .. }));
+        assert!(
+            has_uninit,
+            "should detect uninitialized read: {:?}",
+            violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1658,9 +1629,9 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let violations = verifier.verify_detailed();
-        let has_reld_violation = violations.iter().any(|v| {
-            matches!(v, InterpretationViolation::RelDNotPreserved { .. })
-        });
+        let has_reld_violation = violations
+            .iter()
+            .any(|v| matches!(v, InterpretationViolation::RelDNotPreserved { .. }));
         assert!(
             has_reld_violation,
             "should detect RelD preservation violation: {:?}",
@@ -1691,9 +1662,9 @@ mod tests {
         verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
 
         let violations = verifier.verify_detailed();
-        let has_empty_meet = violations.iter().any(|v| {
-            matches!(v, InterpretationViolation::EmptyCapabilityMeet { .. })
-        });
+        let has_empty_meet = violations
+            .iter()
+            .any(|v| matches!(v, InterpretationViolation::EmptyCapabilityMeet { .. }));
         assert!(
             has_empty_meet,
             "should detect empty capability meet: {:?}",
@@ -1709,8 +1680,16 @@ mod tests {
     fn test_write_read_pair_extraction() {
         let mut verifier = InterpretationVerifier::new();
 
-        let bd1 = make_bd(byte_repd(4, 4), capd_with(&[Capability::Write]), empty_reld());
-        let bd2 = make_bd(byte_repd(4, 4), capd_with(&[Capability::Read]), empty_reld());
+        let bd1 = make_bd(
+            byte_repd(4, 4),
+            capd_with(&[Capability::Write]),
+            empty_reld(),
+        );
+        let bd2 = make_bd(
+            byte_repd(4, 4),
+            capd_with(&[Capability::Read]),
+            empty_reld(),
+        );
 
         verifier.record_write(LocationId(1), bd1.clone(), ProgramPointId(1));
         verifier.record_read(LocationId(1), bd2.clone(), ProgramPointId(2));
@@ -1763,8 +1742,7 @@ mod tests {
 
     #[test]
     fn test_capd_strengthening_with_proof_allowed() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strengthening_proof(true);
+        let mut verifier = InterpretationVerifier::new().with_strengthening_proof(true);
 
         let write_bd = make_bd(
             byte_repd(8, 8),
@@ -1857,10 +1835,7 @@ mod tests {
             pointee: Box::new(byte_repd(1, 1)),
         });
         let struct_ = RepD::Struct(StructRep {
-            fields: vec![
-                (0, byte_repd(4, 4)),
-                (4, byte_repd(4, 4)),
-            ],
+            fields: vec![(0, byte_repd(4, 4)), (4, byte_repd(4, 4))],
             total_size: 8,
             align: 4,
         });
@@ -1888,8 +1863,8 @@ mod tests {
 
     #[test]
     fn test_permissive_no_bd_map_passes() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strictness(InterpretationStrictness::Permissive);
+        let mut verifier =
+            InterpretationVerifier::new().with_strictness(InterpretationStrictness::Permissive);
 
         let bd = make_bd(
             byte_repd(8, 8),
@@ -1928,8 +1903,8 @@ mod tests {
 
     #[test]
     fn test_moderate_no_bd_map_produces_warning() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strictness(InterpretationStrictness::Moderate);
+        let mut verifier =
+            InterpretationVerifier::new().with_strictness(InterpretationStrictness::Moderate);
 
         let bd = make_bd(
             byte_repd(8, 8),
@@ -1984,8 +1959,8 @@ mod tests {
 
     #[test]
     fn test_strict_no_bd_map_produces_violation() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strictness(InterpretationStrictness::Strict);
+        let mut verifier =
+            InterpretationVerifier::new().with_strictness(InterpretationStrictness::Strict);
 
         let bd = make_bd(
             byte_repd(8, 8),
@@ -2075,8 +2050,8 @@ mod tests {
 
     #[test]
     fn test_moderate_multiple_pairs_multiple_warnings() {
-        let mut verifier = InterpretationVerifier::new()
-            .with_strictness(InterpretationStrictness::Moderate);
+        let mut verifier =
+            InterpretationVerifier::new().with_strictness(InterpretationStrictness::Moderate);
 
         let bd = make_bd(
             byte_repd(8, 8),
@@ -2147,9 +2122,7 @@ mod tests {
         let mut verifier = InterpretationVerifier::new()
             .with_strictness(InterpretationStrictness::Strict)
             // BD map only has the write point, not the read point
-            .with_bd_map(HashMap::from([
-                (ProgramPointId(1), bd.clone()),
-            ]));
+            .with_bd_map(HashMap::from([(ProgramPointId(1), bd.clone())]));
 
         verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
         verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));

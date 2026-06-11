@@ -278,7 +278,10 @@ impl ProofChecker {
                     }
                 }
 
-                ProofStep::Induction { base, step: ind_step } => {
+                ProofStep::Induction {
+                    base,
+                    step: ind_step,
+                } => {
                     // Both the base case and the inductive step must be valid.
                     match self.check(base)? {
                         CheckResult::Valid => {}
@@ -327,19 +330,13 @@ impl ProofChecker {
                     if self.check_circular && !established.contains(assumption) {
                         return Ok(CheckResult::Invalid {
                             step: step_idx,
-                            reason: format!(
-                                "assumption fact id {} is not established",
-                                assumption
-                            ),
+                            reason: format!("assumption fact id {} is not established", assumption),
                         });
                     }
                     if self.check_circular && !established.contains(negation) {
                         return Ok(CheckResult::Invalid {
                             step: step_idx,
-                            reason: format!(
-                                "negation fact id {} is not established",
-                                negation
-                            ),
+                            reason: format!("negation fact id {} is not established", negation),
                         });
                     }
                     // A contradiction step is valid if both facts exist.
@@ -369,9 +366,10 @@ impl ProofChecker {
             }
             Conclusion::Refuted => {
                 // A refutation must contain a Contradiction step somewhere.
-                let has_contradiction = proof.steps.iter().any(|s| {
-                    matches!(s, ProofStep::Contradiction { .. })
-                });
+                let has_contradiction = proof
+                    .steps
+                    .iter()
+                    .any(|s| matches!(s, ProofStep::Contradiction { .. }));
                 if !has_contradiction {
                     return Ok(CheckResult::Invalid {
                         step: 0,
@@ -392,7 +390,11 @@ mod tests {
     use crate::rules::InferenceRule;
 
     fn dummy_goal() -> Goal {
-        Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("test"))
+        Goal::new(
+            InvariantName::Liveness,
+            Target::Region(RegionId(1)),
+            ProofContext::new("test"),
+        )
     }
 
     #[test]
@@ -564,7 +566,11 @@ mod tests {
 
     #[test]
     fn check_proof_cached_returns_valid() {
-        let goal = Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("test"));
+        let goal = Goal::new(
+            InvariantName::Liveness,
+            Target::Region(RegionId(1)),
+            ProofContext::new("test"),
+        );
         let mut cache = ProofCache::new();
         let result = check_proof_cached(&goal, &mut cache);
         assert!(result.is_discharged());
@@ -572,7 +578,11 @@ mod tests {
 
     #[test]
     fn check_proof_cached_uses_cache() {
-        let goal = Goal::new(InvariantName::Exclusivity, Target::Region(RegionId(2)), ProofContext::new("test"));
+        let goal = Goal::new(
+            InvariantName::Exclusivity,
+            Target::Region(RegionId(2)),
+            ProofContext::new("test"),
+        );
         let mut cache = ProofCache::new();
         // First call populates the cache.
         let result1 = check_proof_cached(&goal, &mut cache);
@@ -585,8 +595,16 @@ mod tests {
 
     #[test]
     fn check_proof_cached_different_goals() {
-        let goal1 = Goal::new(InvariantName::Liveness, Target::Region(RegionId(1)), ProofContext::new("a"));
-        let goal2 = Goal::new(InvariantName::Exclusivity, Target::Region(RegionId(2)), ProofContext::new("b"));
+        let goal1 = Goal::new(
+            InvariantName::Liveness,
+            Target::Region(RegionId(1)),
+            ProofContext::new("a"),
+        );
+        let goal2 = Goal::new(
+            InvariantName::Exclusivity,
+            Target::Region(RegionId(2)),
+            ProofContext::new("b"),
+        );
         let mut cache = ProofCache::new();
         let r1 = check_proof_cached(&goal1, &mut cache);
         let r2 = check_proof_cached(&goal2, &mut cache);
@@ -606,18 +624,30 @@ mod tests {
 
     // -- Structured judgment checker tests ------------------------------------
 
-    use crate::judgment::{CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId};
+    use crate::judgment::{
+        CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId,
+    };
 
     #[test]
     fn test_structured_liveness_intro_proof() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Allocated { region: JRegionId(1) }),
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Allocated {
+                    region: JRegionId(1),
+                },
+            ),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived_j(2, Judgment::Live { region: JRegionId(1) }),
+            conclusion: Fact::derived_j(
+                2,
+                Judgment::Live {
+                    region: JRegionId(1),
+                },
+            ),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -630,13 +660,23 @@ mod tests {
     fn test_structured_liveness_intro_judgment_mismatch() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Allocated { region: JRegionId(1) }),
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Allocated {
+                    region: JRegionId(1),
+                },
+            ),
         });
         // Claim the conclusion is Live for r2, but the rule will produce Live for r1
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived_j(2, Judgment::Live { region: JRegionId(2) }),
+            conclusion: Fact::derived_j(
+                2,
+                Judgment::Live {
+                    region: JRegionId(2),
+                },
+            ),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -735,13 +775,17 @@ mod tests {
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 1,
-                Judgment::Exclusive { resource: ResourceId(1) },
+                Judgment::Exclusive {
+                    resource: ResourceId(1),
+                },
             ),
         });
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 2,
-                Judgment::Exclusive { resource: ResourceId(2) },
+                Judgment::Exclusive {
+                    resource: ResourceId(2),
+                },
             ),
         });
         proof.add_step(ProofStep::Infer {
@@ -766,14 +810,21 @@ mod tests {
     fn test_structured_liveness_elim_proof() {
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::checked_j(1, Judgment::Freed { region: JRegionId(5) }),
+            fact: Fact::checked_j(
+                1,
+                Judgment::Freed {
+                    region: JRegionId(5),
+                },
+            ),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
             rule: InferenceRule::LivenessElim,
             conclusion: Fact::derived_j(
                 2,
-                Judgment::Dead { region: JRegionId(5) },
+                Judgment::Dead {
+                    region: JRegionId(5),
+                },
             ),
         });
         proof.conclude(Conclusion::Proven);
@@ -788,7 +839,12 @@ mod tests {
         // Try to apply LivenessIntro to a Freed judgment — should fail.
         let mut proof = Proof::new(dummy_goal());
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom_j(1, Judgment::Freed { region: JRegionId(1) }),
+            fact: Fact::axiom_j(
+                1,
+                Judgment::Freed {
+                    region: JRegionId(1),
+                },
+            ),
         });
         proof.add_step(ProofStep::Infer {
             from: vec![1],
@@ -846,7 +902,9 @@ mod tests {
         proof.add_step(ProofStep::Assume {
             fact: Fact::axiom_j(
                 1,
-                Judgment::Exclusive { resource: ResourceId(10) },
+                Judgment::Exclusive {
+                    resource: ResourceId(10),
+                },
             ),
         });
         proof.add_step(ProofStep::Infer {
@@ -854,7 +912,9 @@ mod tests {
             rule: InferenceRule::ExclusivityIntro,
             conclusion: Fact::derived_j(
                 2,
-                Judgment::Exclusive { resource: ResourceId(10) },
+                Judgment::Exclusive {
+                    resource: ResourceId(10),
+                },
             ),
         });
         proof.conclude(Conclusion::Proven);

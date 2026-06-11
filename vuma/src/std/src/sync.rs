@@ -37,7 +37,7 @@
 
 use crate::alloc::Address;
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 // ===========================================================================
 // CapD Helpers
@@ -57,7 +57,12 @@ pub type MutexCapD = CapD;
 /// Supports: Read, Write, Shared (for readers), Exclusive (for writer).
 // VUMA-VERIFIED: rwlock capability descriptor supports both shared and exclusive
 pub fn rwlock_capd() -> CapD {
-    CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Shared, CapFlag::Exclusive])
+    CapD::new(vec![
+        CapFlag::Read,
+        CapFlag::Write,
+        CapFlag::Shared,
+        CapFlag::Exclusive,
+    ])
 }
 
 /// Type alias for RwLock CapD (used in re-exports).
@@ -67,7 +72,12 @@ pub type RwLockCapD = CapD;
 /// Supports: Read, Write, Send, Receive.
 // VUMA-VERIFIED: channel capability descriptor supports message passing
 pub fn channel_capd() -> CapD {
-    CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send, CapFlag::Receive])
+    CapD::new(vec![
+        CapFlag::Read,
+        CapFlag::Write,
+        CapFlag::Send,
+        CapFlag::Receive,
+    ])
 }
 
 /// Type alias for Channel CapD (used in re-exports).
@@ -188,12 +198,16 @@ impl VumaSpinLock {
     // VUMA-VERIFIED: lock acquisition ensures exclusive access
     pub fn lock(&self) -> VumaSpinLockGuard<'_> {
         // ARM64: LDAXR/STLXR exclusive access loop
-        while self.lock.compare_exchange(
-            false,              // expected: unlocked
-            true,               // desired: locked
-            Ordering::Acquire,  // success: acquire semantics
-            Ordering::Relaxed,  // failure: no ordering needed
-        ).is_err() {
+        while self
+            .lock
+            .compare_exchange(
+                false,             // expected: unlocked
+                true,              // desired: locked
+                Ordering::Acquire, // success: acquire semantics
+                Ordering::Relaxed, // failure: no ordering needed
+            )
+            .is_err()
+        {
             // ARM64: WFE/YIELD hint for power-efficient spinning
             while self.lock.load(Ordering::Relaxed) {
                 std::hint::spin_loop();
@@ -207,12 +221,11 @@ impl VumaSpinLock {
     /// Returns `Some(guard)` if the lock was acquired, `None` otherwise.
     // VUMA-VERIFIED: try_lock is safe — only returns guard if lock acquired
     pub fn try_lock(&self) -> Option<VumaSpinLockGuard<'_>> {
-        if self.lock.compare_exchange(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             Some(VumaSpinLockGuard { lock: &self.lock })
         } else {
             None
@@ -488,10 +501,22 @@ impl<T> VumaRwLock<T> {
     // VUMA-VERIFIED: synchronization edges correctly model rwlock ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
         vec![
-            SyncEdge::new("rwlock_read_lock", "rwlock_read_unlock", SyncEdgeKind::LockOrder),
-            SyncEdge::new("rwlock_write_lock", "rwlock_write_unlock", SyncEdgeKind::LockOrder),
+            SyncEdge::new(
+                "rwlock_read_lock",
+                "rwlock_read_unlock",
+                SyncEdgeKind::LockOrder,
+            ),
+            SyncEdge::new(
+                "rwlock_write_lock",
+                "rwlock_write_unlock",
+                SyncEdgeKind::LockOrder,
+            ),
             SyncEdge::new("rwlock_read_lock", "rwlock_read_access", SyncEdgeKind::Seq),
-            SyncEdge::new("rwlock_write_lock", "rwlock_write_access", SyncEdgeKind::Seq),
+            SyncEdge::new(
+                "rwlock_write_lock",
+                "rwlock_write_access",
+                SyncEdgeKind::Seq,
+            ),
         ]
     }
 
@@ -1020,7 +1045,11 @@ impl<T> VumaChannel<T> {
     // VUMA-VERIFIED: synchronization edges correctly model channel ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
         vec![
-            SyncEdge::new("channel_send", "channel_receive", SyncEdgeKind::ChannelOrder),
+            SyncEdge::new(
+                "channel_send",
+                "channel_receive",
+                SyncEdgeKind::ChannelOrder,
+            ),
             SyncEdge::new("channel_produce", "channel_consume", SyncEdgeKind::Seq),
         ]
     }
@@ -1170,7 +1199,11 @@ impl<T: Copy + PartialEq> VumaAtomic<T> {
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
         vec![
             SyncEdge::new("atomic_load", "atomic_store", SyncEdgeKind::Atomic),
-            SyncEdge::new("atomic_cxchg", "atomic_cxchg_complete", SyncEdgeKind::Atomic),
+            SyncEdge::new(
+                "atomic_cxchg",
+                "atomic_cxchg_complete",
+                SyncEdgeKind::Atomic,
+            ),
         ]
     }
 
@@ -1635,10 +1668,13 @@ mod tests {
             barrier.sync_edges(),
             ch.sync_edges(),
             atomic.sync_edges(),
-        ].concat();
+        ]
+        .concat();
 
         let has_lock_order = all_edges.iter().any(|e| e.kind == SyncEdgeKind::LockOrder);
-        let has_channel_order = all_edges.iter().any(|e| e.kind == SyncEdgeKind::ChannelOrder);
+        let has_channel_order = all_edges
+            .iter()
+            .any(|e| e.kind == SyncEdgeKind::ChannelOrder);
         let has_fence = all_edges.iter().any(|e| e.kind == SyncEdgeKind::Fence);
         let has_atomic = all_edges.iter().any(|e| e.kind == SyncEdgeKind::Atomic);
         let has_seq = all_edges.iter().any(|e| e.kind == SyncEdgeKind::Seq);

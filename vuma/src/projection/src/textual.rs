@@ -48,7 +48,7 @@
 //! +node 1: gained RequiresAuth [capability]
 //! ```
 
-use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCG, SCGDiff, SCGNode};
+use crate::{BdKind, EdgeKind, NodeId, NodeKind, RegionId, SCGDiff, SCGNode, SCG};
 use vuma_scg;
 
 // ── Projection style ─────────────────────────────────────────────────────────
@@ -91,7 +91,9 @@ pub struct TemplateEngine {
 impl TemplateEngine {
     /// Create a new template engine with the given template string.
     pub fn new(template: impl Into<String>) -> Self {
-        Self { template: template.into() }
+        Self {
+            template: template.into(),
+        }
     }
 
     /// Render the template by substituting the provided key-value pairs.
@@ -154,7 +156,6 @@ pub enum ProjectionStyle {
     /// Emit using a custom style defined by the user.
     Custom,
 }
-
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -357,7 +358,14 @@ impl TextualProjection {
             ),
             ("Control Flow", vec![NodeKind::Merge]),
             ("Effects", vec![NodeKind::Effect]),
-            ("Memory", vec![NodeKind::Allocation, NodeKind::Deallocation, NodeKind::Access]),
+            (
+                "Memory",
+                vec![
+                    NodeKind::Allocation,
+                    NodeKind::Deallocation,
+                    NodeKind::Access,
+                ],
+            ),
             ("Computation", vec![NodeKind::Computation]),
         ];
 
@@ -388,10 +396,7 @@ impl TextualProjection {
                 // otherwise fall back to Rust-like style.
                 if let Some(ref template) = self.config.signature_template {
                     let kind_str = format!("{:?}", node.kind);
-                    template.render(&[
-                        ("label", &node.label),
-                        ("kind", &kind_str),
-                    ])
+                    template.render(&[("label", &node.label), ("kind", &kind_str)])
                 } else {
                     self.format_rust_signature(node)
                 }
@@ -506,9 +511,7 @@ impl TextualProjection {
                         // otherwise fall back to Rust-like style.
                         if let Some(ref template) = self.config.capability_template {
                             let caps_str = caps.join(", ");
-                            lines.push(template.render(&[
-                                ("capabilities", &caps_str),
-                            ]));
+                            lines.push(template.render(&[("capabilities", &caps_str)]));
                         } else {
                             lines.push(format!("    @{}", caps.join(" + ")));
                         }
@@ -671,7 +674,11 @@ impl TextualProjection {
         let mut out = String::new();
 
         // Signature line
-        out.push_str(&format!("{}{}\n", ind, self.format_node_signature(node, scg)));
+        out.push_str(&format!(
+            "{}{}\n",
+            ind,
+            self.format_node_signature(node, scg)
+        ));
 
         // Each BD as an annotated comment
         if node.bds.is_empty() {
@@ -712,13 +719,21 @@ impl TextualProjection {
     /// Formats a region header with section separators.
     fn format_region_header(&self, region_name: &str, region_id: RegionId) -> String {
         let title = format!(" Region: {} (id={}) ", region_name, region_id);
-        format!("\u{2550}{}{}\n", title, "\u{2550}".repeat(60usize.saturating_sub(title.len())))
+        format!(
+            "\u{2550}{}{}\n",
+            title,
+            "\u{2550}".repeat(60usize.saturating_sub(title.len()))
+        )
     }
 
     /// Formats a region footer.
     fn format_region_footer(&self, region_name: &str) -> String {
         let title = format!(" End Region: {} ", region_name);
-        format!("\u{2550}{}{}\n", title, "\u{2550}".repeat(60usize.saturating_sub(title.len())))
+        format!(
+            "\u{2550}{}{}\n",
+            title,
+            "\u{2550}".repeat(60usize.saturating_sub(title.len()))
+        )
     }
 }
 
@@ -1009,7 +1024,7 @@ fn node_label_or_id(scg: &SCG, id: NodeId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BehaviouralDescriptor, BdKind, SCGEdge, SCGNode, SCGRegion};
+    use crate::{BdKind, BehaviouralDescriptor, SCGEdge, SCGNode, SCGRegion};
 
     // ── Helper builders ──────────────────────────────────────────────────────
 
@@ -1517,8 +1532,9 @@ mod tests {
     #[test]
     fn test_render_real_scg() {
         use vuma_scg::{
-            SCG, NodeType, NodePayload, ComputationNode, AllocationNode, DeallocationNode,
-            ProgramPoint, EdgeKind as ScgEdgeKind, RegionId as ScgRegionId, DeploymentTarget,
+            AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
+            EdgeKind as ScgEdgeKind, NodePayload, NodeType, ProgramPoint, RegionId as ScgRegionId,
+            SCG,
         };
 
         let rid = ScgRegionId::new(1);
@@ -1537,7 +1553,12 @@ mod tests {
                 region_id: rid,
                 type_name: Some("MyBuffer".to_string()),
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(n1);
 
@@ -1548,7 +1569,12 @@ mod tests {
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
 
         let n3 = scg.add_node(
@@ -1557,7 +1583,12 @@ mod tests {
                 allocation_node: n1,
                 region_id: rid,
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(n3);
 
@@ -1569,9 +1600,21 @@ mod tests {
         let output = super::render_scg(&scg);
 
         // Verify the output contains expected text from the 3 nodes
-        assert!(output.contains("MyBuffer"), "output should contain allocation label");
-        assert!(output.contains("process_buffer"), "output should contain computation label");
-        assert!(output.contains("dealloc"), "output should contain deallocation label");
-        assert!(output.contains("region_1"), "output should contain region name");
+        assert!(
+            output.contains("MyBuffer"),
+            "output should contain allocation label"
+        );
+        assert!(
+            output.contains("process_buffer"),
+            "output should contain computation label"
+        );
+        assert!(
+            output.contains("dealloc"),
+            "output should contain deallocation label"
+        );
+        assert!(
+            output.contains("region_1"),
+            "output should contain region name"
+        );
     }
 }

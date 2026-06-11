@@ -52,7 +52,9 @@ impl ExitStatus {
     /// Create from a std::process::ExitStatus.
     // VUMA-VERIFIED: conversion preserves exit code semantics
     pub(crate) fn from_std(status: std::process::ExitStatus) -> Self {
-        Self { code: status.code() }
+        Self {
+            code: status.code(),
+        }
     }
 
     /// Returns true if the process exited successfully (code 0).
@@ -112,7 +114,11 @@ impl Output {
     /// Create a new Output from an exit status and captured output.
     // VUMA-VERIFIED: constructor is pure
     pub fn new(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
-        Self { status, stdout, stderr }
+        Self {
+            status,
+            stdout,
+            stderr,
+        }
     }
 
     /// Create from a std::process::Output.
@@ -180,7 +186,9 @@ impl Child {
     /// Delegates to `std::process::Child::wait`.
     // VUMA-VERIFIED: wait requires Execute capability
     pub fn wait(&mut self) -> Result<ExitStatus, String> {
-        let status = self.inner.wait()
+        let status = self
+            .inner
+            .wait()
             .map_err(|e| format!("Child wait failed: {}", e))?;
         Ok(ExitStatus::from_std(status))
     }
@@ -193,7 +201,9 @@ impl Child {
     /// Delegates to `std::process::Child::try_wait`.
     // VUMA-VERIFIED: try_wait is non-blocking and safe
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, String> {
-        let result = self.inner.try_wait()
+        let result = self
+            .inner
+            .try_wait()
             .map_err(|e| format!("Child try_wait failed: {}", e))?;
         Ok(result.map(ExitStatus::from_std))
     }
@@ -203,7 +213,8 @@ impl Child {
     /// Delegates to `std::process::Child::kill`.
     // VUMA-VERIFIED: kill requires Execute capability
     pub fn kill(&mut self) -> Result<(), String> {
-        self.inner.kill()
+        self.inner
+            .kill()
             .map_err(|e| format!("Child kill failed: {}", e))
     }
 
@@ -334,7 +345,9 @@ impl Command {
     /// Delegates to `std::process::Command::status` for real process execution.
     // VUMA-VERIFIED: status requires Execute capability
     pub fn status(&mut self) -> Result<ExitStatus, String> {
-        let std_status = self.build_std_command().status()
+        let std_status = self
+            .build_std_command()
+            .status()
             .map_err(|e| format!("Command status failed: {}", e))?;
         Ok(ExitStatus::from_std(std_status))
     }
@@ -345,7 +358,9 @@ impl Command {
     /// with captured stdout/stderr.
     // VUMA-VERIFIED: output requires Execute capability
     pub fn output(&mut self) -> Result<Output, String> {
-        let std_output = self.build_std_command().output()
+        let std_output = self
+            .build_std_command()
+            .output()
             .map_err(|e| format!("Command output failed: {}", e))?;
         Ok(Output::from_std(std_output))
     }
@@ -356,7 +371,9 @@ impl Command {
     /// Returns a `Child` that can be waited on, polled, or killed.
     // VUMA-VERIFIED: spawn requires Execute capability
     pub fn spawn(&mut self) -> Result<Child, String> {
-        let std_child = self.build_std_command().spawn()
+        let std_child = self
+            .build_std_command()
+            .spawn()
             .map_err(|e| format!("Command spawn failed: {}", e))?;
         Ok(Child::from_std(std_child))
     }
@@ -457,7 +474,10 @@ mod tests {
     fn test_command_env_and_cwd() {
         let mut cmd = Command::new("python3");
         cmd.env("PYTHONPATH", "/opt/lib").cwd("/home/user");
-        assert_eq!(cmd.get_env(), &[("PYTHONPATH".to_string(), "/opt/lib".to_string())]);
+        assert_eq!(
+            cmd.get_env(),
+            &[("PYTHONPATH".to_string(), "/opt/lib".to_string())]
+        );
         assert_eq!(cmd.get_cwd(), Some("/home/user"));
     }
 

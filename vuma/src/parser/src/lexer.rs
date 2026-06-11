@@ -40,7 +40,11 @@ pub struct Position {
 impl Position {
     /// Create a new position.
     pub fn new(offset: usize, line: usize, column: usize) -> Self {
-        Self { offset, line, column }
+        Self {
+            offset,
+            line,
+            column,
+        }
     }
 
     /// The initial position (offset 0, line 0, column 0).
@@ -806,12 +810,30 @@ impl<'src> Lexer<'src> {
 
         let kind = match ch {
             // ---- Delimiters ----
-            '(' => { self.bump(); TokenKind::LParen }
-            ')' => { self.bump(); TokenKind::RParen }
-            '{' => { self.bump(); TokenKind::LBrace }
-            '}' => { self.bump(); TokenKind::RBrace }
-            '[' => { self.bump(); TokenKind::LBracket }
-            ']' => { self.bump(); TokenKind::RBracket }
+            '(' => {
+                self.bump();
+                TokenKind::LParen
+            }
+            ')' => {
+                self.bump();
+                TokenKind::RParen
+            }
+            '{' => {
+                self.bump();
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.bump();
+                TokenKind::RBrace
+            }
+            '[' => {
+                self.bump();
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.bump();
+                TokenKind::RBracket
+            }
 
             // ---- Simple operators ----
             '+' => return self.lex_plus(start, line, column),
@@ -819,13 +841,34 @@ impl<'src> Lexer<'src> {
             '/' => return self.lex_slash(start, line, column),
             '%' => return self.lex_percent(start, line, column),
             '^' => return self.lex_caret(start, line, column),
-            '~' => { self.bump(); TokenKind::Tilde }
-            '@' => { self.bump(); TokenKind::Ampersat }
-            '#' => { self.bump(); TokenKind::Hash }
-            '$' => { self.bump(); TokenKind::Dollar }
-            '?' => { self.bump(); TokenKind::Question }
-            ';' => { self.bump(); TokenKind::Semicolon }
-            ',' => { self.bump(); TokenKind::Comma }
+            '~' => {
+                self.bump();
+                TokenKind::Tilde
+            }
+            '@' => {
+                self.bump();
+                TokenKind::Ampersat
+            }
+            '#' => {
+                self.bump();
+                TokenKind::Hash
+            }
+            '$' => {
+                self.bump();
+                TokenKind::Dollar
+            }
+            '?' => {
+                self.bump();
+                TokenKind::Question
+            }
+            ';' => {
+                self.bump();
+                TokenKind::Semicolon
+            }
+            ',' => {
+                self.bump();
+                TokenKind::Comma
+            }
 
             // ---- Multi-char operators ----
             '-' => return self.lex_minus(start, line, column),
@@ -898,7 +941,10 @@ impl<'src> Lexer<'src> {
     fn lex_plus(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '+'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::PlusEq, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::PlusEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Plus, start, line, column),
         }
     }
@@ -906,8 +952,14 @@ impl<'src> Lexer<'src> {
     fn lex_minus(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '-'
         match self.chars.peek() {
-            Some(&'>') => { self.bump(); self.make_token(TokenKind::Arrow, start, line, column) }
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::MinusEq, start, line, column) }
+            Some(&'>') => {
+                self.bump();
+                self.make_token(TokenKind::Arrow, start, line, column)
+            }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::MinusEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Minus, start, line, column),
         }
     }
@@ -915,7 +967,10 @@ impl<'src> Lexer<'src> {
     fn lex_star(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '*'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::StarEq, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::StarEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Star, start, line, column),
         }
     }
@@ -923,7 +978,10 @@ impl<'src> Lexer<'src> {
     fn lex_percent(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '%'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::PercentEq, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::PercentEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Percent, start, line, column),
         }
     }
@@ -931,7 +989,10 @@ impl<'src> Lexer<'src> {
     fn lex_slash(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '/'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::SlashEq, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::SlashEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Slash, start, line, column),
         }
     }
@@ -939,7 +1000,10 @@ impl<'src> Lexer<'src> {
     fn lex_caret(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '^'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::CaretEq, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::CaretEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Caret, start, line, column),
         }
     }
@@ -947,7 +1011,10 @@ impl<'src> Lexer<'src> {
     fn lex_bang(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '!'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::Ne, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::Ne, start, line, column)
+            }
             _ => self.make_token(TokenKind::Bang, start, line, column),
         }
     }
@@ -955,8 +1022,14 @@ impl<'src> Lexer<'src> {
     fn lex_eq(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '='
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::EqEq, start, line, column) }
-            Some(&'>') => { self.bump(); self.make_token(TokenKind::FatArrow, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::EqEq, start, line, column)
+            }
+            Some(&'>') => {
+                self.bump();
+                self.make_token(TokenKind::FatArrow, start, line, column)
+            }
             _ => self.make_token(TokenKind::Assign, start, line, column),
         }
     }
@@ -964,7 +1037,10 @@ impl<'src> Lexer<'src> {
     fn lex_lt(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '<'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::Le, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::Le, start, line, column)
+            }
             Some(&'<') => {
                 self.bump(); // consume second '<'
                 if self.chars.peek() == Some(&'=') {
@@ -981,7 +1057,10 @@ impl<'src> Lexer<'src> {
     fn lex_gt(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '>'
         match self.chars.peek() {
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::Ge, start, line, column) }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::Ge, start, line, column)
+            }
             Some(&'>') => {
                 self.bump(); // consume second '>'
                 if self.chars.peek() == Some(&'=') {
@@ -998,8 +1077,14 @@ impl<'src> Lexer<'src> {
     fn lex_ampersand(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '&'
         match self.chars.peek() {
-            Some(&'&') => { self.bump(); self.make_token(TokenKind::AndAnd, start, line, column) }
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::AmpEq, start, line, column) }
+            Some(&'&') => {
+                self.bump();
+                self.make_token(TokenKind::AndAnd, start, line, column)
+            }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::AmpEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Ampersand, start, line, column),
         }
     }
@@ -1007,8 +1092,14 @@ impl<'src> Lexer<'src> {
     fn lex_pipe(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume '|'
         match self.chars.peek() {
-            Some(&'|') => { self.bump(); self.make_token(TokenKind::OrOr, start, line, column) }
-            Some(&'=') => { self.bump(); self.make_token(TokenKind::PipeEq, start, line, column) }
+            Some(&'|') => {
+                self.bump();
+                self.make_token(TokenKind::OrOr, start, line, column)
+            }
+            Some(&'=') => {
+                self.bump();
+                self.make_token(TokenKind::PipeEq, start, line, column)
+            }
             _ => self.make_token(TokenKind::Pipe, start, line, column),
         }
     }
@@ -1016,7 +1107,10 @@ impl<'src> Lexer<'src> {
     fn lex_colon(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume ':'
         match self.chars.peek() {
-            Some(&':') => { self.bump(); self.make_token(TokenKind::PathSep, start, line, column) }
+            Some(&':') => {
+                self.bump();
+                self.make_token(TokenKind::PathSep, start, line, column)
+            }
             _ => self.make_token(TokenKind::Colon, start, line, column),
         }
     }
@@ -1027,8 +1121,14 @@ impl<'src> Lexer<'src> {
             Some(&'.') => {
                 self.bump(); // consume second '.'
                 match self.chars.peek() {
-                    Some(&'.') => { self.bump(); self.make_token(TokenKind::Ellipsis, start, line, column) }
-                    Some(&'=') => { self.bump(); self.make_token(TokenKind::DotDotEq, start, line, column) }
+                    Some(&'.') => {
+                        self.bump();
+                        self.make_token(TokenKind::Ellipsis, start, line, column)
+                    }
+                    Some(&'=') => {
+                        self.bump();
+                        self.make_token(TokenKind::DotDotEq, start, line, column)
+                    }
                     _ => self.make_token(TokenKind::DotDot, start, line, column),
                 }
             }
@@ -1064,7 +1164,8 @@ impl<'src> Lexer<'src> {
                 Some('b') | Some('B') => {
                     let third = self.peek_next(2);
                     if third.is_some_and(|c| c == '0' || c == '1' || c == '_') {
-                        self.bump(); self.bump(); // consume '0b'
+                        self.bump();
+                        self.bump(); // consume '0b'
                         return self.lex_binary_digits(start, line, column);
                     }
                     self.bump(); // consume '0'
@@ -1074,7 +1175,8 @@ impl<'src> Lexer<'src> {
                 Some('o') | Some('O') => {
                     let third = self.peek_next(2);
                     if third.is_some_and(|c| ('0'..='7').contains(&c) || c == '_') {
-                        self.bump(); self.bump(); // consume '0o'
+                        self.bump();
+                        self.bump(); // consume '0o'
                         return self.lex_octal_digits(start, line, column);
                     }
                     self.bump(); // consume '0'
@@ -1170,7 +1272,10 @@ impl<'src> Lexer<'src> {
             }
         }
         if self.offset == digits_start {
-            self.push_error("empty binary digits after '0b'", Span::new(start, self.offset));
+            self.push_error(
+                "empty binary digits after '0b'",
+                Span::new(start, self.offset),
+            );
             return self.make_token(TokenKind::Error, start, line, column);
         }
         self.make_token(TokenKind::Number, start, line, column)
@@ -1186,7 +1291,10 @@ impl<'src> Lexer<'src> {
             }
         }
         if self.offset == digits_start {
-            self.push_error("empty octal digits after '0o'", Span::new(start, self.offset));
+            self.push_error(
+                "empty octal digits after '0o'",
+                Span::new(start, self.offset),
+            );
             return self.make_token(TokenKind::Error, start, line, column);
         }
         self.make_token(TokenKind::Number, start, line, column)
@@ -1223,12 +1331,30 @@ impl<'src> Lexer<'src> {
                 Some(&'\\') => {
                     self.bump(); // consume backslash
                     match self.chars.peek() {
-                        Some(&'n') => { self.bump(); decoded.push('\n'); }
-                        Some(&'t') => { self.bump(); decoded.push('\t'); }
-                        Some(&'r') => { self.bump(); decoded.push('\r'); }
-                        Some(&'\\') => { self.bump(); decoded.push('\\'); }
-                        Some(&'"') => { self.bump(); decoded.push('"'); }
-                        Some(&'0') => { self.bump(); decoded.push('\0'); }
+                        Some(&'n') => {
+                            self.bump();
+                            decoded.push('\n');
+                        }
+                        Some(&'t') => {
+                            self.bump();
+                            decoded.push('\t');
+                        }
+                        Some(&'r') => {
+                            self.bump();
+                            decoded.push('\r');
+                        }
+                        Some(&'\\') => {
+                            self.bump();
+                            decoded.push('\\');
+                        }
+                        Some(&'"') => {
+                            self.bump();
+                            decoded.push('"');
+                        }
+                        Some(&'0') => {
+                            self.bump();
+                            decoded.push('\0');
+                        }
                         Some(&'x') => {
                             self.bump(); // consume 'x'
                             let h1 = self.chars.peek().and_then(|c| c.to_digit(16));
@@ -1295,14 +1421,21 @@ impl<'src> Lexer<'src> {
                                 );
                             }
                         }
-                        Some(&c) => { self.bump(); decoded.push(c); }
+                        Some(&c) => {
+                            self.bump();
+                            decoded.push(c);
+                        }
                         None => {
                             self.push_error(
                                 "unterminated escape in string literal",
                                 Span::new(start, self.offset),
                             );
                             return self.make_token_with_lexeme(
-                                TokenKind::Error, decoded, start, line, column,
+                                TokenKind::Error,
+                                decoded,
+                                start,
+                                line,
+                                column,
                             );
                         }
                     }
@@ -1313,17 +1446,25 @@ impl<'src> Lexer<'src> {
                         Span::new(start, self.offset),
                     );
                     return self.make_token_with_lexeme(
-                        TokenKind::Error, decoded, start, line, column,
+                        TokenKind::Error,
+                        decoded,
+                        start,
+                        line,
+                        column,
                     );
                 }
-                Some(&c) => { self.bump(); decoded.push(c); }
+                Some(&c) => {
+                    self.bump();
+                    decoded.push(c);
+                }
                 None => {
-                    self.push_error(
-                        "unterminated string literal",
-                        Span::new(start, self.offset),
-                    );
+                    self.push_error("unterminated string literal", Span::new(start, self.offset));
                     return self.make_token_with_lexeme(
-                        TokenKind::Error, decoded, start, line, column,
+                        TokenKind::Error,
+                        decoded,
+                        start,
+                        line,
+                        column,
                     );
                 }
             }
@@ -1339,12 +1480,30 @@ impl<'src> Lexer<'src> {
         let decoded = if self.chars.peek() == Some(&'\\') {
             self.bump(); // consume backslash
             match self.chars.peek() {
-                Some(&'n') => { self.bump(); Some('\n') }
-                Some(&'t') => { self.bump(); Some('\t') }
-                Some(&'r') => { self.bump(); Some('\r') }
-                Some(&'\\') => { self.bump(); Some('\\') }
-                Some(&'\'') => { self.bump(); Some('\'') }
-                Some(&'0') => { self.bump(); Some('\0') }
+                Some(&'n') => {
+                    self.bump();
+                    Some('\n')
+                }
+                Some(&'t') => {
+                    self.bump();
+                    Some('\t')
+                }
+                Some(&'r') => {
+                    self.bump();
+                    Some('\r')
+                }
+                Some(&'\\') => {
+                    self.bump();
+                    Some('\\')
+                }
+                Some(&'\'') => {
+                    self.bump();
+                    Some('\'')
+                }
+                Some(&'0') => {
+                    self.bump();
+                    Some('\0')
+                }
                 Some(&'x') => {
                     self.bump(); // consume 'x'
                     let h1 = self.chars.peek().and_then(|c| c.to_digit(16));
@@ -1355,20 +1514,29 @@ impl<'src> Lexer<'src> {
                             self.bump();
                             Some(char::from((h1 * 16 + h2) as u8))
                         } else {
-                            self.push_error("incomplete hex escape in char literal",
-                                Span::new(self.offset.saturating_sub(2), self.offset));
+                            self.push_error(
+                                "incomplete hex escape in char literal",
+                                Span::new(self.offset.saturating_sub(2), self.offset),
+                            );
                             None
                         }
                     } else {
-                        self.push_error("incomplete hex escape in char literal",
-                            Span::new(self.offset.saturating_sub(1), self.offset));
+                        self.push_error(
+                            "incomplete hex escape in char literal",
+                            Span::new(self.offset.saturating_sub(1), self.offset),
+                        );
                         None
                     }
                 }
-                Some(&c) => { self.bump(); Some(c) }
+                Some(&c) => {
+                    self.bump();
+                    Some(c)
+                }
                 None => {
-                    self.push_error("unterminated escape in char literal",
-                        Span::new(start, self.offset));
+                    self.push_error(
+                        "unterminated escape in char literal",
+                        Span::new(start, self.offset),
+                    );
                     None
                 }
             }
@@ -1398,25 +1566,36 @@ impl<'src> Lexer<'src> {
     fn lex_byte_string(&mut self, start: usize, line: usize, column: usize) -> Token {
         // 'b' already consumed; expect opening "
         if self.chars.peek() != Some(&'"') {
-            self.push_error("expected '\"' after 'b' in byte string",
-                Span::new(start, self.offset));
+            self.push_error(
+                "expected '\"' after 'b' in byte string",
+                Span::new(start, self.offset),
+            );
             return self.make_token(TokenKind::Error, start, line, column);
         }
         self.bump(); // consume opening "
 
         while let Some(&c) = self.chars.peek() {
             match c {
-                '"' => { self.bump(); break; }
-                '\\' => {
-                    self.bump(); // consume backslash
-                    if self.chars.peek().is_some() { self.bump(); }
-                }
-                '\n' => {
-                    self.push_error("unterminated byte string literal (newline)",
-                        Span::new(start, self.offset));
+                '"' => {
+                    self.bump();
                     break;
                 }
-                _ => { self.bump(); }
+                '\\' => {
+                    self.bump(); // consume backslash
+                    if self.chars.peek().is_some() {
+                        self.bump();
+                    }
+                }
+                '\n' => {
+                    self.push_error(
+                        "unterminated byte string literal (newline)",
+                        Span::new(start, self.offset),
+                    );
+                    break;
+                }
+                _ => {
+                    self.bump();
+                }
             }
         }
 
@@ -1434,8 +1613,10 @@ impl<'src> Lexer<'src> {
 
         // Expect opening "
         if self.chars.peek() != Some(&'"') {
-            self.push_error("expected '\"' after raw string prefix",
-                Span::new(start, self.offset));
+            self.push_error(
+                "expected '\"' after raw string prefix",
+                Span::new(start, self.offset),
+            );
             return self.make_token(TokenKind::Error, start, line, column);
         }
         self.bump(); // consume opening "
@@ -1455,10 +1636,14 @@ impl<'src> Lexer<'src> {
                     }
                     // Not enough closing hashes — keep reading
                 }
-                Some(_) => { self.bump(); }
+                Some(_) => {
+                    self.bump();
+                }
                 None => {
-                    self.push_error("unterminated raw string literal",
-                        Span::new(start, self.offset));
+                    self.push_error(
+                        "unterminated raw string literal",
+                        Span::new(start, self.offset),
+                    );
                     break;
                 }
             }
@@ -1475,8 +1660,10 @@ impl<'src> Lexer<'src> {
     fn lex_format_string(&mut self, start: usize, line: usize, column: usize) -> Token {
         // 'f' already consumed; expect opening "
         if self.chars.peek() != Some(&'"') {
-            self.push_error("expected '\"' after format string prefix 'f'",
-                Span::new(start, self.offset));
+            self.push_error(
+                "expected '\"' after format string prefix 'f'",
+                Span::new(start, self.offset),
+            );
             return self.make_token(TokenKind::Error, start, line, column);
         }
         self.bump(); // consume opening "
@@ -1496,7 +1683,7 @@ impl<'src> Lexer<'src> {
                 }
                 Some(&'{') => {
                     self.bump(); // consume {
-                    // If {{, it's an escaped brace, not an interpolation
+                                 // If {{, it's an escaped brace, not an interpolation
                     if self.chars.peek() == Some(&'}') {
                         // Empty {} — just consume the } and continue
                         self.bump();
@@ -1506,10 +1693,14 @@ impl<'src> Lexer<'src> {
                 Some(&'}') => {
                     self.bump(); // consume }
                 }
-                Some(_) => { self.bump(); }
+                Some(_) => {
+                    self.bump();
+                }
                 None => {
-                    self.push_error("unterminated format string literal",
-                        Span::new(start, self.offset));
+                    self.push_error(
+                        "unterminated format string literal",
+                        Span::new(start, self.offset),
+                    );
                     break;
                 }
             }
@@ -1570,7 +1761,8 @@ impl<'src> Lexer<'src> {
                 Some(&'/') => {
                     let second = self.peek_next(1);
                     if second == Some('*') {
-                        self.bump(); self.bump(); // consume /*
+                        self.bump();
+                        self.bump(); // consume /*
                         depth += 1;
                     } else {
                         self.bump();
@@ -1579,13 +1771,16 @@ impl<'src> Lexer<'src> {
                 Some(&'*') => {
                     let second = self.peek_next(1);
                     if second == Some('/') {
-                        self.bump(); self.bump(); // consume */
+                        self.bump();
+                        self.bump(); // consume */
                         depth -= 1;
                     } else {
                         self.bump();
                     }
                 }
-                Some(_) => { self.bump(); }
+                Some(_) => {
+                    self.bump();
+                }
                 None => {
                     self.push_error(
                         "unterminated block comment",
@@ -1645,12 +1840,19 @@ impl<'src> Lexer<'src> {
 
     /// Build the EOF sentinel token.
     fn eof_token(&self, start: usize, line: usize, column: usize) -> Token {
-        Token::new(TokenKind::Eof, String::new(), Span::new(start, start), line, column)
+        Token::new(
+            TokenKind::Eof,
+            String::new(),
+            Span::new(start, start),
+            line,
+            column,
+        )
     }
 
     /// Record a lexical error.
     fn push_error(&mut self, msg: impl Into<String>, span: Span) {
-        self.errors.push(ParseError::new(msg, span, ParseErrorKind::UnexpectedToken));
+        self.errors
+            .push(ParseError::new(msg, span, ParseErrorKind::UnexpectedToken));
     }
 }
 
@@ -1672,7 +1874,11 @@ mod tests {
 
     /// Helper: extract just the token kinds (excluding Eof).
     fn kinds(tokens: &[Token]) -> Vec<TokenKind> {
-        tokens.iter().filter(|t| !t.is_eof()).map(|t| t.kind).collect()
+        tokens
+            .iter()
+            .filter(|t| !t.is_eof())
+            .map(|t| t.kind)
+            .collect()
     }
 
     // ---- Test 1: Simple program ----
@@ -1680,16 +1886,19 @@ mod tests {
     fn lex_simple_program() {
         let source = "region pool = allocate(1024);";
         let (tokens, _) = lex(source);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Region,
-            TokenKind::Ident,
-            TokenKind::Assign,
-            TokenKind::Allocate,
-            TokenKind::LParen,
-            TokenKind::Number,
-            TokenKind::RParen,
-            TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Region,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Allocate,
+                TokenKind::LParen,
+                TokenKind::Number,
+                TokenKind::RParen,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 2: All keywords ----
@@ -1702,25 +1911,67 @@ mod tests {
                       true false null as sizeof alignof \
                       break continue where impl trait type const static mut ref";
         let (tokens, _) = lex(source);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Fn, TokenKind::Let, TokenKind::Ptr, TokenKind::Region,
-            TokenKind::Alloc, TokenKind::Allocate, TokenKind::Free,
-            TokenKind::Derive, TokenKind::Cast, TokenKind::Read, TokenKind::Write,
-            TokenKind::Sync, TokenKind::If, TokenKind::Else, TokenKind::While,
-            TokenKind::For, TokenKind::Return, TokenKind::Struct, TokenKind::Enum,
-            TokenKind::Match, TokenKind::Unsafe, TokenKind::Safe,
-            TokenKind::Bd, TokenKind::Repd, TokenKind::Capd, TokenKind::Reld,
-            TokenKind::Import, TokenKind::Export, TokenKind::Mod, TokenKind::Use,
-            TokenKind::SelfKw, TokenKind::Super,
-            TokenKind::Async, TokenKind::Await, TokenKind::Spawn,
-            TokenKind::Lock, TokenKind::Unlock, TokenKind::Channel,
-            TokenKind::Send, TokenKind::Recv,
-            TokenKind::True, TokenKind::False, TokenKind::Null,
-            TokenKind::As, TokenKind::Sizeof, TokenKind::Alignof,
-            TokenKind::Break, TokenKind::Continue, TokenKind::Where,
-            TokenKind::Impl, TokenKind::Trait, TokenKind::Type,
-            TokenKind::Const, TokenKind::Static, TokenKind::Mut, TokenKind::Ref,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Fn,
+                TokenKind::Let,
+                TokenKind::Ptr,
+                TokenKind::Region,
+                TokenKind::Alloc,
+                TokenKind::Allocate,
+                TokenKind::Free,
+                TokenKind::Derive,
+                TokenKind::Cast,
+                TokenKind::Read,
+                TokenKind::Write,
+                TokenKind::Sync,
+                TokenKind::If,
+                TokenKind::Else,
+                TokenKind::While,
+                TokenKind::For,
+                TokenKind::Return,
+                TokenKind::Struct,
+                TokenKind::Enum,
+                TokenKind::Match,
+                TokenKind::Unsafe,
+                TokenKind::Safe,
+                TokenKind::Bd,
+                TokenKind::Repd,
+                TokenKind::Capd,
+                TokenKind::Reld,
+                TokenKind::Import,
+                TokenKind::Export,
+                TokenKind::Mod,
+                TokenKind::Use,
+                TokenKind::SelfKw,
+                TokenKind::Super,
+                TokenKind::Async,
+                TokenKind::Await,
+                TokenKind::Spawn,
+                TokenKind::Lock,
+                TokenKind::Unlock,
+                TokenKind::Channel,
+                TokenKind::Send,
+                TokenKind::Recv,
+                TokenKind::True,
+                TokenKind::False,
+                TokenKind::Null,
+                TokenKind::As,
+                TokenKind::Sizeof,
+                TokenKind::Alignof,
+                TokenKind::Break,
+                TokenKind::Continue,
+                TokenKind::Where,
+                TokenKind::Impl,
+                TokenKind::Trait,
+                TokenKind::Type,
+                TokenKind::Const,
+                TokenKind::Static,
+                TokenKind::Mut,
+                TokenKind::Ref,
+            ]
+        );
     }
 
     // ---- Test 3: Integer literals ----
@@ -1730,12 +1981,12 @@ mod tests {
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
-        assert_eq!(kinds[0], TokenKind::Number);       // 0
-        assert_eq!(kinds[1], TokenKind::Number);       // 42
-        assert_eq!(kinds[2], TokenKind::Address);      // 0xFF (hex -> address)
-        assert_eq!(kinds[3], TokenKind::Number);       // 0b1010
-        assert_eq!(kinds[4], TokenKind::Number);       // 0o777
-        assert_eq!(kinds[5], TokenKind::Number);       // 1_000_000
+        assert_eq!(kinds[0], TokenKind::Number); // 0
+        assert_eq!(kinds[1], TokenKind::Number); // 42
+        assert_eq!(kinds[2], TokenKind::Address); // 0xFF (hex -> address)
+        assert_eq!(kinds[3], TokenKind::Number); // 0b1010
+        assert_eq!(kinds[4], TokenKind::Number); // 0o777
+        assert_eq!(kinds[5], TokenKind::Number); // 1_000_000
         assert_eq!(tokens[1].lexeme, "42");
         assert_eq!(tokens[2].lexeme, "0xFF");
         assert_eq!(tokens[3].lexeme, "0b1010");
@@ -1750,7 +2001,13 @@ mod tests {
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         for t in tokens.iter().filter(|t| !t.is_eof()) {
-            assert_eq!(t.kind, TokenKind::Float, "expected Float, got {:?} for '{}'", t.kind, t.lexeme);
+            assert_eq!(
+                t.kind,
+                TokenKind::Float,
+                "expected Float, got {:?} for '{}'",
+                t.kind,
+                t.lexeme
+            );
         }
         assert_eq!(tokens[0].lexeme, "3.14");
         assert_eq!(tokens[1].lexeme, "0.5");
@@ -1803,18 +2060,41 @@ mod tests {
         let source = "+ - * / % & | ^ ~ ! = == != < <= > >= << >> && || -> => :: .. ... @ # $ ?";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Plus, TokenKind::Minus, TokenKind::Star, TokenKind::Slash,
-            TokenKind::Percent, TokenKind::Ampersand, TokenKind::Pipe, TokenKind::Caret,
-            TokenKind::Tilde, TokenKind::Bang,
-            TokenKind::Assign, TokenKind::EqEq, TokenKind::Ne,
-            TokenKind::Lt, TokenKind::Le, TokenKind::Gt, TokenKind::Ge,
-            TokenKind::Shl, TokenKind::Shr,
-            TokenKind::AndAnd, TokenKind::OrOr,
-            TokenKind::Arrow, TokenKind::FatArrow, TokenKind::PathSep,
-            TokenKind::DotDot, TokenKind::Ellipsis,
-            TokenKind::Ampersat, TokenKind::Hash, TokenKind::Dollar, TokenKind::Question,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Plus,
+                TokenKind::Minus,
+                TokenKind::Star,
+                TokenKind::Slash,
+                TokenKind::Percent,
+                TokenKind::Ampersand,
+                TokenKind::Pipe,
+                TokenKind::Caret,
+                TokenKind::Tilde,
+                TokenKind::Bang,
+                TokenKind::Assign,
+                TokenKind::EqEq,
+                TokenKind::Ne,
+                TokenKind::Lt,
+                TokenKind::Le,
+                TokenKind::Gt,
+                TokenKind::Ge,
+                TokenKind::Shl,
+                TokenKind::Shr,
+                TokenKind::AndAnd,
+                TokenKind::OrOr,
+                TokenKind::Arrow,
+                TokenKind::FatArrow,
+                TokenKind::PathSep,
+                TokenKind::DotDot,
+                TokenKind::Ellipsis,
+                TokenKind::Ampersat,
+                TokenKind::Hash,
+                TokenKind::Dollar,
+                TokenKind::Question,
+            ]
+        );
     }
 
     // ---- Test 9: Delimiters ----
@@ -1822,11 +2102,17 @@ mod tests {
     fn lex_delimiters() {
         let source = "( ) { } [ ]";
         let (tokens, _) = lex(source);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::LParen, TokenKind::RParen,
-            TokenKind::LBrace, TokenKind::RBrace,
-            TokenKind::LBracket, TokenKind::RBracket,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+                TokenKind::LBracket,
+                TokenKind::RBracket,
+            ]
+        );
     }
 
     // ---- Test 10: Comments (line, block, doc) ----
@@ -1835,14 +2121,26 @@ mod tests {
         let source = "let x = 1; // line comment\nlet y = 2; /* block */ let z = 3;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number,
-            TokenKind::Semicolon,
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number,
-            TokenKind::Semicolon,
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number,
-            TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 11: Doc comments preserved as tokens ----
@@ -1851,8 +2149,14 @@ mod tests {
         let source = "/// This is a doc comment\n//! Module doc\nlet x = 1;";
         let (tokens, _) = lex(source);
         let kinds = kinds(&tokens);
-        assert!(kinds.contains(&TokenKind::DocComment), "should contain DocComment");
-        assert!(kinds.contains(&TokenKind::ModuleDoc), "should contain ModuleDoc");
+        assert!(
+            kinds.contains(&TokenKind::DocComment),
+            "should contain DocComment"
+        );
+        assert!(
+            kinds.contains(&TokenKind::ModuleDoc),
+            "should contain ModuleDoc"
+        );
         assert!(kinds.contains(&TokenKind::Let), "should contain Let");
     }
 
@@ -1862,12 +2166,21 @@ mod tests {
         let source = "let x = 1; /* outer /* inner */ still outer */ let y = 2;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number,
-            TokenKind::Semicolon,
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number,
-            TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 13: Position tracking ----
@@ -1896,8 +2209,10 @@ mod tests {
         let source = r#"let x = "hello;"#;
         let (tokens, errors) = lex(source);
         assert!(!errors.is_empty(), "should have at least one error");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Error),
-            "should contain an Error token");
+        assert!(
+            tokens.iter().any(|t| t.kind == TokenKind::Error),
+            "should contain an Error token"
+        );
         assert_eq!(tokens[0].kind, TokenKind::Let);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
     }
@@ -1908,9 +2223,14 @@ mod tests {
         // Use truly unexpected characters
         let source = "let x = `; let y = `;";
         let (tokens, errors) = lex(source);
-        assert!(!errors.is_empty(), "should have errors for unexpected characters");
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Error),
-            "should contain Error tokens");
+        assert!(
+            !errors.is_empty(),
+            "should have errors for unexpected characters"
+        );
+        assert!(
+            tokens.iter().any(|t| t.kind == TokenKind::Error),
+            "should contain Error tokens"
+        );
         // Should still have let and x tokens
         assert_eq!(tokens[0].kind, TokenKind::Let);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
@@ -1921,7 +2241,10 @@ mod tests {
     fn lex_unterminated_block_comment() {
         let source = "let x = 1; /* never closed";
         let (tokens, errors) = lex(source);
-        assert!(!errors.is_empty(), "should report unterminated block comment");
+        assert!(
+            !errors.is_empty(),
+            "should report unterminated block comment"
+        );
         assert_eq!(tokens[0].kind, TokenKind::Let);
         assert_eq!(tokens[1].kind, TokenKind::Ident);
     }
@@ -1955,9 +2278,10 @@ mod tests {
         let source = "1..10";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Number, TokenKind::DotDot, TokenKind::Number,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::Number, TokenKind::DotDot, TokenKind::Number,]
+        );
     }
 
     // ---- Test 20: Example program (hello_memory.vuma) ----
@@ -1976,8 +2300,13 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.starts_with(&[
-            TokenKind::Fn, TokenKind::Ident, TokenKind::LParen, TokenKind::RParen,
-            TokenKind::Arrow, TokenKind::Ident, TokenKind::LBrace,
+            TokenKind::Fn,
+            TokenKind::Ident,
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Arrow,
+            TokenKind::Ident,
+            TokenKind::LBrace,
         ]));
         assert!(kinds.contains(&TokenKind::Allocate));
         assert!(kinds.contains(&TokenKind::Free));
@@ -1988,7 +2317,7 @@ mod tests {
     #[test]
     fn lex_empty_hex_error_recovery() {
         // 0x followed by space: '0' is parsed as Number, 'x' as Ident
-               let source = "0x 42";
+        let source = "0x 42";
         let (tokens, _) = lex(source);
         // 0 should be parsed as Number, then x as Ident, then 42 as Number
         let kinds = kinds(&tokens);
@@ -2020,7 +2349,10 @@ mod tests {
         let source = ". .. ...";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![TokenKind::Dot, TokenKind::DotDot, TokenKind::Ellipsis]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::Dot, TokenKind::DotDot, TokenKind::Ellipsis]
+        );
     }
 
     // ---- Test 25: Path separator ----
@@ -2029,11 +2361,16 @@ mod tests {
         let source = "std::collections::HashMap";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Ident, TokenKind::PathSep,
-            TokenKind::Ident, TokenKind::PathSep,
-            TokenKind::Ident,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Ident,
+                TokenKind::PathSep,
+                TokenKind::Ident,
+                TokenKind::PathSep,
+                TokenKind::Ident,
+            ]
+        );
     }
 
     // ---- Test 26: Single ampersand and pipe ----
@@ -2095,18 +2432,21 @@ mod tests {
         let source = "+= -= *= /= %= &= |= ^= <<= >>=";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::PlusEq,
-            TokenKind::MinusEq,
-            TokenKind::StarEq,
-            TokenKind::SlashEq,
-            TokenKind::PercentEq,
-            TokenKind::AmpEq,
-            TokenKind::PipeEq,
-            TokenKind::CaretEq,
-            TokenKind::ShlEq,
-            TokenKind::ShrEq,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::PlusEq,
+                TokenKind::MinusEq,
+                TokenKind::StarEq,
+                TokenKind::SlashEq,
+                TokenKind::PercentEq,
+                TokenKind::AmpEq,
+                TokenKind::PipeEq,
+                TokenKind::CaretEq,
+                TokenKind::ShlEq,
+                TokenKind::ShrEq,
+            ]
+        );
         assert_eq!(tokens[0].lexeme, "+=");
         assert_eq!(tokens[1].lexeme, "-=");
         assert_eq!(tokens[2].lexeme, "*=");
@@ -2152,13 +2492,19 @@ mod tests {
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
-        assert_eq!(kinds, vec![
-            TokenKind::While, TokenKind::True,
-            TokenKind::LBrace,
-            TokenKind::Break, TokenKind::Semicolon,
-            TokenKind::Continue, TokenKind::Semicolon,
-            TokenKind::RBrace,
-        ]);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::While,
+                TokenKind::True,
+                TokenKind::LBrace,
+                TokenKind::Break,
+                TokenKind::Semicolon,
+                TokenKind::Continue,
+                TokenKind::Semicolon,
+                TokenKind::RBrace,
+            ]
+        );
     }
 
     // ---- Test 34: Null keyword ----
@@ -2167,10 +2513,16 @@ mod tests {
         let source = "let x = null;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign,
-            TokenKind::Null, TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Null,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 35: Where clause ----
@@ -2191,10 +2543,17 @@ mod tests {
         let source = "let ref x = 42;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Let, TokenKind::Ref, TokenKind::Ident,
-            TokenKind::Assign, TokenKind::Number, TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ref,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 37: String with hex escape ----
@@ -2267,9 +2626,10 @@ mod tests {
         let source = "&& & &=";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::AndAnd, TokenKind::Ampersand, TokenKind::AmpEq,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::AndAnd, TokenKind::Ampersand, TokenKind::AmpEq,]
+        );
     }
 
     // ---- Test 44: Pipe disambiguation ----
@@ -2278,9 +2638,10 @@ mod tests {
         let source = "|| | |=";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::OrOr, TokenKind::Pipe, TokenKind::PipeEq,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::OrOr, TokenKind::Pipe, TokenKind::PipeEq,]
+        );
     }
 
     // ---- Test 45: Dot variants ----
@@ -2289,10 +2650,15 @@ mod tests {
         let source = ". .. ... ..=";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Dot, TokenKind::DotDot,
-            TokenKind::Ellipsis, TokenKind::DotDotEq,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Dot,
+                TokenKind::DotDot,
+                TokenKind::Ellipsis,
+                TokenKind::DotDotEq,
+            ]
+        );
     }
 
     // ---- Test 46: GPIO blink example (const, Address, hex) ----
@@ -2301,11 +2667,18 @@ mod tests {
         let source = "const GPIO_BASE: Address = 0x7e200000;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Const, TokenKind::Ident, TokenKind::Colon,
-            TokenKind::Ident, TokenKind::Assign, TokenKind::Address,
-            TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Const,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Address,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Test 47: Lock-free queue example (generics, async) ----
@@ -2317,8 +2690,8 @@ mod tests {
         let kinds = kinds(&tokens);
         assert!(kinds.contains(&TokenKind::Struct));
         assert!(kinds.contains(&TokenKind::Ident));
-        assert!(kinds.contains(&TokenKind::Lt));  // < is Lt
-        assert!(kinds.contains(&TokenKind::Gt));  // > is Gt
+        assert!(kinds.contains(&TokenKind::Lt)); // < is Lt
+        assert!(kinds.contains(&TokenKind::Gt)); // > is Gt
         assert!(kinds.contains(&TokenKind::LBrace));
         assert!(kinds.contains(&TokenKind::RBrace));
     }
@@ -2372,10 +2745,16 @@ mod tests {
         let source = "let my_var = _hidden;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
-        assert_eq!(kinds(&tokens), vec![
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign,
-            TokenKind::Ident, TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Ident,
+                TokenKind::Semicolon,
+            ]
+        );
         assert_eq!(tokens[1].lexeme, "my_var");
         assert_eq!(tokens[3].lexeme, "_hidden");
     }
@@ -2427,9 +2806,13 @@ mod tests {
     // ---- Test 55: Multiple errors collected ----
     #[test]
     fn lex_multiple_errors_collected() {
-        let source = "let `\u{01}` = `\u{02}`;";  // backtick is unexpected
+        let source = "let `\u{01}` = `\u{02}`;"; // backtick is unexpected
         let (tokens, errors) = lex(source);
-        assert!(errors.len() >= 2, "should collect multiple errors, got {}", errors.len());
+        assert!(
+            errors.len() >= 2,
+            "should collect multiple errors, got {}",
+            errors.len()
+        );
         assert!(tokens.iter().filter(|t| t.kind == TokenKind::Error).count() >= 2);
     }
 
@@ -2463,10 +2846,21 @@ mod tests {
         let (tokens, errors) = lex(&source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
-        assert_eq!(kinds, vec![
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number, TokenKind::Semicolon,
-            TokenKind::Let, TokenKind::Ident, TokenKind::Assign, TokenKind::Number, TokenKind::Semicolon,
-        ]);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::Number,
+                TokenKind::Semicolon,
+            ]
+        );
     }
 
     // ---- Reg Test 3: Emoji in strings ----
@@ -2555,7 +2949,13 @@ mod tests {
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         for t in tokens.iter().filter(|t| !t.is_eof()) {
-            assert_eq!(t.kind, TokenKind::Float, "expected Float, got {:?} for '{}'", t.kind, t.lexeme);
+            assert_eq!(
+                t.kind,
+                TokenKind::Float,
+                "expected Float, got {:?} for '{}'",
+                t.kind,
+                t.lexeme
+            );
         }
     }
 }

@@ -346,7 +346,10 @@ impl<T> DoublyLinkedList<T> {
     // VUMA-VERIFIED: get_mut is safe — returns exclusive reference
     pub fn get_mut(&mut self, idx: usize) -> BdResult<&mut T> {
         match self.nodes.get_mut(idx).and_then(|opt| opt.as_mut()) {
-            Some(node) => BdResult::ok(&mut node.data, CapD::new(vec![CapFlag::Read, CapFlag::Write])),
+            Some(node) => BdResult::ok(
+                &mut node.data,
+                CapD::new(vec![CapFlag::Read, CapFlag::Write]),
+            ),
             None => BdResult::err(CapD::new(vec![CapFlag::Read, CapFlag::Write])),
         }
     }
@@ -406,9 +409,7 @@ pub struct Vec<T> {
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Vec<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Vec")
-            .field("inner", &self.inner)
-            .finish()
+        f.debug_struct("Vec").field("inner", &self.inner).finish()
     }
 }
 
@@ -532,7 +533,10 @@ impl<T> Vec<T> {
     pub fn remove(&mut self, idx: usize) -> BdResult<T> {
         self.bd_pop_count.set(self.bd_pop_count.get() + 1);
         if idx < self.inner.len() {
-            BdResult::ok(self.inner.remove(idx), CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+            BdResult::ok(
+                self.inner.remove(idx),
+                CapD::new(vec![CapFlag::Read, CapFlag::Write]),
+            )
         } else {
             BdResult::err(CapD::new(vec![CapFlag::Read, CapFlag::Write]))
         }
@@ -1009,9 +1013,7 @@ impl VumaString {
     /// Returns a reference to the underlying Vec<u8>.
     // VUMA-VERIFIED: read-only access to backing storage
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(self.inner.as_ptr(), self.inner.len())
-        }
+        unsafe { std::slice::from_raw_parts(self.inner.as_ptr(), self.inner.len()) }
     }
 
     /// Returns the BD stats from the underlying Vec.
@@ -1132,8 +1134,8 @@ pub struct SipHasher13 {
     v2: u64,
     v3: u64,
     tail: u64,
-    nbyte: usize,   // bytes in tail
-    total: usize,    // total bytes hashed
+    nbyte: usize, // bytes in tail
+    total: usize, // total bytes hashed
 }
 
 impl SipHasher13 {
@@ -1707,16 +1709,23 @@ impl<T> RingBuffer<T> {
             "RingBuffer",
             0,
             8,
-            CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send, CapFlag::Receive]),
+            CapD::new(vec![
+                CapFlag::Read,
+                CapFlag::Write,
+                CapFlag::Send,
+                CapFlag::Receive,
+            ]),
         )
     }
 
     /// Returns the SyncEdge annotations for this collection.
     // VUMA-VERIFIED: synchronization edges correctly model SPSC ordering
     pub fn sync_edges() -> std::vec::Vec<SyncEdge> {
-        std::vec![
-            SyncEdge::new("ring_push", "ring_pop", SyncEdgeKind::ChannelOrder),
-        ]
+        std::vec![SyncEdge::new(
+            "ring_push",
+            "ring_pop",
+            SyncEdgeKind::ChannelOrder
+        ),]
     }
 
     /// Push a value into the ring buffer (producer side).

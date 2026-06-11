@@ -35,7 +35,7 @@
 
 use crate::capd::{CapD, Capability, Condition};
 use crate::context::Context;
-use crate::descriptor::{BD, BDId};
+use crate::descriptor::{BDId, BD};
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -91,7 +91,9 @@ impl UsageContext {
             UsageContext::Execute => vec![Capability::Execute],
             UsageContext::Observe => vec![Capability::Read, Capability::Compare],
             UsageContext::SharedRef => vec![Capability::Read, Capability::Share],
-            UsageContext::MutRef => vec![Capability::Read, Capability::Write, Capability::DerivePtr],
+            UsageContext::MutRef => {
+                vec![Capability::Read, Capability::Write, Capability::DerivePtr]
+            }
             UsageContext::Borrow => vec![Capability::Read, Capability::DerivePtr],
             UsageContext::Pin => vec![Capability::Pin],
             UsageContext::Unknown => vec![],
@@ -219,11 +221,8 @@ impl UsageSite {
     /// [`extra_required`](UsageSite::extra_required), minus the
     /// [`extra_suppressed`](UsageSite::extra_suppressed) set.
     pub fn effective_required_capabilities(&self) -> HashSet<Capability> {
-        let mut required: HashSet<Capability> = self
-            .usage
-            .required_capabilities()
-            .into_iter()
-            .collect();
+        let mut required: HashSet<Capability> =
+            self.usage.required_capabilities().into_iter().collect();
         for cap in &self.extra_required {
             required.insert(*cap);
         }
@@ -238,11 +237,8 @@ impl UsageSite {
     /// and [`extra_suppressed`](UsageSite::extra_suppressed), minus
     /// [`extra_required`](UsageSite::extra_required).
     pub fn effective_suppressed_capabilities(&self) -> HashSet<Capability> {
-        let mut suppressed: HashSet<Capability> = self
-            .usage
-            .incompatible_capabilities()
-            .into_iter()
-            .collect();
+        let mut suppressed: HashSet<Capability> =
+            self.usage.incompatible_capabilities().into_iter().collect();
         for cap in &self.extra_suppressed {
             suppressed.insert(*cap);
         }
@@ -580,18 +576,10 @@ impl ContextSolver {
     /// 4. Resolve conditional capabilities using `runtime_ctx`.
     /// 5. Ensure the result contains at least the capabilities required
     ///    by the usage context (re-strengthen if needed).
-    pub fn resolve(
-        &mut self,
-        bd: &BD,
-        usage: &UsageContext,
-        runtime_ctx: &Context,
-    ) -> CapD {
+    pub fn resolve(&mut self, bd: &BD, usage: &UsageContext, runtime_ctx: &Context) -> CapD {
         // Step 1: find matching rules
-        let matching: Vec<&ContextRule> = self
-            .rules
-            .iter()
-            .filter(|r| &r.context == usage)
-            .collect();
+        let matching: Vec<&ContextRule> =
+            self.rules.iter().filter(|r| &r.context == usage).collect();
 
         // Step 2: apply highest-priority rule (rules are sorted by desc priority)
         let mut effective = if let Some(rule) = matching.first() {
@@ -601,10 +589,8 @@ impl ContextSolver {
         };
 
         // Step 3: weaken incompatible capabilities
-        let incompatible: HashSet<Capability> = usage
-            .incompatible_capabilities()
-            .into_iter()
-            .collect();
+        let incompatible: HashSet<Capability> =
+            usage.incompatible_capabilities().into_iter().collect();
         if !incompatible.is_empty() {
             let to_remove: Vec<Capability> = effective
                 .caps
@@ -625,14 +611,8 @@ impl ContextSolver {
         };
 
         // Step 5: re-strengthen to ensure required capabilities are present
-        let required: HashSet<Capability> = usage
-            .required_capabilities()
-            .into_iter()
-            .collect();
-        let missing: Vec<Capability> = required
-            .difference(&effective.caps)
-            .copied()
-            .collect();
+        let required: HashSet<Capability> = usage.required_capabilities().into_iter().collect();
+        let missing: Vec<Capability> = required.difference(&effective.caps).copied().collect();
         if !missing.is_empty() {
             effective = effective.strengthen(&missing);
         }
@@ -870,22 +850,40 @@ mod tests {
 
     #[test]
     fn usage_context_required_caps() {
-        assert!(UsageContext::ReadOnly.required_capabilities().contains(&Capability::Read));
-        assert!(UsageContext::WriteOnly.required_capabilities().contains(&Capability::Write));
+        assert!(UsageContext::ReadOnly
+            .required_capabilities()
+            .contains(&Capability::Read));
+        assert!(UsageContext::WriteOnly
+            .required_capabilities()
+            .contains(&Capability::Write));
         let rw = UsageContext::ReadWrite.required_capabilities();
         assert!(rw.contains(&Capability::Read));
         assert!(rw.contains(&Capability::Write));
-        assert!(UsageContext::Consume.required_capabilities().contains(&Capability::Move));
-        assert!(UsageContext::Execute.required_capabilities().contains(&Capability::Execute));
+        assert!(UsageContext::Consume
+            .required_capabilities()
+            .contains(&Capability::Move));
+        assert!(UsageContext::Execute
+            .required_capabilities()
+            .contains(&Capability::Execute));
     }
 
     #[test]
     fn usage_context_incompatible_caps() {
-        assert!(UsageContext::ReadOnly.incompatible_capabilities().contains(&Capability::Write));
-        assert!(UsageContext::WriteOnly.incompatible_capabilities().contains(&Capability::Read));
-        assert!(UsageContext::Consume.incompatible_capabilities().contains(&Capability::Share));
-        assert!(UsageContext::Execute.incompatible_capabilities().contains(&Capability::Write));
-        assert!(UsageContext::SharedRef.incompatible_capabilities().contains(&Capability::Write));
+        assert!(UsageContext::ReadOnly
+            .incompatible_capabilities()
+            .contains(&Capability::Write));
+        assert!(UsageContext::WriteOnly
+            .incompatible_capabilities()
+            .contains(&Capability::Read));
+        assert!(UsageContext::Consume
+            .incompatible_capabilities()
+            .contains(&Capability::Share));
+        assert!(UsageContext::Execute
+            .incompatible_capabilities()
+            .contains(&Capability::Write));
+        assert!(UsageContext::SharedRef
+            .incompatible_capabilities()
+            .contains(&Capability::Write));
     }
 
     #[test]
@@ -933,8 +931,7 @@ mod tests {
 
     #[test]
     fn context_rule_apply_strengthen() {
-        let rule = ContextRule::new(UsageContext::Consume)
-            .add(&[Capability::Move]);
+        let rule = ContextRule::new(UsageContext::Consume).add(&[Capability::Move]);
         let capd = CapD::empty().strengthen(&[Capability::Read]);
         let result = rule.apply(&capd);
         assert!(result.caps.contains(&Capability::Read));
@@ -943,8 +940,7 @@ mod tests {
 
     #[test]
     fn context_rule_apply_weaken() {
-        let rule = ContextRule::new(UsageContext::ReadOnly)
-            .remove(&[Capability::Write]);
+        let rule = ContextRule::new(UsageContext::ReadOnly).remove(&[Capability::Write]);
         let capd = CapD::empty().strengthen(&[Capability::Read, Capability::Write]);
         let result = rule.apply(&capd);
         assert!(result.caps.contains(&Capability::Read));
@@ -1007,7 +1003,11 @@ mod tests {
         let mut solver = ContextSolver::new();
         let results = solver.resolve_polymorphic(
             &bd,
-            &[UsageContext::ReadOnly, UsageContext::WriteOnly, UsageContext::ReadWrite],
+            &[
+                UsageContext::ReadOnly,
+                UsageContext::WriteOnly,
+                UsageContext::ReadWrite,
+            ],
             &Context::empty(),
         );
 
@@ -1103,7 +1103,9 @@ mod tests {
 
     #[test]
     fn infer_usage_from_observe() {
-        let caps: HashSet<Capability> = [Capability::Hash, Capability::Compare].into_iter().collect();
+        let caps: HashSet<Capability> = [Capability::Hash, Capability::Compare]
+            .into_iter()
+            .collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::Observe);
     }
 

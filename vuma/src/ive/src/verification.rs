@@ -17,11 +17,24 @@
 //! 3. Delegates to each of the five specialized verifiers
 //! 4. Aggregates results into a unified vector
 
-use crate::cleanup::{CleanupGraph, CleanupVerifier, NodeId as CleanupNodeId, OperationKind, ResourceId as CleanupResourceId, ResourceKind as CleanupResourceKind};
-use crate::exclusivity::{AccessKind as ExclusivityAccessKind, AccessRecord, ExclusivityInput, ExclusivityVerifier, SyncEdgeRecord, SyncOrdering};
+use crate::cleanup::{
+    CleanupGraph, CleanupVerifier, NodeId as CleanupNodeId, OperationKind,
+    ResourceId as CleanupResourceId, ResourceKind as CleanupResourceKind,
+};
+use crate::exclusivity::{
+    AccessKind as ExclusivityAccessKind, AccessRecord, ExclusivityInput, ExclusivityVerifier,
+    SyncEdgeRecord, SyncOrdering,
+};
 use crate::interpretation::InterpretationVerifier;
-use crate::liveness::{EventAction, LivenessInput, LivenessVerifier, ResourceEvent, ResourceId, ResourceKind, PointId, ThreadId};
-use crate::origin::{Access as OriginAccess, AccessId as OriginAccessId, AccessKind as OriginAccessKind, Address, Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier, Region as OriginRegion, RegionId as OriginRegionId};
+use crate::liveness::{
+    EventAction, LivenessInput, LivenessVerifier, PointId, ResourceEvent, ResourceId, ResourceKind,
+    ThreadId,
+};
+use crate::origin::{
+    Access as OriginAccess, AccessId as OriginAccessId, AccessKind as OriginAccessKind, Address,
+    Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier,
+    Region as OriginRegion, RegionId as OriginRegionId,
+};
 use crate::result::{BatchedViolations, InvariantViolation, Severity, VerificationResult};
 use std::collections::HashMap;
 use vuma_bd::capd::{CapD, Capability};
@@ -53,7 +66,10 @@ impl VerificationInput {
 
     /// Create verification input with a pre-inferred BD map.
     pub fn with_bd_map(scg: SCG, bd_map: HashMap<NodeId, BD>) -> Self {
-        Self { scg, bd_map: Some(bd_map) }
+        Self {
+            scg,
+            bd_map: Some(bd_map),
+        }
     }
 }
 
@@ -341,7 +357,11 @@ impl VerificationEngine {
                     let base_address = 0; // SCG doesn't track concrete addresses
                     let size = access.access_size.unwrap_or(8);
 
-                    let pp = format!("{}:{}", node.program_point.file.as_deref().unwrap_or("?"), node.program_point.line.unwrap_or(0));
+                    let pp = format!(
+                        "{}:{}",
+                        node.program_point.file.as_deref().unwrap_or("?"),
+                        node.program_point.line.unwrap_or(0)
+                    );
 
                     input.add_access(AccessRecord::new(
                         access_id,
@@ -349,7 +369,7 @@ impl VerificationEngine {
                         base_address,
                         size,
                         pp,
-                        node.id.as_u64(), // derivation_id
+                        node.id.as_u64(),          // derivation_id
                         access.region_id.as_u64(), // region_id
                     ));
                 }
@@ -394,7 +414,8 @@ impl VerificationEngine {
         for node in scg.nodes() {
             if node.node_type == NodeType::Access {
                 if let NodePayload::Access(access) = &node.payload {
-                    let bd = bd_map.as_ref()
+                    let bd = bd_map
+                        .as_ref()
                         .and_then(|m| m.get(&node.id))
                         .cloned()
                         .unwrap_or_else(|| default_bd.clone());
@@ -443,8 +464,10 @@ impl VerificationEngine {
                         did,
                         DerivationSource::Region(rid),
                         DerivationKind::Direct,
-                        (Address::new(0x1000 + rid.0 * 0x1000),
-                         Address::new(0x1000 + rid.0 * 0x1000 + alloc.size)),
+                        (
+                            Address::new(0x1000 + rid.0 * 0x1000),
+                            Address::new(0x1000 + rid.0 * 0x1000 + alloc.size),
+                        ),
                     ));
                 }
             }
@@ -513,8 +536,12 @@ impl VerificationEngine {
                 NodeType::Control => {
                     if let NodePayload::Control(ctrl) = &node.payload {
                         match ctrl.kind {
-                            vuma_scg::node::ControlKind::FunctionReturn => Some(OperationKind::Return),
-                            vuma_scg::node::ControlKind::Branch => Some(OperationKind::Branch { condition: String::new() }),
+                            vuma_scg::node::ControlKind::FunctionReturn => {
+                                Some(OperationKind::Return)
+                            }
+                            vuma_scg::node::ControlKind::Branch => Some(OperationKind::Branch {
+                                condition: String::new(),
+                            }),
                             _ => Some(OperationKind::Passthrough),
                         }
                     } else {
@@ -567,18 +594,23 @@ impl VerificationEngine {
         for edge in scg.edges() {
             match &edge.kind {
                 vuma_scg::edge::EdgeKind::ControlFlow => {
-                    if let (Some(&src), Some(&dst)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
+                    if let (Some(&src), Some(&dst)) =
+                        (node_map.get(&edge.source), node_map.get(&edge.target))
+                    {
                         // Skip intraprocedural call-return edges that create
                         // dead-end branches in the cleanup graph.
-                        if fn_entry_cleanup_ids.contains(&dst) || fn_return_cleanup_ids.contains(&src) {
+                        if fn_entry_cleanup_ids.contains(&dst)
+                            || fn_return_cleanup_ids.contains(&src)
+                        {
                             continue;
                         }
                         let _ = graph.add_edge(src, dst);
                     }
                 }
-                vuma_scg::edge::EdgeKind::Call { .. }
-                | vuma_scg::edge::EdgeKind::Return { .. } => {
-                    if let (Some(&src), Some(&dst)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
+                vuma_scg::edge::EdgeKind::Call { .. } | vuma_scg::edge::EdgeKind::Return { .. } => {
+                    if let (Some(&src), Some(&dst)) =
+                        (node_map.get(&edge.source), node_map.get(&edge.target))
+                    {
                         let _ = graph.add_edge(src, dst);
                     }
                 }
@@ -649,8 +681,14 @@ pub fn check_capability_flow(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<Har
     // For each edge, check if the CapD transition is valid
     for edge in scg.edges() {
         if edge.kind == EdgeKind::ControlFlow || edge.kind == EdgeKind::DataFlow {
-            let src_capd = effective_capd.get(&edge.source).cloned().unwrap_or_else(CapD::all);
-            let dst_capd = effective_capd.get(&edge.target).cloned().unwrap_or_else(CapD::all);
+            let src_capd = effective_capd
+                .get(&edge.source)
+                .cloned()
+                .unwrap_or_else(CapD::all);
+            let dst_capd = effective_capd
+                .get(&edge.target)
+                .cloned()
+                .unwrap_or_else(CapD::all);
 
             // Check: if source has Write but target does not, that's a capability drop
             let src_has_write = src_capd.caps.contains(&Capability::Write);
@@ -661,7 +699,9 @@ pub fn check_capability_flow(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<Har
                 if let Some(target_node) = scg.get_node(edge.target) {
                     if target_node.node_type == NodeType::Access {
                         if let NodePayload::Access(access) = &target_node.payload {
-                            if access.mode == AccessMode::Read || access.mode == AccessMode::ReadWrite {
+                            if access.mode == AccessMode::Read
+                                || access.mode == AccessMode::ReadWrite
+                            {
                                 violations.push(HardenedViolation {
                                     invariant: "capability_flow",
                                     description: format!(
@@ -703,7 +743,8 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
     let mut violations = Vec::new();
 
     // Collect all access nodes grouped by region
-    let mut accesses_by_region: HashMap<u64, Vec<(NodeId, AccessMode, Option<BD>)>> = HashMap::new();
+    let mut accesses_by_region: HashMap<u64, Vec<(NodeId, AccessMode, Option<BD>)>> =
+        HashMap::new();
 
     for node in scg.nodes() {
         if node.node_type == NodeType::Access {
@@ -748,12 +789,12 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
                 if a_is_write || b_is_write {
                     // Check BD RelD for aliasing information
                     // If neither BD has anti-alias guarantees, flag as potential violation
-                    let a_has_alias_guard = bd_a.as_ref().is_some_and(|bd| {
-                        !bd.reld.relations.is_empty()
-                    });
-                    let b_has_alias_guard = bd_b.as_ref().is_some_and(|bd| {
-                        !bd.reld.relations.is_empty()
-                    });
+                    let a_has_alias_guard = bd_a
+                        .as_ref()
+                        .is_some_and(|bd| !bd.reld.relations.is_empty());
+                    let b_has_alias_guard = bd_b
+                        .as_ref()
+                        .is_some_and(|bd| !bd.reld.relations.is_empty());
 
                     if !a_has_alias_guard && !b_has_alias_guard {
                         // No aliasing guarantees — potential write-through-alias
@@ -785,7 +826,10 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
 ///
 /// Verifies that derive() produces a sub-CapD of source, and validates
 /// transitive derivation chains (A→B→C where C.capd ≤ A.capd).
-pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+pub fn validate_derivation_chain(
+    scg: &SCG,
+    bd_map: &HashMap<NodeId, BD>,
+) -> Vec<HardenedViolation> {
     let mut violations = Vec::new();
 
     // Collect derivation edges
@@ -798,8 +842,14 @@ pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec
 
     // For each derivation edge (source → target), check that target.capd ⊆ source.capd
     for (source, target) in &derivation_edges {
-        let source_capd = bd_map.get(source).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
-        let target_capd = bd_map.get(target).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+        let source_capd = bd_map
+            .get(source)
+            .map(|bd| bd.capd.clone())
+            .unwrap_or_else(CapD::all);
+        let target_capd = bd_map
+            .get(target)
+            .map(|bd| bd.capd.clone())
+            .unwrap_or_else(CapD::all);
 
         // In a valid derivation, the derived CapD should be a subset of the source
         if !target_capd.is_subset(&source_capd) {
@@ -824,7 +874,10 @@ pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec
 
     // For each node, find transitive derivation targets (BFS through derivation edges)
     for source in deriv_successors.keys() {
-        let source_capd = bd_map.get(source).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+        let source_capd = bd_map
+            .get(source)
+            .map(|bd| bd.capd.clone())
+            .unwrap_or_else(CapD::all);
 
         // BFS to find all transitively derived nodes
         let mut visited = std::collections::HashSet::new();
@@ -841,7 +894,10 @@ pub fn validate_derivation_chain(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec
             }
             visited.insert(current);
 
-            let current_capd = bd_map.get(&current).map(|bd| bd.capd.clone()).unwrap_or_else(CapD::all);
+            let current_capd = bd_map
+                .get(&current)
+                .map(|bd| bd.capd.clone())
+                .unwrap_or_else(CapD::all);
 
             // Check transitive property: current.capd ⊆ source.capd
             if !current_capd.is_subset(&source_capd) {
@@ -943,7 +999,11 @@ mod tests {
         let input = VerificationInput::from_scg(SCG::new());
         let result = engine.verify_liveness(&input);
         // Empty SCG should be safe (no leaks possible)
-        assert!(result.is_proven() || matches!(result.status, VerificationStatus::ProbablySafe { .. }) || matches!(result.status, VerificationStatus::Unverified { .. }));
+        assert!(
+            result.is_proven()
+                || matches!(result.status, VerificationStatus::ProbablySafe { .. })
+                || matches!(result.status, VerificationStatus::Unverified { .. })
+        );
     }
 
     #[test]
@@ -952,7 +1012,9 @@ mod tests {
         let input = VerificationInput::from_scg(SCG::new());
         let result = engine.verify_exclusivity(&input);
         // No accesses → no conflicts
-        assert!(result.is_proven() || matches!(result.status, VerificationStatus::ProbablySafe { .. }));
+        assert!(
+            result.is_proven() || matches!(result.status, VerificationStatus::ProbablySafe { .. })
+        );
     }
 
     #[test]
@@ -961,7 +1023,11 @@ mod tests {
         let input = VerificationInput::from_scg(SCG::new());
         let result = engine.verify_cleanup(&input);
         // No allocations → no leaks
-        assert!(result.is_proven() || matches!(result.status, VerificationStatus::ProbablySafe { .. }) || matches!(result.status, VerificationStatus::Unverified { .. }));
+        assert!(
+            result.is_proven()
+                || matches!(result.status, VerificationStatus::ProbablySafe { .. })
+                || matches!(result.status, VerificationStatus::Unverified { .. })
+        );
     }
 
     #[test]
@@ -981,10 +1047,10 @@ mod tests {
     #[test]
     fn verify_liveness_on_alloc_free_program() {
         // Build an SCG manually: allocate -> free
-        use vuma_scg::node::{AllocationNode, DeallocationNode};
-        use vuma_scg::region::{RegionId, SCGRegion, DeploymentTarget};
         use vuma_scg::edge::EdgeKind;
         use vuma_scg::node::ProgramPoint;
+        use vuma_scg::node::{AllocationNode, DeallocationNode};
+        use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
 
         let mut scg = SCG::new();
         let region_id = RegionId::new(1);
@@ -992,10 +1058,17 @@ mod tests {
         let alloc_id = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 256, align: 16, region_id,
+                size: 256,
+                align: 16,
+                region_id,
                 type_name: Some("Buf".to_string()),
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
 
         let dealloc_id = scg.add_node(
@@ -1004,7 +1077,12 @@ mod tests {
                 allocation_node: alloc_id,
                 region_id,
             }),
-            ProgramPoint { file: None, line: Some(2), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(2),
+                column: Some(1),
+                offset: None,
+            },
         );
 
         let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
@@ -1012,22 +1090,29 @@ mod tests {
         region.add_node(dealloc_id);
         scg.add_region(region);
 
-        scg.add_edge(alloc_id, dealloc_id, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_id, dealloc_id, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation)
+            .unwrap();
 
         let engine = VerificationEngine::new();
         let input = VerificationInput::from_scg(scg);
         let result = engine.verify_liveness(&input);
         // Well-formed program should have no liveness violations
-        assert!(!result.is_violated(), "Liveness check should pass for well-formed allocate/free program, but got: {} - {}", result.status, result.message);
+        assert!(
+            !result.is_violated(),
+            "Liveness check should pass for well-formed allocate/free program, but got: {} - {}",
+            result.status,
+            result.message
+        );
     }
 
     #[test]
     fn verify_liveness_on_multi_region_program() {
-        use vuma_scg::node::{AllocationNode, DeallocationNode};
-        use vuma_scg::region::{RegionId, SCGRegion, DeploymentTarget};
         use vuma_scg::edge::EdgeKind;
         use vuma_scg::node::ProgramPoint;
+        use vuma_scg::node::{AllocationNode, DeallocationNode};
+        use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
 
         let mut scg = SCG::new();
         let region_a = RegionId::new(1);
@@ -1036,32 +1121,58 @@ mod tests {
         let alloc_a = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: region_a,
+                size: 64,
+                align: 8,
+                region_id: region_a,
                 type_name: Some("A".to_string()),
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
         let alloc_b = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 128, align: 8, region_id: region_b,
+                size: 128,
+                align: 8,
+                region_id: region_b,
                 type_name: Some("B".to_string()),
             }),
-            ProgramPoint { file: None, line: Some(2), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(2),
+                column: Some(1),
+                offset: None,
+            },
         );
         let dealloc_a = scg.add_node(
             NodeType::Deallocation,
             NodePayload::Deallocation(DeallocationNode {
-                allocation_node: alloc_a, region_id: region_a,
+                allocation_node: alloc_a,
+                region_id: region_a,
             }),
-            ProgramPoint { file: None, line: Some(3), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(3),
+                column: Some(1),
+                offset: None,
+            },
         );
         let dealloc_b = scg.add_node(
             NodeType::Deallocation,
             NodePayload::Deallocation(DeallocationNode {
-                allocation_node: alloc_b, region_id: region_b,
+                allocation_node: alloc_b,
+                region_id: region_b,
             }),
-            ProgramPoint { file: None, line: Some(4), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(4),
+                column: Some(1),
+                offset: None,
+            },
         );
 
         let mut ra = SCGRegion::new(region_a, DeploymentTarget::Heap);
@@ -1075,17 +1186,27 @@ mod tests {
         scg.add_region(rb);
 
         // Sequential control flow
-        scg.add_edge(alloc_a, alloc_b, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(alloc_b, dealloc_a, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(dealloc_a, dealloc_b, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_a, alloc_b, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(alloc_b, dealloc_a, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(dealloc_a, dealloc_b, EdgeKind::ControlFlow)
+            .unwrap();
         // Derivation edges
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation)
+            .unwrap();
 
         let engine = VerificationEngine::new();
         let input = VerificationInput::from_scg(scg);
         let result = engine.verify_liveness(&input);
-        assert!(!result.is_violated(), "Liveness check should pass for well-formed multi-region program, but got: {} - {}", result.status, result.message);
+        assert!(
+            !result.is_violated(),
+            "Liveness check should pass for well-formed multi-region program, but got: {} - {}",
+            result.status,
+            result.message
+        );
     }
 
     #[test]

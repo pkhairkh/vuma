@@ -16,11 +16,16 @@
 //! 3. The `infer_types` method returns fully inferred `(NodeId, BD)` pairs
 //!    that can be passed directly to the verification engine.
 
-use crate::constraint::{ComplexityConstraint, Constraint, LivenessConstraint, ResourceFlowConstraint, SecurityConstraint, TemporalConstraint};
+use crate::constraint::{
+    ComplexityConstraint, Constraint, LivenessConstraint, ResourceFlowConstraint,
+    SecurityConstraint, TemporalConstraint,
+};
 use hashbrown::HashMap;
 use std::fmt;
 use vuma_bd::descriptor::BD;
-use vuma_bd::inference::{BDInferenceEngine as BdEngineInner, InferenceResult as BdInferenceResult};
+use vuma_bd::inference::{
+    BDInferenceEngine as BdEngineInner, InferenceResult as BdInferenceResult,
+};
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{NodeId, NodePayload, NodeType};
@@ -90,8 +95,13 @@ impl InferenceResult {
 
 impl fmt::Display for InferenceResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "InferenceResult({} nodes, {} constraints, {} iterations)",
-            self.bd_map.len(), self.constraints.len(), self.iterations)?;
+        writeln!(
+            f,
+            "InferenceResult({} nodes, {} constraints, {} iterations)",
+            self.bd_map.len(),
+            self.constraints.len(),
+            self.iterations
+        )?;
         if !self.errors.is_empty() {
             writeln!(f, "  errors: {}", self.errors.len())?;
         }
@@ -187,7 +197,9 @@ impl InferenceEngine {
             Ok(result) => {
                 warnings.extend(result.warnings.iter().cloned());
                 if !result.errors.is_empty() {
-                    let summary = result.errors.iter()
+                    let summary = result
+                        .errors
+                        .iter()
                         .map(|e| format!("{}", e))
                         .collect::<Vec<_>>()
                         .join("; ");
@@ -211,8 +223,13 @@ impl InferenceEngine {
         let constraints = self.derive_constraints(scg, &bd_map);
 
         if self.verbose {
-            log::info!("InferenceEngine::infer: {} BDs, {} constraints, {} iterations, {} errors",
-                bd_map.len(), constraints.len(), iterations, errors.len());
+            log::info!(
+                "InferenceEngine::infer: {} BDs, {} constraints, {} iterations, {} errors",
+                bd_map.len(),
+                constraints.len(),
+                iterations,
+                errors.len()
+            );
         }
 
         InferenceResult {
@@ -234,14 +251,18 @@ impl InferenceEngine {
             return Err(InferenceError::NodeNotFound { node_id });
         }
 
-        let result = self.run_bd_inference(scg).map_err(|e| InferenceError::BdErrors {
-            count: 1,
-            summary: format!("{}", e),
-        })?;
+        let result = self
+            .run_bd_inference(scg)
+            .map_err(|e| InferenceError::BdErrors {
+                count: 1,
+                summary: format!("{}", e),
+            })?;
 
-        result.bd_map.get(&node_id).cloned().ok_or({
-            InferenceError::NodeNotFound { node_id }
-        })
+        result
+            .bd_map
+            .get(&node_id)
+            .cloned()
+            .ok_or(InferenceError::NodeNotFound { node_id })
     }
 
     /// Infer all constraints from the SCG.
@@ -276,19 +297,29 @@ impl InferenceEngine {
     // -----------------------------------------------------------------------
 
     /// Run the 3-phase BD inference algorithm via vuma-bd.
-    fn run_bd_inference(&self, scg: &SCG) -> Result<BdInferenceResult, vuma_bd::inference::InferenceError> {
-        let engine = BdEngineInner::new()
-            .with_max_iterations(self.max_iterations);
+    fn run_bd_inference(
+        &self,
+        scg: &SCG,
+    ) -> Result<BdInferenceResult, vuma_bd::inference::InferenceError> {
+        let engine = BdEngineInner::new().with_max_iterations(self.max_iterations);
 
         if self.verbose {
-            log::info!("Running BD inference on SCG with {} nodes", scg.node_count());
+            log::info!(
+                "Running BD inference on SCG with {} nodes",
+                scg.node_count()
+            );
         }
 
         let result = engine.infer(scg);
 
         if self.verbose {
-            log::info!("BD inference complete: {} BDs inferred, {} errors, {} warnings, {} iterations",
-                result.bd_map.len(), result.errors.len(), result.warnings.len(), result.iterations);
+            log::info!(
+                "BD inference complete: {} BDs inferred, {} errors, {} warnings, {} iterations",
+                result.bd_map.len(),
+                result.errors.len(),
+                result.warnings.len(),
+                result.iterations
+            );
         }
 
         Ok(result)
@@ -308,35 +339,51 @@ impl InferenceEngine {
                     let desc = match (src, dst) {
                         (Some(s), Some(d)) => format!(
                             "data flows from {:?}({}) to {:?}({})",
-                            s.node_type, s.id.as_u64(),
-                            d.node_type, d.id.as_u64()
+                            s.node_type,
+                            s.id.as_u64(),
+                            d.node_type,
+                            d.id.as_u64()
                         ),
-                        _ => format!("data flow: {} -> {}", edge.source.as_u64(), edge.target.as_u64()),
+                        _ => format!(
+                            "data flow: {} -> {}",
+                            edge.source.as_u64(),
+                            edge.target.as_u64()
+                        ),
                     };
-                    constraints.push(Constraint::ResourceFlow(ResourceFlowConstraint { description: desc }));
+                    constraints.push(Constraint::ResourceFlow(ResourceFlowConstraint {
+                        description: desc,
+                    }));
                 }
                 EdgeKind::ControlFlow => {
                     // Control flow imposes temporal ordering constraints
                     let desc = if let Some(label) = &edge.label {
                         format!(
                             "temporal: {} -> {} ({})",
-                            edge.source.as_u64(), edge.target.as_u64(), label
+                            edge.source.as_u64(),
+                            edge.target.as_u64(),
+                            label
                         )
                     } else {
                         format!(
                             "temporal: {} -> {}",
-                            edge.source.as_u64(), edge.target.as_u64()
+                            edge.source.as_u64(),
+                            edge.target.as_u64()
                         )
                     };
-                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                    constraints.push(Constraint::Temporal(TemporalConstraint {
+                        description: desc,
+                    }));
                 }
                 EdgeKind::Derivation => {
                     // Derivation edges impose security constraints (provenance must be valid)
                     let desc = format!(
                         "derivation: {} -> {} (provenance must be traceable)",
-                        edge.source.as_u64(), edge.target.as_u64()
+                        edge.source.as_u64(),
+                        edge.target.as_u64()
                     );
-                    constraints.push(Constraint::Security(SecurityConstraint { description: desc }));
+                    constraints.push(Constraint::Security(SecurityConstraint {
+                        description: desc,
+                    }));
                 }
                 EdgeKind::Annotation => {
                     // Annotation edges carry BD compatibility constraints
@@ -346,25 +393,37 @@ impl InferenceEngine {
                     // Dispatch edges impose temporal constraints like ControlFlow
                     let desc = format!(
                         "dispatch: {} -> {}",
-                        edge.source.as_u64(), edge.target.as_u64()
+                        edge.source.as_u64(),
+                        edge.target.as_u64()
                     );
-                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                    constraints.push(Constraint::Temporal(TemporalConstraint {
+                        description: desc,
+                    }));
                 }
-                EdgeKind::Call { from_node, to_node, caller_region } => {
+                EdgeKind::Call {
+                    from_node,
+                    to_node,
+                    caller_region,
+                } => {
                     // Call edges impose interprocedural temporal constraints
                     let desc = format!(
                         "call: {} -> {} (caller_region: {})",
-                        from_node.as_u64(), to_node.as_u64(), caller_region.as_u64()
+                        from_node.as_u64(),
+                        to_node.as_u64(),
+                        caller_region.as_u64()
                     );
-                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                    constraints.push(Constraint::Temporal(TemporalConstraint {
+                        description: desc,
+                    }));
                 }
-                EdgeKind::Return { from_node, to_node, .. } => {
+                EdgeKind::Return {
+                    from_node, to_node, ..
+                } => {
                     // Return edges impose interprocedural temporal constraints
-                    let desc = format!(
-                        "return: {} -> {}",
-                        from_node.as_u64(), to_node.as_u64()
-                    );
-                    constraints.push(Constraint::Temporal(TemporalConstraint { description: desc }));
+                    let desc = format!("return: {} -> {}", from_node.as_u64(), to_node.as_u64());
+                    constraints.push(Constraint::Temporal(TemporalConstraint {
+                        description: desc,
+                    }));
                 }
             }
         }
@@ -378,39 +437,52 @@ impl InferenceEngine {
                             "loop at node {} — complexity must be bounded",
                             node.id.as_u64()
                         );
-                        constraints.push(Constraint::Complexity(ComplexityConstraint { description: desc }));
+                        constraints.push(Constraint::Complexity(ComplexityConstraint {
+                            description: desc,
+                        }));
                     }
                 }
             }
         }
 
         // Derive liveness constraints from allocation/deallocation patterns
-        let allocation_nodes: Vec<_> = scg.nodes()
+        let allocation_nodes: Vec<_> = scg
+            .nodes()
             .filter(|n| matches!(n.node_type, NodeType::Allocation))
             .collect();
-        let deallocation_nodes: Vec<_> = scg.nodes()
+        let deallocation_nodes: Vec<_> = scg
+            .nodes()
             .filter(|n| matches!(n.node_type, NodeType::Deallocation))
             .collect();
 
         if allocation_nodes.len() > deallocation_nodes.len() {
             let desc = format!(
                 "liveness: {} allocations but only {} deallocations — potential leaks",
-                allocation_nodes.len(), deallocation_nodes.len()
+                allocation_nodes.len(),
+                deallocation_nodes.len()
             );
-            constraints.push(Constraint::Liveness(LivenessConstraint { description: desc }));
+            constraints.push(Constraint::Liveness(LivenessConstraint {
+                description: desc,
+            }));
         }
 
         // Check for CapD compatibility between connected nodes
         for edge in scg.edges() {
             if edge.kind == EdgeKind::DataFlow {
-                if let (Some(src_bd), Some(dst_bd)) = (bd_map.get(&edge.source), bd_map.get(&edge.target)) {
+                if let (Some(src_bd), Some(dst_bd)) =
+                    (bd_map.get(&edge.source), bd_map.get(&edge.target))
+                {
                     if !src_bd.compatible(dst_bd) {
                         let desc = format!(
                             "security: BD incompatibility on edge {} -> {} ({} vs {})",
-                            edge.source.as_u64(), edge.target.as_u64(),
-                            src_bd, dst_bd
+                            edge.source.as_u64(),
+                            edge.target.as_u64(),
+                            src_bd,
+                            dst_bd
                         );
-                        constraints.push(Constraint::Security(SecurityConstraint { description: desc }));
+                        constraints.push(Constraint::Security(SecurityConstraint {
+                            description: desc,
+                        }));
                     }
                 }
             }
@@ -467,7 +539,13 @@ mod tests {
         let result = engine.infer(&scg);
         // Empty SCG should produce empty BDs and no errors
         assert!(result.bd_map.is_empty());
-        assert!(result.is_ok() || result.errors.iter().any(|e| matches!(e, InferenceError::BdErrors { .. })));
+        assert!(
+            result.is_ok()
+                || result
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, InferenceError::BdErrors { .. }))
+        );
     }
 
     #[test]
@@ -527,7 +605,10 @@ mod tests {
             constraints: vec![],
             iterations: 0,
             warnings: vec![],
-            errors: vec![InferenceError::BdErrors { count: 1, summary: "test".into() }],
+            errors: vec![InferenceError::BdErrors {
+                count: 1,
+                summary: "test".into(),
+            }],
         };
         assert!(!result.is_ok());
     }

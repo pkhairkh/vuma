@@ -24,9 +24,9 @@ use std::sync::Arc;
 use vuma_codegen::emit::Emitter;
 use vuma_codegen::ir::BinOpKind;
 use vuma_codegen::scg_to_ir::{
-    AccessNode as CgAccessNode, AllocationNode as CgAllocationNode, ComputationNode as CgComputationNode,
-    ControlNode as CgControlNode, IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgStatement, ScgType,
-    CallNode as CgCallNode, SwitchArm as CgSwitchArm,
+    AccessNode as CgAccessNode, AllocationNode as CgAllocationNode, CallNode as CgCallNode,
+    ComputationNode as CgComputationNode, ControlNode as CgControlNode, IRBuilder, Scg, ScgExpr,
+    ScgFunction, ScgNode, ScgStatement, ScgType, SwitchArm as CgSwitchArm,
 };
 
 // ---------------------------------------------------------------------------
@@ -321,9 +321,14 @@ impl CORuntime {
         // Record profile data for this execution.
         // Only record_access — record_call is a separate API for explicit
         // call-graph tracking and must not double-count with record_access.
-        self.profile_data.record_access(region as crate::types::NodeId);
+        self.profile_data
+            .record_access(region as crate::types::NodeId);
 
-        log::trace!("execute: region {} ({} code bytes)", region, compiled.code.len());
+        log::trace!(
+            "execute: region {} ({} code bytes)",
+            region,
+            compiled.code.len()
+        );
 
         // Execute the compiled code via memory-mapped execution.
         let code = compiled.code.clone();
@@ -385,10 +390,9 @@ impl CORuntime {
                 weight
             });
 
-        let deopts = self.speculative_optimizer.validate_all(
-            most_observed_edge,
-            &contended_regions,
-        );
+        let deopts = self
+            .speculative_optimizer
+            .validate_all(most_observed_edge, &contended_regions);
         if deopts > 0 {
             log::warn!("optimize: {} speculative deoptimizations", deopts);
         }
@@ -560,13 +564,21 @@ impl CORuntime {
                         bytes
                     }
                     Err(e) => {
-                        log::error!("compile_region: emission failed for region {}: {}", region_id, e);
+                        log::error!(
+                            "compile_region: emission failed for region {}: {}",
+                            region_id,
+                            e
+                        );
                         Vec::new()
                     }
                 }
             }
             Err(e) => {
-                log::error!("compile_region: IR translation failed for region {}: {}", region_id, e);
+                log::error!(
+                    "compile_region: IR translation failed for region {}: {}",
+                    region_id,
+                    e
+                );
                 Vec::new()
             }
         }
@@ -593,7 +605,9 @@ impl CORuntime {
     /// Returns a map from region ID to the list of edge IDs whose source
     /// or target nodes belong to that region, along with observed
     /// contention counts from the profile data.
-    fn collect_edge_observations(&self) -> std::collections::HashMap<RegionId, Vec<crate::types::EdgeId>> {
+    fn collect_edge_observations(
+        &self,
+    ) -> std::collections::HashMap<RegionId, Vec<crate::types::EdgeId>> {
         let mut observations: std::collections::HashMap<RegionId, Vec<crate::types::EdgeId>> =
             std::collections::HashMap::new();
 
@@ -638,10 +652,7 @@ impl CORuntime {
     /// into the corresponding codegen IR constructs. Coarser kinds
     /// (Compute, Memory, Call, Loop, Entry) produce representative
     /// function bodies reflecting the node's optimisation metadata.
-    fn node_to_statements(
-        &self,
-        node: &crate::types::SCGNode,
-    ) -> Vec<ScgStatement> {
+    fn node_to_statements(&self, node: &crate::types::SCGNode) -> Vec<ScgStatement> {
         match node.kind {
             NodeKind::Compute => {
                 // Real computation: load operands, compute, store result.
@@ -651,7 +662,7 @@ impl CORuntime {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var("arg0".to_string()),
                         rhs: ScgExpr::Var("arg1".to_string()),
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))]),
                 ]
@@ -677,10 +688,13 @@ impl CORuntime {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var(format!("loaded_{}", node.id)),
                         rhs: ScgExpr::Int(0),
-                    tail_call: false,
+                        tail_call: false,
                     }));
                 }
-                stmts.push(ScgStatement::Return(vec![ScgExpr::Var(format!("loaded_{}", node.id))]));
+                stmts.push(ScgStatement::Return(vec![ScgExpr::Var(format!(
+                    "loaded_{}",
+                    node.id
+                ))]));
                 stmts
             }
             NodeKind::LoopHeader | NodeKind::Loop => {
@@ -694,7 +708,7 @@ impl CORuntime {
                             op: BinOpKind::Add,
                             lhs: ScgExpr::Var(format!("counter_{}", node.id)),
                             rhs: ScgExpr::Int(1),
-                        tail_call: false,
+                            tail_call: false,
                         })]
                     })
                     .collect();
@@ -704,46 +718,49 @@ impl CORuntime {
                     ty: ScgType::U64,
                 })];
                 loop_body.extend(body_stmts);
-                loop_body.push(ScgStatement::Return(vec![ScgExpr::Var(format!("counter_{}", node.id))]));
-                vec![ScgStatement::Control(CgControlNode::Loop { body: loop_body })]
+                loop_body.push(ScgStatement::Return(vec![ScgExpr::Var(format!(
+                    "counter_{}",
+                    node.id
+                ))]));
+                vec![ScgStatement::Control(CgControlNode::Loop {
+                    body: loop_body,
+                })]
             }
             NodeKind::Branch => {
                 // Check if this is a match/switch branch (has "match" label)
                 // vs a simple if/else branch.
-                let is_match = node.control_label.as_ref()
+                let is_match = node
+                    .control_label
+                    .as_ref()
                     .map(|l| l.starts_with("match"))
                     .unwrap_or(false);
                 if is_match {
                     // Generate a switch with 3 arms as a representative match.
-                    vec![
-                        ScgStatement::Control(CgControlNode::Switch {
-                            discriminant: ScgExpr::Var(format!("disc_{}", node.id)),
-                            arms: vec![
-                                CgSwitchArm {
-                                    value: 0,
-                                    body: vec![ScgStatement::Return(vec![ScgExpr::Int(0)])],
-                                },
-                                CgSwitchArm {
-                                    value: 1,
-                                    body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
-                                },
-                                CgSwitchArm {
-                                    value: 2,
-                                    body: vec![ScgStatement::Return(vec![ScgExpr::Int(2)])],
-                                },
-                            ],
-                            default_body: vec![ScgStatement::Return(vec![ScgExpr::Int(-1)])],
-                        }),
-                    ]
+                    vec![ScgStatement::Control(CgControlNode::Switch {
+                        discriminant: ScgExpr::Var(format!("disc_{}", node.id)),
+                        arms: vec![
+                            CgSwitchArm {
+                                value: 0,
+                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(0)])],
+                            },
+                            CgSwitchArm {
+                                value: 1,
+                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
+                            },
+                            CgSwitchArm {
+                                value: 2,
+                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(2)])],
+                            },
+                        ],
+                        default_body: vec![ScgStatement::Return(vec![ScgExpr::Int(-1)])],
+                    })]
                 } else {
                     // Generate a simple conditional branch.
-                    vec![
-                        ScgStatement::Control(CgControlNode::If {
-                            cond: ScgExpr::Var(format!("cond_{}", node.id)),
-                            then_body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
-                            else_body: Some(vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]),
-                        }),
-                    ]
+                    vec![ScgStatement::Control(CgControlNode::If {
+                        cond: ScgExpr::Var(format!("cond_{}", node.id)),
+                        then_body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
+                        else_body: Some(vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]),
+                    })]
                 }
             }
             NodeKind::Call => {
@@ -754,7 +771,7 @@ impl CORuntime {
                             op: BinOpKind::Add,
                             lhs: ScgExpr::Var("arg0".to_string()),
                             rhs: ScgExpr::Int(1),
-                        tail_call: false,
+                            tail_call: false,
                         }),
                         ScgStatement::Return(vec![ScgExpr::Var("inlined_result".to_string())]),
                     ]
@@ -771,7 +788,10 @@ impl CORuntime {
             }
             NodeKind::LoopExit | NodeKind::Join => {
                 // Structural nodes — pass through the value.
-                vec![ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))])]
+                vec![ScgStatement::Return(vec![ScgExpr::Var(format!(
+                    "v{}",
+                    node.id
+                ))])]
             }
             NodeKind::FunctionEntry => {
                 // Function boundary — return 0 as baseline.
@@ -779,7 +799,9 @@ impl CORuntime {
             }
             NodeKind::FunctionReturn => {
                 // Function exit — return the value computed by the function.
-                vec![ScgStatement::Return(vec![ScgExpr::Var("ret_val".to_string())])]
+                vec![ScgStatement::Return(vec![ScgExpr::Var(
+                    "ret_val".to_string(),
+                )])]
             }
             NodeKind::Jump => {
                 // Break/continue jump.
@@ -930,10 +952,7 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
         );
 
         if mem == libc::MAP_FAILED {
-            return Err(RuntimeError::ExecutionFailed(
-                0,
-                "mmap failed".to_string(),
-            ));
+            return Err(RuntimeError::ExecutionFailed(0, "mmap failed".to_string()));
         }
 
         // Copy the machine code into the mapped region.
@@ -1013,10 +1032,7 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
         );
 
         if mem == libc::MAP_FAILED {
-            return Err(RuntimeError::ExecutionFailed(
-                0,
-                "mmap failed".to_string(),
-            ));
+            return Err(RuntimeError::ExecutionFailed(0, "mmap failed".to_string()));
         }
 
         // Copy the machine code into the mapped region.
@@ -1026,7 +1042,11 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
         // x86_64 requires W+X for some JIT scenarios; we use RWX here
         // to match the AArch64 pattern (R+X) but also allow the write
         // flag for self-modifying code scenarios on x86_64.
-        let mprotect_result = libc::mprotect(mem, aligned_len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        let mprotect_result = libc::mprotect(
+            mem,
+            aligned_len,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+        );
         if mprotect_result != 0 {
             libc::munmap(mem, aligned_len);
             return Err(RuntimeError::ExecutionFailed(
@@ -1106,11 +1126,15 @@ mod tests {
         // (not a NOP sled). The codegen pipeline produces at least a
         // prologue, so the code should be non-empty.
         let compiled = rt.compiled_state().get(42).unwrap();
-        assert!(!compiled.code.is_empty(),
-            "compiled code should not be empty");
+        assert!(
+            !compiled.code.is_empty(),
+            "compiled code should not be empty"
+        );
         // Verify it's not a NOP sled (0x90 repeated).
-        assert!(!compiled.code.iter().all(|&b| b == 0x90),
-            "compiled code should not be a NOP sled");
+        assert!(
+            !compiled.code.iter().all(|&b| b == 0x90),
+            "compiled code should not be a NOP sled"
+        );
     }
 
     #[test]
@@ -1208,7 +1232,10 @@ mod tests {
         // Run optimize.
         let reoptimized = rt.optimize();
         // The hot region should have been re-optimized.
-        assert!(reoptimized >= 1, "at least one region should be re-optimized");
+        assert!(
+            reoptimized >= 1,
+            "at least one region should be re-optimized"
+        );
 
         // The compiled region should still exist and have real code.
         let compiled = rt.compiled_state().get(10).unwrap();
@@ -1321,18 +1348,28 @@ mod tests {
         let result = rt.run_optimization_passes();
 
         // Verify that transformations were applied.
-        assert!(result.total_transformations > 0,
-            "should apply at least one optimization");
-        assert!(result.estimated_speedup > 1.0,
-            "estimated speedup should exceed 1.0");
+        assert!(
+            result.total_transformations > 0,
+            "should apply at least one optimization"
+        );
+        assert!(
+            result.estimated_speedup > 1.0,
+            "estimated speedup should exceed 1.0"
+        );
 
         // Verify SCG nodes were actually modified.
         let scg = rt.scg();
-        assert!(scg.get_node(10).unwrap().is_inlined,
-            "hot call node 10 should be inlined after optimization");
-        assert!(scg.get_node(20).unwrap().unroll_factor > 1,
-            "hot loop node 20 should be unrolled after optimization");
-        assert!(scg.get_node(30).unwrap().has_prefetch,
-            "hot memory node 30 should have prefetch after optimization");
+        assert!(
+            scg.get_node(10).unwrap().is_inlined,
+            "hot call node 10 should be inlined after optimization"
+        );
+        assert!(
+            scg.get_node(20).unwrap().unroll_factor > 1,
+            "hot loop node 20 should be unrolled after optimization"
+        );
+        assert!(
+            scg.get_node(30).unwrap().has_prefetch,
+            "hot memory node 30 should have prefetch after optimization"
+        );
     }
 }

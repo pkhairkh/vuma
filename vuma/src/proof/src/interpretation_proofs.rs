@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::models::{
-    Compatibility, DerivationId, ProofAccess, ProofMSG, RepDId, valid_reinterpretation,
+    valid_reinterpretation, Compatibility, DerivationId, ProofAccess, ProofMSG, RepDId,
 };
 use crate::proof::{
     AccessId, Conclusion, Fact, FactId, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
@@ -22,10 +22,7 @@ use crate::rules::InferenceRule;
 #[derive(Debug, Clone, Error)]
 pub enum ProofFailure {
     #[error("incompatible BD for access {access_id}: {reason}")]
-    IncompatibleBD {
-        access_id: AccessId,
-        reason: String,
-    },
+    IncompatibleBD { access_id: AccessId, reason: String },
 
     #[error("unsafe reinterpretation at derivation {derivation_id}: {reason}")]
     UnsafeReinterpretation {
@@ -150,7 +147,9 @@ pub struct InterpretationProof {
 
 impl InterpretationProof {
     pub fn is_valid(&self) -> bool {
-        self.bd_compatibility_proofs.iter().all(|p| p.is_compatible())
+        self.bd_compatibility_proofs
+            .iter()
+            .all(|p| p.is_compatible())
             && self
                 .reinterpretation_safety_proofs
                 .iter()
@@ -210,15 +209,15 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
         std::collections::HashMap::new();
 
     for access in &msg.accesses {
-        let effective_repd = msg
-            .repd_of(access.target_derivation)
-            .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+        let effective_repd = msg.repd_of(access.target_derivation).ok_or_else(|| {
+            ProofFailure::UnresolvableDerivation {
                 derivation_id: access.target_derivation,
                 reason: format!(
                     "cannot resolve effective RepD for derivation {} referenced by access {}",
                     access.target_derivation, access.id
                 ),
-            })?;
+            }
+        })?;
 
         let fid = next_fact_id();
         let fact = Fact::checked(
@@ -243,21 +242,18 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
             .region_of(write_access.target_derivation)
             .ok_or_else(|| ProofFailure::UnresolvableDerivation {
                 derivation_id: write_access.target_derivation,
-                reason: format!(
-                    "cannot resolve region for write access {}",
-                    write_access.id
-                ),
+                reason: format!("cannot resolve region for write access {}", write_access.id),
             })?;
 
-        let write_addr = msg
-            .addr_of(write_access.target_derivation)
-            .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+        let write_addr = msg.addr_of(write_access.target_derivation).ok_or_else(|| {
+            ProofFailure::UnresolvableDerivation {
                 derivation_id: write_access.target_derivation,
                 reason: format!(
                     "cannot resolve address for write access {}",
                     write_access.id
                 ),
-            })?;
+            }
+        })?;
 
         let write_end = write_addr + write_access.size;
 
@@ -281,35 +277,34 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
                 continue;
             }
 
-            let write_repd_id = access_repd_map
-                .get(&write_access.id)
-                .copied()
-                .ok_or_else(|| ProofFailure::Internal(format!(
-                    "BD-tracing did not produce a RepD for write access {}",
-                    write_access.id
-                )))?;
+            let write_repd_id =
+                access_repd_map
+                    .get(&write_access.id)
+                    .copied()
+                    .ok_or_else(|| {
+                        ProofFailure::Internal(format!(
+                            "BD-tracing did not produce a RepD for write access {}",
+                            write_access.id
+                        ))
+                    })?;
 
             let read_repd_id = access_repd_map
                 .get(&read_access.id)
                 .copied()
-                .ok_or_else(|| ProofFailure::Internal(format!(
-                    "BD-tracing did not produce a RepD for read access {}",
-                    read_access.id
-                )))?;
+                .ok_or_else(|| {
+                    ProofFailure::Internal(format!(
+                        "BD-tracing did not produce a RepD for read access {}",
+                        read_access.id
+                    ))
+                })?;
 
-            let write_repd = msg
-                .get_repd(write_repd_id)
-                .ok_or_else(|| ProofFailure::Internal(format!(
-                    "RepD {} not found in MSG",
-                    write_repd_id
-                )))?;
+            let write_repd = msg.get_repd(write_repd_id).ok_or_else(|| {
+                ProofFailure::Internal(format!("RepD {} not found in MSG", write_repd_id))
+            })?;
 
-            let read_repd = msg
-                .get_repd(read_repd_id)
-                .ok_or_else(|| ProofFailure::Internal(format!(
-                    "RepD {} not found in MSG",
-                    read_repd_id
-                )))?;
+            let read_repd = msg.get_repd(read_repd_id).ok_or_else(|| {
+                ProofFailure::Internal(format!("RepD {} not found in MSG", read_repd_id))
+            })?;
 
             let compat = write_repd.compatible_with(read_repd, read_addr);
 
@@ -323,25 +318,34 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
             );
             let mut compat_proof = Proof::new(compat_goal);
 
-            let f1 = Fact::axiom(next_fact_id(), format!(
-                "write access {} has RepD {} (kind={})",
-                write_access.id, write_repd.id, write_repd.kind
-            ));
+            let f1 = Fact::axiom(
+                next_fact_id(),
+                format!(
+                    "write access {} has RepD {} (kind={})",
+                    write_access.id, write_repd.id, write_repd.kind
+                ),
+            );
             let f1_id = f1.id;
             compat_proof.add_step(ProofStep::Assume { fact: f1 });
 
-            let f2 = Fact::axiom(next_fact_id(), format!(
-                "read access {} expects RepD {} (kind={})",
-                read_access.id, read_repd.id, read_repd.kind
-            ));
+            let f2 = Fact::axiom(
+                next_fact_id(),
+                format!(
+                    "read access {} expects RepD {} (kind={})",
+                    read_access.id, read_repd.id, read_repd.kind
+                ),
+            );
             let f2_id = f2.id;
             compat_proof.add_step(ProofStep::Assume { fact: f2 });
 
             if compat.is_compatible() {
-                let f3 = Fact::derived(next_fact_id(), format!(
-                    "BD of write {} is compatible with BD of read {}",
-                    write_access.id, read_access.id
-                ));
+                let f3 = Fact::derived(
+                    next_fact_id(),
+                    format!(
+                        "BD of write {} is compatible with BD of read {}",
+                        write_access.id, read_access.id
+                    ),
+                );
                 compat_proof.add_step(ProofStep::Infer {
                     from: vec![f1_id, f2_id],
                     rule: InferenceRule::CastValidity,
@@ -391,45 +395,48 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
             continue;
         }
 
-        let target_repd_id = derivation
-            .cast
-            .ok_or_else(|| ProofFailure::Internal(format!(
+        let target_repd_id = derivation.cast.ok_or_else(|| {
+            ProofFailure::Internal(format!(
                 "cast derivation {} has no target RepD",
                 derivation.id
-            )))?;
+            ))
+        })?;
 
         let source_repd_id = if let Some(src_did) = derivation.source_derivation {
-            msg.repd_of(src_did).ok_or_else(|| {
-                ProofFailure::UnresolvableDerivation {
+            msg.repd_of(src_did)
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
                     derivation_id: src_did,
                     reason: format!(
                         "cannot resolve source RepD for cast derivation {}",
                         derivation.id
                     ),
-                }
-            })?
+                })?
         } else if let Some(src_rid) = derivation.source_region {
-            let region = msg.get_region(src_rid).ok_or_else(|| {
-                ProofFailure::UnresolvableDerivation {
+            let region =
+                msg.get_region(src_rid)
+                    .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+                        derivation_id: derivation.id,
+                        reason: format!("source region {} not found", src_rid),
+                    })?;
+            region
+                .default_repd
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
                     derivation_id: derivation.id,
-                    reason: format!("source region {} not found", src_rid),
-                }
-            })?;
-            region.default_repd.ok_or_else(|| ProofFailure::UnresolvableDerivation {
-                derivation_id: derivation.id,
-                reason: format!("source region {} has no default RepD", src_rid),
-            })?
+                    reason: format!("source region {} has no default RepD", src_rid),
+                })?
         } else if let Some(src_rid) = derivation.root_region {
-            let region = msg.get_region(src_rid).ok_or_else(|| {
-                ProofFailure::UnresolvableDerivation {
+            let region =
+                msg.get_region(src_rid)
+                    .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+                        derivation_id: derivation.id,
+                        reason: format!("root region {} not found", src_rid),
+                    })?;
+            region
+                .default_repd
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
                     derivation_id: derivation.id,
-                    reason: format!("root region {} not found", src_rid),
-                }
-            })?;
-            region.default_repd.ok_or_else(|| ProofFailure::UnresolvableDerivation {
-                derivation_id: derivation.id,
-                reason: format!("root region {} has no default RepD", src_rid),
-            })?
+                    reason: format!("root region {} has no default RepD", src_rid),
+                })?
         } else {
             return Err(ProofFailure::UnresolvableDerivation {
                 derivation_id: derivation.id,
@@ -444,25 +451,25 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
             ProofFailure::Internal(format!("target RepD {} not found", target_repd_id))
         })?;
 
-        let region_id = msg.region_of(derivation.id).ok_or_else(|| {
-            ProofFailure::UnresolvableDerivation {
-                derivation_id: derivation.id,
-                reason: "cannot resolve root region for cast derivation".into(),
-            }
-        })?;
-        let region = msg.get_region(region_id).ok_or_else(|| {
-            ProofFailure::UnresolvableDerivation {
-                derivation_id: derivation.id,
-                reason: format!("root region {} not found", region_id),
-            }
-        })?;
+        let region_id =
+            msg.region_of(derivation.id)
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+                    derivation_id: derivation.id,
+                    reason: "cannot resolve root region for cast derivation".into(),
+                })?;
+        let region =
+            msg.get_region(region_id)
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+                    derivation_id: derivation.id,
+                    reason: format!("root region {} not found", region_id),
+                })?;
 
-        let resolved_addr = msg.addr_of(derivation.id).ok_or_else(|| {
-            ProofFailure::UnresolvableDerivation {
-                derivation_id: derivation.id,
-                reason: "cannot resolve address for cast derivation".into(),
-            }
-        })?;
+        let resolved_addr =
+            msg.addr_of(derivation.id)
+                .ok_or_else(|| ProofFailure::UnresolvableDerivation {
+                    derivation_id: derivation.id,
+                    reason: "cannot resolve address for cast derivation".into(),
+                })?;
 
         let remaining_bytes = region
             .base_addr
@@ -485,17 +492,23 @@ pub fn prove_interpretation(msg: &ProofMSG) -> Result<InterpretationProof, Proof
         );
         let mut cast_proof = Proof::new(cast_goal);
 
-        let sf = Fact::axiom(next_fact_id(), format!(
-            "source type RepD {} has layout size={}, alignment={}",
-            source_repd.id, source_repd.size, source_repd.alignment
-        ));
+        let sf = Fact::axiom(
+            next_fact_id(),
+            format!(
+                "source type RepD {} has layout size={}, alignment={}",
+                source_repd.id, source_repd.size, source_repd.alignment
+            ),
+        );
         let sf_id = sf.id;
         cast_proof.add_step(ProofStep::Assume { fact: sf });
 
-        let tf = Fact::axiom(next_fact_id(), format!(
-            "target type RepD {} has layout size={}, alignment={}",
-            target_repd.id, target_repd.size, target_repd.alignment
-        ));
+        let tf = Fact::axiom(
+            next_fact_id(),
+            format!(
+                "target type RepD {} has layout size={}, alignment={}",
+                target_repd.id, target_repd.size, target_repd.alignment
+            ),
+        );
         let tf_id = tf.id;
         cast_proof.add_step(ProofStep::Assume { fact: tf });
 

@@ -60,6 +60,6 @@ pub mod speculative;
 pub mod types;
 
 // Re-export the primary entry point for convenience.
-pub use runtime::CORuntime;
 pub use config::Config;
-pub use optimization::{OptimizationEngine, OptimizationResult, apply_optimizations};
+pub use optimization::{apply_optimizations, OptimizationEngine, OptimizationResult};
+pub use runtime::CORuntime;

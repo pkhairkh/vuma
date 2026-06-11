@@ -47,8 +47,8 @@
 //! ```
 
 pub mod callgraph;
-pub mod dominance;
 pub mod diff;
+pub mod dominance;
 pub mod edge;
 pub mod graph;
 pub mod liveness;
@@ -63,45 +63,49 @@ pub mod transform;
 
 // -- Node types --
 pub use node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
-    ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType,
-    PhantomNode, ProgramPoint, VTableNode,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode,
+    ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload,
+    NodeType, PhantomNode, ProgramPoint, VTableNode,
 };
 
 // -- Edge types --
 pub use edge::{EdgeData, EdgeId, EdgeKind};
 
 // -- Graph --
-pub use graph::{SCG, SCGError, ValidationResult};
+pub use graph::{SCGError, ValidationResult, SCG};
 
 // -- Call Graph --
 pub use callgraph::{CallGraph, CallGraphEdge, FunctionId};
 
 // -- Region types --
-pub use region::{DeploymentTarget, InferredRegion, RegionAliasAnalysis, RegionId, RegionLifetime, SCGRegion, infer_regions};
+pub use region::{
+    infer_regions, DeploymentTarget, InferredRegion, RegionAliasAnalysis, RegionId, RegionLifetime,
+    SCGRegion,
+};
 
 // -- Query engine --
-pub use query::{execute, DerivationChain, QueryResult, SCGQuery, find_access_nodes_to_region, find_derivation_chains};
+pub use query::{
+    execute, find_access_nodes_to_region, find_derivation_chains, DerivationChain, QueryResult,
+    SCGQuery,
+};
 
 // -- Diff engine --
 pub use diff::{
-    apply_diff, compute_edit_script, diff_scg, three_way_merge,
-    DiffEntry, DiffError, DiffStats, MergeConflict,
-    EdgeConflict, NodeConflict, RegionConflict, SCGDiff,
+    apply_diff, compute_edit_script, diff_scg, three_way_merge, DiffEntry, DiffError, DiffStats,
+    EdgeConflict, MergeConflict, NodeConflict, RegionConflict, SCGDiff,
 };
 
 // -- Dominance analysis --
 pub use dominance::{
-    DominatorTree, compute_dominators, compute_post_dominators, dominates,
-    strictly_dominates, find_dominance_frontier, nearest_common_dominator,
-    dom_tree_postorder, dominated_by, dominators_of,
-    always_executes_after, write_precedes_read, guaranteed_execution_path,
+    always_executes_after, compute_dominators, compute_post_dominators, dom_tree_postorder,
+    dominated_by, dominates, dominators_of, find_dominance_frontier, guaranteed_execution_path,
+    nearest_common_dominator, strictly_dominates, write_precedes_read, DominatorTree,
 };
 
 // -- Liveness analysis --
 pub use liveness::{
-    LivenessAnalysis, LivenessInfo, UseAfterFree, compute_liveness, find_dead_allocations,
-    find_dead_code, find_uninitialized_reads, find_use_after_free,
+    compute_liveness, find_dead_allocations, find_dead_code, find_uninitialized_reads,
+    find_use_after_free, LivenessAnalysis, LivenessInfo, UseAfterFree,
 };
 
 // -- Loop detection --
@@ -109,10 +113,10 @@ pub use loop_detection::{LoopDetector, LoopNestingTree, NaturalLoop};
 
 // -- Transform passes --
 pub use transform::{
-    CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination, InliningPass,
-    LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass,
-    StrengthReduction, TailCallOptDetection, DeadRegionElimination, VerificationPass,
-    licm, strength_reduce, detect_tail_calls, dead_region_elim,
+    dead_region_elim, detect_tail_calls, licm, strength_reduce, CommonSubexpressionElimination,
+    ConstantFolding, DeadCodeElimination, DeadRegionElimination, InliningPass,
+    LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass, StrengthReduction,
+    TailCallOptDetection, VerificationPass,
 };
 
 #[cfg(test)]
@@ -153,7 +157,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "write_buffer".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             ProgramPoint {
                 file: Some("main.vu".to_string()),
                 line: Some(11),
@@ -182,12 +188,18 @@ mod tests {
 
         // Add edges
         scg.add_edge(alloc_id, comp_id, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation).unwrap();
-        scg.add_edge(comp_id, dealloc_id, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(comp_id, dealloc_id, EdgeKind::ControlFlow)
+            .unwrap();
 
         // Validate
         let validation = scg.validate();
-        assert!(validation.is_valid, "Validation errors: {:?}", validation.errors);
+        assert!(
+            validation.is_valid,
+            "Validation errors: {:?}",
+            validation.errors
+        );
 
         // Query: nodes by type
         let comp_nodes = execute(&scg, SCGQuery::NodesByType(NodeType::Computation));

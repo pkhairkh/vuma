@@ -11,11 +11,7 @@ fn assert_no_panic(source: &str) {
         let mut parser = Parser::new(source);
         let _ = parser.parse_program();
     }));
-    assert!(
-        result.is_ok(),
-        "parser panicked on input: {:?}",
-        source
-    );
+    assert!(result.is_ok(), "parser panicked on input: {:?}", source);
 }
 
 /// Helper: assert that parsing `source` succeeds (Ok with or without errors).
@@ -219,14 +215,12 @@ fn edge_keywords_in_unusual_positions() {
 #[test]
 fn edge_all_keywords_sequential() {
     let keywords = [
-        "fn", "let", "pub", "crate", "ptr", "region", "alloc", "allocate",
-        "free", "derive", "cast", "read", "write", "sync", "if", "else",
-        "while", "for", "return", "struct", "enum", "match", "unsafe",
-        "safe", "bd", "repd", "capd", "reld", "import", "export", "mod",
-        "use", "self", "super", "async", "await", "spawn", "lock", "unlock",
-        "channel", "send", "recv", "true", "false", "null", "as", "sizeof",
-        "alignof", "break", "continue", "where", "impl", "trait", "type",
-        "const", "static", "mut", "ref",
+        "fn", "let", "pub", "crate", "ptr", "region", "alloc", "allocate", "free", "derive",
+        "cast", "read", "write", "sync", "if", "else", "while", "for", "return", "struct", "enum",
+        "match", "unsafe", "safe", "bd", "repd", "capd", "reld", "import", "export", "mod", "use",
+        "self", "super", "async", "await", "spawn", "lock", "unlock", "channel", "send", "recv",
+        "true", "false", "null", "as", "sizeof", "alignof", "break", "continue", "where", "impl",
+        "trait", "type", "const", "static", "mut", "ref",
     ];
     let source = keywords.join(";\n");
     assert_no_panic(&source);

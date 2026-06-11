@@ -30,9 +30,7 @@
 //! Each phase produces structured findings that are aggregated into a final
 //! [`LivenessVerificationResult`].
 
-use crate::result::{
-    CounterExample, Evidence, VerificationResult, VerificationStatus,
-};
+use crate::result::{CounterExample, Evidence, VerificationResult, VerificationStatus};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -535,9 +533,7 @@ impl LivenessVerificationResult {
                 Some(LivenessViolation::LockHeldTooLong { acquire_point, .. }) => {
                     acquire_point.to_string()
                 }
-                Some(LivenessViolation::LostMessage { send_point, .. }) => {
-                    send_point.to_string()
-                }
+                Some(LivenessViolation::LostMessage { send_point, .. }) => send_point.to_string(),
                 Some(LivenessViolation::ConditionalDeallocation { alloc_point, .. }) => {
                     alloc_point.to_string()
                 }
@@ -555,11 +551,7 @@ impl LivenessVerificationResult {
             VerificationResult::new(
                 "liveness",
                 VerificationStatus::Violated {
-                    counterexample: CounterExample::new(
-                        Vec::new(),
-                        violation_point,
-                        description,
-                    ),
+                    counterexample: CounterExample::new(Vec::new(), violation_point, description),
                 },
                 format!(
                     "Liveness invariant violated: {} violation(s) found across {} resources",
@@ -723,9 +715,7 @@ struct Scc {
 
 /// Run Tarjan's algorithm to find all SCCs in a directed graph.
 /// The graph is represented as an adjacency list of ResourceId.
-fn tarjan_scc(
-    graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>,
-) -> Vec<Scc> {
+fn tarjan_scc(graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Scc> {
     let mut index_counter: u64 = 0;
     let mut stack: Vec<ResourceId> = Vec::new();
     let mut on_stack: hashbrown::HashSet<ResourceId> = hashbrown::HashSet::new();
@@ -774,7 +764,14 @@ fn tarjan_strongconnect(
         for &w in neighbors {
             if !indices.contains_key(&w) {
                 tarjan_strongconnect(
-                    w, graph, index_counter, stack, on_stack, indices, lowlinks, sccs,
+                    w,
+                    graph,
+                    index_counter,
+                    stack,
+                    on_stack,
+                    indices,
+                    lowlinks,
+                    sccs,
                 );
                 let vl = lowlinks[&v];
                 let wl = lowlinks[&w];
@@ -799,11 +796,9 @@ fn tarjan_strongconnect(
             }
         }
         let is_cycle = component.len() > 1
-            || component.iter().any(|&node| {
-                graph
-                    .get(&node)
-                    .is_some_and(|nbrs| nbrs.contains(&node))
-            });
+            || component
+                .iter()
+                .any(|&node| graph.get(&node).is_some_and(|nbrs| nbrs.contains(&node)));
         sccs.push(Scc {
             nodes: component,
             is_cycle,
@@ -887,7 +882,10 @@ impl LivenessVerifier {
         // Phase 2: Deadlock detection via SCC
         let deadlock_count = self.check_deadlock(input, &mut result);
         if self.verbose {
-            log::info!("Phase 2 (deadlock detection): {} deadlock cycles found", deadlock_count);
+            log::info!(
+                "Phase 2 (deadlock detection): {} deadlock cycles found",
+                deadlock_count
+            );
         }
 
         // Phase 3: Lock discipline
@@ -899,7 +897,10 @@ impl LivenessVerifier {
         // Phase 4: Message completeness
         let msg_count = self.check_message_completeness(input, &cfg, &mut result);
         if self.verbose {
-            log::info!("Phase 4 (message completeness): {} violations found", msg_count);
+            log::info!(
+                "Phase 4 (message completeness): {} violations found",
+                msg_count
+            );
         }
 
         // Count paths analyzed (approximation from CFG reachability queries)
@@ -919,11 +920,7 @@ impl LivenessVerifier {
 
     /// Collect all unique resource IDs from the input.
     fn collect_resources(&self, input: &LivenessInput) -> hashbrown::HashSet<ResourceId> {
-        input
-            .events
-            .iter()
-            .map(|e| e.resource)
-            .collect()
+        input.events.iter().map(|e| e.resource).collect()
     }
 
     // -----------------------------------------------------------------------
@@ -981,10 +978,8 @@ impl LivenessVerifier {
                     let reachable_from_alloc = cfg.reachable_set(alloc_point);
 
                     // Find deallocation points that are reachable
-                    let dealloc_points: hashbrown::HashSet<PointId> = reachable_deallocs
-                        .iter()
-                        .map(|de| de.point)
-                        .collect();
+                    let dealloc_points: hashbrown::HashSet<PointId> =
+                        reachable_deallocs.iter().map(|de| de.point).collect();
 
                     // A point is a potential leak if it is reachable from alloc,
                     // does not itself reach any dealloc, and has no successors
@@ -1007,9 +1002,8 @@ impl LivenessVerifier {
                         // from alloc to this dead end that doesn't pass through
                         // a dealloc.
                         if let Some(path) = cfg.find_path(alloc_point, point) {
-                            let passes_through_dealloc = path
-                                .iter()
-                                .any(|p| dealloc_points.contains(p));
+                            let passes_through_dealloc =
+                                path.iter().any(|p| dealloc_points.contains(p));
                             if !passes_through_dealloc {
                                 has_potential_leak_path = true;
                                 break;
@@ -1058,10 +1052,7 @@ impl LivenessVerifier {
             hashbrown::HashMap::new();
 
         for dep in &input.wait_for_deps {
-            wait_for_graph
-                .entry(dep.held)
-                .or_default()
-                .push(dep.wanted);
+            wait_for_graph.entry(dep.held).or_default().push(dep.wanted);
         }
 
         // Also ensure all wanted resources are in the graph (even if they
@@ -1129,10 +1120,7 @@ impl LivenessVerifier {
         let mut thread_events: hashbrown::HashMap<ThreadId, Vec<&ResourceEvent>> =
             hashbrown::HashMap::new();
         for event in &input.events {
-            thread_events
-                .entry(event.thread)
-                .or_default()
-                .push(event);
+            thread_events.entry(event.thread).or_default().push(event);
         }
 
         // For each thread, track held locks and the order they're acquired
@@ -1147,10 +1135,7 @@ impl LivenessVerifier {
                     EventAction::Acquire => {
                         // This lock is acquired while holding other locks
                         for &held in &held_locks {
-                            acquire_before
-                                .entry(held)
-                                .or_default()
-                                .push(event.resource);
+                            acquire_before.entry(held).or_default().push(event.resource);
                         }
                         held_locks.push(event.resource);
                     }
@@ -1183,10 +1168,7 @@ impl LivenessVerifier {
                     cycle.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
                 );
 
-                result.add_violation(LivenessViolation::CircularDependency {
-                    cycle,
-                    description,
-                });
+                result.add_violation(LivenessViolation::CircularDependency { cycle, description });
                 circular_count += 1;
             }
         }
@@ -1222,7 +1204,9 @@ impl LivenessVerifier {
             for acquire in &acquires {
                 let matching_releases: Vec<&&ResourceEvent> = releases
                     .iter()
-                    .filter(|r| r.thread == acquire.thread && cfg.is_reachable(acquire.point, r.point))
+                    .filter(|r| {
+                        r.thread == acquire.thread && cfg.is_reachable(acquire.point, r.point)
+                    })
                     .collect();
 
                 if matching_releases.is_empty() {
@@ -1398,8 +1382,10 @@ pub fn compute_path_sensitive_liveness(
     }
 
     // Build gen and kill sets for each point
-    let mut gen: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> = hashbrown::HashMap::new();
-    let mut kill: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> = hashbrown::HashMap::new();
+    let mut gen: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
+        hashbrown::HashMap::new();
+    let mut kill: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
+        hashbrown::HashMap::new();
 
     for event in &input.events {
         let point = event.point;
@@ -1446,12 +1432,13 @@ pub fn compute_path_sensitive_liveness(
                     // Meet: intersection of live_out from all predecessors
                     let mut result: Option<hashbrown::HashSet<ResourceId>> = None;
                     for &p in pred_list {
-                        let out = live_out.get(&p).cloned().unwrap_or_else(|| all_resources.clone());
+                        let out = live_out
+                            .get(&p)
+                            .cloned()
+                            .unwrap_or_else(|| all_resources.clone());
                         result = match result {
                             None => Some(out),
-                            Some(acc) => Some(
-                                acc.intersection(&out).copied().collect(),
-                            ),
+                            Some(acc) => Some(acc.intersection(&out).copied().collect()),
                         };
                     }
                     result.unwrap_or_else(|| all_resources.clone())
@@ -1547,8 +1534,15 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(result.invariant_holds, "Expected invariant to hold for clean alloc/dealloc pairs");
-        assert!(result.violations.is_empty(), "Expected no violations, got: {:?}", result.violations);
+        assert!(
+            result.invariant_holds,
+            "Expected invariant to hold for clean alloc/dealloc pairs"
+        );
+        assert!(
+            result.violations.is_empty(),
+            "Expected no violations, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1573,7 +1567,10 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(!result.invariant_holds, "Expected invariant violation for leaked memory");
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for leaked memory"
+        );
         assert_eq!(result.violations.len(), 1);
         assert!(matches!(
             &result.violations[0],
@@ -1623,11 +1620,19 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(!result.invariant_holds, "Expected invariant violation for deadlock cycle");
-        let has_deadlock = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::DeadlockCycle { .. })
-        });
-        assert!(has_deadlock, "Expected a deadlock cycle violation, got: {:?}", result.violations);
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for deadlock cycle"
+        );
+        let has_deadlock = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::DeadlockCycle { .. }));
+        assert!(
+            has_deadlock,
+            "Expected a deadlock cycle violation, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1681,7 +1686,10 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(!result.invariant_holds, "Expected invariant violation for conditional deallocation");
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for conditional deallocation"
+        );
         // We should get either a ResourceLeak (for the path without dealloc)
         // or a ConditionalDeallocation violation
         let has_leak_or_conditional = result.violations.iter().any(|v| {
@@ -1739,12 +1747,19 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(!result.invariant_holds, "Expected invariant violation for unreleased lock on T2");
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for unreleased lock on T2"
+        );
         let has_lock_violation = result.violations.iter().any(|v| {
             matches!(v, LivenessViolation::LockHeldTooLong { resource, thread, .. }
                 if *resource == rid(2) && *thread == tid(2))
         });
-        assert!(has_lock_violation, "Expected LockHeldTooLong for R2 on T2, got: {:?}", result.violations);
+        assert!(
+            has_lock_violation,
+            "Expected LockHeldTooLong for R2 on T2, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1789,16 +1804,38 @@ mod tests {
         });
 
         // Linear CFG: PP1 -> PP2 -> PP3 -> PP4
-        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
-        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
-        input.add_cfg_edge(ControlFlowEdge { from: pp(3), to: pp(4), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(1),
+            to: pp(2),
+            conditional: false,
+            label: None,
+        });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(2),
+            to: pp(3),
+            conditional: false,
+            label: None,
+        });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(3),
+            to: pp(4),
+            conditional: false,
+            label: None,
+        });
         input.entry_point = Some(pp(1));
 
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(result.invariant_holds, "Expected invariant to hold for nested allocations");
-        assert!(result.violations.is_empty(), "Expected no violations, got: {:?}", result.violations);
+        assert!(
+            result.invariant_holds,
+            "Expected invariant to hold for nested allocations"
+        );
+        assert!(
+            result.violations.is_empty(),
+            "Expected no violations, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1844,12 +1881,19 @@ mod tests {
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(!result.invariant_holds, "Expected invariant violation for circular lock dependency");
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for circular lock dependency"
+        );
         let has_circular = result.violations.iter().any(|v| {
             matches!(v, LivenessViolation::CircularDependency { .. })
                 || matches!(v, LivenessViolation::DeadlockCycle { .. })
         });
-        assert!(has_circular, "Expected circular dependency or deadlock violation, got: {:?}", result.violations);
+        assert!(
+            has_circular,
+            "Expected circular dependency or deadlock violation, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1909,17 +1953,44 @@ mod tests {
         });
 
         // CFG: PP1 -> PP2 -> PP3 -> PP4 -> PP5
-        input.add_cfg_edge(ControlFlowEdge { from: pp(1), to: pp(2), conditional: false, label: None });
-        input.add_cfg_edge(ControlFlowEdge { from: pp(2), to: pp(3), conditional: false, label: None });
-        input.add_cfg_edge(ControlFlowEdge { from: pp(3), to: pp(4), conditional: false, label: None });
-        input.add_cfg_edge(ControlFlowEdge { from: pp(4), to: pp(5), conditional: false, label: None });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(1),
+            to: pp(2),
+            conditional: false,
+            label: None,
+        });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(2),
+            to: pp(3),
+            conditional: false,
+            label: None,
+        });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(3),
+            to: pp(4),
+            conditional: false,
+            label: None,
+        });
+        input.add_cfg_edge(ControlFlowEdge {
+            from: pp(4),
+            to: pp(5),
+            conditional: false,
+            label: None,
+        });
         input.entry_point = Some(pp(1));
 
         let mut verifier = LivenessVerifier::new();
         let result = verifier.verify(&input);
 
-        assert!(result.invariant_holds, "Expected invariant to hold for clean program");
-        assert!(result.violations.is_empty(), "Expected no violations, got: {:?}", result.violations);
+        assert!(
+            result.invariant_holds,
+            "Expected invariant to hold for clean program"
+        );
+        assert!(
+            result.violations.is_empty(),
+            "Expected no violations, got: {:?}",
+            result.violations
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1971,8 +2042,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_no_cycles() {
         // A -> B -> C (no cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![]);
@@ -1985,8 +2055,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_with_cycle() {
         // A -> B -> C -> A (cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![rid(1)]);
@@ -2098,10 +2167,15 @@ mod tests {
         let result = verifier.verify(&input);
 
         assert!(!result.invariant_holds);
-        let has_lost = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::LostMessage { .. })
-        });
-        assert!(has_lost, "Expected LostMessage violation, got: {:?}", result.violations);
+        let has_lost = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::LostMessage { .. }));
+        assert!(
+            has_lost,
+            "Expected LostMessage violation, got: {:?}",
+            result.violations
+        );
     }
 
     #[test]

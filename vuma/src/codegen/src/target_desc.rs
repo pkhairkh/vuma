@@ -332,11 +332,15 @@ fn aarch64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "SUB", "MUL", "SDIV", "UDIV", "AND", "ORR", "EOR", "LSL", "LSR"],
+            insts: vec![
+                "ADD", "SUB", "MUL", "SDIV", "UDIV", "AND", "ORR", "EOR", "LSL", "LSR",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
-            insts: vec!["B", "BL", "BR", "B.cond", "CBZ", "CBNZ", "TBZ", "TBNZ", "RET"],
+            insts: vec![
+                "B", "BL", "BR", "B.cond", "CBZ", "CBNZ", "TBZ", "TBNZ", "RET",
+            ],
         },
         InstCategoryDesc {
             name: "load_store",
@@ -471,7 +475,9 @@ fn riscv64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "SUB", "MUL", "DIV", "AND", "OR", "XOR", "SLL", "SRL", "SRA", "ADDI", "SLT"],
+            insts: vec![
+                "ADD", "SUB", "MUL", "DIV", "AND", "OR", "XOR", "SLL", "SRL", "SRA", "ADDI", "SLT",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
@@ -487,7 +493,9 @@ fn riscv64_target_desc() -> TargetDesc {
         },
         InstCategoryDesc {
             name: "system",
-            insts: vec!["ECALL", "EBREAK", "FENCE", "FENCE.I", "CSRRC", "CSRRS", "CSRRW"],
+            insts: vec![
+                "ECALL", "EBREAK", "FENCE", "FENCE.I", "CSRRC", "CSRRS", "CSRRW",
+            ],
         },
     ];
 
@@ -532,23 +540,43 @@ fn wasm32_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["i32.add", "i32.sub", "i32.mul", "i64.add", "i64.sub", "i64.mul"],
+            insts: vec![
+                "i32.add", "i32.sub", "i32.mul", "i64.add", "i64.sub", "i64.mul",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
-            insts: vec!["br", "br_if", "br_table", "return", "if", "else", "end", "loop", "block"],
+            insts: vec![
+                "br", "br_if", "br_table", "return", "if", "else", "end", "loop", "block",
+            ],
         },
         InstCategoryDesc {
             name: "load_store",
-            insts: vec!["i32.load", "i32.store", "i64.load", "i64.store", "i32.load8_s", "i32.store8"],
+            insts: vec![
+                "i32.load",
+                "i32.store",
+                "i64.load",
+                "i64.store",
+                "i32.load8_s",
+                "i32.store8",
+            ],
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["f32.add", "f32.sub", "f64.add", "f64.sub", "f32.mul", "f64.mul"],
+            insts: vec![
+                "f32.add", "f32.sub", "f64.add", "f64.sub", "f32.mul", "f64.mul",
+            ],
         },
         InstCategoryDesc {
             name: "system",
-            insts: vec!["call", "call_indirect", "drop", "nop", "unreachable", "select"],
+            insts: vec![
+                "call",
+                "call_indirect",
+                "drop",
+                "nop",
+                "unreachable",
+                "select",
+            ],
         },
     ];
 
@@ -667,19 +695,27 @@ fn loongarch64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD.W", "SUB.W", "MUL.W", "DIV.W", "AND", "OR", "XOR", "SLL.W", "SRL.W", "SRA.W"],
+            insts: vec![
+                "ADD.W", "SUB.W", "MUL.W", "DIV.W", "AND", "OR", "XOR", "SLL.W", "SRL.W", "SRA.W",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
-            insts: vec!["BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "B", "BL", "JIRL"],
+            insts: vec![
+                "BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "B", "BL", "JIRL",
+            ],
         },
         InstCategoryDesc {
             name: "load_store",
-            insts: vec!["LD.W", "ST.W", "LD.D", "ST.D", "LD.BU", "ST.B", "LD.HU", "ST.H"],
+            insts: vec![
+                "LD.W", "ST.W", "LD.D", "ST.D", "LD.BU", "ST.B", "LD.HU", "ST.H",
+            ],
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["FADD.D", "FSUB.D", "FMUL.D", "FDIV.D", "FMOV.D", "FCMP.D", "FCVT"],
+            insts: vec![
+                "FADD.D", "FSUB.D", "FMUL.D", "FDIV.D", "FMOV.D", "FCMP.D", "FCVT",
+            ],
         },
         InstCategoryDesc {
             name: "system",
@@ -759,8 +795,8 @@ fn x86_64_target_desc() -> TargetDesc {
         name: "systemv",
         int_arg_regs: vec![7, 6, 2, 1, 8, 9], // RDI, RSI, RDX, RCX, R8, R9
         fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
-        int_return_regs: vec![0],  // RAX
-        fp_return_regs: vec![0, 1], // XMM0, XMM1
+        int_return_regs: vec![0],                      // RAX
+        fp_return_regs: vec![0, 1],                    // XMM0, XMM1
         callee_saved_gprs: vec![3, 5, 12, 13, 14, 15], // RBX, RBP, R12-R15
         callee_saved_fps: vec![],
         stack_alignment: 16,
@@ -772,11 +808,15 @@ fn x86_64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "SUB", "IMUL", "IDIV", "AND", "OR", "XOR", "SHL", "SHR", "SAR", "NEG", "NOT"],
+            insts: vec![
+                "ADD", "SUB", "IMUL", "IDIV", "AND", "OR", "XOR", "SHL", "SHR", "SAR", "NEG", "NOT",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
-            insts: vec!["JMP", "JE", "JNE", "JL", "JG", "JLE", "JGE", "CALL", "RET", "LOOP"],
+            insts: vec![
+                "JMP", "JE", "JNE", "JL", "JG", "JLE", "JGE", "CALL", "RET", "LOOP",
+            ],
         },
         InstCategoryDesc {
             name: "load_store",
@@ -784,11 +824,15 @@ fn x86_64_target_desc() -> TargetDesc {
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["ADDSD", "SUBSD", "MULSD", "DIVSD", "CVTSI2SD", "CVTSD2SI", "UCOMISD"],
+            insts: vec![
+                "ADDSD", "SUBSD", "MULSD", "DIVSD", "CVTSI2SD", "CVTSD2SI", "UCOMISD",
+            ],
         },
         InstCategoryDesc {
             name: "system",
-            insts: vec!["SYSCALL", "INT", "CPUID", "LFENCE", "MFENCE", "SFENCE", "NOP"],
+            insts: vec![
+                "SYSCALL", "INT", "CPUID", "LFENCE", "MFENCE", "SFENCE", "NOP",
+            ],
         },
     ];
 
@@ -889,7 +933,9 @@ fn arm32_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "SUB", "MUL", "MLA", "AND", "ORR", "EOR", "LSL", "LSR", "ASR"],
+            insts: vec![
+                "ADD", "SUB", "MUL", "MLA", "AND", "ORR", "EOR", "LSL", "LSR", "ASR",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
@@ -897,11 +943,15 @@ fn arm32_target_desc() -> TargetDesc {
         },
         InstCategoryDesc {
             name: "load_store",
-            insts: vec!["LDR", "STR", "LDM", "STM", "PUSH", "POP", "LDRB", "STRB", "LDRD", "STRD"],
+            insts: vec![
+                "LDR", "STR", "LDM", "STM", "PUSH", "POP", "LDRB", "STRB", "LDRD", "STRD",
+            ],
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["VADD.F64", "VSUB.F64", "VMUL.F64", "VDIV.F64", "VMOV", "VCMP", "VCVT"],
+            insts: vec![
+                "VADD.F64", "VSUB.F64", "VMUL.F64", "VDIV.F64", "VMOV", "VCMP", "VCVT",
+            ],
         },
         InstCategoryDesc {
             name: "system",
@@ -1031,11 +1081,16 @@ fn mips64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "ADDU", "SUB", "SUBU", "MULT", "DIV", "AND", "OR", "XOR", "SLL", "SRL", "SRA"],
+            insts: vec![
+                "ADD", "ADDU", "SUB", "SUBU", "MULT", "DIV", "AND", "OR", "XOR", "SLL", "SRL",
+                "SRA",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
-            insts: vec!["BEQ", "BNE", "BGTZ", "BLEZ", "BLTZ", "BGEZ", "J", "JAL", "JR", "JALR"],
+            insts: vec![
+                "BEQ", "BNE", "BGTZ", "BLEZ", "BLTZ", "BGEZ", "J", "JAL", "JR", "JALR",
+            ],
         },
         InstCategoryDesc {
             name: "load_store",
@@ -1043,7 +1098,9 @@ fn mips64_target_desc() -> TargetDesc {
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["ADD.D", "SUB.D", "MUL.D", "DIV.D", "MOV.D", "C.LE.D", "CVT.D.W"],
+            insts: vec![
+                "ADD.D", "SUB.D", "MUL.D", "DIV.D", "MOV.D", "C.LE.D", "CVT.D.W",
+            ],
         },
         InstCategoryDesc {
             name: "system",
@@ -1203,8 +1260,12 @@ fn ppc64_target_desc() -> TargetDesc {
         fp_arg_regs: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
         int_return_regs: vec![3],
         fp_return_regs: vec![0, 1],
-        callee_saved_gprs: vec![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
-        callee_saved_fps: vec![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+        callee_saved_gprs: vec![
+            14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ],
+        callee_saved_fps: vec![
+            14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ],
         stack_alignment: 16,
         has_link_register: true,
         has_branch_delay_slots: false,
@@ -1214,7 +1275,9 @@ fn ppc64_target_desc() -> TargetDesc {
     let instruction_categories = vec![
         InstCategoryDesc {
             name: "arithmetic",
-            insts: vec!["ADD", "SUBF", "MULLD", "DIVD", "AND", "OR", "XOR", "SLD", "SRD", "SRAD", "ADDI"],
+            insts: vec![
+                "ADD", "SUBF", "MULLD", "DIVD", "AND", "OR", "XOR", "SLD", "SRD", "SRAD", "ADDI",
+            ],
         },
         InstCategoryDesc {
             name: "branch",
@@ -1222,11 +1285,15 @@ fn ppc64_target_desc() -> TargetDesc {
         },
         InstCategoryDesc {
             name: "load_store",
-            insts: vec!["LD", "STD", "LWZ", "STW", "LBZ", "STB", "LHZ", "STH", "LMW", "STMW"],
+            insts: vec![
+                "LD", "STD", "LWZ", "STW", "LBZ", "STB", "LHZ", "STH", "LMW", "STMW",
+            ],
         },
         InstCategoryDesc {
             name: "fp_arithmetic",
-            insts: vec!["FADD", "FSUB", "FMUL", "FDIV", "FMOV", "FCMP", "FCVT", "FSQRT"],
+            insts: vec![
+                "FADD", "FSUB", "FMUL", "FDIV", "FMOV", "FCMP", "FCVT", "FSQRT",
+            ],
         },
         InstCategoryDesc {
             name: "system",
@@ -1307,16 +1374,8 @@ mod tests {
         for name in registry.isa_names() {
             let desc = registry.get(name).unwrap();
             let total = desc.registers.len();
-            let allocatable = desc
-                .registers
-                .iter()
-                .filter(|r| r.is_allocatable)
-                .count();
-            let non_allocatable = desc
-                .registers
-                .iter()
-                .filter(|r| !r.is_allocatable)
-                .count();
+            let allocatable = desc.registers.iter().filter(|r| r.is_allocatable).count();
+            let non_allocatable = desc.registers.iter().filter(|r| !r.is_allocatable).count();
             assert_eq!(
                 allocatable + non_allocatable,
                 total,
@@ -1376,11 +1435,8 @@ mod tests {
         let registry = TargetDescRegistry::new();
         for name in registry.isa_names() {
             let desc = registry.get(name).unwrap();
-            let category_names: Vec<&str> = desc
-                .instruction_categories
-                .iter()
-                .map(|c| c.name)
-                .collect();
+            let category_names: Vec<&str> =
+                desc.instruction_categories.iter().map(|c| c.name).collect();
             assert!(
                 category_names.contains(&"arithmetic"),
                 "[{}] missing 'arithmetic' instruction category",
@@ -1400,11 +1456,7 @@ mod tests {
         let registry = TargetDescRegistry::new();
         for name in registry.isa_names() {
             let desc = registry.get(name).unwrap();
-            let allocatable = desc
-                .registers
-                .iter()
-                .filter(|r| r.is_allocatable)
-                .count();
+            let allocatable = desc.registers.iter().filter(|r| r.is_allocatable).count();
             if name == "wasm32" {
                 assert_eq!(
                     allocatable, 0,
@@ -1439,7 +1491,8 @@ mod tests {
                 assert!(
                     reg.is_some(),
                     "[{}] calling convention references GPR index {} but no such register",
-                    name, idx
+                    name,
+                    idx
                 );
                 let reg = reg.unwrap();
                 assert!(
@@ -1458,7 +1511,8 @@ mod tests {
                 assert!(
                     reg.is_some(),
                     "[{}] calling convention references SimdFp index {} but no such register",
-                    name, idx
+                    name,
+                    idx
                 );
                 let reg = reg.unwrap();
                 assert!(
@@ -1517,7 +1571,8 @@ mod tests {
 
             let mut seen_gpr: std::collections::HashSet<usize> = std::collections::HashSet::new();
             let mut seen_fpr: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut seen_special: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut seen_special: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
             let mut seen_cond: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
             for reg in &desc.registers {
@@ -1552,17 +1607,11 @@ mod tests {
         // AArch64 should have a hardwired zero register
         let aarch64 = registry.get("aarch64").unwrap();
         assert!(
-            aarch64
-                .registers
-                .iter()
-                .any(|r| r.is_hardwired_zero),
+            aarch64.registers.iter().any(|r| r.is_hardwired_zero),
             "AArch64 should have a hardwired zero register"
         );
         assert!(
-            aarch64
-                .registers
-                .iter()
-                .any(|r| r.is_link_register),
+            aarch64.registers.iter().any(|r| r.is_link_register),
             "AArch64 should have a link register"
         );
 

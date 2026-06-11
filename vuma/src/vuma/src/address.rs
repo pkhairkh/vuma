@@ -178,7 +178,10 @@ mod tests {
         let a = Address::from(0x1000_u64);
         assert_eq!(a + 0x10_u64, Address::from(0x1010_u64));
         assert_eq!(a - 0x10_u64, Address::from(0x0FF0_u64));
-        assert_eq!(Address::from(0x1010_u64) - Address::from(0x1000_u64), 0x10_i64);
+        assert_eq!(
+            Address::from(0x1010_u64) - Address::from(0x1000_u64),
+            0x10_i64
+        );
     }
 
     #[test]

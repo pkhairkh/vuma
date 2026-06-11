@@ -108,26 +108,45 @@ pub enum AllocError {
 impl fmt::Display for AllocError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AllocError::OutOfMemory { requested, available } => {
-                write!(f, "out of memory: requested {} bytes, available {}", requested, available)
+            AllocError::OutOfMemory {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "out of memory: requested {} bytes, available {}",
+                    requested, available
+                )
             }
             AllocError::InvalidAlignment { align } => {
                 write!(f, "invalid alignment: {}", align)
             }
             AllocError::InvalidFree { addr } => {
-                write!(f, "invalid free: address {} was not allocated by this allocator", addr)
+                write!(
+                    f,
+                    "invalid free: address {} was not allocated by this allocator",
+                    addr
+                )
             }
             AllocError::NotInitialized => {
                 write!(f, "allocator not initialized")
             }
             AllocError::InvalidPointer { ptr } => {
-                write!(f, "invalid pointer: 0x{:016X} does not belong to this allocator", ptr)
+                write!(
+                    f,
+                    "invalid pointer: 0x{:016X} does not belong to this allocator",
+                    ptr
+                )
             }
             AllocError::SizeMismatch { expected, actual } => {
                 write!(f, "size mismatch: expected {}, actual {}", expected, actual)
             }
             AllocError::AlignMismatch { expected, actual } => {
-                write!(f, "alignment mismatch: expected {}, actual {}", expected, actual)
+                write!(
+                    f,
+                    "alignment mismatch: expected {}, actual {}",
+                    expected, actual
+                )
             }
         }
     }
@@ -317,7 +336,11 @@ impl ArenaAllocator {
     /// * `size` - The size of the arena region in bytes.
     // VUMA-VERIFIED: initialization establishes valid arena region
     pub fn new(base: Address, size: u64) -> Self {
-        Self { base, size, offset: 0 }
+        Self {
+            base,
+            size,
+            offset: 0,
+        }
     }
 
     /// Returns the RepD for this allocator.
@@ -467,12 +490,10 @@ impl PoolAllocator {
     /// pool is exhausted.
     // VUMA-VERIFIED: allocation from free list is well-defined
     pub fn allocate(&mut self) -> AllocResult<Address> {
-        self.free_list
-            .pop()
-            .ok_or(AllocError::OutOfMemory {
-                requested: self.block_size,
-                available: 0,
-            })
+        self.free_list.pop().ok_or(AllocError::OutOfMemory {
+            requested: self.block_size,
+            available: 0,
+        })
     }
 
     /// Return a block to the pool.
@@ -726,9 +747,11 @@ impl AllocTracker {
     /// Returns the SyncEdge annotations for the tracker.
     // VUMA-VERIFIED: synchronization edges model sequential recording
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("track_record", "track_record", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "track_record",
+            "track_record",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -873,12 +896,8 @@ impl BumpAllocator {
         }
 
         // Record in MSG
-        self.tracker.record(
-            AllocEventKind::Alloc,
-            ptr as u64,
-            size as u64,
-            align as u64,
-        );
+        self.tracker
+            .record(AllocEventKind::Alloc, ptr as u64, size as u64, align as u64);
 
         ptr
     }
@@ -910,7 +929,13 @@ impl BumpAllocator {
     /// # Safety
     ///
     /// `_ptr` must point to a valid allocation previously returned by `alloc`.
-    pub unsafe fn realloc(&mut self, _ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    pub unsafe fn realloc(
+        &mut self,
+        _ptr: *mut u8,
+        old_size: usize,
+        new_size: usize,
+        align: usize,
+    ) -> *mut u8 {
         let new_ptr = self.alloc(new_size, align);
         if new_ptr.is_null() {
             return std::ptr::null_mut();
@@ -1121,20 +1146,26 @@ impl FreeListAllocator {
             // Initialize the entire heap as one free block
             unsafe {
                 let header = alloc.heap_start as *mut BlockHeader;
-                ptr::write(header, BlockHeader {
-                    magic: VUMA_MAGIC,
-                    flags: 1, // is_free = true
-                    size: heap_size,
-                    payload_size: heap_size - BlockHeader::SIZE,
-                    align: 8,
-                    _reserved: [0; 2],
-                });
+                ptr::write(
+                    header,
+                    BlockHeader {
+                        magic: VUMA_MAGIC,
+                        flags: 1, // is_free = true
+                        size: heap_size,
+                        payload_size: heap_size - BlockHeader::SIZE,
+                        align: 8,
+                        _reserved: [0; 2],
+                    },
+                );
                 // Set up the free node
                 let free_node = BlockHeader::payload_ptr(header) as *mut FreeNode;
-                ptr::write(free_node, FreeNode {
-                    next: ptr::null_mut(),
-                    _pad: [0; 8],
-                });
+                ptr::write(
+                    free_node,
+                    FreeNode {
+                        next: ptr::null_mut(),
+                        _pad: [0; 8],
+                    },
+                );
                 alloc.free_head = free_node;
             }
         }
@@ -1207,19 +1238,25 @@ impl FreeListAllocator {
                     if remainder >= MIN_BLOCK_SIZE {
                         // Split: create a new free block from the remainder
                         let new_header = (header as *mut u8).add(needed) as *mut BlockHeader;
-                        ptr::write(new_header, BlockHeader {
-                            magic: VUMA_MAGIC,
-                            flags: 1, // is_free = true
-                            size: remainder,
-                            payload_size: remainder - BlockHeader::SIZE,
-                            align: 8,
-                            _reserved: [0; 2],
-                        });
+                        ptr::write(
+                            new_header,
+                            BlockHeader {
+                                magic: VUMA_MAGIC,
+                                flags: 1, // is_free = true
+                                size: remainder,
+                                payload_size: remainder - BlockHeader::SIZE,
+                                align: 8,
+                                _reserved: [0; 2],
+                            },
+                        );
                         let new_free = BlockHeader::payload_ptr(new_header) as *mut FreeNode;
-                        ptr::write(new_free, FreeNode {
-                            next: (*current).next,
-                            _pad: [0; 8],
-                        });
+                        ptr::write(
+                            new_free,
+                            FreeNode {
+                                next: (*current).next,
+                                _pad: [0; 8],
+                            },
+                        );
 
                         // Update current block size
                         (*header).size = needed;
@@ -1322,10 +1359,13 @@ impl FreeListAllocator {
 
             // Add to free list
             let free_node = ptr as *mut FreeNode;
-            ptr::write(free_node, FreeNode {
-                next: self.free_head,
-                _pad: [0; 8],
-            });
+            ptr::write(
+                free_node,
+                FreeNode {
+                    next: self.free_head,
+                    _pad: [0; 8],
+                },
+            );
             self.free_head = free_node;
 
             // Coalesce with adjacent free blocks
@@ -1360,7 +1400,13 @@ impl FreeListAllocator {
     /// # Safety
     ///
     /// `ptr` must point to a valid allocation previously returned by `alloc`.
-    pub unsafe fn realloc(&mut self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    pub unsafe fn realloc(
+        &mut self,
+        ptr: *mut u8,
+        old_size: usize,
+        new_size: usize,
+        align: usize,
+    ) -> *mut u8 {
         if ptr.is_null() {
             return self.alloc(new_size, align);
         }
@@ -1393,7 +1439,8 @@ impl FreeListAllocator {
                     self.stats.current_usage += diff as u64;
                 } else {
                     self.stats.total_freed += (-diff) as u64;
-                    self.stats.current_usage = self.stats.current_usage.saturating_sub((-diff) as u64);
+                    self.stats.current_usage =
+                        self.stats.current_usage.saturating_sub((-diff) as u64);
                 }
 
                 self.tracker.record(
@@ -1473,10 +1520,13 @@ impl FreeListAllocator {
 
                     // Add to free list (append to maintain order)
                     let free_node = BlockHeader::payload_ptr(header) as *mut FreeNode;
-                    ptr::write(free_node, FreeNode {
-                        next: ptr::null_mut(),
-                        _pad: [0; 8],
-                    });
+                    ptr::write(
+                        free_node,
+                        FreeNode {
+                            next: ptr::null_mut(),
+                            _pad: [0; 8],
+                        },
+                    );
 
                     if new_free_head.is_null() {
                         new_free_head = free_node;
@@ -1569,12 +1619,11 @@ impl SpinLock {
     }
 
     fn lock(&self) {
-        while self.locked.compare_exchange_weak(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ).is_err() {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             std::hint::spin_loop();
         }
     }
@@ -1672,19 +1721,25 @@ impl VumaAllocator {
         // Initialize the entire heap as one free block
         if size >= MIN_BLOCK_SIZE {
             let header = ptr as *mut BlockHeader;
-            ptr::write(header, BlockHeader {
-                magic: VUMA_MAGIC,
-                flags: 1, // is_free = true
-                size,
-                payload_size: size - BlockHeader::SIZE,
-                align: 8,
-                _reserved: [0; 2],
-            });
+            ptr::write(
+                header,
+                BlockHeader {
+                    magic: VUMA_MAGIC,
+                    flags: 1, // is_free = true
+                    size,
+                    payload_size: size - BlockHeader::SIZE,
+                    align: 8,
+                    _reserved: [0; 2],
+                },
+            );
             let free_node = BlockHeader::payload_ptr(header) as *mut FreeNode;
-            ptr::write(free_node, FreeNode {
-                next: ptr::null_mut(),
-                _pad: [0; 8],
-            });
+            ptr::write(
+                free_node,
+                FreeNode {
+                    next: ptr::null_mut(),
+                    _pad: [0; 8],
+                },
+            );
             free_list.free_head = free_node;
         }
 
@@ -1753,11 +1808,19 @@ impl VumaAllocator {
     ///
     /// `ptr` must point to a valid allocation previously returned by `alloc`.
     // VUMA-VERIFIED: realloc preserves data integrity and BD constraints
-    pub unsafe fn realloc(&self, ptr: *mut u8, old_size: usize, new_size: usize, align: usize) -> *mut u8 {
+    pub unsafe fn realloc(
+        &self,
+        ptr: *mut u8,
+        old_size: usize,
+        new_size: usize,
+        align: usize,
+    ) -> *mut u8 {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
         let result = match inner {
-            Some(ref mut inner) => unsafe { inner.free_list.realloc(ptr, old_size, new_size, align) },
+            Some(ref mut inner) => unsafe {
+                inner.free_list.realloc(ptr, old_size, new_size, align)
+            },
             None => ptr::null_mut(),
         };
         self.lock.unlock();
@@ -2044,11 +2107,15 @@ mod tests {
         let p1 = alloc.alloc(32, 8);
         assert!(!p1.is_null());
         // Write some data
-        unsafe { ptr::write(p1, 0x42u8); }
+        unsafe {
+            ptr::write(p1, 0x42u8);
+        }
         let p2 = unsafe { alloc.realloc(p1, 32, 64, 8) };
         assert!(!p2.is_null());
         // Data should be preserved
-        unsafe { assert_eq!(ptr::read(p2), 0x42u8); }
+        unsafe {
+            assert_eq!(ptr::read(p2), 0x42u8);
+        }
     }
 
     // -- New tests: FreeListAllocator ----------------------------------------
@@ -2106,12 +2173,16 @@ mod tests {
         let p1 = alloc.alloc(64, 8);
         assert!(!p1.is_null());
         // Write data
-        unsafe { ptr::write(p1, 0xABu8); }
+        unsafe {
+            ptr::write(p1, 0xABu8);
+        }
         // Grow
         let p2 = unsafe { alloc.realloc(p1, 64, 128, 8) };
         assert!(!p2.is_null());
         // Data preserved
-        unsafe { assert_eq!(ptr::read(p2), 0xABu8); }
+        unsafe {
+            assert_eq!(ptr::read(p2), 0xABu8);
+        }
     }
 
     #[test]
@@ -2213,7 +2284,9 @@ mod tests {
     fn test_vuma_allocator_global_alloc() {
         static mut HEAP: AlignedHeap<8192> = AlignedHeap::ZERO;
         let allocator = VumaAllocator::new();
-        unsafe { allocator.init(HEAP.as_mut_ptr(), HEAP.len()); }
+        unsafe {
+            allocator.init(HEAP.as_mut_ptr(), HEAP.len());
+        }
 
         // Use direct method calls (VumaAllocator::alloc takes size, align)
         let ptr = allocator.alloc(64, 8);
@@ -2226,7 +2299,9 @@ mod tests {
     fn test_vuma_allocator_stats() {
         static mut HEAP: AlignedHeap<8192> = AlignedHeap::ZERO;
         let allocator = VumaAllocator::new();
-        unsafe { allocator.init(HEAP.as_mut_ptr(), HEAP.len()); }
+        unsafe {
+            allocator.init(HEAP.as_mut_ptr(), HEAP.len());
+        }
 
         let ptr = allocator.alloc(128, 8);
         assert!(!ptr.is_null());
@@ -2245,19 +2320,25 @@ mod tests {
     fn test_vuma_allocator_realloc() {
         static mut HEAP: AlignedHeap<8192> = AlignedHeap::ZERO;
         let allocator = VumaAllocator::new();
-        unsafe { allocator.init(HEAP.as_mut_ptr(), HEAP.len()); }
+        unsafe {
+            allocator.init(HEAP.as_mut_ptr(), HEAP.len());
+        }
 
         let ptr = allocator.alloc(64, 8);
         assert!(!ptr.is_null());
 
         // Write some data
-        unsafe { ptr::write(ptr, 0xFFu8); }
+        unsafe {
+            ptr::write(ptr, 0xFFu8);
+        }
 
         // Grow
         let new_ptr = unsafe { allocator.realloc(ptr, 64, 128, 8) };
         assert!(!new_ptr.is_null());
         // Data preserved
-        unsafe { assert_eq!(ptr::read(new_ptr), 0xFFu8); }
+        unsafe {
+            assert_eq!(ptr::read(new_ptr), 0xFFu8);
+        }
 
         allocator.dealloc(new_ptr, 128, 8);
     }
@@ -2324,7 +2405,9 @@ mod tests {
     fn test_vuma_allocator_tracker() {
         static mut HEAP: AlignedHeap<8192> = AlignedHeap::ZERO;
         let allocator = VumaAllocator::new();
-        unsafe { allocator.init(HEAP.as_mut_ptr(), HEAP.len()); }
+        unsafe {
+            allocator.init(HEAP.as_mut_ptr(), HEAP.len());
+        }
 
         let ptr = allocator.alloc(64, 8);
         assert!(!ptr.is_null());
@@ -2341,7 +2424,9 @@ mod tests {
     fn test_vuma_allocator_active_allocations() {
         static mut HEAP: AlignedHeap<8192> = AlignedHeap::ZERO;
         let allocator = VumaAllocator::new();
-        unsafe { allocator.init(HEAP.as_mut_ptr(), HEAP.len()); }
+        unsafe {
+            allocator.init(HEAP.as_mut_ptr(), HEAP.len());
+        }
 
         assert_eq!(allocator.active_allocations(), 0);
         let p1 = allocator.alloc(64, 8);
@@ -2443,7 +2528,10 @@ mod tests {
 
         // After coalescing, the available space should reflect freed blocks
         let available = alloc.available();
-        assert!(available >= 256, "should have at least 256 bytes available after freeing");
+        assert!(
+            available >= 256,
+            "should have at least 256 bytes available after freeing"
+        );
 
         // Allocating again should succeed
         let p4 = alloc.alloc(256, 8);
@@ -2479,14 +2567,20 @@ mod tests {
 
     #[test]
     fn test_alloc_error_display() {
-        let err = AllocError::OutOfMemory { requested: 1024, available: 512 };
+        let err = AllocError::OutOfMemory {
+            requested: 1024,
+            available: 512,
+        };
         assert!(err.to_string().contains("1024"));
         assert!(err.to_string().contains("512"));
 
         let err = AllocError::InvalidAlignment { align: 3 };
         assert!(err.to_string().contains("3"));
 
-        let err = AllocError::SizeMismatch { expected: 64, actual: 128 };
+        let err = AllocError::SizeMismatch {
+            expected: 64,
+            actual: 128,
+        };
         assert!(err.to_string().contains("64"));
         assert!(err.to_string().contains("128"));
     }

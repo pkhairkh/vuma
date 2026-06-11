@@ -80,14 +80,19 @@ impl fmt::Display for WeakeningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WeakeningError::CapabilityNotPresent { extra_caps } => {
-                write!(f, "weakening error: target adds capabilities not in source: ")?;
+                write!(
+                    f,
+                    "weakening error: target adds capabilities not in source: "
+                )?;
                 let strs: Vec<String> = extra_caps.iter().map(|c| format!("{c}")).collect();
                 write!(f, "{}", strs.join(", "))
             }
             WeakeningError::ConditionRemoved { removed_conditions } => {
-                write!(f, "weakening error: target removes conditions from source: ")?;
-                let strs: Vec<String> =
-                    removed_conditions.iter().map(|c| format!("{c}")).collect();
+                write!(
+                    f,
+                    "weakening error: target removes conditions from source: "
+                )?;
+                let strs: Vec<String> = removed_conditions.iter().map(|c| format!("{c}")).collect();
                 write!(f, "{}", strs.join(", "))
             }
             WeakeningError::BothViolations {
@@ -150,8 +155,7 @@ impl fmt::Display for StrengtheningError {
             }
             StrengtheningError::ConditionRelaxation { relaxed_conditions } => {
                 write!(f, "strengthening error: cannot relax conditions: ")?;
-                let strs: Vec<String> =
-                    relaxed_conditions.iter().map(|c| format!("{c}")).collect();
+                let strs: Vec<String> = relaxed_conditions.iter().map(|c| format!("{c}")).collect();
                 write!(f, "{}", strs.join(", "))
             }
             StrengtheningError::BothViolations {
@@ -320,8 +324,11 @@ pub fn weaken(c: &CapD, target: &CapD) -> Result<CapD, WeakeningError> {
     // Compute which capabilities the target adds beyond the source
     let extra_caps: HashSet<Capability> = target.caps.difference(&c.caps).copied().collect();
     // Compute which conditions the target removes relative to the source
-    let removed_conditions: HashSet<Condition> =
-        c.conditions.difference(&target.conditions).copied().collect();
+    let removed_conditions: HashSet<Condition> = c
+        .conditions
+        .difference(&target.conditions)
+        .copied()
+        .collect();
 
     let has_extra_caps = !extra_caps.is_empty();
     let has_removed_conditions = !removed_conditions.is_empty();
@@ -581,11 +588,9 @@ const PTR_COMPATIBLE_CAPS: &[Capability] = &[
 /// ```
 pub fn context_weaken(c: &CapD, usage: UsageContext) -> CapD {
     let retained: HashSet<Capability> = match usage {
-        UsageContext::Observation => {
-            [Capability::Read, Capability::Compare, Capability::Hash]
-                .into_iter()
-                .collect()
-        }
+        UsageContext::Observation => [Capability::Read, Capability::Compare, Capability::Hash]
+            .into_iter()
+            .collect(),
         UsageContext::ReadOnly => c
             .caps
             .iter()
@@ -641,11 +646,14 @@ pub fn context_weaken(c: &CapD, usage: UsageContext) -> CapD {
                 )
             })
             .collect(),
-        UsageContext::Serialization => {
-            [Capability::Read, Capability::Serialize, Capability::Hash, Capability::Compare]
-                .into_iter()
-                .collect()
-        }
+        UsageContext::Serialization => [
+            Capability::Read,
+            Capability::Serialize,
+            Capability::Hash,
+            Capability::Compare,
+        ]
+        .into_iter()
+        .collect(),
         UsageContext::PointerDerivation => {
             let ptr_set: HashSet<Capability> = PTR_COMPATIBLE_CAPS.iter().copied().collect();
             c.caps.intersection(&ptr_set).copied().collect()
@@ -714,8 +722,7 @@ pub fn verify_commutativity(a: &CapD, b: &CapD) -> bool {
 /// - `meet(a, meet(b, c)) = meet(meet(a, b), c)`
 /// - `join(a, join(b, c)) = join(join(a, b), c)`
 pub fn verify_associativity(a: &CapD, b: &CapD, c: &CapD) -> bool {
-    meet(a, &meet(b, c)) == meet(&meet(a, b), c)
-        && join(a, &join(b, c)) == join(&join(a, b), c)
+    meet(a, &meet(b, c)) == meet(&meet(a, b), c) && join(a, &join(b, c)) == join(&join(a, b), c)
 }
 
 /// Verify the **absorption** law: `meet(a, join(a, b)) = a` and
@@ -1109,7 +1116,10 @@ mod tests {
 
     #[test]
     fn test_context_weaken_preserves_conditions() {
-        let d = capd_with_cond(&[Capability::Read, Capability::Write], Condition::InPhase(1));
+        let d = capd_with_cond(
+            &[Capability::Read, Capability::Write],
+            Condition::InPhase(1),
+        );
         let weakened = context_weaken(&d, UsageContext::ReadOnly);
         assert!(weakened.conditions.contains(&Condition::InPhase(1)));
     }
@@ -1292,5 +1302,4 @@ mod tests {
         let w = widen(&c1, &c2);
         assert_eq!(w, CapD::all());
     }
-
 }

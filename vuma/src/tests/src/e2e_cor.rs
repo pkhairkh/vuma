@@ -24,9 +24,8 @@ use vuma_cor::config::Config as CorConfig;
 use vuma_cor::runtime::CORuntime;
 use vuma_cor::types::{Delta, NodeKind, SCGEdge, SCGNode};
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode,
-    EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCG, SCGRegion,
-    DeploymentTarget,
+    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
+    EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCGRegion, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,7 +61,9 @@ fn build_test_vuma_scg() -> SCG {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i64".to_string()), tail_call: false }),
+            result_type: Some("i64".to_string()),
+            tail_call: false,
+        }),
         pp.clone(),
     );
     let dealloc_id = scg.add_node(
@@ -147,7 +148,10 @@ fn build_runtime_from_vuma_scg() -> CORuntime {
     let mut rt = CORuntime::from_vuma_scg(scg_arc, config);
 
     // Compile all nodes incrementally.
-    let all_node_ids: Vec<u64> = build_test_vuma_scg().node_ids().map(|id| id.as_u64()).collect();
+    let all_node_ids: Vec<u64> = build_test_vuma_scg()
+        .node_ids()
+        .map(|id| id.as_u64())
+        .collect();
     let delta = Delta {
         added_nodes: all_node_ids,
         removed_nodes: Vec::new(),
@@ -198,7 +202,8 @@ fn build_rich_cor_runtime() -> CORuntime {
     cor_scg.insert_edge(SCGEdge::new(100, 1, 10)); // entry → call
     cor_scg.insert_edge(SCGEdge::new(200, 10, 40)); // call → cold branch
     cor_scg.insert_edge(SCGEdge::new(300, 20, 30)); // loop → memory (forward)
-    cor_scg.insert_edge(SCGEdge {    // memory → loop (back-edge, high weight)
+    cor_scg.insert_edge(SCGEdge {
+        // memory → loop (back-edge, high weight)
         id: 400,
         source: 30,
         target: 20,
@@ -246,29 +251,44 @@ fn test_e2e_cor_pipeline() {
     let config = vuma::pipeline::CompileConfig::default();
     let result = vuma::pipeline::compile(source, &config);
 
-    assert!(result.is_ok(), "Full pipeline should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Full pipeline should succeed: {:?}",
+        result.err()
+    );
     let output = result.unwrap();
 
     // Binary output should exist.
     assert!(!output.binary.is_empty(), "Should produce binary output");
 
     // COR runtime should be initialized.
-    assert!(output.cor_runtime.is_some(), "COR runtime should be initialized after CorInit stage");
+    assert!(
+        output.cor_runtime.is_some(),
+        "COR runtime should be initialized after CorInit stage"
+    );
 
     // COR runtime should have compiled at least one region (since the SCG
     // has nodes).
     let rt = output.cor_runtime.as_ref().unwrap();
-    assert!(rt.compiled_state().len() > 0,
+    assert!(
+        rt.compiled_state().len() > 0,
         "COR should have at least one compiled region (SCG has {} nodes)",
         output.scg.node_count(),
     );
 
     // The stage timings should include "cor-init".
-    let has_cor_init = output.stage_timings.iter().any(|(name, _)| name == "cor-init");
+    let has_cor_init = output
+        .stage_timings
+        .iter()
+        .any(|(name, _)| name == "cor-init");
     assert!(has_cor_init, "Stage timings should include 'cor-init'");
 
     // Total stages should be 11.
-    assert_eq!(output.stage_timings.len(), 11, "Should have 11 stages including CorInit");
+    assert_eq!(
+        output.stage_timings.len(),
+        11,
+        "Should have 11 stages including CorInit"
+    );
 }
 
 // ===========================================================================
@@ -288,7 +308,10 @@ fn test_e2e_cor_compile_incremental() {
     let mut rt = build_runtime_from_vuma_scg();
 
     let initial_count = rt.compiled_state().len();
-    assert!(initial_count > 0, "Initial compilation should produce compiled regions");
+    assert!(
+        initial_count > 0,
+        "Initial compilation should produce compiled regions"
+    );
 
     // Add new nodes via a delta.
     let new_delta = Delta {
@@ -300,14 +323,26 @@ fn test_e2e_cor_compile_incremental() {
 
     let recompiled = rt.compile_incremental(&new_delta);
     assert_eq!(recompiled.len(), 2, "Should compile 2 new regions");
-    assert!(rt.compiled_state().is_compiled(900), "Node 900 should be compiled");
-    assert!(rt.compiled_state().is_compiled(901), "Node 901 should be compiled");
-    assert_eq!(rt.compiled_state().len(), initial_count + 2,
-        "Compiled state should grow by 2");
+    assert!(
+        rt.compiled_state().is_compiled(900),
+        "Node 900 should be compiled"
+    );
+    assert!(
+        rt.compiled_state().is_compiled(901),
+        "Node 901 should be compiled"
+    );
+    assert_eq!(
+        rt.compiled_state().len(),
+        initial_count + 2,
+        "Compiled state should grow by 2"
+    );
 
     // Verify the compiled regions contain actual ARM64 code.
     let compiled_900 = rt.compiled_state().get(900).unwrap();
-    assert!(!compiled_900.code.is_empty(), "Compiled region 900 should have code");
+    assert!(
+        !compiled_900.code.is_empty(),
+        "Compiled region 900 should have code"
+    );
 }
 
 // ===========================================================================
@@ -340,8 +375,11 @@ fn test_e2e_cor_execute_region() {
     let region_id = region_id.expect("Should have at least one compiled region");
 
     // Verify the region was compiled successfully.
-    assert!(rt.compiled_state().is_compiled(region_id),
-        "Region {} should be compiled", region_id);
+    assert!(
+        rt.compiled_state().is_compiled(region_id),
+        "Region {} should be compiled",
+        region_id
+    );
 
     // Verify profile data is accessible (even without execution).
     // The COR records compilation events in the profile data.
@@ -382,7 +420,8 @@ fn test_e2e_cor_optimize_cycle() {
     let reoptimized = rt.optimize();
 
     // At least one region should be re-optimized.
-    assert!(reoptimized >= 1,
+    assert!(
+        reoptimized >= 1,
         "At least one hot region should be re-optimized, got {}",
         reoptimized,
     );
@@ -392,20 +431,25 @@ fn test_e2e_cor_optimize_cycle() {
 
     // Hot call node 10 should be inlined.
     let call_node = scg.get_node(10).unwrap();
-    assert!(call_node.is_inlined,
-        "Hot Call node 10 should be inlined after optimization");
+    assert!(
+        call_node.is_inlined,
+        "Hot Call node 10 should be inlined after optimization"
+    );
 
     // Hot loop node 20 should be unrolled.
     let loop_node = scg.get_node(20).unwrap();
-    assert!(loop_node.unroll_factor > 1,
+    assert!(
+        loop_node.unroll_factor > 1,
         "Hot Loop node 20 should be unrolled (factor > 1), got {}",
         loop_node.unroll_factor,
     );
 
     // Hot memory node 30 should have prefetch.
     let mem_node = scg.get_node(30).unwrap();
-    assert!(mem_node.has_prefetch,
-        "Hot Memory node 30 should have prefetch after optimization");
+    assert!(
+        mem_node.has_prefetch,
+        "Hot Memory node 30 should have prefetch after optimization"
+    );
 }
 
 // ===========================================================================
@@ -452,31 +496,43 @@ fn test_e2e_cor_full_lifecycle() {
 
     // ── Phase 3: Profile ──────────────────────────────────────────────
     let hot_paths = rt.profile_data_mut().get_hot_paths(5);
-    assert!(!hot_paths.is_empty(), "Should have hot paths after execution");
+    assert!(
+        !hot_paths.is_empty(),
+        "Should have hot paths after execution"
+    );
 
     // At least some nodes should have high call counts.
     let total_calls: u64 = rt.profile_data().call_counts.values().sum();
-    assert!(total_calls > 0, "Total calls should be non-zero after execution");
+    assert!(
+        total_calls > 0,
+        "Total calls should be non-zero after execution"
+    );
 
     // ── Phase 4: Optimize ─────────────────────────────────────────────
     let reoptimized = rt.optimize();
-    assert!(reoptimized >= 1,
+    assert!(
+        reoptimized >= 1,
         "At least one region should be re-optimized after profiling, got {}",
         reoptimized,
     );
 
     // Verify SCG was actually modified.
     let call_node = rt.scg().get_node(10).unwrap();
-    assert!(call_node.is_inlined,
-        "Hot Call node should be inlined after optimization cycle");
+    assert!(
+        call_node.is_inlined,
+        "Hot Call node should be inlined after optimization cycle"
+    );
 
     // ── Phase 5: Re-execute ───────────────────────────────────────────
     // After optimization, the compiled regions should still be in a valid state.
     // We verify the compiled state rather than executing (which may fail on
     // non-native architectures).
     for region_id in &[1u64, 10, 20, 30] {
-        assert!(rt.compiled_state().is_compiled(*region_id),
-            "Region {} should still be compiled after optimization", region_id);
+        assert!(
+            rt.compiled_state().is_compiled(*region_id),
+            "Region {} should still be compiled after optimization",
+            region_id
+        );
     }
 
     // Profile data should reflect the direct record_access calls we made.
@@ -484,9 +540,11 @@ fn test_e2e_cor_full_lifecycle() {
     // Note: Since we use record_access directly rather than execute(),
     // the call counts may not increase further after optimization.
     // Just verify the profile data is still accessible and consistent.
-    assert!(total_calls_after >= total_calls,
+    assert!(
+        total_calls_after >= total_calls,
         "Call counts should not decrease (was {}, now {})",
-        total_calls, total_calls_after,
+        total_calls,
+        total_calls_after,
     );
 }
 

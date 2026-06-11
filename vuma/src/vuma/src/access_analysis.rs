@@ -225,8 +225,12 @@ impl fmt::Display for StreamingPattern {
         write!(
             f,
             "Stream {} {} stride={} count={} dir={} kind={}",
-            self.derivation_id, self.start_address, self.stride,
-            self.access_count, self.direction, self.kind
+            self.derivation_id,
+            self.start_address,
+            self.stride,
+            self.access_count,
+            self.direction,
+            self.kind
         )
     }
 }
@@ -275,13 +279,21 @@ pub struct AccessHistogram {
 
 impl fmt::Display for AccessHistogram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "AccessHistogram {{ total_accesses={}, regions={} }}", self.total_accesses, self.buckets.len())?;
+        writeln!(
+            f,
+            "AccessHistogram {{ total_accesses={}, regions={} }}",
+            self.total_accesses,
+            self.buckets.len()
+        )?;
         for (rid, stats) in &self.buckets {
             writeln!(
                 f,
                 "  {}: reads={} writes={} density={:.2} hot_spots={}",
-                rid, stats.read_count, stats.write_count,
-                stats.access_density, stats.hot_offsets.len()
+                rid,
+                stats.read_count,
+                stats.write_count,
+                stats.access_density,
+                stats.hot_offsets.len()
             )?;
         }
         Ok(())
@@ -345,7 +357,10 @@ fn detect_rw_patterns(accesses: &[&Access]) -> Vec<AccessPattern> {
         return patterns;
     }
 
-    let reads = accesses.iter().filter(|a| a.kind == AccessKind::Read).count();
+    let reads = accesses
+        .iter()
+        .filter(|a| a.kind == AccessKind::Read)
+        .count();
     let writes = accesses.len() - reads;
     let read_ratio = reads as f64 / accesses.len() as f64;
     let write_ratio = writes as f64 / accesses.len() as f64;
@@ -551,9 +566,7 @@ pub fn detect_false_sharing(msg: &MSG) -> Vec<FalseSharing> {
             }
 
             // Check different owner contexts.
-            let _owner1 = msg
-                .region(rid)
-                .and_then(|r| r.owner_context.clone());
+            let _owner1 = msg.region(rid).and_then(|r| r.owner_context.clone());
             // For false sharing, we want accesses from *different* contexts.
             // If owner_context is the same or None, we still flag if the
             // accesses don't overlap but share a cache line.
@@ -602,8 +615,7 @@ pub fn detect_false_sharing(msg: &MSG) -> Vec<FalseSharing> {
 /// Check if two accesses are ordered by any synchronisation edge.
 fn are_ordered(msg: &MSG, a1: AccessId, a2: AccessId) -> bool {
     for edge in msg.sync_edges() {
-        if (edge.access1 == a1 && edge.access2 == a2)
-            || (edge.access1 == a2 && edge.access2 == a1)
+        if (edge.access1 == a1 && edge.access2 == a2) || (edge.access1 == a2 && edge.access2 == a1)
         {
             return true;
         }
@@ -755,7 +767,10 @@ pub fn detect_streaming_patterns(msg: &MSG) -> Vec<StreamingPattern> {
         };
 
         // Determine dominant access kind.
-        let reads = resolved.iter().filter(|(a, _)| a.kind == AccessKind::Read).count();
+        let reads = resolved
+            .iter()
+            .filter(|(a, _)| a.kind == AccessKind::Read)
+            .count();
         let kind = if reads as f64 / resolved.len() as f64 >= MOSTLY_THRESHOLD {
             AccessKind::Read
         } else {
@@ -797,7 +812,10 @@ pub fn compute_access_histogram(msg: &MSG) -> AccessHistogram {
         let region_size = msg.region(*rid).map(|r| r.size).unwrap_or(1);
         let region_base = msg.region(*rid).map(|r| r.base).unwrap_or(Address::NULL);
 
-        let read_count = accesses.iter().filter(|a| a.kind == AccessKind::Read).count();
+        let read_count = accesses
+            .iter()
+            .filter(|a| a.kind == AccessKind::Read)
+            .count();
         let write_count = accesses.len() - read_count;
 
         // Build per-offset histogram.
@@ -838,10 +856,7 @@ pub fn compute_access_histogram(msg: &MSG) -> AccessHistogram {
     // Include regions with zero accesses.
     for region in msg.regions() {
         if !buckets.contains_key(&region.id) {
-            buckets.insert(
-                region.id,
-                RegionAccessStats::empty(region.size),
-            );
+            buckets.insert(region.id, RegionAccessStats::empty(region.size));
         }
     }
 
@@ -934,7 +949,11 @@ mod tests {
             msg.add_access(Access::new(
                 AccessId(i + 1),
                 DerivationId(1),
-                if i < 9 { AccessKind::Write } else { AccessKind::Read },
+                if i < 9 {
+                    AccessKind::Write
+                } else {
+                    AccessKind::Read
+                },
                 4,
                 dummy_pp(10 + i as u32),
             ));
@@ -1251,7 +1270,10 @@ mod tests {
     #[test]
     fn test_access_pattern_display() {
         assert_eq!(format!("{}", AccessPattern::Sequential), "sequential");
-        assert_eq!(format!("{}", AccessPattern::Strided { stride: 16 }), "strided(stride=16)");
+        assert_eq!(
+            format!("{}", AccessPattern::Strided { stride: 16 }),
+            "strided(stride=16)"
+        );
         assert_eq!(format!("{}", AccessPattern::Random), "random");
         assert_eq!(format!("{}", AccessPattern::Streaming), "streaming");
         assert_eq!(format!("{}", AccessPattern::ReadMostly), "read-mostly");
@@ -1410,7 +1432,10 @@ mod tests {
         ));
 
         let false_sharing = detect_false_sharing(&msg);
-        assert!(false_sharing.is_empty(), "Two reads should not trigger false sharing");
+        assert!(
+            false_sharing.is_empty(),
+            "Two reads should not trigger false sharing"
+        );
     }
 
     #[test]

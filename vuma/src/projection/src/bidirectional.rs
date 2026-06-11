@@ -357,7 +357,11 @@ impl BidirectionalProjection {
     pub fn apply_visual_edit(&mut self, scg: &mut SCG, edit: VisualEdit) -> EditResult<()> {
         match &edit {
             // ── AddEdge: handled directly ───────────────────────────────────
-            VisualEdit::AddEdge { source, target, kind } => {
+            VisualEdit::AddEdge {
+                source,
+                target,
+                kind,
+            } => {
                 // Validate endpoints
                 if scg.get_node(*source).is_none() {
                     return Err(EditError::NotFound {
@@ -370,7 +374,11 @@ impl BidirectionalProjection {
                     });
                 }
                 // No duplicate edge
-                if scg.edges.iter().any(|e| e.source == *source && e.target == *target && e.kind == *kind) {
+                if scg
+                    .edges
+                    .iter()
+                    .any(|e| e.source == *source && e.target == *target && e.kind == *kind)
+                {
                     return Err(EditError::InvalidSCG {
                         reason: format!(
                             "edge from {} to {} (kind {:?}) already exists",
@@ -380,7 +388,8 @@ impl BidirectionalProjection {
                 }
                 // Conflict check
                 let element_key = format!("edge_new:{}:{}:{:?}", source, target, kind);
-                self.conflict_tracker.check(&element_key, ProjectionSource::Visual)?;
+                self.conflict_tracker
+                    .check(&element_key, ProjectionSource::Visual)?;
 
                 // Apply
                 let new_id = scg.edges.iter().map(|e| e.id).max().unwrap_or(0) + 1;
@@ -390,7 +399,8 @@ impl BidirectionalProjection {
                     target: *target,
                     kind: *kind,
                 });
-                self.conflict_tracker.record(&element_key, ProjectionSource::Visual);
+                self.conflict_tracker
+                    .record(&element_key, ProjectionSource::Visual);
 
                 // Validate resulting SCG
                 self.validate_scg_wellformedness(scg)?;
@@ -405,10 +415,12 @@ impl BidirectionalProjection {
                     });
                 }
                 let element_key = format!("edge:{}", edge_id);
-                self.conflict_tracker.check(&element_key, ProjectionSource::Visual)?;
+                self.conflict_tracker
+                    .check(&element_key, ProjectionSource::Visual)?;
 
                 scg.edges.retain(|e| e.id != *edge_id);
-                self.conflict_tracker.record(&element_key, ProjectionSource::Visual);
+                self.conflict_tracker
+                    .record(&element_key, ProjectionSource::Visual);
 
                 self.validate_scg_wellformedness(scg)?;
                 Ok(())
@@ -422,18 +434,24 @@ impl BidirectionalProjection {
                     });
                 }
                 // Check for label conflict
-                if scg.nodes.iter().any(|n| n.id != *node_id && n.label == *new_label) {
+                if scg
+                    .nodes
+                    .iter()
+                    .any(|n| n.id != *node_id && n.label == *new_label)
+                {
                     return Err(EditError::InvalidSCG {
                         reason: format!("another node already has the label `{}`", new_label),
                     });
                 }
                 let element_key = format!("node:{}", node_id);
-                self.conflict_tracker.check(&element_key, ProjectionSource::Visual)?;
+                self.conflict_tracker
+                    .check(&element_key, ProjectionSource::Visual)?;
 
                 if let Some(node) = scg.nodes.iter_mut().find(|n| n.id == *node_id) {
                     node.label = new_label.clone();
                 }
-                self.conflict_tracker.record(&element_key, ProjectionSource::Visual);
+                self.conflict_tracker
+                    .record(&element_key, ProjectionSource::Visual);
 
                 self.validate_scg_wellformedness(scg)?;
                 Ok(())
@@ -489,7 +507,11 @@ impl BidirectionalProjection {
     /// edit is invalid.
     pub fn validate_edit(&self, scg: &SCG, edit: &SCGEdit) -> EditResult<bool> {
         match edit {
-            SCGEdit::AddNode { label, kind: _, bds: _ } => {
+            SCGEdit::AddNode {
+                label,
+                kind: _,
+                bds: _,
+            } => {
                 let label_exists = scg.nodes.iter().any(|n| n.label == *label);
                 if label_exists {
                     return Err(EditError::InvalidSCG {
@@ -509,10 +531,7 @@ impl BidirectionalProjection {
                 let has_outgoing = scg.edges.iter().any(|e| e.source == *node_id);
                 if has_incoming || has_outgoing {
                     return Err(EditError::InvalidSCG {
-                        reason: format!(
-                            "removing node {} would leave dangling edges",
-                            node_id
-                        ),
+                        reason: format!("removing node {} would leave dangling edges", node_id),
                     });
                 }
                 Ok(false)
@@ -555,10 +574,7 @@ impl BidirectionalProjection {
                     let already_exists = node_ref.bds.iter().any(|bd| bd.name == *bd_name);
                     if already_exists {
                         return Err(EditError::InvalidSCG {
-                            reason: format!(
-                                "node {} already has BD `{}`",
-                                node_id, bd_name
-                            ),
+                            reason: format!("node {} already has BD `{}`", node_id, bd_name),
                         });
                     }
                 } else {
@@ -589,8 +605,7 @@ impl BidirectionalProjection {
     /// - No self-loops on certain edge kinds (Borrow edges must not be self-loops).
     pub fn validate_scg_wellformedness(&self, scg: &SCG) -> EditResult<()> {
         // Collect node IDs
-        let node_ids: std::collections::HashSet<NodeId> =
-            scg.nodes.iter().map(|n| n.id).collect();
+        let node_ids: std::collections::HashSet<NodeId> = scg.nodes.iter().map(|n| n.id).collect();
 
         // Check edge endpoints
         for edge in &scg.edges {
@@ -691,7 +706,9 @@ impl BidirectionalProjection {
             SCGEdit::AddNode { label, .. } => format!("node_label:{}", label),
             SCGEdit::RemoveNode { node_id } => format!("node:{}", node_id),
             SCGEdit::ModifyEdge { edge_id, .. } => format!("edge:{}", edge_id),
-            SCGEdit::ChangeBD { node_id, bd_name, .. } => {
+            SCGEdit::ChangeBD {
+                node_id, bd_name, ..
+            } => {
                 format!("bd:{}:{}", node_id, bd_name)
             }
         }
@@ -699,7 +716,7 @@ impl BidirectionalProjection {
 
     /// Applies a single [`SCGEdit`] to the SCG in-place.
     fn apply_single_edit(&self, scg: &mut SCG, edit: SCGEdit) -> EditResult<()> {
-        use crate::{BehaviouralDescriptor, BdKind as InnerBdKind, SCGNode};
+        use crate::{BdKind as InnerBdKind, BehaviouralDescriptor, SCGNode};
 
         match edit {
             SCGEdit::AddNode { label, kind, bds } => {
@@ -725,7 +742,8 @@ impl BidirectionalProjection {
             }
 
             SCGEdit::RemoveNode { node_id } => {
-                scg.edges.retain(|e| e.source != node_id && e.target != node_id);
+                scg.edges
+                    .retain(|e| e.source != node_id && e.target != node_id);
                 scg.nodes.retain(|n| n.id != node_id);
                 for region in &mut scg.regions {
                     region.nodes.retain(|&id| id != node_id);
@@ -769,7 +787,8 @@ impl BidirectionalProjection {
                             parameter: None,
                         });
                     } else {
-                        node.bds.retain(|bd| !(bd.name == bd_name && bd.kind == bd_kind));
+                        node.bds
+                            .retain(|bd| !(bd.name == bd_name && bd.kind == bd_kind));
                     }
                     Ok(())
                 } else {
@@ -784,13 +803,11 @@ impl BidirectionalProjection {
     /// Translates a [`VisualEdit`] into one or more [`SCGEdit`] operations.
     fn translate_visual_edit(&self, scg: &SCG, edit: &VisualEdit) -> EditResult<Vec<SCGEdit>> {
         match edit {
-            VisualEdit::AddNode { label, kind, bds } => {
-                Ok(vec![SCGEdit::AddNode {
-                    label: label.clone(),
-                    kind: *kind,
-                    bds: bds.clone(),
-                }])
-            }
+            VisualEdit::AddNode { label, kind, bds } => Ok(vec![SCGEdit::AddNode {
+                label: label.clone(),
+                kind: *kind,
+                bds: bds.clone(),
+            }]),
 
             VisualEdit::RemoveNode { node_id } => {
                 // Check that node exists
@@ -804,7 +821,11 @@ impl BidirectionalProjection {
                 Ok(vec![SCGEdit::RemoveNode { node_id: *node_id }])
             }
 
-            VisualEdit::AddEdge { source, target, kind } => {
+            VisualEdit::AddEdge {
+                source,
+                target,
+                kind,
+            } => {
                 // Validate that both endpoints exist
                 if scg.get_node(*source).is_none() {
                     return Err(EditError::NotFound {
@@ -870,10 +891,7 @@ impl BidirectionalProjection {
                     .any(|n| n.id != *node_id && n.label == *new_label);
                 if label_exists {
                     return Err(EditError::InvalidSCG {
-                        reason: format!(
-                            "another node already has the label `{}`",
-                            new_label
-                        ),
+                        reason: format!("another node already has the label `{}`", new_label),
                     });
                 }
                 // MoveNode is a rename — we don't have a RenameNode in SCGEdit,
@@ -899,11 +917,7 @@ impl BidirectionalProjection {
     ///
     /// Uses a simple diff-based approach: identify added/removed/changed lines
     /// and map them back to SCG elements based on the projection grammar.
-    fn parse_text_edits(
-        &self,
-        old_text: &str,
-        new_text: &str,
-    ) -> EditResult<Vec<SCGEdit>> {
+    fn parse_text_edits(&self, old_text: &str, new_text: &str) -> EditResult<Vec<SCGEdit>> {
         let old_lines: Vec<&str> = old_text.lines().collect();
         let new_lines: Vec<&str> = new_text.lines().collect();
 
@@ -913,10 +927,8 @@ impl BidirectionalProjection {
         // old_text (additions), and lines that appear in old_text but not in
         // new_text (removals). Match by content.
 
-        let old_set: std::collections::HashSet<&str> =
-            old_lines.iter().copied().collect();
-        let new_set: std::collections::HashSet<&str> =
-            new_lines.iter().copied().collect();
+        let old_set: std::collections::HashSet<&str> = old_lines.iter().copied().collect();
+        let new_set: std::collections::HashSet<&str> = new_lines.iter().copied().collect();
 
         // Added lines — try to parse as new node declarations
         for line in &new_lines {
@@ -1099,10 +1111,7 @@ impl BidirectionalProjection {
 ///
 /// Converts to the projection representation, applies the edit via the
 /// bidirectional projection engine, then converts back.
-pub fn apply_edit_to_scg(
-    scg: &vuma_scg::SCG,
-    edit: SCGEdit,
-) -> Result<vuma_scg::SCG, EditError> {
+pub fn apply_edit_to_scg(scg: &vuma_scg::SCG, edit: SCGEdit) -> Result<vuma_scg::SCG, EditError> {
     let mut proj_scg = crate::scg_adapter::from_scg(scg);
     let proj = BidirectionalProjection::new();
     proj.apply_single_edit(&mut proj_scg, edit)?;
@@ -1110,10 +1119,7 @@ pub fn apply_edit_to_scg(
 }
 
 /// Validate an edit against a real vuma-scg SCG without applying it.
-pub fn validate_scg_edit(
-    scg: &vuma_scg::SCG,
-    edit: &SCGEdit,
-) -> Result<bool, EditError> {
+pub fn validate_scg_edit(scg: &vuma_scg::SCG, edit: &SCGEdit) -> Result<bool, EditError> {
     let proj_scg = crate::scg_adapter::from_scg(scg);
     let proj = BidirectionalProjection::new();
     proj.validate_edit(&proj_scg, edit)
@@ -1202,7 +1208,7 @@ impl BidirectionalEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BehaviouralDescriptor, BdKind, EdgeKind, SCGEdge, SCGNode};
+    use crate::{BdKind, BehaviouralDescriptor, EdgeKind, SCGEdge, SCGNode};
 
     fn sample_scg() -> SCG {
         SCG {
@@ -1287,7 +1293,10 @@ mod tests {
         let result = proj.apply_visual_edit(&mut scg, edit);
         // AddEdge is handled specially — it adds the edge directly
         if result.is_ok() {
-            assert!(scg.edges.iter().any(|e| e.source == 2 && e.target == 1 && e.kind == EdgeKind::ControlFlow));
+            assert!(scg
+                .edges
+                .iter()
+                .any(|e| e.source == 2 && e.target == 1 && e.kind == EdgeKind::ControlFlow));
         }
     }
 
@@ -1369,20 +1378,18 @@ mod tests {
     #[test]
     fn conflict_detected_across_sources() {
         let mut scg = SCG {
-            nodes: vec![
-                SCGNode {
-                    id: 1,
-                    label: "auth".into(),
-                    kind: NodeKind::Function,
-                    bds: vec![BehaviouralDescriptor {
-                        id: 100,
-                        name: "Send".into(),
-                        kind: BdKind::Capability,
-                        parameter: None,
-                    }],
-                    regions: vec![],
-                },
-            ],
+            nodes: vec![SCGNode {
+                id: 1,
+                label: "auth".into(),
+                kind: NodeKind::Function,
+                bds: vec![BehaviouralDescriptor {
+                    id: 100,
+                    name: "Send".into(),
+                    kind: BdKind::Capability,
+                    parameter: None,
+                }],
+                regions: vec![],
+            }],
             edges: vec![],
             regions: vec![],
         };
@@ -1404,7 +1411,11 @@ mod tests {
         let result2 = proj.apply_conversational_edit(&mut scg, "make auth thread-safe");
         assert!(result2.is_err());
         match result2.unwrap_err() {
-            EditError::Conflict { element, prev_source, new_source } => {
+            EditError::Conflict {
+                element,
+                prev_source,
+                new_source,
+            } => {
                 assert_eq!(prev_source, ProjectionSource::Visual);
                 assert_eq!(new_source, ProjectionSource::Conversational);
                 assert!(element.contains("bd:1:"));
@@ -1494,20 +1505,18 @@ mod tests {
     #[test]
     fn no_conflict_same_source() {
         let mut scg = SCG {
-            nodes: vec![
-                SCGNode {
-                    id: 1,
-                    label: "auth".into(),
-                    kind: NodeKind::Function,
-                    bds: vec![BehaviouralDescriptor {
-                        id: 100,
-                        name: "Send".into(),
-                        kind: BdKind::Capability,
-                        parameter: None,
-                    }],
-                    regions: vec![],
-                },
-            ],
+            nodes: vec![SCGNode {
+                id: 1,
+                label: "auth".into(),
+                kind: NodeKind::Function,
+                bds: vec![BehaviouralDescriptor {
+                    id: 100,
+                    name: "Send".into(),
+                    kind: BdKind::Capability,
+                    parameter: None,
+                }],
+                regions: vec![],
+            }],
             edges: vec![],
             regions: vec![],
         };

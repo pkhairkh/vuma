@@ -29,12 +29,8 @@ use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
-use crate::models::{
-    ProofMSG, ProofRegion, ProofRegionStatus, ProofSCG,
-};
-use crate::proof::{
-    Conclusion, Fact, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
-};
+use crate::models::{ProofMSG, ProofRegion, ProofRegionStatus, ProofSCG};
+use crate::proof::{Conclusion, Fact, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 use crate::rules::InferenceRule;
 
 // ---------------------------------------------------------------------------
@@ -223,7 +219,9 @@ impl NoDeadlockProof {
     /// Check this proof with the standard proof checker.
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
-        checker.check(&self.proof).unwrap_or(CheckResult::Incomplete)
+        checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
     }
 }
 
@@ -248,7 +246,11 @@ pub struct AllocationFreedProof {
 
 impl AllocationFreedProof {
     /// Attempt to prove that `region` is freed on all paths through `scg`.
-    pub fn prove(region: &ProofRegion, _scg: &ProofSCG, tactic: LivenessTactic) -> Result<Self, ProofFailure> {
+    pub fn prove(
+        region: &ProofRegion,
+        _scg: &ProofSCG,
+        tactic: LivenessTactic,
+    ) -> Result<Self, ProofFailure> {
         let mut proof = Proof::new(Goal::new(
             InvariantName::Liveness,
             Target::Region(region.id),
@@ -256,7 +258,13 @@ impl AllocationFreedProof {
         ));
 
         proof.add_step(ProofStep::Assume {
-            fact: Fact::axiom(0, format!("region {} is allocated at PP {}", region.id, region.alloc_point)),
+            fact: Fact::axiom(
+                0,
+                format!(
+                    "region {} is allocated at PP {}",
+                    region.id, region.alloc_point
+                ),
+            ),
         });
 
         match region.status {
@@ -283,7 +291,10 @@ impl AllocationFreedProof {
                 proof.add_step(ProofStep::Infer {
                     from: vec![1],
                     rule: InferenceRule::LivenessElim,
-                    conclusion: Fact::derived(2, format!("region {} is dead at PP {}", region.id, fp)),
+                    conclusion: Fact::derived(
+                        2,
+                        format!("region {} is dead at PP {}", region.id, fp),
+                    ),
                 });
 
                 proof.conclude(Conclusion::Proven);
@@ -295,19 +306,19 @@ impl AllocationFreedProof {
                     tactic,
                 })
             }
-            _ => {
-                Err(ProofFailure::Leak {
-                    region_id: region.id,
-                    alloc_point: region.alloc_point,
-                })
-            }
+            _ => Err(ProofFailure::Leak {
+                region_id: region.id,
+                alloc_point: region.alloc_point,
+            }),
         }
     }
 
     /// Check this proof with the standard proof checker.
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
-        checker.check(&self.proof).unwrap_or(CheckResult::Incomplete)
+        checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
     }
 }
 
@@ -337,12 +348,17 @@ impl LivenessProof {
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
 
-        if let result @ CheckResult::Invalid { .. } = checker.check(&self.proof).unwrap_or(CheckResult::Incomplete) {
+        if let result @ CheckResult::Invalid { .. } = checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
+        {
             return result;
         }
 
         for (_, sub) in &self.access_proofs {
-            if let result @ CheckResult::Invalid { .. } = checker.check(sub).unwrap_or(CheckResult::Incomplete) {
+            if let result @ CheckResult::Invalid { .. } =
+                checker.check(sub).unwrap_or(CheckResult::Incomplete)
+            {
                 return result;
             }
         }
@@ -373,7 +389,11 @@ impl std::fmt::Display for LivenessProof {
             self.freed_proofs.len()
         )?;
         if let Some(ref dp) = self.deadlock_proof {
-            writeln!(f, "  deadlock proof: present ({} locked regions)", dp.locked_regions.len())?;
+            writeln!(
+                f,
+                "  deadlock proof: present ({} locked regions)",
+                dp.locked_regions.len()
+            )?;
         }
         if let Some(ref ord) = self.ordering {
             writeln!(f, "  ordering: {}", ord.name)?;
@@ -464,20 +484,39 @@ fn prove_liveness_tactic(
         ));
 
         sub.add_step(ProofStep::Assume {
-            fact: Fact::axiom(0, format!("region {} is allocated at PP {}", region.id, access.program_point)),
+            fact: Fact::axiom(
+                0,
+                format!(
+                    "region {} is allocated at PP {}",
+                    region.id, access.program_point
+                ),
+            ),
         });
 
         sub.add_step(ProofStep::Infer {
             from: vec![0],
             rule: InferenceRule::LivenessIntro,
-            conclusion: Fact::derived(1, format!("region {} is live at PP {}", region.id, access.program_point)),
+            conclusion: Fact::derived(
+                1,
+                format!(
+                    "region {} is live at PP {}",
+                    region.id, access.program_point
+                ),
+            ),
         });
 
         sub.add_step(ProofStep::Assume {
-            fact: Fact::checked(2, format!(
-                "access {} bytes [offset {}, offset {}) within region {} size {}",
-                access.id, access.offset, access.offset + access.width, region.id, region.size
-            )),
+            fact: Fact::checked(
+                2,
+                format!(
+                    "access {} bytes [offset {}, offset {}) within region {} size {}",
+                    access.id,
+                    access.offset,
+                    access.offset + access.width,
+                    region.id,
+                    region.size
+                ),
+            ),
         });
 
         sub.conclude(Conclusion::Proven);
@@ -499,7 +538,9 @@ fn prove_liveness_tactic(
     let locked_regions: Vec<RegionId> = msg
         .regions
         .iter()
-        .filter(|r| r.status == ProofRegionStatus::Allocated || r.status == ProofRegionStatus::Mapped)
+        .filter(|r| {
+            r.status == ProofRegionStatus::Allocated || r.status == ProofRegionStatus::Mapped
+        })
         .map(|r| r.id)
         .collect();
 
@@ -518,11 +559,25 @@ fn prove_liveness_tactic(
     ));
 
     top_proof.add_step(ProofStep::Assume {
-        fact: Fact::axiom(0, format!("MSG has {} regions and {} accesses", msg.regions.len(), msg.accesses.len())),
+        fact: Fact::axiom(
+            0,
+            format!(
+                "MSG has {} regions and {} accesses",
+                msg.regions.len(),
+                msg.accesses.len()
+            ),
+        ),
     });
 
     top_proof.add_step(ProofStep::Assume {
-        fact: Fact::axiom(1, format!("SCG has {} nodes and {} edges", scg.nodes.len(), scg.edges.len())),
+        fact: Fact::axiom(
+            1,
+            format!(
+                "SCG has {} nodes and {} edges",
+                scg.nodes.len(),
+                scg.edges.len()
+            ),
+        ),
     });
 
     top_proof.add_step(ProofStep::ByDefinition {

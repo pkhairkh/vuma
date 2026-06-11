@@ -40,19 +40,13 @@ use std::fmt;
 use std::io::{self, Write};
 use std::time::Instant;
 
-use vuma_parser::{
-    ParseError, Parser, Span,
-    offset_to_location,
-};
-use vuma_parser::ast::{Item, Stmt, Expr, Lit};
-use vuma_parser::to_scg::AstToScg;
-use vuma_scg::SCG;
-use vuma_ive::{
-    InferenceEngine, InvariantAggregator,
-    AggregatedResult, DiagnosticsReport,
-};
 use vuma_ive::verification::VerificationEngine;
 use vuma_ive::verification::VerificationInput;
+use vuma_ive::{AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator};
+use vuma_parser::ast::{Expr, Item, Lit, Stmt};
+use vuma_parser::to_scg::AstToScg;
+use vuma_parser::{offset_to_location, ParseError, Parser, Span};
+use vuma_scg::SCG;
 
 use crate::msg::MSG;
 use crate::scg_to_msg;
@@ -184,7 +178,11 @@ pub struct ReplProfile {
 impl fmt::Display for ReplProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "REPL Profile:")?;
-        writeln!(f, "  Expressions processed : {}", self.expressions_processed)?;
+        writeln!(
+            f,
+            "  Expressions processed : {}",
+            self.expressions_processed
+        )?;
         writeln!(f, "  Parse errors          : {}", self.parse_errors)?;
         writeln!(f, "  Parse time            : {}ms", self.parse_time_ms)?;
         writeln!(f, "  SCG build time        : {}ms", self.scg_time_ms)?;
@@ -233,13 +231,33 @@ impl SimpleEvaluator {
         let mut chars = input.chars().peekable();
         while let Some(&ch) = chars.peek() {
             match ch {
-                ' ' | '\t' => { chars.next(); }
-                '(' => { tokens.push(Token::LParen); chars.next(); }
-                ')' => { tokens.push(Token::RParen); chars.next(); }
-                '+' => { tokens.push(Token::Plus); chars.next(); }
-                '-' => { tokens.push(Token::Minus); chars.next(); }
-                '*' => { tokens.push(Token::Star); chars.next(); }
-                '/' => { tokens.push(Token::Slash); chars.next(); }
+                ' ' | '\t' => {
+                    chars.next();
+                }
+                '(' => {
+                    tokens.push(Token::LParen);
+                    chars.next();
+                }
+                ')' => {
+                    tokens.push(Token::RParen);
+                    chars.next();
+                }
+                '+' => {
+                    tokens.push(Token::Plus);
+                    chars.next();
+                }
+                '-' => {
+                    tokens.push(Token::Minus);
+                    chars.next();
+                }
+                '*' => {
+                    tokens.push(Token::Star);
+                    chars.next();
+                }
+                '/' => {
+                    tokens.push(Token::Slash);
+                    chars.next();
+                }
                 '0'..='9' => {
                     let mut num = String::new();
                     while let Some(&d) = chars.peek() {
@@ -289,8 +307,16 @@ impl SimpleEvaluator {
         let mut left = self.parse_multiplicative(tokens, pos)?;
         while *pos < tokens.len() {
             match &tokens[*pos] {
-                Token::Plus => { *pos += 1; let right = self.parse_multiplicative(tokens, pos)?; left += right; }
-                Token::Minus => { *pos += 1; let right = self.parse_multiplicative(tokens, pos)?; left -= right; }
+                Token::Plus => {
+                    *pos += 1;
+                    let right = self.parse_multiplicative(tokens, pos)?;
+                    left += right;
+                }
+                Token::Minus => {
+                    *pos += 1;
+                    let right = self.parse_multiplicative(tokens, pos)?;
+                    left -= right;
+                }
                 _ => break,
             }
         }
@@ -301,8 +327,19 @@ impl SimpleEvaluator {
         let mut left = self.parse_unary(tokens, pos)?;
         while *pos < tokens.len() {
             match &tokens[*pos] {
-                Token::Star => { *pos += 1; let right = self.parse_unary(tokens, pos)?; left *= right; }
-                Token::Slash => { *pos += 1; let right = self.parse_unary(tokens, pos)?; if right == 0 { return None; } left /= right; }
+                Token::Star => {
+                    *pos += 1;
+                    let right = self.parse_unary(tokens, pos)?;
+                    left *= right;
+                }
+                Token::Slash => {
+                    *pos += 1;
+                    let right = self.parse_unary(tokens, pos)?;
+                    if right == 0 {
+                        return None;
+                    }
+                    left /= right;
+                }
                 _ => break,
             }
         }
@@ -312,8 +349,15 @@ impl SimpleEvaluator {
     fn parse_unary(&self, tokens: &[Token], pos: &mut usize) -> Option<i64> {
         if *pos < tokens.len() {
             match &tokens[*pos] {
-                Token::Minus => { *pos += 1; let val = self.parse_primary(tokens, pos)?; Some(-val) }
-                Token::Plus => { *pos += 1; self.parse_primary(tokens, pos) }
+                Token::Minus => {
+                    *pos += 1;
+                    let val = self.parse_primary(tokens, pos)?;
+                    Some(-val)
+                }
+                Token::Plus => {
+                    *pos += 1;
+                    self.parse_primary(tokens, pos)
+                }
                 _ => self.parse_primary(tokens, pos),
             }
         } else {
@@ -326,7 +370,10 @@ impl SimpleEvaluator {
             return None;
         }
         match &tokens[*pos] {
-            Token::Num(n) => { *pos += 1; Some(*n) }
+            Token::Num(n) => {
+                *pos += 1;
+                Some(*n)
+            }
             Token::LParen => {
                 *pos += 1;
                 let result = self.parse_additive(tokens, pos)?;
@@ -362,7 +409,10 @@ enum Token {
 fn format_error_with_context(source: &str, span: &Span, message: &str) -> String {
     let loc = offset_to_location(source, span.start, None);
     let line_start = source[..span.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = source[span.start..].find('\n').map(|i| span.start + i).unwrap_or(source.len());
+    let line_end = source[span.start..]
+        .find('\n')
+        .map(|i| span.start + i)
+        .unwrap_or(source.len());
     let line_text = &source[line_start..line_end];
 
     let column = span.start - line_start;
@@ -374,7 +424,10 @@ fn format_error_with_context(source: &str, span: &Span, message: &str) -> String
 
     let mut result = String::new();
     result.push_str(&format!("error: {message}\n"));
-    result.push_str(&format!("  --> {}:{}:{}\n", loc.line, loc.column, span.start));
+    result.push_str(&format!(
+        "  --> {}:{}:{}\n",
+        loc.line, loc.column, span.start
+    ));
     result.push_str("   |\n");
     result.push_str(&format!("{:3}| {}\n", loc.line, line_text));
     result.push_str("   | ");
@@ -404,8 +457,12 @@ fn format_scg_summary(scg: &SCG) -> String {
     }
 
     let mut result = String::new();
-    result.push_str(&format!("SCG Summary ({} nodes, {} edges, {} regions)\n",
-        scg.node_count(), scg.edge_count(), scg.region_count()));
+    result.push_str(&format!(
+        "SCG Summary ({} nodes, {} edges, {} regions)\n",
+        scg.node_count(),
+        scg.edge_count(),
+        scg.region_count()
+    ));
 
     if !type_counts.is_empty() {
         result.push_str("  Node types:\n");
@@ -427,7 +484,8 @@ fn format_scg_summary(scg: &SCG) -> String {
 
     // List regions.
     for region in scg.regions() {
-        result.push_str(&format!("  Region {} (deployment: {}, nodes: {}, scope: {})\n",
+        result.push_str(&format!(
+            "  Region {} (deployment: {}, nodes: {}, scope: {})\n",
             region.id,
             region.deployment_target,
             region.node_count(),
@@ -449,14 +507,17 @@ fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
     }
 
     for node in scg.nodes() {
-        let bd = inference_engine.infer_bd(scg, node.id)
-            .unwrap_or_else(|_| vuma_bd::descriptor::BD::new(
+        let bd = inference_engine.infer_bd(scg, node.id).unwrap_or_else(|_| {
+            vuma_bd::descriptor::BD::new(
                 vuma_bd::repd::RepD::Byte(vuma_bd::repd::ByteRep { size: 0, align: 0 }),
                 vuma_bd::capd::CapD::empty(),
                 vuma_bd::reld::RelD::empty(),
-            ));
-        result.push_str(&format!("  Node {} ({:?}): {}\n",
-            node.id, node.node_type, bd));
+            )
+        });
+        result.push_str(&format!(
+            "  Node {} ({:?}): {}\n",
+            node.id, node.node_type, bd
+        ));
     }
 
     result
@@ -669,12 +730,18 @@ impl VumaRepl {
         for item in &program.items {
             match item {
                 Item::Stmt(Stmt::Let(l)) => {
-                    if let Expr::Lit { value: Lit::Int(n), .. } = &l.value {
+                    if let Expr::Lit {
+                        value: Lit::Int(n), ..
+                    } = &l.value
+                    {
                         self.simple_vars.insert(l.name.clone(), *n);
                     }
                 }
                 Item::Const(c) => {
-                    if let Expr::Lit { value: Lit::Int(n), .. } = &c.value {
+                    if let Expr::Lit {
+                        value: Lit::Int(n), ..
+                    } = &c.value
+                    {
                         self.simple_vars.insert(c.name.clone(), *n);
                     }
                 }
@@ -736,7 +803,8 @@ Expressions:
     > let x = 10;
     > x + 5
     15
-"#.to_string()
+"#
+        .to_string()
     }
 
     /// Handle the `:load <file>` command.
@@ -769,11 +837,10 @@ Expressions:
         // Build SCG.
         let scg_start = Instant::now();
         let mut converter = AstToScg::new();
-        let scg = converter.convert(&program)
-            .map_err(|e| {
-                self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
-                ReplError::Parse(e)
-            })?;
+        let scg = converter.convert(&program).map_err(|e| {
+            self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
+            ReplError::Parse(e)
+        })?;
         self.scg = scg;
         self.converter = converter;
         self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
@@ -796,7 +863,9 @@ Expressions:
 
         Ok(ReplResult::Ok(Some(format!(
             "Loaded '{}' (SCG: {} nodes, {} edges)",
-            path, self.scg.node_count(), self.scg.edge_count()
+            path,
+            self.scg.node_count(),
+            self.scg.edge_count()
         ))))
     }
 
@@ -820,15 +889,16 @@ Expressions:
     fn cmd_show(&mut self, what: &str) -> Result<ReplResult, ReplError> {
         match what {
             "scg" => Ok(ReplResult::Ok(Some(format_scg_summary(&self.scg)))),
-            "msg" => {
-                match &self.msg {
-                    Some(msg) => Ok(ReplResult::Ok(Some(format!("{msg}")))),
-                    None => Ok(ReplResult::Ok(Some(
-                        "No MSG available. Enter some VUMA code first.".to_string()
-                    ))),
-                }
-            }
-            "bd" => Ok(ReplResult::Ok(Some(format_bd_display(&self.scg, &self.inference_engine)))),
+            "msg" => match &self.msg {
+                Some(msg) => Ok(ReplResult::Ok(Some(format!("{msg}")))),
+                None => Ok(ReplResult::Ok(Some(
+                    "No MSG available. Enter some VUMA code first.".to_string(),
+                ))),
+            },
+            "bd" => Ok(ReplResult::Ok(Some(format_bd_display(
+                &self.scg,
+                &self.inference_engine,
+            )))),
             _ => Ok(ReplResult::Ok(Some(format!(
                 "Unknown show target: '{what}'. Use :show scg, :show msg, or :show bd"
             )))),
@@ -842,7 +912,7 @@ Expressions:
         // Step 1: Parse (already done if we have source).
         if self.source_buffer.is_empty() {
             return Ok(ReplResult::Ok(Some(
-                "No source to compile. Enter some VUMA code first.".to_string()
+                "No source to compile. Enter some VUMA code first.".to_string(),
             )));
         }
 
@@ -857,14 +927,17 @@ Expressions:
         }
         let program = result.unwrap();
         let mut converter = AstToScg::new();
-        let scg = converter.convert(&program)
-            .map_err(ReplError::Parse)?;
+        let scg = converter.convert(&program).map_err(ReplError::Parse)?;
         self.scg = scg;
         self.converter = converter;
         self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
 
-        output.push_str(&format!("SCG: {} nodes, {} edges, {} regions\n",
-            self.scg.node_count(), self.scg.edge_count(), self.scg.region_count()));
+        output.push_str(&format!(
+            "SCG: {} nodes, {} edges, {} regions\n",
+            self.scg.node_count(),
+            self.scg.edge_count(),
+            self.scg.region_count()
+        ));
 
         // Step 3: Convert to MSG.
         let msg_start = Instant::now();
@@ -888,8 +961,10 @@ Expressions:
         self.profile.verification_runs += 1;
         self.last_verification = Some(result.clone());
 
-        output.push_str(&format!("Verification: {} ({}ms)\n",
-            result.overall, result.total_elapsed_ms));
+        output.push_str(&format!(
+            "Verification: {} ({}ms)\n",
+            result.overall, result.total_elapsed_ms
+        ));
 
         self.profile.expressions_processed += 1;
 
@@ -1031,23 +1106,27 @@ Expressions:
                         println!("{}", result);
                     }
                 }
-                Err(e) => {
-                    match &e {
-                        ReplError::Parse(pe) => {
+                Err(e) => match &e {
+                    ReplError::Parse(pe) => {
+                        let ctx = format_error_with_context(
+                            &self.source_buffer,
+                            &pe.span,
+                            &pe.to_string(),
+                        );
+                        eprintln!("{ctx}");
+                    }
+                    ReplError::ParseErrors(errors) => {
+                        for pe in errors {
                             let ctx = format_error_with_context(
-                                &self.source_buffer, &pe.span, &pe.to_string());
+                                &self.source_buffer,
+                                &pe.span,
+                                &pe.to_string(),
+                            );
                             eprintln!("{ctx}");
                         }
-                        ReplError::ParseErrors(errors) => {
-                            for pe in errors {
-                                let ctx = format_error_with_context(
-                                    &self.source_buffer, &pe.span, &pe.to_string());
-                                eprintln!("{ctx}");
-                            }
-                        }
-                        _ => eprintln!("Error: {e}"),
                     }
-                }
+                    _ => eprintln!("Error: {e}"),
+                },
             }
         }
 
@@ -1112,12 +1191,18 @@ mod tests {
         let result = repl.process_line("let x = 42;").unwrap();
         // Should be Ok with SCG info.
         if let ReplResult::Ok(Some(msg)) = result {
-            assert!(msg.contains("SCG:"), "Expected SCG info in output, got: {msg}");
+            assert!(
+                msg.contains("SCG:"),
+                "Expected SCG info in output, got: {msg}"
+            );
         } else {
             panic!("Expected Ok with SCG info, got: {result:?}");
         }
 
-        assert!(repl.scg.node_count() > 0, "SCG should have nodes after evaluating an expression");
+        assert!(
+            repl.scg.node_count() > 0,
+            "SCG should have nodes after evaluating an expression"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1133,8 +1218,10 @@ mod tests {
 
         // Use it in a simple expression.
         let result = repl.process_line("x + 5").unwrap();
-        assert!(matches!(result, ReplResult::Value(ref v) if v == "15"),
-            "Expected '15', got: {result:?}");
+        assert!(
+            matches!(result, ReplResult::Value(ref v) if v == "15"),
+            "Expected '15', got: {result:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1168,7 +1255,10 @@ mod tests {
 
         let result = repl.process_line(":show scg").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("SCG Summary"), "Should show SCG summary, got: {text}");
+            assert!(
+                text.contains("SCG Summary"),
+                "Should show SCG summary, got: {text}"
+            );
             assert!(text.contains("nodes"), "Should mention nodes");
         } else {
             panic!("Expected Ok with SCG summary, got: {result:?}");
@@ -1187,11 +1277,19 @@ mod tests {
         repl.process_line("let x = 42;").unwrap();
 
         let result = repl.process_line(":verify").unwrap();
-        assert!(matches!(result, ReplResult::Verification(_)),
-            "Expected Verification result, got: {result:?}");
+        assert!(
+            matches!(result, ReplResult::Verification(_)),
+            "Expected Verification result, got: {result:?}"
+        );
 
-        assert!(repl.last_verification.is_some(), "Should have a last verification result");
-        assert!(repl.profile.verification_runs == 1, "Should have 1 verification run");
+        assert!(
+            repl.last_verification.is_some(),
+            "Should have a last verification result"
+        );
+        assert!(
+            repl.profile.verification_runs == 1,
+            "Should have 1 verification run"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1225,7 +1323,10 @@ mod tests {
         }
 
         assert_eq!(repl.scg.node_count(), 0, "SCG should be empty after reset");
-        assert!(repl.source_buffer.is_empty(), "Source buffer should be empty after reset");
+        assert!(
+            repl.source_buffer.is_empty(),
+            "Source buffer should be empty after reset"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1242,8 +1343,14 @@ mod tests {
         let result = repl.process_line(":profile").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
             assert!(text.contains("REPL Profile"), "Should show profile header");
-            assert!(text.contains("Expressions processed"), "Should mention expressions");
-            assert!(text.contains("Verification runs"), "Should mention verification");
+            assert!(
+                text.contains("Expressions processed"),
+                "Should mention expressions"
+            );
+            assert!(
+                text.contains("Verification runs"),
+                "Should mention verification"
+            );
         }
     }
 
@@ -1284,7 +1391,10 @@ mod tests {
         // Without any code, MSG should be unavailable.
         let result = repl.process_line(":show msg").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("No MSG"), "Should say no MSG available, got: {text}");
+            assert!(
+                text.contains("No MSG"),
+                "Should say no MSG available, got: {text}"
+            );
         }
     }
 
@@ -1299,7 +1409,10 @@ mod tests {
         // Without any source, should report no source.
         let result = repl.process_line(":compile").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("No source"), "Should say no source, got: {text}");
+            assert!(
+                text.contains("No source"),
+                "Should say no source, got: {text}"
+            );
         }
 
         // Add source and compile.
@@ -1307,7 +1420,10 @@ mod tests {
         let result = repl.process_line(":compile").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
             assert!(text.contains("SCG:"), "Should mention SCG, got: {text}");
-            assert!(text.contains("Verification:"), "Should mention verification, got: {text}");
+            assert!(
+                text.contains("Verification:"),
+                "Should mention verification, got: {text}"
+            );
         }
     }
 
@@ -1321,7 +1437,10 @@ mod tests {
         let span = Span { start: 8, end: 9 };
         let formatted = format_error_with_context(source, &span, "expected expression");
         assert!(formatted.contains("error:"), "Should contain error label");
-        assert!(formatted.contains("expected expression"), "Should contain error message");
+        assert!(
+            formatted.contains("expected expression"),
+            "Should contain error message"
+        );
         assert!(formatted.contains("^"), "Should contain caret");
     }
 
@@ -1337,7 +1456,10 @@ mod tests {
 
         let result = repl.process_line(":show bd").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("Behavioural Descriptors"), "Should show BD header");
+            assert!(
+                text.contains("Behavioural Descriptors"),
+                "Should show BD header"
+            );
         }
     }
 
@@ -1350,7 +1472,10 @@ mod tests {
         let mut repl = VumaRepl::new();
         let result = repl.process_line(":foobar").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("Unknown command"), "Should report unknown command");
+            assert!(
+                text.contains("Unknown command"),
+                "Should report unknown command"
+            );
         }
     }
 

@@ -58,11 +58,8 @@ impl ProfileReport {
     /// back-edges (edges whose `weight` significantly exceeds the average
     /// edge weight in the SCG).
     pub fn from_profile_data(profile: &ProfileData, scg: &SCG) -> Self {
-        let mut all_nodes: Vec<(NodeId, u64)> = profile
-            .call_counts
-            .iter()
-            .map(|(&n, &c)| (n, c))
-            .collect();
+        let mut all_nodes: Vec<(NodeId, u64)> =
+            profile.call_counts.iter().map(|(&n, &c)| (n, c)).collect();
         all_nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let hot_nodes: Vec<(NodeId, u64)> = all_nodes
@@ -237,8 +234,7 @@ pub struct OptimizationResult {
 impl OptimizationResult {
     /// Creates a result from the list of per-pass results.
     pub fn from_pass_results(pass_results: Vec<PassResult>) -> Self {
-        let total_transformations: usize =
-            pass_results.iter().map(|r| r.count()).sum();
+        let total_transformations: usize = pass_results.iter().map(|r| r.count()).sum();
         // Combine speedups multiplicatively (a simplification).
         let estimated_speedup: f64 = pass_results
             .iter()
@@ -433,9 +429,8 @@ impl OptimizationPass for ColdPathOutline {
                     .iter()
                     .chain(node.outgoing_edges.iter())
                     .any(|&eid| {
-                        scg.get_edge(eid).is_some_and(|e| {
-                            profile.is_hot(e.source) || profile.is_hot(e.target)
-                        })
+                        scg.get_edge(eid)
+                            .is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
                     })
             } else {
                 false
@@ -471,7 +466,8 @@ impl OptimizationPass for ColdPathOutline {
                     .iter()
                     .chain(node.outgoing_edges.iter())
                     .any(|&eid| {
-                        scg.get_edge(eid).is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
+                        scg.get_edge(eid)
+                            .is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
                     });
                 if adjacent_hot && profile.is_cold(node_id) {
                     to_outline.push((
@@ -663,10 +659,7 @@ impl OptimizationPass for LoopOptimization {
                     result.transformations.push(Transformation {
                         kind: TransformationKind::LoopVectorized,
                         target_node: loop_node_id,
-                        description: format!(
-                            "Vectorized loop (trip={}, NEON/SIMD)",
-                            trip_count,
-                        ),
+                        description: format!("Vectorized loop (trip={}, NEON/SIMD)", trip_count,),
                     });
                 }
             }
@@ -695,7 +688,11 @@ impl OptimizationPass for LoopOptimization {
             .count();
 
         // Each vectorised loop adds ~4× speedup for that loop body.
-        let vec_speedup = if vec_count > 0 { 1.0 + vec_count as f64 * 0.3 } else { 1.0 };
+        let vec_speedup = if vec_count > 0 {
+            1.0 + vec_count as f64 * 0.3
+        } else {
+            1.0
+        };
 
         result.estimated_speedup = (unroll_speedup * vec_speedup).max(1.0);
 
@@ -861,7 +858,10 @@ impl std::fmt::Debug for OptimizationEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OptimizationEngine")
             .field("pass_count", &self.passes.len())
-            .field("pass_names", &self.passes.iter().map(|p| p.name()).collect::<Vec<_>>())
+            .field(
+                "pass_names",
+                &self.passes.iter().map(|p| p.name()).collect::<Vec<_>>(),
+            )
             .field("config", &self.config)
             .finish()
     }
@@ -889,18 +889,14 @@ impl OptimizationEngine {
 
     /// Registers the default set of passes based on the current config.
     fn register_default_passes(&mut self) {
-        self.passes
-            .push(Box::new(HotPathInlining::new()));
+        self.passes.push(Box::new(HotPathInlining::new()));
+
+        self.passes.push(Box::new(ColdPathOutline::new()));
+
+        self.passes.push(Box::new(LoopOptimization::new()));
 
         self.passes
-            .push(Box::new(ColdPathOutline::new()));
-
-        self.passes
-            .push(Box::new(LoopOptimization::new()));
-
-        self.passes.push(Box::new(
-            MemoryOptimization::new(self.config.target_arch),
-        ));
+            .push(Box::new(MemoryOptimization::new(self.config.target_arch)));
     }
 
     /// Adds a custom optimisation pass.
@@ -1071,11 +1067,15 @@ mod tests {
         let result = pass.apply(&mut scg, &report);
 
         // Node 10 is a hot Call with code_size=64 < 256 → should be inlined.
-        assert!(scg.get_node(10).unwrap().is_inlined,
-            "hot Call node 10 should be inlined");
+        assert!(
+            scg.get_node(10).unwrap().is_inlined,
+            "hot Call node 10 should be inlined"
+        );
         // Node 11 is a hot Call with code_size=512 > 256 → should NOT be inlined.
-        assert!(!scg.get_node(11).unwrap().is_inlined,
-            "large Call node 11 should NOT be inlined");
+        assert!(
+            !scg.get_node(11).unwrap().is_inlined,
+            "large Call node 11 should NOT be inlined"
+        );
         assert!(result.count() >= 1);
         assert!(result.transformations.iter().any(|t| t.target_node == 10));
     }
@@ -1115,8 +1115,10 @@ mod tests {
 
         // Node 40 is a cold Branch with an incoming edge from hot node 10.
         // It should be outlined.
-        assert!(scg.get_node(40).unwrap().is_outlined,
-            "cold branch node 40 adjacent to hot path should be outlined");
+        assert!(
+            scg.get_node(40).unwrap().is_outlined,
+            "cold branch node 40 adjacent to hot path should be outlined"
+        );
         assert!(result.count() >= 1);
     }
 
@@ -1155,11 +1157,15 @@ mod tests {
 
         // Node 20 is a Loop node with back-edge weight 5000 → should be unrolled.
         let loop_node = scg.get_node(20).unwrap();
-        assert!(loop_node.unroll_factor > 1,
-            "hot loop node 20 should be unrolled (factor={})", loop_node.unroll_factor);
-        assert!(result.transformations.iter().any(|t| {
-            matches!(t.kind, TransformationKind::LoopUnrolled { .. })
-        }));
+        assert!(
+            loop_node.unroll_factor > 1,
+            "hot loop node 20 should be unrolled (factor={})",
+            loop_node.unroll_factor
+        );
+        assert!(result
+            .transformations
+            .iter()
+            .any(|t| { matches!(t.kind, TransformationKind::LoopUnrolled { .. }) }));
     }
 
     // -- Test 6: LoopOptimization vectorizes loops with Memory successors ---
@@ -1180,11 +1186,14 @@ mod tests {
         // Node 20 (Loop) has an outgoing edge to node 30 (Memory) → should
         // be vectorized.
         let loop_node = scg.get_node(20).unwrap();
-        assert!(loop_node.is_vectorized,
-            "loop with Memory successor should be vectorized");
-        assert!(result.transformations.iter().any(|t| {
-            matches!(t.kind, TransformationKind::LoopVectorized)
-        }));
+        assert!(
+            loop_node.is_vectorized,
+            "loop with Memory successor should be vectorized"
+        );
+        assert!(result
+            .transformations
+            .iter()
+            .any(|t| { matches!(t.kind, TransformationKind::LoopVectorized) }));
     }
 
     // -- Test 7: MemoryOptimization aligns and prefetches -------------------
@@ -1200,17 +1209,25 @@ mod tests {
 
         // Node 30 is a hot Memory node → should get prefetch and alignment.
         let mem_node = scg.get_node(30).unwrap();
-        assert!(mem_node.has_prefetch,
-            "hot memory node 30 should have prefetch");
-        assert_eq!(mem_node.alignment, 64,
-            "memory node 30 should be 64-byte aligned for Pi 5");
+        assert!(
+            mem_node.has_prefetch,
+            "hot memory node 30 should have prefetch"
+        );
+        assert_eq!(
+            mem_node.alignment, 64,
+            "memory node 30 should be 64-byte aligned for Pi 5"
+        );
 
         // Check transformation kinds.
+        assert!(result
+            .transformations
+            .iter()
+            .any(|t| { matches!(t.kind, TransformationKind::PrefetchInserted) }));
         assert!(result.transformations.iter().any(|t| {
-            matches!(t.kind, TransformationKind::PrefetchInserted)
-        }));
-        assert!(result.transformations.iter().any(|t| {
-            matches!(t.kind, TransformationKind::CacheLineAligned { alignment: 64 })
+            matches!(
+                t.kind,
+                TransformationKind::CacheLineAligned { alignment: 64 }
+            )
         }));
     }
 
@@ -1225,20 +1242,40 @@ mod tests {
         let result = apply_optimizations(&mut scg, &report);
 
         // At least one transformation should have been applied.
-        assert!(result.total_transformations > 0,
-            "end-to-end should produce at least one transformation");
+        assert!(
+            result.total_transformations > 0,
+            "end-to-end should produce at least one transformation"
+        );
         // Speedup should be > 1.0 (we did *something*).
-        assert!(result.estimated_speedup > 1.0,
-            "estimated speedup should exceed 1.0, got {}", result.estimated_speedup);
+        assert!(
+            result.estimated_speedup > 1.0,
+            "estimated speedup should exceed 1.0, got {}",
+            result.estimated_speedup
+        );
         // We expect 4 pass results (one per default pass).
-        assert_eq!(result.pass_results.len(), 4,
-            "should have results from 4 default passes");
+        assert_eq!(
+            result.pass_results.len(),
+            4,
+            "should have results from 4 default passes"
+        );
 
         // Verify individual nodes were actually modified.
-        assert!(scg.get_node(10).unwrap().is_inlined, "node 10 should be inlined");
-        assert!(scg.get_node(40).unwrap().is_outlined, "node 40 should be outlined");
-        assert!(scg.get_node(20).unwrap().unroll_factor > 1, "node 20 should be unrolled");
-        assert!(scg.get_node(30).unwrap().has_prefetch, "node 30 should have prefetch");
+        assert!(
+            scg.get_node(10).unwrap().is_inlined,
+            "node 10 should be inlined"
+        );
+        assert!(
+            scg.get_node(40).unwrap().is_outlined,
+            "node 40 should be outlined"
+        );
+        assert!(
+            scg.get_node(20).unwrap().unroll_factor > 1,
+            "node 20 should be unrolled"
+        );
+        assert!(
+            scg.get_node(30).unwrap().has_prefetch,
+            "node 30 should have prefetch"
+        );
     }
 
     // -- Test 9: OptimizationEngine with no passes produces empty result ----
@@ -1286,7 +1323,9 @@ mod tests {
         /// A no-op pass for testing.
         struct NoopPass;
         impl OptimizationPass for NoopPass {
-            fn name(&self) -> &str { "NoopPass" }
+            fn name(&self) -> &str {
+                "NoopPass"
+            }
             fn apply(&self, _scg: &mut SCG, _profile: &ProfileReport) -> PassResult {
                 PassResult::empty("NoopPass")
             }

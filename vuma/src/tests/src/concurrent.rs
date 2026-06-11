@@ -6,8 +6,8 @@
 //! directly using the per-invariant IVE APIs.
 
 use vuma_ive::exclusivity::{
-    AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord,
-    CapDInfo, ExclusivityInput, ExclusivityVerifier, SyncEdgeRecord, SyncOrdering,
+    AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord, CapDInfo,
+    ExclusivityInput, ExclusivityVerifier, SyncEdgeRecord, SyncOrdering,
 };
 use vuma_ive::liveness::{
     ControlFlowEdge, EventAction, LivenessInput, LivenessVerifier, PointId, ResourceEvent,

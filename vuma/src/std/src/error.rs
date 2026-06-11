@@ -161,7 +161,11 @@ impl VumaErrorChain {
 
     /// Create a new error chain with a source error.
     // VUMA-VERIFIED: chaining preserves all error information
-    pub fn with_source(kind: VumaErrorKind, message: impl Into<String>, source: VumaErrorChain) -> Self {
+    pub fn with_source(
+        kind: VumaErrorKind,
+        message: impl Into<String>,
+        source: VumaErrorChain,
+    ) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -172,7 +176,11 @@ impl VumaErrorChain {
 
     /// Create a new error chain with a context annotation.
     // VUMA-VERIFIED: context addition is pure
-    pub fn with_context(kind: VumaErrorKind, message: impl Into<String>, context: impl Into<String>) -> Self {
+    pub fn with_context(
+        kind: VumaErrorKind,
+        message: impl Into<String>,
+        context: impl Into<String>,
+    ) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -269,7 +277,9 @@ impl fmt::Display for VumaErrorChain {
 
 impl std::error::Error for VumaErrorChain {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|b| b as &(dyn std::error::Error + 'static))
+        self.source
+            .as_ref()
+            .map(|b| b as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -283,7 +293,9 @@ impl VumaError for VumaErrorChain {
     }
 
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|b| b as &(dyn std::error::Error + 'static))
+        self.source
+            .as_ref()
+            .map(|b| b as &(dyn std::error::Error + 'static))
     }
 
     fn kind(&self) -> VumaErrorKind {
@@ -343,7 +355,10 @@ mod tests {
         assert_eq!(VumaErrorKind::Io.to_string(), "I/O error");
         assert_eq!(VumaErrorKind::Net.to_string(), "network error");
         assert_eq!(VumaErrorKind::Parse.to_string(), "parse error");
-        assert_eq!(VumaErrorKind::Verification.to_string(), "verification error");
+        assert_eq!(
+            VumaErrorKind::Verification.to_string(),
+            "verification error"
+        );
         assert_eq!(VumaErrorKind::NotFound.to_string(), "not found");
     }
 
@@ -359,7 +374,8 @@ mod tests {
     #[test]
     fn test_error_chain_with_source() {
         let inner = VumaErrorChain::new(VumaErrorKind::Io, "disk read failed");
-        let outer = VumaErrorChain::with_source(VumaErrorKind::Runtime, "could not load config", inner);
+        let outer =
+            VumaErrorChain::with_source(VumaErrorKind::Runtime, "could not load config", inner);
         assert_eq!(outer.kind(), VumaErrorKind::Runtime);
         assert!(outer.source.is_some());
         assert_eq!(outer.source.as_ref().unwrap().kind(), VumaErrorKind::Io);
@@ -379,7 +395,8 @@ mod tests {
     fn test_error_chain_root_cause() {
         let inner = VumaErrorChain::new(VumaErrorKind::Io, "disk read failed");
         let mid = VumaErrorChain::with_source(VumaErrorKind::Runtime, "config load error", inner);
-        let outer = VumaErrorChain::with_source(VumaErrorKind::Verification, "BD check failed", mid);
+        let outer =
+            VumaErrorChain::with_source(VumaErrorKind::Verification, "BD check failed", mid);
         let root = outer.root_cause();
         assert_eq!(root.kind(), VumaErrorKind::Io);
         assert_eq!(root.message(), "disk read failed");

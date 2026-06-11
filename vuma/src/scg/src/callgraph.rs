@@ -4,11 +4,11 @@
 //! The call graph represents the caller-callee relationships between functions
 //! and supports top-down and bottom-up traversal for summary-based analysis.
 
-use hashbrown::{HashMap, HashSet};
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
 use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
 use crate::region::RegionId;
+use hashbrown::{HashMap, HashSet};
 
 /// Identifier for a function in the call graph.
 ///
@@ -110,7 +110,8 @@ impl CallGraph {
                 let callee_fid = FunctionId(*to_node);
 
                 // Find the function containing from_node
-                let caller_fid = if let Some(entry_id) = cg.find_enclosing_function(scg, *from_node) {
+                let caller_fid = if let Some(entry_id) = cg.find_enclosing_function(scg, *from_node)
+                {
                     FunctionId(entry_id)
                 } else {
                     // from_node is not inside a known function — it might be the
@@ -125,10 +126,7 @@ impl CallGraph {
                     caller_region: *caller_region,
                 };
 
-                cg.call_edges
-                    .entry(caller_fid)
-                    .or_default()
-                    .push(cge);
+                cg.call_edges.entry(caller_fid).or_default().push(cge);
                 cg.reverse_edges
                     .entry(callee_fid)
                     .or_default()
@@ -183,12 +181,18 @@ impl CallGraph {
 
     /// Returns the callees of a given function.
     pub fn callees(&self, fid: &FunctionId) -> &[CallGraphEdge] {
-        self.call_edges.get(fid).map(|v| v.as_slice()).unwrap_or(&[])
+        self.call_edges
+            .get(fid)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Returns the callers of a given function.
     pub fn callers(&self, fid: &FunctionId) -> &[FunctionId] {
-        self.reverse_edges.get(fid).map(|v| v.as_slice()).unwrap_or(&[])
+        self.reverse_edges
+            .get(fid)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Returns the FunctionReturn node for a given function, if known.
@@ -273,10 +277,10 @@ impl CallGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{ControlKind, ControlNode, NodePayload, NodeType, ProgramPoint};
     use crate::region::RegionId;
-    use crate::edge::EdgeKind;
 
     fn pp() -> ProgramPoint {
         ProgramPoint {
@@ -354,8 +358,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         // foo function
         let foo_entry = scg.add_node(
@@ -374,7 +380,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         // Call edge: main → foo
         scg.add_call_edge(call_site, foo_entry, rid).unwrap();
@@ -422,8 +429,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, main_call, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(main_call, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, main_call, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(main_call, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         let foo_entry = scg.add_node(
             NodeType::Control,
@@ -450,8 +459,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, foo_call, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(foo_call, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, foo_call, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(foo_call, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         let bar_entry = scg.add_node(
             NodeType::Control,
@@ -469,7 +480,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(bar_entry, bar_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(bar_entry, bar_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         scg.add_call_edge(main_call, foo_entry, rid).unwrap();
         scg.add_return_edge(foo_ret, main_call, vec![]).unwrap();
@@ -480,9 +492,18 @@ mod tests {
         let order = cg.bottom_up_order();
 
         // bar must come before foo, foo must come before main
-        let bar_pos = order.iter().position(|f| *f == FunctionId(bar_entry)).unwrap();
-        let foo_pos = order.iter().position(|f| *f == FunctionId(foo_entry)).unwrap();
-        let main_pos = order.iter().position(|f| *f == FunctionId(main_entry)).unwrap();
+        let bar_pos = order
+            .iter()
+            .position(|f| *f == FunctionId(bar_entry))
+            .unwrap();
+        let foo_pos = order
+            .iter()
+            .position(|f| *f == FunctionId(foo_entry))
+            .unwrap();
+        let main_pos = order
+            .iter()
+            .position(|f| *f == FunctionId(main_entry))
+            .unwrap();
         assert!(bar_pos < foo_pos);
         assert!(foo_pos < main_pos);
     }
@@ -518,7 +539,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(f_entry, f_call, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(f_entry, f_call, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(f_call, f_ret, EdgeKind::ControlFlow).unwrap();
 
         scg.add_call_edge(f_call, f_entry, rid).unwrap();

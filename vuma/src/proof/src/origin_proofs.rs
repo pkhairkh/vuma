@@ -10,9 +10,7 @@ use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
-use crate::models::{
-    OriginInfo, SinkSensitivity, SourceTrust,
-};
+use crate::models::{OriginInfo, SinkSensitivity, SourceTrust};
 use crate::proof::{
     Conclusion, Fact, FactId, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
 };
@@ -26,10 +24,7 @@ use crate::rules::InferenceRule;
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum ProofFailure {
     #[error("broken derivation chain at derivation {derivation_id}: {reason}")]
-    BrokenChain {
-        derivation_id: u64,
-        reason: String,
-    },
+    BrokenChain { derivation_id: u64, reason: String },
 
     #[error("derivation chain for {derivation_id} terminates at dead region {region_id}")]
     TerminatesAtDeadRegion {
@@ -76,7 +71,9 @@ pub struct OriginProof {
 impl OriginProof {
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
-        checker.check(&self.proof).unwrap_or(CheckResult::Incomplete)
+        checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -96,7 +93,9 @@ pub struct DerivationChainProof {
 impl DerivationChainProof {
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
-        checker.check(&self.proof).unwrap_or(CheckResult::Incomplete)
+        checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -116,7 +115,9 @@ pub struct TaintProof {
 impl TaintProof {
     pub fn check(&self) -> CheckResult {
         let checker = ProofChecker::new();
-        checker.check(&self.proof).unwrap_or(CheckResult::Incomplete)
+        checker
+            .check(&self.proof)
+            .unwrap_or(CheckResult::Incomplete)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -169,7 +170,10 @@ impl OriginTactic {
             let mut next_fid: FactId = 1;
 
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(next_fid, format!("chain root region {} exists", root_region)),
+                fact: Fact::axiom(
+                    next_fid,
+                    format!("chain root region {} exists", root_region),
+                ),
             });
             next_fid += 1;
 
@@ -187,9 +191,14 @@ impl OriginTactic {
             next_fid += 1;
 
             for (i, &region_id) in chain.iter().enumerate() {
-                if i == 0 { continue; }
+                if i == 0 {
+                    continue;
+                }
                 proof.add_step(ProofStep::Assume {
-                    fact: Fact::checked(next_fid, format!("chain link {} -> region {} valid", i, region_id)),
+                    fact: Fact::checked(
+                        next_fid,
+                        format!("chain link {} -> region {} valid", i, region_id),
+                    ),
                 });
                 next_fid += 1;
             }
@@ -199,7 +208,10 @@ impl OriginTactic {
                 rule: InferenceRule::DerivationTransitivity,
                 conclusion: Fact::derived(
                     next_fid,
-                    format!("derivation {} chain terminates at live region {}", derivation_id, root_region),
+                    format!(
+                        "derivation {} chain terminates at live region {}",
+                        derivation_id, root_region
+                    ),
                 ),
             });
             proof.conclude(Conclusion::Proven);
@@ -215,9 +227,7 @@ impl OriginTactic {
         Ok(proofs)
     }
 
-    pub fn apply_taint_propagation(
-        info: &OriginInfo,
-    ) -> Result<TaintProof, ProofFailure> {
+    pub fn apply_taint_propagation(info: &OriginInfo) -> Result<TaintProof, ProofFailure> {
         let goal = Goal::new(
             InvariantName::Origin,
             Target::FullProgram,
@@ -232,14 +242,20 @@ impl OriginTactic {
 
         for &(rid, label) in &info.taint_labels {
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(next_fid, format!("region {} has taint label {}", rid, label)),
+                fact: Fact::axiom(
+                    next_fid,
+                    format!("region {} has taint label {}", rid, label),
+                ),
             });
             next_fid += 1;
             tainted_sources.push(rid);
         }
 
         for &(rid, sensitivity) in &info.sink_classifications {
-            if matches!(sensitivity, SinkSensitivity::Sensitive | SinkSensitivity::Critical) {
+            if matches!(
+                sensitivity,
+                SinkSensitivity::Sensitive | SinkSensitivity::Critical
+            ) {
                 proof.add_step(ProofStep::Assume {
                     fact: Fact::axiom(next_fid, format!("region {} is {} sink", rid, sensitivity)),
                 });
@@ -266,7 +282,10 @@ impl OriginTactic {
             }
 
             proof.add_step(ProofStep::Assume {
-                fact: Fact::checked(next_fid, format!("flow edge {} -> {} is taint-safe", source, target)),
+                fact: Fact::checked(
+                    next_fid,
+                    format!("flow edge {} -> {} is taint-safe", source, target),
+                ),
             });
             next_fid += 1;
             safe_edges.push((source, target));
@@ -275,9 +294,14 @@ impl OriginTactic {
         for &tainted_rid in &tainted_sources {
             let reachable = info.reachable_from(tainted_rid);
             for &reached_rid in &reachable {
-                if reached_rid == tainted_rid { continue; }
+                if reached_rid == tainted_rid {
+                    continue;
+                }
                 if let Some(sensitivity) = info.sink_sensitivity(reached_rid) {
-                    if matches!(sensitivity, SinkSensitivity::Sensitive | SinkSensitivity::Critical) {
+                    if matches!(
+                        sensitivity,
+                        SinkSensitivity::Sensitive | SinkSensitivity::Critical
+                    ) {
                         return Err(ProofFailure::TaintViolation {
                             src_region: tainted_rid,
                             sink_region: reached_rid,
@@ -301,9 +325,7 @@ impl OriginTactic {
         })
     }
 
-    pub fn apply_source_classification(
-        info: &OriginInfo,
-    ) -> Result<TaintProof, ProofFailure> {
+    pub fn apply_source_classification(info: &OriginInfo) -> Result<TaintProof, ProofFailure> {
         let goal = Goal::new(
             InvariantName::Origin,
             Target::FullProgram,
@@ -328,9 +350,15 @@ impl OriginTactic {
         }
 
         for &(rid, sensitivity) in &info.sink_classifications {
-            if matches!(sensitivity, SinkSensitivity::Sensitive | SinkSensitivity::Critical) {
+            if matches!(
+                sensitivity,
+                SinkSensitivity::Sensitive | SinkSensitivity::Critical
+            ) {
                 proof.add_step(ProofStep::Assume {
-                    fact: Fact::checked(next_fid, format!("region {} is {} sink", rid, sensitivity)),
+                    fact: Fact::checked(
+                        next_fid,
+                        format!("region {} is {} sink", rid, sensitivity),
+                    ),
                 });
                 next_fid += 1;
                 sensitive_sinks.push(rid);
@@ -340,9 +368,14 @@ impl OriginTactic {
         for &untrusted_rid in &tainted_sources {
             let reachable = info.reachable_from(untrusted_rid);
             for &reached_rid in &reachable {
-                if reached_rid == untrusted_rid { continue; }
+                if reached_rid == untrusted_rid {
+                    continue;
+                }
                 if let Some(sensitivity) = info.sink_sensitivity(reached_rid) {
-                    if matches!(sensitivity, SinkSensitivity::Sensitive | SinkSensitivity::Critical) {
+                    if matches!(
+                        sensitivity,
+                        SinkSensitivity::Sensitive | SinkSensitivity::Critical
+                    ) {
                         return Err(ProofFailure::UntrustedFlow {
                             src_region: untrusted_rid,
                             sink_region: reached_rid,
@@ -355,7 +388,10 @@ impl OriginTactic {
             proof.add_step(ProofStep::Assume {
                 fact: Fact::checked(
                     next_fid,
-                    format!("untrusted source {} does not reach any sensitive sink", untrusted_rid),
+                    format!(
+                        "untrusted source {} does not reach any sensitive sink",
+                        untrusted_rid
+                    ),
                 ),
             });
             next_fid += 1;
@@ -374,7 +410,8 @@ impl OriginTactic {
         }
 
         proof.add_step(ProofStep::ByDefinition {
-            definition: "source_classification: no untrusted source reaches a sensitive sink".into(),
+            definition: "source_classification: no untrusted source reaches a sensitive sink"
+                .into(),
         });
         proof.conclude(Conclusion::Proven);
 
@@ -428,7 +465,10 @@ pub fn prove_origin(info: &OriginInfo) -> Result<OriginProof, ProofFailure> {
     let mut next_fid: FactId = 1;
 
     proof.add_step(ProofStep::Assume {
-        fact: Fact::axiom(next_fid, format!("{} derivation chains verified", chain_proofs.len())),
+        fact: Fact::axiom(
+            next_fid,
+            format!("{} derivation chains verified", chain_proofs.len()),
+        ),
     });
     next_fid += 1;
 
@@ -438,7 +478,10 @@ pub fn prove_origin(info: &OriginInfo) -> Result<OriginProof, ProofFailure> {
             rule: InferenceRule::DerivationTransitivity,
             conclusion: Fact::derived(
                 next_fid,
-                format!("derivation {} terminates at live region {}", derivation_id, root_region),
+                format!(
+                    "derivation {} terminates at live region {}",
+                    derivation_id, root_region
+                ),
             ),
         });
         next_fid += 1;

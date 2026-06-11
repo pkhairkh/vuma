@@ -59,7 +59,11 @@ impl std::fmt::Display for Step {
             Step::Alloc { region } => write!(f, "alloc r{}", region),
             Step::Free { region } => write!(f, "free r{}", region),
             Step::Read { addr, region } => write!(f, "read [0x{:x}] from r{}", addr, region),
-            Step::Write { addr, region, value } => {
+            Step::Write {
+                addr,
+                region,
+                value,
+            } => {
                 write!(f, "write 0x{:x} to [0x{:x}] in r{}", value, addr, region)
             }
             Step::Branch { taken } => write!(f, "branch({})", if *taken { "then" } else { "else" }),
@@ -117,10 +121,7 @@ pub struct CounterExample {
 impl CounterExample {
     /// Create a counterexample from a violation point, with an empty execution
     /// trace.
-    pub fn from_violation(
-        _msg: &str,
-        violation: ViolationPoint,
-    ) -> Self {
+    pub fn from_violation(_msg: &str, violation: ViolationPoint) -> Self {
         Self {
             execution: Vec::new(),
             violation,
@@ -146,7 +147,10 @@ impl CounterExample {
                 region: 0,
                 value: 0,
             })
-        } else if matches!(self.violation.invariant, InvariantName::Cleanup | InvariantName::Origin | InvariantName::Interpretation) {
+        } else if matches!(
+            self.violation.invariant,
+            InvariantName::Cleanup | InvariantName::Origin | InvariantName::Interpretation
+        ) {
             // Default: an alloc step for other invariant violations.
             Some(Step::Alloc { region: 0 })
         } else {
@@ -178,7 +182,11 @@ impl CounterExample {
 
 impl std::fmt::Display for CounterExample {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Counterexample for invariant '{}':", self.violation.invariant)?;
+        writeln!(
+            f,
+            "Counterexample for invariant '{}':",
+            self.violation.invariant
+        )?;
         writeln!(f, "  Violation: {}", self.violation.description)?;
         writeln!(f, "  Location: 0x{:x}", self.violation.location)?;
         writeln!(f, "  Trace ({} steps):", self.execution.len())?;
@@ -198,17 +206,27 @@ mod tests {
         assert_eq!(format!("{}", Step::Alloc { region: 1 }), "alloc r1");
         assert_eq!(format!("{}", Step::Free { region: 2 }), "free r2");
         assert_eq!(
-            format!("{}", Step::Read { addr: 0x100, region: 3 }),
+            format!(
+                "{}",
+                Step::Read {
+                    addr: 0x100,
+                    region: 3
+                }
+            ),
             "read [0x100] from r3"
         );
         assert_eq!(
-            format!("{}", Step::Write { addr: 0x200, region: 4, value: 42 }),
+            format!(
+                "{}",
+                Step::Write {
+                    addr: 0x200,
+                    region: 4,
+                    value: 42
+                }
+            ),
             "write 0x2a to [0x200] in r4"
         );
-        assert_eq!(
-            format!("{}", Step::Branch { taken: true }),
-            "branch(then)"
-        );
+        assert_eq!(format!("{}", Step::Branch { taken: true }), "branch(then)");
     }
 
     #[test]

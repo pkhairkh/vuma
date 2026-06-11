@@ -234,10 +234,9 @@ impl RepD {
     /// capabilities as the pointee plus Read and Write for dereference.
     // VUMA-VERIFIED: pointer construction preserves pointee capabilities
     pub fn ptr_to(pointee: &RepD) -> Self {
-        let ptr_capd = pointee.capd.union(&CapD::new(vec![
-            CapFlag::Read,
-            CapFlag::Write,
-        ]));
+        let ptr_capd = pointee
+            .capd
+            .union(&CapD::new(vec![CapFlag::Read, CapFlag::Write]));
         Self {
             name: format!("ptr<{}>", pointee.name),
             size: 8,
@@ -384,13 +383,21 @@ pub fn ptr_reld() -> RelD {
 /// The RelD for region-bound pointers: Containment, Liveness, RegionBound.
 // VUMA-VERIFIED: well-known relation set for region-bound pointers
 pub fn region_ptr_reld() -> RelD {
-    RelD::new(vec![RelKind::Containment, RelKind::Liveness, RelKind::RegionBound])
+    RelD::new(vec![
+        RelKind::Containment,
+        RelKind::Liveness,
+        RelKind::RegionBound,
+    ])
 }
 
 /// The RelD for slice types: Containment, Liveness, DataFlow.
 // VUMA-VERIFIED: well-known relation set for slices
 pub fn slice_reld() -> RelD {
-    RelD::new(vec![RelKind::Containment, RelKind::Liveness, RelKind::DataFlow])
+    RelD::new(vec![
+        RelKind::Containment,
+        RelKind::Liveness,
+        RelKind::DataFlow,
+    ])
 }
 
 /// The RelD for result types: DataFlow, Ownership.
@@ -455,8 +462,8 @@ impl BD {
             && self.repd.size == other.repd.size
             && !self.capd.intersect(&other.capd).flags.is_empty()
             && !self.reld.intersect(&other.reld).relations.is_empty()
-                || self.reld.relations.is_empty()
-                || other.reld.relations.is_empty()
+            || self.reld.relations.is_empty()
+            || other.reld.relations.is_empty()
     }
 
     /// `self` **refines** `other` when `self` is at least as specific in
@@ -610,23 +617,29 @@ pub fn float64_repd() -> RepD {
 /// Returns the RepD for `bool` (1-byte boolean).
 // VUMA-VERIFIED: canonical primitive representation
 pub fn bool_repd() -> RepD {
-    RepD::new("bool", 1, 1, CapD::new(vec![
-        CapFlag::Read,
-        CapFlag::Write,
-        CapFlag::Compare,
-        CapFlag::Hash,
-        CapFlag::Serialize,
-    ]))
+    RepD::new(
+        "bool",
+        1,
+        1,
+        CapD::new(vec![
+            CapFlag::Read,
+            CapFlag::Write,
+            CapFlag::Compare,
+            CapFlag::Hash,
+            CapFlag::Serialize,
+        ]),
+    )
 }
 
 /// Returns the RepD for `byte` (raw 8-bit byte, no Compare/Hash by default).
 // VUMA-VERIFIED: canonical primitive representation
 pub fn byte_repd() -> RepD {
-    RepD::new("byte", 1, 1, CapD::new(vec![
-        CapFlag::Read,
-        CapFlag::Write,
-        CapFlag::Serialize,
-    ]))
+    RepD::new(
+        "byte",
+        1,
+        1,
+        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Serialize]),
+    )
 }
 
 /// Returns the RepD for a pointer to the given pointee type.
@@ -716,10 +729,9 @@ impl<T> Ptr<T> {
     /// Returns the CapD for this pointer type.
     // VUMA-VERIFIED: pointer CapD is derived from pointee + Read/Write
     pub fn capd(&self) -> CapD {
-        self.pointee_bd.capd.union(&CapD::new(vec![
-            CapFlag::Read,
-            CapFlag::Write,
-        ]))
+        self.pointee_bd
+            .capd
+            .union(&CapD::new(vec![CapFlag::Read, CapFlag::Write]))
     }
 
     /// Returns the RelD for this pointer type.
@@ -740,7 +752,11 @@ impl<T> HasBD for Ptr<T> {
 
 impl<T> fmt::Display for Ptr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Ptr(0x{:016X}, {})", self.addr, self.pointee_bd.repd.name)
+        write!(
+            f,
+            "Ptr(0x{:016X}, {})",
+            self.addr, self.pointee_bd.repd.name
+        )
     }
 }
 
@@ -792,7 +808,9 @@ impl<T> RegionPtr<T> {
         assert!(
             addr >= region_base && addr < region_base + region_size,
             "RegionPtr: address 0x{:X} is outside region [0x{:X}, 0x{:X})",
-            addr, region_base, region_base + region_size
+            addr,
+            region_base,
+            region_base + region_size
         );
         Self {
             addr,
@@ -1458,8 +1476,16 @@ mod tests {
 
     #[test]
     fn test_bd_refines() {
-        let a = BD::new(uint32_repd(), CapD::new(vec![CapFlag::Read]), RelD::new(vec![RelKind::Containment, RelKind::Liveness]));
-        let b = BD::new(uint32_repd(), numeric_capd(), RelD::new(vec![RelKind::Containment]));
+        let a = BD::new(
+            uint32_repd(),
+            CapD::new(vec![CapFlag::Read]),
+            RelD::new(vec![RelKind::Containment, RelKind::Liveness]),
+        );
+        let b = BD::new(
+            uint32_repd(),
+            numeric_capd(),
+            RelD::new(vec![RelKind::Containment]),
+        );
         // a refines b: a has fewer caps (subcap) and more relations (refines)
         assert!(a.refines(&b));
     }

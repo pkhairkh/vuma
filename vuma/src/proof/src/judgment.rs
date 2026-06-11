@@ -268,7 +268,10 @@ impl Judgment {
                 pointer,
                 offset,
                 size,
-            } => format!("bounds preserved: inbounds {} offset={} size={}", pointer, offset, size),
+            } => format!(
+                "bounds preserved: inbounds {} offset={} size={}",
+                pointer, offset, size
+            ),
             Judgment::Initialized { variable } => format!("variable {} is initialized", variable),
             Judgment::PreservesCapD {
                 resource,
@@ -342,7 +345,10 @@ mod tests {
             resource_a: ResourceId(1),
             resource_b: ResourceId(2),
         };
-        assert_eq!(j.to_statement(), "no conflict between resource#1 and resource#2");
+        assert_eq!(
+            j.to_statement(),
+            "no conflict between resource#1 and resource#2"
+        );
     }
 
     #[test]
@@ -352,7 +358,10 @@ mod tests {
             offset: 16,
             size: 4,
         };
-        assert_eq!(j.to_statement(), "bounds preserved: inbounds pointer#3 offset=16 size=4");
+        assert_eq!(
+            j.to_statement(),
+            "bounds preserved: inbounds pointer#3 offset=16 size=4"
+        );
     }
 
     #[test]

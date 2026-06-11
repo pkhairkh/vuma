@@ -65,9 +65,9 @@ use crate::ast::*;
 use crate::error::{ParseError, Span};
 use std::collections::HashMap;
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationNode, ControlKind, ControlNode,
-    DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, RegionId, SCG, SCGRegion, VTableNode,
+    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
+    ControlNode, DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
+    NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, VTableNode, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,8 +121,7 @@ impl AstToScg {
         let mut scg = SCG::new();
 
         // Create the default top-level region.
-        let mut default_region =
-            SCGRegion::new(self.default_region, DeploymentTarget::Heap);
+        let mut default_region = SCGRegion::new(self.default_region, DeploymentTarget::Heap);
         default_region.scope_level = 0;
 
         let mut prev_node: Option<NodeId> = None;
@@ -170,7 +169,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("import \"{}\"", i.path),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&i.span),
                 );
@@ -183,7 +182,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("export {}", e.name),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&e.span),
                 );
@@ -196,7 +195,9 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: c.ty.as_ref().map(|t| t.to_string()), tail_call: false }),
+                        result_type: c.ty.as_ref().map(|t| t.to_string()),
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&c.span),
                 );
                 default_region.add_node(id);
@@ -205,7 +206,9 @@ impl AstToScg {
                 Ok(id)
             }
             Item::StructDef(s) => {
-                let fields_str: Vec<String> = s.fields.iter()
+                let fields_str: Vec<String> = s
+                    .fields
+                    .iter()
                     .map(|f| format!("{}: {}", f.name, f.ty))
                     .collect();
                 let id = scg.add_node(
@@ -213,7 +216,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("struct {} {{ {} }}", s.name, fields_str.join(", ")),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&s.span),
                 );
@@ -221,15 +224,13 @@ impl AstToScg {
                 Ok(id)
             }
             Item::EnumDef(e) => {
-                let variants_str: Vec<String> = e.variants.iter()
-                    .map(|v| v.name.clone())
-                    .collect();
+                let variants_str: Vec<String> = e.variants.iter().map(|v| v.name.clone()).collect();
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: format!("enum {} {{ {} }}", e.name, variants_str.join(", ")),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&e.span),
                 );
@@ -242,7 +243,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("module {}", m.name),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&m.span),
                 );
@@ -256,7 +257,9 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: s.ty.as_ref().map(|t| t.to_string()), tail_call: false }),
+                        result_type: s.ty.as_ref().map(|t| t.to_string()),
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&s.span),
                 );
                 default_region.add_node(id);
@@ -265,7 +268,9 @@ impl AstToScg {
                 Ok(id)
             }
             Item::TraitDef(t) => {
-                let methods_str: Vec<String> = t.required_methods.iter()
+                let methods_str: Vec<String> = t
+                    .required_methods
+                    .iter()
                     .chain(t.provided_methods.iter())
                     .map(|m| m.name.clone())
                     .collect();
@@ -274,7 +279,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&t.span),
                 );
@@ -284,19 +289,19 @@ impl AstToScg {
             Item::ImplBlock(i) => {
                 let target_str = i.target_type.to_string();
                 let trait_str = i.trait_name.as_deref().unwrap_or("");
-                let methods_str: Vec<String> = i.methods.iter()
-                    .map(|m| m.name.clone())
-                    .collect();
+                let methods_str: Vec<String> = i.methods.iter().map(|m| m.name.clone()).collect();
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("impl {}{} for {} {{ {} }}",
+                        operation: format!(
+                            "impl {}{} for {} {{ {} }}",
                             trait_str,
                             if trait_str.is_empty() { "" } else { " " },
                             target_str,
-                            methods_str.join(", ")),
+                            methods_str.join(", ")
+                        ),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(&i.span),
                 );
@@ -310,14 +315,16 @@ impl AstToScg {
 
     fn convert_fn_def(&mut self, f: &FnDef, scg: &mut SCG) -> Result<NodeId, ParseError> {
         let region_id = self.alloc_region_id();
-        let mut fn_region =
-            SCGRegion::with_scope_level(region_id, DeploymentTarget::Heap, 1);
+        let mut fn_region = SCGRegion::with_scope_level(region_id, DeploymentTarget::Heap, 1);
 
         self.push_scope();
         self.push_alloc_scope();
 
         // Enhanced: include return type in entry label for traceability.
-        let ret_type_str = f.return_type.as_ref().map(|t| t.to_string())
+        let ret_type_str = f
+            .return_type
+            .as_ref()
+            .map(|t| t.to_string())
             .unwrap_or_else(|| "void".to_string());
         let entry_label = format!("fn_{}_entry({})", f.name, ret_type_str);
 
@@ -340,7 +347,7 @@ impl AstToScg {
                 NodePayload::Computation(ComputationNode {
                     operation: format!("param {}", p.name),
                     result_type: p.ty.as_ref().map(|t| t.to_string()),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 self.span_to_pp(&p.span),
             );
@@ -404,8 +411,7 @@ impl AstToScg {
         default_region: &mut SCGRegion,
     ) -> Result<NodeId, ParseError> {
         let region_id = self.alloc_region_id();
-        let mut mem_region =
-            SCGRegion::new(region_id, DeploymentTarget::Heap);
+        let mut mem_region = SCGRegion::new(region_id, DeploymentTarget::Heap);
 
         let size_val = self.eval_const_int(&r.size_expr).unwrap_or(0);
         let align = self.type_alignment(None);
@@ -482,7 +488,9 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: result_type.clone(), tail_call: false }),
+                        result_type: result_type.clone(),
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&l.span),
                 );
                 region.add_node(id);
@@ -497,7 +505,8 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: "uninitialized".to_string(),
                             result_type: result_type.clone(),
-                        tail_call: false }),
+                            tail_call: false,
+                        }),
                         self.span_to_pp(span),
                     );
                     region.add_node(uninit_id);
@@ -523,12 +532,23 @@ impl AstToScg {
                 // with enhanced size/align from type annotation.
                 if let Expr::Allocate { size, .. } = &l.value {
                     self.emit_alloc_from_expr(
-                        size, &l.name, l.ty.as_ref(), id, scg, region, &l.span,
+                        size,
+                        &l.name,
+                        l.ty.as_ref(),
+                        id,
+                        scg,
+                        region,
+                        &l.span,
                     )?;
                 }
 
                 // If the RHS is a cast expression → Cast node.
-                if let Expr::Cast { expr: inner, target_type, .. } = &l.value {
+                if let Expr::Cast {
+                    expr: inner,
+                    target_type,
+                    ..
+                } = &l.value
+                {
                     let source_type = self.infer_expr_type(inner);
                     let target_type_str = target_type.to_string();
                     let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
@@ -562,7 +582,9 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None, tail_call: false }),
+                        result_type: None,
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&a.span),
                 );
                 region.add_node(id);
@@ -570,7 +592,12 @@ impl AstToScg {
                 // Enhanced: if assigning through a dereference or index,
                 // this is also a Write (or ReadWrite if the target is read
                 // before being written, e.g., +=).
-                if matches!(a.target, AssignTarget::Deref { .. } | AssignTarget::DerefField { .. } | AssignTarget::Index { .. }) {
+                if matches!(
+                    a.target,
+                    AssignTarget::Deref { .. }
+                        | AssignTarget::DerefField { .. }
+                        | AssignTarget::Index { .. }
+                ) {
                     let access_size = self.infer_assign_access_size(&a.target);
                     let access_id = scg.add_node(
                         NodeType::Access,
@@ -607,7 +634,13 @@ impl AstToScg {
 
                 // Pointer offset via assignment: `ptr = base + offset`
                 // Create Derivation edge with offset label.
-                if let Expr::BinOp { op: BinOp::Add, lhs, rhs, .. } = &a.value {
+                if let Expr::BinOp {
+                    op: BinOp::Add,
+                    lhs,
+                    rhs,
+                    ..
+                } = &a.value
+                {
                     for var_name in &self.expr_uses(lhs) {
                         if let Some(source) = self.lookup_var(var_name) {
                             let eid = scg.add_edge(source, id, EdgeKind::Derivation);
@@ -628,7 +661,12 @@ impl AstToScg {
                 }
 
                 // Also handle Cast in assignment value
-                if let Expr::Cast { expr: inner, target_type, .. } = &a.value {
+                if let Expr::Cast {
+                    expr: inner,
+                    target_type,
+                    ..
+                } = &a.value
+                {
                     let source_type = self.infer_expr_type(inner);
                     let target_type_str = target_type.to_string();
                     let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
@@ -713,7 +751,9 @@ impl AstToScg {
                 let (_target, field) = self.extract_access(&acc.expr);
                 let access_size = self.infer_access_size(&acc.expr);
                 // Enhanced: compute field offset for struct field access.
-                let offset = field.as_deref().and_then(|_| self.infer_field_offset(&acc.expr));
+                let offset = field
+                    .as_deref()
+                    .and_then(|_| self.infer_field_offset(&acc.expr));
                 let id = scg.add_node(
                     NodeType::Access,
                     NodePayload::Access(AccessNode {
@@ -1099,7 +1139,7 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
                             result_type: None,
-                        tail_call: false,
+                            tail_call: false,
                         }),
                         self.span_to_pp(&arm.span),
                     );
@@ -1126,23 +1166,29 @@ impl AstToScg {
                                 NodePayload::Computation(ComputationNode {
                                     operation: format!("destructure {}.{}", name, field),
                                     result_type: None,
-                                tail_call: false,
+                                    tail_call: false,
                                 }),
                                 self.span_to_pp(&arm.span),
                             );
                             region.add_node(field_comp_id);
-                            let _ = scg.add_edge(field_access_id, field_comp_id, EdgeKind::DataFlow);
+                            let _ =
+                                scg.add_edge(field_access_id, field_comp_id, EdgeKind::DataFlow);
                         }
                     }
 
                     // Enum variant binding: create a Computation node for the binding.
-                    if let MatchPattern::Enum { name, binding: Some(b), .. } = &arm.pattern {
+                    if let MatchPattern::Enum {
+                        name,
+                        binding: Some(b),
+                        ..
+                    } = &arm.pattern
+                    {
                         let bind_id = scg.add_node(
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
                                 operation: format!("enum_bind {}({})", name, b),
                                 result_type: None,
-                            tail_call: false,
+                                tail_call: false,
                             }),
                             self.span_to_pp(&arm.span),
                         );
@@ -1156,9 +1202,13 @@ impl AstToScg {
                         let range_check_id = scg.add_node(
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
-                                operation: format!("range_check {}..={}", self.lit_to_string(start), self.lit_to_string(end)),
+                                operation: format!(
+                                    "range_check {}..={}",
+                                    self.lit_to_string(start),
+                                    self.lit_to_string(end)
+                                ),
                                 result_type: Some("bool".to_string()),
-                            tail_call: false,
+                                tail_call: false,
                             }),
                             self.span_to_pp(&arm.span),
                         );
@@ -1261,7 +1311,9 @@ impl AstToScg {
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None, tail_call: false }),
+                        result_type: None,
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&e.span),
                 );
                 region.add_node(id);
@@ -1296,7 +1348,12 @@ impl AstToScg {
                 }
 
                 // Derive expression → Derivation edges
-                if let Expr::Derive { ptr, region: derive_region, .. } = &e.expr {
+                if let Expr::Derive {
+                    ptr,
+                    region: derive_region,
+                    ..
+                } = &e.expr
+                {
                     for var_name in &self.expr_uses(ptr) {
                         if let Some(source) = self.lookup_var(var_name) {
                             let _ = scg.add_edge(source, id, EdgeKind::Derivation);
@@ -1327,7 +1384,12 @@ impl AstToScg {
                 }
 
                 // If the expression is a cast, add a Cast node.
-                if let Expr::Cast { expr: inner, target_type, .. } = &e.expr {
+                if let Expr::Cast {
+                    expr: inner,
+                    target_type,
+                    ..
+                } = &e.expr
+                {
                     let source_type = self.infer_expr_type(inner);
                     let target_type_str = target_type.to_string();
                     let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
@@ -1379,7 +1441,7 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: format!("sizeof({})", ty),
                             result_type: Some("usize".to_string()),
-                        tail_call: false,
+                            tail_call: false,
                         }),
                         self.span_to_pp(&e.span),
                     );
@@ -1393,7 +1455,7 @@ impl AstToScg {
                         NodePayload::Computation(ComputationNode {
                             operation: format!("alignof({})", ty),
                             result_type: Some("usize".to_string()),
-                        tail_call: false,
+                            tail_call: false,
                         }),
                         self.span_to_pp(&e.span),
                     );
@@ -1419,12 +1481,19 @@ impl AstToScg {
                     CompoundOp::Shl => "<<=",
                     CompoundOp::Shr => ">>=",
                 };
-                let desc = format!("{} {} {}", target_name, op_str, self.expr_to_string(&ca.value));
+                let desc = format!(
+                    "{} {} {}",
+                    target_name,
+                    op_str,
+                    self.expr_to_string(&ca.value)
+                );
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
                         operation: desc,
-                        result_type: None, tail_call: false }),
+                        result_type: None,
+                        tail_call: false,
+                    }),
                     self.span_to_pp(&ca.span),
                 );
                 region.add_node(id);
@@ -1512,7 +1581,12 @@ impl AstToScg {
                 kind: ControlKind::FunctionEntry,
                 label: Some(format!("call_{}", callee_name)),
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(entry_id);
 
@@ -1541,7 +1615,12 @@ impl AstToScg {
                 kind: ControlKind::FunctionReturn,
                 label: Some(format!("return_{}", callee_name)),
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(ret_id);
 
@@ -1582,13 +1661,15 @@ impl AstToScg {
         };
 
         // Filter to only those that exist in the enclosing scope.
-        let captured_vars: Vec<(String, NodeId)> = body_uses.iter()
+        let captured_vars: Vec<(String, NodeId)> = body_uses
+            .iter()
             .filter_map(|name| self.lookup_var(name).map(|id| (name.clone(), id)))
             .collect();
 
         // Determine capture mode for each variable.
         let _is_move = matches!(capture_kind, CaptureKind::Move);
-        let capture_modes: Vec<bool> = captured_vars.iter()
+        let capture_modes: Vec<bool> = captured_vars
+            .iter()
             .map(|(name, _)| {
                 match capture_kind {
                     CaptureKind::Move => true,
@@ -1624,7 +1705,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: format!("copy_capture[{}]", idx),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(span),
                 );
@@ -1666,7 +1747,7 @@ impl AstToScg {
                 NodePayload::Computation(ComputationNode {
                     operation: format!("closure_param {}", p.name),
                     result_type: p.ty.as_ref().map(|t| t.to_string()),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 self.span_to_pp(&p.span),
             );
@@ -1687,7 +1768,7 @@ impl AstToScg {
                     NodePayload::Computation(ComputationNode {
                         operation: self.expr_to_string(e),
                         result_type: None,
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     self.span_to_pp(span),
                 );
@@ -1838,7 +1919,10 @@ impl AstToScg {
             NodeType::Control,
             NodePayload::Control(ControlNode {
                 kind: ControlKind::FunctionReturn,
-                label: Some(format!("static_dispatch_return {}::{}", target_type, method_name)),
+                label: Some(format!(
+                    "static_dispatch_return {}::{}",
+                    target_type, method_name
+                )),
             }),
             self.span_to_pp(span),
         );
@@ -1879,9 +1963,12 @@ impl AstToScg {
         let dispatch_id = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: format!("dyn_dispatch {}::{} for {}", trait_name, method_name, concrete_type),
+                operation: format!(
+                    "dyn_dispatch {}::{} for {}",
+                    trait_name, method_name, concrete_type
+                ),
                 result_type: None,
-            tail_call: false,
+                tail_call: false,
             }),
             self.span_to_pp(span),
         );
@@ -1972,11 +2059,8 @@ impl AstToScg {
         span: &Span,
     ) -> Result<(), ParseError> {
         let async_region_id = self.alloc_region_id();
-        let mut async_region = SCGRegion::with_security_boundary(
-            async_region_id,
-            DeploymentTarget::Shared,
-            true,
-        );
+        let mut async_region =
+            SCGRegion::with_security_boundary(async_region_id, DeploymentTarget::Shared, true);
         async_region.scope_level = 1;
 
         let fork_id = scg.add_node(
@@ -2069,12 +2153,16 @@ impl AstToScg {
     ) -> Result<(), ParseError> {
         // Enhanced: if type annotation is present, use it for size/align.
         let (size_val, align) = if let Some(t) = ty {
-            let computed_size = self.eval_const_int(size)
+            let computed_size = self
+                .eval_const_int(size)
                 .unwrap_or_else(|| self.type_size(t));
             let computed_align = self.type_alignment(Some(t));
             (computed_size, computed_align)
         } else {
-            (self.eval_const_int(size).unwrap_or(0), self.type_alignment(None))
+            (
+                self.eval_const_int(size).unwrap_or(0),
+                self.type_alignment(None),
+            )
         };
 
         let alloc_id = scg.add_node(
@@ -2309,13 +2397,25 @@ impl AstToScg {
 
     fn eval_const_int(&self, expr: &Expr) -> Option<u64> {
         match expr {
-            Expr::Lit { value: Lit::Int(i), .. } => Some(*i as u64),
-            Expr::BinOp { op: BinOp::Add, lhs, rhs, .. } => {
-                self.eval_const_int(lhs).and_then(|l| self.eval_const_int(rhs).map(|r| l + r))
-            }
-            Expr::BinOp { op: BinOp::Mul, lhs, rhs, .. } => {
-                self.eval_const_int(lhs).and_then(|l| self.eval_const_int(rhs).map(|r| l * r))
-            }
+            Expr::Lit {
+                value: Lit::Int(i), ..
+            } => Some(*i as u64),
+            Expr::BinOp {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => self
+                .eval_const_int(lhs)
+                .and_then(|l| self.eval_const_int(rhs).map(|r| l + r)),
+            Expr::BinOp {
+                op: BinOp::Mul,
+                lhs,
+                rhs,
+                ..
+            } => self
+                .eval_const_int(lhs)
+                .and_then(|l| self.eval_const_int(rhs).map(|r| l * r)),
             _ => None,
         }
     }
@@ -2345,9 +2445,7 @@ impl AstToScg {
             Type::BDBase(name) => self.type_size_from_name(name),
             Type::Ptr(_) | Type::RegionPtr { .. } => 8,
             Type::Array { element, size } => self.type_size(element) * (*size as u64),
-            Type::Struct { fields, .. } => {
-                fields.iter().map(|(_, ft)| self.type_size(ft)).sum()
-            }
+            Type::Struct { fields, .. } => fields.iter().map(|(_, ft)| self.type_size(ft)).sum(),
             Type::Func { .. } => 8,
             Type::Generic { .. } => 8,
             Type::BdAnnot { .. } => 0,
@@ -2364,13 +2462,17 @@ impl AstToScg {
                 Lit::Bool(_) => "bool".to_string(),
                 Lit::Address(_) => "u64".to_string(),
             },
-            Expr::BinOp { op, .. } => {
-                match op {
-                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-                    | BinOp::And | BinOp::Or => "bool".to_string(),
-                    _ => "i64".to_string(),
-                }
-            }
+            Expr::BinOp { op, .. } => match op {
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or => "bool".to_string(),
+                _ => "i64".to_string(),
+            },
             Expr::UnOp { op, .. } => match op {
                 UnOp::Not => "bool".to_string(),
                 UnOp::Deref => "unknown".to_string(),
@@ -2496,13 +2598,23 @@ impl AstToScg {
             Expr::AddressOf { expr, .. } => format!("@{}", self.expr_to_string(expr)),
             Expr::Deref { expr, .. } => format!("*{}", self.expr_to_string(expr)),
             Expr::Offset { base, offset, .. } => {
-                format!("{}+{}", self.expr_to_string(base), self.expr_to_string(offset))
+                format!(
+                    "{}+{}",
+                    self.expr_to_string(base),
+                    self.expr_to_string(offset)
+                )
             }
-            Expr::Cast { expr, target_type, .. } => {
+            Expr::Cast {
+                expr, target_type, ..
+            } => {
                 format!("({} as {})", self.expr_to_string(expr), target_type)
             }
             Expr::Index { expr, index, .. } => {
-                format!("{}[{}]", self.expr_to_string(expr), self.expr_to_string(index))
+                format!(
+                    "{}[{}]",
+                    self.expr_to_string(expr),
+                    self.expr_to_string(index)
+                )
             }
             Expr::StructInit { name, fields, .. } => {
                 let f: Vec<String> = fields
@@ -2518,7 +2630,11 @@ impl AstToScg {
                 format!("{}::{}", self.expr_to_string(expr), name)
             }
             Expr::Derive { ptr, region, .. } => {
-                format!("derive({}, {})", self.expr_to_string(ptr), self.expr_to_string(region))
+                format!(
+                    "derive({}, {})",
+                    self.expr_to_string(ptr),
+                    self.expr_to_string(region)
+                )
             }
             Expr::Sizeof { ty, .. } => format!("sizeof({})", ty),
             Expr::Alignof { ty, .. } => format!("alignof({})", ty),
@@ -2530,7 +2646,11 @@ impl AstToScg {
             Expr::Allocate { size, .. } => format!("allocate({})", self.expr_to_string(size)),
             Expr::Null { .. } => "null".to_string(),
             Expr::Range { start, end, .. } => {
-                format!("{}..{}", self.expr_to_string(start), self.expr_to_string(end))
+                format!(
+                    "{}..{}",
+                    self.expr_to_string(start),
+                    self.expr_to_string(end)
+                )
             }
             Expr::FormatStr { .. } => "f\"…\"".to_string(),
             Expr::Closure { .. } => "|…| …".to_string(),
@@ -2570,19 +2690,21 @@ impl AstToScg {
                 format!("(*{}).{}", self.expr_to_string(expr), field)
             }
             AssignTarget::Index { expr, index, .. } => {
-                format!("{}[{}]", self.expr_to_string(expr), self.expr_to_string(index))
+                format!(
+                    "{}[{}]",
+                    self.expr_to_string(expr),
+                    self.expr_to_string(index)
+                )
             }
         }
     }
 
     fn extract_access(&self, expr: &Expr) -> (String, Option<String>) {
         match expr {
-            Expr::Deref { expr: inner, .. } => {
-                (self.expr_to_string(inner), None)
-            }
-            Expr::FieldAccess { expr: inner, field, .. } => {
-                (self.expr_to_string(inner), Some(field.clone()))
-            }
+            Expr::Deref { expr: inner, .. } => (self.expr_to_string(inner), None),
+            Expr::FieldAccess {
+                expr: inner, field, ..
+            } => (self.expr_to_string(inner), Some(field.clone())),
             _ => (self.expr_to_string(expr), None),
         }
     }
@@ -2605,10 +2727,15 @@ impl AstToScg {
                 }
             }
             MatchPattern::Range { start, end, .. } => {
-                format!("{}..={}", self.lit_to_string(start), self.lit_to_string(end))
+                format!(
+                    "{}..={}",
+                    self.lit_to_string(start),
+                    self.lit_to_string(end)
+                )
             }
             MatchPattern::Or { patterns, .. } => {
-                let parts: Vec<String> = patterns.iter().map(|p| self.pattern_to_string(p)).collect();
+                let parts: Vec<String> =
+                    patterns.iter().map(|p| self.pattern_to_string(p)).collect();
                 parts.join(" | ")
             }
         }
@@ -2655,35 +2782,42 @@ mod tests {
 
     /// Helper: find a computation node by operation substring.
     fn find_computation_node(scg: &SCG, op_substring: &str) -> Option<vuma_scg::NodeData> {
-        scg.nodes().find(|n| {
-            if let NodePayload::Computation(c) = &n.payload {
-                c.operation.contains(op_substring)
-            } else {
-                false
-            }
-        }).cloned()
+        scg.nodes()
+            .find(|n| {
+                if let NodePayload::Computation(c) = &n.payload {
+                    c.operation.contains(op_substring)
+                } else {
+                    false
+                }
+            })
+            .cloned()
     }
 
     /// Helper: find a control node by kind.
     fn find_control_node(scg: &SCG, kind: ControlKind) -> Option<vuma_scg::NodeData> {
-        scg.nodes().find(|n| {
-            if let NodePayload::Control(c) = &n.payload {
-                c.kind == kind
-            } else {
-                false
-            }
-        }).cloned()
+        scg.nodes()
+            .find(|n| {
+                if let NodePayload::Control(c) = &n.payload {
+                    c.kind == kind
+                } else {
+                    false
+                }
+            })
+            .cloned()
     }
 
     /// Helper: find all control nodes by kind.
     fn find_all_control_nodes(scg: &SCG, kind: ControlKind) -> Vec<vuma_scg::NodeData> {
-        scg.nodes().filter(|n| {
-            if let NodePayload::Control(c) = &n.payload {
-                c.kind == kind
-            } else {
-                false
-            }
-        }).cloned().collect()
+        scg.nodes()
+            .filter(|n| {
+                if let NodePayload::Control(c) = &n.payload {
+                    c.kind == kind
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect()
     }
 
     // ── Test 1: Function definition → entry/exit with body as intermediates ──
@@ -2692,7 +2826,10 @@ mod tests {
     fn test_fn_def_creates_region_with_entry_exit() {
         let scg = parse_and_convert("fn add(a: u32, b: u32) -> u32 { return a; }");
 
-        assert!(scg.region_count() >= 2, "should have function region + default region");
+        assert!(
+            scg.region_count() >= 2,
+            "should have function region + default region"
+        );
 
         let entry = find_control_node(&scg, ControlKind::FunctionEntry);
         assert!(entry.is_some(), "should have a FunctionEntry node");
@@ -2703,8 +2840,10 @@ mod tests {
         // Enhanced: entry label should contain return type.
         if let Some(e) = &entry {
             if let NodePayload::Control(c) = &e.payload {
-                assert!(c.label.as_ref().map_or(false, |l| l.contains("u32")),
-                    "entry label should include return type");
+                assert!(
+                    c.label.as_ref().map_or(false, |l| l.contains("u32")),
+                    "entry label should include return type"
+                );
             }
         }
     }
@@ -2736,10 +2875,13 @@ mod tests {
         let alloc_count = count_nodes_by_type(&scg, NodeType::Allocation);
         assert!(alloc_count >= 1, "should have at least one Allocation node");
 
-        let alloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Allocation(a) if a.size == 1024)
-        });
-        assert!(alloc_node.is_some(), "should find allocation with size 1024");
+        let alloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Allocation(a) if a.size == 1024));
+        assert!(
+            alloc_node.is_some(),
+            "should find allocation with size 1024"
+        );
 
         let has_derivation = scg.edges().any(|e| e.kind == EdgeKind::Derivation);
         assert!(has_derivation, "should have Derivation edge");
@@ -2749,31 +2891,32 @@ mod tests {
 
     #[test]
     fn test_free_creates_deallocation_referencing_alloc() {
-        let scg = parse_and_convert(
-            "region pool = allocate(256); free(pool);",
-        );
+        let scg = parse_and_convert("region pool = allocate(256); free(pool);");
 
         let dealloc_count = count_nodes_by_type(&scg, NodeType::Deallocation);
         assert!(dealloc_count >= 1, "should have a Deallocation node");
 
-        let alloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Allocation(_))
-        });
-        let dealloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Deallocation(_))
-        });
+        let alloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
+        let dealloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Deallocation(_)));
 
         assert!(alloc_node.is_some());
         assert!(dealloc_node.is_some());
 
         if let (Some(alloc), Some(dealloc)) = (alloc_node, dealloc_node) {
             if let NodePayload::Deallocation(d) = &dealloc.payload {
-                assert_eq!(d.allocation_node, alloc.id,
-                    "deallocation should reference the allocation node");
+                assert_eq!(
+                    d.allocation_node, alloc.id,
+                    "deallocation should reference the allocation node"
+                );
             }
         }
 
-        let derivation_edges: Vec<_> = scg.edges()
+        let derivation_edges: Vec<_> = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Derivation)
             .collect();
         assert!(!derivation_edges.is_empty(), "should have Derivation edges");
@@ -2783,37 +2926,39 @@ mod tests {
 
     #[test]
     fn test_pointer_offset_creates_derivation_edge() {
-        let scg = parse_and_convert(
-            "region pool = allocate(1024); ptr = pool + 64;",
-        );
+        let scg = parse_and_convert("region pool = allocate(1024); ptr = pool + 64;");
 
-        let derivation_edges: Vec<_> = scg.edges()
+        let derivation_edges: Vec<_> = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Derivation)
             .collect();
-        assert!(!derivation_edges.is_empty(),
-            "pointer offset should create Derivation edges");
+        assert!(
+            !derivation_edges.is_empty(),
+            "pointer offset should create Derivation edges"
+        );
 
         // Enhanced: check that the derivation edge has an offset label.
-        let labelled = derivation_edges.iter().any(|e| {
-            e.label.as_ref().map_or(false, |l| l.contains("offset=64"))
-        });
-        assert!(labelled, "derivation edge should be labelled with offset=64");
+        let labelled = derivation_edges
+            .iter()
+            .any(|e| e.label.as_ref().map_or(false, |l| l.contains("offset=64")));
+        assert!(
+            labelled,
+            "derivation edge should be labelled with offset=64"
+        );
     }
 
     // ── Test 6: Cast → Cast node with source/target BD ───────────────────
 
     #[test]
     fn test_cast_creates_cast_node() {
-        let scg = parse_and_convert(
-            "let x = 42; let y = x as u64;",
-        );
+        let scg = parse_and_convert("let x = 42; let y = x as u64;");
 
         let cast_count = count_nodes_by_type(&scg, NodeType::Cast);
         assert!(cast_count >= 1, "should have at least one Cast node");
 
-        let cast_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Cast(_))
-        });
+        let cast_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Cast(_)));
         assert!(cast_node.is_some());
 
         if let Some(node) = cast_node {
@@ -2827,16 +2972,14 @@ mod tests {
 
     #[test]
     fn test_access_creates_access_node() {
-        let scg = parse_and_convert(
-            "region pool = allocate(1024); *pool;",
-        );
+        let scg = parse_and_convert("region pool = allocate(1024); *pool;");
 
         let access_count = count_nodes_by_type(&scg, NodeType::Access);
         assert!(access_count >= 1, "dereference should create Access node");
 
-        let access_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Access(a) if a.mode == AccessMode::Read)
-        });
+        let access_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Access(a) if a.mode == AccessMode::Read));
         assert!(access_node.is_some(), "should have Read Access node");
     }
 
@@ -2844,9 +2987,7 @@ mod tests {
 
     #[test]
     fn test_if_else_creates_branch_and_join() {
-        let scg = parse_and_convert(
-            "let x = 1; if x { let y = 2; } else { let z = 3; }",
-        );
+        let scg = parse_and_convert("let x = 1; if x { let y = 2; } else { let z = 3; }");
 
         let branch = find_control_node(&scg, ControlKind::Branch);
         assert!(branch.is_some(), "should have Branch control node");
@@ -2854,29 +2995,37 @@ mod tests {
         let join = find_control_node(&scg, ControlKind::Join);
         assert!(join.is_some(), "should have Join control node");
 
-        let cf_edges: Vec<_> = scg.edges()
+        let cf_edges: Vec<_> = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::ControlFlow)
             .collect();
-        assert!(cf_edges.len() >= 3, "if/else should have multiple ControlFlow edges");
+        assert!(
+            cf_edges.len() >= 3,
+            "if/else should have multiple ControlFlow edges"
+        );
 
         // Enhanced: check for labelled branch edges.
-        let then_labelled = cf_edges.iter().any(|e| {
-            e.label.as_ref().map_or(false, |l| l == "then")
-        });
-        let else_labelled = cf_edges.iter().any(|e| {
-            e.label.as_ref().map_or(false, |l| l == "else")
-        });
-        assert!(then_labelled, "should have 'then' labelled ControlFlow edge");
-        assert!(else_labelled, "should have 'else' labelled ControlFlow edge");
+        let then_labelled = cf_edges
+            .iter()
+            .any(|e| e.label.as_ref().map_or(false, |l| l == "then"));
+        let else_labelled = cf_edges
+            .iter()
+            .any(|e| e.label.as_ref().map_or(false, |l| l == "else"));
+        assert!(
+            then_labelled,
+            "should have 'then' labelled ControlFlow edge"
+        );
+        assert!(
+            else_labelled,
+            "should have 'else' labelled ControlFlow edge"
+        );
     }
 
     // ── Test 9: While loop → back edges (enhanced: condition DataFlow) ────
 
     #[test]
     fn test_while_creates_loop_with_back_edges() {
-        let scg = parse_and_convert(
-            "let x = 0; while x { let y = 1; }",
-        );
+        let scg = parse_and_convert("let x = 0; while x { let y = 1; }");
 
         let header = find_control_node(&scg, ControlKind::LoopHeader);
         assert!(header.is_some(), "should have LoopHeader node");
@@ -2893,9 +3042,9 @@ mod tests {
 
         // Enhanced: check for data-flow back edge from body to header.
         if let Some(h) = &header {
-            let df_back = scg.edges().any(|e| {
-                e.target == h.id && e.kind == EdgeKind::DataFlow
-            });
+            let df_back = scg
+                .edges()
+                .any(|e| e.target == h.id && e.kind == EdgeKind::DataFlow);
             assert!(df_back, "should have DataFlow back edge to LoopHeader");
         }
     }
@@ -2904,29 +3053,31 @@ mod tests {
 
     #[test]
     fn test_function_call_creates_entry_return() {
-        let scg = parse_and_convert(
-            "fn foo(a: u32) -> u32 { return a; } foo(42);",
-        );
+        let scg = parse_and_convert("fn foo(a: u32) -> u32 { return a; } foo(42);");
 
         let entries = find_all_control_nodes(&scg, ControlKind::FunctionEntry);
-        assert!(entries.len() >= 2,
-            "should have FunctionEntry nodes from fn def and call site");
+        assert!(
+            entries.len() >= 2,
+            "should have FunctionEntry nodes from fn def and call site"
+        );
     }
 
     // ── Test 11: Async → parallel region ─────────────────────────────────
 
     #[test]
     fn test_async_creates_parallel_region() {
-        let scg = parse_and_convert(
-            "async { let x = 1; };",
-        );
+        let scg = parse_and_convert("async { let x = 1; };");
 
         let secure_regions = scg.regions().filter(|r| r.security_boundary).count();
-        assert!(secure_regions >= 1, "async should create security-boundary region");
+        assert!(
+            secure_regions >= 1,
+            "async should create security-boundary region"
+        );
 
-        let shared_regions = scg.regions().filter(|r| {
-            r.deployment_target == DeploymentTarget::Shared
-        }).count();
+        let shared_regions = scg
+            .regions()
+            .filter(|r| r.deployment_target == DeploymentTarget::Shared)
+            .count();
         assert!(shared_regions >= 1, "async should create Shared region");
     }
 
@@ -2934,9 +3085,7 @@ mod tests {
 
     #[test]
     fn test_spawn_creates_effect_node() {
-        let scg = parse_and_convert(
-            "spawn foo();",
-        );
+        let scg = parse_and_convert("spawn foo();");
 
         let effect_node = scg.nodes().find(|n| {
             if let NodePayload::Effect(e) = &n.payload {
@@ -2958,15 +3107,16 @@ mod tests {
 
     #[test]
     fn test_sync_creates_sync_edges() {
-        let scg = parse_and_convert(
-            "sync { let x = 1; }",
-        );
+        let scg = parse_and_convert("sync { let x = 1; }");
 
-        let annotation_edges: Vec<_> = scg.edges()
+        let annotation_edges: Vec<_> = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Annotation)
             .collect();
-        assert!(!annotation_edges.is_empty(),
-            "sync should create Annotation edges");
+        assert!(
+            !annotation_edges.is_empty(),
+            "sync should create Annotation edges"
+        );
 
         // Enhanced: check for sync_enter and sync_exit effect nodes.
         let sync_enter = scg.nodes().find(|n| {
@@ -3002,25 +3152,35 @@ mod tests {
         "#;
         let scg = parse_and_convert(source);
 
-        assert!(count_nodes_by_type(&scg, NodeType::Allocation) >= 1,
-            "should have Allocation nodes");
-        assert!(count_nodes_by_type(&scg, NodeType::Deallocation) >= 1,
-            "should have Deallocation nodes");
-        assert!(count_nodes_by_type(&scg, NodeType::Control) >= 2,
-            "should have Control nodes (fn entry/return)");
-        assert!(count_nodes_by_type(&scg, NodeType::Computation) >= 2,
-            "should have Computation nodes");
+        assert!(
+            count_nodes_by_type(&scg, NodeType::Allocation) >= 1,
+            "should have Allocation nodes"
+        );
+        assert!(
+            count_nodes_by_type(&scg, NodeType::Deallocation) >= 1,
+            "should have Deallocation nodes"
+        );
+        assert!(
+            count_nodes_by_type(&scg, NodeType::Control) >= 2,
+            "should have Control nodes (fn entry/return)"
+        );
+        assert!(
+            count_nodes_by_type(&scg, NodeType::Computation) >= 2,
+            "should have Computation nodes"
+        );
 
-        assert!(scg.region_count() >= 2, "should have function + default regions");
+        assert!(
+            scg.region_count() >= 2,
+            "should have function + default regions"
+        );
 
-        let derivation_count = scg.edges()
+        let derivation_count = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Derivation)
             .count();
         assert!(derivation_count >= 1, "should have Derivation edges");
 
-        let data_flow_count = scg.edges()
-            .filter(|e| e.kind == EdgeKind::DataFlow)
-            .count();
+        let data_flow_count = scg.edges().filter(|e| e.kind == EdgeKind::DataFlow).count();
         assert!(data_flow_count >= 1, "should have DataFlow edges");
     }
 
@@ -3028,9 +3188,7 @@ mod tests {
 
     #[test]
     fn test_data_flow_edges_track_dependencies() {
-        let scg = parse_and_convert(
-            "let x = 10; let y = x + 5;",
-        );
+        let scg = parse_and_convert("let x = 10; let y = x + 5;");
 
         let x_node = find_computation_node(&scg, "let x");
         let y_node = find_computation_node(&scg, "let y");
@@ -3039,11 +3197,13 @@ mod tests {
         assert!(y_node.is_some(), "should have node for let y");
 
         if let (Some(xn), Some(yn)) = (x_node, y_node) {
-            let has_data_flow = scg.edges().any(|e| {
-                e.source == xn.id && e.target == yn.id && e.kind == EdgeKind::DataFlow
-            });
-            assert!(has_data_flow,
-                "should have DataFlow edge from x to y definition");
+            let has_data_flow = scg
+                .edges()
+                .any(|e| e.source == xn.id && e.target == yn.id && e.kind == EdgeKind::DataFlow);
+            assert!(
+                has_data_flow,
+                "should have DataFlow edge from x to y definition"
+            );
         }
     }
 
@@ -3061,21 +3221,26 @@ mod tests {
         let scg = parse_and_convert(source);
 
         assert!(scg.node_count() >= 4, "should have multiple nodes");
-        assert!(scg.region_count() >= 2, "should have function + default regions");
+        assert!(
+            scg.region_count() >= 2,
+            "should have function + default regions"
+        );
 
-        let derivation_count = scg.edges()
+        let derivation_count = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Derivation)
             .count();
-        assert!(derivation_count >= 1, "should have Derivation edges from allocation");
+        assert!(
+            derivation_count >= 1,
+            "should have Derivation edges from allocation"
+        );
     }
 
     // ── Test 17: For loop → LoopHeader/LoopExit with back edges ──────────
 
     #[test]
     fn test_for_loop_creates_loop_nodes() {
-        let scg = parse_and_convert(
-            "for i in 0..10 { let x = i; }",
-        );
+        let scg = parse_and_convert("for i in 0..10 { let x = i; }");
 
         let header = find_control_node(&scg, ControlKind::LoopHeader);
         assert!(header.is_some(), "for should create LoopHeader node");
@@ -3088,9 +3253,7 @@ mod tests {
 
     #[test]
     fn test_deref_assign_creates_write_access() {
-        let scg = parse_and_convert(
-            "region pool = allocate(64); *pool = 42;",
-        );
+        let scg = parse_and_convert("region pool = allocate(64); *pool = 42;");
 
         let write_access = scg.nodes().find(|n| {
             if let NodePayload::Access(a) = &n.payload {
@@ -3099,17 +3262,17 @@ mod tests {
                 false
             }
         });
-        assert!(write_access.is_some(),
-            "dereference assignment should create Write Access node");
+        assert!(
+            write_access.is_some(),
+            "dereference assignment should create Write Access node"
+        );
     }
 
     // ── Test 19: Cast node lossless property ─────────────────────────────
 
     #[test]
     fn test_cast_node_lossless_property() {
-        let scg = parse_and_convert(
-            "let x = 42; let y = x as u64;",
-        );
+        let scg = parse_and_convert("let x = 42; let y = x as u64;");
 
         let cast_node = scg.nodes().find(|n| {
             matches!(&n.payload, NodePayload::Cast(c) if c.from_type == "i64" && c.to_type == "u64")
@@ -3138,7 +3301,11 @@ mod tests {
         let scg = parse_and_convert(source);
 
         let validation = scg.validate();
-        assert!(validation.is_valid, "SCG should validate: errors = {:?}", validation.errors);
+        assert!(
+            validation.is_valid,
+            "SCG should validate: errors = {:?}",
+            validation.errors
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3156,8 +3323,11 @@ mod tests {
         if let Some(e) = entry {
             if let NodePayload::Control(c) = &e.payload {
                 let label = c.label.as_ref().unwrap();
-                assert!(label.contains("u64"),
-                    "entry label should contain return type 'u64', got: {}", label);
+                assert!(
+                    label.contains("u64"),
+                    "entry label should contain return type 'u64', got: {}",
+                    label
+                );
             }
         }
     }
@@ -3175,8 +3345,11 @@ mod tests {
         if let (Some(e), Some(r)) = (&entry, &ret) {
             // There should be a path from entry to return via body nodes.
             let has_path = scg.find_path(e.id, r.id);
-            assert_eq!(has_path, Some(true),
-                "there should be a path from FunctionEntry to FunctionReturn");
+            assert_eq!(
+                has_path,
+                Some(true),
+                "there should be a path from FunctionEntry to FunctionReturn"
+            );
         }
     }
 
@@ -3192,41 +3365,51 @@ mod tests {
         let call_entry = scg.nodes().find(|n| {
             if let NodePayload::Control(c) = &n.payload {
                 c.kind == ControlKind::FunctionEntry
-                    && c.label.as_ref().map_or(false, |l| l.starts_with("call_add"))
+                    && c.label
+                        .as_ref()
+                        .map_or(false, |l| l.starts_with("call_add"))
             } else {
                 false
             }
         });
-        assert!(call_entry.is_some(), "should have call_add FunctionEntry node");
+        assert!(
+            call_entry.is_some(),
+            "should have call_add FunctionEntry node"
+        );
 
         // Check that there are DataFlow edges labelled arg0/arg1.
-        let arg_edges: Vec<_> = scg.edges()
+        let arg_edges: Vec<_> = scg
+            .edges()
             .filter(|e| {
-                e.kind == EdgeKind::DataFlow &&
-                e.label.as_ref().map_or(false, |l| l.starts_with("arg"))
+                e.kind == EdgeKind::DataFlow
+                    && e.label.as_ref().map_or(false, |l| l.starts_with("arg"))
             })
             .collect();
-        assert!(arg_edges.len() >= 2,
-            "should have at least 2 argument DataFlow edges, got {}", arg_edges.len());
+        assert!(
+            arg_edges.len() >= 2,
+            "should have at least 2 argument DataFlow edges, got {}",
+            arg_edges.len()
+        );
     }
 
     // ── Test 24: For loop has DataFlow back edge ─────────────────────────
 
     #[test]
     fn test_for_loop_data_flow_back_edge() {
-        let scg = parse_and_convert(
-            "for i in 0..10 { let x = i; }",
-        );
+        let scg = parse_and_convert("for i in 0..10 { let x = i; }");
 
         let header = find_control_node(&scg, ControlKind::LoopHeader);
         assert!(header.is_some());
 
         // Enhanced: for loop should have a DataFlow back edge to the header.
         if let Some(h) = &header {
-            let df_back = scg.edges().any(|e| {
-                e.target == h.id && e.kind == EdgeKind::DataFlow
-            });
-            assert!(df_back, "for loop should have DataFlow back edge to LoopHeader");
+            let df_back = scg
+                .edges()
+                .any(|e| e.target == h.id && e.kind == EdgeKind::DataFlow);
+            assert!(
+                df_back,
+                "for loop should have DataFlow back edge to LoopHeader"
+            );
         }
     }
 
@@ -3234,19 +3417,19 @@ mod tests {
 
     #[test]
     fn test_narrowing_cast_is_not_lossless() {
-        let scg = parse_and_convert(
-            "let x = 42; let y = x as u8;",
-        );
+        let scg = parse_and_convert("let x = 42; let y = x as u8;");
 
-        let cast_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Cast(c) if c.to_type == "u8")
-        });
+        let cast_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Cast(c) if c.to_type == "u8"));
         assert!(cast_node.is_some(), "should have Cast node targeting u8");
 
         if let Some(node) = cast_node {
             if let NodePayload::Cast(c) = &node.payload {
-                assert!(!c.is_lossless,
-                    "i64→u8 is a narrowing cast and should NOT be lossless");
+                assert!(
+                    !c.is_lossless,
+                    "i64→u8 is a narrowing cast and should NOT be lossless"
+                );
             }
         }
     }
@@ -3255,9 +3438,7 @@ mod tests {
 
     #[test]
     fn test_sync_block_creates_enter_exit_effects() {
-        let scg = parse_and_convert(
-            "sync { let x = 1; let y = 2; }",
-        );
+        let scg = parse_and_convert("sync { let x = 1; let y = 2; }");
 
         let sync_enter = scg.nodes().find(|n| {
             if let NodePayload::Effect(e) = &n.payload {
@@ -3280,15 +3461,21 @@ mod tests {
         // Verify that sync_enter has Annotation edge to body and body has
         // Annotation edge to sync_exit.
         if let (Some(enter), Some(exit)) = (&sync_enter, &sync_exit) {
-            let enter_to_body = scg.edges().any(|e| {
-                e.source == enter.id && e.kind == EdgeKind::Annotation
-            });
-            assert!(enter_to_body, "sync_enter should have Annotation edge to body");
+            let enter_to_body = scg
+                .edges()
+                .any(|e| e.source == enter.id && e.kind == EdgeKind::Annotation);
+            assert!(
+                enter_to_body,
+                "sync_enter should have Annotation edge to body"
+            );
 
-            let body_to_exit = scg.edges().any(|e| {
-                e.target == exit.id && e.kind == EdgeKind::Annotation
-            });
-            assert!(body_to_exit, "body should have Annotation edge to sync_exit");
+            let body_to_exit = scg
+                .edges()
+                .any(|e| e.target == exit.id && e.kind == EdgeKind::Annotation);
+            assert!(
+                body_to_exit,
+                "body should have Annotation edge to sync_exit"
+            );
         }
     }
 
@@ -3296,27 +3483,25 @@ mod tests {
 
     #[test]
     fn test_if_without_else_has_fallthrough() {
-        let scg = parse_and_convert(
-            "let x = 1; if x { let y = 2; }",
-        );
+        let scg = parse_and_convert("let x = 1; if x { let y = 2; }");
 
         // An if without else should have an "else_fallthrough" labelled edge
         // from the branch directly to the join.
         let fallthrough = scg.edges().any(|e| {
-            e.kind == EdgeKind::ControlFlow &&
-            e.label.as_ref().map_or(false, |l| l == "else_fallthrough")
+            e.kind == EdgeKind::ControlFlow
+                && e.label.as_ref().map_or(false, |l| l == "else_fallthrough")
         });
-        assert!(fallthrough,
-            "if without else should have else_fallthrough ControlFlow edge");
+        assert!(
+            fallthrough,
+            "if without else should have else_fallthrough ControlFlow edge"
+        );
     }
 
     // ── Test 28: Write access has Derivation from pointer variable ────────
 
     #[test]
     fn test_write_access_has_derivation_from_pointer() {
-        let scg = parse_and_convert(
-            "region pool = allocate(64); *pool = 42;",
-        );
+        let scg = parse_and_convert("region pool = allocate(64); *pool = 42;");
 
         let write_access = scg.nodes().find(|n| {
             if let NodePayload::Access(a) = &n.payload {
@@ -3327,9 +3512,9 @@ mod tests {
         });
         assert!(write_access.is_some());
 
-        let alloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Allocation(_))
-        });
+        let alloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
         assert!(alloc_node.is_some());
 
         // Enhanced: there should be a Derivation edge from the alloc node
@@ -3338,8 +3523,10 @@ mod tests {
             let has_derivation = scg.edges().any(|e| {
                 e.source == alloc.id && e.target == access.id && e.kind == EdgeKind::Derivation
             });
-            assert!(has_derivation,
-                "should have Derivation edge from allocation to Write Access node");
+            assert!(
+                has_derivation,
+                "should have Derivation edge from allocation to Write Access node"
+            );
         }
     }
 
@@ -3367,58 +3554,69 @@ mod tests {
         // Verify all node types present.
         assert!(count_nodes_by_type(&scg, NodeType::Allocation) >= 1);
         assert!(count_nodes_by_type(&scg, NodeType::Deallocation) >= 1);
-        assert!(count_nodes_by_type(&scg, NodeType::Control) >= 4,
-            "should have fn entry, fn return, branch, loop header, loop exit, join");
+        assert!(
+            count_nodes_by_type(&scg, NodeType::Control) >= 4,
+            "should have fn entry, fn return, branch, loop header, loop exit, join"
+        );
         assert!(count_nodes_by_type(&scg, NodeType::Computation) >= 3);
 
         // Verify regions: default + fn region.
         assert!(scg.region_count() >= 2);
 
         // Verify derivation chain: alloc → free.
-        let alloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Allocation(_))
-        });
-        let dealloc_node = scg.nodes().find(|n| {
-            matches!(&n.payload, NodePayload::Deallocation(_))
-        });
+        let alloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
+        let dealloc_node = scg
+            .nodes()
+            .find(|n| matches!(&n.payload, NodePayload::Deallocation(_)));
         if let (Some(a), Some(d)) = (&alloc_node, &dealloc_node) {
-            let has_derivation = scg.edges().any(|e| {
-                e.source == a.id && e.target == d.id && e.kind == EdgeKind::Derivation
-            });
-            assert!(has_derivation, "alloc → dealloc should have Derivation edge");
+            let has_derivation = scg
+                .edges()
+                .any(|e| e.source == a.id && e.target == d.id && e.kind == EdgeKind::Derivation);
+            assert!(
+                has_derivation,
+                "alloc → dealloc should have Derivation edge"
+            );
         }
 
         // Verify validation.
         let validation = scg.validate();
-        assert!(validation.is_valid, "complex SCG should validate: errors = {:?}", validation.errors);
+        assert!(
+            validation.is_valid,
+            "complex SCG should validate: errors = {:?}",
+            validation.errors
+        );
     }
 
     // ── Test 30: Derive expression creates derivation edges ──────────────
 
     #[test]
     fn test_derive_expression_creates_derivation_edges() {
-        let scg = parse_and_convert(
-            "region pool = allocate(1024); derive(pool, pool);",
-        );
+        let scg = parse_and_convert("region pool = allocate(1024); derive(pool, pool);");
 
-        let derivation_edges: Vec<_> = scg.edges()
+        let derivation_edges: Vec<_> = scg
+            .edges()
             .filter(|e| e.kind == EdgeKind::Derivation)
             .collect();
-        assert!(derivation_edges.len() >= 2,
-            "derive() should create Derivation edges (from alloc + derive expr)");
+        assert!(
+            derivation_edges.len() >= 2,
+            "derive() should create Derivation edges (from alloc + derive expr)"
+        );
     }
 
     // ── Test 31: Async + spawn parallel pattern ──────────────────────────
 
     #[test]
     fn test_async_spawn_parallel_pattern() {
-        let scg = parse_and_convert(
-            "let x = async { spawn foo(); };",
-        );
+        let scg = parse_and_convert("let x = async { spawn foo(); };");
 
         // Should have: async region (security boundary), spawn effect.
         let secure_regions = scg.regions().filter(|r| r.security_boundary).count();
-        assert!(secure_regions >= 1, "async should create security-boundary region");
+        assert!(
+            secure_regions >= 1,
+            "async should create security-boundary region"
+        );
 
         let spawn_effect = scg.nodes().find(|n| {
             if let NodePayload::Effect(e) = &n.payload {
@@ -3427,27 +3625,33 @@ mod tests {
                 false
             }
         });
-        assert!(spawn_effect.is_some(), "should have spawn Effect node inside async");
+        assert!(
+            spawn_effect.is_some(),
+            "should have spawn Effect node inside async"
+        );
     }
 
     // ── Test 32: Return value DataFlow from FunctionReturn to caller ─────
 
     #[test]
     fn test_return_value_data_flow_to_caller() {
-        let scg = parse_and_convert(
-            "fn foo() -> u32 { return 42; } let result = foo();",
-        );
+        let scg = parse_and_convert("fn foo() -> u32 { return 42; } let result = foo();");
 
         // Find the call-site FunctionReturn.
         let call_return = scg.nodes().find(|n| {
             if let NodePayload::Control(c) = &n.payload {
                 c.kind == ControlKind::FunctionReturn
-                    && c.label.as_ref().map_or(false, |l| l.starts_with("return_foo"))
+                    && c.label
+                        .as_ref()
+                        .map_or(false, |l| l.starts_with("return_foo"))
             } else {
                 false
             }
         });
-        assert!(call_return.is_some(), "should have return_foo FunctionReturn");
+        assert!(
+            call_return.is_some(),
+            "should have return_foo FunctionReturn"
+        );
 
         // Find the caller node (let result = foo()).
         let caller = find_computation_node(&scg, "let result");
@@ -3456,11 +3660,13 @@ mod tests {
         // Enhanced: there should be a DataFlow edge from FunctionReturn
         // back to the caller node.
         if let (Some(ret), Some(call)) = (&call_return, &caller) {
-            let has_return_df = scg.edges().any(|e| {
-                e.source == ret.id && e.target == call.id && e.kind == EdgeKind::DataFlow
-            });
-            assert!(has_return_df,
-                "should have DataFlow from FunctionReturn to caller node");
+            let has_return_df = scg
+                .edges()
+                .any(|e| e.source == ret.id && e.target == call.id && e.kind == EdgeKind::DataFlow);
+            assert!(
+                has_return_df,
+                "should have DataFlow from FunctionReturn to caller node"
+            );
         }
     }
 }

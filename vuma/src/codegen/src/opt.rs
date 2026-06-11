@@ -12,7 +12,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue, UnaryOpKind};
+use crate::ir::{
+    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue, UnaryOpKind,
+};
 
 // ===========================================================================
 // Helpers
@@ -79,7 +81,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             base: sv(base),
             offset: sv(offset),
         },
-        IRInstr::Select { dst, cond, true_val, false_val } => IRInstr::Select {
+        IRInstr::Select {
+            dst,
+            cond,
+            true_val,
+            false_val,
+        } => IRInstr::Select {
             dst: sv(dst),
             cond: sv(cond),
             true_val: sv(true_val),
@@ -105,7 +112,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             lhs: sv(lhs),
             rhs: sv(rhs),
         },
-        IRInstr::Cmp { kind, dst, lhs, rhs } => IRInstr::Cmp {
+        IRInstr::Cmp {
+            kind,
+            dst,
+            lhs,
+            rhs,
+        } => IRInstr::Cmp {
             kind: *kind,
             dst: sv(dst),
             lhs: sv(lhs),
@@ -117,7 +129,11 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
         IRInstr::Branch { target } => IRInstr::Branch {
             target: target.clone(),
         },
-        IRInstr::CondBranch { cond, true_target, false_target } => IRInstr::CondBranch {
+        IRInstr::CondBranch {
+            cond,
+            true_target,
+            false_target,
+        } => IRInstr::CondBranch {
             cond: sv(cond),
             true_target: true_target.clone(),
             false_target: false_target.clone(),
@@ -130,17 +146,31 @@ fn substitute_terminator(terminator: &IRTerminator, map: &HashMap<u32, IRValue>)
     let sv = |v: &IRValue| substitute_value(v, map);
     match terminator {
         IRTerminator::Return(vals) => IRTerminator::Return(vals.iter().map(sv).collect()),
-        IRTerminator::Branch { cond, true_block, false_block } => IRTerminator::Branch {
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => IRTerminator::Branch {
             cond: sv(cond),
             true_block: true_block.clone(),
             false_block: false_block.clone(),
         },
-        IRTerminator::Switch { discr, targets, default } => IRTerminator::Switch {
+        IRTerminator::Switch {
+            discr,
+            targets,
+            default,
+        } => IRTerminator::Switch {
             discr: sv(discr),
             targets: targets.clone(),
             default: default.clone(),
         },
-        IRTerminator::Invoke { dst, func, args, normal, unwind } => IRTerminator::Invoke {
+        IRTerminator::Invoke {
+            dst,
+            func,
+            args,
+            normal,
+            unwind,
+        } => IRTerminator::Invoke {
             dst: dst.as_ref().map(sv),
             func: func.clone(),
             args: args.iter().map(sv).collect(),
@@ -246,10 +276,7 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::CondBranch { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,
-            BinOpKind::SDiv
-                | BinOpKind::UDiv
-                | BinOpKind::SRem
-                | BinOpKind::URem
+            BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
         ),
         IRInstr::Div { .. } => true,
         _ => false,
@@ -262,10 +289,7 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
     match instr {
         IRInstr::BinOp { op, .. } => !matches!(
             op,
-            BinOpKind::SDiv
-                | BinOpKind::UDiv
-                | BinOpKind::SRem
-                | BinOpKind::URem
+            BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
         ),
         IRInstr::Div { .. } => false,
         IRInstr::Load { .. } => false,
@@ -369,7 +393,11 @@ fn redirect_terminator(terminator: &mut IRTerminator, from_label: &str, to_label
             *target = to_label.to_string();
         }
         IRTerminator::Jump(_) => {}
-        IRTerminator::Branch { true_block, false_block, .. } => {
+        IRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } => {
             if *true_block == *from_label {
                 *true_block = to_label.to_string();
             }
@@ -377,7 +405,9 @@ fn redirect_terminator(terminator: &mut IRTerminator, from_label: &str, to_label
                 *false_block = to_label.to_string();
             }
         }
-        IRTerminator::Switch { targets, default, .. } => {
+        IRTerminator::Switch {
+            targets, default, ..
+        } => {
             for (_, target) in targets.iter_mut() {
                 if *target == *from_label {
                     *target = to_label.to_string();
@@ -404,11 +434,21 @@ fn compute_expr_key(instr: &IRInstr) -> Option<ExprKey> {
     match instr {
         IRInstr::BinOp { op, lhs, rhs, .. } => Some(ExprKey::Binary(*op, lhs.clone(), rhs.clone())),
         IRInstr::UnaryOp { op, operand, .. } => Some(ExprKey::Unary(*op, operand.clone())),
-        IRInstr::Add { lhs, rhs, .. } => Some(ExprKey::Binary(BinOpKind::Add, lhs.clone(), rhs.clone())),
-        IRInstr::Sub { lhs, rhs, .. } => Some(ExprKey::Binary(BinOpKind::Sub, lhs.clone(), rhs.clone())),
-        IRInstr::Mul { lhs, rhs, .. } => Some(ExprKey::Binary(BinOpKind::Mul, lhs.clone(), rhs.clone())),
-        IRInstr::Div { lhs, rhs, .. } => Some(ExprKey::Binary(BinOpKind::SDiv, lhs.clone(), rhs.clone())),
-        IRInstr::Cmp { kind, lhs, rhs, .. } => Some(ExprKey::Compare(*kind, lhs.clone(), rhs.clone())),
+        IRInstr::Add { lhs, rhs, .. } => {
+            Some(ExprKey::Binary(BinOpKind::Add, lhs.clone(), rhs.clone()))
+        }
+        IRInstr::Sub { lhs, rhs, .. } => {
+            Some(ExprKey::Binary(BinOpKind::Sub, lhs.clone(), rhs.clone()))
+        }
+        IRInstr::Mul { lhs, rhs, .. } => {
+            Some(ExprKey::Binary(BinOpKind::Mul, lhs.clone(), rhs.clone()))
+        }
+        IRInstr::Div { lhs, rhs, .. } => {
+            Some(ExprKey::Binary(BinOpKind::SDiv, lhs.clone(), rhs.clone()))
+        }
+        IRInstr::Cmp { kind, lhs, rhs, .. } => {
+            Some(ExprKey::Compare(*kind, lhs.clone(), rhs.clone()))
+        }
         _ => None,
     }
 }
@@ -550,7 +590,12 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let dst_id = dst.as_register()?;
             l.checked_div(r).map(|v| (dst_id, v))
         }
-        IRInstr::Cmp { kind, dst, lhs, rhs } => {
+        IRInstr::Cmp {
+            kind,
+            dst,
+            lhs,
+            rhs,
+        } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
@@ -684,7 +729,10 @@ pub fn cse(mut func: IRFunction) -> IRFunction {
 /// caller block is split at the call site, the callee's blocks (with
 /// remapped vregs and labels) are inserted in between, and `Return`
 /// terminators are redirected to the continuation block.
-pub fn inline_small(mut func: IRFunction, program_funcs: &HashMap<String, &IRFunction>) -> IRFunction {
+pub fn inline_small(
+    mut func: IRFunction,
+    program_funcs: &HashMap<String, &IRFunction>,
+) -> IRFunction {
     let mut vreg_counter = max_vreg_id(&func) + 1;
     let mut inline_id: u32 = 0;
 
@@ -694,7 +742,12 @@ pub fn inline_small(mut func: IRFunction, program_funcs: &HashMap<String, &IRFun
         let mut call_info: Option<(usize, String, Option<IRValue>, Vec<IRValue>)> = None;
 
         for (i, instr) in func.blocks[block_idx].instructions.iter().enumerate() {
-            if let IRInstr::Call { dst, func: callee_name, args } = instr {
+            if let IRInstr::Call {
+                dst,
+                func: callee_name,
+                args,
+            } = instr
+            {
                 // Don't inline recursive calls.
                 if *callee_name == func.name {
                     continue;
@@ -734,7 +787,8 @@ pub fn inline_small(mut func: IRFunction, program_funcs: &HashMap<String, &IRFun
             for cblock in &callee.blocks {
                 for instr in &cblock.instructions {
                     for def_id in instr.defined_regs() {
-                        if let std::collections::hash_map::Entry::Vacant(e) = vreg_map.entry(def_id) {
+                        if let std::collections::hash_map::Entry::Vacant(e) = vreg_map.entry(def_id)
+                        {
                             let new_vreg = IRValue::Register(vreg_counter);
                             e.insert(new_vreg);
                             vreg_counter += 1;
@@ -774,10 +828,13 @@ pub fn inline_small(mut func: IRFunction, program_funcs: &HashMap<String, &IRFun
                         new_block.terminator = IRTerminator::Jump(cont_label.clone());
                     }
                     IRTerminator::Jump(target) => {
-                        new_block.terminator =
-                            IRTerminator::Jump(format!("{}_{}", prefix, target));
+                        new_block.terminator = IRTerminator::Jump(format!("{}_{}", prefix, target));
                     }
-                    IRTerminator::Branch { cond, true_block, false_block } => {
+                    IRTerminator::Branch {
+                        cond,
+                        true_block,
+                        false_block,
+                    } => {
                         new_block.terminator = IRTerminator::Branch {
                             cond: substitute_value(cond, &vreg_map),
                             true_block: format!("{}_{}", prefix, true_block),
@@ -799,11 +856,8 @@ pub fn inline_small(mut func: IRFunction, program_funcs: &HashMap<String, &IRFun
 
             // Prefix: everything before the call; terminator → first callee block.
             func.blocks[block_idx].instructions.truncate(call_pos);
-            func.blocks[block_idx].terminator = IRTerminator::Jump(format!(
-                "{}_{}",
-                prefix,
-                callee.blocks[0].label
-            ));
+            func.blocks[block_idx].terminator =
+                IRTerminator::Jump(format!("{}_{}", prefix, callee.blocks[0].label));
 
             // Continuation block: copy result to call dst + rest of original.
             let mut cont_block = IRBlock::new(&cont_label);
@@ -1137,7 +1191,11 @@ mod tests {
                 }],
             );
             let result = constant_fold(func);
-            assert!(result.blocks[0].instructions.is_empty(), "failed for {:?}", op);
+            assert!(
+                result.blocks[0].instructions.is_empty(),
+                "failed for {:?}",
+                op
+            );
 
             // Verify via return value.
             let mut func2 = IRFunction::new("test");
@@ -1485,7 +1543,8 @@ mod tests {
         let result = inline_small(caller, &func_map);
 
         // The inlined body should contain the Mul instruction with args substituted.
-        let all_instrs: Vec<&IRInstr> = result.blocks.iter().flat_map(|b| &b.instructions).collect();
+        let all_instrs: Vec<&IRInstr> =
+            result.blocks.iter().flat_map(|b| &b.instructions).collect();
         let has_mul = all_instrs.iter().any(|i| matches!(i, IRInstr::Mul { .. }));
         assert!(has_mul, "inlined body should contain the Mul instruction");
     }
@@ -1554,24 +1613,44 @@ mod tests {
 
         // The BinOp (v2 = v1 + 5) should have been moved out of the loop
         // header into the preheader.
-        let preheader = result.blocks.iter().find(|b| b.label.starts_with("preheader"));
-        assert!(preheader.is_some(), "a preheader block should have been created");
+        let preheader = result
+            .blocks
+            .iter()
+            .find(|b| b.label.starts_with("preheader"));
+        assert!(
+            preheader.is_some(),
+            "a preheader block should have been created"
+        );
 
         let preheader = preheader.unwrap();
-        let has_invariant = preheader
-            .instructions
-            .iter()
-            .any(|i| matches!(i, IRInstr::BinOp { op: BinOpKind::Add, .. }));
-        assert!(has_invariant, "loop-invariant BinOp should be in the preheader");
+        let has_invariant = preheader.instructions.iter().any(|i| {
+            matches!(
+                i,
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_invariant,
+            "loop-invariant BinOp should be in the preheader"
+        );
 
         // The loop header should no longer contain the invariant BinOp.
         let header = result.blocks.iter().find(|b| b.label == "loop_header");
         assert!(header.is_some());
         let header = header.unwrap();
-        let header_has_invariant = header
-            .instructions
-            .iter()
-            .any(|i| matches!(i, IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), .. }));
+        let header_has_invariant = header.instructions.iter().any(|i| {
+            matches!(
+                i,
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    dst: IRValue::Register(2),
+                    ..
+                }
+            )
+        });
         assert!(
             !header_has_invariant,
             "loop-invariant BinOp should have been moved out of the header"
@@ -1609,14 +1688,24 @@ mod tests {
         let result = licm(func);
 
         // No preheader should be created (nothing to move).
-        let preheader = result.blocks.iter().find(|b| b.label.starts_with("preheader"));
+        let preheader = result
+            .blocks
+            .iter()
+            .find(|b| b.label.starts_with("preheader"));
         // Even if a preheader is created, the Div should still be in the header.
-        let header = result.blocks.iter().find(|b| b.label == "loop_header").unwrap();
+        let header = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "loop_header")
+            .unwrap();
         let header_has_div = header
             .instructions
             .iter()
             .any(|i| matches!(i, IRInstr::Div { .. }));
-        assert!(header_has_div, "Div should not be moved out of the loop header");
+        assert!(
+            header_has_div,
+            "Div should not be moved out of the loop header"
+        );
     }
 
     // ---- Pipeline Test ----
@@ -1677,6 +1766,9 @@ mod tests {
                 )
             })
         });
-        assert!(!has_dead_add, "dead constant add should have been eliminated");
+        assert!(
+            !has_dead_add,
+            "dead constant add should have been eliminated"
+        );
     }
 }

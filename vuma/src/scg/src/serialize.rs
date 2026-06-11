@@ -24,14 +24,12 @@
 //! --- Regions (repeated Region count times) ---
 //! ```
 
-
-
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::graph::SCG;
 use crate::node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
-    ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType,
-    PhantomNode, ProgramPoint, VTableNode,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode,
+    ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload,
+    NodeType, PhantomNode, ProgramPoint, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -878,7 +876,7 @@ fn read_payload(
             Ok(NodePayload::Computation(ComputationNode {
                 operation,
                 result_type,
-            tail_call: false,
+                tail_call: false,
             }))
         }
         NodeType::Allocation => {
@@ -949,23 +947,36 @@ fn read_payload(
             let count = reader.read_u64_le(&format!("{}.method_count", context))?;
             let mut method_entries = Vec::with_capacity(count as usize);
             for i in 0..count as usize {
-                method_entries.push(NodeId::new(reader.read_u64_le(&format!("{}.method[{}]", context, i))?));
+                method_entries.push(NodeId::new(
+                    reader.read_u64_le(&format!("{}.method[{}]", context, i))?,
+                ));
             }
-            Ok(NodePayload::VTable(VTableNode { trait_name, concrete_type, method_entries }))
+            Ok(NodePayload::VTable(VTableNode {
+                trait_name,
+                concrete_type,
+                method_entries,
+            }))
         }
         NodeType::ClosureEnv => {
             let var_count = reader.read_u64_le(&format!("{}.var_count", context))?;
             let mut captured_vars = Vec::with_capacity(var_count as usize);
             for i in 0..var_count as usize {
-                captured_vars.push(reader.read_string(&format!("{}.captured_var[{}]", context, i))?);
+                captured_vars
+                    .push(reader.read_string(&format!("{}.captured_var[{}]", context, i))?);
             }
             let mode_count = reader.read_u64_le(&format!("{}.mode_count", context))?;
             let mut capture_modes = Vec::with_capacity(mode_count as usize);
             for i in 0..mode_count as usize {
                 capture_modes.push(reader.read_bool(&format!("{}.capture_mode[{}]", context, i))?);
             }
-            let closure_entry = reader.read_optional_u64(&format!("{}.closure_entry", context))?.map(NodeId::new);
-            Ok(NodePayload::ClosureEnv(ClosureEnvNode { captured_vars, capture_modes, closure_entry }))
+            let closure_entry = reader
+                .read_optional_u64(&format!("{}.closure_entry", context))?
+                .map(NodeId::new);
+            Ok(NodePayload::ClosureEnv(ClosureEnvNode {
+                captured_vars,
+                capture_modes,
+                closure_entry,
+            }))
         }
     }
 }
@@ -1180,10 +1191,7 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::Return { .. } => "orange",
         };
         let kind_str = format!("{}", edge_data.kind);
-        let label = edge_data
-            .label
-            .as_deref()
-            .unwrap_or(&kind_str);
+        let label = edge_data.label.as_deref().unwrap_or(&kind_str);
         out.push_str(&format!(
             "    {} -> {} [style={}, color={}, label=\"{}\"];\n",
             dot_escape_id(&format!("n{}", edge_data.source.as_u64())),
@@ -1229,10 +1237,7 @@ fn format_node_label(node: &NodeData) -> String {
         }
         NodePayload::Deallocation(_) => "dealloc".to_string(),
         NodePayload::Access(a) => {
-            let offset = a
-                .offset
-                .map(|o| format!("+{}", o))
-                .unwrap_or_default();
+            let offset = a.offset.map(|o| format!("+{}", o)).unwrap_or_default();
             format!("{:?}{} @r{}", a.mode, offset, a.region_id.as_u64())
         }
         NodePayload::Cast(c) => format!("{} -> {}", c.from_type, c.to_type),
@@ -1305,7 +1310,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         scg
@@ -1338,7 +1345,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "write".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -1512,10 +1521,8 @@ mod tests {
         assert_eq!(bd.version, Some(3));
 
         // Check edge with label
-        let labeled_edges: Vec<&EdgeData> = restored
-            .edges()
-            .filter(|e| e.label.is_some())
-            .collect();
+        let labeled_edges: Vec<&EdgeData> =
+            restored.edges().filter(|e| e.label.is_some()).collect();
         assert_eq!(labeled_edges.len(), 1);
         assert_eq!(labeled_edges[0].label, Some("then_branch".to_string()));
 
@@ -1526,7 +1533,10 @@ mod tests {
         assert_eq!(region1.scope_level, 1);
 
         let region2 = restored.get_region(RegionId::new(2)).unwrap();
-        assert_eq!(region2.deployment_target, DeploymentTarget::Custom("TPU".to_string()));
+        assert_eq!(
+            region2.deployment_target,
+            DeploymentTarget::Custom("TPU".to_string())
+        );
     }
 
     // ── Test 4: Binary deserialization rejects invalid magic ────────────
@@ -1547,7 +1557,10 @@ mod tests {
         // Truncate to just the header (16 bytes) — no node data
         bytes.truncate(16);
         let result = deserialize_scg(&bytes);
-        assert!(matches!(result, Err(DeserializeError::UnexpectedEof { .. })));
+        assert!(matches!(
+            result,
+            Err(DeserializeError::UnexpectedEof { .. })
+        ));
     }
 
     // ── Test 6: JSON round-trip of a complex SCG ───────────────────────
@@ -1710,7 +1723,10 @@ mod tests {
         let restored = deserialize_scg(&bytes).unwrap();
 
         let node = restored.nodes().next().unwrap();
-        assert_eq!(node.program_point.file, Some("deep/path/test.vu".to_string()));
+        assert_eq!(
+            node.program_point.file,
+            Some("deep/path/test.vu".to_string())
+        );
         assert_eq!(node.program_point.line, Some(42));
         assert_eq!(node.program_point.column, Some(7));
         assert_eq!(node.program_point.offset, Some(1234));
@@ -1757,14 +1773,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "f".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "g".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let eid = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();

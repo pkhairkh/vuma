@@ -718,11 +718,7 @@ pub fn find_dominance_frontier(
 ///
 /// Used to find the earliest point where two control flow paths merge,
 /// which is important for determining the scope of invariants.
-pub fn nearest_common_dominator(
-    dom_tree: &DominatorTree,
-    a: NodeId,
-    b: NodeId,
-) -> Option<NodeId> {
+pub fn nearest_common_dominator(dom_tree: &DominatorTree, a: NodeId, b: NodeId) -> Option<NodeId> {
     if !dom_tree.nodes.contains(&a) || !dom_tree.nodes.contains(&b) {
         return None;
     }
@@ -857,10 +853,7 @@ pub fn write_precedes_read(
 
 /// Finds all nodes that are guaranteed to execute on any path from `entry`
 /// to `target`. These are exactly the dominators of `target`.
-pub fn guaranteed_execution_path(
-    dom_tree: &DominatorTree,
-    target: NodeId,
-) -> Vec<NodeId> {
+pub fn guaranteed_execution_path(dom_tree: &DominatorTree, target: NodeId) -> Vec<NodeId> {
     if !dom_tree.nodes.contains(&target) {
         return Vec::new();
     }
@@ -887,7 +880,7 @@ mod tests {
     use super::*;
     use crate::edge::EdgeKind;
     use crate::node::{
-        ComputationNode, ControlKind, ControlNode, NodeType, NodePayload, PhantomNode, ProgramPoint,
+        ComputationNode, ControlKind, ControlNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
     };
 
     /// Helper to create a default program point for tests.
@@ -929,7 +922,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: op.to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         )
     }
@@ -1151,16 +1146,10 @@ mod tests {
         );
 
         // NCD(then, join) = entry
-        assert_eq!(
-            nearest_common_dominator(&dom_tree, then, join),
-            Some(entry)
-        );
+        assert_eq!(nearest_common_dominator(&dom_tree, then, join), Some(entry));
 
         // NCD(node, node) = node
-        assert_eq!(
-            nearest_common_dominator(&dom_tree, then, then),
-            Some(then)
-        );
+        assert_eq!(nearest_common_dominator(&dom_tree, then, then), Some(then));
 
         // NCD with nonexistent node
         assert_eq!(
@@ -1421,7 +1410,8 @@ mod tests {
         let reachable = add_comp(&mut scg, "reachable");
         let unreachable = add_comp(&mut scg, "unreachable");
 
-        scg.add_edge(entry, reachable, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(entry, reachable, EdgeKind::ControlFlow)
+            .unwrap();
         // unreachable has no edges from entry
 
         let dom_tree = compute_dominators(&scg, entry);

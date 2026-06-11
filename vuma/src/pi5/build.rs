@@ -43,5 +43,8 @@ fn main() {
     println!("cargo:rustc-link-arg=--no-gc-sections");
 
     // Keep all symbol information for debugging.
-    println!("cargo:rustc-link-arg=-Map={}/kernel8.map", manifest_dir.display());
+    println!(
+        "cargo:rustc-link-arg=-Map={}/kernel8.map",
+        manifest_dir.display()
+    );
 }

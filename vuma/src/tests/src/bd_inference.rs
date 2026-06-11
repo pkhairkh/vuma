@@ -8,15 +8,14 @@
 //! - Comparison between BD typing and Rust's type system
 
 use vuma_bd::capd::Capability;
-use vuma_bd::reld::{DepKind, FlowPolicy, Relation, RelD, TemporalKind};
-use vuma_bd::repd::{ByteRep, RepD, StructRep};
 use vuma_bd::inference::BDInferenceEngine;
+use vuma_bd::reld::{DepKind, FlowPolicy, RelD, Relation, TemporalKind};
+use vuma_bd::repd::{ByteRep, RepD, StructRep};
 use vuma_ive::InferenceEngine;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode,
-    EffectNode, NodePayload, NodeType,
+    AccessMode, AccessNode, AllocationNode, ComputationNode, EffectNode, NodePayload, NodeType,
     ProgramPoint,
 };
 use vuma_scg::region::RegionId;
@@ -62,7 +61,10 @@ fn test_infer_numeric_repd() {
     let engine = BDInferenceEngine::new();
     let result = engine.infer(&scg);
     assert!(result.is_ok(), "BD inference failed: {:?}", result.errors);
-    assert!(result.bd_map.contains_key(&alloc), "allocation node should have a BD");
+    assert!(
+        result.bd_map.contains_key(&alloc),
+        "allocation node should have a BD"
+    );
 
     let bd = &result.bd_map[&alloc];
     // RepD should be Byte(8, 8) — an 8-byte, 8-aligned representation.
@@ -79,10 +81,20 @@ fn test_infer_numeric_repd() {
     // Also verify via the IVE InferenceEngine.
     let ive_engine = InferenceEngine::new();
     let ive_result = ive_engine.infer(&scg);
-    assert!(ive_result.is_ok(), "IVE inference failed: {:?}", ive_result.errors);
-    let ive_bd = ive_result.get_bd(&alloc).expect("IVE should infer BD for alloc");
+    assert!(
+        ive_result.is_ok(),
+        "IVE inference failed: {:?}",
+        ive_result.errors
+    );
+    let ive_bd = ive_result
+        .get_bd(&alloc)
+        .expect("IVE should infer BD for alloc");
     assert_eq!(ive_bd.repd.size(), 8, "IVE: i64 should have size 8");
-    assert_eq!(ive_bd.repd.alignment(), 8, "IVE: i64 should have alignment 8");
+    assert_eq!(
+        ive_bd.repd.alignment(),
+        8,
+        "IVE: i64 should have alignment 8"
+    );
 }
 
 /// Test: struct field access infers correct offsets.
@@ -144,9 +156,12 @@ fn test_infer_struct_repd() {
     // the source allocation (24 bytes) since Byte(8,8) and Byte(24,8) are
     // incompatible. This is expected behavior — the solver makes RepDs
     // compatible by widening.
-    scg.add_edge(struct_alloc, read_x, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(struct_alloc, read_y, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(struct_alloc, read_z, EdgeKind::DataFlow).unwrap();
+    scg.add_edge(struct_alloc, read_x, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(struct_alloc, read_y, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(struct_alloc, read_z, EdgeKind::DataFlow)
+        .unwrap();
 
     // Run BD inference.
     let engine = BDInferenceEngine::new();
@@ -156,20 +171,35 @@ fn test_infer_struct_repd() {
     // The struct allocation should have RepD with size 24, align 8.
     let struct_bd = &result.bd_map[&struct_alloc];
     assert_eq!(struct_bd.repd.size(), 24, "struct Point should be 24 bytes");
-    assert_eq!(struct_bd.repd.alignment(), 8, "struct Point should have alignment 8");
+    assert_eq!(
+        struct_bd.repd.alignment(),
+        8,
+        "struct Point should have alignment 8"
+    );
 
     // Each field access should produce a RepD with non-zero size.
     // Due to Phase 2 widening, the access RepDs may be widened to match
     // the source allocation (24 bytes). The key property is that each
     // access has a valid RepD and carries the Containment relation.
     let x_bd = &result.bd_map[&read_x];
-    assert!(x_bd.repd.size() > 0, "field x access should have non-zero RepD size");
-    assert!(x_bd.reld.relations.contains(&Relation::Containment),
-        "field x access should have Containment relation");
+    assert!(
+        x_bd.repd.size() > 0,
+        "field x access should have non-zero RepD size"
+    );
+    assert!(
+        x_bd.reld.relations.contains(&Relation::Containment),
+        "field x access should have Containment relation"
+    );
     let y_bd = &result.bd_map[&read_y];
-    assert!(y_bd.repd.size() > 0, "field y access should have non-zero RepD size");
+    assert!(
+        y_bd.repd.size() > 0,
+        "field y access should have non-zero RepD size"
+    );
     let z_bd = &result.bd_map[&read_z];
-    assert!(z_bd.repd.size() > 0, "field z access should have non-zero RepD size");
+    assert!(
+        z_bd.repd.size() > 0,
+        "field z access should have non-zero RepD size"
+    );
 
     // Verify StructRep construction manually: 3 fields at offsets 0, 8, 16.
     // This demonstrates that the BD type system correctly models struct layouts
@@ -185,18 +215,47 @@ fn test_infer_struct_repd() {
     });
     assert_eq!(struct_repd.size(), 24);
     assert_eq!(struct_repd.alignment(), 8);
-    assert_eq!(struct_repd.field_offset(0), 0, "field 0 (x) should be at offset 0");
-    assert_eq!(struct_repd.field_offset(1), 8, "field 1 (y) should be at offset 8");
-    assert_eq!(struct_repd.field_offset(2), 16, "field 2 (z) should be at offset 16");
-    assert_eq!(struct_repd.field_rep(0).size(), 8, "field x should be 8 bytes");
-    assert_eq!(struct_repd.field_rep(1).size(), 8, "field y should be 8 bytes");
-    assert_eq!(struct_repd.field_rep(2).size(), 8, "field z should be 8 bytes");
+    assert_eq!(
+        struct_repd.field_offset(0),
+        0,
+        "field 0 (x) should be at offset 0"
+    );
+    assert_eq!(
+        struct_repd.field_offset(1),
+        8,
+        "field 1 (y) should be at offset 8"
+    );
+    assert_eq!(
+        struct_repd.field_offset(2),
+        16,
+        "field 2 (z) should be at offset 16"
+    );
+    assert_eq!(
+        struct_repd.field_rep(0).size(),
+        8,
+        "field x should be 8 bytes"
+    );
+    assert_eq!(
+        struct_repd.field_rep(1).size(),
+        8,
+        "field y should be 8 bytes"
+    );
+    assert_eq!(
+        struct_repd.field_rep(2).size(),
+        8,
+        "field z should be 8 bytes"
+    );
     // The struct RepD should be compatible with itself.
-    assert!(struct_repd.compatible(&struct_repd), "struct RepD should be self-compatible");
+    assert!(
+        struct_repd.compatible(&struct_repd),
+        "struct RepD should be self-compatible"
+    );
     // A Byte(24, 8) representation should be compatible with the struct.
     let flat_repd = RepD::Byte(ByteRep { size: 24, align: 8 });
-    assert!(flat_repd.compatible(&struct_repd),
-        "flat byte(24,8) should be compatible with struct RepD");
+    assert!(
+        flat_repd.compatible(&struct_repd),
+        "flat byte(24,8) should be compatible with struct RepD"
+    );
 }
 
 /// Test: function call propagates CapD (Capability Descriptor).
@@ -240,8 +299,10 @@ fn test_infer_capability_flow() {
         pp(),
     );
 
-    scg.add_edge(alloc, write_access, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(alloc, read_access, EdgeKind::DataFlow).unwrap();
+    scg.add_edge(alloc, write_access, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(alloc, read_access, EdgeKind::DataFlow)
+        .unwrap();
 
     // Run BD inference without context refinement first, to verify Phase 1/2 behavior.
     let engine_no_refine = BDInferenceEngine {
@@ -249,7 +310,11 @@ fn test_infer_capability_flow() {
         ..BDInferenceEngine::new()
     };
     let result_nr = engine_no_refine.infer(&scg);
-    assert!(result_nr.is_ok(), "BD inference (no refine) failed: {:?}", result_nr.errors);
+    assert!(
+        result_nr.is_ok(),
+        "BD inference (no refine) failed: {:?}",
+        result_nr.errors
+    );
 
     // The write access should retain Write capability (weakened Read away for Write mode).
     let write_bd = &result_nr.bd_map[&write_access];
@@ -284,8 +349,14 @@ fn test_infer_capability_flow() {
     // Verify via IVE as well.
     let ive_engine = InferenceEngine::new();
     let ive_result = ive_engine.infer(&scg);
-    assert!(ive_result.is_ok(), "IVE inference failed: {:?}", ive_result.errors);
-    let ive_read_bd = ive_result.get_bd(&read_access).expect("IVE should infer BD for read");
+    assert!(
+        ive_result.is_ok(),
+        "IVE inference failed: {:?}",
+        ive_result.errors
+    );
+    let ive_read_bd = ive_result
+        .get_bd(&read_access)
+        .expect("IVE should infer BD for read");
     assert!(
         !ive_read_bd.capd.caps.contains(&Capability::Write),
         "IVE: read access should NOT have Write capability, got: {}",
@@ -327,12 +398,15 @@ fn test_infer_security_level() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "parse_int".to_string(),
-            result_type: Some("i32".to_string()), tail_call: false }),
+            result_type: Some("i32".to_string()),
+            tail_call: false,
+        }),
         pp(),
     );
 
     scg.add_edge(alloc, effect, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(effect, computation, EdgeKind::DataFlow).unwrap();
+    scg.add_edge(effect, computation, EdgeKind::DataFlow)
+        .unwrap();
 
     // Run BD inference.
     let engine = BDInferenceEngine::new();
@@ -342,7 +416,10 @@ fn test_infer_security_level() {
     // The effect node should have ControlDep relation (security boundary).
     let effect_bd = &result.bd_map[&effect];
     assert!(
-        effect_bd.reld.relations.contains(&Relation::Dependency(DepKind::ControlDep)),
+        effect_bd
+            .reld
+            .relations
+            .contains(&Relation::Dependency(DepKind::ControlDep)),
         "effect node should have ControlDep relation, got: {}",
         effect_bd.reld,
     );
@@ -372,7 +449,11 @@ fn test_infer_security_level() {
         ..BDInferenceEngine::new()
     };
     let result2 = engine_no_refine.infer(&scg2);
-    assert!(result2.is_ok(), "standalone effect inference failed: {:?}", result2.errors);
+    assert!(
+        result2.is_ok(),
+        "standalone effect inference failed: {:?}",
+        result2.errors
+    );
     let standalone_bd = &result2.bd_map[&standalone_effect];
     assert!(
         standalone_bd.capd.caps.contains(&Capability::Execute),
@@ -383,7 +464,10 @@ fn test_infer_security_level() {
     // The computation downstream should inherit the DataDep relation.
     let comp_bd = &result.bd_map[&computation];
     assert!(
-        comp_bd.reld.relations.contains(&Relation::Dependency(DepKind::DataDep)),
+        comp_bd
+            .reld
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)),
         "computation should have DataDep relation, got: {}",
         comp_bd.reld,
     );
@@ -392,7 +476,11 @@ fn test_infer_security_level() {
     // for the Derivation edge (if present) or from the effect node.
     let ive_engine = InferenceEngine::new();
     let ive_result = ive_engine.infer(&scg);
-    assert!(ive_result.is_ok(), "IVE inference failed: {:?}", ive_result.errors);
+    assert!(
+        ive_result.is_ok(),
+        "IVE inference failed: {:?}",
+        ive_result.errors
+    );
 
     // IVE should derive constraints from the SCG structure.
     // The effect node is observable, which implies security considerations.
@@ -407,11 +495,18 @@ fn test_infer_security_level() {
         relations: [
             Relation::Security(FlowPolicy::NoDowngrade),
             Relation::Security(FlowPolicy::NoCrossBoundary),
-        ].into_iter().collect(),
+        ]
+        .into_iter()
+        .collect(),
     };
-    assert!(security_reld.is_consistent(), "Security RelD should be consistent");
     assert!(
-        security_reld.relations.contains(&Relation::Security(FlowPolicy::NoDowngrade)),
+        security_reld.is_consistent(),
+        "Security RelD should be consistent"
+    );
+    assert!(
+        security_reld
+            .relations
+            .contains(&Relation::Security(FlowPolicy::NoDowngrade)),
         "Security RelD should contain NoDowngrade",
     );
 }
@@ -451,13 +546,17 @@ fn test_infer_temporal_relation() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i32".to_string()), tail_call: false }),
+            result_type: Some("i32".to_string()),
+            tail_call: false,
+        }),
         pp(),
     );
 
     // Data flow: outer → computation, inner → computation
-    scg.add_edge(alloc_outer, computation, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(alloc_inner, computation, EdgeKind::DataFlow).unwrap();
+    scg.add_edge(alloc_outer, computation, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(alloc_inner, computation, EdgeKind::DataFlow)
+        .unwrap();
 
     // Run BD inference.
     let engine = BDInferenceEngine::new();
@@ -468,7 +567,10 @@ fn test_infer_temporal_relation() {
     // (computations always add Dependency(DataDep)).
     let comp_bd = &result.bd_map[&computation];
     assert!(
-        comp_bd.reld.relations.contains(&Relation::Dependency(DepKind::DataDep)),
+        comp_bd
+            .reld
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)),
         "computation should have DataDep relation, got: {}",
         comp_bd.reld,
     );
@@ -476,12 +578,17 @@ fn test_infer_temporal_relation() {
     // Verify via IVE — should produce temporal constraints from ControlFlow edges.
     let ive_engine = InferenceEngine::new();
     let ive_result = ive_engine.infer(&scg);
-    assert!(ive_result.is_ok(), "IVE inference failed: {:?}", ive_result.errors);
+    assert!(
+        ive_result.is_ok(),
+        "IVE inference failed: {:?}",
+        ive_result.errors
+    );
 
     // IVE should derive ResourceFlow constraints from the DataFlow edges.
-    let has_resource_flow = ive_result.constraints.iter().any(|c| {
-        format!("{:?}", c).contains("ResourceFlow")
-    });
+    let has_resource_flow = ive_result
+        .constraints
+        .iter()
+        .any(|c| format!("{:?}", c).contains("ResourceFlow"));
     assert!(
         has_resource_flow,
         "IVE should derive ResourceFlow constraints from data flow edges",
@@ -492,19 +599,32 @@ fn test_infer_temporal_relation() {
         relations: [
             Relation::Temporal(TemporalKind::Outlives),
             Relation::Liveness,
-        ].into_iter().collect(),
+        ]
+        .into_iter()
+        .collect(),
     };
     let inner_reld = RelD {
         relations: [
             Relation::Temporal(TemporalKind::Coincides),
             Relation::Containment,
-        ].into_iter().collect(),
+        ]
+        .into_iter()
+        .collect(),
     };
-    assert!(outer_reld.is_consistent(), "outer RelD should be consistent");
-    assert!(inner_reld.is_consistent(), "inner RelD should be consistent");
+    assert!(
+        outer_reld.is_consistent(),
+        "outer RelD should be consistent"
+    );
+    assert!(
+        inner_reld.is_consistent(),
+        "inner RelD should be consistent"
+    );
     // The composed RelD (outer ∪ inner) should also be consistent.
     let composed = outer_reld.compose(&inner_reld);
-    assert!(composed.is_consistent(), "composed temporal RelD should be consistent");
+    assert!(
+        composed.is_consistent(),
+        "composed temporal RelD should be consistent"
+    );
 }
 
 /// Test: Rust type-correct program gets valid BD.
@@ -541,7 +661,9 @@ fn test_bd_vs_rust_type() {
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
             operation: "add".to_string(),
-            result_type: Some("i32".to_string()), tail_call: false }),
+            result_type: Some("i32".to_string()),
+            tail_call: false,
+        }),
         pp(),
     );
 
@@ -551,7 +673,11 @@ fn test_bd_vs_rust_type() {
     // Run BD inference.
     let engine = BDInferenceEngine::new();
     let result = engine.infer(&scg);
-    assert!(result.is_ok(), "Valid SCG should produce no errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "Valid SCG should produce no errors: {:?}",
+        result.errors
+    );
 
     // Every node should have a well-formed BD.
     for (node_id, bd) in &result.bd_map {
@@ -597,14 +723,20 @@ fn test_bd_vs_rust_type() {
     // Computation node should have DataDep relation.
     let add_bd = &result.bd_map[&add_node];
     assert!(
-        add_bd.reld.relations.contains(&Relation::Dependency(DepKind::DataDep)),
+        add_bd
+            .reld
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)),
         "add computation should have DataDep relation",
     );
 
     // Also verify via IVE.
     let ive_engine = InferenceEngine::new();
     let ive_result = ive_engine.infer(&scg);
-    assert!(ive_result.is_ok(), "IVE inference should succeed for valid SCG");
+    assert!(
+        ive_result.is_ok(),
+        "IVE inference should succeed for valid SCG"
+    );
     assert_eq!(
         ive_result.bd_map.len(),
         scg.node_count(),
@@ -677,9 +809,12 @@ fn test_bd_more_permissive() {
     // (missing Read) would be used instead of alloc's full CapD.
     // The key property we're testing — that two reads don't conflict — doesn't
     // require ControlFlow edges; it follows from BD compatibility of the reads.
-    scg.add_edge(alloc, write_access, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(alloc, read_access_1, EdgeKind::DataFlow).unwrap();
-    scg.add_edge(alloc, read_access_2, EdgeKind::DataFlow).unwrap();
+    scg.add_edge(alloc, write_access, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(alloc, read_access_1, EdgeKind::DataFlow)
+        .unwrap();
+    scg.add_edge(alloc, read_access_2, EdgeKind::DataFlow)
+        .unwrap();
 
     // Run BD inference.
     let engine = BDInferenceEngine::new();
@@ -738,7 +873,10 @@ fn test_bd_more_permissive() {
         ..BDInferenceEngine::new()
     };
     let result_no_refine = engine_no_refine.infer(&scg);
-    assert!(result_no_refine.is_ok(), "BD inference (no refine) should succeed");
+    assert!(
+        result_no_refine.is_ok(),
+        "BD inference (no refine) should succeed"
+    );
     let read1_bd_nr = &result_no_refine.bd_map[&read_access_1];
     let read2_bd_nr = &result_no_refine.bd_map[&read_access_2];
     assert!(
@@ -767,9 +905,10 @@ fn test_bd_more_permissive() {
     assert!(ive_result.is_ok(), "IVE inference should succeed");
 
     // IVE should produce constraints from the DataFlow edges.
-    let has_resource_flow = ive_result.constraints.iter().any(|c| {
-        format!("{:?}", c).contains("ResourceFlow")
-    });
+    let has_resource_flow = ive_result
+        .constraints
+        .iter()
+        .any(|c| format!("{:?}", c).contains("ResourceFlow"));
     assert!(
         has_resource_flow,
         "IVE should derive ResourceFlow constraints from data flow edges",

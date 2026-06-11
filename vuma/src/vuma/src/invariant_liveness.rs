@@ -74,7 +74,11 @@ impl fmt::Display for InvariantResult {
         if self.satisfied {
             write!(f, "Liveness invariant: SATISFIED")?;
         } else {
-            write!(f, "Liveness invariant: VIOLATED ({} violation(s))", self.violations.len())?;
+            write!(
+                f,
+                "Liveness invariant: VIOLATED ({} violation(s))",
+                self.violations.len()
+            )?;
         }
         Ok(())
     }
@@ -119,9 +123,7 @@ pub enum LivenessViolation {
 
     /// A cycle in the wait-for graph — regions that mutually wait for each
     /// other, preventing any of them from being freed (potential deadlock).
-    CircularWaitDependency {
-        cycle: Vec<RegionId>,
-    },
+    CircularWaitDependency { cycle: Vec<RegionId> },
 }
 
 impl fmt::Display for LivenessViolation {
@@ -280,7 +282,16 @@ fn tarjan_dfs(
     for w in graph.successors(v) {
         if !indices.contains_key(&w) {
             // w has not been visited; recurse
-            tarjan_dfs(w, graph, index_counter, stack, on_stack, indices, lowlinks, sccs);
+            tarjan_dfs(
+                w,
+                graph,
+                index_counter,
+                stack,
+                on_stack,
+                indices,
+                lowlinks,
+                sccs,
+            );
             let v_low = *lowlinks.get(&v).unwrap();
             let w_low = *lowlinks.get(&w).unwrap();
             lowlinks.insert(v, v_low.min(w_low));
@@ -454,14 +465,16 @@ fn check_access_liveness(msg: &MSG, result: &mut InvariantResult) {
 
                 if access_start < region.base || access_end > region_end {
                     result.satisfied = false;
-                    result.violations.push(LivenessViolation::AccessOutOfBounds {
-                        access_id: access.id,
-                        region_id,
-                        access_start,
-                        access_end,
-                        region_start: region.base,
-                        region_end,
-                    });
+                    result
+                        .violations
+                        .push(LivenessViolation::AccessOutOfBounds {
+                            access_id: access.id,
+                            region_id,
+                            access_start,
+                            access_end,
+                            region_start: region.base,
+                            region_end,
+                        });
                 }
             }
         }
@@ -515,11 +528,13 @@ fn check_derivation_liveness(msg: &MSG, result: &mut InvariantResult) {
                 if let Some(ref fp) = region.free_point {
                     if &access.program_point >= fp {
                         result.satisfied = false;
-                        result.violations.push(LivenessViolation::DerivationUsedAfterFree {
-                            derivation_id: deriv.id,
-                            region_id: source_region_id,
-                            access_id: access.id,
-                        });
+                        result
+                            .violations
+                            .push(LivenessViolation::DerivationUsedAfterFree {
+                                derivation_id: deriv.id,
+                                region_id: source_region_id,
+                                access_id: access.id,
+                            });
                     }
                 }
             }
@@ -540,9 +555,9 @@ fn check_circular_wait(msg: &MSG, result: &mut InvariantResult) {
         // SCCs are not violations.
         if scc.len() > 1 {
             result.satisfied = false;
-            result.violations.push(LivenessViolation::CircularWaitDependency {
-                cycle: scc,
-            });
+            result
+                .violations
+                .push(LivenessViolation::CircularWaitDependency { cycle: scc });
         }
     }
 }
@@ -554,15 +569,15 @@ fn check_circular_wait(msg: &MSG, result: &mut InvariantResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::AccessId;
     use crate::access::AccessKind;
     use crate::address::Address;
+    use crate::derivation::DerivationId;
     use crate::derivation::{Derivation, DerivationKind, DerivationSource};
     use crate::msg::MSG;
     use crate::program_point::ProgramPoint;
     use crate::region::{Region, RegionId, RegionStatus};
     use crate::sync::{Ordering, SyncEdge, SyncEdgeId};
-    use crate::access::AccessId;
-    use crate::derivation::DerivationId;
 
     fn dummy_pp(line: u32) -> ProgramPoint {
         ProgramPoint::new("test.vu", line, 1)
@@ -620,7 +635,11 @@ mod tests {
         msg.add_access(make_read_access(100, DerivationId(10), 10, 4));
 
         let result = check_liveness(&msg);
-        assert!(result.satisfied, "Expected satisfied, got violations: {:?}", result.violations);
+        assert!(
+            result.satisfied,
+            "Expected satisfied, got violations: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 2: Use-after-free -----
@@ -635,8 +654,15 @@ mod tests {
 
         let result = check_liveness(&msg);
         assert!(!result.satisfied);
-        let has_uaf = result.violations.iter().any(|v| matches!(v, LivenessViolation::UseAfterFree { .. }));
-        assert!(has_uaf, "Expected UseAfterFree violation, got: {:?}", result.violations);
+        let has_uaf = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::UseAfterFree { .. }));
+        assert!(
+            has_uaf,
+            "Expected UseAfterFree violation, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 3: Region never freed -----
@@ -649,10 +675,15 @@ mod tests {
 
         let result = check_liveness(&msg);
         assert!(!result.satisfied);
-        let has_never_freed = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::RegionNeverFreed { .. })
-        });
-        assert!(has_never_freed, "Expected RegionNeverFreed violation, got: {:?}", result.violations);
+        let has_never_freed = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. }));
+        assert!(
+            has_never_freed,
+            "Expected RegionNeverFreed violation, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 4: Region marked Leaked is acceptable -----
@@ -674,10 +705,14 @@ mod tests {
         // Just checking that RegionNeverFreed is NOT reported for Leaked regions.
 
         let result = check_liveness(&msg);
-        let has_never_freed = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::RegionNeverFreed { .. })
-        });
-        assert!(!has_never_freed, "Leaked region should not trigger RegionNeverFreed");
+        let has_never_freed = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. }));
+        assert!(
+            !has_never_freed,
+            "Leaked region should not trigger RegionNeverFreed"
+        );
     }
 
     // ----- Test 5: Circular wait dependency -----
@@ -716,10 +751,15 @@ mod tests {
         ));
 
         let result = check_liveness(&msg);
-        let has_circular = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::CircularWaitDependency { .. })
-        });
-        assert!(has_circular, "Expected CircularWaitDependency, got: {:?}", result.violations);
+        let has_circular = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::CircularWaitDependency { .. }));
+        assert!(
+            has_circular,
+            "Expected CircularWaitDependency, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 6: No circular wait (acyclic sync) -----
@@ -746,10 +786,15 @@ mod tests {
         ));
 
         let result = check_liveness(&msg);
-        let has_circular = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::CircularWaitDependency { .. })
-        });
-        assert!(!has_circular, "No circular wait expected, got: {:?}", result.violations);
+        let has_circular = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::CircularWaitDependency { .. }));
+        assert!(
+            !has_circular,
+            "No circular wait expected, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 7: Access out of bounds -----
@@ -782,10 +827,15 @@ mod tests {
 
         let result = check_liveness(&msg);
         assert!(!result.satisfied);
-        let has_oob = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::AccessOutOfBounds { .. })
-        });
-        assert!(has_oob, "Expected AccessOutOfBounds violation, got: {:?}", result.violations);
+        let has_oob = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::AccessOutOfBounds { .. }));
+        assert!(
+            has_oob,
+            "Expected AccessOutOfBounds violation, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 8: Derivation used after source freed -----
@@ -815,10 +865,15 @@ mod tests {
         assert!(!result.satisfied);
 
         // Should have both UseAfterFree and DerivationUsedAfterFree.
-        let has_derivation_after_free = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::DerivationUsedAfterFree { .. })
-        });
-        assert!(has_derivation_after_free, "Expected DerivationUsedAfterFree, got: {:?}", result.violations);
+        let has_derivation_after_free = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::DerivationUsedAfterFree { .. }));
+        assert!(
+            has_derivation_after_free,
+            "Expected DerivationUsedAfterFree, got: {:?}",
+            result.violations
+        );
     }
 
     // ----- Test 9: Tarjan SCC on a simple 3-node cycle -----
@@ -871,11 +926,17 @@ mod tests {
         // No RegionNeverFreed for Stack; no UseAfterFree.
         let result = check_liveness(&msg);
         assert!(
-            !result.violations.iter().any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. })),
+            !result
+                .violations
+                .iter()
+                .any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. })),
             "Stack region should not trigger RegionNeverFreed"
         );
         assert!(
-            !result.violations.iter().any(|v| matches!(v, LivenessViolation::UseAfterFree { .. })),
+            !result
+                .violations
+                .iter()
+                .any(|v| matches!(v, LivenessViolation::UseAfterFree { .. })),
             "Stack region access should not trigger UseAfterFree"
         );
     }
@@ -891,14 +952,22 @@ mod tests {
             access_point: ProgramPoint::new("main.vu", 10, 1),
         };
         let s = format!("{}", v);
-        assert!(s.contains("Use-after-free"), "Display should contain 'Use-after-free': {}", s);
+        assert!(
+            s.contains("Use-after-free"),
+            "Display should contain 'Use-after-free': {}",
+            s
+        );
         assert!(s.contains("R1"), "Display should contain region id: {}", s);
 
         let v2 = LivenessViolation::CircularWaitDependency {
             cycle: vec![RegionId(1), RegionId(2), RegionId(3)],
         };
         let s2 = format!("{}", v2);
-        assert!(s2.contains("Circular wait"), "Display should contain 'Circular wait': {}", s2);
+        assert!(
+            s2.contains("Circular wait"),
+            "Display should contain 'Circular wait': {}",
+            s2
+        );
     }
 
     // ----- Test 13: Mapped and Device regions are acceptable -----
@@ -928,7 +997,10 @@ mod tests {
 
         let result = check_liveness(&msg);
         assert!(
-            !result.violations.iter().any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. })),
+            !result
+                .violations
+                .iter()
+                .any(|v| matches!(v, LivenessViolation::RegionNeverFreed { .. })),
             "Mapped/Device regions should not trigger RegionNeverFreed"
         );
     }
@@ -980,7 +1052,10 @@ mod tests {
 
         let result = check_liveness(&msg);
         assert!(
-            !result.violations.iter().any(|v| matches!(v, LivenessViolation::AccessOutOfBounds { .. })),
+            !result
+                .violations
+                .iter()
+                .any(|v| matches!(v, LivenessViolation::AccessOutOfBounds { .. })),
             "Access within bounds should not trigger AccessOutOfBounds"
         );
     }
@@ -1006,10 +1081,14 @@ mod tests {
         let result = check_liveness(&msg);
         assert!(!result.satisfied);
 
-        let has_derivation_violation = result.violations.iter().any(|v| {
-            matches!(v, LivenessViolation::DerivationUsedAfterFree { .. })
-        });
-        assert!(has_derivation_violation, "Expected DerivationUsedAfterFree for chained derivation");
+        let has_derivation_violation = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::DerivationUsedAfterFree { .. }));
+        assert!(
+            has_derivation_violation,
+            "Expected DerivationUsedAfterFree for chained derivation"
+        );
     }
 
     // ----- Test 17: Empty MSG satisfies liveness trivially -----
@@ -1018,6 +1097,9 @@ mod tests {
     fn empty_msg_satisfies_liveness() {
         let msg = MSG::new();
         let result = check_liveness(&msg);
-        assert!(result.satisfied, "Empty MSG should satisfy liveness invariant");
+        assert!(
+            result.satisfied,
+            "Empty MSG should satisfy liveness invariant"
+        );
     }
 }

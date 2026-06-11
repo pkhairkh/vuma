@@ -77,12 +77,18 @@ impl Gpr {
 
     /// Returns `true` if this register is callee-saved under SystemV ABI.
     pub fn is_callee_saved(&self) -> bool {
-        matches!(self, Gpr::Rbx | Gpr::R12 | Gpr::R13 | Gpr::R14 | Gpr::R15 | Gpr::Rbp)
+        matches!(
+            self,
+            Gpr::Rbx | Gpr::R12 | Gpr::R13 | Gpr::R14 | Gpr::R15 | Gpr::Rbp
+        )
     }
 
     /// Returns `true` if this register is an integer argument register under SystemV ABI.
     pub fn is_arg_reg(&self) -> bool {
-        matches!(self, Gpr::Rdi | Gpr::Rsi | Gpr::Rdx | Gpr::Rcx | Gpr::R8 | Gpr::R9)
+        matches!(
+            self,
+            Gpr::Rdi | Gpr::Rsi | Gpr::Rdx | Gpr::Rcx | Gpr::R8 | Gpr::R9
+        )
     }
 
     /// Returns `true` if this register is available for register allocation.
@@ -875,7 +881,10 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
 
         if pos >= bytes.len() {
             let end = pos.min(bytes.len());
-            let hex_bytes: Vec<String> = bytes[start..end].iter().map(|b| format!("{:02x}", b)).collect();
+            let hex_bytes: Vec<String> = bytes[start..end]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
             lines.push(format!("{:#010x}:  {}", start_pc, hex_bytes.join(" ")));
             offset = end;
             pc = start_pc + (end - start) as u64;
@@ -911,7 +920,7 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
             0xB8..=0xBF => {
                 let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
                 if pos + 8 <= bytes.len() {
-                    let imm = u64::from_le_bytes(bytes[pos..pos+8].try_into().unwrap_or([0;8]));
+                    let imm = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
                     pos += 8;
                     format!("mov {}, {:#x}", gpr_name_64(reg_idx), imm)
                 } else {
@@ -923,9 +932,12 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
             // JMP rel32
             0xE9 => {
                 if pos + 4 <= bytes.len() {
-                    let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                     pos += 4;
-                    format!("jmp {:#x}", (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                    format!(
+                        "jmp {:#x}",
+                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+                    )
                 } else {
                     pos = bytes.len();
                     "jmp ???".to_string()
@@ -935,9 +947,12 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
             // CALL rel32
             0xE8 => {
                 if pos + 4 <= bytes.len() {
-                    let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                     pos += 4;
-                    format!("call {:#x}", (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                    format!(
+                        "call {:#x}",
+                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+                    )
                 } else {
                     pos = bytes.len();
                     "call ???".to_string()
@@ -963,16 +978,34 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                         // Jcc rel32
                         0x80..=0x8F => {
                             let cc_name = match op2 & 0xF {
-                                0 => "jo", 1 => "jno", 2 => "jb", 3 => "jae",
-                                4 => "je", 5 => "jne", 6 => "jbe", 7 => "ja",
-                                8 => "js", 9 => "jns", 0xA => "jp", 0xB => "jnp",
-                                0xC => "jl", 0xD => "jge", 0xE => "jle", 0xF => "jg",
+                                0 => "jo",
+                                1 => "jno",
+                                2 => "jb",
+                                3 => "jae",
+                                4 => "je",
+                                5 => "jne",
+                                6 => "jbe",
+                                7 => "ja",
+                                8 => "js",
+                                9 => "jns",
+                                0xA => "jp",
+                                0xB => "jnp",
+                                0xC => "jl",
+                                0xD => "jge",
+                                0xE => "jle",
+                                0xF => "jg",
                                 _ => "j??",
                             };
                             if pos + 4 <= bytes.len() {
-                                let rel = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                                let rel = i32::from_le_bytes(
+                                    bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
+                                );
                                 pos += 4;
-                                format!("{} {:#x}", cc_name, (start_pc + (pos - start) as u64).wrapping_add(rel as u64))
+                                format!(
+                                    "{} {:#x}",
+                                    cc_name,
+                                    (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+                                )
                             } else {
                                 pos = bytes.len();
                                 format!("{} ???", cc_name)
@@ -1007,10 +1040,22 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                             let (_, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
                             pos = new_pos;
                             let cc_name = match op2 & 0xF {
-                                0 => "seto", 1 => "setno", 2 => "setb", 3 => "setae",
-                                4 => "sete", 5 => "setne", 6 => "setbe", 7 => "seta",
-                                8 => "sets", 9 => "setns", 0xA => "setp", 0xB => "setnp",
-                                0xC => "setl", 0xD => "setge", 0xE => "setle", 0xF => "setg",
+                                0 => "seto",
+                                1 => "setno",
+                                2 => "setb",
+                                3 => "setae",
+                                4 => "sete",
+                                5 => "setne",
+                                6 => "setbe",
+                                7 => "seta",
+                                8 => "sets",
+                                9 => "setns",
+                                0xA => "setp",
+                                0xB => "setnp",
+                                0xC => "setl",
+                                0xD => "setge",
+                                0xE => "setle",
+                                0xF => "setg",
                                 _ => "set??",
                             };
                             format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
@@ -1020,10 +1065,22 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                             let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
                             pos = new_pos;
                             let cc_name = match op2 & 0xF {
-                                0 => "cmovo", 1 => "cmovno", 2 => "cmovb", 3 => "cmovae",
-                                4 => "cmove", 5 => "cmovne", 6 => "cmovbe", 7 => "cmova",
-                                8 => "cmovs", 9 => "cmovns", 0xA => "cmovp", 0xB => "cmovnp",
-                                0xC => "cmovl", 0xD => "cmovge", 0xE => "cmovle", 0xF => "cmovg",
+                                0 => "cmovo",
+                                1 => "cmovno",
+                                2 => "cmovb",
+                                3 => "cmovae",
+                                4 => "cmove",
+                                5 => "cmovne",
+                                6 => "cmovbe",
+                                7 => "cmova",
+                                8 => "cmovs",
+                                9 => "cmovns",
+                                0xA => "cmovp",
+                                0xB => "cmovnp",
+                                0xC => "cmovl",
+                                0xD => "cmovge",
+                                0xE => "cmovle",
+                                0xF => "cmovg",
                                 _ => "cmov??",
                             };
                             format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
@@ -1034,24 +1091,96 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
             }
 
             // ALU reg-reg opcodes (with ModR/M byte)
-            0x01 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x03 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x09 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x0B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x21 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x23 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x29 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x2B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x31 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x33 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x39 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x3B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x85 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x87 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x89 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r)) }
-            0x8B => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
-            0x8D => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm)) }
-            0x63 => { let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b); pos = np; format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm)) }
+            0x01 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x03 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x09 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x0B => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x21 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x23 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x29 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x2B => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x31 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x33 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x39 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x3B => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x85 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x87 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x89 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r))
+            }
+            0x8B => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x8D => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm))
+            }
+            0x63 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm))
+            }
 
             // F7 /x (NEG, NOT, MUL, DIV, IDIV)
             0xF7 => {
@@ -1084,7 +1213,7 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                 let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
                 pos = np;
                 if pos + 4 <= bytes.len() {
-                    let imm = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                     pos += 4;
                     format!("mov {}, {}", gpr_name_64(rm), imm)
                 } else {
@@ -1098,11 +1227,17 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                 let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
                 pos = np;
                 if pos + 4 <= bytes.len() {
-                    let imm = i32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap_or([0;4]));
+                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                     pos += 4;
                     let op_name = match r {
-                        0 => "add", 1 => "or", 2 => "adc", 3 => "sbb",
-                        4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+                        0 => "add",
+                        1 => "or",
+                        2 => "adc",
+                        3 => "sbb",
+                        4 => "and",
+                        5 => "sub",
+                        6 => "xor",
+                        7 => "cmp",
                         _ => "???",
                     };
                     format!("{} {}, {}", op_name, gpr_name_64(rm), imm)
@@ -1128,8 +1263,16 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
         };
 
         let end = pos.min(bytes.len());
-        let hex_bytes: Vec<String> = bytes[start..end].iter().map(|b| format!("{:02x}", b)).collect();
-        lines.push(format!("{:#010x}:  {:20} {}", start_pc, hex_bytes.join(" "), mnemonic));
+        let hex_bytes: Vec<String> = bytes[start..end]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        lines.push(format!(
+            "{:#010x}:  {:20} {}",
+            start_pc,
+            hex_bytes.join(" "),
+            mnemonic
+        ));
 
         offset = end;
         pc = start_pc + (end - start) as u64;
@@ -1141,10 +1284,22 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
 /// Helper: get 64-bit GPR name from index (0-15).
 fn gpr_name_64(idx: u8) -> &'static str {
     match idx & 0xF {
-        0 => "rax", 1 => "rcx", 2 => "rdx", 3 => "rbx",
-        4 => "rsp", 5 => "rbp", 6 => "rsi", 7 => "rdi",
-        8 => "r8", 9 => "r9", 10 => "r10", 11 => "r11",
-        12 => "r12", 13 => "r13", 14 => "r14", 15 => "r15",
+        0 => "rax",
+        1 => "rcx",
+        2 => "rdx",
+        3 => "rbx",
+        4 => "rsp",
+        5 => "rbp",
+        6 => "rsi",
+        7 => "rdi",
+        8 => "r8",
+        9 => "r9",
+        10 => "r10",
+        11 => "r11",
+        12 => "r12",
+        13 => "r13",
+        14 => "r14",
+        15 => "r15",
         _ => "r??",
     }
 }
@@ -1152,16 +1307,70 @@ fn gpr_name_64(idx: u8) -> &'static str {
 /// Helper: get 8-bit GPR name from index (0-15).
 fn gpr_name_8(idx: u8, has_rex: bool) -> &'static str {
     match idx & 0xF {
-        0 => if has_rex { "r8b" } else { "al" },
-        1 => if has_rex { "r9b" } else { "cl" },
-        2 => if has_rex { "r10b" } else { "dl" },
-        3 => if has_rex { "r11b" } else { "bl" },
-        4 => if has_rex { "r12b" } else { "spl" }, // REX required for spl
-        5 => if has_rex { "r13b" } else { "bpl" },
-        6 => if has_rex { "r14b" } else { "sil" },
-        7 => if has_rex { "r15b" } else { "dil" },
-        8 => "r8b", 9 => "r9b", 10 => "r10b", 11 => "r11b",
-        12 => "r12b", 13 => "r13b", 14 => "r14b", 15 => "r15b",
+        0 => {
+            if has_rex {
+                "r8b"
+            } else {
+                "al"
+            }
+        }
+        1 => {
+            if has_rex {
+                "r9b"
+            } else {
+                "cl"
+            }
+        }
+        2 => {
+            if has_rex {
+                "r10b"
+            } else {
+                "dl"
+            }
+        }
+        3 => {
+            if has_rex {
+                "r11b"
+            } else {
+                "bl"
+            }
+        }
+        4 => {
+            if has_rex {
+                "r12b"
+            } else {
+                "spl"
+            }
+        } // REX required for spl
+        5 => {
+            if has_rex {
+                "r13b"
+            } else {
+                "bpl"
+            }
+        }
+        6 => {
+            if has_rex {
+                "r14b"
+            } else {
+                "sil"
+            }
+        }
+        7 => {
+            if has_rex {
+                "r15b"
+            } else {
+                "dil"
+            }
+        }
+        8 => "r8b",
+        9 => "r9b",
+        10 => "r10b",
+        11 => "r11b",
+        12 => "r12b",
+        13 => "r13b",
+        14 => "r14b",
+        15 => "r15b",
         _ => "??b",
     }
 }
@@ -1206,37 +1415,37 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
-    elf.push(2);   // ELFCLASS64
-    elf.push(1);   // ELFDATA2LSB
-    elf.push(1);   // EV_CURRENT
-    elf.push(3);   // ELFOSABI_LINUX
-    elf.push(0);   // padding
+    elf.push(2); // ELFCLASS64
+    elf.push(1); // ELFDATA2LSB
+    elf.push(1); // EV_CURRENT
+    elf.push(3); // ELFOSABI_LINUX
+    elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
     // --- ELF header fields ---
-    elf.extend_from_slice(&2u16.to_le_bytes());       // e_type = ET_EXEC
-    elf.extend_from_slice(&62u16.to_le_bytes());      // e_machine = EM_X86_64
-    elf.extend_from_slice(&1u32.to_le_bytes());       // e_version
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes());       // e_shoff (no section headers)
-    elf.extend_from_slice(&0u32.to_le_bytes());       // e_flags
-    elf.extend_from_slice(&64u16.to_le_bytes());      // e_ehsize
-    elf.extend_from_slice(&56u16.to_le_bytes());      // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes());       // e_phnum
-    elf.extend_from_slice(&64u16.to_le_bytes());      // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes());       // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes());       // e_shstrndx
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header (single LOAD segment: PF_R | PF_X) ---
-    elf.extend_from_slice(&1u32.to_le_bytes());       // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_le_bytes());       // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_le_bytes());  // p_filesz
-    elf.extend_from_slice(&text_size.to_le_bytes());  // p_memsz
-    elf.extend_from_slice(&16u64.to_le_bytes());      // p_align
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
 
     // --- Code section ---
     elf.extend_from_slice(code);
@@ -1300,10 +1509,7 @@ const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
 /// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
 fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
     match val {
-        IRValue::Register(id) => (
-            reg_map.get(id).copied().unwrap_or(Gpr::Rax),
-            Vec::new(),
-        ),
+        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
         IRValue::Immediate(imm) => {
             let imm = *imm;
             let code = if (-2147483648..=2147483647).contains(&imm) {
@@ -1378,10 +1584,21 @@ impl Backend for X86_64Backend {
         // Simple register allocation: map virtual registers to physical registers
         // in a round-robin fashion over allocatable GPRs.
         let allocatable: Vec<Gpr> = [
-            Gpr::Rax, Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi,
-            Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11,
-            Gpr::R12, Gpr::R13, Gpr::R14, Gpr::R15,
-            Gpr::Rbx, Gpr::Rbp,
+            Gpr::Rax,
+            Gpr::Rcx,
+            Gpr::Rdx,
+            Gpr::Rsi,
+            Gpr::Rdi,
+            Gpr::R8,
+            Gpr::R9,
+            Gpr::R10,
+            Gpr::R11,
+            Gpr::R12,
+            Gpr::R13,
+            Gpr::R14,
+            Gpr::R15,
+            Gpr::Rbx,
+            Gpr::Rbp,
         ]
         .to_vec();
 
@@ -1391,7 +1608,8 @@ impl Backend for X86_64Backend {
         // Collect all virtual register IDs and track which ones are defined
         // by Alloc instructions (stack allocations, so Free on them is a no-op).
         let mut vreg_ids: Vec<u32> = Vec::new();
-        let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         for block in &func.blocks {
             for instr in &block.instructions {
                 for id in instr.defined_regs() {
@@ -1465,9 +1683,14 @@ impl Backend for X86_64Backend {
                 let encoded = match instr {
                     // ── Dedicated Add/Sub/Mul (with immediate-form optimisations) ──
                     IRInstr::Add { dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
-                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if l != d {
+                            code.extend(encode_mov_reg_reg(d, l));
+                        }
                         if let IRValue::Immediate(imm) = rhs {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_add_reg_imm32(d, *imm as i32));
@@ -1484,9 +1707,14 @@ impl Backend for X86_64Backend {
                         code
                     }
                     IRInstr::Sub { dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
-                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if l != d {
+                            code.extend(encode_mov_reg_reg(d, l));
+                        }
                         if let IRValue::Immediate(imm) = rhs {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_sub_reg_imm32(d, *imm as i32));
@@ -1503,42 +1731,59 @@ impl Backend for X86_64Backend {
                         code
                     }
                     IRInstr::Mul { dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
                         let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
                         code.extend(pre);
-                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if l != d {
+                            code.extend(encode_mov_reg_reg(d, l));
+                        }
                         code.extend(encode_imul_reg_reg(d, r));
                         code
                     }
 
                     // ── Division: uses RAX/RDX implicitly ───────────────
                     IRInstr::Div { dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
                         let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
                         code.extend(pre);
                         // Move lhs into RAX
-                        if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                        if l != Gpr::Rax {
+                            code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+                        }
                         // Sign-extend RAX into RDX:RAX
                         code.extend(encode_cqo());
                         // IDIV r
                         code.extend(encode_idiv_reg(r));
                         // Quotient is in RAX, move to dst if different
-                        if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                        if d != Gpr::Rax {
+                            code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+                        }
                         code
                     }
 
                     // ── BinOp (generic) ──────────────────────────────────
                     IRInstr::BinOp { op, dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
                         let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
                         code.extend(pre);
 
                         match op {
                             BinOpKind::Add => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 if let IRValue::Immediate(imm) = rhs {
                                     if (-2147483648..=2147483647).contains(imm) {
                                         code.extend(encode_add_reg_imm32(d, *imm as i32));
@@ -1550,7 +1795,9 @@ impl Backend for X86_64Backend {
                                 }
                             }
                             BinOpKind::Sub => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 if let IRValue::Immediate(imm) = rhs {
                                     if (-2147483648..=2147483647).contains(imm) {
                                         code.extend(encode_sub_reg_imm32(d, *imm as i32));
@@ -1562,70 +1809,115 @@ impl Backend for X86_64Backend {
                                 }
                             }
                             BinOpKind::Mul => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 code.extend(encode_imul_reg_reg(d, r));
                             }
                             BinOpKind::SDiv => {
-                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                if l != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+                                }
                                 code.extend(encode_cqo());
                                 code.extend(encode_idiv_reg(r));
-                                if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                                if d != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+                                }
                             }
                             BinOpKind::UDiv => {
-                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                if l != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+                                }
                                 // Zero-extend RAX into RDX for unsigned divide
                                 code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
                                 code.extend(encode_div_reg(r));
-                                if d != Gpr::Rax { code.extend(encode_mov_reg_reg(d, Gpr::Rax)); }
+                                if d != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+                                }
                             }
                             BinOpKind::SRem => {
-                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                if l != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+                                }
                                 code.extend(encode_cqo());
                                 code.extend(encode_idiv_reg(r));
                                 // Remainder in RDX
-                                if d != Gpr::Rdx { code.extend(encode_mov_reg_reg(d, Gpr::Rdx)); }
+                                if d != Gpr::Rdx {
+                                    code.extend(encode_mov_reg_reg(d, Gpr::Rdx));
+                                }
                             }
                             BinOpKind::URem => {
-                                if l != Gpr::Rax { code.extend(encode_mov_reg_reg(Gpr::Rax, l)); }
+                                if l != Gpr::Rax {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+                                }
                                 code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
                                 code.extend(encode_div_reg(r));
                                 // Remainder in RDX
-                                if d != Gpr::Rdx { code.extend(encode_mov_reg_reg(d, Gpr::Rdx)); }
+                                if d != Gpr::Rdx {
+                                    code.extend(encode_mov_reg_reg(d, Gpr::Rdx));
+                                }
                             }
                             BinOpKind::And => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 code.extend(encode_and_reg_reg(d, r));
                             }
                             BinOpKind::Or => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 code.extend(encode_or_reg_reg(d, r));
                             }
                             BinOpKind::Xor => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 code.extend(encode_xor_reg_reg(d, r));
                             }
                             BinOpKind::Shl => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 // Shift amount must be in CL (RCX)
-                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                if r != Gpr::Rcx {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+                                }
                                 code.extend(encode_shl_reg_cl(d));
                             }
                             BinOpKind::ShrL => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
-                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
+                                if r != Gpr::Rcx {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+                                }
                                 code.extend(encode_shr_reg_cl(d));
                             }
                             BinOpKind::ShrA => {
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
-                                if r != Gpr::Rcx { code.extend(encode_mov_reg_reg(Gpr::Rcx, r)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
+                                if r != Gpr::Rcx {
+                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+                                }
                                 code.extend(encode_sar_reg_cl(d));
                             }
                             // Comparison BinOps: produce 0 or 1
-                            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
-                            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
-                            | BinOpKind::Eq | BinOpKind::Ne => {
+                            BinOpKind::SLt
+                            | BinOpKind::SLe
+                            | BinOpKind::SGt
+                            | BinOpKind::SGe
+                            | BinOpKind::ULt
+                            | BinOpKind::ULe
+                            | BinOpKind::UGt
+                            | BinOpKind::UGe
+                            | BinOpKind::Eq
+                            | BinOpKind::Ne => {
                                 let cc = binop_cmp_to_cc(op);
-                                if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                                if l != d {
+                                    code.extend(encode_mov_reg_reg(d, l));
+                                }
                                 code.extend(emit_cmp_setcc(d, d, r, cc));
                             }
                         }
@@ -1634,22 +1926,31 @@ impl Backend for X86_64Backend {
 
                     // ── Unary operations ─────────────────────────────────
                     IRInstr::UnaryOp { op, dst, operand } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (s, mut code) = resolve_gpr(operand, &reg_map, Gpr::R10);
 
                         match op {
                             UnaryOpKind::Neg => {
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                                 code.extend(encode_neg_reg(d));
                             }
                             UnaryOpKind::Not => {
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                                 code.extend(encode_not_reg(d));
                             }
                             UnaryOpKind::Clz => {
                                 // BSR finds highest set bit; result = 63 - BSR
                                 // BSR sets ZF if operand is 0
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                                 // BSR dst, dst  (0F BD /r)
                                 // We emit this manually since there's no helper
                                 let r = d.needs_rex();
@@ -1670,7 +1971,9 @@ impl Backend for X86_64Backend {
                             }
                             UnaryOpKind::Ctz => {
                                 // BSF finds lowest set bit; result = BSF
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                                 // BSF dst, dst  (0F BC /r)
                                 let r = d.needs_rex();
                                 let b = d.needs_rex();
@@ -1685,7 +1988,9 @@ impl Backend for X86_64Backend {
                                 // BSF result is already the count of trailing zeros
                             }
                             UnaryOpKind::Popcnt => {
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                                 // POPCNT dst, dst  (F3 0F B8 /r)
                                 // We need the F3 prefix
                                 code.push(0xF3);
@@ -1705,11 +2010,21 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Comparison (dedicated Cmp instruction) ───────────
-                    IRInstr::Cmp { kind, dst, lhs, rhs } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                    IRInstr::Cmp {
+                        kind,
+                        dst,
+                        lhs,
+                        rhs,
+                    } => {
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
                         let cc = cmp_kind_to_cc(kind);
-                        if l != d { code.extend(encode_mov_reg_reg(d, l)); }
+                        if l != d {
+                            code.extend(encode_mov_reg_reg(d, l));
+                        }
                         if let IRValue::Immediate(imm) = rhs {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_cmp_reg_imm32(d, *imm as i32));
@@ -1729,8 +2044,16 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Conditional select (Cmov) ────────────────────────
-                    IRInstr::Select { dst, cond, true_val, false_val } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                    IRInstr::Select {
+                        dst,
+                        cond,
+                        true_val,
+                        false_val,
+                    } => {
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
                         let (tv, pre_tv) = resolve_gpr(true_val, &reg_map, Gpr::R11);
                         let (fv, pre_fv) = resolve_gpr(false_val, &reg_map, Gpr::R8);
@@ -1738,7 +2061,9 @@ impl Backend for X86_64Backend {
                         code.extend(pre_fv);
 
                         // Move false_val into dst first, then conditionally move true_val
-                        if fv != d { code.extend(encode_mov_reg_reg(d, fv)); }
+                        if fv != d {
+                            code.extend(encode_mov_reg_reg(d, fv));
+                        }
                         // Test cond != 0 (test sets ZF if cond == 0)
                         code.extend(encode_test_reg_reg(c, c));
                         // CMOVcc: if NOT zero (NZ = NotEqual), move true_val
@@ -1748,7 +2073,10 @@ impl Backend for X86_64Backend {
 
                     // ── Memory: Load ─────────────────────────────────────
                     IRInstr::Load { dst, addr } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (a, mut code) = resolve_gpr(addr, &reg_map, Gpr::R10);
                         code.extend(encode_mov_reg_mem(d, a, 0));
                         code
@@ -1765,7 +2093,10 @@ impl Backend for X86_64Backend {
 
                     // ── Memory: Lea (Offset) ─────────────────────────────
                     IRInstr::Offset { dst, base, offset } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (b, mut code) = resolve_gpr(base, &reg_map, Gpr::R10);
                         // If offset is an immediate, use LEA
                         match offset {
@@ -1776,7 +2107,9 @@ impl Backend for X86_64Backend {
                             _ => {
                                 let (o, pre) = resolve_gpr(offset, &reg_map, Gpr::R11);
                                 code.extend(pre);
-                                if b != d { code.extend(encode_mov_reg_reg(d, b)); }
+                                if b != d {
+                                    code.extend(encode_mov_reg_reg(d, b));
+                                }
                                 code.extend(encode_add_reg_reg(d, o));
                             }
                         }
@@ -1785,7 +2118,10 @@ impl Backend for X86_64Backend {
 
                     // ── GetAddress ───────────────────────────────────────
                     IRInstr::GetAddress { dst, name } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         // Address will be resolved by R_X86_64_64 relocation at link time.
                         // The mov r64, imm64 instruction is 10 bytes: 2-byte prefix+opcode
                         // followed by an 8-byte immediate.  Record a relocation for the
@@ -1805,7 +2141,10 @@ impl Backend for X86_64Backend {
 
                     // ── Alloc ────────────────────────────────────────────
                     IRInstr::Alloc { dst, size: _ } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         // Alloc is handled by the frame layout; compute the address
                         // using LEA from RBP at the appropriate offset
                         encode_lea_reg_mem(d, Gpr::Rbp, -(frame_size as i32))
@@ -1816,7 +2155,8 @@ impl Backend for X86_64Backend {
                         // If the pointer is a stack allocation (from Alloc), Free is
                         // a no-op — the stack is cleaned up on function return.
                         // If it's a heap allocation, emit a call to __vuma_free.
-                        let is_stack = ptr.as_register()
+                        let is_stack = ptr
+                            .as_register()
                             .map(|id| stack_alloc_vregs.contains(&id))
                             .unwrap_or(false);
                         if is_stack {
@@ -1845,7 +2185,10 @@ impl Backend for X86_64Backend {
 
                     // ── Cast / Conversion ────────────────────────────────
                     IRInstr::Cast { kind, dst, src } => {
-                        let d = reg_map.get(&dst.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                        let d = reg_map
+                            .get(&dst.as_register().unwrap_or(0))
+                            .copied()
+                            .unwrap_or(Gpr::Rax);
                         let (s, mut code) = resolve_gpr(src, &reg_map, Gpr::R10);
 
                         match kind {
@@ -1888,11 +2231,15 @@ impl Backend for X86_64Backend {
                             CastKind::Trunc => {
                                 // Truncation: just move the lower bits (on x86_64,
                                 // writing to a 32-bit register zero-extends to 64 bits)
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                             }
                             CastKind::BitCast => {
                                 // No data change, just a type reinterpretation
-                                if s != d { code.extend(encode_mov_reg_reg(d, s)); }
+                                if s != d {
+                                    code.extend(encode_mov_reg_reg(d, s));
+                                }
                             }
                         }
                         code
@@ -1929,7 +2276,11 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Control: CondBranch ──────────────────────────────
-                    IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
+                    IRInstr::CondBranch {
+                        cond,
+                        true_target: _,
+                        false_target: _,
+                    } => {
                         let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
                         // Test cond != 0; JNZ to true_target; JMP to false_target
                         code.extend(encode_test_reg_reg(c, c));
@@ -1963,7 +2314,10 @@ impl Backend for X86_64Backend {
 
                         // Move return value from RAX to dst if needed
                         if let Some(d) = dst {
-                            let dd = reg_map.get(&d.as_register().unwrap_or(0)).copied().unwrap_or(Gpr::Rax);
+                            let dd = reg_map
+                                .get(&d.as_register().unwrap_or(0))
+                                .copied()
+                                .unwrap_or(Gpr::Rax);
                             if dd != Gpr::Rax {
                                 code.extend(encode_mov_reg_reg(dd, Gpr::Rax));
                             }
@@ -1981,7 +2335,11 @@ impl Backend for X86_64Backend {
                 if !encoded.is_empty() {
                     byte_offset += encoded.len();
                     encoded_instrs.push(AllocatedInstruction {
-                        opcode: format!("{:?}", instr).split_whitespace().next().unwrap_or("unknown").to_string(),
+                        opcode: format!("{:?}", instr)
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string(),
                         reads: vec![],
                         writes: vec![],
                         encoded,
@@ -2535,8 +2893,7 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
         // e_entry should be base + 64 + 56 = 0x400078
         let entry = u64::from_le_bytes([
-            elf[24], elf[25], elf[26], elf[27],
-            elf[28], elf[29], elf[30], elf[31],
+            elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
         assert_eq!(entry, 0x400078);
     }
@@ -2696,7 +3053,10 @@ mod tests {
             rhs: IRValue::Register(2),
         });
         // Should contain an ADD r64, r64 instruction (opcode 0x01)
-        assert!(code.iter().any(|&b| b == 0x01), "ADD opcode 0x01 not found in encoded output");
+        assert!(
+            code.iter().any(|&b| b == 0x01),
+            "ADD opcode 0x01 not found in encoded output"
+        );
     }
 
     #[test]
@@ -2707,7 +3067,9 @@ mod tests {
             rhs: IRValue::Immediate(42),
         });
         // With immediate rhs, should use ADD r64, imm32 (opcode 0x81 /0)
-        let has_add_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x00);
+        let has_add_imm = code
+            .windows(2)
+            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x00);
         assert!(has_add_imm, "ADD r64, imm32 not found in encoded output");
     }
 
@@ -2730,7 +3092,9 @@ mod tests {
             rhs: IRValue::Immediate(10),
         });
         // With immediate, should use SUB r64, imm32 (0x81 /5)
-        let has_sub_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x28);
+        let has_sub_imm = code
+            .windows(2)
+            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x28);
         assert!(has_sub_imm, "SUB r64, imm32 not found");
     }
 
@@ -2767,8 +3131,14 @@ mod tests {
             rhs: IRValue::Register(2),
         });
         // SDiv uses CQO (0x48 0x99) + IDIV (0xF7 /7)
-        assert!(code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x99), "CQO not found for SDiv");
-        assert!(code.iter().any(|&b| b == 0xF7), "IDIV opcode not found for SDiv");
+        assert!(
+            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x99),
+            "CQO not found for SDiv"
+        );
+        assert!(
+            code.iter().any(|&b| b == 0xF7),
+            "IDIV opcode not found for SDiv"
+        );
     }
 
     #[test]
@@ -2802,10 +3172,16 @@ mod tests {
             rhs: IRValue::Immediate(5),
         });
         // CMP r64, imm32 (0x81 /7)
-        let has_cmp_imm = code.windows(2).any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38);
+        let has_cmp_imm = code
+            .windows(2)
+            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38);
         assert!(has_cmp_imm, "CMP r64, imm32 not found");
         // Should also have SETcc (0F 9x) and MOVZX (0F B6)
-        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] >= 0x90 && w[1] <= 0x9F), "SETcc not found");
+        assert!(
+            code.windows(2)
+                .any(|w| w[0] == 0x0F && w[1] >= 0x90 && w[1] <= 0x9F),
+            "SETcc not found"
+        );
     }
 
     #[test]
@@ -2816,7 +3192,10 @@ mod tests {
             src: IRValue::Register(1),
         });
         // ZExt of a register uses MOVZX r8→r64 (0F B6)
-        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xB6), "MOVZX r8 not found for ZExt");
+        assert!(
+            code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xB6),
+            "MOVZX r8 not found for ZExt"
+        );
     }
 
     #[test]
@@ -2827,7 +3206,10 @@ mod tests {
             src: IRValue::Register(1),
         });
         // SExt of a register uses MOVSX r8→r64 (0F BE)
-        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xBE), "MOVSX r8 not found for SExt");
+        assert!(
+            code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xBE),
+            "MOVSX r8 not found for SExt"
+        );
     }
 
     #[test]
@@ -2839,8 +3221,15 @@ mod tests {
             false_val: IRValue::Register(3),
         });
         // Select uses TEST + CMOVcc
-        assert!(code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85), "TEST not found for Select");
-        assert!(code.windows(2).any(|w| w[0] == 0x0F && w[1] >= 0x40 && w[1] <= 0x4F), "CMOVcc not found for Select");
+        assert!(
+            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85),
+            "TEST not found for Select"
+        );
+        assert!(
+            code.windows(2)
+                .any(|w| w[0] == 0x0F && w[1] >= 0x40 && w[1] <= 0x4F),
+            "CMOVcc not found for Select"
+        );
     }
 
     // ── Disassembler Tests ───────────────────────────────────────────
@@ -2871,7 +3260,11 @@ mod tests {
         bytes.extend(encode_pop(Gpr::Rbp));
         let lines = backend.disassemble(&bytes, 0);
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("push"), "Expected push, got: {}", lines[0]);
+        assert!(
+            lines[0].contains("push"),
+            "Expected push, got: {}",
+            lines[0]
+        );
         assert!(lines[1].contains("pop"), "Expected pop, got: {}", lines[1]);
     }
 

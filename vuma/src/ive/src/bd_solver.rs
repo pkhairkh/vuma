@@ -176,10 +176,7 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.repd.compatible(&bd_b.repd)`.
     /// If one node has a default (unresolved) RepD and the other is
     /// specific, the default is replaced with the specific one.
-    RepDCompatible {
-        node_a: NodeId,
-        node_b: NodeId,
-    },
+    RepDCompatible { node_a: NodeId, node_b: NodeId },
 
     /// **CapD Weakening**: `node_a`'s capabilities must be a subset of
     /// `node_b`'s capabilities (i.e., `node_a` is *weaker* than `node_b`).
@@ -187,10 +184,7 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.capd.is_subset(&bd_b.capd)`.
     /// During solving, `node_b` may be widened (via join) to include
     /// `node_a`'s capabilities.
-    CapDWeakening {
-        node_a: NodeId,
-        node_b: NodeId,
-    },
+    CapDWeakening { node_a: NodeId, node_b: NodeId },
 
     /// **RelD Refinement**: `node_a`'s relations must refine `node_b`'s
     /// relations (i.e., `node_a` is *more specific* than `node_b`).
@@ -198,20 +192,14 @@ pub enum BDConstraint {
     /// Satisfied when `bd_a.reld.refines(&bd_b.reld)`.
     /// During solving, `node_b`'s relations may be added to `node_a`
     /// (via compose) to satisfy the refinement requirement.
-    RelDRefinement {
-        node_a: NodeId,
-        node_b: NodeId,
-    },
+    RelDRefinement { node_a: NodeId, node_b: NodeId },
 
     /// **Equality**: `node_a` and `node_b` must have identical BDs.
     ///
     /// Both nodes are set to the meet (greatest lower bound) of their
     /// current BDs. If the RepDs are incompatible, the constraint is
     /// unsatisfiable.
-    Equality {
-        node_a: NodeId,
-        node_b: NodeId,
-    },
+    Equality { node_a: NodeId, node_b: NodeId },
 }
 
 impl BDConstraint {
@@ -425,15 +413,16 @@ impl BDConstraintSolver {
             iteration += 1;
 
             if iteration > self.max_iterations {
-                errors.push(SolverError::NoConvergence { iterations: iteration });
+                errors.push(SolverError::NoConvergence {
+                    iterations: iteration,
+                });
                 return Err(errors);
             }
 
             let apply_widening = iteration > self.widening_threshold;
 
             for constraint in &self.constraints {
-                let result =
-                    self.apply_constraint(constraint, &mut solution, apply_widening);
+                let result = self.apply_constraint(constraint, &mut solution, apply_widening);
                 match result {
                     ApplyResult::Changed => changed = true,
                     ApplyResult::Unchanged => {}
@@ -493,10 +482,7 @@ impl BDConstraintSolver {
         // Initialize: use provided initial assignments, fall back to top.
         let mut solution: HashMap<NodeId, BD> = HashMap::new();
         for node_id in scg.node_ids() {
-            let bd = initial
-                .get(&node_id)
-                .cloned()
-                .unwrap_or_else(top_bd);
+            let bd = initial.get(&node_id).cloned().unwrap_or_else(top_bd);
             solution.insert(node_id, bd);
         }
 
@@ -509,22 +495,24 @@ impl BDConstraintSolver {
             iteration += 1;
 
             if iteration > self.max_iterations {
-                errors.push(SolverError::NoConvergence { iterations: iteration });
+                errors.push(SolverError::NoConvergence {
+                    iterations: iteration,
+                });
                 return Err(errors);
             }
 
             let apply_widening = iteration > self.widening_threshold;
 
             for constraint in &self.constraints {
-                let result =
-                    self.apply_constraint(constraint, &mut solution, apply_widening);
+                let result = self.apply_constraint(constraint, &mut solution, apply_widening);
                 match result {
                     ApplyResult::Changed => changed = true,
                     ApplyResult::Unchanged => {}
                     ApplyResult::Error(e) => {
-                        if !errors.iter().any(|existing| {
-                            format!("{}", existing) == format!("{}", e)
-                        }) {
+                        if !errors
+                            .iter()
+                            .any(|existing| format!("{}", existing) == format!("{}", e))
+                        {
                             errors.push(*e);
                         }
                     }
@@ -581,8 +569,12 @@ impl BDConstraintSolver {
         node_b: NodeId,
         solution: &mut HashMap<NodeId, BD>,
     ) -> ApplyResult {
-        let bd_a = solution.get(&node_a).expect("node_a must exist in solution");
-        let bd_b = solution.get(&node_b).expect("node_b must exist in solution");
+        let bd_a = solution
+            .get(&node_a)
+            .expect("node_a must exist in solution");
+        let bd_b = solution
+            .get(&node_b)
+            .expect("node_b must exist in solution");
 
         if bd_a.repd.compatible(&bd_b.repd) {
             ApplyResult::Unchanged
@@ -627,8 +619,12 @@ impl BDConstraintSolver {
         solution: &mut HashMap<NodeId, BD>,
         apply_widening: bool,
     ) -> ApplyResult {
-        let bd_a = solution.get(&node_a).expect("node_a must exist in solution");
-        let bd_b = solution.get(&node_b).expect("node_b must exist in solution");
+        let bd_a = solution
+            .get(&node_a)
+            .expect("node_a must exist in solution");
+        let bd_b = solution
+            .get(&node_b)
+            .expect("node_b must exist in solution");
 
         if bd_a.capd.is_subset(&bd_b.capd) {
             // Constraint already satisfied.
@@ -664,8 +660,12 @@ impl BDConstraintSolver {
         node_b: NodeId,
         solution: &mut HashMap<NodeId, BD>,
     ) -> ApplyResult {
-        let bd_a = solution.get(&node_a).expect("node_a must exist in solution");
-        let bd_b = solution.get(&node_b).expect("node_b must exist in solution");
+        let bd_a = solution
+            .get(&node_a)
+            .expect("node_a must exist in solution");
+        let bd_b = solution
+            .get(&node_b)
+            .expect("node_b must exist in solution");
 
         if bd_a.reld.refines(&bd_b.reld) {
             // Constraint already satisfied.
@@ -832,8 +832,6 @@ fn widen_capd(capd: &CapD) -> CapD {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -843,7 +841,7 @@ mod tests {
     use super::*;
     use vuma_bd::capd::Capability;
     use vuma_bd::reld::{Relation, TemporalKind};
-    use vuma_scg::node::{ComputationNode, NodeType, NodePayload, ProgramPoint};
+    use vuma_scg::node::{ComputationNode, NodePayload, NodeType, ProgramPoint};
 
     /// Helper: create a program point for testing.
     fn pp() -> ProgramPoint {
@@ -861,7 +859,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "test".into(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         )
     }
@@ -1054,10 +1054,9 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(
-            e,
-            SolverError::RepDIncompatible { .. }
-        )));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, SolverError::RepDIncompatible { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -1150,7 +1149,10 @@ mod tests {
         let solution = result.unwrap();
         // n1 should now have both Liveness and Containment.
         assert!(solution[&n1].reld.relations.contains(&Relation::Liveness));
-        assert!(solution[&n1].reld.relations.contains(&Relation::Containment));
+        assert!(solution[&n1]
+            .reld
+            .relations
+            .contains(&Relation::Containment));
     }
 
     // -----------------------------------------------------------------------
@@ -1181,10 +1183,9 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(
-            e,
-            SolverError::RelDRefinementFailed { .. }
-        )));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, SolverError::RelDRefinementFailed { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -1237,10 +1238,9 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(
-            e,
-            SolverError::EqualityViolated { .. }
-        )));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, SolverError::EqualityViolated { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -1261,10 +1261,9 @@ mod tests {
         assert!(result.is_err());
 
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(
-            e,
-            SolverError::NodeNotFound { .. }
-        )));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, SolverError::NodeNotFound { .. })));
         // Should have errors for both nodes.
         assert!(errors.len() >= 2);
     }

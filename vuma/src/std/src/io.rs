@@ -151,7 +151,11 @@ impl VumaIoError {
 
 impl fmt::Display for VumaIoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VumaIoError({}): {} [{}]", self.kind, self.message, self.capd)
+        write!(
+            f,
+            "VumaIoError({}): {} [{}]",
+            self.kind, self.message, self.capd
+        )
     }
 }
 
@@ -577,7 +581,11 @@ impl<W: VumaWriter> VumaWriter for VumaBufWriter<W> {
     fn sync_edges(&self) -> Vec<SyncEdge> {
         let mut edges = self.inner.sync_edges();
         edges.push(SyncEdge::new("buf_write", "buf_flush", SyncEdgeKind::Seq));
-        edges.push(SyncEdge::new("buf_flush", "inner_write", SyncEdgeKind::Fence));
+        edges.push(SyncEdge::new(
+            "buf_flush",
+            "inner_write",
+            SyncEdgeKind::Fence,
+        ));
         edges
     }
 }
@@ -776,7 +784,11 @@ impl Default for VumaStdin {
 impl fmt::Display for VumaStdin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.bare_metal {
-            write!(f, "VumaStdin {{ mode: bare-metal UART, mmio: {:#010X} }}", self.mmio_base)
+            write!(
+                f,
+                "VumaStdin {{ mode: bare-metal UART, mmio: {:#010X} }}",
+                self.mmio_base
+            )
         } else {
             write!(f, "VumaStdin {{ mode: linux, fd: {} }}", self.fd)
         }
@@ -935,7 +947,11 @@ impl Default for VumaStdout {
 impl fmt::Display for VumaStdout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.bare_metal {
-            write!(f, "VumaStdout {{ mode: bare-metal UART, mmio: {:#010X} }}", self.mmio_base)
+            write!(
+                f,
+                "VumaStdout {{ mode: bare-metal UART, mmio: {:#010X} }}",
+                self.mmio_base
+            )
         } else {
             write!(f, "VumaStdout {{ mode: linux, fd: {} }}", self.fd)
         }
@@ -1086,7 +1102,11 @@ impl Default for VumaStderr {
 impl fmt::Display for VumaStderr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.bare_metal {
-            write!(f, "VumaStderr {{ mode: bare-metal UART, mmio: {:#010X} }}", self.mmio_base)
+            write!(
+                f,
+                "VumaStderr {{ mode: bare-metal UART, mmio: {:#010X} }}",
+                self.mmio_base
+            )
         } else {
             write!(f, "VumaStderr {{ mode: linux, fd: {} }}", self.fd)
         }
@@ -1191,7 +1211,11 @@ impl VumaFile {
     /// On bare-metal, this initializes the eMMC2 controller and prepares
     /// block-based I/O for reading/writing the SD card.
     // VUMA-VERIFIED: bare-metal open initializes block device properly
-    pub fn open_bare_metal(path: impl Into<String>, mode: FileMode, mmio_base: u64) -> VumaIoResult<Self> {
+    pub fn open_bare_metal(
+        path: impl Into<String>,
+        mode: FileMode,
+        mmio_base: u64,
+    ) -> VumaIoResult<Self> {
         Ok(Self {
             fd: -1,
             path: path.into(),
@@ -1239,10 +1263,7 @@ impl VumaFile {
     // VUMA-VERIFIED: read requires Read capability; capability is checked
     pub fn read(&mut self, buf_len: usize) -> VumaIoResult<Vec<u8>> {
         if !self.is_open {
-            return Err(VumaIoError::not_open(
-                "file is not open",
-                self.capd(),
-            ));
+            return Err(VumaIoError::not_open("file is not open", self.capd()));
         }
         if self.mode == FileMode::Write {
             return Err(VumaIoError::capability_denied(
@@ -1285,10 +1306,7 @@ impl VumaFile {
     // VUMA-VERIFIED: write requires Write capability; capability is checked
     pub fn write(&mut self, data: &[u8]) -> VumaIoResult<usize> {
         if !self.is_open {
-            return Err(VumaIoError::not_open(
-                "file is not open",
-                self.capd(),
-            ));
+            return Err(VumaIoError::not_open("file is not open", self.capd()));
         }
         if self.mode == FileMode::Read {
             return Err(VumaIoError::capability_denied(
@@ -1327,10 +1345,7 @@ impl VumaFile {
     // VUMA-VERIFIED: seek only requires an open file
     pub fn seek(&mut self, pos: u64) -> VumaIoResult<()> {
         if !self.is_open {
-            return Err(VumaIoError::not_open(
-                "file is not open",
-                self.capd(),
-            ));
+            return Err(VumaIoError::not_open("file is not open", self.capd()));
         }
         if self.bare_metal {
             self.position = pos;
@@ -1357,10 +1372,7 @@ impl VumaFile {
     // VUMA-VERIFIED: close invalidates the file handle
     pub fn close(&mut self) -> VumaIoResult<()> {
         if !self.is_open {
-            return Err(VumaIoError::not_open(
-                "file is already closed",
-                self.capd(),
-            ));
+            return Err(VumaIoError::not_open("file is already closed", self.capd()));
         }
         self.is_open = false;
         if !self.bare_metal {
@@ -1421,7 +1433,11 @@ impl VumaWriter for VumaFile {
 
 impl fmt::Display for VumaFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mode_str = if self.bare_metal { "bare-metal" } else { "linux" };
+        let mode_str = if self.bare_metal {
+            "bare-metal"
+        } else {
+            "linux"
+        };
         write!(
             f,
             "VumaFile {{ fd: {}, path: {}, mode: {}, platform: {} }}",
@@ -1592,7 +1608,11 @@ impl File {
 
 impl fmt::Display for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "File {{ fd: {}, path: {}, mode: {} }}", self.fd, self.path, self.mode)
+        write!(
+            f,
+            "File {{ fd: {}, path: {}, mode: {} }}",
+            self.fd, self.path, self.mode
+        )
     }
 }
 
@@ -1768,7 +1788,12 @@ pub fn tcp_stream_repd() -> RepD {
 /// Returns the RepD for a TCP listener.
 // VUMA-VERIFIED: type descriptor is correct
 pub fn tcp_listener_repd() -> RepD {
-    RepD::new("TcpListener", 0, 8, CapD::new(vec![CapFlag::Read, CapFlag::Send]))
+    RepD::new(
+        "TcpListener",
+        0,
+        8,
+        CapD::new(vec![CapFlag::Read, CapFlag::Send]),
+    )
 }
 
 /// Returns the RepD for a UDP socket.
@@ -2143,7 +2168,10 @@ mod tests {
         // Read should fail (Write mode).
         let result = f.read(10);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), VumaIoErrorKind::CapabilityDenied);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            VumaIoErrorKind::CapabilityDenied
+        );
         f.close().unwrap();
         let _ = std::fs::remove_file(&tmp);
     }
@@ -2227,7 +2255,10 @@ mod tests {
             assert_eq!(result.unwrap_err().kind(), VumaIoErrorKind::UartError);
         } else {
             // Simulation path: read returns Ok with zero bytes
-            assert!(result.unwrap() > 0, "Simulation should return at least one byte");
+            assert!(
+                result.unwrap() > 0,
+                "Simulation should return at least one byte"
+            );
         }
     }
 
@@ -2247,7 +2278,8 @@ mod tests {
     // Test 10: VumaFile bare-metal mode
     #[test]
     fn test_vuma_file_bare_metal() {
-        let mut f = VumaFile::open_bare_metal("/mmc/test.txt", FileMode::ReadWrite, 0xFE340000).unwrap();
+        let mut f =
+            VumaFile::open_bare_metal("/mmc/test.txt", FileMode::ReadWrite, 0xFE340000).unwrap();
         assert!(f.bare_metal);
         assert!(f.is_open);
 
@@ -2274,9 +2306,15 @@ mod tests {
         // Create a simple reader that returns 0 bytes (EOF).
         struct EofReader;
         impl VumaReader for EofReader {
-            fn capd(&self) -> CapD { CapD::new(vec![CapFlag::Read]) }
-            fn repd(&self) -> RepD { RepD::new("EofReader", 0, 1, CapD::new(vec![CapFlag::Read])) }
-            fn read(&mut self, _buf: &mut [u8]) -> VumaIoResult<usize> { Ok(0) }
+            fn capd(&self) -> CapD {
+                CapD::new(vec![CapFlag::Read])
+            }
+            fn repd(&self) -> RepD {
+                RepD::new("EofReader", 0, 1, CapD::new(vec![CapFlag::Read]))
+            }
+            fn read(&mut self, _buf: &mut [u8]) -> VumaIoResult<usize> {
+                Ok(0)
+            }
         }
 
         let mut reader = EofReader;
@@ -2297,10 +2335,16 @@ mod tests {
     #[test]
     fn test_vuma_io_error_kind_display() {
         assert_eq!(format!("{}", VumaIoErrorKind::NotOpen), "resource not open");
-        assert_eq!(format!("{}", VumaIoErrorKind::CapabilityDenied), "capability denied");
+        assert_eq!(
+            format!("{}", VumaIoErrorKind::CapabilityDenied),
+            "capability denied"
+        );
         assert_eq!(format!("{}", VumaIoErrorKind::UartError), "UART error");
         assert_eq!(format!("{}", VumaIoErrorKind::MmioError), "MMIO error");
-        assert_eq!(format!("{}", VumaIoErrorKind::UnexpectedEof), "unexpected end of resource");
+        assert_eq!(
+            format!("{}", VumaIoErrorKind::UnexpectedEof),
+            "unexpected end of resource"
+        );
     }
 
     // Test 14: VumaFile implements VumaReader trait
@@ -2347,7 +2391,9 @@ mod tests {
     fn test_vuma_stdin_bare_metal_sync_edges() {
         let stdin = VumaStdin::new_bare_metal(0x1D0A_0000);
         let edges = stdin.sync_edges();
-        assert!(edges.iter().any(|e| e.from == "uart_init" && e.to == "uart_read"));
+        assert!(edges
+            .iter()
+            .any(|e| e.from == "uart_init" && e.to == "uart_read"));
     }
 
     // Test 18: VumaFile display formatting
@@ -2423,7 +2469,11 @@ mod tests {
 
         let f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
         // The fd should be a real OS file descriptor (>= 0), not a fake value.
-        assert!(f.fd >= 0, "fd should be a valid OS file descriptor, got {}", f.fd);
+        assert!(
+            f.fd >= 0,
+            "fd should be a valid OS file descriptor, got {}",
+            f.fd
+        );
         assert_ne!(f.fd, 100, "fd should not be the old simulated value 100");
         assert_ne!(f.fd, 101, "fd should not be the old simulated value 101");
         assert_ne!(f.fd, 102, "fd should not be the old simulated value 102");
@@ -2460,7 +2510,11 @@ mod tests {
 
         let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
         let data = f.read(100).unwrap();
-        assert_eq!(data.len(), 0, "reading from empty file should return 0 bytes");
+        assert_eq!(
+            data.len(),
+            0,
+            "reading from empty file should return 0 bytes"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

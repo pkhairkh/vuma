@@ -222,13 +222,23 @@ impl TaintStatus {
     pub fn propagate(&self, other: &TaintStatus) -> TaintStatus {
         match (self, other) {
             (TaintStatus::Clean, TaintStatus::Clean) => TaintStatus::Clean,
-            (TaintStatus::Clean, TaintStatus::Tainted { sources, sanitizable })
-            | (TaintStatus::Tainted { sources, sanitizable }, TaintStatus::Clean) => {
+            (
+                TaintStatus::Clean,
                 TaintStatus::Tainted {
-                    sources: sources.clone(),
-                    sanitizable: *sanitizable,
-                }
-            }
+                    sources,
+                    sanitizable,
+                },
+            )
+            | (
+                TaintStatus::Tainted {
+                    sources,
+                    sanitizable,
+                },
+                TaintStatus::Clean,
+            ) => TaintStatus::Tainted {
+                sources: sources.clone(),
+                sanitizable: *sanitizable,
+            },
             (
                 TaintStatus::Tainted {
                     sources: s1,
@@ -251,8 +261,12 @@ impl TaintStatus {
     pub fn sanitize(self) -> Result<TaintStatus, TaintStatus> {
         match self {
             TaintStatus::Clean => Ok(TaintStatus::Clean),
-            TaintStatus::Tainted { sanitizable: true, .. } => Ok(TaintStatus::Clean),
-            t @ TaintStatus::Tainted { sanitizable: false, .. } => Err(t),
+            TaintStatus::Tainted {
+                sanitizable: true, ..
+            } => Ok(TaintStatus::Clean),
+            t @ TaintStatus::Tainted {
+                sanitizable: false, ..
+            } => Err(t),
         }
     }
 
@@ -270,7 +284,10 @@ impl fmt::Display for TaintStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TaintStatus::Clean => write!(f, "Clean"),
-            TaintStatus::Tainted { sources, sanitizable } => {
+            TaintStatus::Tainted {
+                sources,
+                sanitizable,
+            } => {
                 let srcs: Vec<_> = sources.iter().map(|s| s.to_string()).collect();
                 write!(
                     f,
@@ -492,7 +509,7 @@ impl TaintTracker {
 
 // ---------------------------------------------------------------------------
 // Capability (VUMA-level, mirrors bd::capd::Capability)
-// --------------------------------------------------------------------------- 
+// ---------------------------------------------------------------------------
 
 /// VUMA capability bits used for the security model.
 ///
@@ -709,13 +726,9 @@ pub enum SecurityViolation {
         to_level: SecurityLevel,
     },
     /// Capability monotonicity violated — a capability was added.
-    CapabilityMonotonicityViolation {
-        added: SecurityCapability,
-    },
+    CapabilityMonotonicityViolation { added: SecurityCapability },
     /// An untrusted source value carries the Execute capability.
-    ExecuteOnUntrusted {
-        source: TaintSource,
-    },
+    ExecuteOnUntrusted { source: TaintSource },
     /// Implicit flow across a boundary.
     ImplicitFlowAcrossBoundary {
         condition_level: SecurityLevel,
@@ -726,24 +739,47 @@ pub enum SecurityViolation {
 impl fmt::Display for SecurityViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SecurityViolation::InformationLeak { src_level, dst_level } => {
+            SecurityViolation::InformationLeak {
+                src_level,
+                dst_level,
+            } => {
                 write!(f, "information leak: {} → {}", src_level, dst_level)
             }
-            SecurityViolation::DowngradeBlocked { src_level, dst_level } => {
+            SecurityViolation::DowngradeBlocked {
+                src_level,
+                dst_level,
+            } => {
                 write!(f, "downgrade blocked: {} → {}", src_level, dst_level)
             }
-            SecurityViolation::NoFlowViolation { src_level, dst_level } => {
+            SecurityViolation::NoFlowViolation {
+                src_level,
+                dst_level,
+            } => {
                 write!(f, "NoFlow violation: {} → {}", src_level, dst_level)
             }
             SecurityViolation::TaintedDataAtSink { sources, sink } => {
                 let srcs: Vec<_> = sources.iter().map(|s| s.to_string()).collect();
                 write!(f, "tainted data ({}) at sink '{}'", srcs.join(","), sink)
             }
-            SecurityViolation::MissingCapabilityForCrossing { capability, boundary_id } => {
-                write!(f, "missing {} for crossing boundary {}", capability, boundary_id)
+            SecurityViolation::MissingCapabilityForCrossing {
+                capability,
+                boundary_id,
+            } => {
+                write!(
+                    f,
+                    "missing {} for crossing boundary {}",
+                    capability, boundary_id
+                )
             }
-            SecurityViolation::DeclassificationWithoutProof { from_level, to_level } => {
-                write!(f, "declassification without proof: {} → {}", from_level, to_level)
+            SecurityViolation::DeclassificationWithoutProof {
+                from_level,
+                to_level,
+            } => {
+                write!(
+                    f,
+                    "declassification without proof: {} → {}",
+                    from_level, to_level
+                )
             }
             SecurityViolation::CapabilityMonotonicityViolation { added } => {
                 write!(f, "capability monotonicity violated: {} added", added)
@@ -751,7 +787,10 @@ impl fmt::Display for SecurityViolation {
             SecurityViolation::ExecuteOnUntrusted { source } => {
                 write!(f, "Execute capability on untrusted source: {}", source)
             }
-            SecurityViolation::ImplicitFlowAcrossBoundary { condition_level, target_level } => {
+            SecurityViolation::ImplicitFlowAcrossBoundary {
+                condition_level,
+                target_level,
+            } => {
                 write!(
                     f,
                     "implicit flow across boundary: condition at {} influences {}",
@@ -1122,10 +1161,7 @@ impl Arm64SecurityMapping {
     }
 
     /// Map a capability set to the full set of ARM64 features required.
-    pub fn capabilities_to_hw(
-        &self,
-        caps: &HashSet<SecurityCapability>,
-    ) -> HashSet<Arm64Feature> {
+    pub fn capabilities_to_hw(&self, caps: &HashSet<SecurityCapability>) -> HashSet<Arm64Feature> {
         caps.iter()
             .flat_map(|c| self.capability_to_hw(*c))
             .collect()
@@ -1471,10 +1507,10 @@ impl SecurityVerifier {
             let to_region = to_node.region;
 
             // Only check if the edge actually crosses the boundary.
-            let crosses_high_to_low = from_region == Some(boundary.region_high)
-                && to_region == Some(boundary.region_low);
-            let crosses_low_to_high = from_region == Some(boundary.region_low)
-                && to_region == Some(boundary.region_high);
+            let crosses_high_to_low =
+                from_region == Some(boundary.region_high) && to_region == Some(boundary.region_low);
+            let crosses_low_to_high =
+                from_region == Some(boundary.region_low) && to_region == Some(boundary.region_high);
 
             if !crosses_high_to_low && !crosses_low_to_high {
                 result.pass();
@@ -1494,10 +1530,9 @@ impl SecurityVerifier {
 
             if crosses_high_to_low {
                 // B1: Read-across (High → Low).
-                match boundary.check_read_across(
-                    boundary.region_high,
-                    from_node.security.effective_level(),
-                ) {
+                match boundary
+                    .check_read_across(boundary.region_high, from_node.security.effective_level())
+                {
                     Ok(()) => result.pass(),
                     Err(v) => result.fail(v),
                 }
@@ -1537,9 +1572,7 @@ impl SecurityVerifier {
                 result.pass();
             } else {
                 for cap in added {
-                    result.fail(SecurityViolation::CapabilityMonotonicityViolation {
-                        added: cap,
-                    });
+                    result.fail(SecurityViolation::CapabilityMonotonicityViolation { added: cap });
                 }
             }
         }
@@ -1619,8 +1652,14 @@ mod tests {
             SecurityLevel::Confidential
         );
         // Idempotence
-        assert_eq!(SecurityLevel::Secret.join(SecurityLevel::Secret), SecurityLevel::Secret);
-        assert_eq!(SecurityLevel::Secret.meet(SecurityLevel::Secret), SecurityLevel::Secret);
+        assert_eq!(
+            SecurityLevel::Secret.join(SecurityLevel::Secret),
+            SecurityLevel::Secret
+        );
+        assert_eq!(
+            SecurityLevel::Secret.meet(SecurityLevel::Secret),
+            SecurityLevel::Secret
+        );
     }
 
     #[test]
@@ -1667,7 +1706,10 @@ mod tests {
         let t2 = TaintStatus::tainted(TaintSource::Network, true);
         let combined = t1.propagate(&t2);
         match combined {
-            TaintStatus::Tainted { sources, sanitizable } => {
+            TaintStatus::Tainted {
+                sources,
+                sanitizable,
+            } => {
                 assert!(sources.contains(&TaintSource::UserInput));
                 assert!(sources.contains(&TaintSource::Network));
                 assert!(sanitizable); // both sanitizable
@@ -1695,11 +1737,20 @@ mod tests {
     fn taint_effective_level_boosts_to_internal() {
         let tainted = TaintStatus::tainted(TaintSource::UserInput, true);
         // Public + Internal = Internal
-        assert_eq!(tainted.effective_level(SecurityLevel::Public), SecurityLevel::Internal);
+        assert_eq!(
+            tainted.effective_level(SecurityLevel::Public),
+            SecurityLevel::Internal
+        );
         // Secret + Internal = Secret (Secret is already higher)
-        assert_eq!(tainted.effective_level(SecurityLevel::Secret), SecurityLevel::Secret);
+        assert_eq!(
+            tainted.effective_level(SecurityLevel::Secret),
+            SecurityLevel::Secret
+        );
         // Clean data stays at its level
-        assert_eq!(TaintStatus::Clean.effective_level(SecurityLevel::Public), SecurityLevel::Public);
+        assert_eq!(
+            TaintStatus::Clean.effective_level(SecurityLevel::Public),
+            SecurityLevel::Public
+        );
     }
 
     // ── SecurityRel tests ──────────────────────────────────────────────
@@ -1763,7 +1814,9 @@ mod tests {
             SecurityLevel::Public,
         );
         // Low → High: always permitted
-        assert!(boundary.check_read_across(RegionId(20), SecurityLevel::Public).is_ok());
+        assert!(boundary
+            .check_read_across(RegionId(20), SecurityLevel::Public)
+            .is_ok());
     }
 
     #[test]
@@ -1776,7 +1829,9 @@ mod tests {
             SecurityLevel::Public,
         );
         // High → Low: Secret cannot flow to Public
-        assert!(boundary.check_read_across(RegionId(10), SecurityLevel::Secret).is_err());
+        assert!(boundary
+            .check_read_across(RegionId(10), SecurityLevel::Secret)
+            .is_err());
     }
 
     #[test]
@@ -1790,7 +1845,9 @@ mod tests {
         );
         boundary.declassification_gate = Some(GateFunctionId(42));
         // High → Low: with gate, declassification is possible
-        assert!(boundary.check_read_across(RegionId(10), SecurityLevel::Secret).is_ok());
+        assert!(boundary
+            .check_read_across(RegionId(10), SecurityLevel::Secret)
+            .is_ok());
     }
 
     #[test]
@@ -1856,17 +1913,29 @@ mod tests {
     fn arm64_mapping_capability_to_hw() {
         let mapping = Arm64SecurityMapping::pi5_development();
 
-        assert!(mapping.capability_to_hw(SecurityCapability::DerivePtr).contains(&Arm64Feature::Pac));
-        assert!(mapping.capability_to_hw(SecurityCapability::Execute).contains(&Arm64Feature::Bti));
-        assert!(mapping.capability_to_hw(SecurityCapability::Read).contains(&Arm64Feature::Mte));
-        assert!(mapping.capability_to_hw(SecurityCapability::Write).contains(&Arm64Feature::Mte));
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::DerivePtr)
+            .contains(&Arm64Feature::Pac));
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::Execute)
+            .contains(&Arm64Feature::Bti));
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::Read)
+            .contains(&Arm64Feature::Mte));
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::Write)
+            .contains(&Arm64Feature::Mte));
     }
 
     #[test]
     fn arm64_mapping_disabled_returns_empty() {
         let mapping = Arm64SecurityMapping::disabled();
-        assert!(mapping.capability_to_hw(SecurityCapability::DerivePtr).is_empty());
-        assert!(mapping.capability_to_hw(SecurityCapability::Execute).is_empty());
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::DerivePtr)
+            .is_empty());
+        assert!(mapping
+            .capability_to_hw(SecurityCapability::Execute)
+            .is_empty());
     }
 
     #[test]
@@ -1939,7 +2008,11 @@ mod tests {
         });
 
         let result = v.verify();
-        assert!(result.all_passed(), "Expected all checks to pass, got violations: {:?}", result.violations);
+        assert!(
+            result.all_passed(),
+            "Expected all checks to pass, got violations: {:?}",
+            result.violations
+        );
     }
 
     #[test]
@@ -1968,10 +2041,10 @@ mod tests {
 
         let result = v.verify();
         assert!(!result.all_passed());
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            SecurityViolation::InformationLeak { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, SecurityViolation::InformationLeak { .. })));
     }
 
     #[test]
@@ -1989,10 +2062,10 @@ mod tests {
 
         let result = v.verify();
         assert!(!result.all_passed());
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            SecurityViolation::ExecuteOnUntrusted { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, SecurityViolation::ExecuteOnUntrusted { .. })));
     }
 
     #[test]
@@ -2021,10 +2094,10 @@ mod tests {
 
         let result = v.verify();
         assert!(!result.all_passed());
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            SecurityViolation::CapabilityMonotonicityViolation { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, SecurityViolation::CapabilityMonotonicityViolation { .. })));
     }
 
     #[test]
@@ -2052,17 +2125,20 @@ mod tests {
 
         let result = v.verify();
         assert!(!result.all_passed());
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            SecurityViolation::DeclassificationWithoutProof { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, SecurityViolation::DeclassificationWithoutProof { .. })));
     }
 
     #[test]
     fn verifier_accepts_valid_declassification() {
         let mut v = SecurityVerifier::new();
-        let mut proof =
-            DeclassificationProof::new(GateFunctionId(99), SecurityLevel::Secret, SecurityLevel::Public);
+        let mut proof = DeclassificationProof::new(
+            GateFunctionId(99),
+            SecurityLevel::Secret,
+            SecurityLevel::Public,
+        );
         proof.verify_all();
         v.register_declassification_proof(proof);
 
@@ -2073,8 +2149,11 @@ mod tests {
             vec![SecurityCapability::Read],
             TaintStatus::Clean,
         );
-        let mut valid_proof =
-            DeclassificationProof::new(GateFunctionId(99), SecurityLevel::Secret, SecurityLevel::Public);
+        let mut valid_proof = DeclassificationProof::new(
+            GateFunctionId(99),
+            SecurityLevel::Secret,
+            SecurityLevel::Public,
+        );
         valid_proof.verify_all();
         node.security.declassification = Some(DeclassificationRecord {
             gate_function: GateFunctionId(99),
@@ -2087,7 +2166,11 @@ mod tests {
 
         let result = v.verify();
         // The declassification proof check should pass.
-        assert!(result.all_passed(), "Expected all checks to pass, got violations: {:?}", result.violations);
+        assert!(
+            result.all_passed(),
+            "Expected all checks to pass, got violations: {:?}",
+            result.violations
+        );
     }
 
     #[test]
@@ -2170,7 +2253,11 @@ mod tests {
         });
 
         let result = v.verify();
-        assert!(result.all_passed(), "Expected all checks to pass, got violations: {:?}", result.violations);
+        assert!(
+            result.all_passed(),
+            "Expected all checks to pass, got violations: {:?}",
+            result.violations
+        );
     }
 
     #[test]
@@ -2212,10 +2299,10 @@ mod tests {
 
         let result = v.verify();
         assert!(!result.all_passed());
-        assert!(result.violations.iter().any(|v| matches!(
-            v,
-            SecurityViolation::ImplicitFlowAcrossBoundary { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, SecurityViolation::ImplicitFlowAcrossBoundary { .. })));
     }
 
     // ── Taint through derivation chain test ─────────────────────────────
@@ -2246,8 +2333,14 @@ mod tests {
 
         // d1 is tainted with UserInput, d2 is tainted with Network.
         let mut taint_map: HashMap<DerivationId, TaintStatus> = HashMap::new();
-        taint_map.insert(DerivationId(1), TaintStatus::tainted(TaintSource::UserInput, true));
-        taint_map.insert(DerivationId(2), TaintStatus::tainted(TaintSource::Network, true));
+        taint_map.insert(
+            DerivationId(1),
+            TaintStatus::tainted(TaintSource::UserInput, true),
+        );
+        taint_map.insert(
+            DerivationId(2),
+            TaintStatus::tainted(TaintSource::Network, true),
+        );
 
         let lookup = |id: DerivationId| match id.0 {
             1 => Some(d1.clone()),
@@ -2344,7 +2437,10 @@ mod tests {
         let status = label.to_status(true);
         assert!(status.is_tainted());
         match status {
-            TaintStatus::Tainted { sources, sanitizable } => {
+            TaintStatus::Tainted {
+                sources,
+                sanitizable,
+            } => {
                 assert!(sources.contains(&TaintSource::UntrustedFile));
                 assert!(sanitizable);
             }
@@ -2436,7 +2532,10 @@ mod tests {
         };
 
         let mut taint_map: HashMap<DerivationId, TaintLabel> = HashMap::new();
-        taint_map.insert(DerivationId(1), TaintLabel::from_source(TaintSource::UntrustedFile));
+        taint_map.insert(
+            DerivationId(1),
+            TaintLabel::from_source(TaintSource::UntrustedFile),
+        );
 
         let lookup = |id: DerivationId| match id.0 {
             1 => Some(d1.clone()),

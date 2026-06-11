@@ -544,7 +544,9 @@ pub fn apply_delta(msg: &mut MSG, delta: MSGDelta) -> DeltaResult {
 
     for derivation in delta.derivations.added {
         if msg.derivation(derivation.id).is_some() {
-            result.warnings.push(DeltaError::DuplicateDerivation(derivation.id));
+            result
+                .warnings
+                .push(DeltaError::DuplicateDerivation(derivation.id));
             continue;
         }
         // Validate derivation chain: source must exist.
@@ -1017,14 +1019,10 @@ fn remove_node_from_delta(delta: &mut MSGDelta, node: &SCGNode) {
         SCGNode::Access { access_id, .. } => {
             delta.accesses.remove(access_id.0);
         }
-        SCGNode::Arithmetic {
-            derivation_id, ..
-        } => {
+        SCGNode::Arithmetic { derivation_id, .. } => {
             delta.derivations.remove(derivation_id.0);
         }
-        SCGNode::Cast {
-            derivation_id, ..
-        } => {
+        SCGNode::Cast { derivation_id, .. } => {
             delta.derivations.remove(derivation_id.0);
         }
         SCGNode::Sync { edge_id, .. } => {
@@ -1037,33 +1035,91 @@ fn remove_node_from_delta(delta: &mut MSGDelta, node: &SCGNode) {
 fn nodes_differ(a: &SCGNode, b: &SCGNode) -> bool {
     match (a, b) {
         (
-            SCGNode::Alloc { region_id: r1, base: b1, size: s1, .. },
-            SCGNode::Alloc { region_id: r2, base: b2, size: s2, .. },
+            SCGNode::Alloc {
+                region_id: r1,
+                base: b1,
+                size: s1,
+                ..
+            },
+            SCGNode::Alloc {
+                region_id: r2,
+                base: b2,
+                size: s2,
+                ..
+            },
         ) => r1 != r2 || b1 != b2 || s1 != s2,
 
         (
-            SCGNode::Dealloc { region_id: r1, free_point: fp1, .. },
-            SCGNode::Dealloc { region_id: r2, free_point: fp2, .. },
+            SCGNode::Dealloc {
+                region_id: r1,
+                free_point: fp1,
+                ..
+            },
+            SCGNode::Dealloc {
+                region_id: r2,
+                free_point: fp2,
+                ..
+            },
         ) => r1 != r2 || fp1 != fp2,
 
         (
-            SCGNode::Access { access_id: a1, target_derivation: td1, is_write: w1, size: s1, .. },
-            SCGNode::Access { access_id: a2, target_derivation: td2, is_write: w2, size: s2, .. },
+            SCGNode::Access {
+                access_id: a1,
+                target_derivation: td1,
+                is_write: w1,
+                size: s1,
+                ..
+            },
+            SCGNode::Access {
+                access_id: a2,
+                target_derivation: td2,
+                is_write: w2,
+                size: s2,
+                ..
+            },
         ) => a1 != a2 || td1 != td2 || w1 != w2 || s1 != s2,
 
         (
-            SCGNode::Arithmetic { derivation_id: d1, source_derivation: sd1, offset: o1, .. },
-            SCGNode::Arithmetic { derivation_id: d2, source_derivation: sd2, offset: o2, .. },
+            SCGNode::Arithmetic {
+                derivation_id: d1,
+                source_derivation: sd1,
+                offset: o1,
+                ..
+            },
+            SCGNode::Arithmetic {
+                derivation_id: d2,
+                source_derivation: sd2,
+                offset: o2,
+                ..
+            },
         ) => d1 != d2 || sd1 != sd2 || o1 != o2,
 
         (
-            SCGNode::Cast { derivation_id: d1, source_derivation: sd1, .. },
-            SCGNode::Cast { derivation_id: d2, source_derivation: sd2, .. },
+            SCGNode::Cast {
+                derivation_id: d1,
+                source_derivation: sd1,
+                ..
+            },
+            SCGNode::Cast {
+                derivation_id: d2,
+                source_derivation: sd2,
+                ..
+            },
         ) => d1 != d2 || sd1 != sd2,
 
         (
-            SCGNode::Sync { edge_id: e1, access1: a1, access2: a2, .. },
-            SCGNode::Sync { edge_id: e2, access1: b1, access2: b2, .. },
+            SCGNode::Sync {
+                edge_id: e1,
+                access1: a1,
+                access2: a2,
+                ..
+            },
+            SCGNode::Sync {
+                edge_id: e2,
+                access1: b1,
+                access2: b2,
+                ..
+            },
         ) => e1 != e2 || a1 != b1 || a2 != b2,
 
         _ => true, // Different node types always differ.
@@ -1131,10 +1187,7 @@ fn derivation_resolves_to_region(msg: &MSG, deriv: &Derivation, target_rid: Regi
 
 /// Find all derivations that are transitively derived from the given set
 /// of derivation IDs (spec §5.3, Rule PROPAGATE-DERIVATION).
-fn find_downstream_derivations(
-    msg: &MSG,
-    source_ids: &HashSet<DerivationId>,
-) -> Vec<Derivation> {
+fn find_downstream_derivations(msg: &MSG, source_ids: &HashSet<DerivationId>) -> Vec<Derivation> {
     let mut downstream = Vec::new();
     let mut visited: HashSet<DerivationId> = HashSet::new();
 
@@ -1367,8 +1420,20 @@ mod tests {
         let mut msg = MSG::new();
         msg.add_region(make_region(1, 0x1000, 0x200));
         msg.add_derivation(make_direct_derivation(10, 1));
-        msg.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Write, 4, dummy_pp(2)));
-        msg.add_access(Access::new(AccessId(2), DerivationId(10), AccessKind::Read, 4, dummy_pp(3)));
+        msg.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Write,
+            4,
+            dummy_pp(2),
+        ));
+        msg.add_access(Access::new(
+            AccessId(2),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(3),
+        ));
 
         let mut delta = MSGDelta::new();
         delta.sync_edges.add(SyncEdge::new(
@@ -1458,7 +1523,13 @@ mod tests {
         new.add_region(make_region(1, 0x1000, 0x200)); // same region
         new.add_derivation(make_direct_derivation(10, 1)); // same derivation
         new.add_derivation(make_offset_derivation(20, 10, 0x40)); // new derivation
-        new.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        new.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         let delta = compute_delta(&old, &new);
         assert!(delta.regions.is_empty()); // No region changes
@@ -1476,7 +1547,13 @@ mod tests {
         let mut old = MSG::new();
         old.add_region(make_region(1, 0x1000, 0x200));
         old.add_derivation(make_direct_derivation(10, 1));
-        old.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        old.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         let mut new = MSG::new();
         new.add_region(make_region(1, 0x1000, 0x200));
@@ -1505,7 +1582,13 @@ mod tests {
         let mut msg = MSG::new();
         msg.add_region(make_region(1, 0x1000, 0x200));
         msg.add_derivation(make_direct_derivation(10, 1));
-        msg.add_access(Access::new(AccessId(100), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        msg.add_access(Access::new(
+            AccessId(100),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         // Remove the region.
         let mut delta = MSGDelta::new();
@@ -1594,7 +1677,13 @@ mod tests {
             owner_context: None,
         });
         msg.add_derivation(make_direct_derivation(10, 1));
-        msg.add_access(Access::new(AccessId(100), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        msg.add_access(Access::new(
+            AccessId(100),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         let status = verify_access(&msg, AccessId(100));
         assert_eq!(status, VerificationStatus::Unsafe);
@@ -1666,7 +1755,9 @@ mod tests {
         assert!(delta.is_empty());
 
         let mut delta = MSGDelta::new();
-        delta.verification_updates.insert(AccessId(1), VerificationStatus::Unsafe);
+        delta
+            .verification_updates
+            .insert(AccessId(1), VerificationStatus::Unsafe);
         assert!(!delta.is_empty());
     }
 
@@ -1736,14 +1827,36 @@ mod tests {
         let mut msg1 = MSG::new();
         msg1.add_region(make_region(1, 0x1000, 0x200));
         msg1.add_derivation(make_direct_derivation(10, 1));
-        msg1.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
-        msg1.add_sync_edge(SyncEdge::new(SyncEdgeId(1), AccessId(1), AccessId(1), Ordering::HappensBefore));
+        msg1.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
+        msg1.add_sync_edge(SyncEdge::new(
+            SyncEdgeId(1),
+            AccessId(1),
+            AccessId(1),
+            Ordering::HappensBefore,
+        ));
 
         let mut msg2 = MSG::new();
         msg2.add_region(make_region(1, 0x1000, 0x200));
         msg2.add_derivation(make_direct_derivation(10, 1));
-        msg2.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
-        msg2.add_sync_edge(SyncEdge::new(SyncEdgeId(1), AccessId(1), AccessId(1), Ordering::HappensBefore));
+        msg2.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
+        msg2.add_sync_edge(SyncEdge::new(
+            SyncEdgeId(1),
+            AccessId(1),
+            AccessId(1),
+            Ordering::HappensBefore,
+        ));
 
         let delta = compute_delta(&msg1, &msg2);
         assert!(delta.is_empty());
@@ -1758,17 +1871,51 @@ mod tests {
         let mut old = MSG::new();
         old.add_region(make_region(1, 0x1000, 0x200));
         old.add_derivation(make_direct_derivation(10, 1));
-        old.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Write, 4, dummy_pp(2)));
-        old.add_access(Access::new(AccessId(2), DerivationId(10), AccessKind::Read, 4, dummy_pp(3)));
-        old.add_sync_edge(SyncEdge::new(SyncEdgeId(1), AccessId(1), AccessId(2), Ordering::HappensBefore));
+        old.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Write,
+            4,
+            dummy_pp(2),
+        ));
+        old.add_access(Access::new(
+            AccessId(2),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(3),
+        ));
+        old.add_sync_edge(SyncEdge::new(
+            SyncEdgeId(1),
+            AccessId(1),
+            AccessId(2),
+            Ordering::HappensBefore,
+        ));
 
         let mut new = MSG::new();
         new.add_region(make_region(1, 0x1000, 0x200));
         new.add_derivation(make_direct_derivation(10, 1));
-        new.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Write, 4, dummy_pp(2)));
-        new.add_access(Access::new(AccessId(2), DerivationId(10), AccessKind::Read, 4, dummy_pp(3)));
+        new.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Write,
+            4,
+            dummy_pp(2),
+        ));
+        new.add_access(Access::new(
+            AccessId(2),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(3),
+        ));
         // Sync edge removed, new one added
-        new.add_sync_edge(SyncEdge::new(SyncEdgeId(2), AccessId(2), AccessId(1), Ordering::AtomicAcquireRelease));
+        new.add_sync_edge(SyncEdge::new(
+            SyncEdgeId(2),
+            AccessId(2),
+            AccessId(1),
+            Ordering::AtomicAcquireRelease,
+        ));
 
         let delta = compute_delta(&old, &new);
         assert_eq!(delta.sync_edges.removed.len(), 1);
@@ -1789,7 +1936,7 @@ mod tests {
         let mut delta = MSGDelta::new();
         delta.sync_edges.add(SyncEdge::new(
             SyncEdgeId(1),
-            AccessId(99), // does not exist
+            AccessId(99),  // does not exist
             AccessId(100), // does not exist
             Ordering::HappensBefore,
         ));
@@ -1797,8 +1944,18 @@ mod tests {
         let result = apply_delta(&mut msg, delta);
         assert!(result.success);
         assert_eq!(result.warnings.len(), 2);
-        assert!(result.warnings.contains(&DeltaError::DanglingSyncEdgeAccess(SyncEdgeId(1), AccessId(99))));
-        assert!(result.warnings.contains(&DeltaError::DanglingSyncEdgeAccess(SyncEdgeId(1), AccessId(100))));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::DanglingSyncEdgeAccess(
+                SyncEdgeId(1),
+                AccessId(99)
+            )));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::DanglingSyncEdgeAccess(
+                SyncEdgeId(1),
+                AccessId(100)
+            )));
     }
 
     // =======================================================================
@@ -1818,10 +1975,18 @@ mod tests {
         let result = apply_delta(&mut msg, delta);
         assert!(result.success);
         assert_eq!(result.warnings.len(), 4);
-        assert!(result.warnings.contains(&DeltaError::RegionNotFound(RegionId(999))));
-        assert!(result.warnings.contains(&DeltaError::DerivationNotFound(DerivationId(888))));
-        assert!(result.warnings.contains(&DeltaError::AccessNotFound(AccessId(777))));
-        assert!(result.warnings.contains(&DeltaError::SyncEdgeNotFound(SyncEdgeId(666))));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::RegionNotFound(RegionId(999))));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::DerivationNotFound(DerivationId(888))));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::AccessNotFound(AccessId(777))));
+        assert!(result
+            .warnings
+            .contains(&DeltaError::SyncEdgeNotFound(SyncEdgeId(666))));
     }
 
     // =======================================================================
@@ -1833,13 +1998,25 @@ mod tests {
         let mut old = MSG::new();
         old.add_region(make_region(1, 0x1000, 0x200));
         old.add_derivation(make_direct_derivation(10, 1));
-        old.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        old.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         let mut new = MSG::new();
         new.add_region(make_region(1, 0x1000, 0x200));
         new.add_derivation(make_direct_derivation(10, 1));
         // Same ID but changed kind (Write instead of Read) and size.
-        new.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Write, 8, dummy_pp(5)));
+        new.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Write,
+            8,
+            dummy_pp(5),
+        ));
 
         let delta = compute_delta(&old, &new);
         assert!(delta.accesses.added.is_empty());
@@ -1859,7 +2036,13 @@ mod tests {
         msg.add_region(make_region(1, 0x1000, 0x200));
         msg.add_derivation(make_direct_derivation(10, 1));
         msg.add_derivation(make_offset_derivation(20, 10, 0x40));
-        msg.add_access(Access::new(AccessId(1), DerivationId(20), AccessKind::Read, 4, dummy_pp(5)));
+        msg.add_access(Access::new(
+            AccessId(1),
+            DerivationId(20),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         // Modify the parent derivation.
         let mut delta = MSGDelta::new();
@@ -1891,7 +2074,13 @@ mod tests {
         let mut new = MSG::new();
         new.add_region(make_region(1, 0x1000, 0x200));
         new.add_derivation(make_direct_derivation(10, 1));
-        new.add_access(Access::new(AccessId(1), DerivationId(10), AccessKind::Read, 4, dummy_pp(5)));
+        new.add_access(Access::new(
+            AccessId(1),
+            DerivationId(10),
+            AccessKind::Read,
+            4,
+            dummy_pp(5),
+        ));
 
         let delta = compute_delta(&old, &new);
         assert!(delta.regions.is_empty());

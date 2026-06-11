@@ -107,7 +107,9 @@ impl VumaPermissions {
     /// Create from `std::fs::Permissions`.
     // VUMA-VERIFIED: conversion is lossless
     pub fn from_std(p: &std::fs::Permissions) -> Self {
-        Self { readonly: p.readonly() }
+        Self {
+            readonly: p.readonly(),
+        }
     }
 
     /// Returns `true` if the file is read-only.
@@ -276,9 +278,10 @@ impl VumaFile {
     /// Read bytes from the file into a buffer.
     // VUMA-VERIFIED: read requires Read capability
     pub fn read(&mut self, buf: &mut [u8]) -> VumaResult<usize> {
-        let f = self.inner.as_mut().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
+        let f = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
         f.read(buf)
             .map_err(|e| VumaIoError::from_io(e, "read").into())
     }
@@ -286,9 +289,10 @@ impl VumaFile {
     /// Write bytes to the file.
     // VUMA-VERIFIED: write requires Write capability
     pub fn write(&mut self, buf: &[u8]) -> VumaResult<usize> {
-        let f = self.inner.as_mut().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
+        let f = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
         f.write(buf)
             .map_err(|e| VumaIoError::from_io(e, "write").into())
     }
@@ -296,10 +300,12 @@ impl VumaFile {
     /// Returns the file metadata.
     // VUMA-VERIFIED: metadata query is safe
     pub fn metadata(&self) -> VumaResult<VumaMetadata> {
-        let f = self.inner.as_ref().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
-        let m = f.metadata()
+        let f = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+        let m = f
+            .metadata()
             .map_err(|e| VumaIoError::from_io(e, "metadata"))?;
         Ok(VumaMetadata::from_std(&m))
     }
@@ -307,9 +313,10 @@ impl VumaFile {
     /// Truncate or extend the file to the specified size.
     // VUMA-VERIFIED: set_len requires Write capability
     pub fn set_len(&self, size: u64) -> VumaResult<()> {
-        let f = self.inner.as_ref().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
+        let f = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
         f.set_len(size)
             .map_err(|e| VumaIoError::from_io(e, "set_len").into())
     }
@@ -317,9 +324,10 @@ impl VumaFile {
     /// Sync all OS-internal metadata to disk.
     // VUMA-VERIFIED: sync_all is safe
     pub fn sync_all(&self) -> VumaResult<()> {
-        let f = self.inner.as_ref().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
+        let f = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
         f.sync_all()
             .map_err(|e| VumaIoError::from_io(e, "sync_all").into())
     }
@@ -327,9 +335,10 @@ impl VumaFile {
     /// Sync file data (but not necessarily metadata) to disk.
     // VUMA-VERIFIED: sync_data is safe
     pub fn sync_data(&self) -> VumaResult<()> {
-        let f = self.inner.as_ref().ok_or_else(|| {
-            VumaIoError::new(VumaErrorKind::Io, "file is not open")
-        })?;
+        let f = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
         f.sync_data()
             .map_err(|e| VumaIoError::from_io(e, "sync_data").into())
     }
@@ -384,8 +393,7 @@ impl VumaDir {
     /// Read the contents of a directory.
     // VUMA-VERIFIED: read_dir requires Read+Execute capabilities
     pub fn read_dir(path: impl AsRef<Path>) -> VumaResult<Self> {
-        let rd = std::fs::read_dir(&path)
-            .map_err(|e| VumaIoError::from_io(e, "read_dir"))?;
+        let rd = std::fs::read_dir(&path).map_err(|e| VumaIoError::from_io(e, "read_dir"))?;
         Ok(Self { inner: rd })
     }
 
@@ -408,9 +416,11 @@ impl VumaDir {
     /// Returns the SyncEdge annotations for this directory iterator.
     // VUMA-VERIFIED: synchronization edges model directory iteration
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("fs_read_dir", "fs_next_entry", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "fs_read_dir",
+            "fs_next_entry",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -421,57 +431,49 @@ impl VumaDir {
 /// Remove a file from the filesystem.
 // VUMA-VERIFIED: remove_file requires Write capability on parent dir
 pub fn remove_file(path: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::remove_file(&path)
-        .map_err(|e| VumaIoError::from_io(e, "remove_file").into())
+    std::fs::remove_file(&path).map_err(|e| VumaIoError::from_io(e, "remove_file").into())
 }
 
 /// Remove an empty directory.
 // VUMA-VERIFIED: remove_dir requires Write capability on parent dir
 pub fn remove_dir(path: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::remove_dir(&path)
-        .map_err(|e| VumaIoError::from_io(e, "remove_dir").into())
+    std::fs::remove_dir(&path).map_err(|e| VumaIoError::from_io(e, "remove_dir").into())
 }
 
 /// Remove a directory and all its contents recursively.
 // VUMA-VERIFIED: remove_dir_all requires Write capability
 pub fn remove_dir_all(path: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::remove_dir_all(&path)
-        .map_err(|e| VumaIoError::from_io(e, "remove_dir_all").into())
+    std::fs::remove_dir_all(&path).map_err(|e| VumaIoError::from_io(e, "remove_dir_all").into())
 }
 
 /// Rename a file or directory.
 // VUMA-VERIFIED: rename requires Write capability on both paths
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::rename(&from, &to)
-        .map_err(|e| VumaIoError::from_io(e, "rename").into())
+    std::fs::rename(&from, &to).map_err(|e| VumaIoError::from_io(e, "rename").into())
 }
 
 /// Copy a file to a new path, returning the number of bytes copied.
 // VUMA-VERIFIED: copy requires Read on source, Write on destination
 pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> VumaResult<u64> {
-    std::fs::copy(&from, &to)
-        .map_err(|e| VumaIoError::from_io(e, "copy").into())
+    std::fs::copy(&from, &to).map_err(|e| VumaIoError::from_io(e, "copy").into())
 }
 
 /// Create a new directory.
 // VUMA-VERIFIED: create_dir requires Write capability on parent dir
 pub fn create_dir(path: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::create_dir(&path)
-        .map_err(|e| VumaIoError::from_io(e, "create_dir").into())
+    std::fs::create_dir(&path).map_err(|e| VumaIoError::from_io(e, "create_dir").into())
 }
 
 /// Create a directory and all parent directories as needed.
 // VUMA-VERIFIED: create_dir_all requires Write capability
 pub fn create_dir_all(path: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::create_dir_all(&path)
-        .map_err(|e| VumaIoError::from_io(e, "create_dir_all").into())
+    std::fs::create_dir_all(&path).map_err(|e| VumaIoError::from_io(e, "create_dir_all").into())
 }
 
 /// Returns the canonical, absolute form of a path.
 // VUMA-VERIFIED: canonicalize requires Read capability
 pub fn canonicalize(path: impl AsRef<Path>) -> VumaResult<std::path::PathBuf> {
-    std::fs::canonicalize(&path)
-        .map_err(|e| VumaIoError::from_io(e, "canonicalize").into())
+    std::fs::canonicalize(&path).map_err(|e| VumaIoError::from_io(e, "canonicalize").into())
 }
 
 /// Returns `true` if the path exists.
@@ -483,15 +485,13 @@ pub fn exists(path: impl AsRef<Path>) -> bool {
 /// Create a hard link.
 // VUMA-VERIFIED: hard_link requires Write capability on destination dir
 pub fn hard_link(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> VumaResult<()> {
-    std::fs::hard_link(&src, &dst)
-        .map_err(|e| VumaIoError::from_io(e, "hard_link").into())
+    std::fs::hard_link(&src, &dst).map_err(|e| VumaIoError::from_io(e, "hard_link").into())
 }
 
 /// Read a symbolic link, returning the path it points to.
 // VUMA-VERIFIED: read_link requires Read capability
 pub fn read_link(path: impl AsRef<Path>) -> VumaResult<std::path::PathBuf> {
-    std::fs::read_link(&path)
-        .map_err(|e| VumaIoError::from_io(e, "read_link").into())
+    std::fs::read_link(&path).map_err(|e| VumaIoError::from_io(e, "read_link").into())
 }
 
 // ---------------------------------------------------------------------------

@@ -100,8 +100,7 @@ pub const UART0_BASE: Address =
     crate::platform::PERIPHERAL_BASE + crate::platform::UART_BASE_OFFSET;
 
 /// Default base address for the AUX peripheral block (mini UART / UART1).
-pub const AUX_BASE: Address =
-    crate::platform::PERIPHERAL_BASE + crate::platform::AUX_BASE_OFFSET;
+pub const AUX_BASE: Address = crate::platform::PERIPHERAL_BASE + crate::platform::AUX_BASE_OFFSET;
 
 /// Default baud rate for UART initialisation.
 pub const DEFAULT_BAUD_RATE: u32 = 115200;
@@ -1170,11 +1169,7 @@ mod tests {
 
         // LCRH should have 8-bit + FIFO enable
         let lcrh_val = mock_mmio::read(MOCK_BASE + LCRH);
-        assert_eq!(
-            lcrh_val & LCRH_WLEN8,
-            LCRH_WLEN8,
-            "LCRH should have WLEN8"
-        );
+        assert_eq!(lcrh_val & LCRH_WLEN8, LCRH_WLEN8, "LCRH should have WLEN8");
         assert_eq!(
             lcrh_val & LCRH_FEN,
             LCRH_FEN,
@@ -1422,11 +1417,17 @@ mod tests {
 
         // RX interrupt pending (RXIM bit in MIS)
         mock_mmio::write(MOCK_BASE + MIS, IMSC_RXIM);
-        assert!(uart.rx_interrupt_pending(), "RX should be pending when RXIM set");
+        assert!(
+            uart.rx_interrupt_pending(),
+            "RX should be pending when RXIM set"
+        );
 
         // RTIM bit (receive timeout)
         mock_mmio::write(MOCK_BASE + MIS, IMSC_RTIM);
-        assert!(uart.rx_interrupt_pending(), "RX should be pending when RTIM set");
+        assert!(
+            uart.rx_interrupt_pending(),
+            "RX should be pending when RTIM set"
+        );
     }
 
     // ---- Test 15: tx_interrupt_pending checks MIS ------------------------
@@ -1440,7 +1441,10 @@ mod tests {
         assert!(!uart.tx_interrupt_pending(), "TX should not be pending");
 
         mock_mmio::write(MOCK_BASE + MIS, IMSC_TXIM);
-        assert!(uart.tx_interrupt_pending(), "TX should be pending when TXIM set");
+        assert!(
+            uart.tx_interrupt_pending(),
+            "TX should be pending when TXIM set"
+        );
     }
 
     // ---- Test 16: raw_interrupt_status reads RIS -------------------------
@@ -1669,8 +1673,7 @@ mod tests {
 
     #[test]
     fn mini_uart_default_base_matches_platform() {
-        let expected: Address =
-            crate::platform::PERIPHERAL_BASE + crate::platform::AUX_BASE_OFFSET;
+        let expected: Address = crate::platform::PERIPHERAL_BASE + crate::platform::AUX_BASE_OFFSET;
         assert_eq!(AUX_BASE, expected);
     }
 
@@ -1873,12 +1876,20 @@ mod tests {
 
         // RX not ready
         mock_mmio::write(MOCK_BASE + AUX_MU_LSR, 0);
-        assert_eq!(mu.try_read_byte(), None, "Should return None when RX not ready");
+        assert_eq!(
+            mu.try_read_byte(),
+            None,
+            "Should return None when RX not ready"
+        );
 
         // RX ready
         mock_mmio::write(MOCK_BASE + AUX_MU_LSR, AUX_MU_LSR_RX_READY);
         mock_mmio::write(MOCK_BASE + AUX_MU_IO, 0x77);
-        assert_eq!(mu.try_read_byte(), Some(0x77), "Should return byte when RX ready");
+        assert_eq!(
+            mu.try_read_byte(),
+            Some(0x77),
+            "Should return byte when RX ready"
+        );
     }
 
     // ---- Test: MiniUart available and tx_ready ---------------------------
@@ -1906,7 +1917,10 @@ mod tests {
 
     #[test]
     fn test_bcm2712_uart_clock_is_48mhz() {
-        assert_eq!(UART_CLOCK, 48_000_000, "BCM2712 UART clock should be 48 MHz");
+        assert_eq!(
+            UART_CLOCK, 48_000_000,
+            "BCM2712 UART clock should be 48 MHz"
+        );
     }
 
     // ---- Test: IFLS default after init -----------------------------------

@@ -21,7 +21,6 @@
 //! handlers, replace the function pointers or re-implement the handler
 //! functions.
 
-
 // ---------------------------------------------------------------------------
 // ExceptionContext
 // ---------------------------------------------------------------------------

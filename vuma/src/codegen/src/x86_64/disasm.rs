@@ -113,12 +113,7 @@ fn gpr_name_8(idx: u8, has_rex: bool) -> String {
 }
 
 /// Decode ModR/M reg and r/m fields (register-register mode, mod=3 only).
-fn decode_modrm_reg_rm(
-    bytes: &[u8],
-    pos: usize,
-    rex_r: bool,
-    rex_b: bool,
-) -> (u8, u8, usize) {
+fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
     if pos >= bytes.len() {
         return (0, 0, pos);
     }
@@ -272,8 +267,7 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
         0xB8..=0xBF if rex_w => {
             let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
             if pos + 8 <= bytes.len() {
-                let imm =
-                    u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
+                let imm = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
                 pos += 8;
                 format!("mov {}, {imm:#x}", gpr_name_64(reg_idx))
             } else {
@@ -287,8 +281,7 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
         // JMP rel32
         0xE9 => {
             if pos + 4 <= bytes.len() {
-                let rel =
-                    i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                 pos += 4;
                 let target = (pos as u64).wrapping_add(rel as u64);
                 format!("jmp {target:#x}")
@@ -303,8 +296,7 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
         // CALL rel32
         0xE8 => {
             if pos + 4 <= bytes.len() {
-                let rel =
-                    i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                 pos += 4;
                 let target = (pos as u64).wrapping_add(rel as u64);
                 format!("call {target:#x}")
@@ -359,9 +351,8 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
                         _ => "j??",
                     };
                     if pos + 4 <= bytes.len() {
-                        let rel = i32::from_le_bytes(
-                            bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
-                        );
+                        let rel =
+                            i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                         pos += 4;
                         let target = (pos as u64).wrapping_add(rel as u64);
                         format!("{cc_name} {target:#x}")
@@ -587,8 +578,7 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
             let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
             pos = np;
             if pos + 4 <= bytes.len() {
-                let imm =
-                    i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                 pos += 4;
                 format!("mov {}, {imm}", gpr_name_64(rm))
             } else {
@@ -604,8 +594,7 @@ pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
             let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
             pos = np;
             if pos + 4 <= bytes.len() {
-                let imm =
-                    i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+                let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                 pos += 4;
                 let op_name = match r {
                     0 => "add",
@@ -654,12 +643,11 @@ mod tests {
     use super::*;
     use crate::x86_64::{
         encode_add_reg_reg, encode_and_reg_reg, encode_call_rel32, encode_cmp_reg_reg,
-        encode_imul_reg_reg, encode_jcc_rel32, encode_jmp_rel32, encode_mov_reg_reg,
-        encode_or_reg_reg, encode_ret, encode_sub_reg_reg, encode_xor_reg_reg,
-        encode_nop, encode_push, encode_pop, encode_shl_reg_cl, encode_shr_reg_cl,
-        encode_sar_reg_cl, encode_lea_reg_mem, encode_mov_reg_mem, encode_mov_mem_reg,
-        encode_neg_reg, encode_not_reg, encode_test_reg_reg, encode_idiv_reg,
-        Gpr,
+        encode_idiv_reg, encode_imul_reg_reg, encode_jcc_rel32, encode_jmp_rel32,
+        encode_lea_reg_mem, encode_mov_mem_reg, encode_mov_reg_mem, encode_mov_reg_reg,
+        encode_neg_reg, encode_nop, encode_not_reg, encode_or_reg_reg, encode_pop, encode_push,
+        encode_ret, encode_sar_reg_cl, encode_shl_reg_cl, encode_shr_reg_cl, encode_sub_reg_reg,
+        encode_test_reg_reg, encode_xor_reg_reg, Gpr,
     };
 
     #[test]

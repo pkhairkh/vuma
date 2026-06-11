@@ -168,7 +168,11 @@ impl fmt::Display for OriginRoot {
         match self {
             OriginRoot::Constant { label } => write!(f, "const({})", label),
             OriginRoot::UserInput { channel } => write!(f, "user_input({})", channel),
-            OriginRoot::AllocationSite { region_id, base, size } => {
+            OriginRoot::AllocationSite {
+                region_id,
+                base,
+                size,
+            } => {
                 write!(f, "alloc({} @ {} size={})", region_id, base, size)
             }
             OriginRoot::HardwareRegister { name } => write!(f, "hw_reg({})", name),
@@ -181,7 +185,9 @@ impl fmt::Display for OriginRoot {
 // ---------------------------------------------------------------------------
 
 /// The trust level of a value, propagated from its root source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum TaintLevel {
     /// The value originates from a trusted source and no untrusted data
     /// flows into it.
@@ -234,10 +240,7 @@ pub enum DerivationKind {
     /// Offset from a base pointer: `ptr.offset(n)`.
     Offset { by: i64 },
     /// Type cast: `ptr as *mut T`.
-    Cast {
-        from_repr: String,
-        to_repr: String,
-    },
+    Cast { from_repr: String, to_repr: String },
     /// General pointer arithmetic.
     Arithmetic { description: String },
 }
@@ -486,14 +489,20 @@ impl fmt::Display for ViolationKind {
             ViolationKind::OrphanValue { derivation_id } => {
                 write!(f, "orphan value: {} has no traceable origin", derivation_id)
             }
-            ViolationKind::FabricatedPointer { derivation_id, raw_value } => {
+            ViolationKind::FabricatedPointer {
+                derivation_id,
+                raw_value,
+            } => {
                 write!(
                     f,
                     "fabricated pointer: {} from raw integer 0x{:x}",
                     derivation_id, raw_value
                 )
             }
-            ViolationKind::BrokenChain { derivation_id, missing_parent } => {
+            ViolationKind::BrokenChain {
+                derivation_id,
+                missing_parent,
+            } => {
                 write!(
                     f,
                     "broken chain: {} references missing parent {}",
@@ -503,14 +512,16 @@ impl fmt::Display for ViolationKind {
             ViolationKind::CyclicDerivation { derivation_id } => {
                 write!(f, "cyclic derivation: {} involved in cycle", derivation_id)
             }
-            ViolationKind::UninitializedRead { access_id, program_point } => {
-                write!(
-                    f,
-                    "uninitialized read: {} at {}",
-                    access_id, program_point
-                )
+            ViolationKind::UninitializedRead {
+                access_id,
+                program_point,
+            } => {
+                write!(f, "uninitialized read: {} at {}", access_id, program_point)
             }
-            ViolationKind::OutOfBounds { derivation_id, region_id } => {
+            ViolationKind::OutOfBounds {
+                derivation_id,
+                region_id,
+            } => {
                 write!(
                     f,
                     "out of bounds: {} exceeds region {}",
@@ -520,12 +531,11 @@ impl fmt::Display for ViolationKind {
             ViolationKind::IllFormedProvenance { derivation_id } => {
                 write!(f, "ill-formed provenance range: {}", derivation_id)
             }
-            ViolationKind::FreedRegionAccess { access_id, region_id } => {
-                write!(
-                    f,
-                    "access {} targets freed region {}",
-                    access_id, region_id
-                )
+            ViolationKind::FreedRegionAccess {
+                access_id,
+                region_id,
+            } => {
+                write!(f, "access {} targets freed region {}", access_id, region_id)
             }
         }
     }
@@ -620,7 +630,10 @@ impl OriginReport {
                         descriptions.join("; "),
                     ),
                 },
-                format!("origin invariant violated: {} issue(s)", self.violation_count()),
+                format!(
+                    "origin invariant violated: {} issue(s)",
+                    self.violation_count()
+                ),
             )
         }
     }
@@ -951,9 +964,7 @@ impl OriginVerifier {
             };
 
             // Check that the provenance range falls within the region.
-            if derivation.proven_range.0 < region.base
-                || derivation.proven_range.1 > region.end()
-            {
+            if derivation.proven_range.0 < region.base || derivation.proven_range.1 > region.end() {
                 violations.push(OriginViolation::new(
                     ViolationKind::OutOfBounds {
                         derivation_id: derivation.id,
@@ -1100,13 +1111,17 @@ impl OriginVerifier {
         report.violations.extend(self.detect_cycles());
         report.violations.extend(self.detect_broken_chains());
         report.violations.extend(self.detect_fabricated_pointers());
-        report.violations.extend(self.detect_ill_formed_provenance());
+        report
+            .violations
+            .extend(self.detect_ill_formed_provenance());
         report.violations.extend(self.detect_out_of_bounds());
 
         // Semantic checks.
         report.violations.extend(self.detect_orphans());
         report.violations.extend(self.detect_uninitialized_reads());
-        report.violations.extend(self.detect_freed_region_accesses());
+        report
+            .violations
+            .extend(self.detect_freed_region_accesses());
 
         // Build the provenance forest.
         for derivation in &self.derivations {
@@ -1118,12 +1133,9 @@ impl OriginVerifier {
                 report.tainted_derivations.push((derivation.id, taint));
             }
 
-            report.provenance_forest.push(ProvenanceNode::new(
-                derivation.id,
-                root,
-                taint,
-                chain,
-            ));
+            report
+                .provenance_forest
+                .push(ProvenanceNode::new(derivation.id, root, taint, chain));
         }
 
         report.total_derivations = self.derivations.len();
@@ -1203,11 +1215,17 @@ mod tests {
         ));
 
         let report = v.verify();
-        assert!(report.is_clean(), "expected no violations, got: {:?}", report.violations);
+        assert!(
+            report.is_clean(),
+            "expected no violations, got: {:?}",
+            report.violations
+        );
         assert_eq!(report.total_derivations, 3);
 
         // Check provenance forest.
-        let node3 = report.provenance_forest.iter()
+        let node3 = report
+            .provenance_forest
+            .iter()
             .find(|n| n.derivation_id == DerivationId(3))
             .unwrap();
         assert!(node3.has_origin());
@@ -1234,7 +1252,9 @@ mod tests {
         assert!(!report.is_clean());
         assert!(report.violations.iter().any(|v| matches!(
             &v.kind,
-            ViolationKind::OrphanValue { derivation_id: DerivationId(1) }
+            ViolationKind::OrphanValue {
+                derivation_id: DerivationId(1)
+            }
         )));
     }
 
@@ -1249,7 +1269,9 @@ mod tests {
         // Fabricated root derivation.
         v.add_derivation(Derivation::new(
             DerivationId(1),
-            DerivationSource::Fabricated { raw_value: 0xDEADBEEF },
+            DerivationSource::Fabricated {
+                raw_value: 0xDEADBEEF,
+            },
             DerivationKind::Direct,
             (Address::from(0xDEADBEEFu64), Address::from(0xDEADBFF3u64)),
         ));
@@ -1264,13 +1286,15 @@ mod tests {
         let report = v.verify();
 
         // Fabricated pointer violation.
-        assert!(report.violations.iter().any(|v| matches!(
-            &v.kind,
-            ViolationKind::FabricatedPointer { .. }
-        )));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| matches!(&v.kind, ViolationKind::FabricatedPointer { .. })));
 
         // D2 should be tainted because it derives from D1 (fabricated).
-        let node2 = report.provenance_forest.iter()
+        let node2 = report
+            .provenance_forest
+            .iter()
             .find(|n| n.derivation_id == DerivationId(2))
             .unwrap();
         assert_eq!(node2.taint, TaintLevel::Unknown);
@@ -1338,13 +1362,22 @@ mod tests {
         ));
 
         let report = v.verify();
-        assert!(report.is_clean(), "expected no violations, got: {:?}", report.violations);
+        assert!(
+            report.is_clean(),
+            "expected no violations, got: {:?}",
+            report.violations
+        );
 
         // D3's chain should be [D1, D2, D3].
-        let node3 = report.provenance_forest.iter()
+        let node3 = report
+            .provenance_forest
+            .iter()
             .find(|n| n.derivation_id == DerivationId(3))
             .unwrap();
-        assert_eq!(node3.chain, vec![DerivationId(1), DerivationId(2), DerivationId(3)]);
+        assert_eq!(
+            node3.chain,
+            vec![DerivationId(1), DerivationId(2), DerivationId(3)]
+        );
         assert_eq!(node3.taint, TaintLevel::Trusted);
     }
 
@@ -1457,7 +1490,11 @@ mod tests {
         ));
 
         let report = v.verify();
-        assert!(report.is_clean(), "expected no violations, got: {:?}", report.violations);
+        assert!(
+            report.is_clean(),
+            "expected no violations, got: {:?}",
+            report.violations
+        );
         assert_eq!(report.total_derivations, 3);
         assert_eq!(report.total_accesses, 2);
 
@@ -1485,7 +1522,9 @@ mod tests {
         // from the VUMA spec Section 6.4.
         v.add_derivation(Derivation::new(
             DerivationId(1),
-            DerivationSource::Fabricated { raw_value: 0xDEADBEEF },
+            DerivationSource::Fabricated {
+                raw_value: 0xDEADBEEF,
+            },
             DerivationKind::Direct,
             (Address::from(0xDEADBEEFu64), Address::from(0xDEADBFF3u64)),
         ));
@@ -1501,7 +1540,9 @@ mod tests {
         )));
 
         // The derivation should be tainted as Unknown.
-        let node = report.provenance_forest.iter()
+        let node = report
+            .provenance_forest
+            .iter()
             .find(|n| n.derivation_id == DerivationId(1))
             .unwrap();
         assert_eq!(node.taint, TaintLevel::Unknown);
@@ -1571,10 +1612,10 @@ mod tests {
 
         let report = v.verify();
         assert!(!report.is_clean());
-        assert!(report.violations.iter().any(|v| matches!(
-            &v.kind,
-            ViolationKind::CyclicDerivation { .. }
-        )));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| matches!(&v.kind, ViolationKind::CyclicDerivation { .. })));
     }
 
     // -----------------------------------------------------------------------
@@ -1597,7 +1638,9 @@ mod tests {
         assert!(!report.is_clean());
         assert!(report.violations.iter().any(|v| matches!(
             &v.kind,
-            ViolationKind::IllFormedProvenance { derivation_id: DerivationId(1) }
+            ViolationKind::IllFormedProvenance {
+                derivation_id: DerivationId(1)
+            }
         )));
     }
 
@@ -1636,7 +1679,9 @@ mod tests {
         assert!(constant.is_trusted());
         assert_eq!(format!("{}", constant), "const(42)");
 
-        let user_input = OriginRoot::UserInput { channel: "stdin".into() };
+        let user_input = OriginRoot::UserInput {
+            channel: "stdin".into(),
+        };
         assert!(!user_input.is_trusted());
         assert_eq!(format!("{}", user_input), "user_input(stdin)");
 
@@ -1648,7 +1693,9 @@ mod tests {
         assert!(alloc.is_trusted());
         assert!(format!("{}", alloc).contains("alloc("));
 
-        let hw = OriginRoot::HardwareRegister { name: "MMIO0".into() };
+        let hw = OriginRoot::HardwareRegister {
+            name: "MMIO0".into(),
+        };
         assert!(!hw.is_trusted());
         assert_eq!(format!("{}", hw), "hw_reg(MMIO0)");
     }
@@ -1709,7 +1756,9 @@ mod tests {
     fn report_to_verification_result_violated() {
         let mut report = OriginReport::new();
         report.violations.push(OriginViolation::new(
-            ViolationKind::OrphanValue { derivation_id: DerivationId(1) },
+            ViolationKind::OrphanValue {
+                derivation_id: DerivationId(1),
+            },
             "orphan",
         ));
         report.total_derivations = 1;

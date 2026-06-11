@@ -24,17 +24,15 @@
 
 use vuma_codegen::{
     arm64::{BarrierOption, Condition, Instruction, Operand, Register},
+    emit::{emit_elf, emit_raw, EmitConfig, Emitter},
     ir::{
-        BinOpKind, IRInstr, IRTerminator, IRType, IRProgram,
-        size_of, alignment_of, classify_arg,
-        compute_calling_conv, compute_stack_layout, ArgClass, RegisterClass,
+        alignment_of, classify_arg, compute_calling_conv, compute_stack_layout, size_of, ArgClass,
+        BinOpKind, IRInstr, IRProgram, IRTerminator, IRType, RegisterClass,
     },
     scg_to_ir::{
-        IRBuilder, Scg, ScgNode, ScgFunction, ScgParam, ScgType,
-        ScgStatement, ScgExpr, ComputationNode, AllocationNode, AccessNode,
-        ControlNode, CallNode,
+        AccessNode, AllocationNode, CallNode, ComputationNode, ControlNode, IRBuilder, Scg,
+        ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType,
     },
-    emit::{Emitter, EmitConfig, emit_elf, emit_raw},
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +44,8 @@ fn compile_scg(scg: &Scg) -> (IRProgram, Vec<u32>) {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let mut emitter = Emitter::new();
-    let code_words = emitter.emit_function(&ir_program.functions[0])
+    let code_words = emitter
+        .emit_function(&ir_program.functions[0])
         .expect("Emission should succeed");
     (ir_program, code_words)
 }
@@ -75,8 +74,14 @@ fn test_codegen_simple_add() {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "add".to_string(),
             params: vec![
-                ScgParam { name: "a".to_string(), ty: ScgType::I64 },
-                ScgParam { name: "b".to_string(), ty: ScgType::I64 },
+                ScgParam {
+                    name: "a".to_string(),
+                    ty: ScgType::I64,
+                },
+                ScgParam {
+                    name: "b".to_string(),
+                    ty: ScgType::I64,
+                },
             ],
             results: vec![ScgType::I64],
             body: vec![
@@ -85,7 +90,7 @@ fn test_codegen_simple_add() {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Var("b".to_string()),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -102,7 +107,9 @@ fn test_codegen_simple_add() {
 
     // Check that an Add instruction exists
     let has_add = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Add { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Add { .. }))
     });
     assert!(has_add, "IR should contain an Add instruction");
 
@@ -148,15 +155,26 @@ fn test_codegen_stack_allocation() {
 
     // Check that Alloc instruction exists in the IR
     let has_alloc = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Alloc { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Alloc { .. }))
     });
     assert!(has_alloc, "IR should contain an Alloc instruction");
 
     // Check stack layout
     let layout = compute_stack_layout(func);
-    assert!(layout.total_size > 0, "Stack frame should have non-zero size");
-    assert!(layout.total_size % 16 == 0, "Stack frame should be 16-byte aligned");
-    assert!(!layout.local_slots.is_empty(), "Should have local variable slots");
+    assert!(
+        layout.total_size > 0,
+        "Stack frame should have non-zero size"
+    );
+    assert!(
+        layout.total_size % 16 == 0,
+        "Stack frame should be 16-byte aligned"
+    );
+    assert!(
+        !layout.local_slots.is_empty(),
+        "Should have local variable slots"
+    );
 
     // ARM64 code should be non-empty
     assert!(!code_words.is_empty());
@@ -176,9 +194,10 @@ fn test_codegen_load_store() {
     let scg = Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "load_store".to_string(),
-            params: vec![
-                ScgParam { name: "ptr".to_string(), ty: ScgType::U64 },
-            ],
+            params: vec![ScgParam {
+                name: "ptr".to_string(),
+                ty: ScgType::U64,
+            }],
             results: vec![ScgType::U64],
             body: vec![
                 ScgStatement::Access(AccessNode::Store {
@@ -200,10 +219,14 @@ fn test_codegen_load_store() {
 
     let func = &ir_program.functions[0];
     let has_store = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Store { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Store { .. }))
     });
     let has_load = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Load { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Load { .. }))
     });
     assert!(has_store, "IR should contain a Store instruction");
     assert!(has_load, "IR should contain a Load instruction");
@@ -225,31 +248,28 @@ fn test_codegen_if_else() {
     let scg = Scg {
         nodes: vec![ScgNode::Function(ScgFunction {
             name: "if_else".to_string(),
-            params: vec![
-                ScgParam { name: "cond".to_string(), ty: ScgType::I64 },
-            ],
+            params: vec![ScgParam {
+                name: "cond".to_string(),
+                ty: ScgType::I64,
+            }],
             results: vec![ScgType::I64],
             body: vec![
                 ScgStatement::Control(ControlNode::If {
                     cond: ScgExpr::Var("cond".to_string()),
-                    then_body: vec![
-                        ScgStatement::Computation(ComputationNode {
-                            dst: "result".to_string(),
-                            op: BinOpKind::Add,
-                            lhs: ScgExpr::Var("cond".to_string()),
-                            rhs: ScgExpr::Int(1),
+                    then_body: vec![ScgStatement::Computation(ComputationNode {
+                        dst: "result".to_string(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Var("cond".to_string()),
+                        rhs: ScgExpr::Int(1),
                         tail_call: false,
-                        }),
-                    ],
-                    else_body: Some(vec![
-                        ScgStatement::Computation(ComputationNode {
-                            dst: "result".to_string(),
-                            op: BinOpKind::Sub,
-                            lhs: ScgExpr::Var("cond".to_string()),
-                            rhs: ScgExpr::Int(1),
+                    })],
+                    else_body: Some(vec![ScgStatement::Computation(ComputationNode {
+                        dst: "result".to_string(),
+                        op: BinOpKind::Sub,
+                        lhs: ScgExpr::Var("cond".to_string()),
+                        rhs: ScgExpr::Int(1),
                         tail_call: false,
-                        }),
-                    ]),
+                    })]),
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -261,13 +281,21 @@ fn test_codegen_if_else() {
     let func = &ir_program.functions[0];
 
     // Should have multiple basic blocks (entry, then, else, merge)
-    assert!(func.blocks.len() >= 3, "If/else should produce at least 3 blocks, got {}", func.blocks.len());
+    assert!(
+        func.blocks.len() >= 3,
+        "If/else should produce at least 3 blocks, got {}",
+        func.blocks.len()
+    );
 
     // Should have a CondBranch somewhere
-    let has_cond_branch = func.blocks.iter().any(|b| {
-        matches!(b.terminator, IRTerminator::Branch { .. })
-    });
-    assert!(has_cond_branch, "Should have a conditional branch terminator");
+    let has_cond_branch = func
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, IRTerminator::Branch { .. }));
+    assert!(
+        has_cond_branch,
+        "Should have a conditional branch terminator"
+    );
 
     // ARM64 code should be emitted
     assert!(!code_words.is_empty());
@@ -292,15 +320,13 @@ fn test_codegen_loop() {
             results: vec![ScgType::Void],
             body: vec![
                 ScgStatement::Control(ControlNode::Loop {
-                    body: vec![
-                        ScgStatement::Computation(ComputationNode {
-                            dst: "x".to_string(),
-                            op: BinOpKind::Add,
-                            lhs: ScgExpr::Int(1),
-                            rhs: ScgExpr::Int(1),
+                    body: vec![ScgStatement::Computation(ComputationNode {
+                        dst: "x".to_string(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Int(1),
+                        rhs: ScgExpr::Int(1),
                         tail_call: false,
-                        }),
-                    ],
+                    })],
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -312,11 +338,17 @@ fn test_codegen_loop() {
     let func = &ir_program.functions[0];
 
     // Should have multiple blocks (entry, loop header, loop body, loop exit)
-    assert!(func.blocks.len() >= 3, "Loop should produce at least 3 blocks, got {}", func.blocks.len());
+    assert!(
+        func.blocks.len() >= 3,
+        "Loop should produce at least 3 blocks, got {}",
+        func.blocks.len()
+    );
 
     // Should have a phi node for the loop counter
     let has_phi = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Phi { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Phi { .. }))
     });
     assert!(has_phi, "Loop should have a phi node");
 
@@ -356,7 +388,9 @@ fn test_codegen_function_call() {
 
     let func = &ir_program.functions[0];
     let has_call = func.blocks.iter().any(|b| {
-        b.instructions.iter().any(|i| matches!(i, IRInstr::Call { .. }))
+        b.instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Call { .. }))
     });
     assert!(has_call, "IR should contain a Call instruction");
 
@@ -394,9 +428,10 @@ fn test_codegen_multi_function_elf() {
             }),
             ScgNode::Function(ScgFunction {
                 name: "helper".to_string(),
-                params: vec![
-                    ScgParam { name: "x".to_string(), ty: ScgType::I64 },
-                ],
+                params: vec![ScgParam {
+                    name: "x".to_string(),
+                    ty: ScgType::I64,
+                }],
                 results: vec![ScgType::I64],
                 body: vec![
                     ScgStatement::Computation(ComputationNode {
@@ -404,7 +439,7 @@ fn test_codegen_multi_function_elf() {
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Var("x".to_string()),
                         rhs: ScgExpr::Var("x".to_string()),
-                    tail_call: false,
+                        tail_call: false,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var("doubled".to_string())]),
                 ],
@@ -417,7 +452,11 @@ fn test_codegen_multi_function_elf() {
 
     // Verify ELF magic
     assert!(elf_bytes.len() >= 4, "ELF should have at least 4 bytes");
-    assert_eq!(&elf_bytes[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic should be correct");
+    assert_eq!(
+        &elf_bytes[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "ELF magic should be correct"
+    );
 
     // Verify machine type: EM_AARCH64 = 183
     let e_machine = u16::from_le_bytes([elf_bytes[18], elf_bytes[19]]);
@@ -471,7 +510,9 @@ fn test_codegen_type_system_calling_conv() {
     let args_9: Vec<IRType> = (0..9).map(|_| IRType::I64).collect();
     let cc9 = compute_calling_conv(&args_9, &IRType::I64);
     assert_eq!(cc9.arg_locations.len(), 9);
-    let stack_args: Vec<_> = cc9.arg_locations.iter()
+    let stack_args: Vec<_> = cc9
+        .arg_locations
+        .iter()
         .filter(|a| a.register.is_none())
         .collect();
     assert_eq!(stack_args.len(), 1, "9th arg should be on the stack");
@@ -504,7 +545,7 @@ fn test_codegen_bare_metal_raw() {
                     op: BinOpKind::Add,
                     lhs: ScgExpr::Int(1),
                     rhs: ScgExpr::Int(2),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -515,17 +556,23 @@ fn test_codegen_bare_metal_raw() {
     let ir_program = builder.build(&scg).expect("IRBuilder should succeed");
 
     let config = EmitConfig::bare_metal_raw();
-    let raw_bytes = emit_raw(&ir_program.functions, &config)
-        .expect("Raw emission should succeed");
+    let raw_bytes = emit_raw(&ir_program.functions, &config).expect("Raw emission should succeed");
 
     // Raw binary should NOT start with ELF magic
     if raw_bytes.len() >= 4 {
-        assert_ne!(&raw_bytes[0..4], &[0x7f, b'E', b'L', b'F'],
-            "Raw binary should not have ELF magic");
+        assert_ne!(
+            &raw_bytes[0..4],
+            &[0x7f, b'E', b'L', b'F'],
+            "Raw binary should not have ELF magic"
+        );
     }
 
     // Should be a multiple of 4 bytes (ARM64 instructions)
-    assert_eq!(raw_bytes.len() % 4, 0, "Raw binary should be 4-byte aligned");
+    assert_eq!(
+        raw_bytes.len() % 4,
+        0,
+        "Raw binary should be 4-byte aligned"
+    );
 
     // Should have at least the prologue (STP + MOV + SUB = 3 instr = 12 bytes)
     assert!(raw_bytes.len() >= 12, "Should have at least 3 instructions");
@@ -546,7 +593,10 @@ fn test_arm64_instruction_encoding() {
     let add = Instruction::ADD {
         rd: Register::X0,
         rn: Register::X1,
-        rm: Operand::Reg { reg: Register::X2, shift: None },
+        rm: Operand::Reg {
+            reg: Register::X2,
+            shift: None,
+        },
     };
     let add_encoded = add.encode().expect("ADD should encode");
     assert_ne!(add_encoded, 0, "ADD encoding should be non-zero");
@@ -555,11 +605,17 @@ fn test_arm64_instruction_encoding() {
     let sub = Instruction::SUB {
         rd: Register::X0,
         rn: Register::X1,
-        rm: Operand::Reg { reg: Register::X2, shift: None },
+        rm: Operand::Reg {
+            reg: Register::X2,
+            shift: None,
+        },
     };
     let sub_encoded = sub.encode().expect("SUB should encode");
     assert_ne!(sub_encoded, 0, "SUB encoding should be non-zero");
-    assert_ne!(add_encoded, sub_encoded, "ADD and SUB should have different encodings");
+    assert_ne!(
+        add_encoded, sub_encoded,
+        "ADD and SUB should have different encodings"
+    );
 
     // --- ADD with immediate: ADD X0, X1, #42 ---
     let add_imm = Instruction::ADD {
@@ -568,7 +624,10 @@ fn test_arm64_instruction_encoding() {
         rm: Operand::Imm12(42),
     };
     let add_imm_encoded = add_imm.encode().expect("ADD imm should encode");
-    assert_ne!(add_imm_encoded, add_encoded, "ADD imm should differ from ADD reg");
+    assert_ne!(
+        add_imm_encoded, add_encoded,
+        "ADD imm should differ from ADD reg"
+    );
 
     // --- LDR X0, [X1, #0] ---
     let ldr = Instruction::LDR {
@@ -586,7 +645,10 @@ fn test_arm64_instruction_encoding() {
         offset: 0,
     };
     let str_encoded = str_.encode().expect("STR should encode");
-    assert_ne!(ldr_encoded, str_encoded, "LDR and STR should have different encodings");
+    assert_ne!(
+        ldr_encoded, str_encoded,
+        "LDR and STR should have different encodings"
+    );
 
     // --- MOV X0, X1 ---
     let mov = Instruction::MOV {
@@ -607,12 +669,18 @@ fn test_arm64_instruction_encoding() {
     assert_ne!(nop_encoded, 0);
 
     // --- MOVZ X0, #42 ---
-    let movz = Instruction::MOVZ { rd: Register::X0, imm16: 42, shift: 0 };
+    let movz = Instruction::MOVZ {
+        rd: Register::X0,
+        imm16: 42,
+        shift: 0,
+    };
     let movz_encoded = movz.encode().expect("MOVZ should encode");
     assert_ne!(movz_encoded, 0);
 
     // --- Barrier instructions ---
-    let dmb = Instruction::DMB { option: BarrierOption::ISH };
+    let dmb = Instruction::DMB {
+        option: BarrierOption::ISH,
+    };
     let dmb_encoded = dmb.encode().expect("DMB should encode");
     assert_ne!(dmb_encoded, 0);
 

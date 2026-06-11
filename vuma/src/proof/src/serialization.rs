@@ -113,12 +113,10 @@ impl From<Proof> for ProofEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proof::{
-        Conclusion, Fact, Goal, InvariantName, ProofContext, ProofStep, Target,
-    };
     use crate::judgment::RegionId;
     use crate::liveness_proofs::LivenessProof;
     use crate::liveness_proofs::LivenessTactic;
+    use crate::proof::{Conclusion, Fact, Goal, InvariantName, ProofContext, ProofStep, Target};
 
     /// Helper: create a simple Proof for reuse in tests.
     fn make_simple_proof() -> Proof {
@@ -189,12 +187,17 @@ mod tests {
         let proof = make_simple_proof();
         let envelope = ProofEnvelope::Generic(proof);
 
-        let pretty = envelope.to_json_string_pretty().expect("pretty serialization failed");
+        let pretty = envelope
+            .to_json_string_pretty()
+            .expect("pretty serialization failed");
 
         // Pretty output should contain newlines and the "type" tag
         assert!(pretty.contains('\n'), "pretty JSON should contain newlines");
         assert!(pretty.contains("\"type\""), "should contain type tag");
-        assert!(pretty.contains("\"Generic\""), "should contain Generic variant name");
+        assert!(
+            pretty.contains("\"Generic\""),
+            "should contain Generic variant name"
+        );
     }
 
     #[test]
@@ -205,7 +208,10 @@ mod tests {
 
         // Verify the JSON string contains the expected tagged structure
         assert!(json.contains("\"type\""), "JSON should contain type tag");
-        assert!(json.contains("\"Generic\""), "JSON should contain Generic tag value");
+        assert!(
+            json.contains("\"Generic\""),
+            "JSON should contain Generic tag value"
+        );
 
         // Parse back
         let parsed = ProofEnvelope::from_json_string(&json).expect("deserialization failed");

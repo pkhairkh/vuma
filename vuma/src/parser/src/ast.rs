@@ -1141,7 +1141,10 @@ impl std::fmt::Display for Type {
                 let a: Vec<String> = args.iter().map(|t| t.to_string()).collect();
                 write!(f, "{}<{}>", name, a.join(", "))
             }
-            Type::Func { params, return_type } => {
+            Type::Func {
+                params,
+                return_type,
+            } => {
                 let p: Vec<String> = params.iter().map(|t| t.to_string()).collect();
                 write!(f, "({})", p.join(", "))?;
                 if let Some(rt) = return_type {

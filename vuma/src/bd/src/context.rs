@@ -7,9 +7,7 @@
 //! context satisfies that condition.  For example, a `Condition::InPhase(3)`
 //! is satisfied only when phase 3 is listed among [`Context::active_phases`].
 
-use crate::capd::{
-    CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel,
-};
+use crate::capd::{CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel};
 use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;

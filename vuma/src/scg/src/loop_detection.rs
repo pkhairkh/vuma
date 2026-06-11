@@ -385,9 +385,7 @@ impl LoopDetector {
             // Fallback: use nodes with no CF predecessors.
             let (_, cf_preds) = Self::build_cf_adjacency(scg);
             for node in scg.nodes() {
-                let has_preds = cf_preds
-                    .get(&node.id)
-                    .is_some_and(|p| !p.is_empty());
+                let has_preds = cf_preds.get(&node.id).is_some_and(|p| !p.is_empty());
                 if !has_preds {
                     entries.push(node.id);
                 }
@@ -401,7 +399,9 @@ impl LoopDetector {
     ///
     /// Returns `(succs, preds)` where `succs[n]` is the list of CF successors
     /// of node `n`, and `preds[n]` is the list of CF predecessors.
-    fn build_cf_adjacency(scg: &SCG) -> (HashMap<NodeId, Vec<NodeId>>, HashMap<NodeId, Vec<NodeId>>) {
+    fn build_cf_adjacency(
+        scg: &SCG,
+    ) -> (HashMap<NodeId, Vec<NodeId>>, HashMap<NodeId, Vec<NodeId>>) {
         let mut succs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut preds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
@@ -461,11 +461,8 @@ impl LoopDetector {
         let rpo = Self::reverse_postorder(cf_succs, entry, &reachable);
 
         // Build RPO index map for the intersect function.
-        let rpo_idx: HashMap<NodeId, usize> = rpo
-            .iter()
-            .enumerate()
-            .map(|(i, &node)| (node, i))
-            .collect();
+        let rpo_idx: HashMap<NodeId, usize> =
+            rpo.iter().enumerate().map(|(i, &node)| (node, i)).collect();
 
         // Step 3: Iterative dominator computation (Cooper-Harvey-Kennedy).
         let mut idom: HashMap<NodeId, NodeId> = HashMap::new();
@@ -482,7 +479,12 @@ impl LoopDetector {
                 // Find the set of processed predecessors.
                 let pred_list: Vec<NodeId> = cf_preds
                     .get(&node)
-                    .map(|p| p.iter().filter(|p| idom.contains_key(*p)).copied().collect())
+                    .map(|p| {
+                        p.iter()
+                            .filter(|p| idom.contains_key(*p))
+                            .copied()
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let new_idom = match pred_list.first() {
@@ -795,7 +797,8 @@ mod tests {
         let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
 
         scg.add_edge(entry, outer_h, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(outer_h, exit, EdgeKind::ControlFlow).unwrap();
         scg.add_edge(inner_h, inner_body, EdgeKind::ControlFlow)
             .unwrap();
@@ -822,10 +825,7 @@ mod tests {
 
         // Inner loop should be nested inside outer loop.
         assert_eq!(tree.parent[&inner_idx], Some(outer_idx));
-        assert_eq!(
-            tree.loops[inner_idx].depth,
-            tree.loops[outer_idx].depth + 1
-        );
+        assert_eq!(tree.loops[inner_idx].depth, tree.loops[outer_idx].depth + 1);
     }
 
     // ── Test 6: Infinite loop detection ────────────────────────────────
@@ -841,8 +841,7 @@ mod tests {
         scg.add_edge(entry, header, EdgeKind::ControlFlow).unwrap();
         scg.add_edge(header, body, EdgeKind::ControlFlow).unwrap();
         // No exit edge from header; only back-edge.
-        scg.add_edge(body, header, EdgeKind::ControlFlow)
-            .unwrap(); // back-edge
+        scg.add_edge(body, header, EdgeKind::ControlFlow).unwrap(); // back-edge
 
         let infinite = LoopDetector::detect_infinite_loops(&scg);
         assert_eq!(infinite.len(), 1, "should detect one infinite loop");
@@ -873,8 +872,10 @@ mod tests {
         let loop_body = add_comp(&mut scg, "add");
         let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
 
-        scg.add_edge(entry, constant, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(constant, header, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(entry, constant, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(constant, header, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(header, loop_body, EdgeKind::ControlFlow)
             .unwrap();
         scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
@@ -911,9 +912,8 @@ mod tests {
         scg.add_edge(header, body1, EdgeKind::ControlFlow).unwrap();
         scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
         scg.add_edge(body1, body2, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(body2, header, EdgeKind::ControlFlow)
-            .unwrap(); // back-edge
-        // body2 depends on body1 (inside the loop) via DataFlow.
+        scg.add_edge(body2, header, EdgeKind::ControlFlow).unwrap(); // back-edge
+                                                                     // body2 depends on body1 (inside the loop) via DataFlow.
         scg.add_edge(body1, body2, EdgeKind::DataFlow).unwrap();
 
         let loops = LoopDetector::detect_natural_loops(&scg);
@@ -921,10 +921,7 @@ mod tests {
 
         let invariant = LoopDetector::loop_invariant_nodes(&loops[0], &scg);
         // body1 has no data-flow predecessors inside the loop, so it IS invariant.
-        assert!(
-            invariant.contains(&body1),
-            "body1 should be loop-invariant"
-        );
+        assert!(invariant.contains(&body1), "body1 should be loop-invariant");
         // body2 depends on body1 (inside loop), so not invariant.
         assert!(
             !invariant.contains(&body2),
@@ -996,7 +993,8 @@ mod tests {
         let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
 
         scg.add_edge(entry, outer_h, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(outer_h, exit, EdgeKind::ControlFlow).unwrap();
         scg.add_edge(inner_h, inner_body, EdgeKind::ControlFlow)
             .unwrap();
@@ -1008,11 +1006,7 @@ mod tests {
             .unwrap();
 
         let tree = LoopDetector::detect_loop_nesting(&scg);
-        let outer_idx = tree
-            .loops
-            .iter()
-            .position(|l| l.header == outer_h)
-            .unwrap();
+        let outer_idx = tree.loops.iter().position(|l| l.header == outer_h).unwrap();
 
         let children = tree.children(outer_idx);
         assert_eq!(children.len(), 1, "outer loop should have one child");

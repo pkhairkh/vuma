@@ -4,9 +4,9 @@
 //! instances. Covers the key instructions lowered by the VUMA ISel.
 //! Display is already provided by the parent module.
 
-use super::Instruction;
-use super::Gpr;
 use super::Fpr;
+use super::Gpr;
+use super::Instruction;
 
 // ---------------------------------------------------------------------------
 // Decode error
@@ -201,32 +201,188 @@ impl Instruction {
 
         // 3R opcodes
         match opc_3r {
-            0x0020 => return Ok(Instruction::AddW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0021 => return Ok(Instruction::AddD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0030 => return Ok(Instruction::SubW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0031 => return Ok(Instruction::SubD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0040 => return Ok(Instruction::Slt { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0041 => return Ok(Instruction::Sltu { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0098 => return Ok(Instruction::MulW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0099 => return Ok(Instruction::MulD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x009E => return Ok(Instruction::DivW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x009F => return Ok(Instruction::ModW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x00A0 => return Ok(Instruction::DivD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x00A1 => return Ok(Instruction::ModD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0080 => return Ok(Instruction::And { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0081 => return Ok(Instruction::Or { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0082 => return Ok(Instruction::Xor { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0083 => return Ok(Instruction::Nor { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0084 => return Ok(Instruction::Andn { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0085 => return Ok(Instruction::Orn { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0089 => return Ok(Instruction::SllW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008A => return Ok(Instruction::SrlW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008B => return Ok(Instruction::SraW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008C => return Ok(Instruction::SllD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008D => return Ok(Instruction::SrlD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008E => return Ok(Instruction::SraD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x008F => return Ok(Instruction::RotrW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
-            0x0090 => return Ok(Instruction::RotrD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), rk: gpr_from_bits(rk) }),
+            0x0020 => {
+                return Ok(Instruction::AddW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0021 => {
+                return Ok(Instruction::AddD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0030 => {
+                return Ok(Instruction::SubW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0031 => {
+                return Ok(Instruction::SubD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0040 => {
+                return Ok(Instruction::Slt {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0041 => {
+                return Ok(Instruction::Sltu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0098 => {
+                return Ok(Instruction::MulW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0099 => {
+                return Ok(Instruction::MulD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x009E => {
+                return Ok(Instruction::DivW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x009F => {
+                return Ok(Instruction::ModW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x00A0 => {
+                return Ok(Instruction::DivD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x00A1 => {
+                return Ok(Instruction::ModD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0080 => {
+                return Ok(Instruction::And {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0081 => {
+                return Ok(Instruction::Or {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0082 => {
+                return Ok(Instruction::Xor {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0083 => {
+                return Ok(Instruction::Nor {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0084 => {
+                return Ok(Instruction::Andn {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0085 => {
+                return Ok(Instruction::Orn {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0089 => {
+                return Ok(Instruction::SllW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008A => {
+                return Ok(Instruction::SrlW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008B => {
+                return Ok(Instruction::SraW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008C => {
+                return Ok(Instruction::SllD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008D => {
+                return Ok(Instruction::SrlD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008E => {
+                return Ok(Instruction::SraD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x008F => {
+                return Ok(Instruction::RotrW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
+            0x0090 => {
+                return Ok(Instruction::RotrD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                })
+            }
             _ => {}
         }
 
@@ -235,50 +391,236 @@ impl Instruction {
         // In 2RI8 format, bits [15:14] must be 0; if they're non-zero, it's
         // actually a 2RI12 instruction and we skip the 2RI8 match.
         match _opc_2ri8 {
-            0x008 => return Ok(Instruction::SlliW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
-            0x009 => return Ok(Instruction::SrliW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
-            0x00A => return Ok(Instruction::SraiW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
+            0x008 => {
+                return Ok(Instruction::SlliW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
+            0x009 => {
+                return Ok(Instruction::SrliW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
+            0x00A => {
+                return Ok(Instruction::SraiW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
             // SLLI.D shares opcode with ADDI.D — only match if bits [15:14] are 0
-            0x00B if (word >> 14) & 0x3 == 0 => return Ok(Instruction::SlliD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
-            0x00C => return Ok(Instruction::SrliD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
-            0x00D => return Ok(Instruction::SraiD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm8: imm8_raw }),
+            0x00B if (word >> 14) & 0x3 == 0 => {
+                return Ok(Instruction::SlliD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
+            0x00C => {
+                return Ok(Instruction::SrliD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
+            0x00D => {
+                return Ok(Instruction::SraiD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm8: imm8_raw,
+                })
+            }
             _ => {}
         }
 
         // 2RI12 opcodes
         match opc_2ri12 {
-            0x00A => return Ok(Instruction::AddiW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x00B => return Ok(Instruction::AddiD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x008 => return Ok(Instruction::Slti { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x009 => return Ok(Instruction::Sltui { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x00D => return Ok(Instruction::Andi { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: imm12_raw }),
-            0x00E => return Ok(Instruction::Ori { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: imm12_raw }),
-            0x00F => return Ok(Instruction::Xori { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: imm12_raw }),
+            0x00A => {
+                return Ok(Instruction::AddiW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x00B => {
+                return Ok(Instruction::AddiD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x008 => {
+                return Ok(Instruction::Slti {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x009 => {
+                return Ok(Instruction::Sltui {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x00D => {
+                return Ok(Instruction::Andi {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: imm12_raw,
+                })
+            }
+            0x00E => {
+                return Ok(Instruction::Ori {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: imm12_raw,
+                })
+            }
+            0x00F => {
+                return Ok(Instruction::Xori {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: imm12_raw,
+                })
+            }
             // Load
-            0x0A0 => return Ok(Instruction::LdB { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A1 => return Ok(Instruction::LdH { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A2 => return Ok(Instruction::LdW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A3 => return Ok(Instruction::LdD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A4 => return Ok(Instruction::LdBu { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A5 => return Ok(Instruction::LdHu { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A6 => return Ok(Instruction::LdWu { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
+            0x0A0 => {
+                return Ok(Instruction::LdB {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A1 => {
+                return Ok(Instruction::LdH {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A2 => {
+                return Ok(Instruction::LdW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A3 => {
+                return Ok(Instruction::LdD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A4 => {
+                return Ok(Instruction::LdBu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A5 => {
+                return Ok(Instruction::LdHu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A6 => {
+                return Ok(Instruction::LdWu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
             // Store
-            0x0A7 => return Ok(Instruction::StB { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A8 => return Ok(Instruction::StH { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0A9 => return Ok(Instruction::StW { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
-            0x0AA => return Ok(Instruction::StD { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), imm12: sign_extend_12(imm12_raw) }),
+            0x0A7 => {
+                return Ok(Instruction::StB {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A8 => {
+                return Ok(Instruction::StH {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A9 => {
+                return Ok(Instruction::StW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0AA => {
+                return Ok(Instruction::StD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
             _ => {}
         }
 
         // 2RI16 opcodes (branches)
         match opc_2ri16 {
-            0x16 => return Ok(Instruction::Beq { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x17 => return Ok(Instruction::Bne { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x18 => return Ok(Instruction::Blt { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x19 => return Ok(Instruction::Bge { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x1A => return Ok(Instruction::Bltu { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x1B => return Ok(Instruction::Bgeu { rj: gpr_from_bits(rj), rd: gpr_from_bits(rd), offs16: sign_extend_16(imm16_raw) }),
-            0x13 => return Ok(Instruction::Jirl { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj), offs16: sign_extend_16(imm16_raw) }),
+            0x16 => {
+                return Ok(Instruction::Beq {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x17 => {
+                return Ok(Instruction::Bne {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x18 => {
+                return Ok(Instruction::Blt {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x19 => {
+                return Ok(Instruction::Bge {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x1A => {
+                return Ok(Instruction::Bltu {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x1B => {
+                return Ok(Instruction::Bgeu {
+                    rj: gpr_from_bits(rj),
+                    rd: gpr_from_bits(rd),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
+            0x13 => {
+                return Ok(Instruction::Jirl {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    offs16: sign_extend_16(imm16_raw),
+                })
+            }
             _ => {}
         }
 
@@ -287,8 +629,16 @@ impl Instruction {
         let lo16 = word & 0xFFFF;
         let offs26 = (hi10 << 16) | lo16;
         match opc_i26 {
-            0x14 => return Ok(Instruction::B { offs26: offs26 as i32 }),
-            0x15 => return Ok(Instruction::Bl { offs26: offs26 as i32 }),
+            0x14 => {
+                return Ok(Instruction::B {
+                    offs26: offs26 as i32,
+                })
+            }
+            0x15 => {
+                return Ok(Instruction::Bl {
+                    offs26: offs26 as i32,
+                })
+            }
             _ => {}
         }
 
@@ -297,15 +647,35 @@ impl Instruction {
         let imm21_lo16 = (word >> 5) & 0xFFFF;
         let imm21 = (imm21_hi5 << 16) | imm21_lo16;
         match opc_1ri21 {
-            0x1C => return Ok(Instruction::Beqz { rj: gpr_from_bits(rj), offs21: sign_extend_21(imm21) }),
-            0x1D => return Ok(Instruction::Bnez { rj: gpr_from_bits(rj), offs21: sign_extend_21(imm21) }),
+            0x1C => {
+                return Ok(Instruction::Beqz {
+                    rj: gpr_from_bits(rj),
+                    offs21: sign_extend_21(imm21),
+                })
+            }
+            0x1D => {
+                return Ok(Instruction::Bnez {
+                    rj: gpr_from_bits(rj),
+                    offs21: sign_extend_21(imm21),
+                })
+            }
             _ => {}
         }
 
         // 2R format (ext.w.h, ext.w.b)
         match opc_2r {
-            0x000005A => return Ok(Instruction::ExtWH { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj) }),
-            0x000005B => return Ok(Instruction::ExtWB { rd: gpr_from_bits(rd), rj: gpr_from_bits(rj) }),
+            0x000005A => {
+                return Ok(Instruction::ExtWH {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                })
+            }
+            0x000005B => {
+                return Ok(Instruction::ExtWB {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                })
+            }
             _ => {}
         }
 
@@ -324,7 +694,11 @@ mod tests {
 
     #[test]
     fn test_decode_add_d() {
-        let instr = Instruction::AddD { rd: G::A0, rj: G::A1, rk: G::A2 };
+        let instr = Instruction::AddD {
+            rd: G::A0,
+            rj: G::A1,
+            rk: G::A2,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -332,7 +706,11 @@ mod tests {
 
     #[test]
     fn test_decode_sub_w() {
-        let instr = Instruction::SubW { rd: G::T0, rj: G::T1, rk: G::T2 };
+        let instr = Instruction::SubW {
+            rd: G::T0,
+            rj: G::T1,
+            rk: G::T2,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -341,9 +719,21 @@ mod tests {
     #[test]
     fn test_decode_and_or_xor() {
         for instr in [
-            Instruction::And { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Or { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Xor { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::And {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Or {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Xor {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
         ] {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
@@ -353,7 +743,11 @@ mod tests {
 
     #[test]
     fn test_decode_addi_d() {
-        let instr = Instruction::AddiD { rd: G::A0, rj: G::Sp, imm12: 16 };
+        let instr = Instruction::AddiD {
+            rd: G::A0,
+            rj: G::Sp,
+            imm12: 16,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -361,12 +755,20 @@ mod tests {
 
     #[test]
     fn test_decode_ld_st() {
-        let ld = Instruction::LdD { rd: G::A0, rj: G::Sp, imm12: 0 };
+        let ld = Instruction::LdD {
+            rd: G::A0,
+            rj: G::Sp,
+            imm12: 0,
+        };
         let bytes = ld.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{ld}"));
 
-        let st = Instruction::StD { rd: G::A0, rj: G::Sp, imm12: 8 };
+        let st = Instruction::StD {
+            rd: G::A0,
+            rj: G::Sp,
+            imm12: 8,
+        };
         let bytes = st.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{st}"));
@@ -380,7 +782,11 @@ mod tests {
 
     #[test]
     fn test_decode_mul_div() {
-        let instr = Instruction::MulD { rd: G::A0, rj: G::A1, rk: G::A2 };
+        let instr = Instruction::MulD {
+            rd: G::A0,
+            rj: G::A1,
+            rk: G::A2,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));

@@ -19,9 +19,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use vuma_scg::callgraph::{CallGraph, FunctionId};
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{
-    AccessMode, ControlKind, NodeId, NodePayload, NodeType,
-};
+use vuma_scg::node::{AccessMode, ControlKind, NodeId, NodePayload, NodeType};
 use vuma_scg::region::RegionId;
 
 // ---------------------------------------------------------------------------
@@ -72,7 +70,8 @@ impl FunctionSummary {
     ///
     /// Used when inlining a callee's summary into the caller.
     pub fn merge(&mut self, other: &FunctionSummary) {
-        self.allocated_regions.extend(other.allocated_regions.iter());
+        self.allocated_regions
+            .extend(other.allocated_regions.iter());
         self.freed_regions.extend(other.freed_regions.iter());
         self.written_regions.extend(other.written_regions.iter());
         self.read_regions.extend(other.read_regions.iter());
@@ -119,7 +118,10 @@ impl FunctionSummary {
 /// Uses the call graph to determine bottom-up processing order.
 /// For each function, computes a summary of its direct effects and
 /// then merges summaries from callees.
-pub fn compute_summaries(scg: &SCG, call_graph: &CallGraph) -> HashMap<FunctionId, FunctionSummary> {
+pub fn compute_summaries(
+    scg: &SCG,
+    call_graph: &CallGraph,
+) -> HashMap<FunctionId, FunctionSummary> {
     let mut summaries: HashMap<FunctionId, FunctionSummary> = HashMap::new();
 
     // Get bottom-up order (callees before callers)
@@ -277,16 +279,36 @@ impl std::fmt::Display for InterproceduralViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InterproceduralViolation::CrossFunctionLeak { function, region } => {
-                write!(f, "cross-function leak: function {} leaks region {}", function, region)
+                write!(
+                    f,
+                    "cross-function leak: function {} leaks region {}",
+                    function, region
+                )
             }
-            InterproceduralViolation::CrossFunctionDataRace { caller, callee, region } => {
-                write!(f, "cross-function data race: caller {} and callee {} both write region {}", caller, callee, region)
+            InterproceduralViolation::CrossFunctionDataRace {
+                caller,
+                callee,
+                region,
+            } => {
+                write!(
+                    f,
+                    "cross-function data race: caller {} and callee {} both write region {}",
+                    caller, callee, region
+                )
             }
             InterproceduralViolation::CrossFunctionLockLeak { function, region } => {
-                write!(f, "cross-function lock leak: function {} does not release lock for region {}", function, region)
+                write!(
+                    f,
+                    "cross-function lock leak: function {} does not release lock for region {}",
+                    function, region
+                )
             }
             InterproceduralViolation::RecursiveLeak { function, region } => {
-                write!(f, "recursive leak: recursive function {} may leak region {} per recursion", function, region)
+                write!(
+                    f,
+                    "recursive leak: recursive function {} may leak region {} per recursion",
+                    function, region
+                )
             }
         }
     }
@@ -369,12 +391,12 @@ pub fn verify_interprocedural_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuma_scg::edge::EdgeKind;
     use vuma_scg::graph::SCG;
     use vuma_scg::node::{
-        AllocationNode, ComputationNode, ControlKind, ControlNode, DeallocationNode,
-        NodePayload, NodeType, ProgramPoint, AccessNode,
+        AccessNode, AllocationNode, ComputationNode, ControlKind, ControlNode, DeallocationNode,
+        NodePayload, NodeType, ProgramPoint,
     };
-    use vuma_scg::edge::EdgeKind;
     use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
 
     fn pp() -> ProgramPoint {
@@ -418,8 +440,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         // foo function: alloc and dealloc region 1
         let foo_entry = scg.add_node(
@@ -433,14 +457,18 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
         let dealloc = scg.add_node(
             NodeType::Deallocation,
             NodePayload::Deallocation(DeallocationNode {
-                allocation_node: alloc, region_id: rid,
+                allocation_node: alloc,
+                region_id: rid,
             }),
             pp(),
         );
@@ -452,9 +480,11 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, alloc, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, alloc, EdgeKind::ControlFlow)
+            .unwrap();
         scg.add_edge(alloc, dealloc, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(dealloc, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(dealloc, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         // Call and return edges
         scg.add_call_edge(call_site, foo_entry, rid).unwrap();
@@ -474,7 +504,11 @@ mod tests {
             .iter()
             .filter(|v| matches!(v, InterproceduralViolation::CrossFunctionLeak { .. }))
             .collect();
-        assert!(leak_violations.is_empty(), "Expected no cross-function leaks, got: {:?}", leak_violations);
+        assert!(
+            leak_violations.is_empty(),
+            "Expected no cross-function leaks, got: {:?}",
+            leak_violations
+        );
     }
 
     #[test]
@@ -508,8 +542,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, call_site, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         let foo_entry = scg.add_node(
             NodeType::Control,
@@ -522,7 +558,10 @@ mod tests {
         let _alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
@@ -535,8 +574,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, _alloc, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(_alloc, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, _alloc, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(_alloc, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         scg.add_call_edge(call_site, foo_entry, rid).unwrap();
         scg.add_return_edge(foo_ret, call_site, vec![]).unwrap();
@@ -569,7 +610,10 @@ mod tests {
         let main_write = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Write, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Write,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
@@ -590,9 +634,12 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, main_write, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(main_write, call_site, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, main_write, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(main_write, call_site, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         let foo_entry = scg.add_node(
             NodeType::Control,
@@ -605,7 +652,10 @@ mod tests {
         let foo_write = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Write, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Write,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
@@ -617,8 +667,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, foo_write, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(foo_write, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, foo_write, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(foo_write, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         scg.add_call_edge(call_site, foo_entry, rid).unwrap();
         scg.add_return_edge(foo_ret, call_site, vec![]).unwrap();
@@ -631,7 +683,10 @@ mod tests {
             .iter()
             .filter(|v| matches!(v, InterproceduralViolation::CrossFunctionDataRace { .. }))
             .collect();
-        assert!(!race_violations.is_empty(), "Expected cross-function data race");
+        assert!(
+            !race_violations.is_empty(),
+            "Expected cross-function data race"
+        );
     }
 
     #[test]
@@ -651,7 +706,10 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: None,
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: None,
             }),
             pp(),
         );
@@ -673,8 +731,10 @@ mod tests {
             pp(),
         );
         scg.add_edge(f_entry, alloc, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(alloc, call_self, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_self, f_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc, call_self, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_self, f_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         scg.add_call_edge(call_self, f_entry, rid).unwrap();
         scg.add_return_edge(f_ret, call_self, vec![]).unwrap();
@@ -718,7 +778,11 @@ mod tests {
         let cg = CallGraph::build(&scg);
         let summaries = compute_summaries(&scg, &cg);
         let violations = verify_interprocedural_invariants(&scg, &cg, &summaries);
-        assert!(violations.is_empty(), "Expected no violations, got: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "Expected no violations, got: {:?}",
+            violations
+        );
     }
 
     #[test]
@@ -754,7 +818,10 @@ mod tests {
         let main_write = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Write, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Write,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
@@ -775,9 +842,12 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(main_entry, main_write, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(main_write, call_site, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(main_entry, main_write, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(main_write, call_site, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(call_site, main_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         let foo_entry = scg.add_node(
             NodeType::Control,
@@ -790,7 +860,10 @@ mod tests {
         let foo_read = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Read, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Read,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
@@ -802,8 +875,10 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(foo_entry, foo_read, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(foo_read, foo_ret, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(foo_entry, foo_read, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(foo_read, foo_ret, EdgeKind::ControlFlow)
+            .unwrap();
 
         scg.add_call_edge(call_site, foo_entry, rid).unwrap();
         scg.add_return_edge(foo_ret, call_site, vec![]).unwrap();
@@ -817,6 +892,10 @@ mod tests {
             .iter()
             .filter(|v| matches!(v, InterproceduralViolation::CrossFunctionDataRace { .. }))
             .collect();
-        assert!(race_violations.is_empty(), "Expected no data race when callee only reads, got: {:?}", race_violations);
+        assert!(
+            race_violations.is_empty(),
+            "Expected no data race when callee only reads, got: {:?}",
+            race_violations
+        );
     }
 }

@@ -12,7 +12,7 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
-use crate::node::{NodeData, NodeId, NodeType, NodePayload, ProgramPoint};
+use crate::node::{NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
 use crate::region::{RegionId, SCGRegion};
 
 /// Errors that can occur during SCG operations.
@@ -47,7 +47,10 @@ impl std::fmt::Display for SCGError {
             SCGError::ValidationFailed(msg) => write!(f, "validation failed: {msg}"),
             SCGError::RegionNotFound(id) => write!(f, "region not found: {id}"),
             SCGError::InvalidEdgeEndpoints { source, target } => {
-                write!(f, "invalid edge endpoints: source={source}, target={target}")
+                write!(
+                    f,
+                    "invalid edge endpoints: source={source}, target={target}"
+                )
             }
         }
     }
@@ -241,10 +244,7 @@ impl SCG {
         }
 
         self.node_index_to_id.remove(&idx);
-        let data = self
-            .graph
-            .remove_node(idx)
-            .expect("node index was valid");
+        let data = self.graph.remove_node(idx).expect("node index was valid");
 
         // Rebuild index mappings since petgraph shifts indices on removal
         self.rebuild_index_mappings();
@@ -364,10 +364,7 @@ impl SCG {
             .ok_or(SCGError::EdgeNotFound(id))?;
 
         self.edge_index_to_id.remove(&eidx);
-        let data = self
-            .graph
-            .remove_edge(eidx)
-            .expect("edge index was valid");
+        let data = self.graph.remove_edge(eidx).expect("edge index was valid");
 
         // Note: edge removal in petgraph does not shift node indices,
         // but it does shift edge indices. We need to rebuild edge mappings.
@@ -557,15 +554,20 @@ impl SCG {
     pub fn find_path(&self, source: NodeId, target: NodeId) -> Option<bool> {
         let &source_idx = self.node_id_to_index.get(&source)?;
         let &target_idx = self.node_id_to_index.get(&target)?;
-        Some(has_path_connecting(&self.graph, source_idx, target_idx, None))
+        Some(has_path_connecting(
+            &self.graph,
+            source_idx,
+            target_idx,
+            None,
+        ))
     }
 
     /// Returns a topological ordering of the nodes in the graph.
     ///
     /// Returns an error if the graph contains a cycle.
     pub fn topological_sort(&self) -> Result<Vec<NodeId>, SCGError> {
-        let sorted: Vec<NodeIndex> = toposort(&self.graph, None)
-            .map_err(|_| SCGError::CycleDetected)?;
+        let sorted: Vec<NodeIndex> =
+            toposort(&self.graph, None).map_err(|_| SCGError::CycleDetected)?;
         let result: Vec<NodeId> = sorted
             .into_iter()
             .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
@@ -677,10 +679,8 @@ impl SCG {
                 let succs = self.successors(node_data.id).unwrap_or_default();
                 let preds = self.predecessors(node_data.id).unwrap_or_default();
                 if succs.is_empty() && preds.is_empty() && self.node_count() > 1 {
-                    result = result.with_warning(format!(
-                        "orphan node {} (no edges)",
-                        node_data.id
-                    ));
+                    result =
+                        result.with_warning(format!("orphan node {} (no edges)", node_data.id));
                 }
             }
         }
@@ -866,7 +866,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let node = scg.get_node(id).unwrap();
@@ -903,14 +905,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "f".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "g".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let eid = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -933,21 +939,27 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "c".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -970,21 +982,27 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "x".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "y".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "z".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1001,14 +1019,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "first".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "second".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1028,14 +1050,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1088,7 +1114,10 @@ mod tests {
         );
         let result = scg.validate();
         // Should have warnings but still be valid (warnings don't invalidate)
-        assert!(result.warnings.iter().any(|w| w.contains("no corresponding deallocation")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("no corresponding deallocation")));
     }
 
     #[test]
@@ -1098,7 +1127,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
 
@@ -1107,7 +1138,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             make_program_point(),
         );
 

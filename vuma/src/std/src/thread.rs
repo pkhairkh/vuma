@@ -120,7 +120,12 @@ impl VumaThreadId {
     /// Returns the CapD for this thread ID.
     // VUMA-VERIFIED: capability descriptor is correct
     pub fn capd(&self) -> CapD {
-        CapD::new(vec![CapFlag::Read, CapFlag::Compare, CapFlag::Hash, CapFlag::Serialize])
+        CapD::new(vec![
+            CapFlag::Read,
+            CapFlag::Compare,
+            CapFlag::Hash,
+            CapFlag::Serialize,
+        ])
     }
 }
 
@@ -210,9 +215,11 @@ impl VumaThread {
     /// Returns the SyncEdge annotations for this thread.
     // VUMA-VERIFIED: synchronization edges model thread lifecycle
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("thread_spawn", "thread_join", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "thread_spawn",
+            "thread_join",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -266,10 +273,7 @@ impl<T> VumaJoinHandle<T> {
     /// Returns `true` if the thread has finished execution.
     // VUMA-VERIFIED: pure query
     pub fn is_finished(&self) -> bool {
-        self.inner
-            .as_ref()
-            .map(|h| h.is_finished())
-            .unwrap_or(true) // already joined = finished
+        self.inner.as_ref().map(|h| h.is_finished()).unwrap_or(true) // already joined = finished
     }
 
     /// Returns a reference to the thread metadata.
@@ -287,9 +291,11 @@ impl<T> VumaJoinHandle<T> {
     /// Returns the SyncEdge annotations for this join handle.
     // VUMA-VERIFIED: synchronization edges model join ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("thread_spawn", "thread_join", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "thread_spawn",
+            "thread_join",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -351,9 +357,9 @@ impl VumaThreadBuilder {
             builder = builder.stack_size(size);
         }
 
-        let std_handle = builder.spawn(f).map_err(|e| {
-            VumaThreadError::SpawnFailed(e.to_string())
-        })?;
+        let std_handle = builder
+            .spawn(f)
+            .map_err(|e| VumaThreadError::SpawnFailed(e.to_string()))?;
 
         let std_thread = std_handle.thread();
         let id = VumaThreadId::from_std(std_thread.id());
@@ -375,9 +381,11 @@ impl VumaThreadBuilder {
     /// Returns the SyncEdge annotations for this builder.
     // VUMA-VERIFIED: synchronization edges model spawn ordering
     pub fn sync_edges(&self) -> Vec<SyncEdge> {
-        vec![
-            SyncEdge::new("thread_builder_new", "thread_spawn", SyncEdgeKind::Seq),
-        ]
+        vec![SyncEdge::new(
+            "thread_builder_new",
+            "thread_spawn",
+            SyncEdgeKind::Seq,
+        )]
     }
 }
 
@@ -485,7 +493,8 @@ mod tests {
         let handle = spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
             99
-        }).unwrap();
+        })
+        .unwrap();
         let _ = handle.is_finished();
         let result = handle.join().unwrap();
         assert_eq!(result, 99);
@@ -495,7 +504,8 @@ mod tests {
     fn test_thread_panic() {
         let handle = spawn(move || -> i32 {
             panic!("intentional test panic");
-        }).unwrap();
+        })
+        .unwrap();
         let result = handle.join();
         assert!(matches!(result, Err(VumaThreadError::Panicked(_))));
     }
@@ -523,7 +533,8 @@ mod tests {
         let counter_clone = Arc::clone(&counter);
         let handle = spawn(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        }).unwrap();
+        })
+        .unwrap();
         handle.join().unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -534,9 +545,12 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..4 {
             let c = Arc::clone(&counter);
-            handles.push(spawn(move || {
-                c.fetch_add(1, Ordering::SeqCst);
-            }).unwrap());
+            handles.push(
+                spawn(move || {
+                    c.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap(),
+            );
         }
         for h in handles {
             h.join().unwrap();

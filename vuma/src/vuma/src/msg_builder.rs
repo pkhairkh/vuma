@@ -42,9 +42,8 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 use vuma_scg::{
-    AccessMode, NodeData, NodeId as ScgNodeId,
-    NodePayload, NodeType as ScgNodeType, EdgeKind as ScgEdgeKind, EdgeData as ScgEdgeData,
-    SCG,
+    AccessMode, EdgeData as ScgEdgeData, EdgeKind as ScgEdgeKind, NodeData, NodeId as ScgNodeId,
+    NodePayload, NodeType as ScgNodeType, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -67,10 +66,7 @@ pub enum BuilderError {
     /// An allocation node has size 0, which is illegal.
     ZeroSizeAllocation(ScgNodeId),
     /// A deallocation node targets a region that is already freed (double-free).
-    DoubleFree {
-        node: ScgNodeId,
-        region: RegionId,
-    },
+    DoubleFree { node: ScgNodeId, region: RegionId },
     /// A cast node has an alignment violation.
     AlignmentViolation {
         node: ScgNodeId,
@@ -427,7 +423,10 @@ impl MsgBuilder {
     /// requires file, line, and col.
     fn convert_program_point(scg_pp: &vuma_scg::ProgramPoint) -> ProgramPoint {
         ProgramPoint {
-            file: scg_pp.file.clone().unwrap_or_else(|| "<unknown>".to_string()),
+            file: scg_pp
+                .file
+                .clone()
+                .unwrap_or_else(|| "<unknown>".to_string()),
             line: scg_pp.line.unwrap_or(0) as u32,
             col: scg_pp.column.unwrap_or(0) as u32,
             node_id: None,
@@ -446,7 +445,9 @@ impl MsgBuilder {
     /// This method may be called only once on a fresh builder. For incremental
     /// updates, use [`MsgBuilder::update`].
     pub fn build(&mut self, scg: &SCG) -> Result<&MSG, BuilderError> {
-        let topo_order = scg.topological_sort().map_err(|_| BuilderError::CycleDetected)?;
+        let topo_order = scg
+            .topological_sort()
+            .map_err(|_| BuilderError::CycleDetected)?;
 
         // Pre-populate the SCG region → MSG region mapping.
         // We create one MSG Region for each SCG Region that has an AllocationNode.
@@ -480,7 +481,10 @@ impl MsgBuilder {
             return Ok(());
         }
 
-        let node_data = scg.get_node(node_id).cloned().ok_or(BuilderError::NodeNotFound(node_id))?;
+        let node_data = scg
+            .get_node(node_id)
+            .cloned()
+            .ok_or(BuilderError::NodeNotFound(node_id))?;
 
         let result = match node_data.node_type {
             ScgNodeType::Allocation => self.rule_alloc(&node_data)?,
@@ -489,7 +493,10 @@ impl MsgBuilder {
             ScgNodeType::Access => self.rule_access(&node_data)?,
             ScgNodeType::Cast => self.rule_cast(&node_data)?,
             ScgNodeType::Effect => self.rule_effect(&node_data)?,
-            ScgNodeType::Control | ScgNodeType::Phantom | ScgNodeType::VTable | ScgNodeType::ClosureEnv => ScgNodeMapping::None,
+            ScgNodeType::Control
+            | ScgNodeType::Phantom
+            | ScgNodeType::VTable
+            | ScgNodeType::ClosureEnv => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);
@@ -509,9 +516,11 @@ impl MsgBuilder {
     fn rule_alloc(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let alloc = match &node.payload {
             NodePayload::Allocation(a) => a,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Allocation node has non-Allocation payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Allocation node has non-Allocation payload".to_string(),
+                ))
+            }
         };
 
         if alloc.size == 0 {
@@ -537,7 +546,8 @@ impl MsgBuilder {
         self.msg.add_region(region);
 
         // Record the SCG region ID → MSG region ID mapping.
-        self.scg_region_to_msg_region.insert(alloc.region_id.as_u64(), rid);
+        self.scg_region_to_msg_region
+            .insert(alloc.region_id.as_u64(), rid);
 
         // Create the root derivation (CHAIN-ROOT from spec §2.2).
         let deriv_id = self.alloc_derivation_id();
@@ -564,9 +574,11 @@ impl MsgBuilder {
     fn rule_dealloc(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let dealloc = match &node.payload {
             NodePayload::Deallocation(d) => d,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Deallocation node has non-Deallocation payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Deallocation node has non-Deallocation payload".to_string(),
+                ))
+            }
         };
 
         let pp = Self::convert_program_point(&node.program_point);
@@ -576,7 +588,9 @@ impl MsgBuilder {
             .scg_region_to_msg_region
             .get(&dealloc.region_id.as_u64())
             .copied()
-            .ok_or(BuilderError::RegionNotFound(RegionId(dealloc.region_id.as_u64())))?;
+            .ok_or(BuilderError::RegionNotFound(RegionId(
+                dealloc.region_id.as_u64(),
+            )))?;
 
         // Find the region that the allocation node created.
         // We look up the allocation node's mapping to find the region.
@@ -636,9 +650,11 @@ impl MsgBuilder {
     fn rule_derive(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let comp = match &node.payload {
             NodePayload::Computation(c) => c,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Computation node has non-Computation payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Computation node has non-Computation payload".to_string(),
+                ))
+            }
         };
 
         // Heuristic: if the operation name contains "offset", "add", "sub",
@@ -684,9 +700,11 @@ impl MsgBuilder {
     fn rule_cast(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let cast = match &node.payload {
             NodePayload::Cast(c) => c,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Cast node has non-Cast payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Cast node has non-Cast payload".to_string(),
+                ))
+            }
         };
 
         let source_derivation_id = self.find_source_derivation_for_node(node)?;
@@ -712,9 +730,11 @@ impl MsgBuilder {
     fn rule_access(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let access = match &node.payload {
             NodePayload::Access(a) => a,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Access node has non-Access payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Access node has non-Access payload".to_string(),
+                ))
+            }
         };
 
         let pp = Self::convert_program_point(&node.program_point);
@@ -722,7 +742,8 @@ impl MsgBuilder {
         // Find the derivation that this access targets.
         // If the access node has incoming DataFlow edges, we use the source
         // derivation. Otherwise, we look up the region's root derivation.
-        let target_derivation_id = self.find_target_derivation_for_access(node, &access.region_id)?;
+        let target_derivation_id =
+            self.find_target_derivation_for_access(node, &access.region_id)?;
 
         let access_kind = match access.mode {
             AccessMode::Read => AccessKind::Read,
@@ -746,9 +767,11 @@ impl MsgBuilder {
     fn rule_effect(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
         let effect = match &node.payload {
             NodePayload::Effect(e) => e,
-            _ => return Err(BuilderError::ValidationFailed(
-                "Effect node has non-Effect payload".to_string(),
-            )),
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Effect node has non-Effect payload".to_string(),
+                ))
+            }
         };
 
         let pp = Self::convert_program_point(&node.program_point);
@@ -799,8 +822,11 @@ impl MsgBuilder {
         for edge in edges {
             // Only consider edges that imply synchronization.
             match edge.kind {
-                ScgEdgeKind::ControlFlow | ScgEdgeKind::Annotation | ScgEdgeKind::Dispatch
-                | ScgEdgeKind::Call { .. } | ScgEdgeKind::Return { .. } => {
+                ScgEdgeKind::ControlFlow
+                | ScgEdgeKind::Annotation
+                | ScgEdgeKind::Dispatch
+                | ScgEdgeKind::Call { .. }
+                | ScgEdgeKind::Return { .. } => {
                     self.process_sync_edge(&edge)?;
                 }
                 ScgEdgeKind::DataFlow | ScgEdgeKind::Derivation => {
@@ -889,7 +915,9 @@ impl MsgBuilder {
             .scg_region_to_msg_region
             .get(&scg_region_id.as_u64())
             .copied()
-            .ok_or(BuilderError::RegionNotFound(RegionId(scg_region_id.as_u64())))?;
+            .ok_or(BuilderError::RegionNotFound(RegionId(
+                scg_region_id.as_u64(),
+            )))?;
 
         // Find the first derivation whose source is this region.
         for d in self.msg.derivations() {
@@ -1014,7 +1042,11 @@ impl MsgBuilder {
     /// For example, "offset_16" → 16, "add8" → 8.
     fn extract_offset_from_operation(op: &str) -> i64 {
         // Try to find a numeric suffix.
-        let digits: String = op.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = op
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if digits.is_empty() {
             return 0;
         }
@@ -1063,15 +1095,15 @@ impl MsgBuilder {
                 DerivationSource::Region(rid) => {
                     DerivationSource::Region(region_id_map.get(rid).copied().unwrap_or(*rid))
                 }
-                DerivationSource::AnotherDerivation(did) => {
-                    DerivationSource::AnotherDerivation(
-                        deriv_id_map.get(did).copied().unwrap_or(*did),
-                    )
-                }
+                DerivationSource::AnotherDerivation(did) => DerivationSource::AnotherDerivation(
+                    deriv_id_map.get(did).copied().unwrap_or(*did),
+                ),
             };
             self.msg.add_derivation(new_deriv.clone());
             deriv_id_map.insert(old_id, new_id);
-            delta.derivation_changes.push(DerivationChange::Added(new_deriv));
+            delta
+                .derivation_changes
+                .push(DerivationChange::Added(new_deriv));
         }
 
         // Merge accesses — remap target derivation IDs.
@@ -1146,7 +1178,9 @@ impl MsgBuilder {
                     }
                     ScgNodeMapping::Derivation(did) => {
                         if let Some(_deriv) = self.msg.remove_derivation(did) {
-                            delta.derivation_changes.push(DerivationChange::Removed(did));
+                            delta
+                                .derivation_changes
+                                .push(DerivationChange::Removed(did));
                             // Remove downstream derivations.
                             self.remove_downstream_derivations(did, &mut delta);
                             // Remove accesses targeting removed derivations.
@@ -1195,26 +1229,34 @@ impl MsgBuilder {
                 match mapping {
                     ScgNodeMapping::Region(rid) => {
                         if let Some(region) = self.msg.region(*rid) {
-                            delta.region_changes.push(RegionChange::Added(region.clone()));
+                            delta
+                                .region_changes
+                                .push(RegionChange::Added(region.clone()));
                         }
                     }
                     ScgNodeMapping::Derivation(did) => {
                         if self.msg.derivation_count() > derivs_before {
                             if let Some(deriv) = self.msg.derivation(*did) {
-                                delta.derivation_changes.push(DerivationChange::Added(deriv.clone()));
+                                delta
+                                    .derivation_changes
+                                    .push(DerivationChange::Added(deriv.clone()));
                             }
                         }
                     }
                     ScgNodeMapping::Access(aid) => {
                         if self.msg.access_count() > accesses_before {
                             if let Some(access) = self.msg.access(*aid) {
-                                delta.access_changes.push(AccessChange::Added(access.clone()));
+                                delta
+                                    .access_changes
+                                    .push(AccessChange::Added(access.clone()));
                             }
                         }
                     }
                     ScgNodeMapping::Deallocation(rid) => {
                         if let Some(region) = self.msg.region(*rid) {
-                            delta.region_changes.push(RegionChange::Modified(region.clone()));
+                            delta
+                                .region_changes
+                                .push(RegionChange::Modified(region.clone()));
                         }
                     }
                     ScgNodeMapping::None => {}
@@ -1233,15 +1275,15 @@ impl MsgBuilder {
         let deriv_ids_to_remove: Vec<DerivationId> = self
             .msg
             .derivations()
-            .filter(|d| {
-                matches!(d.source, DerivationSource::Region(r) if r == rid)
-            })
+            .filter(|d| matches!(d.source, DerivationSource::Region(r) if r == rid))
             .map(|d| d.id)
             .collect();
 
         for did in deriv_ids_to_remove {
             if self.msg.remove_derivation(did).is_some() {
-                delta.derivation_changes.push(DerivationChange::Removed(did));
+                delta
+                    .derivation_changes
+                    .push(DerivationChange::Removed(did));
             }
         }
     }
@@ -1260,7 +1302,9 @@ impl MsgBuilder {
         for child_id in downstream {
             self.remove_downstream_derivations(child_id, delta);
             if self.msg.remove_derivation(child_id).is_some() {
-                delta.derivation_changes.push(DerivationChange::Removed(child_id));
+                delta
+                    .derivation_changes
+                    .push(DerivationChange::Removed(child_id));
             }
         }
     }
@@ -1389,11 +1433,11 @@ mod tests {
     use crate::address::Address;
     use crate::derivation::DerivationSource;
     use crate::region::RegionStatus;
-    use vuma_scg::{
-        AllocationNode, ComputationNode, DeallocationNode, AccessNode, AccessMode,
-        CastNode, EffectNode, ProgramPoint as ScgPP,
-    };
     use vuma_scg::region::{DeploymentTarget, RegionId as ScgRegionId, SCGRegion};
+    use vuma_scg::{
+        AccessMode, AccessNode, AllocationNode, CastNode, ComputationNode, DeallocationNode,
+        EffectNode, ProgramPoint as ScgPP,
+    };
 
     /// Helper: create a minimal SCG ProgramPoint.
     fn scg_pp(line: u64) -> ScgPP {
@@ -1474,7 +1518,8 @@ mod tests {
             }),
             scg_pp(10),
         );
-        scg.add_edge(alloc_id, dealloc_id, ScgEdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_id, dealloc_id, ScgEdgeKind::Derivation)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         let msg = builder.build(&scg).unwrap();
@@ -1507,8 +1552,10 @@ mod tests {
             }),
             scg_pp(20),
         );
-        scg.add_edge(alloc_id, dealloc1, ScgEdgeKind::Derivation).unwrap();
-        scg.add_edge(dealloc1, dealloc2, ScgEdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_id, dealloc1, ScgEdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(dealloc1, dealloc2, ScgEdgeKind::ControlFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         let result = builder.build(&scg);
@@ -1531,10 +1578,13 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "assign".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(5),
         );
-        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1554,10 +1604,13 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_16".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(5),
         );
-        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1586,7 +1639,8 @@ mod tests {
             }),
             scg_pp(6),
         );
-        scg.add_edge(alloc_id, cast_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, cast_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1622,7 +1676,8 @@ mod tests {
             }),
             scg_pp(7),
         );
-        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1653,7 +1708,8 @@ mod tests {
             }),
             scg_pp(8),
         );
-        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1694,9 +1750,12 @@ mod tests {
             }),
             scg_pp(8),
         );
-        scg.add_edge(alloc_id, read_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(alloc_id, write_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(read_id, write_id, ScgEdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_id, read_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(alloc_id, write_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(read_id, write_id, ScgEdgeKind::ControlFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         let msg = builder.build(&scg).unwrap();
@@ -1785,7 +1844,8 @@ mod tests {
             }),
             scg_pp(5),
         );
-        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1808,7 +1868,9 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_32".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(3),
         );
         let cast_id = scg.add_node(
@@ -1820,8 +1882,10 @@ mod tests {
             }),
             scg_pp(4),
         );
-        scg.add_edge(alloc_id, offset_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(offset_id, cast_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, offset_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(offset_id, cast_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1830,7 +1894,11 @@ mod tests {
         if let Some(ScgNodeMapping::Derivation(cast_did)) = builder.mapping_for(cast_id) {
             let chain = builder.derivation_chain(cast_did);
             // Chain should be: [root_direct, offset, cast]
-            assert!(chain.len() >= 2, "Expected at least 2 derivations in chain, got {}", chain.len());
+            assert!(
+                chain.len() >= 2,
+                "Expected at least 2 derivations in chain, got {}",
+                chain.len()
+            );
         } else {
             panic!("Expected Derivation mapping for cast node");
         }
@@ -1867,7 +1935,8 @@ mod tests {
             }),
             scg_pp(9),
         );
-        scg.add_edge(alloc_id, effect_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, effect_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -1914,14 +1983,18 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             scg_pp(1),
         );
         let n2 = scg.add_node(
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             scg_pp(2),
         );
         scg.add_edge(n1, n2, ScgEdgeKind::DataFlow).unwrap();
@@ -2001,7 +2074,8 @@ mod tests {
             }),
             scg_pp(7),
         );
-        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, access_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         builder.build(&scg).unwrap();
@@ -2036,10 +2110,13 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_9999".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(5),
         );
-        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_id, comp_id, ScgEdgeKind::DataFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new().with_out_of_bounds_warnings(true);
         builder.build(&scg).unwrap();
@@ -2105,7 +2182,9 @@ mod tests {
             ScgNodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_64".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(2),
         );
 
@@ -2150,11 +2229,16 @@ mod tests {
             scg_pp(6),
         );
 
-        scg.add_edge(alloc_id, offset_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(offset_id, cast_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(cast_id, read_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(cast_id, write_id, ScgEdgeKind::DataFlow).unwrap();
-        scg.add_edge(write_id, dealloc_id, ScgEdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_id, offset_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(offset_id, cast_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(cast_id, read_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(cast_id, write_id, ScgEdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(write_id, dealloc_id, ScgEdgeKind::ControlFlow)
+            .unwrap();
 
         let mut builder = MsgBuilder::new();
         let msg = builder.build(&scg).unwrap();

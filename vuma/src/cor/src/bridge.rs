@@ -29,7 +29,7 @@
 //! | Derivation | 1 | Semantic dependency |
 //! | Annotation | 1 | Metadata attachment |
 
-use crate::types::{EdgeId, NodeId, NodeKind, SCG, SCGEdge, SCGNode};
+use crate::types::{EdgeId, NodeId, NodeKind, SCGEdge, SCGNode, SCG};
 use std::collections::HashMap;
 
 /// Maps a `vuma_scg::NodeType` (with optional payload) to the COR-internal
@@ -48,8 +48,7 @@ fn map_node_type(
         | vuma_scg::NodeType::Deallocation
         | vuma_scg::NodeType::Access => NodeKind::Memory,
 
-        vuma_scg::NodeType::Computation
-        | vuma_scg::NodeType::Cast => NodeKind::Compute,
+        vuma_scg::NodeType::Computation | vuma_scg::NodeType::Cast => NodeKind::Compute,
 
         vuma_scg::NodeType::Control => {
             // Inspect payload to determine fine-grained kind
@@ -208,13 +207,22 @@ mod tests {
     fn node_type_mapping() {
         let none: Option<vuma_scg::node::NodePayload> = None;
         // Computation → Compute
-        assert_eq!(map_node_type(&NodeType::Computation, &none), NodeKind::Compute);
+        assert_eq!(
+            map_node_type(&NodeType::Computation, &none),
+            NodeKind::Compute
+        );
         // Cast → Compute
         assert_eq!(map_node_type(&NodeType::Cast, &none), NodeKind::Compute);
         // Allocation → Memory
-        assert_eq!(map_node_type(&NodeType::Allocation, &none), NodeKind::Memory);
+        assert_eq!(
+            map_node_type(&NodeType::Allocation, &none),
+            NodeKind::Memory
+        );
         // Deallocation → Memory
-        assert_eq!(map_node_type(&NodeType::Deallocation, &none), NodeKind::Memory);
+        assert_eq!(
+            map_node_type(&NodeType::Deallocation, &none),
+            NodeKind::Memory
+        );
         // Access → Memory
         assert_eq!(map_node_type(&NodeType::Access, &none), NodeKind::Memory);
         // Control with no payload → Entry
@@ -223,10 +231,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::Branch,
-                    label: None,
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::Branch,
+                        label: None,
+                    }
+                ))
             ),
             NodeKind::Branch,
         );
@@ -234,10 +244,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::LoopHeader,
-                    label: Some("loop".to_string()),
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::LoopHeader,
+                        label: Some("loop".to_string()),
+                    }
+                ))
             ),
             NodeKind::LoopHeader,
         );
@@ -245,10 +257,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::LoopExit,
-                    label: None,
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::LoopExit,
+                        label: None,
+                    }
+                ))
             ),
             NodeKind::LoopExit,
         );
@@ -256,10 +270,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::Join,
-                    label: None,
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::Join,
+                        label: None,
+                    }
+                ))
             ),
             NodeKind::Join,
         );
@@ -267,10 +283,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::FunctionEntry,
-                    label: Some("main".to_string()),
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::FunctionEntry,
+                        label: Some("main".to_string()),
+                    }
+                ))
             ),
             NodeKind::FunctionEntry,
         );
@@ -278,10 +296,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::FunctionReturn,
-                    label: None,
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::FunctionReturn,
+                        label: None,
+                    }
+                ))
             ),
             NodeKind::FunctionReturn,
         );
@@ -289,10 +309,12 @@ mod tests {
         assert_eq!(
             map_node_type(
                 &NodeType::Control,
-                &Some(vuma_scg::node::NodePayload::Control(vuma_scg::ControlNode {
-                    kind: vuma_scg::ControlKind::Jump,
-                    label: None,
-                }))
+                &Some(vuma_scg::node::NodePayload::Control(
+                    vuma_scg::ControlNode {
+                        kind: vuma_scg::ControlKind::Jump,
+                        label: None,
+                    }
+                ))
             ),
             NodeKind::Jump,
         );
@@ -318,7 +340,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
@@ -370,7 +394,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "body".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 

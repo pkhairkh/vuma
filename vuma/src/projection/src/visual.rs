@@ -23,9 +23,9 @@
 //! - Region boundaries rendered as subgraph clusters
 //! - Edge labels identify the relationship type
 
-use crate::{EdgeKind, NodeId, NodeKind, RegionId, SCG, SCGEdge, SCGNode};
-use vuma_scg;
+use crate::{EdgeKind, NodeId, NodeKind, RegionId, SCGEdge, SCGNode, SCG};
 use std::collections::{HashMap, HashSet};
+use vuma_scg;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -239,10 +239,7 @@ impl VisualProjection {
 
         // Render region clusters
         for region in &scg.regions {
-            out.push_str(&format!(
-                "    subgraph cluster_region_{} {{\n",
-                region.id
-            ));
+            out.push_str(&format!("    subgraph cluster_region_{} {{\n", region.id));
             out.push_str(&format!(
                 "        label=\"{}\";\n",
                 dot_escape(&region.name)
@@ -421,13 +418,8 @@ impl VisualProjection {
 
         // Render region backgrounds first (behind everything)
         for region in &scg.regions {
-            let region_bounds = self.region_bounds(
-                &region.nodes,
-                &layout.positions,
-                NODE_W,
-                NODE_H,
-                MARGIN,
-            );
+            let region_bounds =
+                self.region_bounds(&region.nodes, &layout.positions, NODE_W, NODE_H, MARGIN);
             if let Some((rx, ry, rw, rh)) = region_bounds {
                 svg.push_str(&format!(
                     "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
@@ -703,12 +695,7 @@ impl VisualProjection {
             .max(self.min_box_width);
         let inner_width = content_width;
 
-        let top = format!(
-            "{}{}{}",
-            BOX_TL,
-            BOX_H.repeat(inner_width + 2),
-            BOX_TR
-        );
+        let top = format!("{}{}{}", BOX_TL, BOX_H.repeat(inner_width + 2), BOX_TR);
         let label_line = format!(
             "{} {}{} {}",
             BOX_V,
@@ -723,12 +710,7 @@ impl VisualProjection {
             " ".repeat(inner_width - kind_label.len()),
             BOX_V
         );
-        let bottom = format!(
-            "{}{}{}",
-            BOX_BL,
-            BOX_H.repeat(inner_width + 2),
-            BOX_BR
-        );
+        let bottom = format!("{}{}{}", BOX_BL, BOX_H.repeat(inner_width + 2), BOX_BR);
 
         if self.use_color {
             use colored::Colorize;
@@ -739,13 +721,19 @@ impl VisualProjection {
                 VisualCategory::Access => label_line.blue().bold().to_string(),
                 VisualCategory::Computation => {
                     use colored::CustomColor;
-                    label_line.custom_color(CustomColor::new(255, 152, 0)).bold().to_string()
+                    label_line
+                        .custom_color(CustomColor::new(255, 152, 0))
+                        .bold()
+                        .to_string()
                 }
                 VisualCategory::ControlFlow => label_line.purple().bold().to_string(),
             };
             format!(
                 "{}\n{}\n{}\n{}",
-                top, colored_label, kind_line.dimmed(), bottom
+                top,
+                colored_label,
+                kind_line.dimmed(),
+                bottom
             )
         } else {
             format!("{}\n{}\n{}\n{}", top, label_line, kind_line, bottom)
@@ -815,7 +803,11 @@ impl VisualProjection {
 
     /// Renders the call graph of the SCG as a tree-like diagram.
     pub fn render_call_graph(&self, scg: &SCG) -> String {
-        let call_edges: Vec<&SCGEdge> = scg.edges.iter().filter(|e| e.kind == EdgeKind::Call).collect();
+        let call_edges: Vec<&SCGEdge> = scg
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Call)
+            .collect();
 
         if call_edges.is_empty() {
             return "// <no call edges>\n".to_string();
@@ -1204,13 +1196,13 @@ mod tests {
 
         // Allocation → green
         assert!(dot.contains("#C8E6C9")); // green fill
-        // Deallocation → red
+                                          // Deallocation → red
         assert!(dot.contains("#FFCDD2")); // red fill
-        // Access → blue
+                                          // Access → blue
         assert!(dot.contains("#BBDEFB")); // blue fill
-        // Computation → orange
+                                          // Computation → orange
         assert!(dot.contains("#FFE0B2")); // orange fill
-        // ControlFlow → purple
+                                          // ControlFlow → purple
         assert!(dot.contains("#E1BEE7")); // purple fill
 
         // Mermaid style directives
@@ -1364,8 +1356,9 @@ mod tests {
     #[test]
     fn test_render_real_scg() {
         use vuma_scg::{
-            SCG, NodeType, NodePayload, ComputationNode, AllocationNode, DeallocationNode,
-            ProgramPoint, EdgeKind as ScgEdgeKind, RegionId as ScgRegionId, DeploymentTarget,
+            AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
+            EdgeKind as ScgEdgeKind, NodePayload, NodeType, ProgramPoint, RegionId as ScgRegionId,
+            SCG,
         };
 
         let rid = ScgRegionId::new(1);
@@ -1384,7 +1377,12 @@ mod tests {
                 region_id: rid,
                 type_name: Some("MyBuffer".to_string()),
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(n1);
 
@@ -1395,7 +1393,12 @@ mod tests {
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
 
         let n3 = scg.add_node(
@@ -1404,7 +1407,12 @@ mod tests {
                 allocation_node: n1,
                 region_id: rid,
             }),
-            ProgramPoint { file: None, line: None, column: None, offset: None },
+            ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
         );
         region.add_node(n3);
 
@@ -1416,10 +1424,25 @@ mod tests {
         let output = super::render_scg(&scg);
 
         // Verify the output contains expected DOT elements from the 3 nodes
-        assert!(output.contains("digraph SCG"), "output should be a DOT graph");
-        assert!(output.contains("MyBuffer"), "output should contain allocation label");
-        assert!(output.contains("process_buffer"), "output should contain computation label");
-        assert!(output.contains("dealloc"), "output should contain deallocation label");
-        assert!(output.contains("DataFlow"), "output should contain DataFlow edge label");
+        assert!(
+            output.contains("digraph SCG"),
+            "output should be a DOT graph"
+        );
+        assert!(
+            output.contains("MyBuffer"),
+            "output should contain allocation label"
+        );
+        assert!(
+            output.contains("process_buffer"),
+            "output should contain computation label"
+        );
+        assert!(
+            output.contains("dealloc"),
+            "output should contain deallocation label"
+        );
+        assert!(
+            output.contains("DataFlow"),
+            "output should contain DataFlow edge label"
+        );
     }
 }

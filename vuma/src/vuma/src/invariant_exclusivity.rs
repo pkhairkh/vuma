@@ -81,12 +81,10 @@ impl InvariantResult {
     pub fn interference_graph(&self) -> &InterferenceGraph {
         match self {
             InvariantResult::Satisfied {
-                interference_graph,
-                ..
+                interference_graph, ..
             } => interference_graph,
             InvariantResult::Violated {
-                interference_graph,
-                ..
+                interference_graph, ..
             } => interference_graph,
         }
     }
@@ -382,10 +380,7 @@ fn compute_reachability(msg: &MSG) -> HashMap<AccessId, HashSet<AccessId>> {
     // Build forward adjacency list from sync edges.
     let mut forward: HashMap<AccessId, Vec<AccessId>> = HashMap::new();
     for edge in msg.sync_edges() {
-        forward
-            .entry(edge.access1)
-            .or_default()
-            .push(edge.access2);
+        forward.entry(edge.access1).or_default().push(edge.access2);
     }
 
     // For each access, compute reachable set via BFS/DFS.
@@ -444,10 +439,7 @@ fn are_ordered(
 fn find_nearby_edges(msg: &MSG, a1: AccessId, a2: AccessId) -> Vec<SyncEdgeId> {
     msg.sync_edges()
         .filter(|edge| {
-            edge.access1 == a1
-                || edge.access2 == a1
-                || edge.access1 == a2
-                || edge.access2 == a2
+            edge.access1 == a1 || edge.access2 == a1 || edge.access1 == a2 || edge.access2 == a2
         })
         .map(|edge| edge.id)
         .collect()
@@ -527,7 +519,6 @@ where
         }
 
         for (id2, base2, access2) in access_info.iter().skip(i + 1) {
-
             // Two reads never conflict.
             if access1.kind == AccessKind::Read && access2.kind == AccessKind::Read {
                 continue;
@@ -1021,7 +1012,10 @@ mod tests {
 
         if let InvariantResult::Violated { violations, .. } = &result {
             // The A1-A2 violation should report nearby edges.
-            let v = violations.iter().find(|v| v.access2 == AccessId(2)).unwrap();
+            let v = violations
+                .iter()
+                .find(|v| v.access2 == AccessId(2))
+                .unwrap();
             match &v.missing_sync {
                 MissingSync::NoOrderingPath { nearby_edges } => {
                     // The edge A1→A3 touches A1, so it's nearby.

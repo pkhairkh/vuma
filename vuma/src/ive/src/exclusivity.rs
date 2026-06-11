@@ -32,7 +32,9 @@
 //! This graph can be used for coloring-based alias analysis or for
 //! reporting violation clusters to the user.
 
-use crate::result::{CounterExample, Evidence, ProgramPoint, VerificationResult, VerificationStatus};
+use crate::result::{
+    CounterExample, Evidence, ProgramPoint, VerificationResult, VerificationStatus,
+};
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -42,9 +44,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a memory access event within the exclusivity checker.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AccessId(pub u64);
 
 impl fmt::Display for AccessId {
@@ -167,8 +167,7 @@ impl AccessRecord {
     /// 1. Their byte ranges overlap, **and**
     /// 2. At least one of them is a write.
     pub fn conflicts_with(&self, other: &AccessRecord) -> bool {
-        self.overlaps(other)
-            && (self.kind == AccessKind::Write || other.kind == AccessKind::Write)
+        self.overlaps(other) && (self.kind == AccessKind::Write || other.kind == AccessKind::Write)
     }
 }
 
@@ -192,11 +191,7 @@ pub struct SyncEdgeRecord {
 
 impl SyncEdgeRecord {
     /// Create a new sync edge record.
-    pub fn new(
-        access_before: AccessId,
-        access_after: AccessId,
-        ordering: SyncOrdering,
-    ) -> Self {
+    pub fn new(access_before: AccessId, access_after: AccessId, ordering: SyncOrdering) -> Self {
         Self {
             access_before,
             access_after,
@@ -327,10 +322,7 @@ impl CapDInfo {
         CapDInfo {
             can_read: self.can_read && other.can_read,
             can_write: self.can_write && other.can_write,
-            write_requires_lock: match (
-                self.write_requires_lock,
-                other.write_requires_lock,
-            ) {
+            write_requires_lock: match (self.write_requires_lock, other.write_requires_lock) {
                 (Some(a), Some(b)) if a == b => Some(a),
                 (Some(a), None) => Some(a),
                 (None, Some(b)) => Some(b),
@@ -354,10 +346,7 @@ impl CapDInfo {
         CapDInfo {
             can_read: self.can_read || other.can_read,
             can_write: self.can_write || other.can_write,
-            write_requires_lock: match (
-                self.write_requires_lock,
-                other.write_requires_lock,
-            ) {
+            write_requires_lock: match (self.write_requires_lock, other.write_requires_lock) {
                 (Some(a), Some(b)) if a == b => Some(a),
                 _ => None, // different or missing → intersection is empty → no condition
             },
@@ -451,7 +440,11 @@ impl fmt::Display for Conflict {
         write!(
             f,
             "{} between {} and {} at [0x{:x}, 0x{:x}): {}",
-            self.kind, self.access1, self.access2, self.overlap_start, self.overlap_end,
+            self.kind,
+            self.access1,
+            self.access2,
+            self.overlap_start,
+            self.overlap_end,
             self.description
         )
     }
@@ -742,14 +735,8 @@ impl ExclusivityVerifier {
                     )
                 };
 
-                let conflict = Conflict::new(
-                    a1.id,
-                    a2.id,
-                    kind,
-                    overlap_start,
-                    overlap_end,
-                    description,
-                );
+                let conflict =
+                    Conflict::new(a1.id, a2.id, kind, overlap_start, overlap_end, description);
 
                 if self.verbose {
                     log::info!("ExclusivityVerifier: detected conflict: {}", conflict);
@@ -785,10 +772,7 @@ impl ExclusivityVerifier {
 
             let counterexample = first_hard.map(|c| {
                 CounterExample::new(
-                    vec![
-                        format!("{}", c.access1),
-                        format!("{}", c.access2),
-                    ],
+                    vec![format!("{}", c.access1), format!("{}", c.access2)],
                     format!("{}", c.access1),
                     c.description.clone(),
                 )
@@ -901,11 +885,7 @@ impl ExclusivityVerifier {
     /// *may* write (regardless of lock conditions — the lock condition
     /// is checked separately to determine if the conflict is protected).
     /// If no CapD info is available, the access kind determines capability.
-    fn access_has_write_capability(
-        &self,
-        access: &AccessRecord,
-        cap: Option<&CapDInfo>,
-    ) -> bool {
+    fn access_has_write_capability(&self, access: &AccessRecord, cap: Option<&CapDInfo>) -> bool {
         // If the access is a Read kind, it never has write capability.
         if access.kind == AccessKind::Read {
             return false;
@@ -926,12 +906,10 @@ impl ExclusivityVerifier {
         cap2: Option<&CapDInfo>,
     ) -> bool {
         match (cap1, cap2) {
-            (Some(c1), Some(c2)) => {
-                match (c1.write_requires_lock, c2.write_requires_lock) {
-                    (Some(l1), Some(l2)) => l1 == l2,
-                    _ => false,
-                }
-            }
+            (Some(c1), Some(c2)) => match (c1.write_requires_lock, c2.write_requires_lock) {
+                (Some(l1), Some(l2)) => l1 == l2,
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -1049,7 +1027,10 @@ mod tests {
         let verifier = ExclusivityVerifier::new();
         let output = verifier.verify(&input);
 
-        assert!(output.is_violated(), "Expected violation for two concurrent writes");
+        assert!(
+            output.is_violated(),
+            "Expected violation for two concurrent writes"
+        );
         assert_eq!(output.write_write_count(), 1);
         assert_eq!(output.interference_graph.conflict_count(), 1);
     }
@@ -1089,7 +1070,10 @@ mod tests {
         let verifier = ExclusivityVerifier::new();
         let output = verifier.verify(&input);
 
-        assert!(output.is_proven(), "Sequential access should be proven safe");
+        assert!(
+            output.is_proven(),
+            "Sequential access should be proven safe"
+        );
         assert_eq!(output.conflict_count(), 0);
     }
 
@@ -1123,10 +1107,7 @@ mod tests {
         let verifier = ExclusivityVerifier::new();
         let output = verifier.verify(&input);
 
-        assert!(
-            output.is_proven(),
-            "Concurrent reads should be proven safe"
-        );
+        assert!(output.is_proven(), "Concurrent reads should be proven safe");
         assert_eq!(output.conflict_count(), 0);
     }
 
@@ -1160,7 +1141,10 @@ mod tests {
         let verifier = ExclusivityVerifier::new();
         let output = verifier.verify(&input);
 
-        assert!(output.is_violated(), "Concurrent write+read should be violated");
+        assert!(
+            output.is_violated(),
+            "Concurrent write+read should be violated"
+        );
         assert_eq!(output.write_read_count(), 1);
     }
 
@@ -1237,7 +1221,10 @@ mod tests {
         let verifier = ExclusivityVerifier::new();
         let output = verifier.verify(&input);
 
-        assert!(output.is_violated(), "Overlapping ranges should be violated");
+        assert!(
+            output.is_violated(),
+            "Overlapping ranges should be violated"
+        );
         assert_eq!(output.write_read_count(), 1);
 
         // Check overlap range.
@@ -1295,7 +1282,10 @@ mod tests {
         // The result should be ProbablySafe, not Proven (since there IS a conflict,
         // but it's protected by a lock assumption).
         assert!(
-            matches!(output.result.status, VerificationStatus::ProbablySafe { .. }),
+            matches!(
+                output.result.status,
+                VerificationStatus::ProbablySafe { .. }
+            ),
             "Lock-protected conflict should be ProbablySafe"
         );
     }
@@ -1396,16 +1386,28 @@ mod tests {
         // Cluster 1: A1-A2, A2-A3
         // Cluster 2: A4-A5
         graph.add_conflict(Conflict::new(
-            AccessId(1), AccessId(2), ConflictKind::WriteWrite,
-            0x1000, 0x1004, "c1".into(),
+            AccessId(1),
+            AccessId(2),
+            ConflictKind::WriteWrite,
+            0x1000,
+            0x1004,
+            "c1".into(),
         ));
         graph.add_conflict(Conflict::new(
-            AccessId(2), AccessId(3), ConflictKind::WriteWrite,
-            0x1000, 0x1004, "c2".into(),
+            AccessId(2),
+            AccessId(3),
+            ConflictKind::WriteWrite,
+            0x1000,
+            0x1004,
+            "c2".into(),
         ));
         graph.add_conflict(Conflict::new(
-            AccessId(4), AccessId(5), ConflictKind::WriteRead,
-            0x2000, 0x2004, "c3".into(),
+            AccessId(4),
+            AccessId(5),
+            ConflictKind::WriteRead,
+            0x2000,
+            0x2004,
+            "c3".into(),
         ));
 
         assert_eq!(graph.conflict_count(), 3);
@@ -1484,15 +1486,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_access_record_overlap_and_conflict() {
-        let a1 = AccessRecord::new(
-            AccessId(1), AccessKind::Write, 0x1000, 8, pp("x"), 1, 1,
-        );
-        let a2 = AccessRecord::new(
-            AccessId(2), AccessKind::Read, 0x1004, 8, pp("y"), 1, 1,
-        );
-        let a3 = AccessRecord::new(
-            AccessId(3), AccessKind::Read, 0x2000, 4, pp("z"), 2, 2,
-        );
+        let a1 = AccessRecord::new(AccessId(1), AccessKind::Write, 0x1000, 8, pp("x"), 1, 1);
+        let a2 = AccessRecord::new(AccessId(2), AccessKind::Read, 0x1004, 8, pp("y"), 1, 1);
+        let a3 = AccessRecord::new(AccessId(3), AccessKind::Read, 0x2000, 4, pp("z"), 2, 2);
 
         // a1 and a2 overlap partially.
         assert!(a1.overlaps(&a2));
@@ -1545,13 +1541,31 @@ mod tests {
 
         // Three writes to the same address — 3 pairwise conflicts.
         input.add_access(AccessRecord::new(
-            AccessId(1), AccessKind::Write, 0x1000, 4, pp("a"), 1, 1,
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("a"),
+            1,
+            1,
         ));
         input.add_access(AccessRecord::new(
-            AccessId(2), AccessKind::Write, 0x1000, 4, pp("b"), 1, 1,
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("b"),
+            1,
+            1,
         ));
         input.add_access(AccessRecord::new(
-            AccessId(3), AccessKind::Write, 0x1000, 4, pp("c"), 1, 1,
+            AccessId(3),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("c"),
+            1,
+            1,
         ));
 
         let verifier = ExclusivityVerifier::new();

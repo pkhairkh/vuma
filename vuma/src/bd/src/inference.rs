@@ -26,8 +26,11 @@
 
 use crate::capd::{CapD, Capability};
 use crate::descriptor::BD;
-use crate::reld::{DepKind, Relation, RelD};
-use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep, BDConstraint as RepDConstraint};
+use crate::reld::{DepKind, RelD, Relation};
+use crate::repd::{
+    ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep,
+    UnionRep,
+};
 use hashbrown::{HashMap, HashSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
@@ -305,9 +308,7 @@ impl BDInferenceEngine {
         // ── Completeness check ──
         for node_id in scg.node_ids() {
             if !result.bd_map.contains_key(&node_id) {
-                result
-                    .errors
-                    .push(InferenceError::UninferredNode(node_id));
+                result.errors.push(InferenceError::UninferredNode(node_id));
             }
         }
 
@@ -320,12 +321,7 @@ impl BDInferenceEngine {
 
     /// Phase 1: Walk the SCG in topological order. For each node, compute
     /// initial BD from its operation and the BDs of its inputs.
-    fn phase1_propagate(
-        &self,
-        scg: &SCG,
-        topo_order: &[NodeId],
-        result: &mut InferenceResult,
-    ) {
+    fn phase1_propagate(&self, scg: &SCG, topo_order: &[NodeId], result: &mut InferenceResult) {
         for &node_id in topo_order {
             let node_data = match scg.get_node(node_id) {
                 Some(n) => n.clone(),
@@ -350,30 +346,16 @@ impl BDInferenceEngine {
         bd_map: &HashMap<NodeId, BD>,
     ) -> Option<BD> {
         match node_data.node_type {
-            NodeType::Allocation => {
-                self.compute_allocation_bd(node_id, &node_data.payload)
-            }
+            NodeType::Allocation => self.compute_allocation_bd(node_id, &node_data.payload),
             NodeType::Computation => {
                 self.compute_computation_bd(scg, node_id, &node_data.payload, bd_map)
             }
-            NodeType::Deallocation => {
-                self.compute_deallocation_bd(scg, node_id, bd_map)
-            }
-            NodeType::Access => {
-                self.compute_access_bd(scg, node_id, &node_data.payload, bd_map)
-            }
-            NodeType::Cast => {
-                self.compute_cast_bd(scg, node_id, &node_data.payload, bd_map)
-            }
-            NodeType::Effect => {
-                self.compute_effect_bd(scg, node_id, bd_map)
-            }
-            NodeType::Control => {
-                self.compute_control_bd(scg, node_id, bd_map)
-            }
-            NodeType::Phantom => {
-                self.compute_phantom_bd(scg, node_id, bd_map)
-            }
+            NodeType::Deallocation => self.compute_deallocation_bd(scg, node_id, bd_map),
+            NodeType::Access => self.compute_access_bd(scg, node_id, &node_data.payload, bd_map),
+            NodeType::Cast => self.compute_cast_bd(scg, node_id, &node_data.payload, bd_map),
+            NodeType::Effect => self.compute_effect_bd(scg, node_id, bd_map),
+            NodeType::Control => self.compute_control_bd(scg, node_id, bd_map),
+            NodeType::Phantom => self.compute_phantom_bd(scg, node_id, bd_map),
             NodeType::VTable | NodeType::ClosureEnv => {
                 // VTable and ClosureEnv nodes inherit BD from their inputs
                 self.compute_phantom_bd(scg, node_id, bd_map)
@@ -439,7 +421,8 @@ impl BDInferenceEngine {
                         .fold(input_bds[0].reld.clone(), |acc, bd| acc.compose(&bd.reld))
                 };
                 // Computation adds a data dependency relation
-                reld.relations.insert(Relation::Dependency(DepKind::DataDep));
+                reld.relations
+                    .insert(Relation::Dependency(DepKind::DataDep));
 
                 Some(BD::new(repd, capd, reld))
             }
@@ -569,16 +552,14 @@ impl BDInferenceEngine {
         if let Some(first_bd) = input_bds.first() {
             // Effects generally pass through BD
             let mut reld = first_bd.reld.clone();
-            reld
-                .relations
+            reld.relations
                 .insert(Relation::Dependency(DepKind::ControlDep));
             Some(BD::new(first_bd.repd.clone(), first_bd.capd.clone(), reld))
         } else {
             let repd = RepD::Byte(ByteRep { size: 0, align: 1 });
             let capd = CapD::empty().strengthen(&[Capability::Execute]);
             let mut reld = RelD::empty();
-            reld
-                .relations
+            reld.relations
                 .insert(Relation::Dependency(DepKind::ControlDep));
             Some(BD::new(repd, capd, reld))
         }
@@ -667,9 +648,10 @@ impl BDInferenceEngine {
                         // Check edge kind and apply constraints
                         if let Some(edge_data) = self.find_edge(scg, pred_id, node_id) {
                             if edge_data.kind == EdgeKind::DataFlow {
-                                if let (Some(source_bd), Some(target_bd)) =
-                                    (result.bd_map.get(&pred_id).cloned(), result.bd_map.get(&node_id).cloned())
-                                {
+                                if let (Some(source_bd), Some(target_bd)) = (
+                                    result.bd_map.get(&pred_id).cloned(),
+                                    result.bd_map.get(&node_id).cloned(),
+                                ) {
                                     // RepD constraint: source must be compatible with target
                                     if !source_bd.repd.compatible(&target_bd.repd)
                                         && source_bd.repd.size() > 0
@@ -678,18 +660,17 @@ impl BDInferenceEngine {
                                         // Attempt to resolve by widening the target's RepD
                                         // to a Byte representation (most permissive)
                                         if self.use_widening {
-                                            if let Some(target) =
-                                                result.bd_map.get_mut(&node_id)
-                                            {
-                                                let widened =
-                                                    RepD::Byte(ByteRep {
-                                                        size: source_bd.repd.size().max(
-                                                            target.repd.size(),
-                                                        ),
-                                                        align: source_bd.repd.alignment().max(
-                                                            target.repd.alignment(),
-                                                        ),
-                                                    });
+                                            if let Some(target) = result.bd_map.get_mut(&node_id) {
+                                                let widened = RepD::Byte(ByteRep {
+                                                    size: source_bd
+                                                        .repd
+                                                        .size()
+                                                        .max(target.repd.size()),
+                                                    align: source_bd
+                                                        .repd
+                                                        .alignment()
+                                                        .max(target.repd.alignment()),
+                                                });
                                                 if widened != target.repd {
                                                     target.repd = widened;
                                                     changed = true;
@@ -701,11 +682,8 @@ impl BDInferenceEngine {
                                     // CapD constraint: target must be a weakening of source
                                     if !source_bd.capd.is_superset(&target_bd.capd) {
                                         // Resolve by meeting target's CapD with source's
-                                        if let Some(target) =
-                                            result.bd_map.get_mut(&node_id)
-                                        {
-                                            let resolved =
-                                                target.capd.meet(&source_bd.capd);
+                                        if let Some(target) = result.bd_map.get_mut(&node_id) {
+                                            let resolved = target.capd.meet(&source_bd.capd);
                                             if resolved != target.capd {
                                                 target.capd = resolved;
                                                 changed = true;
@@ -716,11 +694,8 @@ impl BDInferenceEngine {
                                     // RelD constraint: source RelD must refine to target RelD
                                     // (target should have at least the relations of source)
                                     if !target_bd.reld.refines(&source_bd.reld) {
-                                        if let Some(target) =
-                                            result.bd_map.get_mut(&node_id)
-                                        {
-                                            let resolved =
-                                                target.reld.compose(&source_bd.reld);
+                                        if let Some(target) = result.bd_map.get_mut(&node_id) {
+                                            let resolved = target.reld.compose(&source_bd.reld);
                                             if resolved != target.reld {
                                                 target.reld = resolved;
                                                 changed = true;
@@ -774,19 +749,13 @@ impl BDInferenceEngine {
         for node_id in scg.node_ids() {
             // Include the node's own intrinsic usage context
             if let Some(self_ctx) = self.node_self_usage_context(scg, node_id) {
-                usage_contexts
-                    .entry(node_id)
-                    .or_default()
-                    .push(self_ctx);
+                usage_contexts.entry(node_id).or_default().push(self_ctx);
             }
 
             if let Some(successors) = scg.successors(node_id) {
                 for succ_id in successors {
                     let ctx = self.infer_usage_context(scg, node_id, succ_id);
-                    usage_contexts
-                        .entry(node_id)
-                        .or_default()
-                        .push(ctx);
+                    usage_contexts.entry(node_id).or_default().push(ctx);
                 }
             }
         }
@@ -862,12 +831,7 @@ impl BDInferenceEngine {
     }
 
     /// Infers the usage context of a value at a particular edge.
-    fn infer_usage_context(
-        &self,
-        scg: &SCG,
-        _source: NodeId,
-        target: NodeId,
-    ) -> UsageContext {
+    fn infer_usage_context(&self, scg: &SCG, _source: NodeId, target: NodeId) -> UsageContext {
         let target_data = scg.get_node(target);
 
         if let Some(td) = target_data {
@@ -940,10 +904,7 @@ impl BDInferenceEngine {
             "i32" | "u32" | "f32" => RepD::Byte(ByteRep { size: 4, align: 4 }),
             "i64" | "u64" | "f64" => RepD::Byte(ByteRep { size: 8, align: 8 }),
             "bool" => RepD::Byte(ByteRep { size: 1, align: 1 }),
-            "ptr" | "usize" | "isize" => RepD::Byte(ByteRep {
-                size: 8,
-                align: 8,
-            }),
+            "ptr" | "usize" | "isize" => RepD::Byte(ByteRep { size: 8, align: 8 }),
             _ => RepD::Byte(ByteRep { size: 8, align: 8 }), // default
         }
     }
@@ -1116,10 +1077,12 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
                 .iter()
                 .map(|c| match c {
                     RepDConstraint::CapDAtLeast(capd) => RepDConstraint::CapDAtLeast(capd.clone()),
-                    RepDConstraint::RepDCompatibleWith(repd) => {
-                        RepDConstraint::RepDCompatibleWith(Box::new(instantiate_repd(repd, type_args)))
+                    RepDConstraint::RepDCompatibleWith(repd) => RepDConstraint::RepDCompatibleWith(
+                        Box::new(instantiate_repd(repd, type_args)),
+                    ),
+                    RepDConstraint::RelDContains(reld) => {
+                        RepDConstraint::RelDContains(reld.clone())
                     }
-                    RepDConstraint::RelDContains(reld) => RepDConstraint::RelDContains(reld.clone()),
                 })
                 .collect();
             RepD::Generic {
@@ -1210,9 +1173,8 @@ mod tests {
     use crate::repd::{ByteRep, RepD};
     use vuma_scg::graph::SCG;
     use vuma_scg::node::{
-        AccessNode, AllocationNode, CastNode, ComputationNode, ControlKind,
-        ControlNode, DeallocationNode, EffectNode, NodePayload, NodeType,
-        ProgramPoint,
+        AccessNode, AllocationNode, CastNode, ComputationNode, ControlKind, ControlNode,
+        DeallocationNode, EffectNode, NodePayload, NodeType, ProgramPoint,
     };
     use vuma_scg::region::RegionId;
 
@@ -1287,7 +1249,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -1306,7 +1270,10 @@ mod tests {
         // Note: Write may be removed by context refinement since Computation
         // only needs Read; check that Read is preserved
         // RelD should have a data dependency
-        assert!(bd.reld.relations.contains(&Relation::Dependency(DepKind::DataDep)));
+        assert!(bd
+            .reld
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)));
     }
 
     // -----------------------------------------------------------------------
@@ -1376,14 +1343,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "double".to_string(),
-                result_type: Some("i64".to_string()), tail_call: false }),
+                result_type: Some("i64".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "square".to_string(),
-                result_type: Some("i64".to_string()), tail_call: false }),
+                result_type: Some("i64".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -1458,7 +1429,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "process".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -1470,7 +1443,9 @@ mod tests {
         assert!(result.is_ok(), "Errors: {:?}", result.errors);
         let bd2 = &result.bd_map[&n2];
         assert!(
-            bd2.reld.relations.contains(&Relation::Dependency(DepKind::DataDep)),
+            bd2.reld
+                .relations
+                .contains(&Relation::Dependency(DepKind::DataDep)),
             "Computation node should have DataDep relation"
         );
     }
@@ -1485,14 +1460,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -1536,7 +1515,7 @@ mod tests {
                 NodePayload::Computation(ComputationNode {
                     operation: format!("step_{i}"),
                     result_type: Some("i32".to_string()),
-                tail_call: false,
+                    tail_call: false,
                 }),
                 pp(),
             );
@@ -1595,7 +1574,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "transform".to_string(),
-                result_type: Some("i64".to_string()), tail_call: false }),
+                result_type: Some("i64".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         let access = scg.add_node(
@@ -1612,7 +1593,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "finalize".to_string(),
-                result_type: Some("i64".to_string()), tail_call: false }),
+                result_type: Some("i64".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         let dealloc = scg.add_node(
@@ -1627,7 +1610,8 @@ mod tests {
         scg.add_edge(alloc, compute1, EdgeKind::DataFlow).unwrap();
         scg.add_edge(compute1, access, EdgeKind::DataFlow).unwrap();
         scg.add_edge(access, compute2, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(compute2, dealloc, EdgeKind::Derivation).unwrap();
+        scg.add_edge(compute2, dealloc, EdgeKind::Derivation)
+            .unwrap();
 
         let engine = BDInferenceEngine::new();
         let result = engine.infer(&scg);
@@ -1837,7 +1821,9 @@ mod tests {
     fn test_usage_context_capabilities() {
         let readonly = UsageContext::ReadOnly;
         assert!(readonly.required_capabilities().contains(&Capability::Read));
-        assert!(!readonly.required_capabilities().contains(&Capability::Write));
+        assert!(!readonly
+            .required_capabilities()
+            .contains(&Capability::Write));
 
         let rw = UsageContext::ReadWrite;
         assert!(rw.required_capabilities().contains(&Capability::Read));
@@ -1947,7 +1933,10 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -1964,21 +1953,26 @@ mod tests {
         let e1 = scg.add_node(
             NodeType::Control,
             NodePayload::Control(ControlNode {
-                kind: ControlKind::FunctionEntry, label: Some("f1".to_string()),
+                kind: ControlKind::FunctionEntry,
+                label: Some("f1".to_string()),
             }),
             pp(),
         );
         let e2 = scg.add_node(
             NodeType::Control,
             NodePayload::Control(ControlNode {
-                kind: ControlKind::FunctionEntry, label: Some("f2".to_string()),
+                kind: ControlKind::FunctionEntry,
+                label: Some("f2".to_string()),
             }),
             pp(),
         );
         let a1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 8, align: 8, region_id: region(), type_name: None,
+                size: 8,
+                align: 8,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -1997,14 +1991,18 @@ mod tests {
         let entry = scg.add_node(
             NodeType::Control,
             NodePayload::Control(ControlNode {
-                kind: ControlKind::FunctionEntry, label: None,
+                kind: ControlKind::FunctionEntry,
+                label: None,
             }),
             pp(),
         );
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2030,7 +2028,10 @@ mod tests {
         scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2095,7 +2096,9 @@ mod tests {
     fn test_instantiate_generic_ptr_replacement() {
         let pointee = RepD::Byte(ByteRep { size: 1, align: 1 });
         let template = BD::new(
-            RepD::Ptr(PtrRep { pointee: Box::new(pointee) }),
+            RepD::Ptr(PtrRep {
+                pointee: Box::new(pointee),
+            }),
             CapD::all(),
             RelD::empty(),
         );
@@ -2131,7 +2134,10 @@ mod tests {
         scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2148,7 +2154,10 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2166,14 +2175,20 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 8, align: 8, region_id: region(), type_name: None,
+                size: 8,
+                align: 8,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2186,11 +2201,14 @@ mod tests {
 
         let mut existing: HashMap<NodeId, BD> = HashMap::new();
         // Pre-populate n2 with a stale BD
-        existing.insert(n2, BD::new(
-            RepD::Byte(ByteRep { size: 0, align: 1 }),
-            CapD::empty(),
-            RelD::empty(),
-        ));
+        existing.insert(
+            n2,
+            BD::new(
+                RepD::Byte(ByteRep { size: 0, align: 1 }),
+                CapD::empty(),
+                RelD::empty(),
+            ),
+        );
 
         let result = reinfer_incremental(&scg, &dirty, &existing);
         assert!(result.contains_key(&n1));
@@ -2205,14 +2223,20 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 8, align: 8, region_id: region(), type_name: None,
+                size: 8,
+                align: 8,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
@@ -2240,21 +2264,28 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 4, align: 4, region_id: region(), type_name: None,
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: None,
             }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(), result_type: Some("i32".to_string()), tail_call: false,
+                operation: "add".to_string(),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
             }),
             pp(),
         );
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(), result_type: Some("i32".to_string()), tail_call: false,
+                operation: "mul".to_string(),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
             }),
             pp(),
         );

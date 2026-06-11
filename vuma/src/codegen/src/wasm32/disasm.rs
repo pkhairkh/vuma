@@ -60,7 +60,10 @@ impl std::fmt::Display for WasmInstr {
             }
             WasmInstr::Return => write!(f, "return"),
             WasmInstr::Call(idx) => write!(f, "call {idx}"),
-            WasmInstr::CallIndirect { type_idx, table_idx } => {
+            WasmInstr::CallIndirect {
+                type_idx,
+                table_idx,
+            } => {
                 write!(f, "call_indirect {type_idx} {table_idx}")
             }
 
@@ -76,31 +79,77 @@ impl std::fmt::Display for WasmInstr {
             WasmInstr::GlobalSet(idx) => write!(f, "global.set {idx}"),
 
             // Memory loads
-            WasmInstr::I32Load { align, offset } => write!(f, "i32.load align={align} offset={offset}"),
-            WasmInstr::I64Load { align, offset } => write!(f, "i64.load align={align} offset={offset}"),
-            WasmInstr::F32Load { align, offset } => write!(f, "f32.load align={align} offset={offset}"),
-            WasmInstr::F64Load { align, offset } => write!(f, "f64.load align={align} offset={offset}"),
-            WasmInstr::I32Load8S { align, offset } => write!(f, "i32.load8_s align={align} offset={offset}"),
-            WasmInstr::I32Load8U { align, offset } => write!(f, "i32.load8_u align={align} offset={offset}"),
-            WasmInstr::I32Load16S { align, offset } => write!(f, "i32.load16_s align={align} offset={offset}"),
-            WasmInstr::I32Load16U { align, offset } => write!(f, "i32.load16_u align={align} offset={offset}"),
-            WasmInstr::I64Load8S { align, offset } => write!(f, "i64.load8_s align={align} offset={offset}"),
-            WasmInstr::I64Load8U { align, offset } => write!(f, "i64.load8_u align={align} offset={offset}"),
-            WasmInstr::I64Load16S { align, offset } => write!(f, "i64.load16_s align={align} offset={offset}"),
-            WasmInstr::I64Load16U { align, offset } => write!(f, "i64.load16_u align={align} offset={offset}"),
-            WasmInstr::I64Load32S { align, offset } => write!(f, "i64.load32_s align={align} offset={offset}"),
-            WasmInstr::I64Load32U { align, offset } => write!(f, "i64.load32_u align={align} offset={offset}"),
+            WasmInstr::I32Load { align, offset } => {
+                write!(f, "i32.load align={align} offset={offset}")
+            }
+            WasmInstr::I64Load { align, offset } => {
+                write!(f, "i64.load align={align} offset={offset}")
+            }
+            WasmInstr::F32Load { align, offset } => {
+                write!(f, "f32.load align={align} offset={offset}")
+            }
+            WasmInstr::F64Load { align, offset } => {
+                write!(f, "f64.load align={align} offset={offset}")
+            }
+            WasmInstr::I32Load8S { align, offset } => {
+                write!(f, "i32.load8_s align={align} offset={offset}")
+            }
+            WasmInstr::I32Load8U { align, offset } => {
+                write!(f, "i32.load8_u align={align} offset={offset}")
+            }
+            WasmInstr::I32Load16S { align, offset } => {
+                write!(f, "i32.load16_s align={align} offset={offset}")
+            }
+            WasmInstr::I32Load16U { align, offset } => {
+                write!(f, "i32.load16_u align={align} offset={offset}")
+            }
+            WasmInstr::I64Load8S { align, offset } => {
+                write!(f, "i64.load8_s align={align} offset={offset}")
+            }
+            WasmInstr::I64Load8U { align, offset } => {
+                write!(f, "i64.load8_u align={align} offset={offset}")
+            }
+            WasmInstr::I64Load16S { align, offset } => {
+                write!(f, "i64.load16_s align={align} offset={offset}")
+            }
+            WasmInstr::I64Load16U { align, offset } => {
+                write!(f, "i64.load16_u align={align} offset={offset}")
+            }
+            WasmInstr::I64Load32S { align, offset } => {
+                write!(f, "i64.load32_s align={align} offset={offset}")
+            }
+            WasmInstr::I64Load32U { align, offset } => {
+                write!(f, "i64.load32_u align={align} offset={offset}")
+            }
 
             // Memory stores
-            WasmInstr::I32Store { align, offset } => write!(f, "i32.store align={align} offset={offset}"),
-            WasmInstr::I64Store { align, offset } => write!(f, "i64.store align={align} offset={offset}"),
-            WasmInstr::F32Store { align, offset } => write!(f, "f32.store align={align} offset={offset}"),
-            WasmInstr::F64Store { align, offset } => write!(f, "f64.store align={align} offset={offset}"),
-            WasmInstr::I32Store8 { align, offset } => write!(f, "i32.store8 align={align} offset={offset}"),
-            WasmInstr::I32Store16 { align, offset } => write!(f, "i32.store16 align={align} offset={offset}"),
-            WasmInstr::I64Store8 { align, offset } => write!(f, "i64.store8 align={align} offset={offset}"),
-            WasmInstr::I64Store16 { align, offset } => write!(f, "i64.store16 align={align} offset={offset}"),
-            WasmInstr::I64Store32 { align, offset } => write!(f, "i64.store32 align={align} offset={offset}"),
+            WasmInstr::I32Store { align, offset } => {
+                write!(f, "i32.store align={align} offset={offset}")
+            }
+            WasmInstr::I64Store { align, offset } => {
+                write!(f, "i64.store align={align} offset={offset}")
+            }
+            WasmInstr::F32Store { align, offset } => {
+                write!(f, "f32.store align={align} offset={offset}")
+            }
+            WasmInstr::F64Store { align, offset } => {
+                write!(f, "f64.store align={align} offset={offset}")
+            }
+            WasmInstr::I32Store8 { align, offset } => {
+                write!(f, "i32.store8 align={align} offset={offset}")
+            }
+            WasmInstr::I32Store16 { align, offset } => {
+                write!(f, "i32.store16 align={align} offset={offset}")
+            }
+            WasmInstr::I64Store8 { align, offset } => {
+                write!(f, "i64.store8 align={align} offset={offset}")
+            }
+            WasmInstr::I64Store16 { align, offset } => {
+                write!(f, "i64.store16 align={align} offset={offset}")
+            }
+            WasmInstr::I64Store32 { align, offset } => {
+                write!(f, "i64.store32 align={align} offset={offset}")
+            }
 
             WasmInstr::MemorySize(idx) => write!(f, "memory.size {idx}"),
             WasmInstr::MemoryGrow(idx) => write!(f, "memory.grow {idx}"),
@@ -230,7 +279,9 @@ impl std::fmt::Display for WasmInstr {
             WasmInstr::F32X4Mul => write!(f, "f32x4.mul"),
 
             // Bulk memory
-            WasmInstr::MemoryCopy { src_mem, dst_mem } => write!(f, "memory.copy {src_mem} {dst_mem}"),
+            WasmInstr::MemoryCopy { src_mem, dst_mem } => {
+                write!(f, "memory.copy {src_mem} {dst_mem}")
+            }
             WasmInstr::MemoryFill { mem } => write!(f, "memory.fill {mem}"),
             WasmInstr::MemoryInit { data_idx, mem } => write!(f, "memory.init {data_idx} {mem}"),
         }
@@ -406,36 +457,209 @@ impl WasmInstr {
             }
 
             // Memory loads
-            0x28 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Load { align: a, offset: o } }
-            0x29 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load { align: a, offset: o } }
-            0x2A => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::F32Load { align: a, offset: o } }
-            0x2B => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::F64Load { align: a, offset: o } }
-            0x2C => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Load8S { align: a, offset: o } }
-            0x2D => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Load8U { align: a, offset: o } }
-            0x2E => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Load16S { align: a, offset: o } }
-            0x2F => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Load16U { align: a, offset: o } }
-            0x30 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load8S { align: a, offset: o } }
-            0x31 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load8U { align: a, offset: o } }
-            0x32 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load16S { align: a, offset: o } }
-            0x33 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load16U { align: a, offset: o } }
-            0x34 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load32S { align: a, offset: o } }
-            0x35 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Load32U { align: a, offset: o } }
+            0x28 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Load {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x29 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2A => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::F32Load {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2B => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::F64Load {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2C => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Load8S {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2D => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Load8U {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2E => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Load16S {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x2F => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Load16U {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x30 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load8S {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x31 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load8U {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x32 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load16S {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x33 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load16U {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x34 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load32S {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x35 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Load32U {
+                    align: a,
+                    offset: o,
+                }
+            }
 
             // Memory stores
-            0x36 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Store { align: a, offset: o } }
-            0x37 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Store { align: a, offset: o } }
-            0x38 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::F32Store { align: a, offset: o } }
-            0x39 => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::F64Store { align: a, offset: o } }
-            0x3A => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Store8 { align: a, offset: o } }
-            0x3B => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I32Store16 { align: a, offset: o } }
-            0x3C => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Store8 { align: a, offset: o } }
-            0x3D => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Store16 { align: a, offset: o } }
-            0x3E => { let (a, o, np) = read_memarg(bytes, pos)?; pos = np; WasmInstr::I64Store32 { align: a, offset: o } }
-            0x3F => { let (idx, np) = read_idx(bytes, pos)?; pos = np; WasmInstr::MemorySize(idx) }
-            0x40 => { let (idx, np) = read_idx(bytes, pos)?; pos = np; WasmInstr::MemoryGrow(idx) }
+            0x36 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Store {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x37 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Store {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x38 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::F32Store {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x39 => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::F64Store {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3A => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Store8 {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3B => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Store16 {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3C => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Store8 {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3D => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Store16 {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3E => {
+                let (a, o, np) = read_memarg(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Store32 {
+                    align: a,
+                    offset: o,
+                }
+            }
+            0x3F => {
+                let (idx, np) = read_idx(bytes, pos)?;
+                pos = np;
+                WasmInstr::MemorySize(idx)
+            }
+            0x40 => {
+                let (idx, np) = read_idx(bytes, pos)?;
+                pos = np;
+                WasmInstr::MemoryGrow(idx)
+            }
 
             // i32 constants and comparisons
-            0x41 => { let (val, np) = read_i32(bytes, pos)?; pos = np; WasmInstr::I32Const(val) }
+            0x41 => {
+                let (val, np) = read_i32(bytes, pos)?;
+                pos = np;
+                WasmInstr::I32Const(val)
+            }
             0x45 => WasmInstr::I32Eqz,
             0x46 => WasmInstr::I32Eq,
             0x47 => WasmInstr::I32Ne,
@@ -467,7 +691,11 @@ impl WasmInstr {
             0x78 => WasmInstr::I32Rotr,
 
             // i64
-            0x42 => { let (val, np) = read_i64(bytes, pos)?; pos = np; WasmInstr::I64Const(val) }
+            0x42 => {
+                let (val, np) = read_i64(bytes, pos)?;
+                pos = np;
+                WasmInstr::I64Const(val)
+            }
             0x50 => WasmInstr::I64Eqz,
             0x51 => WasmInstr::I64Eq,
             0x52 => WasmInstr::I64Ne,
@@ -501,7 +729,10 @@ impl WasmInstr {
             // f32
             0x43 => {
                 if pos + 4 > bytes.len() {
-                    return Err(DecodeError::Truncated { needed: pos + 4, available: bytes.len() });
+                    return Err(DecodeError::Truncated {
+                        needed: pos + 4,
+                        available: bytes.len(),
+                    });
                 }
                 let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
                 pos += 4;
@@ -523,7 +754,10 @@ impl WasmInstr {
             // f64
             0x44 => {
                 if pos + 8 > bytes.len() {
-                    return Err(DecodeError::Truncated { needed: pos + 8, available: bytes.len() });
+                    return Err(DecodeError::Truncated {
+                        needed: pos + 8,
+                        available: bytes.len(),
+                    });
                 }
                 let val = f64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
                 pos += 8;
@@ -633,7 +867,10 @@ mod tests {
 
     #[test]
     fn test_roundtrip_i32_load() {
-        let original = WasmInstr::I32Load { align: 2, offset: 8 };
+        let original = WasmInstr::I32Load {
+            align: 2,
+            offset: 8,
+        };
         let mut encoded = Vec::new();
         original.encode(&mut encoded);
         let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
@@ -642,7 +879,10 @@ mod tests {
 
     #[test]
     fn test_roundtrip_i32_store() {
-        let original = WasmInstr::I32Store { align: 2, offset: 0 };
+        let original = WasmInstr::I32Store {
+            align: 2,
+            offset: 0,
+        };
         let mut encoded = Vec::new();
         original.encode(&mut encoded);
         let (decoded, _) = WasmInstr::decode(&encoded).unwrap();

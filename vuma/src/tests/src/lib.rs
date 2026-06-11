@@ -55,27 +55,27 @@
 //! - [`vuma_pi5_test!`] — Pi5 target test category
 
 #[cfg(test)]
-pub mod trivial;
-#[cfg(test)]
-pub mod dlist;
-#[cfg(test)]
-pub mod graph;
-#[cfg(test)]
-pub mod concurrent;
-#[cfg(test)]
 pub mod bd_inference;
-pub mod framework;
 pub mod benchmarks;
-#[cfg(test)]
-pub mod pi5_hardware;
 #[cfg(test)]
 pub mod codegen;
 #[cfg(test)]
-pub mod full_pipeline;
+pub mod concurrent;
+#[cfg(test)]
+pub mod dlist;
 #[cfg(test)]
 pub mod e2e_cor;
 #[cfg(test)]
 pub mod execution_validation;
+pub mod framework;
+#[cfg(test)]
+pub mod full_pipeline;
+#[cfg(test)]
+pub mod graph;
+#[cfg(test)]
+pub mod pi5_hardware;
+#[cfg(test)]
+pub mod trivial;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

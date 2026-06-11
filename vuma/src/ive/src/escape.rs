@@ -13,9 +13,9 @@
 //!   making its lifetime depend on the caller's behavior.
 
 use std::collections::HashMap;
+use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{AccessMode, NodeId, NodePayload, NodeType};
-use vuma_scg::edge::EdgeKind;
 
 /// Classification of how a pointer derived from a region may escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,7 +86,8 @@ pub fn analyze_escapes(scg: &SCG) -> HashMap<NodeId, EscapeKind> {
     }
 
     // Identify heap-storing write accesses
-    let mut write_access_nodes: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    let mut write_access_nodes: std::collections::HashSet<NodeId> =
+        std::collections::HashSet::new();
     for node in scg.nodes() {
         if node.node_type == NodeType::Access {
             if let NodePayload::Access(access) = &node.payload {
@@ -99,7 +100,8 @@ pub fn analyze_escapes(scg: &SCG) -> HashMap<NodeId, EscapeKind> {
 
     // For each pointer node, check if it escapes
     for &ptr_node in &pointer_nodes {
-        let escape = compute_escape_kind(ptr_node, &outgoing, &return_nodes, &write_access_nodes, scg);
+        let escape =
+            compute_escape_kind(ptr_node, &outgoing, &return_nodes, &write_access_nodes, scg);
         result.insert(ptr_node, escape);
     }
 
@@ -143,7 +145,8 @@ fn compute_escape_kind(
                         if target_node.node_type == NodeType::Control {
                             if let NodePayload::Control(ctrl) = &target_node.payload {
                                 if ctrl.kind == vuma_scg::node::ControlKind::FunctionReturn {
-                                    max_escape = worse_escape(max_escape, EscapeKind::EscapesToCaller);
+                                    max_escape =
+                                        worse_escape(max_escape, EscapeKind::EscapesToCaller);
                                 }
                             }
                         }
@@ -170,7 +173,8 @@ fn compute_escape_kind(
                         if target_node.node_type == NodeType::Control {
                             if let NodePayload::Control(ctrl) = &target_node.payload {
                                 if ctrl.kind == vuma_scg::node::ControlKind::FunctionEntry {
-                                    max_escape = worse_escape(max_escape, EscapeKind::EscapesToCaller);
+                                    max_escape =
+                                        worse_escape(max_escape, EscapeKind::EscapesToCaller);
                                 }
                             }
                         }
@@ -214,7 +218,10 @@ fn propagate_escapes(
                 if *kind == EdgeKind::Derivation {
                     // If target escapes, source must escape at least as much
                     if let Some(&target_escape) = result.get(&target) {
-                        let current = result.get(&node).copied().unwrap_or(EscapeKind::DoesNotEscape);
+                        let current = result
+                            .get(&node)
+                            .copied()
+                            .unwrap_or(EscapeKind::DoesNotEscape);
                         let new_escape = worse_escape(current, target_escape);
                         if new_escape != current {
                             updates.push((node, new_escape));
@@ -222,7 +229,10 @@ fn propagate_escapes(
                     }
                     // Also: if source escapes, target inherits
                     if let Some(&source_escape) = result.get(&node) {
-                        let current = result.get(&target).copied().unwrap_or(EscapeKind::DoesNotEscape);
+                        let current = result
+                            .get(&target)
+                            .copied()
+                            .unwrap_or(EscapeKind::DoesNotEscape);
                         let new_escape = worse_escape(current, source_escape);
                         if new_escape != current {
                             updates.push((target, new_escape));
@@ -233,7 +243,10 @@ fn propagate_escapes(
         }
 
         for (node, new_escape) in updates {
-            let current = result.get(&node).copied().unwrap_or(EscapeKind::DoesNotEscape);
+            let current = result
+                .get(&node)
+                .copied()
+                .unwrap_or(EscapeKind::DoesNotEscape);
             if new_escape != current {
                 result.insert(node, new_escape);
                 changed = true;
@@ -252,13 +265,13 @@ fn propagate_escapes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vuma_scg::edge::EdgeKind;
     use vuma_scg::graph::SCG;
     use vuma_scg::node::{
-        AccessNode, AllocationNode, ComputationNode, ControlNode, ControlKind,
-        NodePayload, NodeType, ProgramPoint,
+        AccessNode, AllocationNode, ComputationNode, ControlKind, ControlNode, NodePayload,
+        NodeType, ProgramPoint,
     };
-    use vuma_scg::region::{RegionId, DeploymentTarget, SCGRegion};
-    use vuma_scg::edge::EdgeKind;
+    use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
 
     fn pp() -> ProgramPoint {
         ProgramPoint {
@@ -277,7 +290,10 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("Buf".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("Buf".into()),
             }),
             pp(),
         );
@@ -297,18 +313,25 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("Buf".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("Buf".into()),
             }),
             pp(),
         );
         let write_access = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Write, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Write,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
-        scg.add_edge(alloc, write_access, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc, write_access, EdgeKind::DataFlow)
+            .unwrap();
 
         let result = analyze_escapes(&scg);
         assert_eq!(result.get(&alloc), Some(&EscapeKind::EscapesToHeap));
@@ -322,14 +345,18 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("Buf".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("Buf".into()),
             }),
             pp(),
         );
         let ret = scg.add_node(
             NodeType::Control,
             NodePayload::Control(ControlNode {
-                kind: ControlKind::FunctionReturn, label: None,
+                kind: ControlKind::FunctionReturn,
+                label: None,
             }),
             pp(),
         );
@@ -347,28 +374,39 @@ mod tests {
         let alloc_a = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("A".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("A".into()),
             }),
             pp(),
         );
         let alloc_b = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("B".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("B".into()),
             }),
             pp(),
         );
         let write_access = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Write, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Write,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
         // B flows to write (escapes to heap)
-        scg.add_edge(alloc_b, write_access, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_b, write_access, EdgeKind::DataFlow)
+            .unwrap();
         // A derives from B
-        scg.add_edge(alloc_a, alloc_b, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_a, alloc_b, EdgeKind::Derivation)
+            .unwrap();
 
         let result = analyze_escapes(&scg);
         // B escapes to heap; A should also escape to heap via derivation
@@ -378,16 +416,28 @@ mod tests {
 
     #[test]
     fn test_escape_kind_ordering() {
-        assert_eq!(worse_escape(EscapeKind::DoesNotEscape, EscapeKind::EscapesToHeap), EscapeKind::EscapesToHeap);
-        assert_eq!(worse_escape(EscapeKind::EscapesToHeap, EscapeKind::EscapesToCaller), EscapeKind::EscapesToCaller);
-        assert_eq!(worse_escape(EscapeKind::DoesNotEscape, EscapeKind::DoesNotEscape), EscapeKind::DoesNotEscape);
+        assert_eq!(
+            worse_escape(EscapeKind::DoesNotEscape, EscapeKind::EscapesToHeap),
+            EscapeKind::EscapesToHeap
+        );
+        assert_eq!(
+            worse_escape(EscapeKind::EscapesToHeap, EscapeKind::EscapesToCaller),
+            EscapeKind::EscapesToCaller
+        );
+        assert_eq!(
+            worse_escape(EscapeKind::DoesNotEscape, EscapeKind::DoesNotEscape),
+            EscapeKind::DoesNotEscape
+        );
     }
 
     #[test]
     fn test_escape_kind_display() {
         assert_eq!(format!("{}", EscapeKind::DoesNotEscape), "DoesNotEscape");
         assert_eq!(format!("{}", EscapeKind::EscapesToHeap), "EscapesToHeap");
-        assert_eq!(format!("{}", EscapeKind::EscapesToCaller), "EscapesToCaller");
+        assert_eq!(
+            format!("{}", EscapeKind::EscapesToCaller),
+            "EscapesToCaller"
+        );
     }
 
     #[test]
@@ -405,18 +455,25 @@ mod tests {
         let alloc = scg.add_node(
             NodeType::Allocation,
             NodePayload::Allocation(AllocationNode {
-                size: 64, align: 8, region_id: rid, type_name: Some("Buf".into()),
+                size: 64,
+                align: 8,
+                region_id: rid,
+                type_name: Some("Buf".into()),
             }),
             pp(),
         );
         let read_access = scg.add_node(
             NodeType::Access,
             NodePayload::Access(AccessNode {
-                mode: AccessMode::Read, region_id: rid, offset: None, access_size: Some(8),
+                mode: AccessMode::Read,
+                region_id: rid,
+                offset: None,
+                access_size: Some(8),
             }),
             pp(),
         );
-        scg.add_edge(alloc, read_access, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc, read_access, EdgeKind::DataFlow)
+            .unwrap();
 
         let result = analyze_escapes(&scg);
         assert_eq!(result.get(&alloc), Some(&EscapeKind::DoesNotEscape));
@@ -424,7 +481,13 @@ mod tests {
 
     #[test]
     fn test_escape_worse_escape_symmetry() {
-        assert_eq!(worse_escape(EscapeKind::EscapesToHeap, EscapeKind::DoesNotEscape), EscapeKind::EscapesToHeap);
-        assert_eq!(worse_escape(EscapeKind::EscapesToCaller, EscapeKind::EscapesToHeap), EscapeKind::EscapesToCaller);
+        assert_eq!(
+            worse_escape(EscapeKind::EscapesToHeap, EscapeKind::DoesNotEscape),
+            EscapeKind::EscapesToHeap
+        );
+        assert_eq!(
+            worse_escape(EscapeKind::EscapesToCaller, EscapeKind::EscapesToHeap),
+            EscapeKind::EscapesToCaller
+        );
     }
 }

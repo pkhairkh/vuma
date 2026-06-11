@@ -38,16 +38,17 @@ pub use checker::{CheckResult, ProofChecker};
 pub use counterexample::{CounterExample, Step, ViolationPoint};
 pub use judgment::{CapDKind, EventId, Judgment, PointerId, RegionId, ResourceId, VariableId};
 pub use models::{
-    Addr, BDKind, Compatibility, DerivationId, LockId, OriginInfo, OriginInfoBuilder,
-    ProofAccess, ProofAccessKind, ProofDerivation, ProofMemOp, ProofMemOpKind, ProofMSG,
-    ProofRegion, ProofRegionStatus, ProofRepD, ProofSCG, ProofSCGEdge, ProofSyncEdge,
-    RepDId, SinkSensitivity, SourceTrust, SyncEdgeId, SyncOrdering, TaintLabelId,
-    valid_reinterpretation,
+    valid_reinterpretation, Addr, BDKind, Compatibility, DerivationId, LockId, OriginInfo,
+    OriginInfoBuilder, ProofAccess, ProofAccessKind, ProofDerivation, ProofMSG, ProofMemOp,
+    ProofMemOpKind, ProofRegion, ProofRegionStatus, ProofRepD, ProofSCG, ProofSCGEdge,
+    ProofSyncEdge, RepDId, SinkSensitivity, SourceTrust, SyncEdgeId, SyncOrdering, TaintLabelId,
 };
-pub use proof::{Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target};
 pub use origin_proofs::{
-    DerivationChainProof, OriginProof, OriginTactic, ProofFailure as OriginProofFailure,
-    TaintProof, prove_origin,
+    prove_origin, DerivationChainProof, OriginProof, OriginTactic,
+    ProofFailure as OriginProofFailure, TaintProof,
+};
+pub use proof::{
+    Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
 };
 pub use rules::InferenceRule;
 pub use tactics::Tactic;

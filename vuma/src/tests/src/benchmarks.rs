@@ -34,14 +34,12 @@ use std::fmt;
 use std::time::Instant;
 
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode,
-    DeploymentTarget, EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId,
-    SCG, SCGRegion,
+    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
+    EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCGRegion, SCG,
 };
 
 use vuma_ive::{
-    InferenceEngine, InvariantAggregator, InvariantKind, VerificationInput,
-    VerificationLevel,
+    InferenceEngine, InvariantAggregator, InvariantKind, VerificationInput, VerificationLevel,
 };
 
 use vuma_core::scg_to_msg;
@@ -175,7 +173,11 @@ impl BenchmarkStats {
         let p95_idx = ((n as f64) * 0.95).ceil() as usize - 1;
         let p95_ns = sorted[p95_idx.min(n - 1)];
 
-        let cv = if mean_f > 0.0 { stddev_ns / mean_f } else { 0.0 };
+        let cv = if mean_f > 0.0 {
+            stddev_ns / mean_f
+        } else {
+            0.0
+        };
         let unreliable = cv > 0.05;
 
         Self {
@@ -211,8 +213,15 @@ impl fmt::Display for BenchmarkStats {
             f,
             "{:<50} mean={:>12}ns  median={:>12}ns  stddev={:>10.1}ns  \
              min={:>10}ns  max={:>10}ns  p95={:>10}ns  cv={:.3}{}",
-            self.name, self.mean_ns, self.median_ns, self.stddev_ns,
-            self.min_ns, self.max_ns, self.p95_ns, self.cv, flag
+            self.name,
+            self.mean_ns,
+            self.median_ns,
+            self.stddev_ns,
+            self.min_ns,
+            self.max_ns,
+            self.p95_ns,
+            self.cv,
+            flag
         )
     }
 }
@@ -485,7 +494,7 @@ pub fn build_linear_scg(n_chains: usize) -> SCG {
             NodePayload::Computation(ComputationNode {
                 operation: format!("compute_{}", i),
                 result_type: Some("i64".to_string()),
-            tail_call: false,
+                tail_call: false,
             }),
             pp.clone(),
         );
@@ -581,7 +590,7 @@ pub fn build_rich_scg(n_chains: usize) -> SCG {
             NodePayload::Computation(ComputationNode {
                 operation: format!("transform_{}", i),
                 result_type: Some("i64".to_string()),
-            tail_call: false,
+                tail_call: false,
             }),
             pp.clone(),
         );
@@ -802,10 +811,7 @@ pub fn ive_verification_bench() -> Vec<BenchmarkResult> {
         }
 
         // Benchmark incremental verification.
-        let label = format!(
-            "ive_verification/incremental/{}_nodes",
-            scg.node_count()
-        );
+        let label = format!("ive_verification/incremental/{}_nodes", scg.node_count());
         // Populate cache by running incremental with a full delta first.
         let full_delta = vuma_ive::InvariantDelta::from_set(InvariantKind::all().to_vec());
         let mut aggregator = InvariantAggregator::new();
@@ -1242,18 +1248,25 @@ pub struct BenchmarkSuiteResult {
 
 impl fmt::Display for BenchmarkSuiteResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "═══════════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════════"
+        )?;
         writeln!(f, "          VUMA Benchmark Suite Results")?;
-        writeln!(f, "═══════════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════════"
+        )?;
 
-        let print_section = |f: &mut fmt::Formatter, title: &str, results: &[BenchmarkResult]| -> fmt::Result {
-            writeln!(f)?;
-            writeln!(f, "── {} ──", title)?;
-            for r in results {
-                writeln!(f, "  {}", r)?;
-            }
-            Ok(())
-        };
+        let print_section =
+            |f: &mut fmt::Formatter, title: &str, results: &[BenchmarkResult]| -> fmt::Result {
+                writeln!(f)?;
+                writeln!(f, "── {} ──", title)?;
+                for r in results {
+                    writeln!(f, "  {}", r)?;
+                }
+                Ok(())
+            };
 
         print_section(f, "1. SCG Construction", &self.scg_construction)?;
         print_section(f, "2. BD Inference", &self.bd_inference)?;
@@ -1273,7 +1286,9 @@ impl fmt::Display for BenchmarkSuiteResult {
         // Summary.
         writeln!(f)?;
         writeln!(f, "── Summary ──")?;
-        let all_results: Vec<&BenchmarkResult> = self.scg_construction.iter()
+        let all_results: Vec<&BenchmarkResult> = self
+            .scg_construction
+            .iter()
             .chain(self.bd_inference.iter())
             .chain(self.msg_construction.iter())
             .chain(self.ive_verification.iter())
@@ -1283,14 +1298,26 @@ impl fmt::Display for BenchmarkSuiteResult {
             .collect();
 
         writeln!(f, "  Total benchmarks : {}", all_results.len())?;
-        writeln!(f, "  Total iterations : {}", all_results.iter().map(|r| r.iterations).sum::<usize>())?;
+        writeln!(
+            f,
+            "  Total iterations : {}",
+            all_results.iter().map(|r| r.iterations).sum::<usize>()
+        )?;
 
         // Fastest / slowest.
         if let Some(fastest) = all_results.iter().min_by_key(|r| r.median_ns) {
-            writeln!(f, "  Fastest (median) : {} ({}ns)", fastest.name, fastest.median_ns)?;
+            writeln!(
+                f,
+                "  Fastest (median) : {} ({}ns)",
+                fastest.name, fastest.median_ns
+            )?;
         }
         if let Some(slowest) = all_results.iter().max_by_key(|r| r.median_ns) {
-            writeln!(f, "  Slowest (median) : {} ({}ns)", slowest.name, slowest.median_ns)?;
+            writeln!(
+                f,
+                "  Slowest (median) : {} ({}ns)",
+                slowest.name, slowest.median_ns
+            )?;
         }
 
         Ok(())
@@ -1358,7 +1385,11 @@ mod tests {
     fn test_build_linear_scg_validates() {
         let scg = build_linear_scg(10);
         let validation = scg.validate();
-        assert!(validation.is_valid, "Validation errors: {:?}", validation.errors);
+        assert!(
+            validation.is_valid,
+            "Validation errors: {:?}",
+            validation.errors
+        );
     }
 
     // -- Test 4: build_rich_scg validates successfully --
@@ -1366,7 +1397,11 @@ mod tests {
     fn test_build_rich_scg_validates() {
         let scg = build_rich_scg(5);
         let validation = scg.validate();
-        assert!(validation.is_valid, "Validation errors: {:?}", validation.errors);
+        assert!(
+            validation.is_valid,
+            "Validation errors: {:?}",
+            validation.errors
+        );
     }
 
     // -- Test 5: BenchmarkResult computes correct statistics --
@@ -1446,10 +1481,19 @@ mod tests {
         let expected = 2;
         #[cfg(not(test))]
         let expected = 3;
-        assert_eq!(results.len(), expected, "Should have {} SCG construction benchmarks", expected);
+        assert_eq!(
+            results.len(),
+            expected,
+            "Should have {} SCG construction benchmarks",
+            expected
+        );
         // Verify the names contain node counts.
         for r in &results {
-            assert!(r.name.contains("_nodes"), "Result name should contain node count: {}", r.name);
+            assert!(
+                r.name.contains("_nodes"),
+                "Result name should contain node count: {}",
+                r.name
+            );
         }
     }
 
@@ -1474,7 +1518,12 @@ mod tests {
         let expected = 2;
         #[cfg(not(test))]
         let expected = 3;
-        assert_eq!(results.len(), expected, "Should have {} MSG construction benchmarks", expected);
+        assert_eq!(
+            results.len(),
+            expected,
+            "Should have {} MSG construction benchmarks",
+            expected
+        );
     }
 
     // -- Test 13: ive_verification_bench produces results --
@@ -1530,7 +1579,12 @@ mod tests {
         let expected = 2;
         #[cfg(not(test))]
         let expected = 3;
-        assert_eq!(results.len(), expected, "Should have {} e2e benchmarks", expected);
+        assert_eq!(
+            results.len(),
+            expected,
+            "Should have {} e2e benchmarks",
+            expected
+        );
     }
 
     // -- Test 18: Full benchmark suite runs --
@@ -1547,7 +1601,9 @@ mod tests {
         assert!(!suite.e2e_pipeline.is_empty());
 
         // Every BenchmarkResult should have at least 1 iteration.
-        for r in suite.scg_construction.iter()
+        for r in suite
+            .scg_construction
+            .iter()
             .chain(suite.bd_inference.iter())
             .chain(suite.msg_construction.iter())
             .chain(suite.ive_verification.iter())

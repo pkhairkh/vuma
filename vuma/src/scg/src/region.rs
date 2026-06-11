@@ -120,7 +120,11 @@ impl SCGRegion {
     }
 
     /// Creates a new region with a specified scope level.
-    pub fn with_scope_level(id: RegionId, deployment_target: DeploymentTarget, scope_level: u32) -> Self {
+    pub fn with_scope_level(
+        id: RegionId,
+        deployment_target: DeploymentTarget,
+        scope_level: u32,
+    ) -> Self {
         Self {
             id,
             nodes: hashbrown::HashSet::new(),
@@ -267,10 +271,8 @@ impl InferredRegion {
     pub fn depth(&self, regions: &[InferredRegion]) -> u32 {
         let mut depth = 0u32;
         let mut current_parent = self.parent;
-        let region_map: HashMap<RegionId, &InferredRegion> = regions
-            .iter()
-            .map(|r| (r.id, r))
-            .collect();
+        let region_map: HashMap<RegionId, &InferredRegion> =
+            regions.iter().map(|r| (r.id, r)).collect();
         while let Some(parent_id) = current_parent {
             depth += 1;
             if let Some(parent) = region_map.get(&parent_id) {
@@ -359,25 +361,29 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
         // Nodes in the region: reachable from alloc AND can reach dealloc
         let reachable_set: HashSet<NodeId> = reachable_from_alloc.into_iter().collect();
         let reaching_set: HashSet<NodeId> = reaching_dealloc.into_iter().collect();
-        let region_nodes: Vec<NodeId> = reachable_set
-            .intersection(&reaching_set)
-            .copied()
-            .collect();
+        let region_nodes: Vec<NodeId> =
+            reachable_set.intersection(&reaching_set).copied().collect();
 
-        region_node_sets.push((AllocPair {
-            alloc_node: pair.alloc_node,
-            dealloc_node: pair.dealloc_node,
-        }, region_nodes));
+        region_node_sets.push((
+            AllocPair {
+                alloc_node: pair.alloc_node,
+                dealloc_node: pair.dealloc_node,
+            },
+            region_nodes,
+        ));
     }
 
     // For unpaired allocs, create regions with Unknown lifetime containing
     // just the alloc node and nodes reachable from it (limited scope).
     for alloc_id in unpaired_allocs {
         let reachable = bfs_forward(scg, alloc_id, None);
-        region_node_sets.push((AllocPair {
-            alloc_node: alloc_id,
-            dealloc_node: alloc_id, // placeholder; won't be used as Scoped
-        }, reachable));
+        region_node_sets.push((
+            AllocPair {
+                alloc_node: alloc_id,
+                dealloc_node: alloc_id, // placeholder; won't be used as Scoped
+            },
+            reachable,
+        ));
     }
 
     // Step 3: Build InferredRegion objects and determine lifetimes.
@@ -388,8 +394,8 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
         let id = RegionId::new(next_id);
         next_id += 1;
 
-        let is_paired = alloc_set.contains(&pair.alloc_node)
-            && pair.dealloc_node != pair.alloc_node;
+        let is_paired =
+            alloc_set.contains(&pair.alloc_node) && pair.dealloc_node != pair.alloc_node;
 
         let lifetime = if is_paired {
             RegionLifetime::Scoped {
@@ -442,8 +448,7 @@ pub fn infer_regions(scg: &SCG) -> Vec<InferredRegion> {
                     continue;
                 }
                 let candidate = &regions[j];
-                let candidate_nodes: HashSet<NodeId> =
-                    candidate.nodes.iter().copied().collect();
+                let candidate_nodes: HashSet<NodeId> = candidate.nodes.iter().copied().collect();
 
                 if candidate_nodes.contains(&child_alloc)
                     && candidate_nodes.contains(&child_dealloc)
@@ -570,11 +575,8 @@ impl RegionAliasAnalysis {
     /// - Ancestor/descendant relationships
     pub fn new(scg: &SCG) -> Self {
         let regions = infer_regions(scg);
-        let region_index: HashMap<RegionId, usize> = regions
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id, i))
-            .collect();
+        let region_index: HashMap<RegionId, usize> =
+            regions.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
 
         let mut analysis = Self {
             regions,
@@ -588,11 +590,8 @@ impl RegionAliasAnalysis {
 
     /// Constructs an alias analysis from pre-inferred regions.
     pub fn from_regions(scg: &SCG, regions: Vec<InferredRegion>) -> Self {
-        let region_index: HashMap<RegionId, usize> = regions
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id, i))
-            .collect();
+        let region_index: HashMap<RegionId, usize> =
+            regions.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
 
         let mut analysis = Self {
             regions,
@@ -611,9 +610,7 @@ impl RegionAliasAnalysis {
 
     /// Returns a reference to the inferred region with the given ID.
     pub fn get_region(&self, id: RegionId) -> Option<&InferredRegion> {
-        self.region_index
-            .get(&id)
-            .map(|&idx| &self.regions[idx])
+        self.region_index.get(&id).map(|&idx| &self.regions[idx])
     }
 
     /// Returns `true` if two regions may alias (access the same memory).
@@ -679,8 +676,14 @@ impl RegionAliasAnalysis {
         match (&reg_a.lifetime, &reg_b.lifetime) {
             // Two scoped regions with non-overlapping lifetimes can merge
             (
-                RegionLifetime::Scoped { alloc: a1, dealloc: d1 },
-                RegionLifetime::Scoped { alloc: a2, dealloc: d2 },
+                RegionLifetime::Scoped {
+                    alloc: a1,
+                    dealloc: d1,
+                },
+                RegionLifetime::Scoped {
+                    alloc: a2,
+                    dealloc: d2,
+                },
             ) => {
                 // Non-overlapping: one ends before the other starts
                 let a_before_b = node_order(scg, *d1) < node_order(scg, *a2);
@@ -695,12 +698,16 @@ impl RegionAliasAnalysis {
             // Unknown lifetimes are conservative: cannot merge
             (RegionLifetime::Unknown, _) | (_, RegionLifetime::Unknown) => false,
             // Reference-counted regions can merge if they don't share ref nodes
-            (RegionLifetime::ReferenceCounted { ref_nodes: a_refs }, RegionLifetime::ReferenceCounted { ref_nodes: b_refs }) => {
+            (
+                RegionLifetime::ReferenceCounted { ref_nodes: a_refs },
+                RegionLifetime::ReferenceCounted { ref_nodes: b_refs },
+            ) => {
                 let a_set: HashSet<NodeId> = a_refs.iter().copied().collect();
                 let b_set: HashSet<NodeId> = b_refs.iter().copied().collect();
                 a_set.is_disjoint(&b_set)
             }
-            (RegionLifetime::ReferenceCounted { .. }, _) | (_, RegionLifetime::ReferenceCounted { .. }) => {
+            (RegionLifetime::ReferenceCounted { .. }, _)
+            | (_, RegionLifetime::ReferenceCounted { .. }) => {
                 false // conservative: don't merge RC with non-RC
             }
         }
@@ -814,8 +821,14 @@ impl RegionAliasAnalysis {
                 }
 
                 if let (
-                    RegionLifetime::Scoped { alloc: a1, dealloc: d1 },
-                    RegionLifetime::Scoped { alloc: a2, dealloc: d2 },
+                    RegionLifetime::Scoped {
+                        alloc: a1,
+                        dealloc: d1,
+                    },
+                    RegionLifetime::Scoped {
+                        alloc: a2,
+                        dealloc: d2,
+                    },
                 ) = (&self.regions[i].lifetime, &self.regions[j].lifetime)
                 {
                     // Check if lifetimes overlap
@@ -859,22 +872,14 @@ impl RegionAliasAnalysis {
 /// Determines if two scoped lifetimes overlap by checking topological
 /// ordering. Lifetimes overlap if neither [a1..d1] ends before [a2..d2]
 /// starts, nor vice versa.
-fn lifetimes_overlap(
-    scg: &SCG,
-    a1: NodeId,
-    d1: NodeId,
-    a2: NodeId,
-    d2: NodeId,
-) -> bool {
+fn lifetimes_overlap(scg: &SCG, a1: NodeId, d1: NodeId, a2: NodeId, d2: NodeId) -> bool {
     // Use topological sort to determine ordering
     let topo = match scg.topological_sort() {
         Ok(t) => t,
         Err(_) => return true, // cycle => conservative: assume overlap
     };
 
-    let pos = |id: NodeId| -> Option<usize> {
-        topo.iter().position(|&x| x == id)
-    };
+    let pos = |id: NodeId| -> Option<usize> { topo.iter().position(|&x| x == id) };
 
     let (p_a1, p_d1, p_a2, p_d2) = match (pos(a1), pos(d1), pos(a2), pos(d2)) {
         (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
@@ -889,10 +894,7 @@ fn lifetimes_overlap(
 /// if the node is not in the topological sort (e.g., in a cycle).
 fn node_order(scg: &SCG, node: NodeId) -> usize {
     match scg.topological_sort() {
-        Ok(topo) => topo
-            .iter()
-            .position(|&id| id == node)
-            .unwrap_or(usize::MAX),
+        Ok(topo) => topo.iter().position(|&id| id == node).unwrap_or(usize::MAX),
         Err(_) => usize::MAX,
     }
 }
@@ -970,11 +972,8 @@ mod tests {
 
     #[test]
     fn test_region_security_boundary() {
-        let region = SCGRegion::with_security_boundary(
-            RegionId::new(2),
-            DeploymentTarget::Gpu,
-            true,
-        );
+        let region =
+            SCGRegion::with_security_boundary(RegionId::new(2), DeploymentTarget::Gpu, true);
         assert!(region.security_boundary);
     }
 
@@ -1116,7 +1115,10 @@ mod tests {
 
         // Verify lifetime
         match &r.lifetime {
-            RegionLifetime::Scoped { alloc: a, dealloc: d } => {
+            RegionLifetime::Scoped {
+                alloc: a,
+                dealloc: d,
+            } => {
                 assert_eq!(*a, alloc);
                 assert_eq!(*d, dealloc);
             }
@@ -1149,7 +1151,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::DataFlow)
+            .unwrap();
 
         // Region B
         let alloc_b = scg.add_node(
@@ -1170,7 +1173,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::DataFlow)
+            .unwrap();
 
         let regions = infer_regions(&scg);
         assert_eq!(regions.len(), 2);
@@ -1246,11 +1250,16 @@ mod tests {
         );
 
         // Build edges: outer_alloc -> comp_outer -> inner_alloc -> comp_inner -> inner_dealloc -> outer_dealloc
-        scg.add_edge(alloc_outer, comp_outer, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(comp_outer, alloc_inner, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(alloc_inner, comp_inner, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(comp_inner, dealloc_inner, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(dealloc_inner, dealloc_outer, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_outer, comp_outer, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(comp_outer, alloc_inner, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(alloc_inner, comp_inner, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(comp_inner, dealloc_inner, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(dealloc_inner, dealloc_outer, EdgeKind::DataFlow)
+            .unwrap();
 
         let regions = infer_regions(&scg);
         assert_eq!(regions.len(), 2);
@@ -1337,7 +1346,8 @@ mod tests {
             pp(),
         );
         scg.add_edge(alloc_a, access_a, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(access_a, dealloc_a, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(access_a, dealloc_a, EdgeKind::DataFlow)
+            .unwrap();
 
         // Region B: alloc -> access -> dealloc (same region_id!)
         let alloc_b = scg.add_node(
@@ -1369,7 +1379,8 @@ mod tests {
             pp(),
         );
         scg.add_edge(alloc_b, access_b, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(access_b, dealloc_b, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(access_b, dealloc_b, EdgeKind::DataFlow)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();
@@ -1493,7 +1504,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::DataFlow)
+            .unwrap();
 
         // Region B
         let alloc_b = scg.add_node(
@@ -1514,11 +1526,13 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::DataFlow)
+            .unwrap();
 
         // Cross-region DataFlow edge: dealloc_a -> alloc_b
         // This makes their lifetimes overlap (they are connected by data flow)
-        scg.add_edge(dealloc_a, alloc_b, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(dealloc_a, alloc_b, EdgeKind::DataFlow)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();
@@ -1557,7 +1571,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation)
+            .unwrap();
 
         // Region B: starts after A ends (no shared nodes, no crossing edges)
         let alloc_b = scg.add_node(
@@ -1578,7 +1593,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();
@@ -1621,14 +1637,11 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation)
+            .unwrap();
 
         // Add a security boundary region in the SCG
-        let mut scg_region = SCGRegion::with_security_boundary(
-            rid,
-            DeploymentTarget::Heap,
-            true,
-        );
+        let mut scg_region = SCGRegion::with_security_boundary(rid, DeploymentTarget::Heap, true);
         scg_region.add_node(alloc_a);
         scg.add_region(scg_region);
 
@@ -1652,7 +1665,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();
@@ -1712,15 +1726,24 @@ mod tests {
             pp(),
         );
 
-        scg.add_edge(alloc_outer, alloc_inner, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(alloc_inner, dealloc_inner, EdgeKind::DataFlow).unwrap();
-        scg.add_edge(dealloc_inner, dealloc_outer, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc_outer, alloc_inner, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(alloc_inner, dealloc_inner, EdgeKind::DataFlow)
+            .unwrap();
+        scg.add_edge(dealloc_inner, dealloc_outer, EdgeKind::DataFlow)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();
 
-        let outer = regions.iter().find(|r| r.entry_node == alloc_outer).unwrap();
-        let inner = regions.iter().find(|r| r.entry_node == alloc_inner).unwrap();
+        let outer = regions
+            .iter()
+            .find(|r| r.entry_node == alloc_outer)
+            .unwrap();
+        let inner = regions
+            .iter()
+            .find(|r| r.entry_node == alloc_inner)
+            .unwrap();
 
         // Cannot merge ancestor and descendant
         assert!(
@@ -1787,7 +1810,8 @@ mod tests {
             }),
             pp(),
         );
-        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_a, dealloc_a, EdgeKind::Derivation)
+            .unwrap();
 
         // Region B: alloc_b -> comp -> dealloc_b
         // B is entirely inside A's lifetime (overlapping)
@@ -1813,9 +1837,12 @@ mod tests {
         // Connect: alloc_a -> alloc_b -> dealloc_b -> dealloc_a
         // This makes A's lifetime overlap with B's, and they're not nested
         // (because we're not creating a nested alloc/dealloc pattern)
-        scg.add_edge(alloc_a, alloc_b, EdgeKind::ControlFlow).unwrap();
-        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation).unwrap();
-        scg.add_edge(dealloc_b, dealloc_a, EdgeKind::ControlFlow).unwrap();
+        scg.add_edge(alloc_a, alloc_b, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(alloc_b, dealloc_b, EdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(dealloc_b, dealloc_a, EdgeKind::ControlFlow)
+            .unwrap();
 
         let analysis = RegionAliasAnalysis::new(&scg);
         let regions = analysis.regions();

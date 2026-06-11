@@ -47,11 +47,11 @@ pub mod parser;
 pub mod to_scg;
 
 // Convenience re-exports for the most commonly used types.
-pub use ast::{Attribute, AttrValue, Block, Expr, Item, Lit, Program, Stmt, Type, Visibility};
+pub use ast::{AttrValue, Attribute, Block, Expr, Item, Lit, Program, Stmt, Type, Visibility};
 pub use error::{
-    Diagnostic, ErrorCollector, ErrorRecovery, ParseError, ParseErrorKind, ParseResult, Severity,
-    SourceLocation, Span, format_suggestion, levenshtein, offset_to_location, suggest,
-    suggest_keyword, VUMA_KEYWORDS,
+    format_suggestion, levenshtein, offset_to_location, suggest, suggest_keyword, Diagnostic,
+    ErrorCollector, ErrorRecovery, ParseError, ParseErrorKind, ParseResult, Severity,
+    SourceLocation, Span, VUMA_KEYWORDS,
 };
 pub use lexer::{Lexer, Position, Token, TokenKind};
 pub use parser::Parser;

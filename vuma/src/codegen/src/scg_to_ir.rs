@@ -160,9 +160,7 @@ pub enum ControlNode {
         else_body: Option<Vec<ScgStatement>>,
     },
     /// `loop { body }`
-    Loop {
-        body: Vec<ScgStatement>,
-    },
+    Loop { body: Vec<ScgStatement> },
     /// `break` (from inside a loop).
     Break,
     /// `continue` (from inside a loop).
@@ -503,10 +501,8 @@ impl IRBuilder {
                 self.lower_call(call, ir_func, names)?;
             }
             ScgStatement::Return(vals) => {
-                let ir_vals: Vec<IRValue> = vals
-                    .iter()
-                    .map(|e| self.resolve_expr(e, names))
-                    .collect();
+                let ir_vals: Vec<IRValue> =
+                    vals.iter().map(|e| self.resolve_expr(e, names)).collect();
                 // Emit a Ret instruction and set the terminator.
                 ir_func.current_block().push(IRInstruction::Ret {
                     values: ir_vals.clone(),
@@ -545,7 +541,11 @@ impl IRBuilder {
             ControlNode::Continue => {
                 self.lower_continue(ir_func)?;
             }
-            ControlNode::Switch { discriminant, arms, default_body } => {
+            ControlNode::Switch {
+                discriminant,
+                arms,
+                default_body,
+            } => {
                 self.lower_switch(discriminant, arms, default_body, ir_func, names)?;
             }
         }
@@ -622,7 +622,10 @@ impl IRBuilder {
 
         // Add a jump to merge if the block doesn't already have a proper
         // terminator.
-        if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+        if matches!(
+            ir_func.current_block().terminator,
+            IRTerminator::Unreachable
+        ) {
             ir_func.current_block().push(IRInstruction::Branch {
                 target: merge_label.clone(),
             });
@@ -648,7 +651,10 @@ impl IRBuilder {
                 }
             }
 
-            if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+            if matches!(
+                ir_func.current_block().terminator,
+                IRTerminator::Unreachable
+            ) {
                 ir_func.current_block().push(IRInstruction::Branch {
                     target: merge_label.clone(),
                 });
@@ -660,18 +666,22 @@ impl IRBuilder {
             // we need a phi node.  For variables defined in only one branch,
             // keep the definition from that branch; the other branch's value
             // comes from the pre-if definition.
-            let all_modified: HashSet<String> = then_defs.defined_names()
+            let all_modified: HashSet<String> = then_defs
+                .defined_names()
                 .union(&else_defs.defined_names())
                 .cloned()
                 .collect();
 
             // We'll insert phi nodes at the merge block below.
             // For now, store the phi info.
-            let phis_to_insert: Vec<(String, u32, u32)> = all_modified.iter()
+            let phis_to_insert: Vec<(String, u32, u32)> = all_modified
+                .iter()
                 .filter_map(|name| {
-                    let then_vreg = then_defs.get(name)
+                    let then_vreg = then_defs
+                        .get(name)
                         .or_else(|| names_before.get(name).copied());
-                    let else_vreg = else_defs.get(name)
+                    let else_vreg = else_defs
+                        .get(name)
                         .or_else(|| names_before.get(name).copied());
                     // Only insert phi if defined in both branches
                     if then_defs.is_defined(name) && else_defs.is_defined(name) {
@@ -783,7 +793,10 @@ impl IRBuilder {
         self.lower_statements(body, ir_func, names)?;
 
         // Back-edge to header if the block doesn't have a terminator.
-        if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+        if matches!(
+            ir_func.current_block().terminator,
+            IRTerminator::Unreachable
+        ) {
             ir_func.current_block().push(IRInstruction::Branch {
                 target: loop_header.clone(),
             });
@@ -801,12 +814,12 @@ impl IRBuilder {
 
     /// Lower a `break` to a jump to the enclosing loop's exit label.
     fn lower_break(&mut self, ir_func: &mut IRFunction) -> Result<()> {
-        let exit_label = self.loop_stack.last()
+        let exit_label = self
+            .loop_stack
+            .last()
             .map(|ctx| ctx.exit_label.clone())
             .ok_or_else(|| {
-                crate::CodegenError::TranslationError(
-                    "break outside of loop".to_string()
-                )
+                crate::CodegenError::TranslationError("break outside of loop".to_string())
             })?;
 
         ir_func.current_block().push(IRInstruction::Branch {
@@ -818,12 +831,12 @@ impl IRBuilder {
 
     /// Lower a `continue` to a jump to the enclosing loop's header label.
     fn lower_continue(&mut self, ir_func: &mut IRFunction) -> Result<()> {
-        let header_label = self.loop_stack.last()
+        let header_label = self
+            .loop_stack
+            .last()
             .map(|ctx| ctx.header_label.clone())
             .ok_or_else(|| {
-                crate::CodegenError::TranslationError(
-                    "continue outside of loop".to_string()
-                )
+                crate::CodegenError::TranslationError("continue outside of loop".to_string())
             })?;
 
         ir_func.current_block().push(IRInstruction::Branch {
@@ -868,7 +881,8 @@ impl IRBuilder {
         let names_before = names.clone();
 
         // Generate labels for each arm and the default case.
-        let arm_labels: Vec<String> = arms.iter()
+        let arm_labels: Vec<String> = arms
+            .iter()
             .enumerate()
             .map(|(i, _)| self.alloc_label(&format!("case_{}", i)))
             .collect();
@@ -921,7 +935,10 @@ impl IRBuilder {
             }
             all_arm_defs.push(arm_defs);
 
-            if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+            if matches!(
+                ir_func.current_block().terminator,
+                IRTerminator::Unreachable
+            ) {
                 ir_func.current_block().push(IRInstruction::Branch {
                     target: merge_label.clone(),
                 });
@@ -942,7 +959,10 @@ impl IRBuilder {
             }
         }
 
-        if matches!(ir_func.current_block().terminator, IRTerminator::Unreachable) {
+        if matches!(
+            ir_func.current_block().terminator,
+            IRTerminator::Unreachable
+        ) {
             ir_func.current_block().push(IRInstruction::Branch {
                 target: merge_label.clone(),
             });
@@ -951,7 +971,8 @@ impl IRBuilder {
         let default_exit_label = ir_func.current_block().label.clone();
 
         // Compute all modified variable names across all arms + default.
-        let all_modified: HashSet<String> = all_arm_defs.iter()
+        let all_modified: HashSet<String> = all_arm_defs
+            .iter()
             .chain(std::iter::once(&default_defs))
             .flat_map(|defs| defs.defined_names())
             .collect();
@@ -964,14 +985,16 @@ impl IRBuilder {
             let mut incoming: Vec<(IRValue, String)> = Vec::new();
 
             for (i, arm_defs) in all_arm_defs.iter().enumerate() {
-                let vreg = arm_defs.get(name)
+                let vreg = arm_defs
+                    .get(name)
                     .or_else(|| names_before.get(name).copied())
                     .unwrap_or(0);
                 incoming.push((IRValue::Register(vreg), arm_exit_labels[i].clone()));
             }
 
             // Add the default arm's value.
-            let default_vreg = default_defs.get(name)
+            let default_vreg = default_defs
+                .get(name)
                 .or_else(|| names_before.get(name).copied())
                 .unwrap_or(0);
             incoming.push((IRValue::Register(default_vreg), default_exit_label.clone()));
@@ -1075,11 +1098,7 @@ impl IRBuilder {
                     addr: addr_val,
                 });
             }
-            AccessNode::Store {
-                ptr,
-                offset,
-                value,
-            } => {
+            AccessNode::Store { ptr, offset, value } => {
                 let ptr_val = self.resolve_expr(ptr, names);
                 let val = self.resolve_expr(value, names);
                 let addr_val = match offset {
@@ -1360,11 +1379,7 @@ impl IRBuilder {
     /// immediates; labels are passed through.  Floating-point literals are
     /// represented as immediates with the bits reinterpreted (the downstream
     /// emitter must handle this correctly).
-    fn resolve_expr(
-        &self,
-        expr: &ScgExpr,
-        names: &HashMap<String, u32>,
-    ) -> IRValue {
+    fn resolve_expr(&self, expr: &ScgExpr, names: &HashMap<String, u32>) -> IRValue {
         match expr {
             ScgExpr::Var(name) => {
                 if let Some(&vreg) = names.get(name) {
@@ -1434,9 +1449,7 @@ impl IRBuilder {
             in_degree[j] = deps[j].len();
         }
 
-        let mut queue: Vec<usize> = (0..n)
-            .filter(|&i| in_degree[i] == 0)
-            .collect();
+        let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
 
         let mut result = Vec::with_capacity(n);
         while let Some(i) = queue.first().copied() {
@@ -1483,7 +1496,9 @@ impl IRBuilder {
             ScgStatement::Allocation(AllocationNode::Stack { name, .. }) => {
                 defs.insert(name.clone());
             }
-            ScgStatement::Allocation(AllocationNode::Heap { name, size_expr, .. }) => {
+            ScgStatement::Allocation(AllocationNode::Heap {
+                name, size_expr, ..
+            }) => {
                 defs.insert(name.clone());
                 Self::expr_uses(size_expr, &mut uses);
             }
@@ -1518,7 +1533,11 @@ impl IRBuilder {
                     Self::expr_uses(v, &mut uses);
                 }
             }
-            ScgStatement::Control(ControlNode::If { cond, then_body, else_body }) => {
+            ScgStatement::Control(ControlNode::If {
+                cond,
+                then_body,
+                else_body,
+            }) => {
                 Self::expr_uses(cond, &mut uses);
                 for s in then_body {
                     let (d, u) = Self::stmt_def_use(s);
@@ -1540,8 +1559,13 @@ impl IRBuilder {
                     uses.extend(u);
                 }
             }
-            ScgStatement::Control(ControlNode::Break) | ScgStatement::Control(ControlNode::Continue) => {}
-            ScgStatement::Control(ControlNode::Switch { discriminant, arms, default_body }) => {
+            ScgStatement::Control(ControlNode::Break)
+            | ScgStatement::Control(ControlNode::Continue) => {}
+            ScgStatement::Control(ControlNode::Switch {
+                discriminant,
+                arms,
+                default_body,
+            }) => {
                 Self::expr_uses(discriminant, &mut uses);
                 for arm in arms {
                     Self::expr_uses(&ScgExpr::Int(arm.value), &mut uses);
@@ -1610,43 +1634,57 @@ mod tests {
         assert_eq!(program.functions[0].name, "main");
         // Entry block should have a Ret instruction
         let block = &program.functions[0].blocks[0];
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Ret { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Ret { .. })));
     }
 
     // ── Test 2: Addition computation ─────────────────────────────────
 
     #[test]
     fn test_addition() {
-        let scg = func_scg("add_one", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "result".into(),
-                op: BinOpKind::Add,
-                lhs: ScgExpr::Var("x".into()),
-                rhs: ScgExpr::Int(1),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
-        ]);
+        let scg = func_scg(
+            "add_one",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "result".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("x".into()),
+                    rhs: ScgExpr::Int(1),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
         // Entry block should have Add instruction
         let block = &func.blocks[0];
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Add { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Add { .. })));
     }
 
     // ── Test 3: If/else control flow ─────────────────────────────────
 
     #[test]
     fn test_if_else() {
-        let scg = func_scg("test_if", vec![], vec![ScgStatement::Control(ControlNode::If {
-            cond: ScgExpr::Int(1),
-            then_body: vec![ScgStatement::Return(vec![])],
-            else_body: Some(vec![ScgStatement::Return(vec![])]),
-        })]);
+        let scg = func_scg(
+            "test_if",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::If {
+                cond: ScgExpr::Int(1),
+                then_body: vec![ScgStatement::Return(vec![])],
+                else_body: Some(vec![ScgStatement::Return(vec![])]),
+            })],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         // Should have: entry, then, else, merge blocks
@@ -1657,38 +1695,47 @@ mod tests {
 
     #[test]
     fn test_if_without_else() {
-        let scg = func_scg("test_if_no_else", vec![], vec![
-            ScgStatement::Control(ControlNode::If {
-                cond: ScgExpr::Var("flag".into()),
-                then_body: vec![ScgStatement::Computation(ComputationNode {
-                    dst: "x".into(),
-                    op: BinOpKind::Add,
-                    lhs: ScgExpr::Int(1),
-                    rhs: ScgExpr::Int(2),
-    tail_call: false,
-                })],
-                else_body: None,
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_if_no_else",
+            vec![],
+            vec![
+                ScgStatement::Control(ControlNode::If {
+                    cond: ScgExpr::Var("flag".into()),
+                    then_body: vec![ScgStatement::Computation(ComputationNode {
+                        dst: "x".into(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Int(1),
+                        rhs: ScgExpr::Int(2),
+                        tail_call: false,
+                    })],
+                    else_body: None,
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
         // Should have: entry, then, merge blocks
         assert!(func.blocks.len() >= 3);
         // The entry block should branch to then or merge
-        assert!(matches!(func.blocks[0].terminator, IRTerminator::Branch { .. }));
+        assert!(matches!(
+            func.blocks[0].terminator,
+            IRTerminator::Branch { .. }
+        ));
     }
 
     // ── Test 5: Loop with phi node ──────────────────────────────────
 
     #[test]
     fn test_loop_with_phi() {
-        let scg = func_scg("test_loop", vec![], vec![
-            ScgStatement::Control(ControlNode::Loop {
+        let scg = func_scg(
+            "test_loop",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Return(vec![])],
-            }),
-        ]);
+            })],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -1696,25 +1743,31 @@ mod tests {
         assert!(func.blocks.len() >= 4);
         // Loop header should contain a phi instruction
         let header_block = &func.blocks[1];
-        assert!(header_block.instructions.iter().any(|i| matches!(i, IRInstruction::Phi { .. })));
+        assert!(header_block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Phi { .. })));
     }
 
     // ── Test 6: Break from loop ─────────────────────────────────────
 
     #[test]
     fn test_break_from_loop() {
-        let scg = func_scg("test_break", vec![], vec![
-            ScgStatement::Control(ControlNode::Loop {
+        let scg = func_scg(
+            "test_break",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Break)],
-            }),
-        ]);
+            })],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
         // Find the block with the break — it should jump to loop_exit
-        let break_block = func.blocks.iter().find(|b| {
-            matches!(b.terminator, IRTerminator::Jump(ref t) if t.contains("loop_exit"))
-        });
+        let break_block = func
+            .blocks
+            .iter()
+            .find(|b| matches!(b.terminator, IRTerminator::Jump(ref t) if t.contains("loop_exit")));
         assert!(break_block.is_some(), "break should jump to loop_exit");
     }
 
@@ -1722,18 +1775,20 @@ mod tests {
 
     #[test]
     fn test_continue_in_loop() {
-        let scg = func_scg("test_continue", vec![], vec![
-            ScgStatement::Control(ControlNode::Loop {
+        let scg = func_scg(
+            "test_continue",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Continue)],
-            }),
-        ]);
+            })],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
         // Find the block with the continue — it should jump to loop_header
-        let cont_block = func.blocks.iter().find(|b| {
-            matches!(b.terminator, IRTerminator::Jump(ref t) if t.contains("loop_header"))
-        });
+        let cont_block = func.blocks.iter().find(
+            |b| matches!(b.terminator, IRTerminator::Jump(ref t) if t.contains("loop_header")),
+        );
         assert!(cont_block.is_some(), "continue should jump to loop_header");
     }
 
@@ -1741,97 +1796,134 @@ mod tests {
 
     #[test]
     fn test_stack_allocation() {
-        let scg = func_scg("test_alloc", vec![], vec![
-            ScgStatement::Allocation(AllocationNode::Stack {
-                name: "buf".into(),
-                size: 64,
-                ty: ScgType::U8,
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_alloc",
+            vec![],
+            vec![
+                ScgStatement::Allocation(AllocationNode::Stack {
+                    name: "buf".into(),
+                    size: 64,
+                    ty: ScgType::U8,
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Alloc { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Alloc { .. })));
     }
 
     // ── Test 9: Heap allocation (call to allocator) ──────────────────
 
     #[test]
     fn test_heap_allocation() {
-        let scg = func_scg("test_heap_alloc", vec![], vec![
-            ScgStatement::Allocation(AllocationNode::Heap {
-                name: "dyn_buf".into(),
-                size_expr: ScgExpr::Int(128),
-                ty: ScgType::U8,
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_heap_alloc",
+            vec![],
+            vec![
+                ScgStatement::Allocation(AllocationNode::Heap {
+                    name: "dyn_buf".into(),
+                    size_expr: ScgExpr::Int(128),
+                    ty: ScgType::U8,
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let call_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Call { func, .. } if func == "__vuma_alloc")
-        });
-        assert!(call_instr.is_some(), "heap allocation should call __vuma_alloc");
+        let call_instr = block
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Call { func, .. } if func == "__vuma_alloc"));
+        assert!(
+            call_instr.is_some(),
+            "heap allocation should call __vuma_alloc"
+        );
     }
 
     // ── Test 10: Load and store with offset ──────────────────────────
 
     #[test]
     fn test_load_store_with_offset() {
-        let scg = func_scg("test_mem", vec![ScgParam {
-            name: "ptr".into(),
-            ty: ScgType::Ptr,
-        }], vec![
-            ScgStatement::Access(AccessNode::Load {
-                dst: "val".into(),
-                ptr: ScgExpr::Var("ptr".into()),
-                offset: Some(ScgExpr::Int(8)),
-            }),
-            ScgStatement::Access(AccessNode::Store {
-                ptr: ScgExpr::Var("ptr".into()),
-                offset: Some(ScgExpr::Int(16)),
-                value: ScgExpr::Var("val".into()),
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_mem",
+            vec![ScgParam {
+                name: "ptr".into(),
+                ty: ScgType::Ptr,
+            }],
+            vec![
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "val".into(),
+                    ptr: ScgExpr::Var("ptr".into()),
+                    offset: Some(ScgExpr::Int(8)),
+                }),
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var("ptr".into()),
+                    offset: Some(ScgExpr::Int(16)),
+                    value: ScgExpr::Var("val".into()),
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         // Should have Offset instructions for address computation
-        let offset_count = block.instructions.iter().filter(|i| {
-            matches!(i, IRInstruction::Offset { .. })
-        }).count();
-        assert_eq!(offset_count, 2, "should have 2 offset instructions (load + store)");
+        let offset_count = block
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, IRInstruction::Offset { .. }))
+            .count();
+        assert_eq!(
+            offset_count, 2,
+            "should have 2 offset instructions (load + store)"
+        );
         // Should have Load and Store
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Load { .. })));
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Store { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Load { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Store { .. })));
     }
 
     // ── Test 11: Cast node ───────────────────────────────────────────
 
     #[test]
     fn test_cast_node() {
-        let scg = func_scg("test_cast", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I32,
-        }], vec![
-            ScgStatement::Cast(CastNode {
-                dst: "extended".into(),
-                src: ScgExpr::Var("x".into()),
-                kind: CastKind::SExt,
-                from_ty: ScgType::I32,
-                to_ty: ScgType::I64,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("extended".into())]),
-        ]);
+        let scg = func_scg(
+            "test_cast",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I32,
+            }],
+            vec![
+                ScgStatement::Cast(CastNode {
+                    dst: "extended".into(),
+                    src: ScgExpr::Var("x".into()),
+                    kind: CastKind::SExt,
+                    from_ty: ScgType::I32,
+                    to_ty: ScgType::I64,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("extended".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         assert!(block.instructions.iter().any(|i| matches!(
             i,
-            IRInstruction::Cast { kind: CastKind::SExt, .. }
+            IRInstruction::Cast {
+                kind: CastKind::SExt,
+                ..
+            }
         )));
     }
 
@@ -1839,20 +1931,25 @@ mod tests {
 
     #[test]
     fn test_function_call() {
-        let scg = func_scg("test_call", vec![], vec![
-            ScgStatement::Call(CallNode {
-                dst: Some("result".into()),
-                func: "compute".into(),
-                args: vec![ScgExpr::Int(42), ScgExpr::Int(7)],
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
-        ]);
+        let scg = func_scg(
+            "test_call",
+            vec![],
+            vec![
+                ScgStatement::Call(CallNode {
+                    dst: Some("result".into()),
+                    func: "compute".into(),
+                    args: vec![ScgExpr::Int(42), ScgExpr::Int(7)],
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let call_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Call { func, .. } if func == "compute")
-        });
+        let call_instr = block
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Call { func, .. } if func == "compute"));
         assert!(call_instr.is_some());
         if let Some(IRInstruction::Call { args, dst, .. }) = call_instr {
             assert_eq!(args.len(), 2);
@@ -1864,47 +1961,64 @@ mod tests {
 
     #[test]
     fn test_specific_arithmetic() {
-        let scg = func_scg("test_arith", vec![ScgParam {
-            name: "a".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "s".into(), op: BinOpKind::Sub,
-                lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Int(1),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "m".into(), op: BinOpKind::Mul,
-                lhs: ScgExpr::Var("s".into()), rhs: ScgExpr::Int(2),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "d".into(), op: BinOpKind::SDiv,
-                lhs: ScgExpr::Var("m".into()), rhs: ScgExpr::Int(4),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("d".into())]),
-        ]);
+        let scg = func_scg(
+            "test_arith",
+            vec![ScgParam {
+                name: "a".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "s".into(),
+                    op: BinOpKind::Sub,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(1),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "m".into(),
+                    op: BinOpKind::Mul,
+                    lhs: ScgExpr::Var("s".into()),
+                    rhs: ScgExpr::Int(2),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "d".into(),
+                    op: BinOpKind::SDiv,
+                    lhs: ScgExpr::Var("m".into()),
+                    rhs: ScgExpr::Int(4),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("d".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Sub { .. })));
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Mul { .. })));
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Div { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Sub { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Mul { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Div { .. })));
     }
 
     // ── Test 14: Data section ────────────────────────────────────────
 
     #[test]
     fn test_data_section() {
-        let scg = scg_from_nodes(vec![
-            ScgNode::Data(ScgData {
-                name: "rodata".into(),
-                kind: DataSectionKind::ReadOnly,
-                align: 16,
-                data: vec![1, 2, 3, 4],
-            }),
-        ]);
+        let scg = scg_from_nodes(vec![ScgNode::Data(ScgData {
+            name: "rodata".into(),
+            kind: DataSectionKind::ReadOnly,
+            align: 16,
+            data: vec![1, 2, 3, 4],
+        })]);
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         assert_eq!(program.data_sections.len(), 1);
@@ -1941,19 +2055,23 @@ mod tests {
 
     #[test]
     fn test_virtual_register_naming() {
-        let scg = func_scg("test_vreg", vec![ScgParam {
-            name: "input".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "output".into(),
-                op: BinOpKind::Add,
-                lhs: ScgExpr::Var("input".into()),
-                rhs: ScgExpr::Int(10),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("output".into())]),
-        ]);
+        let scg = func_scg(
+            "test_vreg",
+            vec![ScgParam {
+                name: "input".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "output".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("input".into()),
+                    rhs: ScgExpr::Int(10),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("output".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -1964,7 +2082,10 @@ mod tests {
         assert_eq!(param_vreg.name(), Some("input"));
 
         // Check that the computation result vreg is named
-        let add_instr = func.blocks[0].instructions.iter().find(|i| matches!(i, IRInstruction::Add { .. }));
+        let add_instr = func.blocks[0]
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Add { .. }));
         if let Some(IRInstruction::Add { dst, .. }) = add_instr {
             let dst_id = dst.as_register().unwrap();
             let dst_vreg = func.get_vreg(dst_id).unwrap();
@@ -1976,9 +2097,11 @@ mod tests {
 
     #[test]
     fn test_break_outside_loop_error() {
-        let scg = func_scg("bad_break", vec![], vec![
-            ScgStatement::Control(ControlNode::Break),
-        ]);
+        let scg = func_scg(
+            "bad_break",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::Break)],
+        );
         let mut builder = IRBuilder::new();
         let result = builder.build(&scg);
         assert!(result.is_err(), "break outside of loop should fail");
@@ -1988,9 +2111,11 @@ mod tests {
 
     #[test]
     fn test_continue_outside_loop_error() {
-        let scg = func_scg("bad_continue", vec![], vec![
-            ScgStatement::Control(ControlNode::Continue),
-        ]);
+        let scg = func_scg(
+            "bad_continue",
+            vec![],
+            vec![ScgStatement::Control(ControlNode::Continue)],
+        );
         let mut builder = IRBuilder::new();
         let result = builder.build(&scg);
         assert!(result.is_err(), "continue outside of loop should fail");
@@ -2002,32 +2127,33 @@ mod tests {
     fn test_cfg_computed() {
         // Use an if/else where neither branch returns, so both fall through
         // to the merge block.  This ensures the merge block gets predecessors.
-        let scg = func_scg("test_cfg", vec![ScgParam {
-            name: "c".into(),
-            ty: ScgType::I64,
-        }], vec![ScgStatement::Control(ControlNode::If {
-            cond: ScgExpr::Var("c".into()),
-            then_body: vec![
-                ScgStatement::Computation(ComputationNode {
-                    dst: "x".into(),
-                    op: BinOpKind::Add,
-                    lhs: ScgExpr::Int(1),
-                    rhs: ScgExpr::Int(2),
-    tail_call: false,
+        let scg = func_scg(
+            "test_cfg",
+            vec![ScgParam {
+                name: "c".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Control(ControlNode::If {
+                    cond: ScgExpr::Var("c".into()),
+                    then_body: vec![ScgStatement::Computation(ComputationNode {
+                        dst: "x".into(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Int(1),
+                        rhs: ScgExpr::Int(2),
+                        tail_call: false,
+                    })],
+                    else_body: Some(vec![ScgStatement::Computation(ComputationNode {
+                        dst: "y".into(),
+                        op: BinOpKind::Sub,
+                        lhs: ScgExpr::Int(5),
+                        rhs: ScgExpr::Int(3),
+                        tail_call: false,
+                    })]),
                 }),
+                ScgStatement::Return(vec![]),
             ],
-            else_body: Some(vec![
-                ScgStatement::Computation(ComputationNode {
-                    dst: "y".into(),
-                    op: BinOpKind::Sub,
-                    lhs: ScgExpr::Int(5),
-                    rhs: ScgExpr::Int(3),
-    tail_call: false,
-                }),
-            ]),
-        }),
-        ScgStatement::Return(vec![]),
-        ]);
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -2037,11 +2163,16 @@ mod tests {
         let merge_block = func.blocks.iter().find(|b| b.label.contains("merge"));
         assert!(merge_block.is_some(), "should have a merge block");
         let merge = merge_block.unwrap();
-        assert!(!merge.predecessors.is_empty(),
-            "merge block should have at least one predecessor");
+        assert!(
+            !merge.predecessors.is_empty(),
+            "merge block should have at least one predecessor"
+        );
 
         // The entry block should have a conditional branch terminator
-        assert!(matches!(func.blocks[0].terminator, IRTerminator::Branch { .. }));
+        assert!(matches!(
+            func.blocks[0].terminator,
+            IRTerminator::Branch { .. }
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2052,23 +2183,33 @@ mod tests {
 
     #[test]
     fn test_unary_neg() {
-        let scg = func_scg("test_neg", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::UnaryComputation(UnaryComputationNode {
-                dst: "negated".into(),
-                op: UnaryOpKind::Neg,
-                operand: ScgExpr::Var("x".into()),
-            tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("negated".into())]),
-        ]);
+        let scg = func_scg(
+            "test_neg",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::UnaryComputation(UnaryComputationNode {
+                    dst: "negated".into(),
+                    op: UnaryOpKind::Neg,
+                    operand: ScgExpr::Var("x".into()),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("negated".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         let unary_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::UnaryOp { op: UnaryOpKind::Neg, .. })
+            matches!(
+                i,
+                IRInstruction::UnaryOp {
+                    op: UnaryOpKind::Neg,
+                    ..
+                }
+            )
         });
         assert!(unary_instr.is_some(), "should have a Neg unary instruction");
     }
@@ -2077,23 +2218,33 @@ mod tests {
 
     #[test]
     fn test_unary_not() {
-        let scg = func_scg("test_not", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::UnaryComputation(UnaryComputationNode {
-                dst: "inverted".into(),
-                op: UnaryOpKind::Not,
-                operand: ScgExpr::Var("x".into()),
-            tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("inverted".into())]),
-        ]);
+        let scg = func_scg(
+            "test_not",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::UnaryComputation(UnaryComputationNode {
+                    dst: "inverted".into(),
+                    op: UnaryOpKind::Not,
+                    operand: ScgExpr::Var("x".into()),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("inverted".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         let unary_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::UnaryOp { op: UnaryOpKind::Not, .. })
+            matches!(
+                i,
+                IRInstruction::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    ..
+                }
+            )
         });
         assert!(unary_instr.is_some(), "should have a Not unary instruction");
     }
@@ -2102,23 +2253,33 @@ mod tests {
 
     #[test]
     fn test_unary_clz() {
-        let scg = func_scg("test_clz", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::U64,
-        }], vec![
-            ScgStatement::UnaryComputation(UnaryComputationNode {
-                dst: "leading_zeros".into(),
-                op: UnaryOpKind::Clz,
-                operand: ScgExpr::Var("x".into()),
-            tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("leading_zeros".into())]),
-        ]);
+        let scg = func_scg(
+            "test_clz",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::U64,
+            }],
+            vec![
+                ScgStatement::UnaryComputation(UnaryComputationNode {
+                    dst: "leading_zeros".into(),
+                    op: UnaryOpKind::Clz,
+                    operand: ScgExpr::Var("x".into()),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("leading_zeros".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         assert!(block.instructions.iter().any(|i| {
-            matches!(i, IRInstruction::UnaryOp { op: UnaryOpKind::Clz, .. })
+            matches!(
+                i,
+                IRInstruction::UnaryOp {
+                    op: UnaryOpKind::Clz,
+                    ..
+                }
+            )
         }));
     }
 
@@ -2126,39 +2287,58 @@ mod tests {
 
     #[test]
     fn test_comparison_to_cmp() {
-        let scg = func_scg("test_cmp", vec![ScgParam {
-            name: "a".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "less".into(),
-                op: BinOpKind::SLt,
-                lhs: ScgExpr::Var("a".into()),
-                rhs: ScgExpr::Int(10),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "equal".into(),
-                op: BinOpKind::Eq,
-                lhs: ScgExpr::Var("a".into()),
-                rhs: ScgExpr::Int(0),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("less".into()), ScgExpr::Var("equal".into())]),
-        ]);
+        let scg = func_scg(
+            "test_cmp",
+            vec![ScgParam {
+                name: "a".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "less".into(),
+                    op: BinOpKind::SLt,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(10),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "equal".into(),
+                    op: BinOpKind::Eq,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![
+                    ScgExpr::Var("less".into()),
+                    ScgExpr::Var("equal".into()),
+                ]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
 
         // SLt should produce a Cmp instruction
         let slt_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::SLt, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::SLt,
+                    ..
+                }
+            )
         });
         assert!(slt_instr.is_some(), "SLt should lower to Cmp instruction");
 
         // Eq should produce a Cmp instruction
         let eq_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::Eq, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::Eq,
+                    ..
+                }
+            )
         });
         assert!(eq_instr.is_some(), "Eq should lower to Cmp instruction");
     }
@@ -2167,37 +2347,53 @@ mod tests {
 
     #[test]
     fn test_unsigned_comparisons() {
-        let scg = func_scg("test_ucmp", vec![ScgParam {
-            name: "a".into(),
-            ty: ScgType::U64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "ult".into(),
-                op: BinOpKind::ULt,
-                lhs: ScgExpr::Var("a".into()),
-                rhs: ScgExpr::Int(10),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "uge".into(),
-                op: BinOpKind::UGe,
-                lhs: ScgExpr::Var("a".into()),
-                rhs: ScgExpr::Int(5),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("ult".into()), ScgExpr::Var("uge".into())]),
-        ]);
+        let scg = func_scg(
+            "test_ucmp",
+            vec![ScgParam {
+                name: "a".into(),
+                ty: ScgType::U64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "ult".into(),
+                    op: BinOpKind::ULt,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(10),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "uge".into(),
+                    op: BinOpKind::UGe,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(5),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("ult".into()), ScgExpr::Var("uge".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
 
         let ult_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::ULt, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::ULt,
+                    ..
+                }
+            )
         });
         assert!(ult_instr.is_some(), "ULt should lower to Cmp instruction");
 
         let uge_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::UGe, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::UGe,
+                    ..
+                }
+            )
         });
         assert!(uge_instr.is_some(), "UGe should lower to Cmp instruction");
     }
@@ -2222,12 +2418,20 @@ mod tests {
 
     #[test]
     fn test_param_types_mapped() {
-        let scg = func_scg("typed_fn", vec![
-            ScgParam { name: "a".into(), ty: ScgType::I32 },
-            ScgParam { name: "b".into(), ty: ScgType::Ptr },
-        ], vec![
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "typed_fn",
+            vec![
+                ScgParam {
+                    name: "a".into(),
+                    ty: ScgType::I32,
+                },
+                ScgParam {
+                    name: "b".into(),
+                    ty: ScgType::Ptr,
+                },
+            ],
+            vec![ScgStatement::Return(vec![])],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -2240,33 +2444,33 @@ mod tests {
 
     #[test]
     fn test_if_else_phi_nodes() {
-        let scg = func_scg("test_phi", vec![ScgParam {
-            name: "flag".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Control(ControlNode::If {
-                cond: ScgExpr::Var("flag".into()),
-                then_body: vec![
-                    ScgStatement::Computation(ComputationNode {
+        let scg = func_scg(
+            "test_phi",
+            vec![ScgParam {
+                name: "flag".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Control(ControlNode::If {
+                    cond: ScgExpr::Var("flag".into()),
+                    then_body: vec![ScgStatement::Computation(ComputationNode {
                         dst: "x".into(),
                         op: BinOpKind::Add,
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
-    tail_call: false,
-                    }),
-                ],
-                else_body: Some(vec![
-                    ScgStatement::Computation(ComputationNode {
+                        tail_call: false,
+                    })],
+                    else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "x".into(),
                         op: BinOpKind::Sub,
                         lhs: ScgExpr::Int(10),
                         rhs: ScgExpr::Int(3),
-    tail_call: false,
-                    }),
-                ]),
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("x".into())]),
-        ]);
+                        tail_call: false,
+                    })]),
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("x".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -2275,11 +2479,14 @@ mod tests {
         let merge_block = func.blocks.iter().find(|b| b.label.contains("merge"));
         assert!(merge_block.is_some(), "should have a merge block");
         let merge = merge_block.unwrap();
-        let phi_instr = merge.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Phi { .. })
-        });
-        assert!(phi_instr.is_some(),
-            "merge block should have a phi node for variable 'x' defined in both branches");
+        let phi_instr = merge
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Phi { .. }));
+        assert!(
+            phi_instr.is_some(),
+            "merge block should have a phi node for variable 'x' defined in both branches"
+        );
     }
 
     // ── Test 28: Topological sort of statements ──────────────────────
@@ -2288,14 +2495,18 @@ mod tests {
     fn test_topological_sort_basic() {
         let stmts = vec![
             ScgStatement::Computation(ComputationNode {
-                dst: "a".into(), op: BinOpKind::Add,
-                lhs: ScgExpr::Int(1), rhs: ScgExpr::Int(2),
-    tail_call: false,
+                dst: "a".into(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Int(1),
+                rhs: ScgExpr::Int(2),
+                tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
-                dst: "b".into(), op: BinOpKind::Add,
-                lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Int(3),
-    tail_call: false,
+                dst: "b".into(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("a".into()),
+                rhs: ScgExpr::Int(3),
+                tail_call: false,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("b".into())]),
         ];
@@ -2313,19 +2524,25 @@ mod tests {
     fn test_topological_sort_independent() {
         let stmts = vec![
             ScgStatement::Computation(ComputationNode {
-                dst: "a".into(), op: BinOpKind::Add,
-                lhs: ScgExpr::Int(1), rhs: ScgExpr::Int(2),
-    tail_call: false,
+                dst: "a".into(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Int(1),
+                rhs: ScgExpr::Int(2),
+                tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
-                dst: "b".into(), op: BinOpKind::Mul,
-                lhs: ScgExpr::Int(3), rhs: ScgExpr::Int(4),
-    tail_call: false,
+                dst: "b".into(),
+                op: BinOpKind::Mul,
+                lhs: ScgExpr::Int(3),
+                rhs: ScgExpr::Int(4),
+                tail_call: false,
             }),
             ScgStatement::Computation(ComputationNode {
-                dst: "c".into(), op: BinOpKind::Add,
-                lhs: ScgExpr::Var("a".into()), rhs: ScgExpr::Var("b".into()),
-    tail_call: false,
+                dst: "c".into(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("a".into()),
+                rhs: ScgExpr::Var("b".into()),
+                tail_call: false,
             }),
         ];
         let order = IRBuilder::topological_sort_statements(&stmts);
@@ -2351,66 +2568,91 @@ mod tests {
 
     #[test]
     fn test_load_without_offset() {
-        let scg = func_scg("test_load_plain", vec![ScgParam {
-            name: "ptr".into(),
-            ty: ScgType::Ptr,
-        }], vec![
-            ScgStatement::Access(AccessNode::Load {
-                dst: "val".into(),
-                ptr: ScgExpr::Var("ptr".into()),
-                offset: None,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("val".into())]),
-        ]);
+        let scg = func_scg(
+            "test_load_plain",
+            vec![ScgParam {
+                name: "ptr".into(),
+                ty: ScgType::Ptr,
+            }],
+            vec![
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "val".into(),
+                    ptr: ScgExpr::Var("ptr".into()),
+                    offset: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("val".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         // Should have Load but no Offset
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Load { .. })));
-        assert!(!block.instructions.iter().any(|i| matches!(i, IRInstruction::Offset { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Load { .. })));
+        assert!(!block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Offset { .. })));
     }
 
     // ── Test 32: Store without offset ────────────────────────────────
 
     #[test]
     fn test_store_without_offset() {
-        let scg = func_scg("test_store_plain", vec![ScgParam {
-            name: "ptr".into(),
-            ty: ScgType::Ptr,
-        }], vec![
-            ScgStatement::Access(AccessNode::Store {
-                ptr: ScgExpr::Var("ptr".into()),
-                offset: None,
-                value: ScgExpr::Int(42),
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_store_plain",
+            vec![ScgParam {
+                name: "ptr".into(),
+                ty: ScgType::Ptr,
+            }],
+            vec![
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var("ptr".into()),
+                    offset: None,
+                    value: ScgExpr::Int(42),
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         // Should have Store but no Offset
-        assert!(block.instructions.iter().any(|i| matches!(i, IRInstruction::Store { .. })));
-        assert!(!block.instructions.iter().any(|i| matches!(i, IRInstruction::Offset { .. })));
+        assert!(block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Store { .. })));
+        assert!(!block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstruction::Offset { .. })));
     }
 
     // ── Test 33: Function call without return value ──────────────────
 
     #[test]
     fn test_void_function_call() {
-        let scg = func_scg("test_void_call", vec![], vec![
-            ScgStatement::Call(CallNode {
-                dst: None,
-                func: "print_int".into(),
-                args: vec![ScgExpr::Int(123)],
-            }),
-            ScgStatement::Return(vec![]),
-        ]);
+        let scg = func_scg(
+            "test_void_call",
+            vec![],
+            vec![
+                ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "print_int".into(),
+                    args: vec![ScgExpr::Int(123)],
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let call_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Call { func, .. } if func == "print_int")
-        });
+        let call_instr = block
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Call { func, .. } if func == "print_int"));
         assert!(call_instr.is_some());
         if let Some(IRInstruction::Call { dst, args, .. }) = call_instr {
             assert!(dst.is_none(), "void call should have no dst");
@@ -2422,35 +2664,59 @@ mod tests {
 
     #[test]
     fn test_multiple_casts() {
-        let scg = func_scg("test_multi_cast", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I8,
-        }], vec![
-            ScgStatement::Cast(CastNode {
-                dst: "wider".into(),
-                src: ScgExpr::Var("x".into()),
-                kind: CastKind::ZExt,
-                from_ty: ScgType::I8,
-                to_ty: ScgType::I64,
-            }),
-            ScgStatement::Cast(CastNode {
-                dst: "narrow".into(),
-                src: ScgExpr::Var("wider".into()),
-                kind: CastKind::Trunc,
-                from_ty: ScgType::I64,
-                to_ty: ScgType::I32,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("narrow".into())]),
-        ]);
+        let scg = func_scg(
+            "test_multi_cast",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I8,
+            }],
+            vec![
+                ScgStatement::Cast(CastNode {
+                    dst: "wider".into(),
+                    src: ScgExpr::Var("x".into()),
+                    kind: CastKind::ZExt,
+                    from_ty: ScgType::I8,
+                    to_ty: ScgType::I64,
+                }),
+                ScgStatement::Cast(CastNode {
+                    dst: "narrow".into(),
+                    src: ScgExpr::Var("wider".into()),
+                    kind: CastKind::Trunc,
+                    from_ty: ScgType::I64,
+                    to_ty: ScgType::I32,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("narrow".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let zext_count = block.instructions.iter().filter(|i| {
-            matches!(i, IRInstruction::Cast { kind: CastKind::ZExt, .. })
-        }).count();
-        let trunc_count = block.instructions.iter().filter(|i| {
-            matches!(i, IRInstruction::Cast { kind: CastKind::Trunc, .. })
-        }).count();
+        let zext_count = block
+            .instructions
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    IRInstruction::Cast {
+                        kind: CastKind::ZExt,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let trunc_count = block
+            .instructions
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    IRInstruction::Cast {
+                        kind: CastKind::Trunc,
+                        ..
+                    }
+                )
+            })
+            .count();
         assert_eq!(zext_count, 1, "should have exactly one ZExt cast");
         assert_eq!(trunc_count, 1, "should have exactly one Trunc cast");
     }
@@ -2459,37 +2725,56 @@ mod tests {
 
     #[test]
     fn test_bitwise_binop() {
-        let scg = func_scg("test_bitwise", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "and_result".into(),
-                op: BinOpKind::And,
-                lhs: ScgExpr::Var("x".into()),
-                rhs: ScgExpr::Int(0xFF),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "or_result".into(),
-                op: BinOpKind::Or,
-                lhs: ScgExpr::Var("x".into()),
-                rhs: ScgExpr::Int(0x100),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("and_result".into()), ScgExpr::Var("or_result".into())]),
-        ]);
+        let scg = func_scg(
+            "test_bitwise",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "and_result".into(),
+                    op: BinOpKind::And,
+                    lhs: ScgExpr::Var("x".into()),
+                    rhs: ScgExpr::Int(0xFF),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "or_result".into(),
+                    op: BinOpKind::Or,
+                    lhs: ScgExpr::Var("x".into()),
+                    rhs: ScgExpr::Int(0x100),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![
+                    ScgExpr::Var("and_result".into()),
+                    ScgExpr::Var("or_result".into()),
+                ]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
 
         let and_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::BinOp { op: BinOpKind::And, .. })
+            matches!(
+                i,
+                IRInstruction::BinOp {
+                    op: BinOpKind::And,
+                    ..
+                }
+            )
         });
         assert!(and_instr.is_some(), "And should use BinOp instruction");
 
         let or_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::BinOp { op: BinOpKind::Or, .. })
+            matches!(
+                i,
+                IRInstruction::BinOp {
+                    op: BinOpKind::Or,
+                    ..
+                }
+            )
         });
         assert!(or_instr.is_some(), "Or should use BinOp instruction");
     }
@@ -2498,17 +2783,15 @@ mod tests {
 
     #[test]
     fn test_result_types_mapped() {
-        let scg = scg_from_nodes(vec![
-            ScgNode::Function(ScgFunction {
-                name: "typed_ret".into(),
-                params: vec![],
-                results: vec![ScgType::I64, ScgType::Ptr],
-                body: vec![ScgStatement::Return(vec![
-                    ScgExpr::Int(42),
-                    ScgExpr::Int(0),
-                ])],
-            }),
-        ]);
+        let scg = scg_from_nodes(vec![ScgNode::Function(ScgFunction {
+            name: "typed_ret".into(),
+            params: vec![],
+            results: vec![ScgType::I64, ScgType::Ptr],
+            body: vec![ScgStatement::Return(vec![
+                ScgExpr::Int(42),
+                ScgExpr::Int(0),
+            ])],
+        })]);
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -2521,107 +2804,140 @@ mod tests {
 
     #[test]
     fn test_nested_if() {
-        let scg = func_scg("test_nested_if", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Control(ControlNode::If {
+        let scg = func_scg(
+            "test_nested_if",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![ScgStatement::Control(ControlNode::If {
                 cond: ScgExpr::Var("x".into()),
-                then_body: vec![
-                    ScgStatement::Control(ControlNode::If {
-                        cond: ScgExpr::Int(1),
-                        then_body: vec![ScgStatement::Return(vec![])],
-                        else_body: None,
-                    }),
-                ],
-                else_body: Some(vec![
-                    ScgStatement::Return(vec![]),
-                ]),
-            }),
-        ]);
+                then_body: vec![ScgStatement::Control(ControlNode::If {
+                    cond: ScgExpr::Int(1),
+                    then_body: vec![ScgStatement::Return(vec![])],
+                    else_body: None,
+                })],
+                else_body: Some(vec![ScgStatement::Return(vec![])]),
+            })],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
         // Should have multiple blocks for the nested structure
-        assert!(func.blocks.len() >= 5,
+        assert!(
+            func.blocks.len() >= 5,
             "nested if/else should produce at least 5 blocks, got {}",
-            func.blocks.len());
+            func.blocks.len()
+        );
     }
 
     // ── Test 38: Combined allocation + access pattern ────────────────
 
     #[test]
     fn test_alloc_access_pattern() {
-        let scg = func_scg("test_alloc_access", vec![], vec![
-            ScgStatement::Allocation(AllocationNode::Stack {
-                name: "buf".into(),
-                size: 32,
-                ty: ScgType::U8,
-            }),
-            ScgStatement::Access(AccessNode::Store {
-                ptr: ScgExpr::Var("buf".into()),
-                offset: None,
-                value: ScgExpr::Int(99),
-            }),
-            ScgStatement::Access(AccessNode::Load {
-                dst: "loaded".into(),
-                ptr: ScgExpr::Var("buf".into()),
-                offset: None,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("loaded".into())]),
-        ]);
+        let scg = func_scg(
+            "test_alloc_access",
+            vec![],
+            vec![
+                ScgStatement::Allocation(AllocationNode::Stack {
+                    name: "buf".into(),
+                    size: 32,
+                    ty: ScgType::U8,
+                }),
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var("buf".into()),
+                    offset: None,
+                    value: ScgExpr::Int(99),
+                }),
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "loaded".into(),
+                    ptr: ScgExpr::Var("buf".into()),
+                    offset: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("loaded".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
 
         // Should have: Alloc, Store, Load in that order
-        let alloc_pos = block.instructions.iter().position(|i| matches!(i, IRInstruction::Alloc { .. }));
-        let store_pos = block.instructions.iter().position(|i| matches!(i, IRInstruction::Store { .. }));
-        let load_pos = block.instructions.iter().position(|i| matches!(i, IRInstruction::Load { .. }));
+        let alloc_pos = block
+            .instructions
+            .iter()
+            .position(|i| matches!(i, IRInstruction::Alloc { .. }));
+        let store_pos = block
+            .instructions
+            .iter()
+            .position(|i| matches!(i, IRInstruction::Store { .. }));
+        let load_pos = block
+            .instructions
+            .iter()
+            .position(|i| matches!(i, IRInstruction::Load { .. }));
         assert!(alloc_pos.is_some(), "should have Alloc");
         assert!(store_pos.is_some(), "should have Store");
         assert!(load_pos.is_some(), "should have Load");
-        assert!(alloc_pos.unwrap() < store_pos.unwrap(),
-            "Alloc should come before Store");
-        assert!(store_pos.unwrap() < load_pos.unwrap(),
-            "Store should come before Load");
+        assert!(
+            alloc_pos.unwrap() < store_pos.unwrap(),
+            "Alloc should come before Store"
+        );
+        assert!(
+            store_pos.unwrap() < load_pos.unwrap(),
+            "Store should come before Load"
+        );
     }
 
     // ── Test 39: Ne and SGe comparisons ──────────────────────────────
 
     #[test]
     fn test_ne_sge_comparisons() {
-        let scg = func_scg("test_ne_sge", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Computation(ComputationNode {
-                dst: "ne".into(),
-                op: BinOpKind::Ne,
-                lhs: ScgExpr::Var("x".into()),
-                rhs: ScgExpr::Int(0),
-    tail_call: false,
-            }),
-            ScgStatement::Computation(ComputationNode {
-                dst: "sge".into(),
-                op: BinOpKind::SGe,
-                lhs: ScgExpr::Var("x".into()),
-                rhs: ScgExpr::Int(0),
-    tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("ne".into()), ScgExpr::Var("sge".into())]),
-        ]);
+        let scg = func_scg(
+            "test_ne_sge",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Computation(ComputationNode {
+                    dst: "ne".into(),
+                    op: BinOpKind::Ne,
+                    lhs: ScgExpr::Var("x".into()),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                }),
+                ScgStatement::Computation(ComputationNode {
+                    dst: "sge".into(),
+                    op: BinOpKind::SGe,
+                    lhs: ScgExpr::Var("x".into()),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("ne".into()), ScgExpr::Var("sge".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
 
         let ne_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::Ne, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::Ne,
+                    ..
+                }
+            )
         });
         assert!(ne_instr.is_some(), "Ne should lower to Cmp");
 
         let sge_instr = block.instructions.iter().find(|i| {
-            matches!(i, IRInstruction::Cmp { kind: CmpKind::SGe, .. })
+            matches!(
+                i,
+                IRInstruction::Cmp {
+                    kind: CmpKind::SGe,
+                    ..
+                }
+            )
         });
         assert!(sge_instr.is_some(), "SGe should lower to Cmp");
     }
@@ -2630,23 +2946,33 @@ mod tests {
 
     #[test]
     fn test_unary_popcnt() {
-        let scg = func_scg("test_popcnt", vec![ScgParam {
-            name: "x".into(),
-            ty: ScgType::U64,
-        }], vec![
-            ScgStatement::UnaryComputation(UnaryComputationNode {
-                dst: "bits".into(),
-                op: UnaryOpKind::Popcnt,
-                operand: ScgExpr::Var("x".into()),
-            tail_call: false,
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("bits".into())]),
-        ]);
+        let scg = func_scg(
+            "test_popcnt",
+            vec![ScgParam {
+                name: "x".into(),
+                ty: ScgType::U64,
+            }],
+            vec![
+                ScgStatement::UnaryComputation(UnaryComputationNode {
+                    dst: "bits".into(),
+                    op: UnaryOpKind::Popcnt,
+                    operand: ScgExpr::Var("x".into()),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("bits".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
         assert!(block.instructions.iter().any(|i| {
-            matches!(i, IRInstruction::UnaryOp { op: UnaryOpKind::Popcnt, .. })
+            matches!(
+                i,
+                IRInstruction::UnaryOp {
+                    op: UnaryOpKind::Popcnt,
+                    ..
+                }
+            )
         }));
     }
 
@@ -2654,24 +2980,28 @@ mod tests {
 
     #[test]
     fn test_loop_with_computation_and_break() {
-        let scg = func_scg("test_loop_comp", vec![ScgParam {
-            name: "n".into(),
-            ty: ScgType::I64,
-        }], vec![
-            ScgStatement::Control(ControlNode::Loop {
-                body: vec![
-                    ScgStatement::Computation(ComputationNode {
-                        dst: "sum".into(),
-                        op: BinOpKind::Add,
-                        lhs: ScgExpr::Var("n".into()),
-                        rhs: ScgExpr::Int(1),
-    tail_call: false,
-                    }),
-                    ScgStatement::Control(ControlNode::Break),
-                ],
-            }),
-            ScgStatement::Return(vec![ScgExpr::Var("sum".into())]),
-        ]);
+        let scg = func_scg(
+            "test_loop_comp",
+            vec![ScgParam {
+                name: "n".into(),
+                ty: ScgType::I64,
+            }],
+            vec![
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "sum".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("n".into()),
+                            rhs: ScgExpr::Int(1),
+                            tail_call: false,
+                        }),
+                        ScgStatement::Control(ControlNode::Break),
+                    ],
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("sum".into())]),
+            ],
+        );
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let func = &program.functions[0];
@@ -2682,14 +3012,22 @@ mod tests {
 
         // Loop header should have phi
         if let Some(h) = header {
-            assert!(h.instructions.iter().any(|i| matches!(i, IRInstruction::Phi { .. })));
+            assert!(h
+                .instructions
+                .iter()
+                .any(|i| matches!(i, IRInstruction::Phi { .. })));
         }
 
         // Should have an Add instruction in the loop body
-        let add_count = func.blocks.iter()
+        let add_count = func
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .filter(|i| matches!(i, IRInstruction::Add { .. }))
             .count();
-        assert!(add_count >= 1, "should have at least one Add in the loop body");
+        assert!(
+            add_count >= 1,
+            "should have at least one Add in the loop body"
+        );
     }
 }

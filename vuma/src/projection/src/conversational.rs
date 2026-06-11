@@ -277,7 +277,8 @@ impl<'a> SuggestionEngine<'a> {
         // Rate limiting / throttling
         if intent_lower.contains("rate limit") || intent_lower.contains("throttle") {
             // Try to find an existing Effect or Function node to annotate
-            let target = self.find_node_by_keywords(&["handler", "api", "endpoint", "request", "service"]);
+            let target =
+                self.find_node_by_keywords(&["handler", "api", "endpoint", "request", "service"]);
             edits.push(SCGEdit::AddNode {
                 label: "rate_limiter".into(),
                 kind: NodeKind::Effect,
@@ -292,8 +293,12 @@ impl<'a> SuggestionEngine<'a> {
         }
 
         // Thread safety
-        if intent_lower.contains("thread-safe") || intent_lower.contains("send") || intent_lower.contains("sync") {
-            let target = self.find_node_by_keywords(&["handler", "worker", "task", "thread", "pool"]);
+        if intent_lower.contains("thread-safe")
+            || intent_lower.contains("send")
+            || intent_lower.contains("sync")
+        {
+            let target =
+                self.find_node_by_keywords(&["handler", "worker", "task", "thread", "pool"]);
             edits.push(SCGEdit::ChangeBD {
                 node_id: target,
                 bd_name: "Send".into(),
@@ -561,8 +566,7 @@ impl ConversationalProjection {
 
         // Regions.
         if !scg.regions.is_empty() {
-            let region_names: Vec<&str> =
-                scg.regions.iter().map(|r| r.name.as_str()).collect();
+            let region_names: Vec<&str> = scg.regions.iter().map(|r| r.name.as_str()).collect();
             parts.push(format!(
                 "It is organised into {} region(s): {}.",
                 scg.regions.len(),
@@ -661,10 +665,7 @@ impl ConversationalProjection {
                         .get_node(e.target)
                         .map(|n| n.label.as_str())
                         .unwrap_or("?");
-                    format!(
-                        "  - {} ──{:?}──▶ {}",
-                        src_label, e.kind, tgt_label
-                    )
+                    format!("  - {} ──{:?}──▶ {}", src_label, e.kind, tgt_label)
                 })
                 .collect();
             paragraphs.push(format!("Edge catalogue:\n{}", edge_lines.join("\n")));
@@ -836,9 +837,7 @@ impl ConversationalProjection {
         let internal_edges: Vec<&crate::SCGEdge> = scg
             .edges
             .iter()
-            .filter(|e| {
-                region.nodes.contains(&e.source) && region.nodes.contains(&e.target)
-            })
+            .filter(|e| region.nodes.contains(&e.source) && region.nodes.contains(&e.target))
             .collect();
 
         if !internal_edges.is_empty() {
@@ -866,10 +865,7 @@ impl ConversationalProjection {
                 edge_parts.push(format!("{} message", msg_count));
             }
             if !edge_parts.is_empty() {
-                parts.push(format!(
-                    "Internal connections: {}.",
-                    edge_parts.join(", ")
-                ));
+                parts.push(format!("Internal connections: {}.", edge_parts.join(", ")));
             }
         }
 
@@ -937,16 +933,10 @@ impl ConversationalProjection {
                         .get_node(e.target)
                         .map(|n| n.label.as_str())
                         .unwrap_or("?");
-                    format!(
-                        "  - {} ──{:?}──▶ {} (crosses boundary)",
-                        src, e.kind, tgt
-                    )
+                    format!("  - {} ──{:?}──▶ {} (crosses boundary)", src, e.kind, tgt)
                 })
                 .collect();
-            parts.push(format!(
-                "External connections:\n{}",
-                ext_lines.join("\n")
-            ));
+            parts.push(format!("External connections:\n{}", ext_lines.join("\n")));
         }
 
         parts.join("\n")
@@ -963,10 +953,7 @@ impl ConversationalProjection {
         match self.verbosity {
             Verbosity::Brief => {
                 if result.is_ok() {
-                    format!(
-                        "All {} check(s) passed.",
-                        result.total_checks
-                    )
+                    format!("All {} check(s) passed.", result.total_checks)
                 } else {
                     format!(
                         "{} of {} check(s) failed.",
@@ -999,10 +986,7 @@ impl ConversationalProjection {
             let criticals = result.violations_by_severity(ViolationSeverity::Critical);
 
             if !criticals.is_empty() {
-                parts.push(format!(
-                    "{} critical violation(s) found.",
-                    criticals.len()
-                ));
+                parts.push(format!("{} critical violation(s) found.", criticals.len()));
             }
             if !errors.is_empty() {
                 parts.push(format!("{} error(s) found.", errors.len()));
@@ -1084,9 +1068,7 @@ impl ConversationalProjection {
             }
             // Unsafe dataflow violations.
             code if code.starts_with("EDGE-UNSAFE-") => {
-                let edge_type = code
-                    .strip_prefix("EDGE-UNSAFE-")
-                    .unwrap_or("unknown");
+                let edge_type = code.strip_prefix("EDGE-UNSAFE-").unwrap_or("unknown");
                 format!(
                     "The {} edge is considered unsafe. Consider adding a \
                      safety check or validation step along this edge, or \
@@ -1283,19 +1265,13 @@ impl ConversationalProjection {
                 .collect();
 
             if !data_targets.is_empty() {
-                parts.push(format!(
-                    "It sends data to: {}.",
-                    data_targets.join(", ")
-                ));
+                parts.push(format!("It sends data to: {}.", data_targets.join(", ")));
             }
             if !call_targets.is_empty() {
                 parts.push(format!("It calls: {}.", call_targets.join(", ")));
             }
             if !msg_targets.is_empty() {
-                parts.push(format!(
-                    "It sends messages to: {}.",
-                    msg_targets.join(", ")
-                ));
+                parts.push(format!("It sends messages to: {}.", msg_targets.join(", ")));
             }
         }
 
@@ -1308,10 +1284,7 @@ impl ConversationalProjection {
                         .unwrap_or_else(|| format!("node_{}", e.source))
                 })
                 .collect();
-            parts.push(format!(
-                "It receives input from: {}.",
-                sources.join(", ")
-            ));
+            parts.push(format!("It receives input from: {}.", sources.join(", ")));
         }
 
         // ── Region membership ─────────────────────────────────────────────
@@ -1553,7 +1526,8 @@ impl ConversationalProjection {
         // so no save/restore is needed.
 
         // Normal explanation.
-        let _normal = self.render_with_verbosity(Verbosity::Normal, |proj| proj.describe(scg, node_id));
+        let _normal =
+            self.render_with_verbosity(Verbosity::Normal, |proj| proj.describe(scg, node_id));
         // Detailed explanation.
         let detailed = self.render_with_verbosity(Verbosity::Detailed, |proj| {
             proj.describe_detailed(scg, node_id)
@@ -1571,7 +1545,14 @@ impl ConversationalProjection {
         for bd in &node.bds {
             key_facts.push((
                 format!("bd_{}", bd.name),
-                format!("{:?}{}", bd.kind, bd.parameter.as_ref().map(|p| format!("({})", p)).unwrap_or_default()),
+                format!(
+                    "{:?}{}",
+                    bd.kind,
+                    bd.parameter
+                        .as_ref()
+                        .map(|p| format!("({})", p))
+                        .unwrap_or_default()
+                ),
             ));
         }
 
@@ -1579,19 +1560,14 @@ impl ConversationalProjection {
             .iter()
             .map(|e| format!("node_{}", e.target))
             .chain(incoming.iter().map(|e| format!("node_{}", e.source)))
-            .chain(
-                node.regions
-                    .iter()
-                    .map(|&rid| format!("region_{}", rid)),
-            )
+            .chain(node.regions.iter().map(|&rid| format!("region_{}", rid)))
             .collect();
 
         AIExplainerOutput {
             entity_type: "node".into(),
             entity_id: node_id.to_string(),
-            explanation: self.render_with_verbosity(Verbosity::Normal, |proj| {
-                proj.describe(scg, node_id)
-            }),
+            explanation: self
+                .render_with_verbosity(Verbosity::Normal, |proj| proj.describe(scg, node_id)),
             brief_summary: brief,
             detailed_explanation: detailed,
             key_facts,
@@ -1687,16 +1663,16 @@ impl ConversationalProjection {
             ("total_checks".into(), result.total_checks.to_string()),
             ("passed".into(), result.passed.to_string()),
             ("failed".into(), result.failed().to_string()),
-            ("violation_count".into(), result.violation_count().to_string()),
+            (
+                "violation_count".into(),
+                result.violation_count().to_string(),
+            ),
         ];
 
         for v in &result.violations {
             key_facts.push((
                 format!("violation_{}", v.code),
-                format!(
-                    "{:?}: {}",
-                    v.severity, v.message
-                ),
+                format!("{:?}: {}", v.severity, v.message),
             ));
         }
 
@@ -1740,7 +1716,7 @@ impl ConversationalProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BehaviouralDescriptor, BdKind, SCGEdge, SCGNode, SCGRegion};
+    use crate::{BdKind, BehaviouralDescriptor, SCGEdge, SCGNode, SCGRegion};
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -1751,28 +1727,24 @@ mod tests {
                     id: 1,
                     label: "auth_handler".into(),
                     kind: NodeKind::Function,
-                    bds: vec![
-                        BehaviouralDescriptor {
-                            id: 100,
-                            name: "Send".into(),
-                            kind: BdKind::Capability,
-                            parameter: None,
-                        },
-                    ],
+                    bds: vec![BehaviouralDescriptor {
+                        id: 100,
+                        name: "Send".into(),
+                        kind: BdKind::Capability,
+                        parameter: None,
+                    }],
                     regions: vec![10],
                 },
                 SCGNode {
                     id: 2,
                     label: "session_token".into(),
                     kind: NodeKind::Value,
-                    bds: vec![
-                        BehaviouralDescriptor {
-                            id: 101,
-                            name: "Pin".into(),
-                            kind: BdKind::MemoryLayout,
-                            parameter: None,
-                        },
-                    ],
+                    bds: vec![BehaviouralDescriptor {
+                        id: 101,
+                        name: "Pin".into(),
+                        kind: BdKind::MemoryLayout,
+                        parameter: None,
+                    }],
                     regions: vec![10],
                 },
             ],
@@ -2012,7 +1984,9 @@ mod tests {
         let scg = SCG::empty();
         let edits = proj.suggest_modification(&scg, "add rate limiting to the API");
         assert!(!edits.is_empty());
-        assert!(edits.iter().any(|e| matches!(e, SCGEdit::AddNode { label, .. } if label == "rate_limiter")));
+        assert!(edits
+            .iter()
+            .any(|e| matches!(e, SCGEdit::AddNode { label, .. } if label == "rate_limiter")));
     }
 
     // ── Test 15: suggest_thread_safety ──────────────────────────────────
@@ -2022,7 +1996,9 @@ mod tests {
         let proj = ConversationalProjection::new();
         let scg = SCG::empty();
         let edits = proj.suggest_modification(&scg, "make auth_handler thread-safe");
-        assert!(edits.iter().any(|e| matches!(e, SCGEdit::ChangeBD { bd_name, .. } if bd_name == "Send")));
+        assert!(edits
+            .iter()
+            .any(|e| matches!(e, SCGEdit::ChangeBD { bd_name, .. } if bd_name == "Send")));
     }
 
     // ── Test 16: AI prompt for verification result ─────────────────────
@@ -2154,7 +2130,9 @@ mod tests {
         // Explain a node by its projection ID
         let node_desc = session.explain_node(alloc_id.as_u64());
         assert!(
-            node_desc.contains("alloc") || node_desc.contains("MyBuffer") || node_desc.contains("Allocation"),
+            node_desc.contains("alloc")
+                || node_desc.contains("MyBuffer")
+                || node_desc.contains("Allocation"),
             "Expected allocation node description, got: {}",
             node_desc
         );
@@ -2209,7 +2187,10 @@ mod tests {
         // Get conversational output
         let session = super::ConversationalSession::new(proj_scg.clone());
         let desc = session.render();
-        assert!(!desc.is_empty(), "Conversational output should not be empty");
+        assert!(
+            !desc.is_empty(),
+            "Conversational output should not be empty"
+        );
 
         // Convert back to real SCG
         let roundtrip_scg = crate::scg_adapter::to_scg(&proj_scg);
@@ -2228,7 +2209,9 @@ mod tests {
 
         // Verify node types are preserved where possible
         let orig_alloc_type = real_scg.get_node(alloc_id).map(|n| n.node_type.clone());
-        let rt_alloc_type = roundtrip_scg.get_node(alloc_id).map(|n| n.node_type.clone());
+        let rt_alloc_type = roundtrip_scg
+            .get_node(alloc_id)
+            .map(|n| n.node_type.clone());
         assert_eq!(
             orig_alloc_type, rt_alloc_type,
             "Allocation node type should be preserved in roundtrip"

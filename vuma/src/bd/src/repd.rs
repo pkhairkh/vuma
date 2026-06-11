@@ -194,7 +194,10 @@ impl std::hash::Hash for RepD {
                 }
                 f.result.hash(state);
             }
-            RepD::Generic { name, constraints: _ } => {
+            RepD::Generic {
+                name,
+                constraints: _,
+            } => {
                 // Hash only the name; constraints contain non-Hash types.
                 name.hash(state);
             }
@@ -218,12 +221,7 @@ impl RepD {
             RepD::Array(a) => a.element.size() * a.count,
             RepD::Enum(e) => {
                 // tag size (u64) + max variant size, aligned to 8
-                let max_variant = e
-                    .variants
-                    .iter()
-                    .map(|(_, v)| v.size())
-                    .max()
-                    .unwrap_or(0);
+                let max_variant = e.variants.iter().map(|(_, v)| v.size()).max().unwrap_or(0);
                 let tag_size = 8u64; // discriminant
                 let aligned_variant = align_to(max_variant, 8);
                 tag_size + aligned_variant
@@ -231,7 +229,7 @@ impl RepD {
             RepD::Ptr(_) => POINTER_SIZE,
             RepD::Union(u) => u.max_size,
             RepD::Func(_) => POINTER_SIZE, // function pointer
-            RepD::Generic { .. } => 0, // unknown until substituted
+            RepD::Generic { .. } => 0,     // unknown until substituted
         }
     }
 
@@ -329,8 +327,7 @@ impl RepD {
     /// but is directed (not symmetric).
     pub fn subsumes(&self, other: &RepD) -> bool {
         // Byte with matching size/alignment subsumes all.
-        if matches!(self, RepD::Byte(b) if b.size == other.size() && b.align == other.alignment())
-        {
+        if matches!(self, RepD::Byte(b) if b.size == other.size() && b.align == other.alignment()) {
             return true;
         }
         // Generic subsumes anything satisfying its constraints.
@@ -345,9 +342,7 @@ impl RepD {
                 a.fields
                     .iter()
                     .zip(&b.fields)
-                    .all(|((off_a, rep_a), (off_b, rep_b))| {
-                        off_a == off_b && rep_a.subsumes(rep_b)
-                    })
+                    .all(|((off_a, rep_a), (off_b, rep_b))| off_a == off_b && rep_a.subsumes(rep_b))
             }
             (RepD::Array(a), RepD::Array(b)) => {
                 a.count == b.count && a.element.subsumes(&b.element)
@@ -688,7 +683,10 @@ mod tests {
     #[test]
     fn ptr_size_alignment() {
         let p = RepD::Ptr(PtrRep {
-            pointee: Box::new(RepD::Byte(ByteRep { size: 16, align: 16 })),
+            pointee: Box::new(RepD::Byte(ByteRep {
+                size: 16,
+                align: 16,
+            })),
         });
         assert_eq!(p.size(), 8);
         assert_eq!(p.alignment(), 8);
@@ -784,7 +782,13 @@ mod tests {
     fn max_alignment_128() {
         let s = RepD::Struct(StructRep {
             fields: vec![
-                (0, RepD::Byte(ByteRep { size: 16, align: 16 })),
+                (
+                    0,
+                    RepD::Byte(ByteRep {
+                        size: 16,
+                        align: 16,
+                    }),
+                ),
                 (16, RepD::Byte(ByteRep { size: 4, align: 4 })),
             ],
             total_size: 32,
@@ -832,9 +836,12 @@ mod tests {
         let rep = RepD::Struct(StructRep {
             fields: vec![
                 (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
-                (4, RepD::Ptr(PtrRep {
-                    pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
-                })),
+                (
+                    4,
+                    RepD::Ptr(PtrRep {
+                        pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+                    }),
+                ),
             ],
             total_size: 12,
             align: 8,
@@ -955,9 +962,14 @@ mod tests {
 
     #[test]
     fn generic_no_constraints_compatible_with_anything() {
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
         let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
-        let ptr = RepD::Ptr(PtrRep { pointee: Box::new(byte.clone()) });
+        let ptr = RepD::Ptr(PtrRep {
+            pointee: Box::new(byte.clone()),
+        });
         assert!(g.compatible(&byte));
         assert!(byte.compatible(&g));
         assert!(g.compatible(&ptr));
@@ -966,34 +978,44 @@ mod tests {
 
     #[test]
     fn generic_size_and_alignment() {
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
         assert_eq!(g.size(), 0);
         assert_eq!(g.alignment(), 1);
     }
 
     #[test]
     fn generic_subsumes_concrete() {
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
         let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
         assert!(g.subsumes(&byte));
     }
 
     #[test]
     fn generic_with_repd_compatible_constraint_passes() {
-        let constraint = BDConstraint::RepDCompatibleWith(
-            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
-        );
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let constraint =
+            BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })));
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![constraint],
+        };
         let byte4 = RepD::Byte(ByteRep { size: 4, align: 4 });
         assert!(g.compatible(&byte4));
     }
 
     #[test]
     fn generic_with_repd_compatible_constraint_fails() {
-        let constraint = BDConstraint::RepDCompatibleWith(
-            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
-        );
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let constraint =
+            BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })));
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![constraint],
+        };
         let byte8 = RepD::Byte(ByteRep { size: 8, align: 8 });
         assert!(!g.compatible(&byte8));
     }
@@ -1002,7 +1024,10 @@ mod tests {
     fn generic_with_capd_constraint_conservatively_passes() {
         let capd = CapD::empty().strengthen(&[crate::capd::Capability::Read]);
         let constraint = BDConstraint::CapDAtLeast(capd);
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![constraint],
+        };
         let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
         // CapDAtLeast is conservatively accepted at the RepD level
         assert!(g.compatible(&byte));
@@ -1012,7 +1037,10 @@ mod tests {
     fn generic_with_reld_constraint_conservatively_passes() {
         let reld = RelD::empty();
         let constraint = BDConstraint::RelDContains(reld);
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![constraint],
+        };
         let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
         // RelDContains is conservatively accepted at the RepD level
         assert!(g.compatible(&byte));
@@ -1020,16 +1048,21 @@ mod tests {
 
     #[test]
     fn generic_display() {
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
         assert_eq!(format!("{g}"), "generic(T)");
     }
 
     #[test]
     fn generic_with_constraints_display() {
-        let constraint = BDConstraint::RepDCompatibleWith(
-            Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))
-        );
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![constraint] };
+        let constraint =
+            BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })));
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![constraint],
+        };
         let displayed = format!("{g}");
         assert!(displayed.starts_with("generic(T"));
         assert!(displayed.contains("RepDCompatibleWith"));
@@ -1037,7 +1070,10 @@ mod tests {
 
     #[test]
     fn generic_serde_roundtrip() {
-        let g = RepD::Generic { name: "T".to_string(), constraints: vec![] };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
         let json = serde_json::to_string(&g).unwrap();
         let back: RepD = serde_json::from_str(&json).unwrap();
         assert_eq!(g, back);
@@ -1047,9 +1083,9 @@ mod tests {
     fn generic_with_constraint_serde_roundtrip() {
         let g = RepD::Generic {
             name: "U".to_string(),
-            constraints: vec![BDConstraint::RepDCompatibleWith(
-                Box::new(RepD::Byte(ByteRep { size: 8, align: 8 }))
-            )],
+            constraints: vec![BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(
+                ByteRep { size: 8, align: 8 },
+            )))],
         };
         let json = serde_json::to_string(&g).unwrap();
         let back: RepD = serde_json::from_str(&json).unwrap();
@@ -1058,8 +1094,14 @@ mod tests {
 
     #[test]
     fn generic_two_generics_compatible() {
-        let g1 = RepD::Generic { name: "T".to_string(), constraints: vec![] };
-        let g2 = RepD::Generic { name: "U".to_string(), constraints: vec![] };
+        let g1 = RepD::Generic {
+            name: "T".to_string(),
+            constraints: vec![],
+        };
+        let g2 = RepD::Generic {
+            name: "U".to_string(),
+            constraints: vec![],
+        };
         assert!(g1.compatible(&g2));
     }
 
@@ -1070,7 +1112,10 @@ mod tests {
             BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(ByteRep { size: 4, align: 4 }))),
             BDConstraint::RelDContains(RelD::empty()),
         ];
-        let g = RepD::Generic { name: "T".to_string(), constraints };
+        let g = RepD::Generic {
+            name: "T".to_string(),
+            constraints,
+        };
         let byte = RepD::Byte(ByteRep { size: 4, align: 4 });
         assert!(g.compatible(&byte));
         let byte8 = RepD::Byte(ByteRep { size: 8, align: 8 });

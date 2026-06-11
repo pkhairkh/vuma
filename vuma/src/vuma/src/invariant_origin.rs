@@ -361,10 +361,7 @@ pub fn check_origin(msg: &MSG) -> InvariantResult {
 
 /// Compute provenance information for a single derivation, detecting
 /// cycles, orphans, dangling references, out-of-bounds, and inverted ranges.
-fn compute_provenance(
-    msg: &MSG,
-    deriv_id: DerivationId,
-) -> (ProvenanceInfo, Vec<OriginViolation>) {
+fn compute_provenance(msg: &MSG, deriv_id: DerivationId) -> (ProvenanceInfo, Vec<OriginViolation>) {
     let mut violations = Vec::new();
     let mut chain: Vec<DerivationId> = Vec::new();
     let mut visited: HashSet<DerivationId> = HashSet::new();
@@ -678,7 +675,10 @@ mod tests {
         msg.add_derivation(make_offset_derivation(1, 99, 0x10, 0x1010, 0x1100));
 
         let result = check_origin(&msg);
-        assert!(!result.satisfied, "Expected violation for orphan derivation");
+        assert!(
+            !result.satisfied,
+            "Expected violation for orphan derivation"
+        );
         assert!(
             result
                 .violations
@@ -872,7 +872,11 @@ mod tests {
             cumulative_offset: 64,
         };
         let display = format!("{}", info);
-        assert!(display.contains("42"), "Expected region 42 in display: {}", display);
+        assert!(
+            display.contains("42"),
+            "Expected region 42 in display: {}",
+            display
+        );
         assert!(display.contains("D1"));
         assert!(display.contains("D3"));
         assert!(display.contains("live=true"));

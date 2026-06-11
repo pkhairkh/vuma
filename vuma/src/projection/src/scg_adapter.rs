@@ -20,7 +20,7 @@
 //!   `SCGRegion.security_boundary`, `scope_level`, and `deployment_target` fields
 //!   have no projection equivalent.
 
-use crate::{BdKind, BehaviouralDescriptor, EdgeKind, NodeKind, SCG, SCGEdge, SCGNode, SCGRegion};
+use crate::{BdKind, BehaviouralDescriptor, EdgeKind, NodeKind, SCGEdge, SCGNode, SCGRegion, SCG};
 
 // ── NodeKind ↔ NodeType ──────────────────────────────────────────────────────
 
@@ -73,21 +73,19 @@ pub fn node_type_to_node_kind(
         vuma_scg::NodeType::Access => NodeKind::Access,
         vuma_scg::NodeType::Cast => NodeKind::Computation,
         vuma_scg::NodeType::Effect => NodeKind::Effect,
-        vuma_scg::NodeType::Control => {
-            match control_kind {
-                Some(vuma_scg::ControlKind::Join) => NodeKind::Merge,
-                Some(
-                    vuma_scg::ControlKind::FunctionEntry
-                    | vuma_scg::ControlKind::FunctionReturn
-                    | vuma_scg::ControlKind::ClosureEntry
-                    | vuma_scg::ControlKind::ClosureReturn,
-                ) => NodeKind::Function,
-                Some(vuma_scg::ControlKind::FuturePoll)
-                | Some(vuma_scg::ControlKind::WakerRegistration)
-                | Some(vuma_scg::ControlKind::StateTransition) => NodeKind::Effect,
-                _ => NodeKind::Function,
-            }
-        }
+        vuma_scg::NodeType::Control => match control_kind {
+            Some(vuma_scg::ControlKind::Join) => NodeKind::Merge,
+            Some(
+                vuma_scg::ControlKind::FunctionEntry
+                | vuma_scg::ControlKind::FunctionReturn
+                | vuma_scg::ControlKind::ClosureEntry
+                | vuma_scg::ControlKind::ClosureReturn,
+            ) => NodeKind::Function,
+            Some(vuma_scg::ControlKind::FuturePoll)
+            | Some(vuma_scg::ControlKind::WakerRegistration)
+            | Some(vuma_scg::ControlKind::StateTransition) => NodeKind::Effect,
+            _ => NodeKind::Function,
+        },
         vuma_scg::NodeType::Phantom => NodeKind::Effect,
         vuma_scg::NodeType::VTable => NodeKind::Effect,
         vuma_scg::NodeType::ClosureEnv => NodeKind::Value,
@@ -142,10 +140,7 @@ pub fn edge_kind_to_scg_edge_kind(
 /// | `Return { .. }`            | `ControlFlow`     | Return edges are control flow  |
 /// | `Derivation`               | `Derivation`      |                                |
 /// | `Annotation`               | `Annotation`      |                                |
-pub fn scg_edge_kind_to_edge_kind(
-    kind: &vuma_scg::EdgeKind,
-    label: Option<&str>,
-) -> EdgeKind {
+pub fn scg_edge_kind_to_edge_kind(kind: &vuma_scg::EdgeKind, label: Option<&str>) -> EdgeKind {
     match kind {
         vuma_scg::EdgeKind::DataFlow => {
             // If the edge was created from a Borrow, it carries the label "borrow"
@@ -174,28 +169,24 @@ pub fn scg_edge_kind_to_edge_kind(
 pub fn extract_label(payload: &vuma_scg::NodePayload) -> String {
     match payload {
         vuma_scg::NodePayload::Computation(p) => p.operation.clone(),
-        vuma_scg::NodePayload::Allocation(p) => {
-            p.type_name
-                .clone()
-                .unwrap_or_else(|| format!("alloc_{}", p.size))
-        }
+        vuma_scg::NodePayload::Allocation(p) => p
+            .type_name
+            .clone()
+            .unwrap_or_else(|| format!("alloc_{}", p.size)),
         vuma_scg::NodePayload::Deallocation(p) => {
             format!("dealloc_{}", p.allocation_node.as_u64())
         }
         vuma_scg::NodePayload::Access(p) => format!(
             "access_{:?}{}_r{}",
             p.mode,
-            p.offset
-                .map(|o| format!("_off{}", o))
-                .unwrap_or_default(),
+            p.offset.map(|o| format!("_off{}", o)).unwrap_or_default(),
             p.region_id.as_u64()
         ),
         vuma_scg::NodePayload::Cast(p) => format!("{}_to_{}", p.from_type, p.to_type),
         vuma_scg::NodePayload::Effect(p) => p.effect_kind.clone(),
-        vuma_scg::NodePayload::Control(p) => p
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("{:?}", p.kind)),
+        vuma_scg::NodePayload::Control(p) => {
+            p.label.clone().unwrap_or_else(|| format!("{:?}", p.kind))
+        }
         vuma_scg::NodePayload::Phantom(p) => p.purpose.clone(),
         vuma_scg::NodePayload::VTable(p) => {
             format!("vtable_{}_for_{}", p.trait_name, p.concrete_type)
@@ -392,8 +383,10 @@ pub fn from_scg_region(region: &vuma_scg::SCGRegion) -> SCGRegion {
 /// - `scope_level` defaults to `0`.
 /// - `security_boundary` defaults to `false`.
 pub fn to_scg_region(region: &SCGRegion) -> vuma_scg::SCGRegion {
-    let mut scg_region =
-        vuma_scg::SCGRegion::new(vuma_scg::RegionId::new(region.id), vuma_scg::DeploymentTarget::Heap);
+    let mut scg_region = vuma_scg::SCGRegion::new(
+        vuma_scg::RegionId::new(region.id),
+        vuma_scg::DeploymentTarget::Heap,
+    );
     for &node_id in &region.nodes {
         scg_region.add_node(vuma_scg::NodeId::new(node_id));
     }
@@ -412,14 +405,12 @@ pub fn from_scg(scg: &vuma_scg::SCG) -> SCG {
     let mut proj_nodes: Vec<SCGNode> = scg.nodes().map(from_scg_node).collect();
 
     // Build a mapping from NodeId to the region IDs it belongs to
-    let mut node_regions: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
+    let mut node_regions: std::collections::HashMap<u64, Vec<u64>> =
+        std::collections::HashMap::new();
     for region in scg.regions() {
         let rid = region.id.as_u64();
         for node_id in region.iter_nodes() {
-            node_regions
-                .entry(node_id.as_u64())
-                .or_default()
-                .push(rid);
+            node_regions.entry(node_id.as_u64()).or_default().push(rid);
         }
     }
 
@@ -453,12 +444,7 @@ pub fn to_scg(scg: &SCG) -> vuma_scg::SCG {
     // Add all nodes first (edges require both endpoints to exist)
     for node in &scg.nodes {
         let data = to_scg_node(node);
-        let _ = real.add_node_with_id(
-            data.id,
-            data.node_type,
-            data.payload,
-            data.program_point,
-        );
+        let _ = real.add_node_with_id(data.id, data.node_type, data.payload, data.program_point);
         // Copy annotation if present
         if let Some(ref ann) = data.annotation {
             if let Some(real_node) = real.get_node_mut(data.id) {

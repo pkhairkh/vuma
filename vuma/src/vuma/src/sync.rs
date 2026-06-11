@@ -134,9 +134,6 @@ mod tests {
             AccessId(20),
             Ordering::AtomicAcquireRelease,
         );
-        assert_eq!(
-            format!("{}", edge),
-            "SyncEdge SE1 A10 ─[acq-rel]─▶ A20"
-        );
+        assert_eq!(format!("{}", edge), "SyncEdge SE1 A10 ─[acq-rel]─▶ A20");
     }
 }

@@ -75,9 +75,7 @@ impl DiffEntry {
     pub fn is_addition(&self) -> bool {
         matches!(
             self,
-            DiffEntry::NodeAdded(_)
-                | DiffEntry::EdgeAdded(_)
-                | DiffEntry::RegionAdded(_)
+            DiffEntry::NodeAdded(_) | DiffEntry::EdgeAdded(_) | DiffEntry::RegionAdded(_)
         )
     }
 
@@ -85,9 +83,7 @@ impl DiffEntry {
     pub fn is_removal(&self) -> bool {
         matches!(
             self,
-            DiffEntry::NodeRemoved(_)
-                | DiffEntry::EdgeRemoved(_)
-                | DiffEntry::RegionRemoved(_)
+            DiffEntry::NodeRemoved(_) | DiffEntry::EdgeRemoved(_) | DiffEntry::RegionRemoved(_)
         )
     }
 
@@ -107,10 +103,16 @@ impl DiffEntry {
             DiffEntry::NodeAdded(data) => format!("node {} added ({})", data.id, data.node_type),
             DiffEntry::NodeRemoved(id) => format!("node {} removed", id),
             DiffEntry::NodeModified { id, old, new } => {
-                format!("node {} modified ({} -> {})", id, old.node_type, new.node_type)
+                format!(
+                    "node {} modified ({} -> {})",
+                    id, old.node_type, new.node_type
+                )
             }
             DiffEntry::EdgeAdded(data) => {
-                format!("edge {} added ({} -> {}, {})", data.id, data.source, data.target, data.kind)
+                format!(
+                    "edge {} added ({} -> {}, {})",
+                    data.id, data.source, data.target, data.kind
+                )
             }
             DiffEntry::EdgeRemoved(id) => format!("edge {} removed", id),
             DiffEntry::EdgeModified { id, old, new } => {
@@ -164,9 +166,15 @@ pub struct DiffStats {
 impl DiffStats {
     /// Returns the total number of changes.
     pub fn total_changes(&self) -> usize {
-        self.nodes_added + self.nodes_removed + self.nodes_modified
-            + self.edges_added + self.edges_removed + self.edges_modified
-            + self.regions_added + self.regions_removed + self.regions_modified
+        self.nodes_added
+            + self.nodes_removed
+            + self.nodes_modified
+            + self.edges_added
+            + self.edges_removed
+            + self.edges_modified
+            + self.regions_added
+            + self.regions_removed
+            + self.regions_modified
     }
 
     /// Returns `true` if there are no changes.
@@ -282,10 +290,7 @@ pub enum DiffError {
     /// An edge with the given ID already exists (cannot add duplicate).
     DuplicateEdge(EdgeId),
     /// An edge's source or target node does not exist.
-    InvalidEdgeEndpoints {
-        source: NodeId,
-        target: NodeId,
-    },
+    InvalidEdgeEndpoints { source: NodeId, target: NodeId },
     /// The diff cannot be applied in its current state (e.g., dependency
     /// ordering issue).
     CannotApply(String),
@@ -300,7 +305,10 @@ impl std::fmt::Display for DiffError {
             DiffError::DuplicateNode(id) => write!(f, "diff error: duplicate node: {id}"),
             DiffError::DuplicateEdge(id) => write!(f, "diff error: duplicate edge: {id}"),
             DiffError::InvalidEdgeEndpoints { source, target } => {
-                write!(f, "diff error: invalid edge endpoints: source={source}, target={target}")
+                write!(
+                    f,
+                    "diff error: invalid edge endpoints: source={source}, target={target}"
+                )
             }
             DiffError::CannotApply(msg) => write!(f, "diff error: cannot apply: {msg}"),
         }
@@ -467,9 +475,7 @@ fn apply_entry(scg: &mut SCG, entry: &DiffEntry) -> Result<(), DiffError> {
             Ok(())
         }
         DiffEntry::NodeModified { id, new, .. } => {
-            let node = scg
-                .get_node_mut(*id)
-                .ok_or(DiffError::NodeNotFound(*id))?;
+            let node = scg.get_node_mut(*id).ok_or(DiffError::NodeNotFound(*id))?;
             node.node_type = new.node_type.clone();
             node.payload = new.payload.clone();
             node.annotation = new.annotation.clone();
@@ -509,9 +515,7 @@ fn apply_entry(scg: &mut SCG, entry: &DiffEntry) -> Result<(), DiffError> {
             Ok(())
         }
         DiffEntry::EdgeModified { id, new, .. } => {
-            let edge = scg
-                .get_edge_mut(*id)
-                .ok_or(DiffError::EdgeNotFound(*id))?;
+            let edge = scg.get_edge_mut(*id).ok_or(DiffError::EdgeNotFound(*id))?;
             edge.kind = new.kind.clone();
             edge.label = new.label.clone();
             // Note: source/target changes on an existing edge are not
@@ -739,11 +743,7 @@ pub struct RegionConflict {
 /// - **Removed in theirs only**: Remove.
 /// - **Removed in one, modified in other**: Conflict.
 /// - **Removed in both**: Remove.
-pub fn three_way_merge(
-    base: &SCG,
-    ours: &SCG,
-    theirs: &SCG,
-) -> Result<SCG, MergeConflict> {
+pub fn three_way_merge(base: &SCG, ours: &SCG, theirs: &SCG) -> Result<SCG, MergeConflict> {
     let diff_ours = diff_scg(base, ours);
     let diff_theirs = diff_scg(base, theirs);
 
@@ -1055,9 +1055,7 @@ fn change_to_region_data(change: &ElementChange<SCGRegion>) -> Option<SCGRegion>
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::node::{
-        ComputationNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
-    };
+    use crate::node::{ComputationNode, NodePayload, NodeType, PhantomNode, ProgramPoint};
     use crate::region::{DeploymentTarget, SCGRegion};
 
     /// Helper to create a default program point.
@@ -1077,14 +1075,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -1099,26 +1101,39 @@ mod tests {
 
         // Build an identical SCG with the same node/edge IDs
         let mut scg2 = SCG::new();
-        let n1 = scg2.add_node_with_id(
-            NodeId::new(0),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
-            pp(),
-        ).unwrap();
-        let n2 = scg2.add_node_with_id(
-            NodeId::new(1),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
-        scg2.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow).unwrap();
+        let n1 = scg2
+            .add_node_with_id(
+                NodeId::new(0),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "add".to_string(),
+                    result_type: Some("i32".to_string()),
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
+        let n2 = scg2
+            .add_node_with_id(
+                NodeId::new(1),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "sub".to_string(),
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
+        scg2.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow)
+            .unwrap();
 
         let diff = diff_scg(&scg1, &scg2);
-        assert!(diff.is_empty(), "Expected empty diff for identical graphs, got {} entries", diff.len());
+        assert!(
+            diff.is_empty(),
+            "Expected empty diff for identical graphs, got {} entries",
+            diff.len()
+        );
         assert!(diff.stats().is_empty());
     }
 
@@ -1135,18 +1150,30 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
         new.add_node_with_id(
             NodeId::new(1),
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
-        new.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
+        )
+        .unwrap();
+        new.add_edge_with_id(
+            EdgeId::new(0),
+            NodeId::new(0),
+            NodeId::new(1),
+            EdgeKind::DataFlow,
+        )
+        .unwrap();
 
         // Add a new node
         new.add_node(
@@ -1173,17 +1200,23 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
         old.add_node_with_id(
             NodeId::new(1),
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut new = SCG::new();
         new.add_node_with_id(
@@ -1191,9 +1224,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let diff = diff_scg(&old, &new);
         assert_eq!(diff.stats().nodes_removed, 1);
@@ -1210,9 +1246,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut new = SCG::new();
         new.add_node_with_id(
@@ -1220,9 +1259,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(), // changed operation
-                result_type: Some("i32".to_string()), tail_call: false }),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let diff = diff_scg(&old, &new);
         assert_eq!(diff.stats().nodes_modified, 1);
@@ -1230,12 +1272,22 @@ mod tests {
         // Verify the entry has the right old and new data
         let mod_entry = diff.node_entries().next().unwrap();
         if let DiffEntry::NodeModified { old, new, .. } = mod_entry {
-            assert_eq!(old.payload, NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }));
-            assert_eq!(new.payload, NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
-                result_type: Some("i32".to_string()), tail_call: false }));
+            assert_eq!(
+                old.payload,
+                NodePayload::Computation(ComputationNode {
+                    operation: "add".to_string(),
+                    result_type: Some("i32".to_string()),
+                    tail_call: false
+                })
+            );
+            assert_eq!(
+                new.payload,
+                NodePayload::Computation(ComputationNode {
+                    operation: "mul".to_string(),
+                    result_type: Some("i32".to_string()),
+                    tail_call: false
+                })
+            );
         } else {
             panic!("Expected NodeModified entry");
         }
@@ -1246,23 +1298,89 @@ mod tests {
     #[test]
     fn test_diff_edge_changes() {
         let mut old = SCG::new();
-        old.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        old.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        old.add_node_with_id(NodeId::new(2), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        old.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
+        old.add_node_with_id(
+            NodeId::new(0),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "a".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        old.add_node_with_id(
+            NodeId::new(1),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "b".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        old.add_node_with_id(
+            NodeId::new(2),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "c".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        old.add_edge_with_id(
+            EdgeId::new(0),
+            NodeId::new(0),
+            NodeId::new(1),
+            EdgeKind::DataFlow,
+        )
+        .unwrap();
 
         let mut new = SCG::new();
-        new.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        new.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        new.add_node_with_id(NodeId::new(2), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "c".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
+        new.add_node_with_id(
+            NodeId::new(0),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "a".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        new.add_node_with_id(
+            NodeId::new(1),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "b".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        new.add_node_with_id(
+            NodeId::new(2),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "c".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
         // Old edge removed, new edge added
-        new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), NodeId::new(2), EdgeKind::ControlFlow).unwrap();
+        new.add_edge_with_id(
+            EdgeId::new(1),
+            NodeId::new(0),
+            NodeId::new(2),
+            EdgeKind::ControlFlow,
+        )
+        .unwrap();
 
         let diff = diff_scg(&old, &new);
         assert_eq!(diff.stats().edges_removed, 1);
@@ -1294,23 +1412,32 @@ mod tests {
     #[test]
     fn test_apply_diff_roundtrip() {
         let mut old = SCG::new();
-        let n1 = old.add_node_with_id(
-            NodeId::new(0),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
-        let n2 = old.add_node_with_id(
-            NodeId::new(1),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
-        old.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow).unwrap();
+        let n1 = old
+            .add_node_with_id(
+                NodeId::new(0),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "add".to_string(),
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
+        let n2 = old
+            .add_node_with_id(
+                NodeId::new(1),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "sub".to_string(),
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
+        old.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow)
+            .unwrap();
 
         let mut new = SCG::new();
         new.add_node_with_id(
@@ -1318,19 +1445,25 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "mul".to_string(), // modified
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
-        // n2 removed, n3 added
-        let n3 = new.add_node_with_id(
-            NodeId::new(2),
-            NodeType::Phantom,
-            NodePayload::Phantom(PhantomNode {
-                purpose: "new".to_string(),
+                result_type: None,
+                tail_call: false,
             }),
             pp(),
-        ).unwrap();
-        new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), n3, EdgeKind::ControlFlow).unwrap();
+        )
+        .unwrap();
+        // n2 removed, n3 added
+        let n3 = new
+            .add_node_with_id(
+                NodeId::new(2),
+                NodeType::Phantom,
+                NodePayload::Phantom(PhantomNode {
+                    purpose: "new".to_string(),
+                }),
+                pp(),
+            )
+            .unwrap();
+        new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), n3, EdgeKind::ControlFlow)
+            .unwrap();
 
         let _diff = diff_scg(&old, &new);
         let script = compute_edit_script(&old, &new);
@@ -1359,9 +1492,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Ours: adds a new node
         let mut ours = base.clone();
@@ -1370,31 +1506,46 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Theirs: modifies the existing node
         let mut theirs = SCG::new();
-        theirs.add_node_with_id(
-            NodeId::new(0),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(), // modified
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
+        theirs
+            .add_node_with_id(
+                NodeId::new(0),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "mul".to_string(), // modified
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
 
         let result = three_way_merge(&base, &ours, &theirs);
-        assert!(result.is_ok(), "Expected merge to succeed without conflicts");
+        assert!(
+            result.is_ok(),
+            "Expected merge to succeed without conflicts"
+        );
 
         let merged = result.unwrap();
         assert_eq!(merged.node_count(), 2);
         // Node 0 should have the modification from theirs
         let n0 = merged.get_node(NodeId::new(0)).unwrap();
-        assert_eq!(n0.payload, NodePayload::Computation(ComputationNode {
-            operation: "mul".to_string(),
-            result_type: None, tail_call: false }));
+        assert_eq!(
+            n0.payload,
+            NodePayload::Computation(ComputationNode {
+                operation: "mul".to_string(),
+                result_type: None,
+                tail_call: false
+            })
+        );
         // Node 1 should have been added from ours
         assert!(merged.get_node(NodeId::new(1)).is_some());
     }
@@ -1410,9 +1561,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Ours: modifies the operation to "sub"
         let mut ours = SCG::new();
@@ -1421,20 +1575,27 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Theirs: modifies the operation to "mul" (conflicting change)
         let mut theirs = SCG::new();
-        theirs.add_node_with_id(
-            NodeId::new(0),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
+        theirs
+            .add_node_with_id(
+                NodeId::new(0),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "mul".to_string(),
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
 
         let result = three_way_merge(&base, &ours, &theirs);
         assert!(result.is_err(), "Expected merge conflict");
@@ -1450,18 +1611,64 @@ mod tests {
     #[test]
     fn test_edit_script_ordering() {
         let mut old = SCG::new();
-        old.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        old.add_node_with_id(NodeId::new(1), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "b".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        old.add_edge_with_id(EdgeId::new(0), NodeId::new(0), NodeId::new(1), EdgeKind::DataFlow).unwrap();
+        old.add_node_with_id(
+            NodeId::new(0),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "a".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        old.add_node_with_id(
+            NodeId::new(1),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "b".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        old.add_edge_with_id(
+            EdgeId::new(0),
+            NodeId::new(0),
+            NodeId::new(1),
+            EdgeKind::DataFlow,
+        )
+        .unwrap();
 
         let mut new = SCG::new();
-        new.add_node_with_id(NodeId::new(0), NodeType::Computation,
-            NodePayload::Computation(ComputationNode { operation: "a_v2".to_string(), result_type: None, tail_call: false }), pp()).unwrap();
-        new.add_node_with_id(NodeId::new(2), NodeType::Phantom,
-            NodePayload::Phantom(PhantomNode { purpose: "new".to_string() }), pp()).unwrap();
-        new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), NodeId::new(2), EdgeKind::ControlFlow).unwrap();
+        new.add_node_with_id(
+            NodeId::new(0),
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                operation: "a_v2".to_string(),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        )
+        .unwrap();
+        new.add_node_with_id(
+            NodeId::new(2),
+            NodeType::Phantom,
+            NodePayload::Phantom(PhantomNode {
+                purpose: "new".to_string(),
+            }),
+            pp(),
+        )
+        .unwrap();
+        new.add_edge_with_id(
+            EdgeId::new(1),
+            NodeId::new(0),
+            NodeId::new(2),
+            EdgeKind::ControlFlow,
+        )
+        .unwrap();
 
         let script = compute_edit_script(&old, &new);
 
@@ -1473,11 +1680,15 @@ mod tests {
                 DiffEntry::EdgeAdded(_) | DiffEntry::NodeAdded(_) | DiffEntry::RegionAdded(_) => {
                     saw_addition = true;
                 }
-                DiffEntry::EdgeModified { .. } | DiffEntry::NodeModified { .. } | DiffEntry::RegionModified { .. } => {
+                DiffEntry::EdgeModified { .. }
+                | DiffEntry::NodeModified { .. }
+                | DiffEntry::RegionModified { .. } => {
                     assert!(!saw_addition, "Modification after addition");
                     saw_modification = true;
                 }
-                DiffEntry::EdgeRemoved(_) | DiffEntry::NodeRemoved(_) | DiffEntry::RegionRemoved(_) => {
+                DiffEntry::EdgeRemoved(_)
+                | DiffEntry::NodeRemoved(_)
+                | DiffEntry::RegionRemoved(_) => {
                     assert!(!saw_modification, "Removal after modification");
                     assert!(!saw_addition, "Removal after addition");
                 }
@@ -1497,7 +1708,9 @@ mod tests {
             program_point: pp,
             payload: NodePayload::Computation(ComputationNode {
                 operation: "test".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
         };
 
         let added = DiffEntry::NodeAdded(node_data.clone());
@@ -1553,9 +1766,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Try to add a node that already exists
         let diff = SCGDiff::from_entries(vec![DiffEntry::NodeAdded(NodeData {
@@ -1582,9 +1798,12 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
         base.add_node_with_id(
             NodeId::new(1),
             NodeType::Phantom,
@@ -1592,7 +1811,8 @@ mod tests {
                 purpose: "marker".to_string(),
             }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Ours: removes node 1
         let mut ours = SCG::new();
@@ -1601,29 +1821,38 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
-        ).unwrap();
+        )
+        .unwrap();
         // NodeId::new(1) is absent — removed
 
         // Theirs: modifies node 1
         let mut theirs = SCG::new();
-        theirs.add_node_with_id(
-            NodeId::new(0),
-            NodeType::Computation,
-            NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
-                result_type: None, tail_call: false }),
-            pp(),
-        ).unwrap();
-        theirs.add_node_with_id(
-            NodeId::new(1),
-            NodeType::Phantom,
-            NodePayload::Phantom(PhantomNode {
-                purpose: "updated_marker".to_string(), // modified
-            }),
-            pp(),
-        ).unwrap();
+        theirs
+            .add_node_with_id(
+                NodeId::new(0),
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    operation: "add".to_string(),
+                    result_type: None,
+                    tail_call: false,
+                }),
+                pp(),
+            )
+            .unwrap();
+        theirs
+            .add_node_with_id(
+                NodeId::new(1),
+                NodeType::Phantom,
+                NodePayload::Phantom(PhantomNode {
+                    purpose: "updated_marker".to_string(), // modified
+                }),
+                pp(),
+            )
+            .unwrap();
 
         let result = three_way_merge(&base, &ours, &theirs);
         // Ours removes node 1, theirs modifies it — conflict
@@ -1641,7 +1870,10 @@ mod tests {
         assert!(entry.describe().contains("removed"));
 
         let entry = DiffEntry::EdgeAdded(EdgeData::new(
-            EdgeId::new(7), NodeId::new(1), NodeId::new(2), EdgeKind::DataFlow,
+            EdgeId::new(7),
+            NodeId::new(1),
+            NodeId::new(2),
+            EdgeKind::DataFlow,
         ));
         assert!(entry.describe().contains("added"));
     }

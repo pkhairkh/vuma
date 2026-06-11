@@ -28,7 +28,7 @@ use vuma_ive::liveness::{
 use vuma_scg::region::RegionId;
 use vuma_scg::{
     AccessMode, AccessNode, AllocationNode, ControlKind, ControlNode, DeallocationNode,
-    DeploymentTarget, EdgeKind, NodePayload, NodeType, ProgramPoint, SCG, SCGRegion,
+    DeploymentTarget, EdgeKind, NodePayload, NodeType, ProgramPoint, SCGRegion, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -334,7 +334,8 @@ fn test_use_after_free() {
     scg.add_edge(_entry, alloc, EdgeKind::ControlFlow).unwrap();
     scg.add_edge(alloc, write, EdgeKind::ControlFlow).unwrap();
     scg.add_edge(write, free, EdgeKind::ControlFlow).unwrap();
-    scg.add_edge(free, read_freed, EdgeKind::ControlFlow).unwrap();
+    scg.add_edge(free, read_freed, EdgeKind::ControlFlow)
+        .unwrap();
 
     // Use the cleanup verifier directly — it detects use-after-free
     let mut graph = CleanupGraph::new();
@@ -472,10 +473,7 @@ fn test_double_free() {
     let verifier = CleanupVerifier::new();
     let report = verifier.verify(&graph);
 
-    assert!(
-        !report.clean,
-        "Cleanup should detect double-free violation"
-    );
+    assert!(!report.clean, "Cleanup should detect double-free violation");
     assert!(
         report
             .violations
@@ -529,7 +527,8 @@ fn test_out_of_bounds() {
     );
 
     scg.add_edge(_alloc, _write, EdgeKind::ControlFlow).unwrap();
-    scg.add_edge(_write, _read_oob, EdgeKind::ControlFlow).unwrap();
+    scg.add_edge(_write, _read_oob, EdgeKind::ControlFlow)
+        .unwrap();
 
     // Use the interpretation verifier with BDs that reflect the out-of-bounds:
     // Write uses a BD covering the full 16-byte allocation.
@@ -735,7 +734,8 @@ fn test_pointer_arithmetic_oob() {
     );
 
     scg.add_edge(_alloc, _write, EdgeKind::ControlFlow).unwrap();
-    scg.add_edge(_write, _read_oob, EdgeKind::ControlFlow).unwrap();
+    scg.add_edge(_write, _read_oob, EdgeKind::ControlFlow)
+        .unwrap();
 
     // Write covers 16 bytes, read at offset 16 with size 8 extends to byte 24,
     // which is well beyond the 16-byte allocation. Model this with incompatible BDs:

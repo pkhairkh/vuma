@@ -40,10 +40,13 @@ pub use bidirectional::{
     SemanticFlag, VisualEdit,
 };
 pub use conversational::{
-    AIExplainerOutput, AggregatedResult, ConversationalProjection, ConversationalSession, SCGEdit, SuggestionEngine, Verbosity, Violation,
-    ViolationSeverity, session_from_scg,
+    session_from_scg, AIExplainerOutput, AggregatedResult, ConversationalProjection,
+    ConversationalSession, SCGEdit, SuggestionEngine, Verbosity, Violation, ViolationSeverity,
 };
-pub use diff::{ChangeGroup, DiffProjection, ImpactLevel, SCGDiff, project_diff, project_diff_conversational, project_diff_visual};
+pub use diff::{
+    project_diff, project_diff_conversational, project_diff_visual, ChangeGroup, DiffProjection,
+    ImpactLevel, SCGDiff,
+};
 pub use textual::{ProjectionStyle, TemplateEngine, TextualConfig, TextualProjection};
 pub use visual::VisualProjection;
 

@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::judgment::RegionId;
 use crate::models::{
-    LockId, ProofAccess, ProofAccessKind, ProofMSG, SyncEdgeId, SyncOrdering, Addr,
+    Addr, LockId, ProofAccess, ProofAccessKind, ProofMSG, SyncEdgeId, SyncOrdering,
 };
 use crate::proof::{
     AccessId, Conclusion, Fact, FactId, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
@@ -83,11 +83,7 @@ pub enum ProofFailureReason {
     },
 
     #[error("alias detected: derivations {d1} and {d2} both target region {region}")]
-    AliasDetected {
-        d1: u64,
-        d2: u64,
-        region: RegionId,
-    },
+    AliasDetected { d1: u64, d2: u64, region: RegionId },
 
     #[error("lock graph has cycle involving locks {locks:?}")]
     LockCycle { locks: Vec<LockId> },
@@ -282,23 +278,35 @@ impl SynchronizationProof {
         if let Some(lock_id) = find_common_lock(msg, a1_id, a2_id) {
             fact_id += 1;
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(fact_id, format!("lock {} acquired on region for access {}", lock_id, a1_id)),
+                fact: Fact::axiom(
+                    fact_id,
+                    format!("lock {} acquired on region for access {}", lock_id, a1_id),
+                ),
             });
             fact_id += 1;
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(fact_id, format!("lock {} acquired on region for access {}", lock_id, a2_id)),
+                fact: Fact::axiom(
+                    fact_id,
+                    format!("lock {} acquired on region for access {}", lock_id, a2_id),
+                ),
             });
             fact_id += 1;
             proof.add_step(ProofStep::Infer {
                 from: vec![1],
                 rule: InferenceRule::ExclusivityIntro,
-                conclusion: Fact::derived(fact_id, format!("exclusive access to region for access {}", a1_id)),
+                conclusion: Fact::derived(
+                    fact_id,
+                    format!("exclusive access to region for access {}", a1_id),
+                ),
             });
             fact_id += 1;
             proof.add_step(ProofStep::Infer {
                 from: vec![2],
                 rule: InferenceRule::ExclusivityIntro,
-                conclusion: Fact::derived(fact_id, format!("exclusive access to region for access {}", a2_id)),
+                conclusion: Fact::derived(
+                    fact_id,
+                    format!("exclusive access to region for access {}", a2_id),
+                ),
             });
             proof.conclude(Conclusion::Proven);
 
@@ -338,7 +346,10 @@ impl SynchronizationProof {
 
             fact_id += 1;
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(fact_id, format!("atomic sync between access {} and access {}", a1_id, a2_id)),
+                fact: Fact::axiom(
+                    fact_id,
+                    format!("atomic sync between access {} and access {}", a1_id, a2_id),
+                ),
             });
             proof.conclude(Conclusion::Proven);
 
@@ -358,7 +369,10 @@ impl SynchronizationProof {
 
             fact_id += 1;
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(fact_id, format!("access {} happens before access {}", a1_id, a2_id)),
+                fact: Fact::axiom(
+                    fact_id,
+                    format!("access {} happens before access {}", a1_id, a2_id),
+                ),
             });
 
             if path.len() > 1 {
@@ -369,7 +383,10 @@ impl SynchronizationProof {
                         rule: InferenceRule::TemporalOrdering,
                         conclusion: Fact::derived(
                             fact_id,
-                            format!("temporal transitivity step {} for access pair ({}, {})", i, a1_id, a2_id),
+                            format!(
+                                "temporal transitivity step {} for access pair ({}, {})",
+                                i, a1_id, a2_id
+                            ),
                         ),
                     });
                 }
@@ -393,7 +410,10 @@ impl SynchronizationProof {
 
             fact_id += 1;
             proof.add_step(ProofStep::Assume {
-                fact: Fact::axiom(fact_id, format!("access {} happens before access {}", a2_id, a1_id)),
+                fact: Fact::axiom(
+                    fact_id,
+                    format!("access {} happens before access {}", a2_id, a1_id),
+                ),
             });
             proof.conclude(Conclusion::Proven);
 
@@ -479,7 +499,10 @@ impl ExclusivityTactic {
         } else {
             Err(ProofFailure::new(ProofFailureReason::TacticFailed {
                 tactic: self.name().into(),
-                reason: format!("no common lock held by access {} and access {}", a1.id, a2.id),
+                reason: format!(
+                    "no common lock held by access {} and access {}",
+                    a1.id, a2.id
+                ),
             }))
         }
     }
@@ -496,7 +519,10 @@ impl ExclusivityTactic {
         } else {
             Err(ProofFailure::new(ProofFailureReason::TacticFailed {
                 tactic: self.name().into(),
-                reason: format!("no happens-before ordering between access {} and access {}", a1.id, a2.id),
+                reason: format!(
+                    "no happens-before ordering between access {} and access {}",
+                    a1.id, a2.id
+                ),
             }))
         }
     }
@@ -508,8 +534,7 @@ impl ExclusivityTactic {
         a2: &ProofAccess,
     ) -> Result<ExclusivitySubProof, ProofFailure> {
         let has_transfer = msg.sync_edges.iter().any(|e| {
-            (e.access1 == a1.id && e.access2 == a2.id)
-                || (e.access1 == a2.id && e.access2 == a1.id)
+            (e.access1 == a1.id && e.access2 == a2.id) || (e.access1 == a2.id && e.access2 == a1.id)
         });
 
         if has_transfer {
@@ -518,7 +543,10 @@ impl ExclusivityTactic {
         } else {
             Err(ProofFailure::new(ProofFailureReason::TacticFailed {
                 tactic: self.name().into(),
-                reason: format!("no ownership transfer edge between access {} and access {}", a1.id, a2.id),
+                reason: format!(
+                    "no ownership transfer edge between access {} and access {}",
+                    a1.id, a2.id
+                ),
             }))
         }
     }
@@ -530,7 +558,9 @@ impl ExclusivityTactic {
         a2: &ProofAccess,
     ) -> Result<ExclusivitySubProof, ProofFailure> {
         if let Some(cycle) = detect_lock_cycle(msg) {
-            return Err(ProofFailure::new(ProofFailureReason::LockCycle { locks: cycle }));
+            return Err(ProofFailure::new(ProofFailureReason::LockCycle {
+                locks: cycle,
+            }));
         }
 
         if find_common_lock(msg, a1.id, a2.id).is_some() {
@@ -613,8 +643,7 @@ fn find_ordering_path(msg: &ProofMSG, a1: AccessId, a2: AccessId) -> Vec<SyncEdg
 fn has_atomic_sync(msg: &ProofMSG, a1: AccessId, a2: AccessId) -> bool {
     msg.sync_edges.iter().any(|e| {
         e.ordering == SyncOrdering::Atomic
-            && ((e.access1 == a1 && e.access2 == a2)
-                || (e.access1 == a2 && e.access2 == a1))
+            && ((e.access1 == a1 && e.access2 == a2) || (e.access1 == a2 && e.access2 == a1))
     })
 }
 
@@ -623,7 +652,11 @@ fn detect_lock_cycle(msg: &ProofMSG) -> Option<Vec<LockId>> {
         .sync_edges
         .iter()
         .filter_map(|e| {
-            if e.ordering == SyncOrdering::Locked { e.lock } else { None }
+            if e.ordering == SyncOrdering::Locked {
+                e.lock
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -738,7 +771,10 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
                     proof.add_step(ProofStep::Assume {
                         fact: Fact::checked(
                             fact_id,
-                            format!("accesses {} and {} do not alias (different regions)", a1.id, a2.id),
+                            format!(
+                                "accesses {} and {} do not alias (different regions)",
+                                a1.id, a2.id
+                            ),
                         ),
                     });
                     sub_proofs.push((a1.id, a2.id, ExclusivitySubProof::NoAlias(no_alias)));
@@ -761,7 +797,12 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
                         proof.add_step(ProofStep::Assume {
                             fact: Fact::checked(
                                 fact_id,
-                                format!("exclusivity proven for access pair ({}, {}) via {}", a1.id, a2.id, tactic.name()),
+                                format!(
+                                    "exclusivity proven for access pair ({}, {}) via {}",
+                                    a1.id,
+                                    a2.id,
+                                    tactic.name()
+                                ),
                             ),
                         });
                         if !tactics_used.contains(tactic) {
@@ -772,7 +813,12 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
                         break;
                     }
                     Err(_) => {
-                        log::debug!("Tactic {} failed for pair ({}, {})", tactic.name(), a1.id, a2.id);
+                        log::debug!(
+                            "Tactic {} failed for pair ({}, {})",
+                            tactic.name(),
+                            a1.id,
+                            a2.id
+                        );
                     }
                 }
             }

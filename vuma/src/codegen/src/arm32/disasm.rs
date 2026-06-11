@@ -140,13 +140,19 @@ impl Instruction {
         // BX: cond 00010010 111111111111 0001 Rm
         if (word & 0x0FFF_FFF0) == 0x012F_FF10 {
             let rm = (word) & 0xF;
-            return Ok(Instruction::Bx { rm: gpr_from_bits(rm), cond });
+            return Ok(Instruction::Bx {
+                rm: gpr_from_bits(rm),
+                cond,
+            });
         }
 
         // BLX reg: cond 00010010 111111111111 0011 Rm
         if (word & 0x0FFF_FFF0) == 0x012F_FF30 {
             let rm = word & 0xF;
-            return Ok(Instruction::BlxReg { rm: gpr_from_bits(rm), cond });
+            return Ok(Instruction::BlxReg {
+                rm: gpr_from_bits(rm),
+                cond,
+            });
         }
 
         // Load/store word/byte with immediate offset: cond 01 I P U B W L Rn Rd offset12
@@ -168,16 +174,36 @@ impl Instruction {
                     -(offset12 as i32)
                 };
                 if load && !b {
-                    return Ok(Instruction::Ldr { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), offset: off, cond });
+                    return Ok(Instruction::Ldr {
+                        rd: gpr_from_bits(rd),
+                        rn: gpr_from_bits(rn),
+                        offset: off,
+                        cond,
+                    });
                 }
                 if !load && !b {
-                    return Ok(Instruction::Str { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), offset: off, cond });
+                    return Ok(Instruction::Str {
+                        rd: gpr_from_bits(rd),
+                        rn: gpr_from_bits(rn),
+                        offset: off,
+                        cond,
+                    });
                 }
                 if load && b {
-                    return Ok(Instruction::Ldrb { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), offset: off, cond });
+                    return Ok(Instruction::Ldrb {
+                        rd: gpr_from_bits(rd),
+                        rn: gpr_from_bits(rn),
+                        offset: off,
+                        cond,
+                    });
                 }
                 if !load && b {
-                    return Ok(Instruction::Strb { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), offset: off, cond });
+                    return Ok(Instruction::Strb {
+                        rd: gpr_from_bits(rd),
+                        rn: gpr_from_bits(rn),
+                        offset: off,
+                        cond,
+                    });
                 }
             }
         }
@@ -202,18 +228,96 @@ impl Instruction {
                 if !shift_by_reg && shift_imm == 0 && shift_type == 0 {
                     // No shift
                     match opcode {
-                        0b0100 if s_bit == 0 => return Ok(Instruction::Add { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b0010 if s_bit == 0 => return Ok(Instruction::Sub { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b0000 if s_bit == 0 => return Ok(Instruction::And { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1100 if s_bit == 0 => return Ok(Instruction::Orr { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b0001 if s_bit == 0 => return Ok(Instruction::Eor { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1110 if s_bit == 0 => return Ok(Instruction::Bic { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1101 if s_bit == 0 && rn == 0 => return Ok(Instruction::Mov { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), cond }),
-                        0b1111 if s_bit == 0 && rn == 0 => return Ok(Instruction::Mvn { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), cond }),
-                        0b1010 if s_bit == 1 => return Ok(Instruction::Cmp { rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1011 if s_bit == 1 => return Ok(Instruction::Cmn { rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1000 if s_bit == 1 => return Ok(Instruction::Tst { rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
-                        0b1001 if s_bit == 1 => return Ok(Instruction::Teq { rn: gpr_from_bits(rn), rm: gpr_from_bits(rm), cond }),
+                        0b0100 if s_bit == 0 => {
+                            return Ok(Instruction::Add {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b0010 if s_bit == 0 => {
+                            return Ok(Instruction::Sub {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b0000 if s_bit == 0 => {
+                            return Ok(Instruction::And {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1100 if s_bit == 0 => {
+                            return Ok(Instruction::Orr {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b0001 if s_bit == 0 => {
+                            return Ok(Instruction::Eor {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1110 if s_bit == 0 => {
+                            return Ok(Instruction::Bic {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1101 if s_bit == 0 && rn == 0 => {
+                            return Ok(Instruction::Mov {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1111 if s_bit == 0 && rn == 0 => {
+                            return Ok(Instruction::Mvn {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1010 if s_bit == 1 => {
+                            return Ok(Instruction::Cmp {
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1011 if s_bit == 1 => {
+                            return Ok(Instruction::Cmn {
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1000 if s_bit == 1 => {
+                            return Ok(Instruction::Tst {
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
+                        0b1001 if s_bit == 1 => {
+                            return Ok(Instruction::Teq {
+                                rn: gpr_from_bits(rn),
+                                rm: gpr_from_bits(rm),
+                                cond,
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -221,10 +325,38 @@ impl Instruction {
                 // Shift by immediate (encoded as MOV Rd, Rm, shift #imm)
                 if !shift_by_reg && shift_imm != 0 && opcode == 0b1101 && s_bit == 0 {
                     match shift_type {
-                        0 => return Ok(Instruction::LslImm { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), shift_imm, cond }),
-                        1 => return Ok(Instruction::LsrImm { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), shift_imm, cond }),
-                        2 => return Ok(Instruction::AsrImm { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), shift_imm, cond }),
-                        3 => return Ok(Instruction::RorImm { rd: gpr_from_bits(rd), rm: gpr_from_bits(rm), shift_imm, cond }),
+                        0 => {
+                            return Ok(Instruction::LslImm {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                shift_imm,
+                                cond,
+                            })
+                        }
+                        1 => {
+                            return Ok(Instruction::LsrImm {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                shift_imm,
+                                cond,
+                            })
+                        }
+                        2 => {
+                            return Ok(Instruction::AsrImm {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                shift_imm,
+                                cond,
+                            })
+                        }
+                        3 => {
+                            return Ok(Instruction::RorImm {
+                                rd: gpr_from_bits(rd),
+                                rm: gpr_from_bits(rm),
+                                shift_imm,
+                                cond,
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -232,10 +364,38 @@ impl Instruction {
                 // Shift by register
                 if shift_by_reg && opcode == 0b1101 && s_bit == 0 {
                     match shift_type {
-                        0 => return Ok(Instruction::LslReg { rd: gpr_from_bits(rd), rn: gpr_from_bits(rm), rs: gpr_from_bits(rs), cond }),
-                        1 => return Ok(Instruction::LsrReg { rd: gpr_from_bits(rd), rn: gpr_from_bits(rm), rs: gpr_from_bits(rs), cond }),
-                        2 => return Ok(Instruction::AsrReg { rd: gpr_from_bits(rd), rn: gpr_from_bits(rm), rs: gpr_from_bits(rs), cond }),
-                        3 => return Ok(Instruction::RorReg { rd: gpr_from_bits(rd), rn: gpr_from_bits(rm), rs: gpr_from_bits(rs), cond }),
+                        0 => {
+                            return Ok(Instruction::LslReg {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rm),
+                                rs: gpr_from_bits(rs),
+                                cond,
+                            })
+                        }
+                        1 => {
+                            return Ok(Instruction::LsrReg {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rm),
+                                rs: gpr_from_bits(rs),
+                                cond,
+                            })
+                        }
+                        2 => {
+                            return Ok(Instruction::AsrReg {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rm),
+                                rs: gpr_from_bits(rs),
+                                cond,
+                            })
+                        }
+                        3 => {
+                            return Ok(Instruction::RorReg {
+                                rd: gpr_from_bits(rd),
+                                rn: gpr_from_bits(rm),
+                                rs: gpr_from_bits(rs),
+                                cond,
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -246,10 +406,40 @@ impl Instruction {
                 let rotate = (word >> 8) & 0xF;
                 let imm8 = word & 0xFF;
                 match opcode {
-                    0b0100 if s_bit == 0 => return Ok(Instruction::AddImm { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rotate, imm8, cond }),
-                    0b0010 if s_bit == 0 => return Ok(Instruction::SubImm { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rotate, imm8, cond }),
-                    0b1101 if s_bit == 0 && rn == 0 => return Ok(Instruction::MovImm { rd: gpr_from_bits(rd), rotate, imm8, cond }),
-                    0b1010 if s_bit == 1 => return Ok(Instruction::CmpImm { rn: gpr_from_bits(rn), rotate, imm8, cond }),
+                    0b0100 if s_bit == 0 => {
+                        return Ok(Instruction::AddImm {
+                            rd: gpr_from_bits(rd),
+                            rn: gpr_from_bits(rn),
+                            rotate,
+                            imm8,
+                            cond,
+                        })
+                    }
+                    0b0010 if s_bit == 0 => {
+                        return Ok(Instruction::SubImm {
+                            rd: gpr_from_bits(rd),
+                            rn: gpr_from_bits(rn),
+                            rotate,
+                            imm8,
+                            cond,
+                        })
+                    }
+                    0b1101 if s_bit == 0 && rn == 0 => {
+                        return Ok(Instruction::MovImm {
+                            rd: gpr_from_bits(rd),
+                            rotate,
+                            imm8,
+                            cond,
+                        })
+                    }
+                    0b1010 if s_bit == 1 => {
+                        return Ok(Instruction::CmpImm {
+                            rn: gpr_from_bits(rn),
+                            rotate,
+                            imm8,
+                            cond,
+                        })
+                    }
                     _ => {}
                 }
             }
@@ -263,7 +453,13 @@ impl Instruction {
             let rs = (word >> 8) & 0xF;
             let rm = word & 0xF;
             if !s_bit {
-                return Ok(Instruction::Mul { rd: gpr_from_bits(rd), rn: gpr_from_bits(rn), rs: gpr_from_bits(rs), rm: gpr_from_bits(rm), cond });
+                return Ok(Instruction::Mul {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    rs: gpr_from_bits(rs),
+                    rm: gpr_from_bits(rm),
+                    cond,
+                });
             }
         }
 
@@ -284,12 +480,17 @@ impl Instruction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arm32::Gpr as G;
     use crate::arm32::Condition as C;
+    use crate::arm32::Gpr as G;
 
     #[test]
     fn test_decode_add() {
-        let instr = Instruction::Add { rd: G::R0, rn: G::R1, rm: G::R2, cond: C::Al };
+        let instr = Instruction::Add {
+            rd: G::R0,
+            rn: G::R1,
+            rm: G::R2,
+            cond: C::Al,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -297,7 +498,12 @@ mod tests {
 
     #[test]
     fn test_decode_sub() {
-        let instr = Instruction::Sub { rd: G::R3, rn: G::R4, rm: G::R5, cond: C::Al };
+        let instr = Instruction::Sub {
+            rd: G::R3,
+            rn: G::R4,
+            rm: G::R5,
+            cond: C::Al,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -306,9 +512,24 @@ mod tests {
     #[test]
     fn test_decode_and_orr_eor() {
         for instr in [
-            Instruction::And { rd: G::R0, rn: G::R1, rm: G::R2, cond: C::Al },
-            Instruction::Orr { rd: G::R0, rn: G::R1, rm: G::R2, cond: C::Al },
-            Instruction::Eor { rd: G::R0, rn: G::R1, rm: G::R2, cond: C::Al },
+            Instruction::And {
+                rd: G::R0,
+                rn: G::R1,
+                rm: G::R2,
+                cond: C::Al,
+            },
+            Instruction::Orr {
+                rd: G::R0,
+                rn: G::R1,
+                rm: G::R2,
+                cond: C::Al,
+            },
+            Instruction::Eor {
+                rd: G::R0,
+                rn: G::R1,
+                rm: G::R2,
+                cond: C::Al,
+            },
         ] {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
@@ -318,7 +539,11 @@ mod tests {
 
     #[test]
     fn test_decode_mov() {
-        let instr = Instruction::Mov { rd: G::R0, rm: G::R1, cond: C::Al };
+        let instr = Instruction::Mov {
+            rd: G::R0,
+            rm: G::R1,
+            cond: C::Al,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -326,12 +551,22 @@ mod tests {
 
     #[test]
     fn test_decode_ldr_str() {
-        let ldr = Instruction::Ldr { rd: G::R0, rn: G::R1, offset: 4, cond: C::Al };
+        let ldr = Instruction::Ldr {
+            rd: G::R0,
+            rn: G::R1,
+            offset: 4,
+            cond: C::Al,
+        };
         let bytes = ldr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{ldr}"));
 
-        let str = Instruction::Str { rd: G::R0, rn: G::R1, offset: 4, cond: C::Al };
+        let str = Instruction::Str {
+            rd: G::R0,
+            rn: G::R1,
+            offset: 4,
+            cond: C::Al,
+        };
         let bytes = str.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{str}"));
@@ -339,7 +574,11 @@ mod tests {
 
     #[test]
     fn test_decode_cmp() {
-        let instr = Instruction::Cmp { rn: G::R0, rm: G::R1, cond: C::Al };
+        let instr = Instruction::Cmp {
+            rn: G::R0,
+            rm: G::R1,
+            cond: C::Al,
+        };
         let bytes = instr.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{instr}"));
@@ -347,12 +586,18 @@ mod tests {
 
     #[test]
     fn test_decode_branch() {
-        let b = Instruction::B { offset: 8, cond: C::Al };
+        let b = Instruction::B {
+            offset: 8,
+            cond: C::Al,
+        };
         let bytes = b.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{b}"));
 
-        let bl = Instruction::Bl { offset: 12, cond: C::Al };
+        let bl = Instruction::Bl {
+            offset: 12,
+            cond: C::Al,
+        };
         let bytes = bl.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{bl}"));

@@ -53,8 +53,8 @@ pub mod debt;
 pub mod escape;
 pub mod exclusivity;
 pub mod inference;
-pub mod interprocedural;
 pub mod interpretation;
+pub mod interprocedural;
 pub mod invariant_aggregator;
 pub mod liveness;
 pub mod origin;
@@ -62,41 +62,43 @@ pub mod result;
 pub mod verification;
 
 // Re-export the primary public API.
-pub use constraint::{Constraint, ConstraintId};
-pub use debt::{DebtItem, DebtStatus, Priority, VerificationDebt};
-pub use inference::{InferenceEngine, InferenceError, InferenceResult};
-pub use result::{
-    Assumption, BatchedViolations, ConfidenceLevel, CounterExample, Evidence, InvariantName,
-    InvariantViolation, ProgramPoint, ProofStep, Severity, VerificationResult, VerificationStatus,
-};
-pub use invariant_aggregator::{
-    AggregatedResult, DiagnosticsReport, InvariantAggregator, InvariantDelta, InvariantKind,
-    OverallVerdict, VerificationLevel, VerificationSummary,
-};
-pub use escape::{EscapeKind, analyze_escapes};
-pub use cache::{InvariantViolation as CacheInvariantViolation, Severity as CacheSeverity, VerificationCache, compute_fingerprint};
-pub use verification::{VerificationEngine, VerificationInput};
-pub use interpretation::{
-    AccessEvent, CapDTransitionResult, InterpretationStrictness,
-    InterpretationVerificationDetail, InterpretationVerifier, InterpretationViolation,
-    LocationId, ProgramPointId, SafetyProof, UnverifiedPair, VerificationWarning, WriteReadPair,
-};
-pub use liveness::{
-    EventAction, LivenessInput, LivenessVerificationResult, LivenessVerifier, LivenessViolation,
-    ObligationKind, PointId, ProofObligation, ResourceEvent, ResourceId, ResourceKind, ThreadId,
-    WaitForDependency, verify_liveness,
+pub use cache::{
+    compute_fingerprint, InvariantViolation as CacheInvariantViolation, Severity as CacheSeverity,
+    VerificationCache,
 };
 pub use cleanup::{
     CleanupGraph, CleanupReport, CleanupVerifier, CleanupViolation, NodeId as CleanupNodeId,
     OperationKind, ResourceId as CleanupResourceId, ResourceKind as CleanupResourceKind,
     ViolationKind,
 };
+pub use constraint::{Constraint, ConstraintId};
+pub use debt::{DebtItem, DebtStatus, Priority, VerificationDebt};
+pub use escape::{analyze_escapes, EscapeKind};
 pub use exclusivity::{
-    AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord,
-    CapDInfo, Conflict, ConflictKind, ExclusivityInput, ExclusivityOutput,
-    ExclusivityVerifier, InterferenceGraph, SyncEdgeRecord, SyncOrdering,
+    AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord, CapDInfo,
+    Conflict, ConflictKind, ExclusivityInput, ExclusivityOutput, ExclusivityVerifier,
+    InterferenceGraph, SyncEdgeRecord, SyncOrdering,
+};
+pub use inference::{InferenceEngine, InferenceError, InferenceResult};
+pub use interpretation::{
+    AccessEvent, CapDTransitionResult, InterpretationStrictness, InterpretationVerificationDetail,
+    InterpretationVerifier, InterpretationViolation, LocationId, ProgramPointId, SafetyProof,
+    UnverifiedPair, VerificationWarning, WriteReadPair,
 };
 pub use interprocedural::{
-    FunctionSummary, InterproceduralViolation,
-    compute_summaries, verify_interprocedural_invariants,
+    compute_summaries, verify_interprocedural_invariants, FunctionSummary, InterproceduralViolation,
 };
+pub use invariant_aggregator::{
+    AggregatedResult, DiagnosticsReport, InvariantAggregator, InvariantDelta, InvariantKind,
+    OverallVerdict, VerificationLevel, VerificationSummary,
+};
+pub use liveness::{
+    verify_liveness, EventAction, LivenessInput, LivenessVerificationResult, LivenessVerifier,
+    LivenessViolation, ObligationKind, PointId, ProofObligation, ResourceEvent, ResourceId,
+    ResourceKind, ThreadId, WaitForDependency,
+};
+pub use result::{
+    Assumption, BatchedViolations, ConfidenceLevel, CounterExample, Evidence, InvariantName,
+    InvariantViolation, ProgramPoint, ProofStep, Severity, VerificationResult, VerificationStatus,
+};
+pub use verification::{VerificationEngine, VerificationInput};

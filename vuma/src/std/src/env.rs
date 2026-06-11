@@ -56,10 +56,13 @@ impl std::error::Error for VumaEnvError {}
 impl From<VumaEnvError> for VumaErrorChain {
     fn from(e: VumaEnvError) -> Self {
         match e {
-            VumaEnvError::NotPresent => VumaErrorChain::new(VumaErrorKind::NotFound, "environment variable not found"),
-            VumaEnvError::NotUnicode(name) => {
-                VumaErrorChain::new(VumaErrorKind::Io, format!("environment variable '{}' is not valid Unicode", name))
+            VumaEnvError::NotPresent => {
+                VumaErrorChain::new(VumaErrorKind::NotFound, "environment variable not found")
             }
+            VumaEnvError::NotUnicode(name) => VumaErrorChain::new(
+                VumaErrorKind::Io,
+                format!("environment variable '{}' is not valid Unicode", name),
+            ),
         }
     }
 }
@@ -113,7 +116,8 @@ pub fn vars() -> Vec<(String, String)> {
 // VUMA-VERIFIED: current_dir requires Read capability
 pub fn current_dir() -> VumaResult<std::path::PathBuf> {
     std::env::current_dir().map_err(|e| {
-        let err: VumaErrorChain = VumaErrorChain::new(VumaErrorKind::Io, format!("current_dir: {}", e));
+        let err: VumaErrorChain =
+            VumaErrorChain::new(VumaErrorKind::Io, format!("current_dir: {}", e));
         err
     })
 }
@@ -121,17 +125,15 @@ pub fn current_dir() -> VumaResult<std::path::PathBuf> {
 /// Sets the current working directory.
 // VUMA-VERIFIED: set_current_dir requires Write capability
 pub fn set_current_dir(path: &std::path::Path) -> VumaResult<()> {
-    std::env::set_current_dir(path).map_err(|e| {
-        VumaErrorChain::new(VumaErrorKind::Io, format!("set_current_dir: {}", e))
-    })
+    std::env::set_current_dir(path)
+        .map_err(|e| VumaErrorChain::new(VumaErrorKind::Io, format!("set_current_dir: {}", e)))
 }
 
 /// Returns the path to the current executable.
 // VUMA-VERIFIED: current_exe requires Read capability
 pub fn current_exe() -> VumaResult<std::path::PathBuf> {
-    std::env::current_exe().map_err(|e| {
-        VumaErrorChain::new(VumaErrorKind::Io, format!("current_exe: {}", e))
-    })
+    std::env::current_exe()
+        .map_err(|e| VumaErrorChain::new(VumaErrorKind::Io, format!("current_exe: {}", e)))
 }
 
 /// Returns the path to the temporary directory.
@@ -185,7 +187,10 @@ mod tests {
         let val = var("VUMA_TEST_ENV_KEY").unwrap();
         assert_eq!(val, "test_value");
         remove_var("VUMA_TEST_ENV_KEY");
-        assert!(matches!(var("VUMA_TEST_ENV_KEY"), Err(VumaEnvError::NotPresent)));
+        assert!(matches!(
+            var("VUMA_TEST_ENV_KEY"),
+            Err(VumaEnvError::NotPresent)
+        ));
     }
 
     #[test]
@@ -199,7 +204,9 @@ mod tests {
         // Set a unique variable and verify it appears
         set_var("VUMA_TEST_VARS_KEY", "vars_value");
         let all = vars();
-        let found = all.iter().any(|(k, v)| k == "VUMA_TEST_VARS_KEY" && v == "vars_value");
+        let found = all
+            .iter()
+            .any(|(k, v)| k == "VUMA_TEST_VARS_KEY" && v == "vars_value");
         assert!(found);
         remove_var("VUMA_TEST_VARS_KEY");
     }

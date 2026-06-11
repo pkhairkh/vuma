@@ -42,8 +42,8 @@ use crate::sync::{Ordering, SyncEdge, SyncEdgeId};
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{
-    AccessMode, NodeData, NodeId as ScgNodeId,
-    NodePayload, NodeType, ProgramPoint as ScgProgramPoint,
+    AccessMode, NodeData, NodeId as ScgNodeId, NodePayload, NodeType,
+    ProgramPoint as ScgProgramPoint,
 };
 use vuma_scg::region::RegionId as ScgRegionId;
 
@@ -110,11 +110,7 @@ impl fmt::Display for ConversionError {
                 )
             }
             ConversionError::BrokenDerivationChain(did) => {
-                write!(
-                    f,
-                    "derivation {} chain does not terminate at a region",
-                    did
-                )
+                write!(f, "derivation {} chain does not terminate at a region", did)
             }
             ConversionError::InvalidProvenanceRange(did) => {
                 write!(f, "derivation {} has invalid provenance range", did)
@@ -187,11 +183,7 @@ impl ConversionContext {
     /// Returns the base address of the allocated range. Addresses are assigned
     /// monotonically — each new region is placed after the previous one.
     fn allocate_address(&mut self, size: u64, align: u64) -> Address {
-        let align = if align == 0 {
-            DEFAULT_ALIGN
-        } else {
-            align
-        };
+        let align = if align == 0 { DEFAULT_ALIGN } else { align };
         let base = Address::from(self.next_address).align_to(align);
         self.next_address = base.as_u64() + size;
         base
@@ -341,7 +333,12 @@ fn process_node(
         NodeType::Deallocation => {
             process_deallocation(ctx, node)?;
         }
-        NodeType::Computation | NodeType::Effect | NodeType::Control | NodeType::Phantom | NodeType::VTable | NodeType::ClosureEnv => {
+        NodeType::Computation
+        | NodeType::Effect
+        | NodeType::Control
+        | NodeType::Phantom
+        | NodeType::VTable
+        | NodeType::ClosureEnv => {
             // These node types do not directly produce MSG constructs.
             // However, if they participate in derivation chains via Derivation
             // edges, we create a passthrough derivation.
@@ -646,9 +643,7 @@ fn compute_derivation_for_node(
             };
             Ok((
                 DerivationSource::AnotherDerivation(parent_deriv_id),
-                DerivationKind::Offset {
-                    by: offset as i64,
-                },
+                DerivationKind::Offset { by: offset as i64 },
                 (offset_addr, end),
             ))
         }
@@ -662,12 +657,12 @@ fn compute_derivation_for_node(
                 access_payload.region_id,
             ))?;
 
-        let &(base, size) = ctx
-            .region_bounds
-            .get(&msg_region_id)
-            .ok_or(ConversionError::AccessRegionNotFound(
-                access_payload.region_id,
-            ))?;
+        let &(base, size) =
+            ctx.region_bounds
+                .get(&msg_region_id)
+                .ok_or(ConversionError::AccessRegionNotFound(
+                    access_payload.region_id,
+                ))?;
 
         let offset = access_payload.offset.unwrap_or(0);
         if offset == 0 {
@@ -680,9 +675,7 @@ fn compute_derivation_for_node(
             let offset_addr = base + offset;
             Ok((
                 DerivationSource::Region(msg_region_id),
-                DerivationKind::Offset {
-                    by: offset as i64,
-                },
+                DerivationKind::Offset { by: offset as i64 },
                 (offset_addr, base + size),
             ))
         }
@@ -770,8 +763,8 @@ mod tests {
     use vuma_scg::edge::EdgeKind;
     use vuma_scg::graph::SCG;
     use vuma_scg::node::{
-        AccessMode, AccessNode, AllocationNode, CastNode, ComputationNode,
-        DeallocationNode, NodePayload, NodeType, ProgramPoint as ScgPP,
+        AccessMode, AccessNode, AllocationNode, CastNode, ComputationNode, DeallocationNode,
+        NodePayload, NodeType, ProgramPoint as ScgPP,
     };
     use vuma_scg::region::{DeploymentTarget, RegionId as ScgRegionId, SCGRegion};
 
@@ -858,10 +851,7 @@ mod tests {
         // The first derivation (from allocation) should be Direct.
         let direct_deriv = msg.derivation(DerivationId(0)).unwrap();
         assert!(matches!(direct_deriv.kind, DerivationKind::Direct));
-        assert!(matches!(
-            direct_deriv.source,
-            DerivationSource::Region(_)
-        ));
+        assert!(matches!(direct_deriv.source, DerivationSource::Region(_)));
         assert!(direct_deriv.is_within_bounds());
     }
 
@@ -1225,10 +1215,8 @@ mod tests {
         );
 
         // Both accesses derived from the same allocation, no control flow between them.
-        scg.add_edge(alloc_id, w1, EdgeKind::Derivation)
-            .unwrap();
-        scg.add_edge(alloc_id, w2, EdgeKind::Derivation)
-            .unwrap();
+        scg.add_edge(alloc_id, w1, EdgeKind::Derivation).unwrap();
+        scg.add_edge(alloc_id, w2, EdgeKind::Derivation).unwrap();
 
         let msg = scg_to_msg(&scg).unwrap();
 
@@ -1292,7 +1280,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "offset_compute".to_string(),
-                result_type: Some("*mut u8".to_string()), tail_call: false }),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
             scg_pp(2),
         );
 

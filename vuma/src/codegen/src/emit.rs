@@ -617,7 +617,8 @@ impl Emitter {
 
         // Emit each basic block.
         for block in &func.blocks {
-            self.label_offsets.insert(block.label.clone(), self.code.len());
+            self.label_offsets
+                .insert(block.label.clone(), self.code.len());
             self.emit_block(block)?;
         }
 
@@ -667,34 +668,60 @@ impl Emitter {
                         self.emit_instruction(Instruction::SUB {
                             rd,
                             rn: Register::XZR,
-                            rm: Operand::Reg { reg: rn, shift: None },
+                            rm: Operand::Reg {
+                                reg: rn,
+                                shift: None,
+                            },
                         })?;
                     }
                     UnaryOpKind::Not => {
                         self.emit_load_immediate(Register::X9, -1)?;
-                        self.emit_instruction(Instruction::EOR { rd, rn, rm: Register::X9 })?;
+                        self.emit_instruction(Instruction::EOR {
+                            rd,
+                            rn,
+                            rm: Register::X9,
+                        })?;
                     }
                     UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                        log::warn!("unary op {:?} not yet implemented, emitting MOV XZR placeholder", op);
-                        self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
+                        log::warn!(
+                            "unary op {:?} not yet implemented, emitting MOV XZR placeholder",
+                            op
+                        );
+                        self.emit_instruction(Instruction::MOV {
+                            rd,
+                            rm: Register::XZR,
+                        })?;
                     }
                 }
             }
 
-            IRInstr::Call { dst, func: target_name, args } => {
+            IRInstr::Call {
+                dst,
+                func: target_name,
+                args,
+            } => {
                 // Move arguments into X0–X7.
                 for (i, arg) in args.iter().enumerate() {
-                    if i >= 8 { break; }
+                    if i >= 8 {
+                        break;
+                    }
                     let src = self.resolve_reg(arg)?;
                     let dst_reg = match i {
-                        0 => Register::X0, 1 => Register::X1,
-                        2 => Register::X2, 3 => Register::X3,
-                        4 => Register::X4, 5 => Register::X5,
-                        6 => Register::X6, 7 => Register::X7,
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
                         _ => unreachable!(),
                     };
                     if src != dst_reg {
-                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
+                        self.emit_instruction(Instruction::MOV {
+                            rd: dst_reg,
+                            rm: src,
+                        })?;
                     }
                 }
 
@@ -709,14 +736,20 @@ impl Emitter {
                 if let Some(dst_val) = dst {
                     let rd = self.resolve_reg(dst_val)?;
                     if rd != Register::X0 {
-                        self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
+                        self.emit_instruction(Instruction::MOV {
+                            rd,
+                            rm: Register::X0,
+                        })?;
                     }
                 }
             }
 
             IRInstr::Alloc { dst, size } => {
                 let rd = self.resolve_reg(dst)?;
-                self.emit_instruction(Instruction::MOV { rd, rm: Register::SP })?;
+                self.emit_instruction(Instruction::MOV {
+                    rd,
+                    rm: Register::SP,
+                })?;
                 let aligned = (*size).div_ceil(16) * 16;
                 self.emit_instruction(Instruction::SUB {
                     rd: Register::SP,
@@ -729,7 +762,10 @@ impl Emitter {
                 let rt = self.resolve_reg(ptr)?;
                 // Move ptr to X0 (first argument)
                 if rt != Register::X0 {
-                    self.emit_instruction(Instruction::MOV { rd: Register::X0, rm: rt })?;
+                    self.emit_instruction(Instruction::MOV {
+                        rd: Register::X0,
+                        rm: rt,
+                    })?;
                 }
                 // BL __vuma_free
                 let bl_word_idx = self.code.len();
@@ -746,11 +782,21 @@ impl Emitter {
                 match kind {
                     CastKind::ZExt => {
                         // Zero-extend 32-bit to 64-bit using UBFM
-                        self.emit_instruction(Instruction::UBFM { rd, rn, immr: 0, imms: 31 })?;
+                        self.emit_instruction(Instruction::UBFM {
+                            rd,
+                            rn,
+                            immr: 0,
+                            imms: 31,
+                        })?;
                     }
                     CastKind::SExt => {
                         // Sign-extend 32-bit to 64-bit using SBFM
-                        self.emit_instruction(Instruction::SBFM { rd, rn, immr: 0, imms: 31 })?;
+                        self.emit_instruction(Instruction::SBFM {
+                            rd,
+                            rn,
+                            immr: 0,
+                            imms: 31,
+                        })?;
                     }
                     CastKind::Trunc | CastKind::BitCast => {
                         // Trunc: upper bits discarded on write — just MOV
@@ -763,14 +809,18 @@ impl Emitter {
             }
 
             IRInstr::Phi { .. } => {
-                log::warn!("IRInstr::Phi encountered during emission — should be resolved by SSA pass");
+                log::warn!(
+                    "IRInstr::Phi encountered during emission — should be resolved by SSA pass"
+                );
             }
 
             IRInstr::GetAddress { dst, name } => {
                 let rd = self.resolve_reg(dst)?;
                 // Emit a call to __vuma_getaddr to resolve the symbol at runtime.
                 // Move name hash to X0 as the argument.
-                let name_hash = name.chars().fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
+                let name_hash = name
+                    .chars()
+                    .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
                 self.emit_load_immediate(Register::X0, name_hash as i64)?;
                 let bl_word_idx = self.code.len();
                 self.call_relocs.push(CallRelocation {
@@ -779,7 +829,10 @@ impl Emitter {
                 });
                 self.emit_instruction(Instruction::BL { offset: 0 })?;
                 if rd != Register::X0 {
-                    self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
+                    self.emit_instruction(Instruction::MOV {
+                        rd,
+                        rm: Register::X0,
+                    })?;
                 }
             }
 
@@ -793,10 +846,16 @@ impl Emitter {
                         } else {
                             let temp = Register::X9;
                             self.emit_load_immediate(temp, *v)?;
-                            Operand::Reg { reg: temp, shift: None }
+                            Operand::Reg {
+                                reg: temp,
+                                shift: None,
+                            }
                         }
                     }
-                    _ => Operand::Reg { reg: self.resolve_reg(offset)?, shift: None },
+                    _ => Operand::Reg {
+                        reg: self.resolve_reg(offset)?,
+                        shift: None,
+                    },
                 };
                 self.emit_instruction(Instruction::ADD { rd, rn, rm })?;
             }
@@ -816,13 +875,21 @@ impl Emitter {
             }
 
             // ── Comparison instruction ──
-            IRInstr::Cmp { kind, dst, lhs, rhs } => {
+            IRInstr::Cmp {
+                kind,
+                dst,
+                lhs,
+                rhs,
+            } => {
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(lhs)?;
                 let rm = self.resolve_reg(rhs)?;
                 self.emit_instruction(Instruction::CMP {
                     rn,
-                    rm: Operand::Reg { reg: rm, shift: None },
+                    rm: Operand::Reg {
+                        reg: rm,
+                        shift: None,
+                    },
                 })?;
                 let cond = cmp_kind_to_condition(kind);
                 self.emit_instruction(Instruction::CSET { rd, cond })?;
@@ -831,17 +898,26 @@ impl Emitter {
             // ── Instruction-level control flow ──
             IRInstr::Ret { values } => {
                 for (i, val) in values.iter().enumerate() {
-                    if i >= 8 { break; }
+                    if i >= 8 {
+                        break;
+                    }
                     let src = self.resolve_reg(val)?;
                     let dst_reg = match i {
-                        0 => Register::X0, 1 => Register::X1,
-                        2 => Register::X2, 3 => Register::X3,
-                        4 => Register::X4, 5 => Register::X5,
-                        6 => Register::X6, 7 => Register::X7,
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
                         _ => unreachable!(),
                     };
                     if src != dst_reg {
-                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
+                        self.emit_instruction(Instruction::MOV {
+                            rd: dst_reg,
+                            rm: src,
+                        })?;
                     }
                 }
             }
@@ -852,7 +928,11 @@ impl Emitter {
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
 
-            IRInstr::CondBranch { cond, true_target, false_target } => {
+            IRInstr::CondBranch {
+                cond,
+                true_target,
+                false_target,
+            } => {
                 let rt = self.resolve_reg(cond)?;
                 let fixup_cbz = self.code.len();
                 self.fixups.push((fixup_cbz, false_target.clone()));
@@ -862,7 +942,12 @@ impl Emitter {
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
 
-            IRInstr::Select { dst, cond, true_val, false_val } => {
+            IRInstr::Select {
+                dst,
+                cond,
+                true_val,
+                false_val,
+            } => {
                 // Lower select as: SUBS XZR, cond, #0; CSEL dst, false_val, true_val, NE
                 let rd = self.resolve_reg(dst)?;
                 let rc = self.resolve_reg(cond)?;
@@ -890,7 +975,13 @@ impl Emitter {
     }
 
     /// Emit a binary operation (shared by `BinOp` and dedicated `Add`/`Sub`/…).
-    fn emit_binop(&mut self, op: BinOpKind, dst: &IRValue, lhs: &IRValue, rhs: &IRValue) -> Result<()> {
+    fn emit_binop(
+        &mut self,
+        op: BinOpKind,
+        dst: &IRValue,
+        lhs: &IRValue,
+        rhs: &IRValue,
+    ) -> Result<()> {
         let rd = self.resolve_reg(dst)?;
         let rn = self.resolve_reg(lhs)?;
         let rm = match rhs {
@@ -900,15 +991,25 @@ impl Emitter {
                 } else {
                     let temp = Register::X9;
                     self.emit_load_immediate(temp, *v)?;
-                    Operand::Reg { reg: temp, shift: None }
+                    Operand::Reg {
+                        reg: temp,
+                        shift: None,
+                    }
                 }
             }
-            _ => Operand::Reg { reg: self.resolve_reg(rhs)?, shift: None },
+            _ => Operand::Reg {
+                reg: self.resolve_reg(rhs)?,
+                shift: None,
+            },
         };
 
         match op {
-            BinOpKind::Add => { self.emit_instruction(Instruction::ADD { rd, rn, rm })?; }
-            BinOpKind::Sub => { self.emit_instruction(Instruction::SUB { rd, rn, rm })?; }
+            BinOpKind::Add => {
+                self.emit_instruction(Instruction::ADD { rd, rn, rm })?;
+            }
+            BinOpKind::Sub => {
+                self.emit_instruction(Instruction::SUB { rd, rn, rm })?;
+            }
             BinOpKind::Mul => {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 self.emit_instruction(Instruction::MUL { rd, rn, rm: rm_reg })?;
@@ -933,9 +1034,15 @@ impl Emitter {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 self.emit_instruction(Instruction::EOR { rd, rn, rm: rm_reg })?;
             }
-            BinOpKind::Shl => { self.emit_instruction(Instruction::LSL { rd, rn, rm })?; }
-            BinOpKind::ShrL => { self.emit_instruction(Instruction::LSR { rd, rn, rm })?; }
-            BinOpKind::ShrA => { self.emit_instruction(Instruction::ASR { rd, rn, rm })?; }
+            BinOpKind::Shl => {
+                self.emit_instruction(Instruction::LSL { rd, rn, rm })?;
+            }
+            BinOpKind::ShrL => {
+                self.emit_instruction(Instruction::LSR { rd, rn, rm })?;
+            }
+            BinOpKind::ShrA => {
+                self.emit_instruction(Instruction::ASR { rd, rn, rm })?;
+            }
             BinOpKind::SRem | BinOpKind::URem => {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 let div_instr = if op == BinOpKind::SRem {
@@ -947,18 +1054,28 @@ impl Emitter {
                 // MSUB rd, rd, rm, rn  =>  rd = rn - rd * rm  =  dividend - quotient * divisor
                 self.emit_instruction(Instruction::MSUB {
                     rd,
-                    rn: rd,      // quotient (result of DIV)
-                    rm: rm_reg,  // divisor
-                    ra: rn,      // dividend
+                    rn: rd,     // quotient (result of DIV)
+                    rm: rm_reg, // divisor
+                    ra: rn,     // dividend
                 })?;
             }
-            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
-            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
-            | BinOpKind::Eq | BinOpKind::Ne => {
+            BinOpKind::SLt
+            | BinOpKind::SLe
+            | BinOpKind::SGt
+            | BinOpKind::SGe
+            | BinOpKind::ULt
+            | BinOpKind::ULe
+            | BinOpKind::UGt
+            | BinOpKind::UGe
+            | BinOpKind::Eq
+            | BinOpKind::Ne => {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 self.emit_instruction(Instruction::CMP {
                     rn,
-                    rm: Operand::Reg { reg: rm_reg, shift: None },
+                    rm: Operand::Reg {
+                        reg: rm_reg,
+                        shift: None,
+                    },
                 })?;
                 let cond = binop_kind_to_condition(&op);
                 self.emit_instruction(Instruction::CSET { rd, cond })?;
@@ -975,7 +1092,11 @@ impl Emitter {
                 self.fixups.push((fixup_idx, target.clone()));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
-            IRTerminator::Branch { cond, true_block, false_block } => {
+            IRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
                 let rt = self.resolve_reg(cond)?;
                 let fixup_cbnz = self.code.len();
                 self.fixups.push((fixup_cbnz, true_block.clone()));
@@ -986,31 +1107,48 @@ impl Emitter {
             }
             IRTerminator::Return(vals) => {
                 for (i, val) in vals.iter().enumerate() {
-                    if i >= 8 { break; }
+                    if i >= 8 {
+                        break;
+                    }
                     let src = self.resolve_reg(val)?;
                     let dst_reg = match i {
-                        0 => Register::X0, 1 => Register::X1,
-                        2 => Register::X2, 3 => Register::X3,
-                        4 => Register::X4, 5 => Register::X5,
-                        6 => Register::X6, 7 => Register::X7,
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
                         _ => unreachable!(),
                     };
                     if src != dst_reg {
-                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
+                        self.emit_instruction(Instruction::MOV {
+                            rd: dst_reg,
+                            rm: src,
+                        })?;
                     }
                 }
                 // Use the same frame size computed in the prologue
                 let frame_size = self.frame_size;
                 self.emit_instruction(Instruction::ADD {
-                    rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(frame_size),
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(frame_size),
                 })?;
                 self.emit_instruction(Instruction::LDP {
-                    rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 16,
+                    rt1: Register::X29,
+                    rt2: Register::X30,
+                    rn: Register::SP,
+                    offset: 16,
                 })?;
                 self.emit_instruction(Instruction::RET { rn: None })?;
             }
             IRTerminator::Unreachable => {
-                self.emit_instruction(Instruction::MOV { rd: Register::XZR, rm: Register::XZR })?;
+                self.emit_instruction(Instruction::MOV {
+                    rd: Register::XZR,
+                    rm: Register::XZR,
+                })?;
             }
             // Switch, Invoke, TailCall, and Resume are lowered by the
             // control_flow module before reaching the emitter. If they
@@ -1062,32 +1200,66 @@ impl Emitter {
                 self.emit_load_immediate(temp, *addr as i64)?;
                 Ok(temp)
             }
-            IRValue::Label(_) => {
-                Err(CodegenError::EncodingError("label value cannot be resolved to a register".into()))
-            }
+            IRValue::Label(_) => Err(CodegenError::EncodingError(
+                "label value cannot be resolved to a register".into(),
+            )),
         }
     }
 
     fn emit_load_immediate(&mut self, rd: Register, value: i64) -> Result<()> {
         if (0..=65535).contains(&value) {
-            self.emit_instruction(Instruction::MOVZ { rd, imm16: value as u16, shift: 0 })?;
+            self.emit_instruction(Instruction::MOVZ {
+                rd,
+                imm16: value as u16,
+                shift: 0,
+            })?;
             return Ok(());
         }
         if (0..=0xFFFF_FFFF).contains(&value) {
             let lo = (value & 0xFFFF) as u16;
             let hi = ((value >> 16) & 0xFFFF) as u16;
-            self.emit_instruction(Instruction::MOVZ { rd, imm16: lo, shift: 0 })?;
-            self.emit_instruction(Instruction::MOVK { rd, imm16: hi, shift: 16 })?;
+            self.emit_instruction(Instruction::MOVZ {
+                rd,
+                imm16: lo,
+                shift: 0,
+            })?;
+            self.emit_instruction(Instruction::MOVK {
+                rd,
+                imm16: hi,
+                shift: 16,
+            })?;
             return Ok(());
         }
         let w0 = (value & 0xFFFF) as u16;
         let w1 = ((value >> 16) & 0xFFFF) as u16;
         let w2 = ((value >> 32) & 0xFFFF) as u16;
         let w3 = ((value >> 48) & 0xFFFF) as u16;
-        self.emit_instruction(Instruction::MOVZ { rd, imm16: w0, shift: 0 })?;
-        if w1 != 0 { self.emit_instruction(Instruction::MOVK { rd, imm16: w1, shift: 16 })?; }
-        if w2 != 0 { self.emit_instruction(Instruction::MOVK { rd, imm16: w2, shift: 32 })?; }
-        if w3 != 0 { self.emit_instruction(Instruction::MOVK { rd, imm16: w3, shift: 48 })?; }
+        self.emit_instruction(Instruction::MOVZ {
+            rd,
+            imm16: w0,
+            shift: 0,
+        })?;
+        if w1 != 0 {
+            self.emit_instruction(Instruction::MOVK {
+                rd,
+                imm16: w1,
+                shift: 16,
+            })?;
+        }
+        if w2 != 0 {
+            self.emit_instruction(Instruction::MOVK {
+                rd,
+                imm16: w2,
+                shift: 32,
+            })?;
+        }
+        if w3 != 0 {
+            self.emit_instruction(Instruction::MOVK {
+                rd,
+                imm16: w3,
+                shift: 48,
+            })?;
+        }
         Ok(())
     }
 
@@ -1126,7 +1298,9 @@ impl Emitter {
 }
 
 impl Default for Emitter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,16 +1310,16 @@ impl Default for Emitter {
 /// Map an IR [`CmpKind`] to the corresponding ARM64 [`Condition`] code.
 fn cmp_kind_to_condition(kind: &CmpKind) -> Condition {
     match kind {
-        CmpKind::Eq  => Condition::EQ,
-        CmpKind::Ne  => Condition::NE,
+        CmpKind::Eq => Condition::EQ,
+        CmpKind::Ne => Condition::NE,
         CmpKind::SLt => Condition::LT,
         CmpKind::SLe => Condition::LE,
         CmpKind::SGt => Condition::GT,
         CmpKind::SGe => Condition::GE,
-        CmpKind::ULt => Condition::CC,  // Carry clear = unsigned lower
-        CmpKind::ULe => Condition::LS,  // Unsigned lower or same
-        CmpKind::UGt => Condition::HI,  // Unsigned higher
-        CmpKind::UGe => Condition::CS,  // Carry set = unsigned higher or same
+        CmpKind::ULt => Condition::CC, // Carry clear = unsigned lower
+        CmpKind::ULe => Condition::LS, // Unsigned lower or same
+        CmpKind::UGt => Condition::HI, // Unsigned higher
+        CmpKind::UGe => Condition::CS, // Carry set = unsigned higher or same
     }
 }
 
@@ -1160,8 +1334,8 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
         BinOpKind::ULe => Condition::LS,
         BinOpKind::UGt => Condition::HI,
         BinOpKind::UGe => Condition::CS,
-        BinOpKind::Eq  => Condition::EQ,
-        BinOpKind::Ne  => Condition::NE,
+        BinOpKind::Eq => Condition::EQ,
+        BinOpKind::Ne => Condition::NE,
         _ => Condition::EQ, // fallback — should not be reached
     }
 }
@@ -1299,12 +1473,21 @@ pub fn emit_elf(
 
     let text_vaddr = if is_obj { 0 } else { base_addr + text_offset };
 
-    let entry_offset = function_offsets.get(&config.entry_name).copied().unwrap_or(0);
+    let entry_offset = function_offsets
+        .get(&config.entry_name)
+        .copied()
+        .unwrap_or(0);
     let entry_point = if is_obj { 0 } else { base_addr + entry_offset };
 
     // ---- Step 5: Build symbol table and string table ----
     let (symtab_bytes, strtab_bytes, sym_name_to_idx) = if config.symbol_table {
-        build_symbol_table(functions, &function_offsets, &function_sizes, text_vaddr, &external_symbols)
+        build_symbol_table(
+            functions,
+            &function_offsets,
+            &function_sizes,
+            text_vaddr,
+            &external_symbols,
+        )
     } else {
         (Vec::new(), Vec::new(), HashMap::new())
     };
@@ -1313,7 +1496,10 @@ pub fn emit_elf(
     let call_reloc_type = call_reloc_type_for_backend(config.backend);
     if is_obj {
         for reloc in &all_call_relocs {
-            let sym_idx = sym_name_to_idx.get(&reloc.target_func).copied().unwrap_or(0);
+            let sym_idx = sym_name_to_idx
+                .get(&reloc.target_func)
+                .copied()
+                .unwrap_or(0);
             rela_entries.push(RelaEntry::new(
                 reloc.text_byte_offset,
                 sym_idx,
@@ -1328,14 +1514,22 @@ pub fn emit_elf(
     // ---- Step 6: Compute remaining layout ----
     let rela_text_offset = text_offset + text_aligned;
     let rela_text_size = rela_text_bytes.len() as u64;
-    let rela_text_aligned = if is_obj { align_up(rela_text_size, 8) } else { 0 };
+    let rela_text_aligned = if is_obj {
+        align_up(rela_text_size, 8)
+    } else {
+        0
+    };
 
     let data_file_offset = text_offset + text_aligned + rela_text_aligned;
     let rodata_size = rodata_section.len() as u64;
     let rwdata_size = data_section.len() as u64;
     let data_file_total = rodata_size + rwdata_size;
 
-    let data_vaddr = if is_obj { 0 } else { base_addr + data_file_offset };
+    let data_vaddr = if is_obj {
+        0
+    } else {
+        base_addr + data_file_offset
+    };
 
     // ---- Step 7: Build section header string table ----
     let shstrtab = build_shstrtab(config);
@@ -1372,7 +1566,11 @@ pub fn emit_elf(
     elf.extend_from_slice(&(1u32).to_le_bytes());
     elf.extend_from_slice(&entry_point.to_le_bytes());
     elf.extend_from_slice(&elf_header_size.to_le_bytes());
-    let sh_off = if config.section_headers { shdr_offset } else { 0 };
+    let sh_off = if config.section_headers {
+        shdr_offset
+    } else {
+        0
+    };
     elf.extend_from_slice(&sh_off.to_le_bytes());
     elf.extend_from_slice(&(0u32).to_le_bytes());
     elf.extend_from_slice(&(64u16).to_le_bytes());
@@ -1380,17 +1578,43 @@ pub fn emit_elf(
     elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes());
     elf.extend_from_slice(&(shdr_size as u16).to_le_bytes());
     let rela_shift: u64 = if is_obj { 1 } else { 0 };
-    let num_shdrs: u64 = if config.section_headers { 8 + rela_shift } else { 0 };
+    let num_shdrs: u64 = if config.section_headers {
+        8 + rela_shift
+    } else {
+        0
+    };
     elf.extend_from_slice(&(num_shdrs as u16).to_le_bytes());
-    let shstrndx = if config.section_headers { (7 + rela_shift) as u16 } else { 0u16 };
+    let shstrndx = if config.section_headers {
+        (7 + rela_shift) as u16
+    } else {
+        0u16
+    };
     elf.extend_from_slice(&shstrndx.to_le_bytes());
 
     assert_eq!(elf.len(), 64, "ELF header must be exactly 64 bytes");
 
     // ---- Step 9: Program Headers ----
     if !is_obj {
-        write_phdr(&mut elf, PT_LOAD, PF_R | PF_X, text_offset, text_vaddr, text_vaddr, text_size, text_size);
-        write_phdr(&mut elf, PT_LOAD, PF_R | PF_W, data_file_offset, data_vaddr, data_vaddr, data_file_total, data_file_total + bss_size);
+        write_phdr(
+            &mut elf,
+            PT_LOAD,
+            PF_R | PF_X,
+            text_offset,
+            text_vaddr,
+            text_vaddr,
+            text_size,
+            text_size,
+        );
+        write_phdr(
+            &mut elf,
+            PT_LOAD,
+            PF_R | PF_W,
+            data_file_offset,
+            data_vaddr,
+            data_vaddr,
+            data_file_total,
+            data_file_total + bss_size,
+        );
     }
 
     // ---- Step 10: .text section ----
@@ -1431,7 +1655,17 @@ pub fn emit_elf(
 
         // Section 1: .text
         let text_name_idx = shstrtab_name_offset(&shstrtab, ".text");
-        let mut sh = new_shdr(SHT_PROGBITS, (PF_R | PF_X) as u64, text_vaddr, text_offset, text_size, 0, 0, 16, 0);
+        let mut sh = new_shdr(
+            SHT_PROGBITS,
+            (PF_R | PF_X) as u64,
+            text_vaddr,
+            text_offset,
+            text_size,
+            0,
+            0,
+            16,
+            0,
+        );
         sh.name = text_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
@@ -1439,10 +1673,15 @@ pub fn emit_elf(
         if is_obj {
             let rela_name_idx = shstrtab_name_offset(&shstrtab, ".rela.text");
             let mut sh = new_shdr(
-                SHT_RELA, 0, 0, rela_text_offset, rela_text_size,
-                5 + rela_shift,  // sh_link: .symtab section index
-                1,               // sh_info: .text section index
-                8, 24,           // alignment, entry size
+                SHT_RELA,
+                0,
+                0,
+                rela_text_offset,
+                rela_text_size,
+                5 + rela_shift, // sh_link: .symtab section index
+                1,              // sh_info: .text section index
+                8,
+                24, // alignment, entry size
             );
             sh.name = rela_name_idx as u32;
             write_filled_shdr(&mut elf, &sh);
@@ -1450,7 +1689,17 @@ pub fn emit_elf(
 
         // Section 2+rela_shift: .rodata
         let rodata_name_idx = shstrtab_name_offset(&shstrtab, ".rodata");
-        let mut sh = new_shdr(SHT_PROGBITS, PF_R as u64, data_vaddr, data_file_offset, rodata_size, 0, 0, 8, 0);
+        let mut sh = new_shdr(
+            SHT_PROGBITS,
+            PF_R as u64,
+            data_vaddr,
+            data_file_offset,
+            rodata_size,
+            0,
+            0,
+            8,
+            0,
+        );
         sh.name = rodata_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
@@ -1458,36 +1707,82 @@ pub fn emit_elf(
         let data_name_idx = shstrtab_name_offset(&shstrtab, ".data");
         let data_section_offset = data_file_offset + rodata_size;
         let data_section_vaddr = data_vaddr + rodata_size;
-        let mut sh = new_shdr(SHT_PROGBITS, (PF_R | PF_W) as u64, data_section_vaddr, data_section_offset, rwdata_size, 0, 0, 8, 0);
+        let mut sh = new_shdr(
+            SHT_PROGBITS,
+            (PF_R | PF_W) as u64,
+            data_section_vaddr,
+            data_section_offset,
+            rwdata_size,
+            0,
+            0,
+            8,
+            0,
+        );
         sh.name = data_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
         // Section 4+rela_shift: .bss
         let bss_name_idx = shstrtab_name_offset(&shstrtab, ".bss");
         let bss_vaddr = data_vaddr + data_file_total;
-        let mut sh = new_shdr(SHT_NOBITS, (PF_R | PF_W) as u64, bss_vaddr, 0, bss_size, 0, 0, 16, 0);
+        let mut sh = new_shdr(
+            SHT_NOBITS,
+            (PF_R | PF_W) as u64,
+            bss_vaddr,
+            0,
+            bss_size,
+            0,
+            0,
+            16,
+            0,
+        );
         sh.name = bss_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
         // Section 5+rela_shift: .symtab
         let symtab_name_idx = shstrtab_name_offset(&shstrtab, ".symtab");
-        let mut sh = new_shdr(SHT_SYMTAB, 0, 0, symtab_file_offset, symtab_bytes.len() as u64,
-            6 + rela_shift,  // sh_link: .strtab section index
-            2,               // sh_info: one past last local symbol
-            8, 24,
+        let mut sh = new_shdr(
+            SHT_SYMTAB,
+            0,
+            0,
+            symtab_file_offset,
+            symtab_bytes.len() as u64,
+            6 + rela_shift, // sh_link: .strtab section index
+            2,              // sh_info: one past last local symbol
+            8,
+            24,
         );
         sh.name = symtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
         // Section 6+rela_shift: .strtab
         let strtab_name_idx = shstrtab_name_offset(&shstrtab, ".strtab");
-        let mut sh = new_shdr(SHT_STRTAB, 0, 0, strtab_file_offset, strtab_bytes.len() as u64, 0, 0, 1, 0);
+        let mut sh = new_shdr(
+            SHT_STRTAB,
+            0,
+            0,
+            strtab_file_offset,
+            strtab_bytes.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
         sh.name = strtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
         // Section 7+rela_shift: .shstrtab
         let shstrtab_name_idx = shstrtab_name_offset(&shstrtab, ".shstrtab");
-        let mut sh = new_shdr(SHT_STRTAB, 0, 0, shstrtab_file_offset, shstrtab.len() as u64, 0, 0, 1, 0);
+        let mut sh = new_shdr(
+            SHT_STRTAB,
+            0,
+            0,
+            shstrtab_file_offset,
+            shstrtab.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        );
         sh.name = shstrtab_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
     }
@@ -1496,10 +1791,7 @@ pub fn emit_elf(
     if config.debug_info && config.section_headers {
         let mut db = crate::dwarf::DwarfBuilder::new();
         let source_file = config.entry_name.clone() + ".vuma";
-        db.add_compile_unit(
-            &source_file,
-            "vuma-codegen 0.1",
-        );
+        db.add_compile_unit(&source_file, "vuma-codegen 0.1");
         for func in functions {
             let start = function_offsets.get(&func.name).copied().unwrap_or(0);
             let size = function_sizes.get(&func.name).copied().unwrap_or(0);
@@ -1543,7 +1835,11 @@ pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>
 /// Convenience wrapper around [`emit_elf`] with `OutputFormat::Obj` and the
 /// given backend kind. The resulting object file contains `.rela.text` entries
 /// using the appropriate relocation type for the target ISA.
-pub fn emit_obj(functions: &[IRFunction], data_sections: &[DataSection], backend: BackendKind) -> Result<Vec<u8>> {
+pub fn emit_obj(
+    functions: &[IRFunction],
+    data_sections: &[DataSection],
+    backend: BackendKind,
+) -> Result<Vec<u8>> {
     let config = EmitConfig::relocatable_obj_for(backend);
     emit_elf(functions, data_sections, &config)
 }
@@ -1562,7 +1858,10 @@ fn resolve_call_relocs(
         let target_offset = match function_offsets.get(&reloc.target_func) {
             Some(&off) => off,
             None => {
-                log::warn!("call relocation target '{}' not found — leaving BL offset as 0", reloc.target_func);
+                log::warn!(
+                    "call relocation target '{}' not found — leaving BL offset as 0",
+                    reloc.target_func
+                );
                 continue;
             }
         };
@@ -1570,12 +1869,15 @@ fn resolve_call_relocs(
         if bl_byte_idx + 4 > text_section.len() {
             return Err(CodegenError::ElfError(format!(
                 "call relocation at byte {} is out of bounds (text section is {} bytes)",
-                bl_byte_idx, text_section.len()
+                bl_byte_idx,
+                text_section.len()
             )));
         }
         let bl_word = u32::from_le_bytes([
-            text_section[bl_byte_idx], text_section[bl_byte_idx + 1],
-            text_section[bl_byte_idx + 2], text_section[bl_byte_idx + 3],
+            text_section[bl_byte_idx],
+            text_section[bl_byte_idx + 1],
+            text_section[bl_byte_idx + 2],
+            text_section[bl_byte_idx + 3],
         ]);
         let offset_bytes = (target_offset as i64) - (reloc.text_byte_offset as i64);
         let offset_words = (offset_bytes >> 2) as i32;
@@ -1593,12 +1895,17 @@ fn collect_data_sections(data_sections: &[DataSection]) -> (Vec<u8>, Vec<u8>, u6
 
     for ds in data_sections {
         match ds.kind {
-            DataSectionKind::ReadOnly => { rodata_section.extend_from_slice(&ds.data); }
-            DataSectionKind::Data => { data_section.extend_from_slice(&ds.data); }
+            DataSectionKind::ReadOnly => {
+                rodata_section.extend_from_slice(&ds.data);
+            }
+            DataSectionKind::Data => {
+                data_section.extend_from_slice(&ds.data);
+            }
             DataSectionKind::Bss => {
                 bss_size += ds.data.len() as u64;
                 if ds.align > 1 {
-                    let padding = (ds.align as u64 - (bss_size % ds.align as u64)) % ds.align as u64;
+                    let padding =
+                        (ds.align as u64 - (bss_size % ds.align as u64)) % ds.align as u64;
                     bss_size += padding;
                 }
             }
@@ -1613,7 +1920,16 @@ fn collect_data_sections(data_sections: &[DataSection]) -> (Vec<u8>, Vec<u8>, u6
 
 /// Write a 64-bit ELF program header.
 #[allow(clippy::too_many_arguments)]
-fn write_phdr(buf: &mut Vec<u8>, p_type: u32, p_flags: u32, p_offset: u64, p_vaddr: u64, p_paddr: u64, p_filesz: u64, p_memsz: u64) {
+fn write_phdr(
+    buf: &mut Vec<u8>,
+    p_type: u32,
+    p_flags: u32,
+    p_offset: u64,
+    p_vaddr: u64,
+    p_paddr: u64,
+    p_filesz: u64,
+    p_memsz: u64,
+) {
     buf.extend_from_slice(&p_type.to_le_bytes());
     buf.extend_from_slice(&p_flags.to_le_bytes());
     buf.extend_from_slice(&p_offset.to_le_bytes());
@@ -1639,8 +1955,29 @@ struct FilledShdr {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn new_shdr(sh_type: u32, sh_flags: u64, sh_addr: u64, sh_offset: u64, sh_size: u64, sh_link: u32, sh_info: u32, sh_addralign: u64, sh_entsize: u64) -> FilledShdr {
-    FilledShdr { name: 0, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link, sh_info, sh_addralign, sh_entsize }
+fn new_shdr(
+    sh_type: u32,
+    sh_flags: u64,
+    sh_addr: u64,
+    sh_offset: u64,
+    sh_size: u64,
+    sh_link: u32,
+    sh_info: u32,
+    sh_addralign: u64,
+    sh_entsize: u64,
+) -> FilledShdr {
+    FilledShdr {
+        name: 0,
+        sh_type,
+        sh_flags,
+        sh_addr,
+        sh_offset,
+        sh_size,
+        sh_link,
+        sh_info,
+        sh_addralign,
+        sh_entsize,
+    }
 }
 
 fn write_filled_shdr(buf: &mut Vec<u8>, sh: &FilledShdr) {
@@ -1790,7 +2127,9 @@ mod tests {
     fn make_calling_function(name: &str, callee: &str) -> IRFunction {
         let mut func = IRFunction::new(name);
         func.current_block().push(IRInstr::Call {
-            dst: None, func: callee.to_string(), args: vec![],
+            dst: None,
+            func: callee.to_string(),
+            args: vec![],
         });
         func.current_block().terminator = IRTerminator::Return(vec![]);
         func
@@ -1844,7 +2183,10 @@ mod tests {
         let elf = emit_elf(&funcs, &[], &config).unwrap();
         let mut found_main = false;
         for i in 0..elf.len().saturating_sub(4) {
-            if &elf[i..i + 5] == b"main\0" { found_main = true; break; }
+            if &elf[i..i + 5] == b"main\0" {
+                found_main = true;
+                break;
+            }
         }
         assert!(found_main, "symbol 'main' must appear in strtab");
     }
@@ -1875,10 +2217,13 @@ mod tests {
         let mut found_bl = false;
         let mut i = text_offset;
         while i + 4 <= elf.len() {
-            let word = u32::from_le_bytes([elf[i], elf[i+1], elf[i+2], elf[i+3]]);
+            let word = u32::from_le_bytes([elf[i], elf[i + 1], elf[i + 2], elf[i + 3]]);
             if (word >> 26) == 0b100101 {
                 let imm26 = word & 0x03FFFFFF;
-                if imm26 != 0 { found_bl = true; break; }
+                if imm26 != 0 {
+                    found_bl = true;
+                    break;
+                }
             }
             i += 4;
         }
@@ -1929,9 +2274,24 @@ mod tests {
     fn emit_elf_data_sections() {
         let funcs = vec![make_return_function("main")];
         let data_sections = vec![
-            DataSection { name: "rodata".into(), kind: DataSectionKind::ReadOnly, align: 4, data: vec![0xDE, 0xAD, 0xBE, 0xEF] },
-            DataSection { name: "data".into(), kind: DataSectionKind::Data, align: 8, data: vec![0x42; 16] },
-            DataSection { name: "bss".into(), kind: DataSectionKind::Bss, align: 16, data: vec![0; 32] },
+            DataSection {
+                name: "rodata".into(),
+                kind: DataSectionKind::ReadOnly,
+                align: 4,
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            },
+            DataSection {
+                name: "data".into(),
+                kind: DataSectionKind::Data,
+                align: 8,
+                data: vec![0x42; 16],
+            },
+            DataSection {
+                name: "bss".into(),
+                kind: DataSectionKind::Bss,
+                align: 16,
+                data: vec![0; 32],
+            },
         ];
         let config = EmitConfig::linux_elf();
         let elf = emit_elf(&funcs, &data_sections, &config).unwrap();
@@ -1939,7 +2299,10 @@ mod tests {
         // Verify rodata bytes appear.
         let mut found_rodata = false;
         for i in 0..elf.len().saturating_sub(4) {
-            if &elf[i..i+4] == &[0xDE, 0xAD, 0xBE, 0xEF] { found_rodata = true; break; }
+            if &elf[i..i + 4] == &[0xDE, 0xAD, 0xBE, 0xEF] {
+                found_rodata = true;
+                break;
+            }
         }
         assert!(found_rodata, "rodata must appear in the ELF file");
     }
@@ -1948,7 +2311,10 @@ mod tests {
     fn emit_program_elf_header() {
         let mut func = IRFunction::new("main");
         func.current_block().terminator = IRTerminator::Return(vec![]);
-        let program = IRProgram { functions: vec![func], data_sections: vec![] };
+        let program = IRProgram {
+            functions: vec![func],
+            data_sections: vec![],
+        };
         let mut emitter = Emitter::new();
         let elf = emitter.emit_program(&program).unwrap();
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -1978,8 +2344,14 @@ mod tests {
 
     #[test]
     fn effective_base_addr() {
-        assert_eq!(EmitConfig::linux_elf().effective_base_addr(), BASE_ADDR_LINUX);
-        assert_eq!(EmitConfig::bare_metal_raw().effective_base_addr(), BASE_ADDR_BARE);
+        assert_eq!(
+            EmitConfig::linux_elf().effective_base_addr(),
+            BASE_ADDR_LINUX
+        );
+        assert_eq!(
+            EmitConfig::bare_metal_raw().effective_base_addr(),
+            BASE_ADDR_BARE
+        );
         let mut custom = EmitConfig::linux_elf();
         custom.base_addr = 0x100000;
         assert_eq!(custom.effective_base_addr(), 0x100000);
@@ -1998,7 +2370,10 @@ mod tests {
             let name_bytes = [name.as_bytes(), &[0u8]].concat();
             let mut found = false;
             for i in 0..elf.len().saturating_sub(name.len() + 1) {
-                if &elf[i..i + name.len() + 1] == name_bytes.as_slice() { found = true; break; }
+                if &elf[i..i + name.len() + 1] == name_bytes.as_slice() {
+                    found = true;
+                    break;
+                }
             }
             assert!(found, "function '{}' must appear in strtab", name);
         }
@@ -2015,20 +2390,30 @@ mod tests {
 
         for i in 0..e_shnum {
             let off = e_shoff + i * 64;
-            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            let sh_type = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
-                let sh_size = u64::from_le_bytes(elf[off+32..off+40].try_into().unwrap()) as usize;
-                let sh_entsize = u64::from_le_bytes(elf[off+56..off+64].try_into().unwrap()) as usize;
-                if sh_entsize == 0 { continue; }
+                let sh_offset =
+                    u64::from_le_bytes(elf[off + 24..off + 32].try_into().unwrap()) as usize;
+                let sh_size =
+                    u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+                let sh_entsize =
+                    u64::from_le_bytes(elf[off + 56..off + 64].try_into().unwrap()) as usize;
+                if sh_entsize == 0 {
+                    continue;
+                }
                 let num_entries = sh_size / sh_entsize;
                 let mut entries = Vec::new();
                 for j in 0..num_entries {
                     let base = sh_offset + j * sh_entsize;
-                    let r_offset = u64::from_le_bytes(elf[base..base+8].try_into().unwrap());
-                    let r_info = u64::from_le_bytes(elf[base+8..base+16].try_into().unwrap());
-                    let r_addend = i64::from_le_bytes(elf[base+16..base+24].try_into().unwrap());
-                    entries.push(RelaEntry { offset: r_offset, info: r_info, addend: r_addend });
+                    let r_offset = u64::from_le_bytes(elf[base..base + 8].try_into().unwrap());
+                    let r_info = u64::from_le_bytes(elf[base + 8..base + 16].try_into().unwrap());
+                    let r_addend =
+                        i64::from_le_bytes(elf[base + 16..base + 24].try_into().unwrap());
+                    entries.push(RelaEntry {
+                        offset: r_offset,
+                        info: r_info,
+                        addend: r_addend,
+                    });
                 }
                 return entries;
             }
@@ -2049,32 +2434,44 @@ mod tests {
 
         for i in 0..e_shnum {
             let off = e_shoff + i * 64;
-            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            let sh_type = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
             if sh_type == SHT_SYMTAB {
-                symtab_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
-                symtab_size = u64::from_le_bytes(elf[off+32..off+40].try_into().unwrap()) as usize;
-                let sh_link = u32::from_le_bytes(elf[off+40..off+44].try_into().unwrap()) as usize;
+                symtab_offset =
+                    u64::from_le_bytes(elf[off + 24..off + 32].try_into().unwrap()) as usize;
+                symtab_size =
+                    u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+                let sh_link =
+                    u32::from_le_bytes(elf[off + 40..off + 44].try_into().unwrap()) as usize;
                 let strtab_off = e_shoff + sh_link * 64;
-                strtab_offset = u64::from_le_bytes(elf[strtab_off+24..strtab_off+32].try_into().unwrap()) as usize;
-                strtab_size = u64::from_le_bytes(elf[strtab_off+32..strtab_off+40].try_into().unwrap()) as usize;
+                strtab_offset =
+                    u64::from_le_bytes(elf[strtab_off + 24..strtab_off + 32].try_into().unwrap())
+                        as usize;
+                strtab_size =
+                    u64::from_le_bytes(elf[strtab_off + 32..strtab_off + 40].try_into().unwrap())
+                        as usize;
                 break;
             }
         }
 
-        if symtab_size == 0 { return Vec::new(); }
+        if symtab_size == 0 {
+            return Vec::new();
+        }
 
         let strtab = &elf[strtab_offset..strtab_offset + strtab_size];
         let num_syms = symtab_size / 24;
         let mut symbols = Vec::new();
         for i in 0..num_syms {
             let base = symtab_offset + i * 24;
-            let st_name = u32::from_le_bytes(elf[base..base+4].try_into().unwrap()) as usize;
+            let st_name = u32::from_le_bytes(elf[base..base + 4].try_into().unwrap()) as usize;
             let st_info = elf[base + 4];
-            let st_shndx = u16::from_le_bytes(elf[base+6..base+8].try_into().unwrap());
-            let st_value = u64::from_le_bytes(elf[base+8..base+16].try_into().unwrap());
+            let st_shndx = u16::from_le_bytes(elf[base + 6..base + 8].try_into().unwrap());
+            let st_value = u64::from_le_bytes(elf[base + 8..base + 16].try_into().unwrap());
 
             let name = if st_name < strtab.len() {
-                let end = strtab[st_name..].iter().position(|&b| b == 0).unwrap_or(strtab.len() - st_name);
+                let end = strtab[st_name..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(strtab.len() - st_name);
                 String::from_utf8_lossy(&strtab[st_name..st_name + end]).to_string()
             } else {
                 String::new()
@@ -2094,20 +2491,26 @@ mod tests {
         let elf = emit_elf(&funcs, &[], &config).unwrap();
 
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
-        assert!(e_shnum >= 9, "ET_REL with calls should have at least 9 section headers");
+        assert!(
+            e_shnum >= 9,
+            "ET_REL with calls should have at least 9 section headers"
+        );
 
         // Find the .rela.text section by looking for SHT_RELA type.
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
         let mut found_rela = false;
         for i in 0..e_shnum {
             let off = e_shoff + i * 64;
-            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            let sh_type = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
                 found_rela = true;
                 break;
             }
         }
-        assert!(found_rela, ".rela.text section (SHT_RELA) must exist in ET_REL");
+        assert!(
+            found_rela,
+            ".rela.text section (SHT_RELA) must exist in ET_REL"
+        );
     }
 
     #[test]
@@ -2124,8 +2527,12 @@ mod tests {
 
         // All BL relocations should be R_AARCH64_CALL26.
         for entry in &entries {
-            assert_eq!(entry.r_type(), R_AARCH64_CALL26,
-                "expected R_AARCH64_CALL26, got type {}", entry.r_type());
+            assert_eq!(
+                entry.r_type(),
+                R_AARCH64_CALL26,
+                "expected R_AARCH64_CALL26, got type {}",
+                entry.r_type()
+            );
         }
     }
 
@@ -2139,9 +2546,9 @@ mod tests {
 
         // Parse the symbol table to find external_func.
         let symbols = parse_symbols_from_elf(&elf);
-        let ext_sym = symbols.iter().find(|(name, _, _, shndx)|
-            name == "external_func" && *shndx == SHN_UNDEF
-        );
+        let ext_sym = symbols
+            .iter()
+            .find(|(name, _, _, shndx)| name == "external_func" && *shndx == SHN_UNDEF);
         assert!(ext_sym.is_some(), "external_func should be SHN_UNDEF");
     }
 
@@ -2163,23 +2570,33 @@ mod tests {
         let mut text_file_offset: usize = 0;
         for i in 0..e_shnum {
             let off = e_shoff + i * 64;
-            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
+            let sh_type = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
             if sh_type == SHT_PROGBITS {
-                text_file_offset = u64::from_le_bytes(elf[off+24..off+32].try_into().unwrap()) as usize;
+                text_file_offset =
+                    u64::from_le_bytes(elf[off + 24..off + 32].try_into().unwrap()) as usize;
                 break;
             }
         }
 
         for entry in &entries {
             let bl_file_offset = text_file_offset + entry.offset as usize;
-            assert!(bl_file_offset + 4 <= elf.len(), "relocation offset out of bounds");
+            assert!(
+                bl_file_offset + 4 <= elf.len(),
+                "relocation offset out of bounds"
+            );
             let word = u32::from_le_bytes([
-                elf[bl_file_offset], elf[bl_file_offset + 1],
-                elf[bl_file_offset + 2], elf[bl_file_offset + 3],
+                elf[bl_file_offset],
+                elf[bl_file_offset + 1],
+                elf[bl_file_offset + 2],
+                elf[bl_file_offset + 3],
             ]);
             // BL opcode: bits [31:26] = 100101
-            assert_eq!((word >> 26) & 0x3F, 0b100101,
-                "relocation offset should point to a BL instruction, got {:08x}", word);
+            assert_eq!(
+                (word >> 26) & 0x3F,
+                0b100101,
+                "relocation offset should point to a BL instruction, got {:08x}",
+                word
+            );
         }
     }
 
@@ -2188,13 +2605,19 @@ mod tests {
         // Verify multiple BL instructions generate multiple rela entries.
         let mut func = IRFunction::new("main");
         func.current_block().push(IRInstr::Call {
-            dst: None, func: "foo".to_string(), args: vec![],
+            dst: None,
+            func: "foo".to_string(),
+            args: vec![],
         });
         func.current_block().push(IRInstr::Call {
-            dst: None, func: "bar".to_string(), args: vec![],
+            dst: None,
+            func: "bar".to_string(),
+            args: vec![],
         });
         func.current_block().push(IRInstr::Call {
-            dst: None, func: "baz".to_string(), args: vec![],
+            dst: None,
+            func: "baz".to_string(),
+            args: vec![],
         });
         func.current_block().terminator = IRTerminator::Return(vec![]);
         let funcs = vec![func];
@@ -2206,8 +2629,10 @@ mod tests {
 
         // Verify offsets are distinct and increasing.
         for i in 1..entries.len() {
-            assert!(entries[i].offset > entries[i-1].offset,
-                "rela entries should be sorted by offset");
+            assert!(
+                entries[i].offset > entries[i - 1].offset,
+                "rela entries should be sorted by offset"
+            );
         }
     }
 
@@ -2224,8 +2649,11 @@ mod tests {
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
         for i in 0..e_shnum {
             let off = e_shoff + i * 64;
-            let sh_type = u32::from_le_bytes(elf[off+4..off+8].try_into().unwrap());
-            assert_ne!(sh_type, SHT_RELA, "ET_EXEC should not have SHT_RELA sections");
+            let sh_type = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
+            assert_ne!(
+                sh_type, SHT_RELA,
+                "ET_EXEC should not have SHT_RELA sections"
+            );
         }
     }
 
@@ -2274,7 +2702,10 @@ mod tests {
         let funcs = vec![make_return_function("main")];
         let elf = emit_obj(&funcs, &[], BackendKind::X86_64).unwrap();
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
-        assert_eq!(e_machine, EM_X86_64, "x86-64 object file must have EM_X86_64");
+        assert_eq!(
+            e_machine, EM_X86_64,
+            "x86-64 object file must have EM_X86_64"
+        );
     }
 
     #[test]
@@ -2289,15 +2720,20 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_X86_64_PLT32,
-                        "expected R_X86_64_PLT32 (4), got {}", r_type);
+                    assert_eq!(
+                        r_type, R_X86_64_PLT32,
+                        "expected R_X86_64_PLT32 (4), got {}",
+                        r_type
+                    );
                 }
             }
         }
@@ -2324,7 +2760,10 @@ mod tests {
         let funcs = vec![make_return_function("main")];
         let elf = emit_obj(&funcs, &[], BackendKind::RiscV64).unwrap();
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
-        assert_eq!(e_machine, EM_RISCV, "RISC-V64 object file must have EM_RISCV");
+        assert_eq!(
+            e_machine, EM_RISCV,
+            "RISC-V64 object file must have EM_RISCV"
+        );
     }
 
     #[test]
@@ -2338,15 +2777,20 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_RISCV_CALL,
-                        "expected R_RISCV_CALL (18), got {}", r_type);
+                    assert_eq!(
+                        r_type, R_RISCV_CALL,
+                        "expected R_RISCV_CALL (18), got {}",
+                        r_type
+                    );
                 }
             }
         }
@@ -2386,15 +2830,16 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_MIPS_26,
-                        "expected R_MIPS_26 (4), got {}", r_type);
+                    assert_eq!(r_type, R_MIPS_26, "expected R_MIPS_26 (4), got {}", r_type);
                 }
             }
         }
@@ -2431,15 +2876,20 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_PPC64_REL24,
-                        "expected R_PPC64_REL24 (10), got {}", r_type);
+                    assert_eq!(
+                        r_type, R_PPC64_REL24,
+                        "expected R_PPC64_REL24 (10), got {}",
+                        r_type
+                    );
                 }
             }
         }
@@ -2464,7 +2914,10 @@ mod tests {
         let funcs = vec![make_return_function("main")];
         let elf = emit_obj(&funcs, &[], BackendKind::LoongArch64).unwrap();
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
-        assert_eq!(e_machine, EM_LOONGARCH, "LoongArch64 object file must have EM_LOONGARCH");
+        assert_eq!(
+            e_machine, EM_LOONGARCH,
+            "LoongArch64 object file must have EM_LOONGARCH"
+        );
     }
 
     #[test]
@@ -2478,15 +2931,20 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_LARCH_B26,
-                        "expected R_LARCH_B26 (69), got {}", r_type);
+                    assert_eq!(
+                        r_type, R_LARCH_B26,
+                        "expected R_LARCH_B26 (69), got {}",
+                        r_type
+                    );
                 }
             }
         }
@@ -2525,15 +2983,20 @@ mod tests {
             let sh_off = e_shoff as usize + i * 64;
             let sh_type = u32::from_le_bytes(elf[sh_off + 4..sh_off + 8].try_into().unwrap());
             if sh_type == SHT_RELA {
-                let sh_offset = u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
+                let sh_offset =
+                    u64::from_le_bytes(elf[sh_off + 24..sh_off + 32].try_into().unwrap());
                 let sh_size = u64::from_le_bytes(elf[sh_off + 32..sh_off + 40].try_into().unwrap());
                 let num_entries = sh_size as usize / 24;
                 for j in 0..num_entries {
                     let ent_off = sh_offset as usize + j * 24;
-                    let info = u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
+                    let info =
+                        u64::from_le_bytes(elf[ent_off + 8..ent_off + 16].try_into().unwrap());
                     let r_type = (info & 0xFFFFFFFF) as u32;
-                    assert_eq!(r_type, R_ARM_CALL,
-                        "expected R_ARM_CALL (28), got {}", r_type);
+                    assert_eq!(
+                        r_type, R_ARM_CALL,
+                        "expected R_ARM_CALL (28), got {}",
+                        r_type
+                    );
                 }
             }
         }
@@ -2550,18 +3013,36 @@ mod tests {
         assert_eq!(em_machine_for_backend(BackendKind::RiscV64), EM_RISCV);
         assert_eq!(em_machine_for_backend(BackendKind::Mips64), EM_MIPS);
         assert_eq!(em_machine_for_backend(BackendKind::PowerPC64), EM_PPC64);
-        assert_eq!(em_machine_for_backend(BackendKind::LoongArch64), EM_LOONGARCH);
+        assert_eq!(
+            em_machine_for_backend(BackendKind::LoongArch64),
+            EM_LOONGARCH
+        );
         assert_eq!(em_machine_for_backend(BackendKind::Arm32), EM_ARM);
     }
 
     #[test]
     fn call_reloc_type_for_backend_mapping() {
-        assert_eq!(call_reloc_type_for_backend(BackendKind::AArch64), R_AARCH64_CALL26);
-        assert_eq!(call_reloc_type_for_backend(BackendKind::X86_64), R_X86_64_PLT32);
-        assert_eq!(call_reloc_type_for_backend(BackendKind::RiscV64), R_RISCV_CALL);
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::AArch64),
+            R_AARCH64_CALL26
+        );
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::X86_64),
+            R_X86_64_PLT32
+        );
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::RiscV64),
+            R_RISCV_CALL
+        );
         assert_eq!(call_reloc_type_for_backend(BackendKind::Mips64), R_MIPS_26);
-        assert_eq!(call_reloc_type_for_backend(BackendKind::PowerPC64), R_PPC64_REL24);
-        assert_eq!(call_reloc_type_for_backend(BackendKind::LoongArch64), R_LARCH_B26);
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::PowerPC64),
+            R_PPC64_REL24
+        );
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::LoongArch64),
+            R_LARCH_B26
+        );
         assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32), R_ARM_CALL);
     }
 }

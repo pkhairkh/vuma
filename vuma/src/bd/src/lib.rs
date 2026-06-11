@@ -33,13 +33,13 @@ pub mod capd_lattice;
 pub mod context;
 pub mod context_solver;
 pub mod descriptor;
+pub mod error_reporting;
 pub mod inference;
 pub mod reld;
 pub mod reld_refine;
-pub mod error_reporting;
 pub mod repd;
 pub mod repd_compat;
 pub mod unify;
 
 // Convenient re-exports for the most commonly used types.
-pub use descriptor::{BD, BDId};
+pub use descriptor::{BDId, BD};

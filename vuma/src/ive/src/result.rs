@@ -269,7 +269,11 @@ impl InvariantViolation {
 
 impl fmt::Display for InvariantViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] {}: {}", self.severity, self.invariant, self.description)
+        write!(
+            f,
+            "[{}] {}: {}",
+            self.severity, self.invariant, self.description
+        )
     }
 }
 
@@ -301,7 +305,10 @@ impl BatchedViolations {
     /// Add a violation to the batch.
     pub fn add(&mut self, v: InvariantViolation) {
         let severity = v.severity;
-        self.severity_index.entry(severity).or_default().push(v.clone());
+        self.severity_index
+            .entry(severity)
+            .or_default()
+            .push(v.clone());
         self.violations.push(v);
     }
 
@@ -328,7 +335,11 @@ impl BatchedViolations {
         for severity in &[Severity::High, Severity::Medium, Severity::Low] {
             if let Some(violations) = self.severity_index.get(severity) {
                 if !violations.is_empty() {
-                    report.push_str(&format!("\n{} severity ({}):\n", severity, violations.len()));
+                    report.push_str(&format!(
+                        "\n{} severity ({}):\n",
+                        severity,
+                        violations.len()
+                    ));
                     for v in violations {
                         report.push_str(&format!("  - {}\n", v));
                     }
@@ -341,7 +352,10 @@ impl BatchedViolations {
 
     /// Get all violations at a specific severity level.
     pub fn by_severity_level(&self, severity: Severity) -> &[InvariantViolation] {
-        self.severity_index.get(&severity).map(|v| v.as_slice()).unwrap_or(&[])
+        self.severity_index
+            .get(&severity)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Get the total number of violations.
@@ -403,9 +417,7 @@ mod tests {
         );
         let r = VerificationResult::new(
             "liveness",
-            VerificationStatus::Violated {
-                counterexample: ce,
-            },
+            VerificationStatus::Violated { counterexample: ce },
             "loop never terminates",
         );
         assert!(r.is_violated());
@@ -444,9 +456,21 @@ mod tests {
     #[test]
     fn batched_violations_add_and_query() {
         let mut bv = BatchedViolations::new();
-        bv.add(InvariantViolation::new("memory_safety", "leak detected", Severity::High));
-        bv.add(InvariantViolation::new("capability", "use-after-cap-drop", Severity::Medium));
-        bv.add(InvariantViolation::new("aliasing", "minor alias concern", Severity::Low));
+        bv.add(InvariantViolation::new(
+            "memory_safety",
+            "leak detected",
+            Severity::High,
+        ));
+        bv.add(InvariantViolation::new(
+            "capability",
+            "use-after-cap-drop",
+            Severity::Medium,
+        ));
+        bv.add(InvariantViolation::new(
+            "aliasing",
+            "minor alias concern",
+            Severity::Low,
+        ));
 
         assert_eq!(bv.total(), 3);
         assert!(bv.has_critical());
@@ -458,7 +482,11 @@ mod tests {
     #[test]
     fn batched_violations_report() {
         let mut bv = BatchedViolations::new();
-        bv.add(InvariantViolation::new("memory_safety", "leak", Severity::High));
+        bv.add(InvariantViolation::new(
+            "memory_safety",
+            "leak",
+            Severity::High,
+        ));
         let report = bv.report();
         assert!(report.contains("1 total"));
         assert!(report.contains("HIGH severity"));
@@ -487,7 +515,10 @@ mod tests {
 
         // by_severity_level returns only matching
         assert_eq!(bv.by_severity_level(Severity::High).len(), 1);
-        assert_eq!(bv.by_severity_level(Severity::High)[0].invariant, "high_inv");
+        assert_eq!(
+            bv.by_severity_level(Severity::High)[0].invariant,
+            "high_inv"
+        );
     }
 
     // ----- Additional BatchedViolations tests -----

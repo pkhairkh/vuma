@@ -23,9 +23,7 @@
 //! [`Normal`]: VerificationLevel::Normal
 //! [`Exhaustive`]: VerificationLevel::Exhaustive
 
-use crate::result::{
-    ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus,
-};
+use crate::result::{ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus};
 use crate::verification::{VerificationEngine, VerificationInput};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -305,7 +303,10 @@ pub struct VerificationSummary {
 impl VerificationSummary {
     /// Compute a summary from a slice of per-invariant results.
     pub fn from_results(results: &[PerInvariantResult]) -> Self {
-        let mut summary = Self { total_checked: results.len(), ..Default::default() };
+        let mut summary = Self {
+            total_checked: results.len(),
+            ..Default::default()
+        };
 
         for r in results {
             if r.cached {
@@ -360,11 +361,7 @@ impl fmt::Display for VerificationSummary {
         writeln!(f, "  Unverified    : {}", self.unverified)?;
         writeln!(f, "  Cached        : {}", self.cached_count)?;
         writeln!(f, "  Fresh         : {}", self.fresh_count)?;
-        writeln!(
-            f,
-            "  Pass rate     : {:.0}%",
-            self.pass_rate() * 100.0
-        )?;
+        writeln!(f, "  Pass rate     : {:.0}%", self.pass_rate() * 100.0)?;
         match self.min_confidence {
             Some(c) => writeln!(f, "  Min confidence: {c}")?,
             None => writeln!(f, "  Min confidence: N/A")?,
@@ -423,7 +420,9 @@ impl DiagnosticsReport {
         for pir in &result.per_invariant {
             let (icon, status_label) = match &pir.result.status {
                 VerificationStatus::Proven => ("PASS".to_string(), "PROVEN".into()),
-                VerificationStatus::ProbablySafe { .. } => ("PROB".to_string(), "PROBABLY_SAFE".into()),
+                VerificationStatus::ProbablySafe { .. } => {
+                    ("PROB".to_string(), "PROBABLY_SAFE".into())
+                }
                 VerificationStatus::Unverified { .. } => ("????".to_string(), "UNVERIFIED".into()),
                 VerificationStatus::Violated { .. } => ("FAIL".to_string(), "VIOLATED".into()),
             };
@@ -657,7 +656,11 @@ impl InvariantAggregator {
     }
 
     /// Run a single invariant check by kind.
-    fn run_single_check(&self, kind: InvariantKind, input: &VerificationInput) -> VerificationResult {
+    fn run_single_check(
+        &self,
+        kind: InvariantKind,
+        input: &VerificationInput,
+    ) -> VerificationResult {
         if self.verbose {
             log::info!("InvariantAggregator: checking {kind}");
         }
@@ -799,9 +802,8 @@ mod tests {
 
     #[test]
     fn delta_from_set() {
-        let delta =
-            InvariantDelta::from_set([InvariantKind::Liveness, InvariantKind::Cleanup])
-                .with_reason("resource change");
+        let delta = InvariantDelta::from_set([InvariantKind::Liveness, InvariantKind::Cleanup])
+            .with_reason("resource change");
         assert!(delta.affects(InvariantKind::Liveness));
         assert!(delta.affects(InvariantKind::Cleanup));
         assert!(!delta.affects(InvariantKind::Origin));

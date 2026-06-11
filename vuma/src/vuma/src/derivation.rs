@@ -157,12 +157,10 @@ impl Derivation {
         loop {
             match current_source {
                 DerivationSource::Region(rid) => return Some(rid),
-                DerivationSource::AnotherDerivation(parent_id) => {
-                    match lookup(parent_id) {
-                        Some(parent) => current_source = parent.source,
-                        None => return None,
-                    }
-                }
+                DerivationSource::AnotherDerivation(parent_id) => match lookup(parent_id) {
+                    Some(parent) => current_source = parent.source,
+                    None => return None,
+                },
             }
         }
     }
@@ -179,11 +177,7 @@ impl fmt::Display for Derivation {
         write!(
             f,
             "Deriv {} source={:?} kind={} proven=[{}, {})",
-            self.id,
-            self.source,
-            self.kind,
-            self.proven_range.0,
-            self.proven_range.1,
+            self.id, self.source, self.kind, self.proven_range.0, self.proven_range.1,
         )
     }
 }
@@ -201,11 +195,7 @@ mod tests {
         }
     }
 
-    fn make_chained_derivation(
-        id: u64,
-        parent: DerivationId,
-        kind: DerivationKind,
-    ) -> Derivation {
+    fn make_chained_derivation(id: u64, parent: DerivationId, kind: DerivationKind) -> Derivation {
         Derivation {
             id: DerivationId(id),
             source: DerivationSource::AnotherDerivation(parent),

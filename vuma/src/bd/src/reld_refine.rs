@@ -75,11 +75,14 @@ impl TemporalRel {
         }
         // Before/After are incomparable with each other but both refine During and Concurrent.
         // During refines Concurrent.
-        matches!((self, other), (TemporalRel::Before, TemporalRel::During)
-            | (TemporalRel::Before, TemporalRel::Concurrent)
-            | (TemporalRel::After, TemporalRel::During)
-            | (TemporalRel::After, TemporalRel::Concurrent)
-            | (TemporalRel::During, TemporalRel::Concurrent))
+        matches!(
+            (self, other),
+            (TemporalRel::Before, TemporalRel::During)
+                | (TemporalRel::Before, TemporalRel::Concurrent)
+                | (TemporalRel::After, TemporalRel::During)
+                | (TemporalRel::After, TemporalRel::Concurrent)
+                | (TemporalRel::During, TemporalRel::Concurrent)
+        )
     }
 
     /// Weaken to the most general relation that both `self` and `other` satisfy.
@@ -100,8 +103,10 @@ impl TemporalRel {
 
     /// Check if two temporal relations are contradictory.
     pub fn contradicts(&self, other: &TemporalRel) -> bool {
-        matches!((self, other), (TemporalRel::Before, TemporalRel::After)
-            | (TemporalRel::After, TemporalRel::Before))
+        matches!(
+            (self, other),
+            (TemporalRel::Before, TemporalRel::After) | (TemporalRel::After, TemporalRel::Before)
+        )
     }
 }
 
@@ -162,9 +167,12 @@ impl StructuralRel {
         //
         // So the refinement chain is: Contains ≤ SubsetOf ≤ Aliases
         // Disjoint is incomparable with all except itself.
-        matches!((self, other), (StructuralRel::Contains, StructuralRel::SubsetOf)
-            | (StructuralRel::Contains, StructuralRel::Aliases)
-            | (StructuralRel::SubsetOf, StructuralRel::Aliases))
+        matches!(
+            (self, other),
+            (StructuralRel::Contains, StructuralRel::SubsetOf)
+                | (StructuralRel::Contains, StructuralRel::Aliases)
+                | (StructuralRel::SubsetOf, StructuralRel::Aliases)
+        )
     }
 
     /// Weaken (join) two structural relations.
@@ -251,12 +259,15 @@ impl SecurityRel {
         if self == other {
             return true;
         }
-        matches!((self, other), (SecurityRel::TrustedAs, SecurityRel::TaintedBy)
-            | (SecurityRel::TrustedAs, SecurityRel::IsolatedFrom)
-            | (SecurityRel::TrustedAs, SecurityRel::DeclassifiesTo)
-            | (SecurityRel::TaintedBy, SecurityRel::IsolatedFrom)
-            | (SecurityRel::TaintedBy, SecurityRel::DeclassifiesTo)
-            | (SecurityRel::IsolatedFrom, SecurityRel::DeclassifiesTo))
+        matches!(
+            (self, other),
+            (SecurityRel::TrustedAs, SecurityRel::TaintedBy)
+                | (SecurityRel::TrustedAs, SecurityRel::IsolatedFrom)
+                | (SecurityRel::TrustedAs, SecurityRel::DeclassifiesTo)
+                | (SecurityRel::TaintedBy, SecurityRel::IsolatedFrom)
+                | (SecurityRel::TaintedBy, SecurityRel::DeclassifiesTo)
+                | (SecurityRel::IsolatedFrom, SecurityRel::DeclassifiesTo)
+        )
     }
 
     /// Weaken (join) two security relations.
@@ -390,9 +401,12 @@ impl LifetimeRel {
         if self == other {
             return true;
         }
-        matches!((self, other), (LifetimeRel::Static, LifetimeRel::Outlives)
-            | (LifetimeRel::Static, LifetimeRel::ScopedTo)
-            | (LifetimeRel::Outlives, LifetimeRel::ScopedTo))
+        matches!(
+            (self, other),
+            (LifetimeRel::Static, LifetimeRel::Outlives)
+                | (LifetimeRel::Static, LifetimeRel::ScopedTo)
+                | (LifetimeRel::Outlives, LifetimeRel::ScopedTo)
+        )
     }
 
     /// Weaken (join).
@@ -811,9 +825,7 @@ fn weaken_refined(r: &RelDRefined) -> RelDRefined {
     let mut weakened = RelDRefined::empty();
     for dr in &r.relations {
         let weak = match dr {
-            DetailedRelation::Temporal(_) => {
-                DetailedRelation::Temporal(TemporalRel::Concurrent)
-            }
+            DetailedRelation::Temporal(_) => DetailedRelation::Temporal(TemporalRel::Concurrent),
             DetailedRelation::Structural(s) => {
                 // Weaken to the least refined form that isn't Disjoint
                 // (Disjoint is already weak but orthogonal).
@@ -827,12 +839,8 @@ fn weaken_refined(r: &RelDRefined) -> RelDRefined {
             DetailedRelation::Security(_) => {
                 DetailedRelation::Security(SecurityRel::DeclassifiesTo)
             }
-            DetailedRelation::Ownership(_) => {
-                DetailedRelation::Ownership(OwnershipRel::SharedBy)
-            }
-            DetailedRelation::Lifetime(_) => {
-                DetailedRelation::Lifetime(LifetimeRel::ScopedTo)
-            }
+            DetailedRelation::Ownership(_) => DetailedRelation::Ownership(OwnershipRel::SharedBy),
+            DetailedRelation::Lifetime(_) => DetailedRelation::Lifetime(LifetimeRel::ScopedTo),
             DetailedRelation::Dependency(_) => {
                 DetailedRelation::Dependency(DependencyRel::ProvidesTo)
             }
@@ -941,8 +949,12 @@ pub fn check_security(r: &RelD) -> SecurityResult {
     }
 
     // Check for isolation + declassification conflict
-    let has_isolated = security_rels.iter().any(|s| matches!(s, SecurityRel::IsolatedFrom));
-    let has_declassify = security_rels.iter().any(|s| matches!(s, SecurityRel::DeclassifiesTo));
+    let has_isolated = security_rels
+        .iter()
+        .any(|s| matches!(s, SecurityRel::IsolatedFrom));
+    let has_declassify = security_rels
+        .iter()
+        .any(|s| matches!(s, SecurityRel::DeclassifiesTo));
     if has_isolated && has_declassify {
         violations.push(
             "Isolation and declassification conflict: value cannot be both isolated and declassifiable".to_string()
@@ -987,25 +999,25 @@ mod tests {
             Relation::Temporal(TemporalKind::Outlives),
             Relation::Containment,
         ]);
-        let sup = reld_from(vec![
-            Relation::Temporal(TemporalKind::Coincides),
-        ]);
+        let sup = reld_from(vec![Relation::Temporal(TemporalKind::Coincides)]);
         // Outlives maps to During, Coincides maps to Concurrent.
         // During refines Concurrent, so sub should refine sup.
-        assert!(refines(&sub, &sup), "sub with Outlives+Containment refines sup with Coincides");
+        assert!(
+            refines(&sub, &sup),
+            "sub with Outlives+Containment refines sup with Coincides"
+        );
     }
 
     // --- Test 3: refines — not refined when sup has unmet constraint ---
     #[test]
     fn test_refines_not_when_unmet() {
-        let sub = reld_from(vec![
-            Relation::Temporal(TemporalKind::Coincides),
-        ]);
-        let sup = reld_from(vec![
-            Relation::Containment,
-        ]);
+        let sub = reld_from(vec![Relation::Temporal(TemporalKind::Coincides)]);
+        let sup = reld_from(vec![Relation::Containment]);
         // sub has no structural relation, so it cannot refine sup's Contains.
-        assert!(!refines(&sub, &sup), "sub without structural cannot refine sup with Containment");
+        assert!(
+            !refines(&sub, &sup),
+            "sub without structural cannot refine sup with Containment"
+        );
     }
 
     // --- Test 4: compose ---
@@ -1023,7 +1035,10 @@ mod tests {
     fn test_consistent_pair() {
         let a = reld_from(vec![Relation::Containment]);
         let b = reld_from(vec![Relation::Liveness]);
-        assert!(consistent(&a, &b), "Containment and Liveness are consistent");
+        assert!(
+            consistent(&a, &b),
+            "Containment and Liveness are consistent"
+        );
     }
 
     // --- Test 6: consistent — inconsistent temporal pair ---
@@ -1037,7 +1052,10 @@ mod tests {
         // Our `consistent` checks the refined conversion. Let's verify
         // the actual base inconsistency path.
         let combined = a.compose(&b);
-        assert!(!combined.is_consistent(), "Outlives + Succeeds is inconsistent per base");
+        assert!(
+            !combined.is_consistent(),
+            "Outlives + Succeeds is inconsistent per base"
+        );
     }
 
     // --- Test 7: weaken ---
@@ -1050,11 +1068,15 @@ mod tests {
         let weakened = weaken(&original);
         // Weakened should have Coincides (weakest temporal) and Sanitized (weakest security)
         assert!(
-            weakened.relations.contains(&Relation::Temporal(TemporalKind::Coincides)),
+            weakened
+                .relations
+                .contains(&Relation::Temporal(TemporalKind::Coincides)),
             "weakened temporal should be Coincides"
         );
         assert!(
-            weakened.relations.contains(&Relation::Security(FlowPolicy::Sanitized)),
+            weakened
+                .relations
+                .contains(&Relation::Security(FlowPolicy::Sanitized)),
             "weakened security should be Sanitized"
         );
     }
@@ -1067,7 +1089,10 @@ mod tests {
             Relation::Temporal(TemporalKind::Coincides),
         ]);
         let result = check_temporal(&r);
-        assert!(result.consistent, "Outlives + Coincides should be temporally consistent");
+        assert!(
+            result.consistent,
+            "Outlives + Coincides should be temporally consistent"
+        );
         assert!(result.violations.is_empty());
     }
 
@@ -1079,21 +1104,24 @@ mod tests {
             Relation::Temporal(TemporalKind::Succeeds),
         ]);
         let result = check_temporal(&r);
-        assert!(!result.consistent, "Outlives + Succeeds should be temporally inconsistent");
+        assert!(
+            !result.consistent,
+            "Outlives + Succeeds should be temporally inconsistent"
+        );
         assert!(!result.violations.is_empty());
     }
 
-    // --- Test 10: check_structural --- 
+    // --- Test 10: check_structural ---
     #[test]
     fn test_check_structural_consistent() {
-        let r = reld_from(vec![
-            Relation::Containment,
-            Relation::Equivalence,
-        ]);
+        let r = reld_from(vec![Relation::Containment, Relation::Equivalence]);
         let result = check_structural(&r);
         // Contains maps to Contains, Equivalence maps to Aliases.
         // Contains refines Aliases — they are on the same chain, no contradiction.
-        assert!(result.consistent, "Contains + Aliases should be structurally consistent");
+        assert!(
+            result.consistent,
+            "Contains + Aliases should be structurally consistent"
+        );
     }
 
     // --- Test 11: check_security ---
@@ -1107,7 +1135,10 @@ mod tests {
         // NoDowngrade -> TrustedAs, NoCrossBoundary -> IsolatedFrom.
         // TrustedAs and IsolatedFrom are not contradictory.
         // But IsolatedFrom + ... hmm, they should be consistent.
-        assert!(result.consistent, "TrustedAs + IsolatedFrom should be consistent");
+        assert!(
+            result.consistent,
+            "TrustedAs + IsolatedFrom should be consistent"
+        );
     }
 
     // --- Test 12: DetailedRelation refinement ---
@@ -1190,10 +1221,22 @@ mod tests {
     // --- Test 20: TemporalRel join ---
     #[test]
     fn test_temporal_join() {
-        assert_eq!(TemporalRel::Before.join(&TemporalRel::During), TemporalRel::During);
-        assert_eq!(TemporalRel::Before.join(&TemporalRel::Concurrent), TemporalRel::Concurrent);
-        assert_eq!(TemporalRel::Before.join(&TemporalRel::After), TemporalRel::Concurrent);
-        assert_eq!(TemporalRel::During.join(&TemporalRel::Concurrent), TemporalRel::Concurrent);
+        assert_eq!(
+            TemporalRel::Before.join(&TemporalRel::During),
+            TemporalRel::During
+        );
+        assert_eq!(
+            TemporalRel::Before.join(&TemporalRel::Concurrent),
+            TemporalRel::Concurrent
+        );
+        assert_eq!(
+            TemporalRel::Before.join(&TemporalRel::After),
+            TemporalRel::Concurrent
+        );
+        assert_eq!(
+            TemporalRel::During.join(&TemporalRel::Concurrent),
+            TemporalRel::Concurrent
+        );
     }
 
     // --- Test 21: RelDRefined from_reld conversion ---
@@ -1205,9 +1248,15 @@ mod tests {
             Relation::Security(FlowPolicy::NoDowngrade),
         ]);
         let refined = RelDRefined::from_reld(&r);
-        assert!(refined.relations.contains(&DetailedRelation::Temporal(TemporalRel::Before)));
-        assert!(refined.relations.contains(&DetailedRelation::Structural(StructuralRel::Contains)));
-        assert!(refined.relations.contains(&DetailedRelation::Security(SecurityRel::TrustedAs)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Temporal(TemporalRel::Before)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Structural(StructuralRel::Contains)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Security(SecurityRel::TrustedAs)));
     }
 
     // --- Test 22: check_security with isolation + declassification ---
@@ -1230,12 +1279,19 @@ mod tests {
             })
             .collect();
 
-        let has_isolated = security_rels.iter().any(|s| matches!(s, SecurityRel::IsolatedFrom));
-        let has_declassify = security_rels.iter().any(|s| matches!(s, SecurityRel::DeclassifiesTo));
+        let has_isolated = security_rels
+            .iter()
+            .any(|s| matches!(s, SecurityRel::IsolatedFrom));
+        let has_declassify = security_rels
+            .iter()
+            .any(|s| matches!(s, SecurityRel::DeclassifiesTo));
         if has_isolated && has_declassify {
             violations.push("conflict".to_string());
         }
-        assert!(!violations.is_empty(), "IsolatedFrom + DeclassifiesTo should conflict");
+        assert!(
+            !violations.is_empty(),
+            "IsolatedFrom + DeclassifiesTo should conflict"
+        );
     }
 
     // --- Test 23: weaken_refined ---
@@ -1247,9 +1303,15 @@ mod tests {
         r.insert(DetailedRelation::Ownership(OwnershipRel::OwnedBy));
 
         let weakened = weaken_refined(&r);
-        assert!(weakened.relations.contains(&DetailedRelation::Temporal(TemporalRel::Concurrent)));
-        assert!(weakened.relations.contains(&DetailedRelation::Security(SecurityRel::DeclassifiesTo)));
-        assert!(weakened.relations.contains(&DetailedRelation::Ownership(OwnershipRel::SharedBy)));
+        assert!(weakened
+            .relations
+            .contains(&DetailedRelation::Temporal(TemporalRel::Concurrent)));
+        assert!(weakened
+            .relations
+            .contains(&DetailedRelation::Security(SecurityRel::DeclassifiesTo)));
+        assert!(weakened
+            .relations
+            .contains(&DetailedRelation::Ownership(OwnershipRel::SharedBy)));
     }
 
     // --- Test 24: refines_refined ---
@@ -1264,10 +1326,16 @@ mod tests {
         sup.insert(DetailedRelation::Structural(StructuralRel::Aliases));
 
         // Before refines Concurrent, Contains refines Aliases
-        assert!(refines_refined(&sub, &sup), "more refined should refine less refined");
+        assert!(
+            refines_refined(&sub, &sup),
+            "more refined should refine less refined"
+        );
 
         // Reverse should NOT hold
-        assert!(!refines_refined(&sup, &sub), "less refined should not refine more refined");
+        assert!(
+            !refines_refined(&sup, &sub),
+            "less refined should not refine more refined"
+        );
     }
 
     // --- Test 25: StructuralRel join ---
@@ -1305,12 +1373,8 @@ mod tests {
     #[test]
     fn test_outlives_chain_refined() {
         // Outlives maps to During. Composing two Dures should be consistent.
-        let a = RelDRefined::from_relations([
-            DetailedRelation::Temporal(TemporalRel::During),
-        ]);
-        let b = RelDRefined::from_relations([
-            DetailedRelation::Temporal(TemporalRel::During),
-        ]);
+        let a = RelDRefined::from_relations([DetailedRelation::Temporal(TemporalRel::During)]);
+        let b = RelDRefined::from_relations([DetailedRelation::Temporal(TemporalRel::During)]);
         let combined = RelDRefined {
             relations: a.relations.union(&b.relations).cloned().collect(),
         };
@@ -1340,7 +1404,10 @@ mod tests {
     #[test]
     fn test_temporal_join_before_after() {
         // Before and After are incomparable; join = Concurrent
-        assert_eq!(TemporalRel::Before.join(&TemporalRel::After), TemporalRel::Concurrent);
+        assert_eq!(
+            TemporalRel::Before.join(&TemporalRel::After),
+            TemporalRel::Concurrent
+        );
     }
 
     #[test]
@@ -1466,21 +1533,27 @@ mod tests {
     fn test_reldrefined_from_reld_temporal() {
         let r = reld_from(vec![Relation::Temporal(TemporalKind::Outlives)]);
         let refined = RelDRefined::from_reld(&r);
-        assert!(refined.relations.contains(&DetailedRelation::Temporal(TemporalRel::During)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Temporal(TemporalRel::During)));
     }
 
     #[test]
     fn test_reldrefined_from_reld_containment() {
         let r = reld_from(vec![Relation::Containment]);
         let refined = RelDRefined::from_reld(&r);
-        assert!(refined.relations.contains(&DetailedRelation::Structural(StructuralRel::Contains)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Structural(StructuralRel::Contains)));
     }
 
     #[test]
     fn test_reldrefined_from_reld_equivalence() {
         let r = reld_from(vec![Relation::Equivalence]);
         let refined = RelDRefined::from_reld(&r);
-        assert!(refined.relations.contains(&DetailedRelation::Structural(StructuralRel::Aliases)));
+        assert!(refined
+            .relations
+            .contains(&DetailedRelation::Structural(StructuralRel::Aliases)));
     }
 
     #[test]
@@ -1490,9 +1563,8 @@ mod tests {
             DetailedRelation::Temporal(TemporalRel::During),
             DetailedRelation::Structural(StructuralRel::Contains),
         ]);
-        let sup = RelDRefined::from_relations([
-            DetailedRelation::Structural(StructuralRel::Aliases),
-        ]);
+        let sup =
+            RelDRefined::from_relations([DetailedRelation::Structural(StructuralRel::Aliases)]);
         // During doesn't cover Aliases, but Contains does
         assert!(refines_refined(&sub, &sup));
     }

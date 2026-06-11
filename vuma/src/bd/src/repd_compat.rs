@@ -22,8 +22,8 @@
 //! - [`is_subtype`] — subtyping relation
 
 use crate::repd::{
-    ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep, POINTER_SIZE,
-    generic_satisfies_constraints,
+    generic_satisfies_constraints, ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep,
+    UnionRep, POINTER_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,10 @@ pub enum IncompatibilityReason {
     /// Struct field counts differ.
     FieldCountMismatch { count1: usize, count2: usize },
     /// Field at the given index is incompatible.
-    FieldIncompatible { index: usize, reason: Box<IncompatibilityReason> },
+    FieldIncompatible {
+        index: usize,
+        reason: Box<IncompatibilityReason>,
+    },
     /// Array element counts differ.
     ArrayCountMismatch { count1: u64, count2: u64 },
     /// Enum variant counts differ.
@@ -69,7 +72,10 @@ pub enum IncompatibilityReason {
     /// Function parameter counts differ.
     ParamCountMismatch { count1: usize, count2: usize },
     /// A nested incompatibility with context.
-    Nested { context: &'static str, reason: Box<IncompatibilityReason> },
+    Nested {
+        context: &'static str,
+        reason: Box<IncompatibilityReason>,
+    },
     /// Generic catch-all.
     Other(String),
 }
@@ -88,12 +94,20 @@ pub struct CompatibilityResult {
 impl CompatibilityResult {
     /// Create a positive result with the given kind.
     pub fn yes(kind: CompatibilityKind) -> Self {
-        Self { compatible: true, kind: Some(kind), reason: None }
+        Self {
+            compatible: true,
+            kind: Some(kind),
+            reason: None,
+        }
     }
 
     /// Create a negative result with the given reason.
     pub fn no(reason: IncompatibilityReason) -> Self {
-        Self { compatible: false, kind: None, reason: Some(reason) }
+        Self {
+            compatible: false,
+            kind: None,
+            reason: Some(reason),
+        }
     }
 }
 
@@ -160,12 +174,20 @@ pub struct ReinterpretResult {
 impl ReinterpretResult {
     /// Create a positive result.
     pub fn yes(rule: ReinterpretRule, details: impl Into<String>) -> Self {
-        Self { can_reinterpret: true, rule: Some(rule), details: details.into() }
+        Self {
+            can_reinterpret: true,
+            rule: Some(rule),
+            details: details.into(),
+        }
     }
 
     /// Create a negative result.
     pub fn no(details: impl Into<String>) -> Self {
-        Self { can_reinterpret: false, rule: None, details: details.into() }
+        Self {
+            can_reinterpret: false,
+            rule: None,
+            details: details.into(),
+        }
     }
 }
 
@@ -175,7 +197,10 @@ impl std::fmt::Display for ReinterpretResult {
             write!(
                 f,
                 "safe ({})",
-                self.rule.as_ref().map(|r| format!("{r:?}")).unwrap_or_default()
+                self.rule
+                    .as_ref()
+                    .map(|r| format!("{r:?}"))
+                    .unwrap_or_default()
             )
         } else {
             write!(f, "unsafe: {}", self.details)
@@ -258,9 +283,7 @@ pub fn are_compatible(r1: &RepD, r2: &RepD) -> CompatibilityResult {
     }
 
     // If reinterpretation works in either direction, they can coexist.
-    if can_reinterpret(r1, r2).can_reinterpret
-        || can_reinterpret(r2, r1).can_reinterpret
-    {
+    if can_reinterpret(r1, r2).can_reinterpret || can_reinterpret(r2, r1).can_reinterpret {
         return CompatibilityResult::yes(CompatibilityKind::ReinterpretCompatible);
     }
 
@@ -289,9 +312,7 @@ fn check_structural_compatibility(r1: &RepD, r2: &RepD) -> CompatibilityResult {
                     count2: s2.fields.len(),
                 });
             }
-            for (i, ((off1, rep1), (off2, rep2))) in
-                s1.fields.iter().zip(&s2.fields).enumerate()
-            {
+            for (i, ((off1, rep1), (off2, rep2))) in s1.fields.iter().zip(&s2.fields).enumerate() {
                 if off1 != off2 {
                     return CompatibilityResult::no(IncompatibilityReason::FieldIncompatible {
                         index: i,
@@ -304,9 +325,11 @@ fn check_structural_compatibility(r1: &RepD, r2: &RepD) -> CompatibilityResult {
                 if !sub.compatible {
                     return CompatibilityResult::no(IncompatibilityReason::FieldIncompatible {
                         index: i,
-                        reason: Box::new(sub.reason.unwrap_or(IncompatibilityReason::Other(
-                            "field incompatible".into(),
-                        ))),
+                        reason: Box::new(
+                            sub.reason.unwrap_or(IncompatibilityReason::Other(
+                                "field incompatible".into(),
+                            )),
+                        ),
                     });
                 }
             }
@@ -340,9 +363,7 @@ fn check_structural_compatibility(r1: &RepD, r2: &RepD) -> CompatibilityResult {
                     count2: e2.variants.len(),
                 });
             }
-            for (i, ((t1, v1), (t2, v2))) in
-                e1.variants.iter().zip(&e2.variants).enumerate()
-            {
+            for (i, ((t1, v1), (t2, v2))) in e1.variants.iter().zip(&e2.variants).enumerate() {
                 if t1 != t2 {
                     return CompatibilityResult::no(IncompatibilityReason::EnumTagMismatch {
                         index: i,
@@ -525,7 +546,9 @@ pub fn meet(r1: &RepD, r2: &RepD) -> Option<RepD> {
         }
         (RepD::Ptr(p1), RepD::Ptr(p2)) => {
             let pointee = meet(&p1.pointee, &p2.pointee)?;
-            Some(RepD::Ptr(PtrRep { pointee: Box::new(pointee) }))
+            Some(RepD::Ptr(PtrRep {
+                pointee: Box::new(pointee),
+            }))
         }
         (RepD::Union(u1), RepD::Union(u2)) => {
             if u1.alternatives.len() != u2.alternatives.len() {
@@ -536,7 +559,11 @@ pub fn meet(r1: &RepD, r2: &RepD) -> Option<RepD> {
                 alternatives.push(meet(a, b)?);
             }
             let max_size = alternatives.iter().map(|r| r.size()).max().unwrap_or(0);
-            let max_align = alternatives.iter().map(|r| r.alignment()).max().unwrap_or(1);
+            let max_align = alternatives
+                .iter()
+                .map(|r| r.alignment())
+                .max()
+                .unwrap_or(1);
             Some(RepD::Union(UnionRep {
                 alternatives,
                 max_size,
@@ -652,7 +679,9 @@ pub fn join(r1: &RepD, r2: &RepD) -> Option<RepD> {
         }
         (RepD::Ptr(p1), RepD::Ptr(p2)) => {
             let pointee = join(&p1.pointee, &p2.pointee)?;
-            Some(RepD::Ptr(PtrRep { pointee: Box::new(pointee) }))
+            Some(RepD::Ptr(PtrRep {
+                pointee: Box::new(pointee),
+            }))
         }
         (RepD::Union(u1), RepD::Union(u2)) => {
             if u1.alternatives.len() != u2.alternatives.len() {
@@ -663,7 +692,11 @@ pub fn join(r1: &RepD, r2: &RepD) -> Option<RepD> {
                 alternatives.push(join(a, b)?);
             }
             let max_size = alternatives.iter().map(|r| r.size()).max().unwrap_or(0);
-            let max_align = alternatives.iter().map(|r| r.alignment()).max().unwrap_or(1);
+            let max_align = alternatives
+                .iter()
+                .map(|r| r.alignment())
+                .max()
+                .unwrap_or(1);
             Some(RepD::Union(UnionRep {
                 alternatives,
                 max_size,
@@ -858,7 +891,12 @@ pub fn can_reinterpret(from: &RepD, to: &RepD) -> ReinterpretResult {
                 u_to.alternatives.len()
             ));
         }
-        for (i, (a, b)) in u_from.alternatives.iter().zip(&u_to.alternatives).enumerate() {
+        for (i, (a, b)) in u_from
+            .alternatives
+            .iter()
+            .zip(&u_to.alternatives)
+            .enumerate()
+        {
             let sub = can_reinterpret(a, b);
             if !sub.can_reinterpret {
                 return ReinterpretResult::no(format!(
@@ -963,7 +1001,11 @@ pub fn is_subtype(sub: &RepD, sup: &RepD) -> bool {
     // subsumes(Byte{n,a}, r2) iff size(r2)=n && alignment(r2) | a
     // i.e., sub.alignment() must divide sup.align (sub has stricter alignment)
     if let RepD::Byte(b) = sup {
-        if sub.size() == b.size && sub.alignment() > 0 && b.align > 0 && sub.alignment().is_multiple_of(b.align) {
+        if sub.size() == b.size
+            && sub.alignment() > 0
+            && b.align > 0
+            && sub.alignment().is_multiple_of(b.align)
+        {
             return true;
         }
     }
@@ -980,13 +1022,11 @@ pub fn is_subtype(sub: &RepD, sup: &RepD) -> bool {
             if s_sub.fields.len() != s_sup.fields.len() {
                 return false;
             }
-            s_sub
-                .fields
-                .iter()
-                .zip(&s_sup.fields)
-                .all(|((off_sub, rep_sub), (off_sup, rep_sup))| {
+            s_sub.fields.iter().zip(&s_sup.fields).all(
+                |((off_sub, rep_sub), (off_sup, rep_sup))| {
                     off_sub == off_sup && is_subtype(rep_sub, rep_sup)
-                })
+                },
+            )
         }
         (RepD::Array(a_sub), RepD::Array(a_sup)) => {
             a_sub.count == a_sup.count && is_subtype(&a_sub.element, &a_sup.element)
@@ -999,9 +1039,7 @@ pub fn is_subtype(sub: &RepD, sup: &RepD) -> bool {
                 .variants
                 .iter()
                 .zip(&e_sup.variants)
-                .all(|((t_sub, v_sub), (t_sup, v_sup))| {
-                    t_sub == t_sup && is_subtype(v_sub, v_sup)
-                })
+                .all(|((t_sub, v_sub), (t_sup, v_sup))| t_sub == t_sup && is_subtype(v_sub, v_sup))
         }
         (RepD::Ptr(p_sub), RepD::Ptr(p_sup)) => {
             // Pointers are covariant in their pointee type.
@@ -1055,15 +1093,24 @@ mod tests {
     }
 
     fn ptr(pointee: RepD) -> RepD {
-        RepD::Ptr(PtrRep { pointee: Box::new(pointee) })
+        RepD::Ptr(PtrRep {
+            pointee: Box::new(pointee),
+        })
     }
 
     fn array(element: RepD, count: u64) -> RepD {
-        RepD::Array(ArrayRep { element: Box::new(element), count })
+        RepD::Array(ArrayRep {
+            element: Box::new(element),
+            count,
+        })
     }
 
     fn struct_of(fields: Vec<(u64, RepD)>, total_size: u64, align: u64) -> RepD {
-        RepD::Struct(StructRep { fields, total_size, align })
+        RepD::Struct(StructRep {
+            fields,
+            total_size,
+            align,
+        })
     }
 
     fn enum_of(variants: Vec<(u64, RepD)>) -> RepD {
@@ -1072,12 +1119,23 @@ mod tests {
 
     fn union_of(alternatives: Vec<RepD>) -> RepD {
         let max_size = alternatives.iter().map(|r| r.size()).max().unwrap_or(0);
-        let max_align = alternatives.iter().map(|r| r.alignment()).max().unwrap_or(1);
-        RepD::Union(UnionRep { alternatives, max_size, max_align })
+        let max_align = alternatives
+            .iter()
+            .map(|r| r.alignment())
+            .max()
+            .unwrap_or(1);
+        RepD::Union(UnionRep {
+            alternatives,
+            max_size,
+            max_align,
+        })
     }
 
     fn func(params: Vec<RepD>, result: RepD) -> RepD {
-        RepD::Func(FuncRep { params, result: Box::new(result) })
+        RepD::Func(FuncRep {
+            params,
+            result: Box::new(result),
+        })
     }
 
     // Test 1: are_compatible — identical RepDs --------------------------------
@@ -1108,11 +1166,7 @@ mod tests {
 
     #[test]
     fn test_compatible_byte_erosion() {
-        let structured = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
+        let structured = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
         let raw = byte(8, 4);
         let result = are_compatible(&structured, &raw);
         assert!(result.compatible);
@@ -1122,11 +1176,7 @@ mod tests {
 
     #[test]
     fn test_compatible_struct_fields() {
-        let s = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
+        let s = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
         let result = are_compatible(&s, &s);
         assert!(result.compatible);
         assert_eq!(result.kind, Some(CompatibilityKind::Identical));
@@ -1222,16 +1272,8 @@ mod tests {
 
     #[test]
     fn test_meet_struct_field_wise() {
-        let s1 = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
-        let s2 = struct_of(
-            vec![(0, byte(4, 8)), (4, byte(4, 8))],
-            8,
-            8,
-        );
+        let s1 = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
+        let s2 = struct_of(vec![(0, byte(4, 8)), (4, byte(4, 8))], 8, 8);
         let m = meet(&s1, &s2).unwrap();
         // Each field's meet should have the stricter alignment.
         if let RepD::Struct(s) = m {
@@ -1269,11 +1311,7 @@ mod tests {
     #[test]
     fn test_join_subsumption() {
         let b = byte(8, 8);
-        let s = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
+        let s = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
         // byte subsumes struct, so join is byte.
         let j = join(&b, &s).unwrap();
         assert_eq!(j, b);
@@ -1294,11 +1332,7 @@ mod tests {
 
     #[test]
     fn test_size_of_alignment_of() {
-        let s = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
+        let s = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
         assert_eq!(size_of(&s), 8);
         assert_eq!(alignment_of(&s), 4);
 
@@ -1438,16 +1472,8 @@ mod tests {
 
     #[test]
     fn test_reinterpret_struct_fields() {
-        let s_from = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
-        let s_to = struct_of(
-            vec![(0, byte(4, 4)), (4, byte(4, 4))],
-            8,
-            4,
-        );
+        let s_from = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
+        let s_to = struct_of(vec![(0, byte(4, 4)), (4, byte(4, 4))], 8, 4);
         let result = can_reinterpret(&s_from, &s_to);
         assert!(result.can_reinterpret);
         // Identical structs → Identity rule.

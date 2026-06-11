@@ -65,7 +65,9 @@ fn read_cntpct() -> u64 {
     let val: u64;
     // SAFETY: CNTPCT_EL0 is a readable system register on all AArch64
     // implementations that support the generic timer.
-    unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntpct_el0", out(reg) val, options(nostack, preserves_flags));
+    }
     val
 }
 
@@ -75,7 +77,9 @@ fn read_cntvct() -> u64 {
     let val: u64;
     // SAFETY: CNTVCT_EL0 is a readable system register on AArch64
     // implementations with virtualisation support (all Cortex-A76).
-    unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nostack, preserves_flags));
+    }
     val
 }
 
@@ -84,7 +88,9 @@ fn read_cntvct() -> u64 {
 fn read_cntfrq() -> u64 {
     let val: u64;
     // SAFETY: CNTFRQ_EL0 is a readable system register.
-    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntfrq_el0", out(reg) val, options(nostack, preserves_flags));
+    }
     val
 }
 
@@ -93,7 +99,9 @@ fn read_cntfrq() -> u64 {
 fn read_cntv_ctl() -> u64 {
     let val: u64;
     // SAFETY: CNTV_CTL_EL0 is a readable system register.
-    unsafe { core::arch::asm!("mrs {}, cntv_ctl_el0", out(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("mrs {}, cntv_ctl_el0", out(reg) val, options(nostack, preserves_flags));
+    }
     val
 }
 
@@ -102,7 +110,9 @@ fn read_cntv_ctl() -> u64 {
 fn write_cntv_ctl(val: u64) {
     // SAFETY: CNTV_CTL_EL0 is a writable system register.  We only toggle
     // the well-defined ENABLE / IMASK bits.
-    unsafe { core::arch::asm!("msr cntv_ctl_el0, {}", in(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("msr cntv_ctl_el0, {}", in(reg) val, options(nostack, preserves_flags));
+    }
 }
 
 /// Write the virtual timer compare value — relative (`CNTV_TVAL_EL0`).
@@ -112,7 +122,9 @@ fn write_cntv_ctl(val: u64) {
 #[inline(always)]
 fn write_cntv_tval(val: u64) {
     // SAFETY: CNTV_TVAL_EL0 is a writable system register.
-    unsafe { core::arch::asm!("msr cntv_tval_el0, {}", in(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("msr cntv_tval_el0, {}", in(reg) val, options(nostack, preserves_flags));
+    }
 }
 
 /// Write the virtual timer compare value — absolute (`CNTV_CVAL_EL0`).
@@ -121,7 +133,9 @@ fn write_cntv_tval(val: u64) {
 #[inline(always)]
 fn write_cntv_cval(val: u64) {
     // SAFETY: CNTV_CVAL_EL0 is a writable system register.
-    unsafe { core::arch::asm!("msr cntv_cval_el0, {}", in(reg) val, options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!("msr cntv_cval_el0, {}", in(reg) val, options(nostack, preserves_flags));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +242,7 @@ impl Timer {
     pub fn delay_ns(&self, ns: u64) {
         let freq = self.frequency();
         // target_ticks = ns * freq / 1_000_000_000
-        let target = (ns / 1_000_000_000) * freq
-            + ((ns % 1_000_000_000) * freq) / 1_000_000_000;
+        let target = (ns / 1_000_000_000) * freq + ((ns % 1_000_000_000) * freq) / 1_000_000_000;
         let start = self.current_ticks();
         while self.current_ticks().wrapping_sub(start) < target {
             core::hint::spin_loop();

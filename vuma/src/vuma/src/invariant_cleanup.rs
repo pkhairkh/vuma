@@ -168,7 +168,10 @@ impl InvariantResult {
     /// Create a result from a list of violations.
     pub fn from_violations(violations: Vec<CleanupViolation>) -> Self {
         let satisfied = violations.is_empty();
-        Self { satisfied, violations }
+        Self {
+            satisfied,
+            violations,
+        }
     }
 
     /// Merge another result into this one.
@@ -228,10 +231,7 @@ impl FreeTracker {
 
     /// Record a free operation targeting `region_id` at `point`.
     pub fn record_free(&mut self, region_id: RegionId, point: ProgramPoint) {
-        self.free_events
-            .entry(region_id)
-            .or_default()
-            .push(point);
+        self.free_events.entry(region_id).or_default().push(point);
     }
 
     /// Returns the number of free events recorded for `region_id`.
@@ -317,9 +317,7 @@ impl ResourceLifetime {
     /// Returns `None` if the region has not been freed or if the points
     /// are not comparable (different files).
     pub fn span(&self) -> Option<std::cmp::Ordering> {
-        self.free_point
-            .as_ref()
-            .map(|fp| fp.cmp(&self.alloc_point))
+        self.free_point.as_ref().map(|fp| fp.cmp(&self.alloc_point))
     }
 }
 
@@ -640,7 +638,12 @@ mod tests {
         ProgramPoint::new("test.vu", line, 1)
     }
 
-    fn make_region(id: u64, status: RegionStatus, alloc_line: u32, free_line: Option<u32>) -> Region {
+    fn make_region(
+        id: u64,
+        status: RegionStatus,
+        alloc_line: u32,
+        free_line: Option<u32>,
+    ) -> Region {
         Region {
             id: RegionId(id),
             base: Address::from(0x1000_u64 * id),
@@ -711,7 +714,11 @@ mod tests {
         msg.add_access(make_access(1, 1, AccessKind::Read, 5));
 
         let result = check_cleanup(&msg);
-        assert!(result.satisfied, "Expected no violations, got: {:?}", result.violations);
+        assert!(
+            result.satisfied,
+            "Expected no violations, got: {:?}",
+            result.violations
+        );
         assert!(result.violations.is_empty());
     }
 
@@ -729,7 +736,10 @@ mod tests {
         let result = check_cleanup(&msg);
         assert!(!result.satisfied);
 
-        let has_leak = result.violations.iter().any(|v| matches!(v, CleanupViolation::Leak { .. }));
+        let has_leak = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, CleanupViolation::Leak { .. }));
         let has_not_freed = result
             .violations
             .iter()
@@ -844,7 +854,10 @@ mod tests {
         msg.add_region(make_region(3, RegionStatus::Device, 3, None));
 
         let result = check_cleanup(&msg);
-        assert!(result.satisfied, "Stack/Mapped/Device regions should not be violations");
+        assert!(
+            result.satisfied,
+            "Stack/Mapped/Device regions should not be violations"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -860,7 +873,10 @@ mod tests {
         msg.add_access(make_access(1, 1, AccessKind::Write, 10));
 
         let result = check_cleanup(&msg);
-        assert!(result.satisfied, "Access before free should not be a violation");
+        assert!(
+            result.satisfied,
+            "Access before free should not be a violation"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1014,7 +1030,10 @@ mod tests {
             .violations
             .iter()
             .any(|v| matches!(v, CleanupViolation::InvalidTransition { .. }));
-        assert!(has_invalid, "Expected InvalidTransition for Freed region without free_point");
+        assert!(
+            has_invalid,
+            "Expected InvalidTransition for Freed region without free_point"
+        );
     }
 
     // -----------------------------------------------------------------------

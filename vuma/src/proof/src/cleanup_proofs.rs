@@ -10,9 +10,7 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use crate::judgment::RegionId;
-use crate::models::{
-    ProofMemOp, ProofMemOpKind, ProofMSG, ProofSCG,
-};
+use crate::models::{ProofMSG, ProofMemOp, ProofMemOpKind, ProofSCG};
 use crate::proof::{
     Conclusion, Fact, FactId, Goal, InvariantName, ProgramPoint, Proof, ProofContext, ProofStep,
     Target,
@@ -161,7 +159,10 @@ pub fn prove_cleanup_with_tactic(
     }
 }
 
-pub fn prove_no_double_free(msg: &ProofMSG, scg: &ProofSCG) -> Result<NoDoubleFreeProof, ProofFailure> {
+pub fn prove_no_double_free(
+    msg: &ProofMSG,
+    scg: &ProofSCG,
+) -> Result<NoDoubleFreeProof, ProofFailure> {
     prove_no_double_free_with_tactic(msg, scg, CleanupTactic::OwnershipTracking)
 }
 
@@ -285,7 +286,10 @@ pub fn prove_no_use_after_free_with_tactic(
             proof.add_step(ProofStep::Assume {
                 fact: Fact::checked(
                     fact_id,
-                    format!("region {} accessed at 0x{:x} (region not freed)", access.region, access.location),
+                    format!(
+                        "region {} accessed at 0x{:x} (region not freed)",
+                        access.region, access.location
+                    ),
                 ),
             });
             fact_id += 1;
@@ -345,7 +349,10 @@ fn prove_via_path_enumeration(
                 proof_obj.add_step(ProofStep::Assume {
                     fact: Fact::checked(
                         fact_id,
-                        format!("region {} allocated at 0x{:x} with no free", region, alloc_point),
+                        format!(
+                            "region {} allocated at 0x{:x} with no free",
+                            region, alloc_point
+                        ),
                     ),
                 });
                 proof_obj.conclude(Conclusion::Refuted);
@@ -447,7 +454,10 @@ fn prove_via_ownership_tracking(
                 proof_obj.add_step(ProofStep::Assume {
                     fact: Fact::checked(
                         fact_id,
-                        format!("region {} freed (memory released) at 0x{:x}", op.region, op.location),
+                        format!(
+                            "region {} freed (memory released) at 0x{:x}",
+                            op.region, op.location
+                        ),
                     ),
                 });
                 fact_id += 1;
@@ -457,7 +467,10 @@ fn prove_via_ownership_tracking(
                 proof_obj.add_step(ProofStep::Assume {
                     fact: Fact::checked(
                         fact_id,
-                        format!("region {} access ownership acquired at 0x{:x}", op.region, op.location),
+                        format!(
+                            "region {} access ownership acquired at 0x{:x}",
+                            op.region, op.location
+                        ),
                     ),
                 });
                 fact_id += 1;
@@ -467,7 +480,10 @@ fn prove_via_ownership_tracking(
                 proof_obj.add_step(ProofStep::Assume {
                     fact: Fact::checked(
                         fact_id,
-                        format!("region {} access ownership released at 0x{:x}", op.region, op.location),
+                        format!(
+                            "region {} access ownership released at 0x{:x}",
+                            op.region, op.location
+                        ),
                     ),
                 });
                 fact_id += 1;

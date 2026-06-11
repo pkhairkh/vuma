@@ -131,11 +131,7 @@ pub struct Goal {
 
 impl Goal {
     /// Create a new proof goal.
-    pub fn new(
-        invariant: InvariantName,
-        target: Target,
-        context: ProofContext,
-    ) -> Self {
+    pub fn new(invariant: InvariantName, target: Target, context: ProofContext) -> Self {
         Self {
             invariant,
             target,
@@ -402,7 +398,10 @@ impl Proof {
                         case.collect_facts_into(out);
                     }
                 }
-                ProofStep::Induction { base, step: ind_step } => {
+                ProofStep::Induction {
+                    base,
+                    step: ind_step,
+                } => {
                     base.collect_facts_into(out);
                     ind_step.collect_facts_into(out);
                 }

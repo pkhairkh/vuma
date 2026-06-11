@@ -19,8 +19,8 @@
 //! - **"Did you mean?" suggestions** — [`suggest`], [`suggest_keyword`],
 //!   [`levenshtein`], [`format_suggestion`] for typo correction.
 
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Span
@@ -406,7 +406,11 @@ impl ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}..{})", self.message, self.span.start, self.span.end)?;
+        write!(
+            f,
+            "{} ({}..{})",
+            self.message, self.span.start, self.span.end
+        )?;
         if let Some(ref s) = self.suggestion {
             write!(f, " (did you mean `{}`?)", s)?;
         }
@@ -444,9 +448,7 @@ impl ErrorRecovery {
     /// Return the default recovery strategy for a given error kind.
     pub fn for_kind(kind: &ParseErrorKind) -> Self {
         match kind {
-            ParseErrorKind::MissingSemicolon => {
-                ErrorRecovery::InsertMissingToken(";".to_string())
-            }
+            ParseErrorKind::MissingSemicolon => ErrorRecovery::InsertMissingToken(";".to_string()),
             ParseErrorKind::ExpectedToken => ErrorRecovery::SkipOneToken,
             ParseErrorKind::UnexpectedToken => ErrorRecovery::SkipToStatementBoundary,
             ParseErrorKind::InvalidSyntax => ErrorRecovery::SkipToStatementBoundary,
@@ -699,10 +701,7 @@ impl Diagnostic {
             suggestion_text,
         );
         for child in &self.children {
-            result.push_str(&format!(
-                "\n{}: {}",
-                child.severity, child.message
-            ));
+            result.push_str(&format!("\n{}: {}", child.severity, child.message));
         }
         result.push('\n');
         result
@@ -718,10 +717,7 @@ impl fmt::Display for Diagnostic {
         write!(
             f,
             "{}{}: {} at {}",
-            self.severity,
-            code_str,
-            self.message,
-            self.location
+            self.severity, code_str, self.message, self.location
         )
     }
 }
@@ -775,8 +771,7 @@ impl ErrorCollector {
     /// the same message (deduplication).
     pub fn add_dedup(&mut self, diag: Diagnostic) {
         let is_dup = self.diagnostics.iter().any(|existing| {
-            existing.location.line == diag.location.line
-                && existing.message == diag.message
+            existing.location.line == diag.location.line && existing.message == diag.message
         });
         if !is_dup {
             self.add(diag);
@@ -815,12 +810,16 @@ impl ErrorCollector {
 
     /// Iterate over only error-level diagnostics.
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == Severity::Error)
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
     }
 
     /// Iterate over only warning-level diagnostics.
     pub fn warnings(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == Severity::Warning)
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
     }
 
     /// Take all diagnostics, leaving the collector empty.
@@ -850,10 +849,18 @@ impl ErrorCollector {
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.error_count > 0 {
-            parts.push(format!("{} error{}", self.error_count, if self.error_count > 1 { "s" } else { "" }));
+            parts.push(format!(
+                "{} error{}",
+                self.error_count,
+                if self.error_count > 1 { "s" } else { "" }
+            ));
         }
         if self.warning_count > 0 {
-            parts.push(format!("{} warning{}", self.warning_count, if self.warning_count > 1 { "s" } else { "" }));
+            parts.push(format!(
+                "{} warning{}",
+                self.warning_count,
+                if self.warning_count > 1 { "s" } else { "" }
+            ));
         }
         if parts.is_empty() {
             "no diagnostics".to_string()
@@ -899,9 +906,9 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = prev[0] + 1;
         for (i, sc) in (1..).zip(short.chars()) {
             let cost = if sc == lc { 0 } else { 1 };
-            curr[i] = (prev[i] + 1)        // deletion
-                .min(curr[i - 1] + 1)      // insertion
-                .min(prev[i - 1] + cost);  // substitution
+            curr[i] = (prev[i] + 1) // deletion
+                .min(curr[i - 1] + 1) // insertion
+                .min(prev[i - 1] + cost); // substitution
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -911,7 +918,11 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
 
 /// Suggest the closest match from a list of candidates using Levenshtein
 /// distance.  Returns `None` if no candidate is within `max_distance`.
-pub fn suggest<'a>(input: &str, candidates: &'a [String], max_distance: usize) -> Option<&'a String> {
+pub fn suggest<'a>(
+    input: &str,
+    candidates: &'a [String],
+    max_distance: usize,
+) -> Option<&'a String> {
     candidates
         .iter()
         .filter(|c| {
@@ -928,12 +939,11 @@ pub fn suggest<'a>(input: &str, candidates: &'a [String], max_distance: usize) -
 
 /// VUMA language keywords, used for "did you mean?" suggestions.
 pub const VUMA_KEYWORDS: &[&str] = &[
-    "fn", "let", "ptr", "region", "alloc", "allocate", "free", "derive",
-    "cast", "read", "write", "sync", "if", "else", "while", "for", "return",
-    "struct", "enum", "match", "unsafe", "safe", "bd", "repd", "capd", "reld",
-    "import", "export", "mod", "use", "self", "super", "async", "await",
-    "spawn", "lock", "unlock", "channel", "send", "recv", "true", "false",
-    "as", "sizeof", "alignof", "loop",
+    "fn", "let", "ptr", "region", "alloc", "allocate", "free", "derive", "cast", "read", "write",
+    "sync", "if", "else", "while", "for", "return", "struct", "enum", "match", "unsafe", "safe",
+    "bd", "repd", "capd", "reld", "import", "export", "mod", "use", "self", "super", "async",
+    "await", "spawn", "lock", "unlock", "channel", "send", "recv", "true", "false", "as", "sizeof",
+    "alignof", "loop",
 ];
 
 /// Suggest a keyword similar to `input` using Levenshtein distance.
@@ -968,11 +978,7 @@ pub fn format_suggestion(input: &str, suggestion: &str) -> String {
 
 /// Extract the text of a 0-based line number from `source`.
 fn get_line(source: &str, line: usize) -> String {
-    source
-        .lines()
-        .nth(line)
-        .unwrap_or("")
-        .to_string()
+    source.lines().nth(line).unwrap_or("").to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,14 +1032,26 @@ mod tests {
 
     #[test]
     fn error_kind_display() {
-        assert_eq!(ParseErrorKind::UnexpectedToken.to_string(), "unexpected token");
+        assert_eq!(
+            ParseErrorKind::UnexpectedToken.to_string(),
+            "unexpected token"
+        );
         assert_eq!(ParseErrorKind::ExpectedToken.to_string(), "expected token");
         assert_eq!(ParseErrorKind::InvalidSyntax.to_string(), "invalid syntax");
-        assert_eq!(ParseErrorKind::DuplicateDefinition.to_string(), "duplicate definition");
-        assert_eq!(ParseErrorKind::UndefinedReference.to_string(), "undefined reference");
+        assert_eq!(
+            ParseErrorKind::DuplicateDefinition.to_string(),
+            "duplicate definition"
+        );
+        assert_eq!(
+            ParseErrorKind::UndefinedReference.to_string(),
+            "undefined reference"
+        );
         assert_eq!(ParseErrorKind::TypeMismatch.to_string(), "type mismatch");
         assert_eq!(ParseErrorKind::RegionError.to_string(), "region error");
-        assert_eq!(ParseErrorKind::BDAnnotationError.to_string(), "BD annotation error");
+        assert_eq!(
+            ParseErrorKind::BDAnnotationError.to_string(),
+            "BD annotation error"
+        );
     }
 
     // -- ParseError construction tests ---------------------------------------
@@ -1068,8 +1086,7 @@ mod tests {
     #[test]
     fn parse_error_with_suggestion() {
         let span = Span::new(0, 3);
-        let err = ParseError::unexpected("unexpected 'fun'", span)
-            .with_suggestion("fn");
+        let err = ParseError::unexpected("unexpected 'fun'", span).with_suggestion("fn");
         assert_eq!(err.suggestion.as_deref(), Some("fn"));
         let display = err.to_string();
         assert!(display.contains("did you mean"));
@@ -1080,8 +1097,7 @@ mod tests {
     fn parse_error_display_with_source() {
         let source = "region pool = allocate(1024);";
         let span = Span::new(7, 11); // "pool"
-        let err = ParseError::undefined_ref("pool", span)
-            .with_suggestion("pools");
+        let err = ParseError::undefined_ref("pool", span).with_suggestion("pools");
         let rendered = err.display_with_source(source);
         assert!(rendered.contains("undefined reference"));
         assert!(rendered.contains("did you mean"));
@@ -1202,8 +1218,7 @@ mod tests {
     #[test]
     fn diagnostic_from_parse_error() {
         let source = "fn main() { x }";
-        let err = ParseError::undefined_var("x", Span::new(13, 14))
-            .with_suggestion("y");
+        let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
         let diag = Diagnostic::from_parse_error(&err, source, Some("main.vu"));
         assert_eq!(diag.severity, Severity::Error);
         assert!(diag.message.contains("x"));
@@ -1216,8 +1231,7 @@ mod tests {
     fn diagnostic_display_with_source() {
         let source = "fn main() { x }";
         let loc = offset_to_location(source, 13, Some("main.vu"));
-        let diag = Diagnostic::error("undefined variable `x`", loc)
-            .with_suggestion("y");
+        let diag = Diagnostic::error("undefined variable `x`", loc).with_suggestion("y");
         let rendered = diag.display_with_source();
         assert!(rendered.contains("error:"));
         assert!(rendered.contains("did you mean"));
@@ -1299,9 +1313,8 @@ mod tests {
 
     #[test]
     fn suggest_close_match() {
-        let candidates: Vec<String> = vec![
-            "fn".into(), "let".into(), "region".into(), "struct".into(),
-        ];
+        let candidates: Vec<String> =
+            vec!["fn".into(), "let".into(), "region".into(), "struct".into()];
         let result = suggest("fun", &candidates, 2);
         assert_eq!(result, Some(&"fn".to_string()));
 

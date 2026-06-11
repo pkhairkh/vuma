@@ -96,10 +96,7 @@ pub enum ViolationKind {
         final_repd: String,
     },
     /// Reading uninitialized memory as a pointer type.
-    UninitPointerRead {
-        access: AccessId,
-        repd_name: String,
-    },
+    UninitPointerRead { access: AccessId, repd_name: String },
     /// The access size is not a multiple of the effective RepD size.
     AccessSizeMismatch {
         access: AccessId,
@@ -222,7 +219,9 @@ pub struct InvariantResult {
 impl InvariantResult {
     /// Create an empty (passing) result.
     pub fn ok() -> Self {
-        InvariantResult { violations: Vec::new() }
+        InvariantResult {
+            violations: Vec::new(),
+        }
     }
 
     /// Create a result with a single violation.
@@ -422,9 +421,7 @@ fn effective_repd(msg: &MSG, derivation_id: DerivationId) -> Option<RepD> {
                         size: 0, // will be filled by caller if needed
                     })
                 }
-                DerivationSource::AnotherDerivation(parent_id) => {
-                    effective_repd(msg, *parent_id)
-                }
+                DerivationSource::AnotherDerivation(parent_id) => effective_repd(msg, *parent_id),
             }
         }
     }
@@ -460,7 +457,10 @@ fn effective_repd_with_size(msg: &MSG, derivation_id: DerivationId) -> Option<Re
 /// Collect all Cast RepDs along a derivation chain, in order from root to leaf.
 ///
 /// Returns `None` if the chain is broken.
-fn collect_cast_chain(msg: &MSG, derivation_id: DerivationId) -> Option<Vec<(DerivationId, RepD, RepD)>> {
+fn collect_cast_chain(
+    msg: &MSG,
+    derivation_id: DerivationId,
+) -> Option<Vec<(DerivationId, RepD, RepD)>> {
     let chain = msg.derivation_chain(derivation_id);
     if chain.is_empty() {
         return None;
@@ -788,9 +788,7 @@ mod tests {
     use super::*;
     use crate::access::{Access, AccessId, AccessKind};
     use crate::address::Address;
-    use crate::derivation::{
-        Derivation, DerivationId, DerivationKind, DerivationSource, RepD,
-    };
+    use crate::derivation::{Derivation, DerivationId, DerivationKind, DerivationSource, RepD};
     use crate::msg::MSG;
     use crate::program_point::ProgramPoint;
     use crate::region::{Region, RegionId, RegionStatus};
@@ -820,7 +818,13 @@ mod tests {
         }
     }
 
-    fn make_offset_derivation(id: u64, parent: DerivationId, by: i64, lo: u64, hi: u64) -> Derivation {
+    fn make_offset_derivation(
+        id: u64,
+        parent: DerivationId,
+        by: i64,
+        lo: u64,
+        hi: u64,
+    ) -> Derivation {
         Derivation {
             id: DerivationId(id),
             source: DerivationSource::AnotherDerivation(parent),
@@ -843,8 +847,14 @@ mod tests {
             id: DerivationId(id),
             source: DerivationSource::AnotherDerivation(parent),
             kind: DerivationKind::Cast {
-                from: RepD { name: from.to_string(), size: from_size },
-                to: RepD { name: to.to_string(), size: to_size },
+                from: RepD {
+                    name: from.to_string(),
+                    size: from_size,
+                },
+                to: RepD {
+                    name: to.to_string(),
+                    size: to_size,
+                },
             },
             proven_range: (Address::from(lo), Address::from(hi)),
         }
@@ -864,8 +874,14 @@ mod tests {
             id: DerivationId(id),
             source: DerivationSource::Region(RegionId(rid)),
             kind: DerivationKind::Cast {
-                from: RepD { name: from.to_string(), size: from_size },
-                to: RepD { name: to.to_string(), size: to_size },
+                from: RepD {
+                    name: from.to_string(),
+                    size: from_size,
+                },
+                to: RepD {
+                    name: to.to_string(),
+                    size: to_size,
+                },
             },
             proven_range: (Address::from(lo), Address::from(hi)),
         }
@@ -887,16 +903,25 @@ mod tests {
         msg.add_derivation(make_direct_derivation(1, 1, 0x1000, 0x1100));
         // Cast from 4-byte to 8-byte — size mismatch
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "u32", 4, "u64", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "u32",
+            4,
+            "u64",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         let result = check_interpretation(&msg);
         assert!(!result.is_ok(), "Size mismatch should be flagged");
         assert!(result.violations.iter().any(|v| matches!(
             &v.kind,
-            ViolationKind::CastSizeMismatch { from_size: 4, to_size: 8, .. }
+            ViolationKind::CastSizeMismatch {
+                from_size: 4,
+                to_size: 8,
+                ..
+            }
         )));
     }
 
@@ -908,13 +933,22 @@ mod tests {
         msg.add_derivation(make_direct_derivation(1, 1, 0x1000, 0x1400));
         // bytes → Header struct, same size — valid
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "Header", 8,
-            0x1000, 0x1400,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "Header",
+            8,
+            0x1000,
+            0x1400,
         ));
 
         let result = check_interpretation(&msg);
-        assert!(result.is_ok(), "bytes → struct cast with same size should pass, got: {:?}", result.violations);
+        assert!(
+            result.is_ok(),
+            "bytes → struct cast with same size should pass, got: {:?}",
+            result.violations
+        );
     }
 
     // ---- Test 4: Pointer to float cast is detected ----
@@ -925,17 +959,22 @@ mod tests {
         msg.add_derivation(make_direct_derivation(1, 1, 0x1000, 0x1100));
         // Cast from ptr<u8> to f64 — pointer to non-pointer
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "ptr<u8>", 8, "f64", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "ptr<u8>",
+            8,
+            "f64",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         let result = check_interpretation(&msg);
         assert!(!result.is_ok(), "pointer → float should be flagged");
-        assert!(result.violations.iter().any(|v| matches!(
-            &v.kind,
-            ViolationKind::CastPointerToNonPointer { .. }
-        )));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(&v.kind, ViolationKind::CastPointerToNonPointer { .. })));
     }
 
     // ---- Test 5: Valid transitive chain does not produce confusion ----
@@ -949,16 +988,26 @@ mod tests {
 
         // D2: bytes → ptr<u8> (valid: bytes ⊑ any)
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "ptr<u8>", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "ptr<u8>",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         // D3: ptr<u8> → *mut u8 (valid: same class)
         msg.add_derivation(make_cast_derivation(
-            3, DerivationId(2),
-            "ptr<u8>", 8, "*mut u8", 8,
-            0x1000, 0x1100,
+            3,
+            DerivationId(2),
+            "ptr<u8>",
+            8,
+            "*mut u8",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         // The overall chain bytes → *mut u8 is valid (bytes ⊑ any)
@@ -986,9 +1035,14 @@ mod tests {
 
         // D2: bytes → u64 (valid: bytes ⊑ any)
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "u64", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "u64",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         // D3: u64 → f64 (Integer → Float: different classes, individually invalid)
@@ -996,9 +1050,14 @@ mod tests {
         // bytes → f64 is valid (bytes ⊑ any), so the transitive check
         // should NOT flag it — only the individual step is invalid.
         msg.add_derivation(make_cast_derivation(
-            3, DerivationId(2),
-            "u64", 8, "f64", 8,
-            0x1000, 0x1100,
+            3,
+            DerivationId(2),
+            "u64",
+            8,
+            "f64",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         let result = check_interpretation(&msg);
@@ -1029,9 +1088,14 @@ mod tests {
 
         // D2: cast to u32 (4 bytes)
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 4, "u32", 4,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            4,
+            "u32",
+            4,
+            0x1000,
+            0x1100,
         ));
 
         // Access with size 6, which is not a multiple of u32's size (4)
@@ -1047,7 +1111,11 @@ mod tests {
         assert!(
             result.violations.iter().any(|v| matches!(
                 &v.kind,
-                ViolationKind::AccessSizeMismatch { access_size: 6, repd_size: 4, .. }
+                ViolationKind::AccessSizeMismatch {
+                    access_size: 6,
+                    repd_size: 4,
+                    ..
+                }
             )),
             "Expected AccessSizeMismatch violation, got: {:?}",
             result.violations
@@ -1065,9 +1133,14 @@ mod tests {
 
         // D2: cast to ptr<u8> (pointer type)
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "ptr<u8>", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "ptr<u8>",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         // Read as pointer — no prior write exists
@@ -1081,10 +1154,10 @@ mod tests {
 
         let result = check_interpretation(&msg);
         assert!(
-            result.violations.iter().any(|v| matches!(
-                &v.kind,
-                ViolationKind::UninitPointerRead { .. }
-            )),
+            result
+                .violations
+                .iter()
+                .any(|v| matches!(&v.kind, ViolationKind::UninitPointerRead { .. })),
             "Expected UninitPointerRead violation, got: {:?}",
             result.violations
         );
@@ -1101,9 +1174,14 @@ mod tests {
 
         // D2: cast to ptr<u8>
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "ptr<u8>", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "ptr<u8>",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         // Write first
@@ -1148,16 +1226,25 @@ mod tests {
 
         // D2: cast to a 16-byte struct, but provenance only has 4 bytes
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 4, "BigStruct", 16,
-            0x1000, 0x1004, // only 4 bytes available
+            2,
+            DerivationId(1),
+            "bytes",
+            4,
+            "BigStruct",
+            16,
+            0x1000,
+            0x1004, // only 4 bytes available
         ));
 
         let result = check_interpretation(&msg);
         assert!(
             result.violations.iter().any(|v| matches!(
                 &v.kind,
-                ViolationKind::ProvenanceTooSmallForCast { proven_size: 4, repd_size: 16, .. }
+                ViolationKind::ProvenanceTooSmallForCast {
+                    proven_size: 4,
+                    repd_size: 16,
+                    ..
+                }
             )),
             "Expected ProvenanceTooSmallForCast, got: {:?}",
             result.violations
@@ -1175,16 +1262,26 @@ mod tests {
 
         // D2: cast to u32
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 4, "u32", 4,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            4,
+            "u32",
+            4,
+            0x1000,
+            0x1100,
         ));
 
         // D3: cast to f32 (different class, same size)
         msg.add_derivation(make_cast_derivation(
-            3, DerivationId(1),
-            "bytes", 4, "f32", 4,
-            0x1000, 0x1100,
+            3,
+            DerivationId(1),
+            "bytes",
+            4,
+            "f32",
+            4,
+            0x1000,
+            0x1100,
         ));
 
         // Write as u32
@@ -1229,9 +1326,14 @@ mod tests {
 
         // D2: cast bytes → Header (valid: bytes ⊑ any, same size)
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "Header", 8,
-            0x1000, 0x1400,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "Header",
+            8,
+            0x1000,
+            0x1400,
         ));
 
         // Write as Header
@@ -1270,13 +1372,24 @@ mod tests {
         msg.add_derivation(make_direct_derivation(1, 1, 0x1000, 0x1400));
 
         // D2: offset by 64
-        msg.add_derivation(make_offset_derivation(2, DerivationId(1), 64, 0x1040, 0x1400));
+        msg.add_derivation(make_offset_derivation(
+            2,
+            DerivationId(1),
+            64,
+            0x1040,
+            0x1400,
+        ));
 
         // D3: cast bytes → u32 at the offset location
         msg.add_derivation(make_cast_derivation(
-            3, DerivationId(2),
-            "bytes", 4, "u32", 4,
-            0x1040, 0x1400,
+            3,
+            DerivationId(2),
+            "bytes",
+            4,
+            "u32",
+            4,
+            0x1040,
+            0x1400,
         ));
 
         // Write
@@ -1327,14 +1440,24 @@ mod tests {
         // same-class (both "Other") but the original was bytes:
         // bytes → Header → Packet — all valid, no confusion
         msg.add_derivation(make_cast_derivation(
-            2, DerivationId(1),
-            "bytes", 8, "Header", 8,
-            0x1000, 0x1100,
+            2,
+            DerivationId(1),
+            "bytes",
+            8,
+            "Header",
+            8,
+            0x1000,
+            0x1100,
         ));
         msg.add_derivation(make_cast_derivation(
-            3, DerivationId(2),
-            "Header", 8, "Packet", 8,
-            0x1000, 0x1100,
+            3,
+            DerivationId(2),
+            "Header",
+            8,
+            "Packet",
+            8,
+            0x1000,
+            0x1100,
         ));
 
         let result = check_interpretation(&msg);
@@ -1360,9 +1483,7 @@ mod tests {
 
         // Direct cast from region to struct
         msg.add_derivation(make_region_cast_derivation(
-            2, 1,
-            "bytes", 8, "Header", 8,
-            0x1000, 0x1100,
+            2, 1, "bytes", 8, "Header", 8, 0x1000, 0x1100,
         ));
 
         // Write + read as Header
@@ -1393,7 +1514,10 @@ mod tests {
     #[test]
     fn invariant_result_display() {
         let ok_result = InvariantResult::ok();
-        assert_eq!(format!("{}", ok_result), "Interpretation invariant: SATISFIED");
+        assert_eq!(
+            format!("{}", ok_result),
+            "Interpretation invariant: SATISFIED"
+        );
 
         let err_result = InvariantResult::with_violation(
             ViolationKind::CastSizeMismatch {
@@ -1412,58 +1536,97 @@ mod tests {
 
     #[test]
     fn classify_repd_bytes() {
-        let repd = RepD { name: "bytes".into(), size: 8 };
+        let repd = RepD {
+            name: "bytes".into(),
+            size: 8,
+        };
         assert_eq!(classify_repd(&repd), RepDClass::Bytes);
     }
 
     #[test]
     fn classify_repd_pointer() {
-        let repd = RepD { name: "ptr<u8>".into(), size: 8 };
+        let repd = RepD {
+            name: "ptr<u8>".into(),
+            size: 8,
+        };
         assert_eq!(classify_repd(&repd), RepDClass::Pointer);
 
-        let repd2 = RepD { name: "*mut u32".into(), size: 8 };
+        let repd2 = RepD {
+            name: "*mut u32".into(),
+            size: 8,
+        };
         assert_eq!(classify_repd(&repd2), RepDClass::Pointer);
     }
 
     #[test]
     fn classify_repd_integer() {
-        let repd = RepD { name: "u32".into(), size: 4 };
+        let repd = RepD {
+            name: "u32".into(),
+            size: 4,
+        };
         assert_eq!(classify_repd(&repd), RepDClass::Integer);
 
-        let repd2 = RepD { name: "i64".into(), size: 8 };
+        let repd2 = RepD {
+            name: "i64".into(),
+            size: 8,
+        };
         assert_eq!(classify_repd(&repd2), RepDClass::Integer);
     }
 
     #[test]
     fn classify_repd_float() {
-        let repd = RepD { name: "f64".into(), size: 8 };
+        let repd = RepD {
+            name: "f64".into(),
+            size: 8,
+        };
         assert_eq!(classify_repd(&repd), RepDClass::Float);
     }
 
     #[test]
     fn compatible_same_repd() {
-        let r = RepD { name: "u32".into(), size: 4 };
+        let r = RepD {
+            name: "u32".into(),
+            size: 4,
+        };
         assert!(compatible(&r, &r));
     }
 
     #[test]
     fn compatible_bytes_to_any() {
-        let bytes = RepD { name: "bytes".into(), size: 8 };
-        let ptr = RepD { name: "ptr<u8>".into(), size: 8 };
+        let bytes = RepD {
+            name: "bytes".into(),
+            size: 8,
+        };
+        let ptr = RepD {
+            name: "ptr<u8>".into(),
+            size: 8,
+        };
         assert!(compatible(&bytes, &ptr));
     }
 
     #[test]
     fn incompatible_pointer_to_float() {
-        let ptr = RepD { name: "ptr<u8>".into(), size: 8 };
-        let float = RepD { name: "f64".into(), size: 8 };
+        let ptr = RepD {
+            name: "ptr<u8>".into(),
+            size: 8,
+        };
+        let float = RepD {
+            name: "f64".into(),
+            size: 8,
+        };
         assert!(!compatible(&ptr, &float));
     }
 
     #[test]
     fn incompatible_size_mismatch() {
-        let a = RepD { name: "u32".into(), size: 4 };
-        let b = RepD { name: "u64".into(), size: 8 };
+        let a = RepD {
+            name: "u32".into(),
+            size: 4,
+        };
+        let b = RepD {
+            name: "u64".into(),
+            size: 8,
+        };
         assert!(!compatible(&a, &b));
     }
 }

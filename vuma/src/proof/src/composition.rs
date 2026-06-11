@@ -10,8 +10,8 @@
 //!   invariant's proof are discharged by conclusions (facts) in another
 //!   invariant's proof.
 
-use serde::{Deserialize, Serialize};
 use crate::proof::{Conclusion, InvariantName, Proof};
+use serde::{Deserialize, Serialize};
 
 /// A bundle of proofs for all five invariants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +97,9 @@ impl ProofBundle {
     /// Returns `true` only if every invariant has a proof whose conclusion
     /// is `Conclusion::Proven`.
     pub fn all_proven(&self) -> bool {
-        self.status().iter().all(|(_, s)| matches!(s, InvariantStatus::Proven))
+        self.status()
+            .iter()
+            .all(|(_, s)| matches!(s, InvariantStatus::Proven))
     }
 
     /// Check cross-invariant consistency: verify that assumptions
@@ -113,7 +115,8 @@ impl ProofBundle {
         let mut unresolved = Vec::new();
 
         // Collect all fact statements from each invariant, keyed by invariant name.
-        let all_invariant_facts: Vec<(InvariantName, Vec<String>)> = self.collect_all_fact_statements();
+        let all_invariant_facts: Vec<(InvariantName, Vec<String>)> =
+            self.collect_all_fact_statements();
 
         // For each invariant that has a proof, extract its assumptions and check
         // if they are discharged by facts from other invariants.
@@ -128,13 +131,13 @@ impl ProofBundle {
                 .collect();
 
             for assumption in assumptions {
-                let mut checked: Vec<InvariantName> = other_fact_strings
-                    .iter()
-                    .map(|(inv, _)| *inv)
-                    .collect();
+                let mut checked: Vec<InvariantName> =
+                    other_fact_strings.iter().map(|(inv, _)| *inv).collect();
 
                 let discharged = other_fact_strings.iter().any(|(_, facts)| {
-                    facts.iter().any(|stmt| stmt.contains(&assumption) || assumption.contains(stmt))
+                    facts
+                        .iter()
+                        .any(|stmt| stmt.contains(&assumption) || assumption.contains(stmt))
                 });
 
                 if !discharged {
@@ -243,7 +246,11 @@ impl ProofBundle {
 
     /// Extract all fact statement strings from a [`Proof`] object.
     fn fact_statements_from_proof(proof: &Proof) -> Vec<String> {
-        proof.all_facts().iter().map(|f| f.statement.clone()).collect()
+        proof
+            .all_facts()
+            .iter()
+            .map(|f| f.statement.clone())
+            .collect()
     }
 
     /// Collect assumptions from each proof's goal context.
@@ -307,16 +314,16 @@ impl Default for ProofBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proof::{Fact, Goal, Proof, ProofContext, ProofStep, Target};
-    use crate::judgment::RegionId;
-    use crate::rules::InferenceRule;
-    use crate::liveness_proofs::LivenessProof;
-    use crate::liveness_proofs::LivenessTactic;
-    use crate::exclusivity_proofs::ExclusivityProof;
     use crate::cleanup_proofs::CleanupProof;
     use crate::cleanup_proofs::CleanupTactic;
-    use crate::origin_proofs::OriginProof;
+    use crate::exclusivity_proofs::ExclusivityProof;
     use crate::interpretation_proofs::InterpretationProof;
+    use crate::judgment::RegionId;
+    use crate::liveness_proofs::LivenessProof;
+    use crate::liveness_proofs::LivenessTactic;
+    use crate::origin_proofs::OriginProof;
+    use crate::proof::{Fact, Goal, Proof, ProofContext, ProofStep, Target};
+    use crate::rules::InferenceRule;
 
     /// An empty bundle should report all invariants as NotAttempted and
     /// `all_proven()` should return `false`.
@@ -324,7 +331,10 @@ mod tests {
     fn test_empty_bundle_not_all_proven() {
         let bundle = ProofBundle::new();
 
-        assert!(!bundle.all_proven(), "empty bundle should not be all_proven");
+        assert!(
+            !bundle.all_proven(),
+            "empty bundle should not be all_proven"
+        );
 
         let statuses = bundle.status();
         assert_eq!(statuses.len(), 5, "should have 5 invariant statuses");
@@ -357,7 +367,10 @@ mod tests {
             interpretation: Some(interpretation),
         };
 
-        assert!(bundle.all_proven(), "fully populated bundle should be all_proven");
+        assert!(
+            bundle.all_proven(),
+            "fully populated bundle should be all_proven"
+        );
 
         for (name, status) in bundle.status() {
             assert_eq!(

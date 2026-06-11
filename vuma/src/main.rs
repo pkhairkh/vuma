@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use vuma::pipeline::{
     compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
 };
-use vuma_codegen::backend::{BackendKind, create_backend};
+use vuma_codegen::backend::{create_backend, BackendKind};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLI definition (clap derive)
@@ -225,13 +225,8 @@ impl From<TargetArg> for CompileTarget {
 
 /// Read source file content with a human-readable error on failure.
 fn read_source(path: &PathBuf) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| {
-        format!(
-            "error: cannot read source file '{}': {}",
-            path.display(),
-            e
-        )
-    })
+    fs::read_to_string(path)
+        .map_err(|e| format!("error: cannot read source file '{}': {}", path.display(), e))
 }
 
 /// Build a `CompileConfig` from the global CLI flags.
@@ -254,10 +249,7 @@ fn print_errors(errors: &[VumaError]) {
 
 /// Determine the default output path for a given input file.
 fn default_output_path(input: &Path) -> PathBuf {
-    let stem = input
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let dir = input.parent().unwrap_or(std::path::Path::new("."));
     dir.join(format!("{}.o", stem))
 }
@@ -267,7 +259,12 @@ fn default_output_path(input: &Path) -> PathBuf {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `vuma build <file>` — Parse + compile to ELF, save to output file.
-fn cmd_build(cli: &Cli, file: &PathBuf, output: &Option<PathBuf>, target: TargetArg) -> Result<(), String> {
+fn cmd_build(
+    cli: &Cli,
+    file: &PathBuf,
+    output: &Option<PathBuf>,
+    target: TargetArg,
+) -> Result<(), String> {
     let source = read_source(file)?;
     let config = make_config(cli, CompileTarget::from(target));
     let result = compile(&source, &config).map_err(|errors| {
@@ -275,9 +272,16 @@ fn cmd_build(cli: &Cli, file: &PathBuf, output: &Option<PathBuf>, target: Target
         format!("compilation failed with {} error(s)", errors.len())
     })?;
 
-    let out_path = output.as_ref().cloned().unwrap_or_else(|| default_output_path(file));
+    let out_path = output
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| default_output_path(file));
     fs::write(&out_path, &result.binary).map_err(|e| {
-        format!("error: cannot write output file '{}': {}", out_path.display(), e)
+        format!(
+            "error: cannot write output file '{}': {}",
+            out_path.display(),
+            e
+        )
     })?;
 
     println!(
@@ -310,26 +314,27 @@ fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
     let tmp_dir = std::env::temp_dir();
     let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
     fs::write(&exe_path, &result.binary).map_err(|e| {
-        format!("error: cannot write temporary executable '{}': {}", exe_path.display(), e)
+        format!(
+            "error: cannot write temporary executable '{}': {}",
+            exe_path.display(),
+            e
+        )
     })?;
 
     // Make the file executable on Unix.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&exe_path).map_err(|e| {
-            format!("error: cannot stat '{}': {}", exe_path.display(), e)
-        })?.permissions();
+        let mut perms = fs::metadata(&exe_path)
+            .map_err(|e| format!("error: cannot stat '{}': {}", exe_path.display(), e))?
+            .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&exe_path, perms).map_err(|e| {
-            format!("error: cannot chmod '{}': {}", exe_path.display(), e)
-        })?;
+        fs::set_permissions(&exe_path, perms)
+            .map_err(|e| format!("error: cannot chmod '{}': {}", exe_path.display(), e))?;
     }
 
     // Try to execute: first natively (if on aarch64), then via qemu-aarch64.
-    let native_output = Command::new(&exe_path)
-        .args(args)
-        .output();
+    let native_output = Command::new(&exe_path).args(args).output();
 
     let output = match native_output {
         Ok(out) => out,
@@ -349,12 +354,12 @@ fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
         }
     };
 
-    io::stdout().write_all(&output.stdout).map_err(|e| {
-        format!("error: failed to write program output: {}", e)
-    })?;
-    io::stderr().write_all(&output.stderr).map_err(|e| {
-        format!("error: failed to write program stderr: {}", e)
-    })?;
+    io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|e| format!("error: failed to write program output: {}", e))?;
+    io::stderr()
+        .write_all(&output.stderr)
+        .map_err(|e| format!("error: failed to write program stderr: {}", e))?;
 
     // Clean up temp file.
     let _ = fs::remove_file(&exe_path);
@@ -401,7 +406,12 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 }
 
 /// `vuma emit <isa> <file>` — Compile to a specific ISA target.
-fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) -> Result<(), String> {
+fn cmd_emit(
+    cli: &Cli,
+    isa: IsaArg,
+    file: &PathBuf,
+    output: &Option<PathBuf>,
+) -> Result<(), String> {
     let source = read_source(file)?;
     let backend_kind = BackendKind::from(isa);
     let config = make_config(cli, CompileTarget::Pi5Linux);
@@ -412,7 +422,11 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
 
     // Use the multi-arch backend to produce ISA-specific output.
     let backend = create_backend(backend_kind).map_err(|e| {
-        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
+        format!(
+            "error: cannot create {} backend: {}",
+            backend_kind.isa_name(),
+            e
+        )
     })?;
 
     // Allocate registers and encode using the target backend.
@@ -423,14 +437,20 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
                 match backend.allocate_registers(func) {
                     Ok(allocated) => allocated_functions.push(allocated),
                     Err(e) => {
-                        eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+                        eprintln!(
+                            "warning: register allocation failed for '{}': {}",
+                            func.name, e
+                        );
                     }
                 }
             }
         }
     }
 
-    let out_path = output.as_ref().cloned().unwrap_or_else(|| default_output_path(file));
+    let out_path = output
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| default_output_path(file));
 
     // If we have allocated functions, encode them; otherwise write the ARM64 binary.
     if !allocated_functions.is_empty() {
@@ -442,7 +462,11 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
         match backend.encode_program(&allocated_program) {
             Ok(bytes) => {
                 fs::write(&out_path, &bytes).map_err(|e| {
-                    format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                    format!(
+                        "error: cannot write output file '{}': {}",
+                        out_path.display(),
+                        e
+                    )
                 })?;
                 println!(
                     "Emitted {} -> {} ({} bytes, ISA: {})",
@@ -454,9 +478,17 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
             }
             Err(e) => {
                 // Backend encode failed; fall back to writing the ARM64 ELF.
-                eprintln!("warning: {} encoding failed ({}), writing ARM64 ELF instead", backend.name(), e);
+                eprintln!(
+                    "warning: {} encoding failed ({}), writing ARM64 ELF instead",
+                    backend.name(),
+                    e
+                );
                 fs::write(&out_path, &result.binary).map_err(|e2| {
-                    format!("error: cannot write output file '{}': {}", out_path.display(), e2)
+                    format!(
+                        "error: cannot write output file '{}': {}",
+                        out_path.display(),
+                        e2
+                    )
                 })?;
                 println!(
                     "Emitted {} -> {} ({} bytes, ARM64 ELF fallback)",
@@ -469,7 +501,11 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
     } else {
         // No IR program available (debug info not captured), write the ARM64 binary.
         fs::write(&out_path, &result.binary).map_err(|e| {
-            format!("error: cannot write output file '{}': {}", out_path.display(), e)
+            format!(
+                "error: cannot write output file '{}': {}",
+                out_path.display(),
+                e
+            )
         })?;
         println!(
             "Emitted {} -> {} ({} bytes, ARM64 ELF)",
@@ -484,21 +520,29 @@ fn cmd_emit(cli: &Cli, isa: IsaArg, file: &PathBuf, output: &Option<PathBuf>) ->
 
 /// `vuma disasm <file>` — Read binary and disassemble.
 fn cmd_disasm(file: &PathBuf, isa: IsaArg, base_addr_str: &str) -> Result<(), String> {
-    let bytes = fs::read(file).map_err(|e| {
-        format!("error: cannot read binary file '{}': {}", file.display(), e)
-    })?;
+    let bytes = fs::read(file)
+        .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;
 
     let base_addr = u64::from_str_radix(base_addr_str.trim_start_matches("0x"), 16)
         .map_err(|e| format!("error: invalid base address '{}': {}", base_addr_str, e))?;
 
     let backend_kind = BackendKind::from(isa);
     let backend = create_backend(backend_kind).map_err(|e| {
-        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
+        format!(
+            "error: cannot create {} backend: {}",
+            backend_kind.isa_name(),
+            e
+        )
     })?;
 
     let instructions = backend.disassemble(&bytes, base_addr);
 
-    println!("Disassembly of {} ({} bytes, ISA: {}):", file.display(), bytes.len(), backend.name());
+    println!(
+        "Disassembly of {} ({} bytes, ISA: {}):",
+        file.display(),
+        bytes.len(),
+        backend.name()
+    );
     for line in &instructions {
         println!("{}", line);
     }
@@ -515,14 +559,20 @@ fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 
     let result = compile(&source, &config).map_err(|errors| {
         print_errors(&errors);
-        format!("compilation/verification failed with {} error(s)", errors.len())
+        format!(
+            "compilation/verification failed with {} error(s)",
+            errors.len()
+        )
     })?;
 
     match result.verification {
         Some(ref verification) => {
             println!("IVE Verification Results for {}", file.display());
             println!("  Overall verdict: {}", verification.overall);
-            println!("  Summary: {} invariant(s) checked", verification.summary.total_checked);
+            println!(
+                "  Summary: {} invariant(s) checked",
+                verification.summary.total_checked
+            );
             println!("           {} passed", verification.summary.passed);
             println!("           {} failed", verification.summary.failed);
             println!("           {} unverified", verification.summary.unverified);
@@ -537,9 +587,7 @@ fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
                 };
                 println!(
                     "  [{}] {:?} — {}",
-                    status_str,
-                    per_inv.kind,
-                    per_inv.result.message,
+                    status_str, per_inv.kind, per_inv.result.message,
                 );
                 if let Some(ref evidence) = per_inv.result.evidence {
                     println!("    evidence: {}", evidence);
@@ -564,7 +612,9 @@ fn cmd_repl() -> Result<(), String> {
 
     loop {
         print!("vuma> ");
-        io::stdout().flush().map_err(|e| format!("flush error: {}", e))?;
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("flush error: {}", e))?;
 
         input.clear();
         match stdin.read_line(&mut input) {
@@ -635,11 +685,23 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Build { ref file, ref output, target } => cmd_build(&cli, file, output, target),
+        Commands::Build {
+            ref file,
+            ref output,
+            target,
+        } => cmd_build(&cli, file, output, target),
         Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
         Commands::Check { ref file } => cmd_check(&cli, file),
-        Commands::Emit { isa, ref file, ref output } => cmd_emit(&cli, isa, file, output),
-        Commands::Disasm { ref file, isa, ref base_addr } => cmd_disasm(file, isa, base_addr),
+        Commands::Emit {
+            isa,
+            ref file,
+            ref output,
+        } => cmd_emit(&cli, isa, file, output),
+        Commands::Disasm {
+            ref file,
+            isa,
+            ref base_addr,
+        } => cmd_disasm(file, isa, base_addr),
         Commands::Verify { ref file } => cmd_verify(&cli, file),
         Commands::Repl => cmd_repl(),
     };
@@ -664,7 +726,11 @@ mod tests {
     fn test_build_basic() {
         let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Build { ref file, ref output, ref target } => {
+            Commands::Build {
+                ref file,
+                ref output,
+                ref target,
+            } => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
                 assert_eq!(target, &TargetArg::Pi5Linux);
@@ -677,11 +743,21 @@ mod tests {
     #[test]
     fn test_build_with_options() {
         let cli = Cli::try_parse_from([
-            "vuma", "build", "hello.vuma", "-o", "out.o", "--target", "pi5-bare",
+            "vuma",
+            "build",
+            "hello.vuma",
+            "-o",
+            "out.o",
+            "--target",
+            "pi5-bare",
         ])
         .unwrap();
         match cli.command {
-            Commands::Build { ref file, ref output, ref target } => {
+            Commands::Build {
+                ref file,
+                ref output,
+                ref target,
+            } => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
                 assert_eq!(target, &TargetArg::Pi5Bare);
@@ -733,7 +809,11 @@ mod tests {
     fn test_emit_aarch64() {
         let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Emit { isa, ref file, ref output } => {
+            Commands::Emit {
+                isa,
+                ref file,
+                ref output,
+            } => {
                 assert_eq!(isa, IsaArg::Aarch64);
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
@@ -745,9 +825,14 @@ mod tests {
     /// Test 7: `vuma emit x86-64 hello.vuma -o out.o` parses correctly.
     #[test]
     fn test_emit_x86_64_with_output() {
-        let cli = Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
         match cli.command {
-            Commands::Emit { isa, ref file, ref output } => {
+            Commands::Emit {
+                isa,
+                ref file,
+                ref output,
+            } => {
                 assert_eq!(isa, IsaArg::X86_64);
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
@@ -760,11 +845,21 @@ mod tests {
     #[test]
     fn test_disasm() {
         let cli = Cli::try_parse_from([
-            "vuma", "disasm", "hello.o", "--isa", "riscv64", "--base-addr", "0x1000",
+            "vuma",
+            "disasm",
+            "hello.o",
+            "--isa",
+            "riscv64",
+            "--base-addr",
+            "0x1000",
         ])
         .unwrap();
         match cli.command {
-            Commands::Disasm { ref file, isa, ref base_addr } => {
+            Commands::Disasm {
+                ref file,
+                isa,
+                ref base_addr,
+            } => {
                 assert_eq!(file, &PathBuf::from("hello.o"));
                 assert_eq!(isa, IsaArg::Riscv64);
                 assert_eq!(base_addr, "0x1000");
@@ -798,14 +893,22 @@ mod tests {
     /// Test 11: Global --opt-level flag works.
     #[test]
     fn test_global_opt_level() {
-        let cli = Cli::try_parse_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.opt_level, OptLevelArg::O0);
     }
 
     /// Test 12: Global --verification flag works.
     #[test]
     fn test_global_verification_level() {
-        let cli = Cli::try_parse_from(["vuma", "--verification", "exhaustive", "build", "hello.vuma"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "vuma",
+            "--verification",
+            "exhaustive",
+            "build",
+            "hello.vuma",
+        ])
+        .unwrap();
         assert_eq!(cli.verification, VerificationArg::Exhaustive);
     }
 
@@ -828,7 +931,16 @@ mod tests {
     /// Test 15: All ISA values are parseable.
     #[test]
     fn test_all_isa_values() {
-        let isa_names = ["aarch64", "x86_64", "riscv64", "wasm32", "loongarch64", "arm32", "mips64", "ppc64"];
+        let isa_names = [
+            "aarch64",
+            "x86_64",
+            "riscv64",
+            "wasm32",
+            "loongarch64",
+            "arm32",
+            "mips64",
+            "ppc64",
+        ];
         for name in isa_names {
             let cli = Cli::try_parse_from(["vuma", "emit", name, "test.vuma"]).unwrap();
             match cli.command {
@@ -853,17 +965,35 @@ mod tests {
     /// Test 17: VerificationArg conversion to pipeline VerificationLevel.
     #[test]
     fn test_verification_conversion() {
-        assert_eq!(VerificationLevel::from(VerificationArg::None), VerificationLevel::None);
-        assert_eq!(VerificationLevel::from(VerificationArg::Quick), VerificationLevel::Quick);
-        assert_eq!(VerificationLevel::from(VerificationArg::Normal), VerificationLevel::Normal);
-        assert_eq!(VerificationLevel::from(VerificationArg::Exhaustive), VerificationLevel::Exhaustive);
+        assert_eq!(
+            VerificationLevel::from(VerificationArg::None),
+            VerificationLevel::None
+        );
+        assert_eq!(
+            VerificationLevel::from(VerificationArg::Quick),
+            VerificationLevel::Quick
+        );
+        assert_eq!(
+            VerificationLevel::from(VerificationArg::Normal),
+            VerificationLevel::Normal
+        );
+        assert_eq!(
+            VerificationLevel::from(VerificationArg::Exhaustive),
+            VerificationLevel::Exhaustive
+        );
     }
 
     /// Test 18: TargetArg conversion to pipeline CompileTarget.
     #[test]
     fn test_target_conversion() {
-        assert_eq!(CompileTarget::from(TargetArg::Pi5Bare), CompileTarget::Pi5Bare);
-        assert_eq!(CompileTarget::from(TargetArg::Pi5Linux), CompileTarget::Pi5Linux);
+        assert_eq!(
+            CompileTarget::from(TargetArg::Pi5Bare),
+            CompileTarget::Pi5Bare
+        );
+        assert_eq!(
+            CompileTarget::from(TargetArg::Pi5Linux),
+            CompileTarget::Pi5Linux
+        );
         assert_eq!(CompileTarget::from(TargetArg::Linux), CompileTarget::Linux);
     }
 

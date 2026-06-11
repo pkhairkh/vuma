@@ -78,7 +78,9 @@ pub use mips64::Mips64Backend;
 pub use ppc64::PPC64Backend;
 
 /// Re-export target description types.
-pub use target_desc::{CallingConventionDesc, InstCategoryDesc, RegDesc, TargetDesc, TargetDescRegistry};
+pub use target_desc::{
+    CallingConventionDesc, InstCategoryDesc, RegDesc, TargetDesc, TargetDescRegistry,
+};
 
 /// Error type for code-generation failures.
 #[derive(Debug, Clone, thiserror::Error)]

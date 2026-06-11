@@ -32,7 +32,7 @@
 //! reachability from entry points.
 //! ```
 
-use crate::{BdKind, NodeId, NodeKind, SCG, SCGEdge, SCGNode};
+use crate::{BdKind, NodeId, NodeKind, SCGEdge, SCGNode, SCG};
 use colored::*;
 use vuma_scg;
 
@@ -118,7 +118,9 @@ impl ChangeGroup {
 }
 
 /// Impact level for verification analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ImpactLevel {
     /// No impact on verification results.
     None,
@@ -290,16 +292,10 @@ impl DiffProjection {
         let mut diff = SCGDiff::empty();
 
         // ── Index old nodes by ID ─────────────────────────────────────────
-        let old_nodes: std::collections::HashMap<NodeId, &SCGNode> = old_scg
-            .nodes
-            .iter()
-            .map(|n| (n.id, n))
-            .collect();
-        let new_nodes: std::collections::HashMap<NodeId, &SCGNode> = new_scg
-            .nodes
-            .iter()
-            .map(|n| (n.id, n))
-            .collect();
+        let old_nodes: std::collections::HashMap<NodeId, &SCGNode> =
+            old_scg.nodes.iter().map(|n| (n.id, n)).collect();
+        let new_nodes: std::collections::HashMap<NodeId, &SCGNode> =
+            new_scg.nodes.iter().map(|n| (n.id, n)).collect();
 
         // ── Added / removed nodes ─────────────────────────────────────────
         for node in &new_scg.nodes {
@@ -328,16 +324,10 @@ impl DiffProjection {
         }
 
         // ── Edge diff ─────────────────────────────────────────────────────
-        let old_edges: std::collections::HashMap<u64, &SCGEdge> = old_scg
-            .edges
-            .iter()
-            .map(|e| (e.id, e))
-            .collect();
-        let new_edges: std::collections::HashMap<u64, &SCGEdge> = new_scg
-            .edges
-            .iter()
-            .map(|e| (e.id, e))
-            .collect();
+        let old_edges: std::collections::HashMap<u64, &SCGEdge> =
+            old_scg.edges.iter().map(|e| (e.id, e)).collect();
+        let new_edges: std::collections::HashMap<u64, &SCGEdge> =
+            new_scg.edges.iter().map(|e| (e.id, e)).collect();
 
         for edge in &new_scg.edges {
             if !old_edges.contains_key(&edge.id) {
@@ -456,10 +446,8 @@ impl DiffProjection {
                         groups[idx].added_edges.push(edge.clone());
                     } else {
                         // Unaffiliated edge — create standalone group
-                        let label = format!(
-                            "Edge {} → {} ({:?})",
-                            edge.source, edge.target, edge.kind
-                        );
+                        let label =
+                            format!("Edge {} → {} ({:?})", edge.source, edge.target, edge.kind);
                         let mut group = ChangeGroup::new(label, None);
                         group.added_edges.push(edge.clone());
                         groups.push(group);
@@ -503,7 +491,10 @@ impl DiffProjection {
     /// the changes affect the verification state.
     pub fn analyse_impact(&self, diff: &SCGDiff) -> (ImpactLevel, String) {
         if diff.is_empty() {
-            return (ImpactLevel::None, "No changes — verification results are unaffected.".to_string());
+            return (
+                ImpactLevel::None,
+                "No changes — verification results are unaffected.".to_string(),
+            );
         }
 
         let mut reasons: Vec<String> = Vec::new();
@@ -572,7 +563,11 @@ impl DiffProjection {
         // ── Node removals invalidate reachability ──
         if !diff.removed_nodes.is_empty() {
             level = level.max(ImpactLevel::High);
-            let names: Vec<&str> = diff.removed_nodes.iter().map(|n| n.label.as_str()).collect();
+            let names: Vec<&str> = diff
+                .removed_nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect();
             reasons.push(format!(
                 "Node(s) removed ({}) — call graph reachability must be re-verified",
                 names.join(", ")
@@ -603,7 +598,8 @@ impl DiffProjection {
         if !cap_bds.is_empty() && !diff.added_edges.is_empty() {
             level = level.max(ImpactLevel::High);
             reasons.push(
-                "Capability changes combined with new edges may affect call graph verification".to_string()
+                "Capability changes combined with new edges may affect call graph verification"
+                    .to_string(),
             );
         }
 
@@ -743,10 +739,16 @@ impl DiffProjection {
         // Standalone BD changes
         for bd in &diff.modified_bds {
             if bd.added {
-                let desc = format!("+ [bd] `{}` ({:?}) on node {}", bd.name, bd.kind, bd.node_id);
+                let desc = format!(
+                    "+ [bd] `{}` ({:?}) on node {}",
+                    bd.name, bd.kind, bd.node_id
+                );
                 lines.push(format!("{}", self.green(&desc)));
             } else {
-                let desc = format!("- [bd] `{}` ({:?}) on node {}", bd.name, bd.kind, bd.node_id);
+                let desc = format!(
+                    "- [bd] `{}` ({:?}) on node {}",
+                    bd.name, bd.kind, bd.node_id
+                );
                 lines.push(format!("{}", self.red(&desc)));
             }
         }
@@ -773,8 +775,18 @@ impl DiffProjection {
         // Header
         let left_header = format!("{:^width$}", "OLD SCG", width = col_width);
         let right_header = format!("{:^width$}", "NEW SCG", width = col_width);
-        lines.push(format!("{}{}{}", self.bold(&left_header), separator, self.bold(&right_header)));
-        lines.push(format!("{}{}{}", "─".repeat(col_width), "─┼─", "─".repeat(col_width)));
+        lines.push(format!(
+            "{}{}{}",
+            self.bold(&left_header),
+            separator,
+            self.bold(&right_header)
+        ));
+        lines.push(format!(
+            "{}{}{}",
+            "─".repeat(col_width),
+            "─┼─",
+            "─".repeat(col_width)
+        ));
 
         // Collect all node IDs involved in changes
         // Removed nodes: show on left only
@@ -843,14 +855,8 @@ impl DiffProjection {
 
                 let max_rows = left_parts.len().max(right_parts.len());
                 for i in 0..max_rows {
-                    let left = left_parts
-                        .get(i)
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let right = right_parts
-                        .get(i)
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
+                    let left = left_parts.get(i).map(|s| s.as_str()).unwrap_or("");
+                    let right = right_parts.get(i).map(|s| s.as_str()).unwrap_or("");
                     lines.push(format!(
                         "{}{}{}",
                         self.red(&format!("{:<width$}", left, width = col_width)),
@@ -947,13 +953,21 @@ impl DiffProjection {
                 for node in &group.added_nodes {
                     lines.push(format!(
                         "    {}",
-                        self.green(&format!("Added {} `{}`", self.kind_label(&node.kind), node.label))
+                        self.green(&format!(
+                            "Added {} `{}`",
+                            self.kind_label(&node.kind),
+                            node.label
+                        ))
                     ));
                 }
                 for node in &group.removed_nodes {
                     lines.push(format!(
                         "    {}",
-                        self.red(&format!("Removed {} `{}`", self.kind_label(&node.kind), node.label))
+                        self.red(&format!(
+                            "Removed {} `{}`",
+                            self.kind_label(&node.kind),
+                            node.label
+                        ))
                     ));
                 }
                 for change in &group.modified_nodes {
@@ -1073,10 +1087,28 @@ impl DiffProjection {
         let (impact_level, impact_desc) = self.analyse_impact(diff);
         let impact_label = match impact_level {
             ImpactLevel::None => format!("{}", self.bold("Impact: none")),
-            ImpactLevel::Low => format!("{}", self.bold(&format!("Impact: {}", self.yellow(&impact_level.to_string())))),
-            ImpactLevel::Medium => format!("{}", self.bold(&format!("Impact: {}", self.yellow(&impact_level.to_string())))),
-            ImpactLevel::High => format!("{}", self.bold(&format!("Impact: {}", self.red(&impact_level.to_string())))),
-            ImpactLevel::Critical => format!("{}", self.bold(&format!("Impact: {}", self.red(&impact_level.to_string())))),
+            ImpactLevel::Low => format!(
+                "{}",
+                self.bold(&format!(
+                    "Impact: {}",
+                    self.yellow(&impact_level.to_string())
+                ))
+            ),
+            ImpactLevel::Medium => format!(
+                "{}",
+                self.bold(&format!(
+                    "Impact: {}",
+                    self.yellow(&impact_level.to_string())
+                ))
+            ),
+            ImpactLevel::High => format!(
+                "{}",
+                self.bold(&format!("Impact: {}", self.red(&impact_level.to_string())))
+            ),
+            ImpactLevel::Critical => format!(
+                "{}",
+                self.bold(&format!("Impact: {}", self.red(&impact_level.to_string())))
+            ),
         };
         lines.push(impact_label);
         lines.push(impact_desc);
@@ -1179,11 +1211,7 @@ impl DiffProjection {
     /// will integrate with the VUMA LLM backend for richer summaries.
     fn generate_summary_sentence(&self, diff: &SCGDiff) -> String {
         // Check for common patterns.
-        let added_labels: Vec<&str> = diff
-            .added_nodes
-            .iter()
-            .map(|n| n.label.as_str())
-            .collect();
+        let added_labels: Vec<&str> = diff.added_nodes.iter().map(|n| n.label.as_str()).collect();
         let added_bds: Vec<&str> = diff
             .modified_nodes
             .iter()
@@ -1193,8 +1221,12 @@ impl DiffProjection {
             .collect();
 
         // Pattern: "X now requires Y"
-        if added_labels.iter().any(|l| l.contains("2fa") || l.contains("verify"))
-            && added_bds.iter().any(|b| b.contains("Auth") || b.contains("Requires"))
+        if added_labels
+            .iter()
+            .any(|l| l.contains("2fa") || l.contains("verify"))
+            && added_bds
+                .iter()
+                .any(|b| b.contains("Auth") || b.contains("Requires"))
         {
             return "The authentication flow now requires 2FA for admin accounts.".to_string();
         }
@@ -1215,7 +1247,11 @@ impl DiffProjection {
 
         // Generic: describe what was removed
         if diff.added_nodes.is_empty() && !diff.removed_nodes.is_empty() {
-            let names: Vec<&str> = diff.removed_nodes.iter().map(|n| n.label.as_str()).collect();
+            let names: Vec<&str> = diff
+                .removed_nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect();
             return format!("Component(s) were removed: {}.", names.join(", "));
         }
 
@@ -1287,7 +1323,7 @@ pub fn diff_scg(old: &vuma_scg::SCG, new: &vuma_scg::SCG) -> SCGDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BehaviouralDescriptor, BdKind, EdgeKind, SCGEdge, SCGNode};
+    use crate::{BdKind, BehaviouralDescriptor, EdgeKind, SCGEdge, SCGNode};
 
     fn old_scg() -> SCG {
         SCG {

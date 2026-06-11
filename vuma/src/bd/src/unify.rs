@@ -218,20 +218,11 @@ pub enum UnificationError {
     },
     /// Capability descriptors cannot be reconciled (empty meet with
     /// non-empty inputs).
-    IncompatibleCapD {
-        capd1: String,
-        capd2: String,
-    },
+    IncompatibleCapD { capd1: String, capd2: String },
     /// Relational descriptors are internally inconsistent when composed.
-    InconsistentRelD {
-        reld1: String,
-        reld2: String,
-    },
+    InconsistentRelD { reld1: String, reld2: String },
     /// Occurs check failed — would create an infinite type.
-    OccursCheckFailed {
-        var: BDVariable,
-        term: String,
-    },
+    OccursCheckFailed { var: BDVariable, term: String },
     /// A variable has conflicting bindings that cannot be reconciled.
     ConflictingBinding {
         var: BDVariable,
@@ -239,10 +230,7 @@ pub enum UnificationError {
         proposed: String,
     },
     /// A subtyping constraint is violated: left does not refine right.
-    SubtypeViolation {
-        sub: String,
-        sup: String,
-    },
+    SubtypeViolation { sub: String, sup: String },
     /// General unification failure with a descriptive message.
     Failed(String),
 }
@@ -255,10 +243,7 @@ impl fmt::Display for UnificationError {
                 repd2,
                 reason,
             } => {
-                write!(
-                    f,
-                    "incompatible RepD: {repd1} vs {repd2}: {reason}"
-                )
+                write!(f, "incompatible RepD: {repd1} vs {repd2}: {reason}")
             }
             UnificationError::IncompatibleCapD { capd1, capd2 } => {
                 write!(f, "incompatible CapD: {capd1} vs {capd2}")
@@ -274,10 +259,7 @@ impl fmt::Display for UnificationError {
                 existing,
                 proposed,
             } => {
-                write!(
-                    f,
-                    "conflicting binding for {var}: {existing} vs {proposed}"
-                )
+                write!(f, "conflicting binding for {var}: {existing} vs {proposed}")
             }
             UnificationError::SubtypeViolation { sub, sup } => {
                 write!(f, "subtype violation: {sub} is not a subtype of {sup}")
@@ -337,7 +319,11 @@ fn unify_repd_with_occurs(
     // assume they unify coinductively (standard treatment for recursive types).
     let ptr1 = r1 as *const RepD as usize;
     let ptr2 = r2 as *const RepD as usize;
-    let key = if ptr1 < ptr2 { (ptr1, ptr2) } else { (ptr2, ptr1) };
+    let key = if ptr1 < ptr2 {
+        (ptr1, ptr2)
+    } else {
+        (ptr2, ptr1)
+    };
     if visited.contains(&key) {
         // Recursive occurrence — assume unification succeeds coinductively
         return Ok(r1.clone());
@@ -396,9 +382,7 @@ fn unify_repd_inner(
                     return Err(UnificationError::IncompatibleRepD {
                         repd1: format!("{r1}"),
                         repd2: format!("{r2}"),
-                        reason: format!(
-                            "struct field offset mismatch: {off_a} vs {off_b}"
-                        ),
+                        reason: format!("struct field offset mismatch: {off_a} vs {off_b}"),
                     });
                 }
                 fields.push((*off_a, unify_repd_with_occurs(rep_a, rep_b, visited)?));
@@ -416,10 +400,7 @@ fn unify_repd_inner(
                 return Err(UnificationError::IncompatibleRepD {
                     repd1: format!("{r1}"),
                     repd2: format!("{r2}"),
-                    reason: format!(
-                        "array count mismatch: {} vs {}",
-                        a.count, b.count
-                    ),
+                    reason: format!("array count mismatch: {} vs {}", a.count, b.count),
                 });
             }
             let element = unify_repd_with_occurs(&a.element, &b.element, visited)?;
@@ -443,9 +424,7 @@ fn unify_repd_inner(
                 });
             }
             let mut variants = Vec::with_capacity(a.variants.len());
-            for ((tag_a, rep_a), (tag_b, rep_b)) in
-                a.variants.iter().zip(&b.variants)
-            {
+            for ((tag_a, rep_a), (tag_b, rep_b)) in a.variants.iter().zip(&b.variants) {
                 if tag_a != tag_b {
                     return Err(UnificationError::IncompatibleRepD {
                         repd1: format!("{r1}"),
@@ -516,9 +495,7 @@ fn unify_repd_inner(
 
         // Generic can be unified with any RepD (substitution).
         // When unifying a Generic with a concrete RepD, return the concrete one.
-        (RepD::Generic { .. }, other) | (other, RepD::Generic { .. }) => {
-            Ok(other.clone())
-        }
+        (RepD::Generic { .. }, other) | (other, RepD::Generic { .. }) => Ok(other.clone()),
 
         // Different constructors: incompatible.
         _ => Err(UnificationError::IncompatibleRepD {
@@ -584,10 +561,7 @@ pub fn substitute(bd: &BD, _subst: &HashMap<BDVariable, BD>) -> BD {
 /// Apply a substitution to a [`BDTerm`], resolving variables through the
 /// substitution map by chasing variable chains until a concrete BD or an
 /// unbound variable is reached.
-pub fn substitute_term(
-    term: &BDTerm,
-    subst: &HashMap<BDVariable, BDTerm>,
-) -> BDTerm {
+pub fn substitute_term(term: &BDTerm, subst: &HashMap<BDVariable, BDTerm>) -> BDTerm {
     match term {
         BDTerm::Concrete(bd) => BDTerm::Concrete(bd.clone()),
         BDTerm::Var(v) => match subst.get(v) {
@@ -632,11 +606,7 @@ pub fn compose_subst(
 /// `X`).  For concrete BDs the check always returns `false` since BDs do
 /// not contain variables.  For variable terms, we check transitively through
 /// the substitution.
-fn occurs_in(
-    var: &BDVariable,
-    term: &BDTerm,
-    subst: &HashMap<BDVariable, BDTerm>,
-) -> bool {
+fn occurs_in(var: &BDVariable, term: &BDTerm, subst: &HashMap<BDVariable, BDTerm>) -> bool {
     match term {
         BDTerm::Concrete(_) => false,
         BDTerm::Var(v) => {
@@ -753,28 +723,19 @@ impl BDSolver {
     ///
     /// Returns `Ok(())` if the constraint is satisfied, `Err` otherwise.
     /// On success the internal substitution may have been extended.
-    pub fn add_constraint(
-        &mut self,
-        constraint: &BDConstraint,
-    ) -> Result<(), UnificationError> {
+    pub fn add_constraint(&mut self, constraint: &BDConstraint) -> Result<(), UnificationError> {
         let left = self.resolve(&constraint.left);
         let right = self.resolve(&constraint.right);
 
         match constraint.kind {
             BDConstraintKind::Equality => self.unify_terms(&left, &right),
-            BDConstraintKind::Compatibility => {
-                self.check_compatibility(&left, &right)
-            }
+            BDConstraintKind::Compatibility => self.check_compatibility(&left, &right),
             BDConstraintKind::Subtyping => self.check_subtyping(&left, &right),
         }
     }
 
     /// Unify two terms under an equality constraint.
-    fn unify_terms(
-        &mut self,
-        t1: &BDTerm,
-        t2: &BDTerm,
-    ) -> Result<(), UnificationError> {
+    fn unify_terms(&mut self, t1: &BDTerm, t2: &BDTerm) -> Result<(), UnificationError> {
         // Trivial case: identical terms (after resolution).
         if t1 == t2 {
             return Ok(());
@@ -799,11 +760,7 @@ impl BDSolver {
     ///
     /// If the variable is already bound, the existing binding and the
     /// proposed binding are unified instead.
-    fn bind_variable(
-        &mut self,
-        var: &BDVariable,
-        term: &BDTerm,
-    ) -> Result<(), UnificationError> {
+    fn bind_variable(&mut self, var: &BDVariable, term: &BDTerm) -> Result<(), UnificationError> {
         // Occurs check: prevent infinite types.
         if occurs_in(var, term, &self.subst) {
             return Err(UnificationError::OccursCheckFailed {
@@ -832,11 +789,7 @@ impl BDSolver {
     /// For concrete BDs, this uses [`BD::compatible`].  For variables,
     /// compatibility is conservatively assumed (the check is deferred
     /// until the variable is bound).
-    fn check_compatibility(
-        &self,
-        t1: &BDTerm,
-        t2: &BDTerm,
-    ) -> Result<(), UnificationError> {
+    fn check_compatibility(&self, t1: &BDTerm, t2: &BDTerm) -> Result<(), UnificationError> {
         match (t1, t2) {
             (BDTerm::Concrete(bd1), BDTerm::Concrete(bd2)) => {
                 if bd1.compatible(bd2) {
@@ -857,11 +810,7 @@ impl BDSolver {
     ///
     /// For concrete BDs, this uses [`BD::refines`].  For variables,
     /// subtyping is conservatively assumed (deferred).
-    fn check_subtyping(
-        &self,
-        t1: &BDTerm,
-        t2: &BDTerm,
-    ) -> Result<(), UnificationError> {
+    fn check_subtyping(&self, t1: &BDTerm, t2: &BDTerm) -> Result<(), UnificationError> {
         match (t1, t2) {
             (BDTerm::Concrete(bd1), BDTerm::Concrete(bd2)) => {
                 if bd1.refines(bd2) {
@@ -1044,10 +993,7 @@ mod tests {
             empty_reld(),
         );
         let err = unify(&a, &b).unwrap_err();
-        assert!(matches!(
-            err,
-            UnificationError::IncompatibleRepD { .. }
-        ));
+        assert!(matches!(err, UnificationError::IncompatibleRepD { .. }));
     }
 
     // -- Test 4: Unify BDs with disjoint capabilities -------------------
@@ -1057,10 +1003,7 @@ mod tests {
         let a = make_bd(byte_rep(4, 4), exec_cap(), empty_reld());
         let b = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
         let err = unify(&a, &b).unwrap_err();
-        assert!(matches!(
-            err,
-            UnificationError::IncompatibleCapD { .. }
-        ));
+        assert!(matches!(err, UnificationError::IncompatibleCapD { .. }));
     }
 
     // -- Test 5: Solver with variable binding ---------------------------
@@ -1069,12 +1012,9 @@ mod tests {
     fn solver_variable_binding() {
         let var = BDVariable::new(0, "T");
         let bd = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
-        let constraint = BDConstraint::equality(
-            BDTerm::Var(var.clone()),
-            BDTerm::Concrete(bd.clone()),
-        );
-        let result =
-            solve_constraints(vec![constraint]).expect("should solve");
+        let constraint =
+            BDConstraint::equality(BDTerm::Var(var.clone()), BDTerm::Concrete(bd.clone()));
+        let result = solve_constraints(vec![constraint]).expect("should solve");
         assert_eq!(result.get(&var), Some(&bd));
     }
 
@@ -1087,18 +1027,11 @@ mod tests {
         let bd = make_bd(byte_rep(8, 8), read_cap(), empty_reld());
 
         let constraints = vec![
-            BDConstraint::equality(
-                BDTerm::Var(var_a.clone()),
-                BDTerm::Concrete(bd.clone()),
-            ),
-            BDConstraint::equality(
-                BDTerm::Var(var_b.clone()),
-                BDTerm::Var(var_a.clone()),
-            ),
+            BDConstraint::equality(BDTerm::Var(var_a.clone()), BDTerm::Concrete(bd.clone())),
+            BDConstraint::equality(BDTerm::Var(var_b.clone()), BDTerm::Var(var_a.clone())),
         ];
 
-        let result =
-            solve_constraints(constraints).expect("should solve");
+        let result = solve_constraints(constraints).expect("should solve");
         assert_eq!(result.get(&var_a), Some(&bd));
         assert_eq!(result.get(&var_b), Some(&bd));
     }
@@ -1109,10 +1042,7 @@ mod tests {
     fn compatibility_constraint_passes() {
         let a = make_bd(byte_rep(8, 8), read_write_cap(), empty_reld());
         let b = make_bd(byte_rep(8, 8), read_cap(), empty_reld());
-        let constraint = BDConstraint::compatibility(
-            BDTerm::Concrete(a),
-            BDTerm::Concrete(b),
-        );
+        let constraint = BDConstraint::compatibility(BDTerm::Concrete(a), BDTerm::Concrete(b));
         let result = solve_constraints(vec![constraint]);
         assert!(result.is_ok());
     }
@@ -1124,10 +1054,7 @@ mod tests {
         // read_cap ⊆ read_write_cap → a refines b.
         let a = make_bd(byte_rep(4, 4), read_cap(), liveness_reld());
         let b = make_bd(byte_rep(4, 4), read_write_cap(), liveness_reld());
-        let constraint = BDConstraint::subtyping(
-            BDTerm::Concrete(a),
-            BDTerm::Concrete(b),
-        );
+        let constraint = BDConstraint::subtyping(BDTerm::Concrete(a), BDTerm::Concrete(b));
         let result = solve_constraints(vec![constraint]);
         assert!(result.is_ok());
     }
@@ -1139,10 +1066,7 @@ mod tests {
         // read_write_cap ⊄ read_cap → a does NOT refine b.
         let a = make_bd(byte_rep(4, 4), read_write_cap(), liveness_reld());
         let b = make_bd(byte_rep(4, 4), read_cap(), liveness_reld());
-        let constraint = BDConstraint::subtyping(
-            BDTerm::Concrete(a),
-            BDTerm::Concrete(b),
-        );
+        let constraint = BDConstraint::subtyping(BDTerm::Concrete(a), BDTerm::Concrete(b));
         let result = solve_constraints(vec![constraint]);
         assert!(result.is_err());
     }
@@ -1185,23 +1109,17 @@ mod tests {
     #[test]
     fn struct_repd_unification() {
         let s1 = RepD::Struct(StructRep {
-            fields: vec![
-                (0u64, byte_rep(4, 4)),
-                (4u64, byte_rep(2, 2)),
-            ],
+            fields: vec![(0u64, byte_rep(4, 4)), (4u64, byte_rep(2, 2))],
             total_size: 8,
             align: 4,
         });
         let s2 = RepD::Struct(StructRep {
-            fields: vec![
-                (0u64, byte_rep(4, 4)),
-                (4u64, byte_rep(2, 2)),
-            ],
+            fields: vec![(0u64, byte_rep(4, 4)), (4u64, byte_rep(2, 2))],
             total_size: 8,
             align: 4,
         });
-        let result =
-            unify_repd_with_occurs(&s1, &s2, &mut HashSet::new()).expect("identical structs should unify");
+        let result = unify_repd_with_occurs(&s1, &s2, &mut HashSet::new())
+            .expect("identical structs should unify");
         assert_eq!(result.size(), 8);
     }
 
@@ -1231,8 +1149,8 @@ mod tests {
         let p2 = RepD::Ptr(PtrRep {
             pointee: Box::new(byte_rep(4, 4)),
         });
-        let result =
-            unify_repd_with_occurs(&p1, &p2, &mut HashSet::new()).expect("identical ptrs should unify");
+        let result = unify_repd_with_occurs(&p1, &p2, &mut HashSet::new())
+            .expect("identical ptrs should unify");
         assert_eq!(result.size(), 8); // pointer size
     }
 
@@ -1281,14 +1199,8 @@ mod tests {
         let bd2 = make_bd(byte_rep(8, 8), read_write_cap(), empty_reld());
 
         let constraints = vec![
-            BDConstraint::equality(
-                BDTerm::Var(var.clone()),
-                BDTerm::Concrete(bd1),
-            ),
-            BDConstraint::equality(
-                BDTerm::Var(var),
-                BDTerm::Concrete(bd2),
-            ),
+            BDConstraint::equality(BDTerm::Var(var.clone()), BDTerm::Concrete(bd1)),
+            BDConstraint::equality(BDTerm::Var(var), BDTerm::Concrete(bd2)),
         ];
 
         let result = solve_constraints(constraints);
@@ -1315,22 +1227,12 @@ mod tests {
         let bd = make_bd(byte_rep(8, 8), read_cap(), empty_reld());
 
         let constraints = vec![
-            BDConstraint::equality(
-                BDTerm::Var(var_a.clone()),
-                BDTerm::Concrete(bd.clone()),
-            ),
-            BDConstraint::equality(
-                BDTerm::Var(var_b.clone()),
-                BDTerm::Concrete(bd.clone()),
-            ),
-            BDConstraint::equality(
-                BDTerm::Var(var_c.clone()),
-                BDTerm::Var(var_a.clone()),
-            ),
+            BDConstraint::equality(BDTerm::Var(var_a.clone()), BDTerm::Concrete(bd.clone())),
+            BDConstraint::equality(BDTerm::Var(var_b.clone()), BDTerm::Concrete(bd.clone())),
+            BDConstraint::equality(BDTerm::Var(var_c.clone()), BDTerm::Var(var_a.clone())),
         ];
 
-        let result =
-            solve_constraints(constraints).expect("should solve");
+        let result = solve_constraints(constraints).expect("should solve");
         assert_eq!(result.get(&var_a), Some(&bd));
         assert_eq!(result.get(&var_b), Some(&bd));
         assert_eq!(result.get(&var_c), Some(&bd));
@@ -1342,8 +1244,7 @@ mod tests {
     fn constraint_display() {
         let var = BDVariable::new(0, "T");
         let bd = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
-        let c =
-            BDConstraint::equality(BDTerm::Var(var), BDTerm::Concrete(bd));
+        let c = BDConstraint::equality(BDTerm::Var(var), BDTerm::Concrete(bd));
         let s = format!("{c}");
         assert!(s.contains("="));
     }
@@ -1361,10 +1262,7 @@ mod tests {
     #[test]
     fn reflexivity_x_equals_x() {
         let var = BDVariable::new(0, "X");
-        let constraint = BDConstraint::equality(
-            BDTerm::Var(var.clone()),
-            BDTerm::Var(var.clone()),
-        );
+        let constraint = BDConstraint::equality(BDTerm::Var(var.clone()), BDTerm::Var(var.clone()));
         let result = solve_constraints(vec![constraint]);
         // X = X is trivially true — the variable remains free (no
         // concrete binding), but the constraint is satisfied.
@@ -1383,8 +1281,8 @@ mod tests {
             params: vec![byte_rep(4, 4), byte_rep(8, 8)],
             result: Box::new(byte_rep(4, 4)),
         });
-        let result =
-            unify_repd_with_occurs(&f1, &f2, &mut HashSet::new()).expect("identical func sigs should unify");
+        let result = unify_repd_with_occurs(&f1, &f2, &mut HashSet::new())
+            .expect("identical func sigs should unify");
         assert_eq!(result.size(), 8); // function pointer size
     }
 
@@ -1436,10 +1334,7 @@ mod tests {
     fn compatibility_constraint_fails() {
         let a = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
         let b = make_bd(byte_rep(8, 8), read_cap(), empty_reld());
-        let constraint = BDConstraint::compatibility(
-            BDTerm::Concrete(a),
-            BDTerm::Concrete(b),
-        );
+        let constraint = BDConstraint::compatibility(BDTerm::Concrete(a), BDTerm::Concrete(b));
         let result = solve_constraints(vec![constraint]);
         assert!(result.is_err());
     }
@@ -1487,18 +1382,11 @@ mod tests {
 
         // A = bd1, A ~ bd2 (compatibility), A <: bd2 (subtyping: read ⊆ read+write)
         let constraints = vec![
-            BDConstraint::equality(
-                BDTerm::Var(var_a.clone()),
-                BDTerm::Concrete(bd1),
-            ),
-            BDConstraint::compatibility(
-                BDTerm::Var(var_b.clone()),
-                BDTerm::Concrete(bd2.clone()),
-            ),
+            BDConstraint::equality(BDTerm::Var(var_a.clone()), BDTerm::Concrete(bd1)),
+            BDConstraint::compatibility(BDTerm::Var(var_b.clone()), BDTerm::Concrete(bd2.clone())),
         ];
 
-        let result =
-            solve_constraints(constraints).expect("should solve");
+        let result = solve_constraints(constraints).expect("should solve");
         assert!(result.get(&var_a).is_some());
         // var_b has no equality binding, so it's free.
         assert!(result.get(&var_b).is_none());

@@ -44,9 +44,6 @@ pub mod pipeline;
 
 // Re-export the primary pipeline API at the crate root for convenience.
 pub use pipeline::{
-    compile, compile_incremental,
-    CompileConfig, CompileTarget, CompilationOutput, DebugInfo,
-    OptLevel, VerificationLevel,
-    VumaError,
-    IncrementalCache, SourceFingerprint, PipelineStage,
+    compile, compile_incremental, CompilationOutput, CompileConfig, CompileTarget, DebugInfo,
+    IncrementalCache, OptLevel, PipelineStage, SourceFingerprint, VerificationLevel, VumaError,
 };

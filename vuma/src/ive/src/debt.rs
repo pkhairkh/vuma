@@ -111,11 +111,7 @@ impl DebtItem {
 
 impl fmt::Display for DebtItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[{}] {} ({})",
-            self.priority, self.property, self.status
-        )
+        write!(f, "[{}] {} ({})", self.priority, self.property, self.status)
     }
 }
 
@@ -180,11 +176,7 @@ impl VerificationDebt {
 
     /// Return an iterator over unresolved debt items, sorted by priority.
     pub fn outstanding(&self) -> impl Iterator<Item = &DebtItem> {
-        let mut pending: Vec<&DebtItem> = self
-            .items
-            .iter()
-            .filter(|i| !i.is_resolved())
-            .collect();
+        let mut pending: Vec<&DebtItem> = self.items.iter().filter(|i| !i.is_resolved()).collect();
         pending.sort_by_key(|i| i.priority);
         pending.into_iter()
     }

@@ -204,52 +204,31 @@ pub struct AllocatedProgram {
 pub enum BackendError {
     /// The requested feature is not supported by this ISA.
     #[error("[{isa}] unsupported feature: {feature}")]
-    UnsupportedFeature {
-        isa: &'static str,
-        feature: String,
-    },
+    UnsupportedFeature { isa: &'static str, feature: String },
 
     /// Register allocation failed.
     #[error("[{isa}] register allocation failed: {reason}")]
-    RegisterAllocFailed {
-        isa: &'static str,
-        reason: String,
-    },
+    RegisterAllocFailed { isa: &'static str, reason: String },
 
     /// Instruction encoding failed.
     #[error("[{isa}] encoding error: {reason}")]
-    EncodingError {
-        isa: &'static str,
-        reason: String,
-    },
+    EncodingError { isa: &'static str, reason: String },
 
     /// Invalid instruction for this target.
     #[error("[{isa}] invalid instruction: {details}")]
-    InvalidInstruction {
-        isa: &'static str,
-        details: String,
-    },
+    InvalidInstruction { isa: &'static str, details: String },
 
     /// ELF / binary emission error.
     #[error("[{isa}] emission error: {reason}")]
-    EmissionError {
-        isa: &'static str,
-        reason: String,
-    },
+    EmissionError { isa: &'static str, reason: String },
 
     /// The target cannot handle this type.
     #[error("[{isa}] unsupported type: {ty}")]
-    UnsupportedType {
-        isa: &'static str,
-        ty: String,
-    },
+    UnsupportedType { isa: &'static str, ty: String },
 
     /// Generic backend error.
     #[error("[{isa}] {message}")]
-    Other {
-        isa: &'static str,
-        message: String,
-    },
+    Other { isa: &'static str, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -446,11 +425,21 @@ impl fmt::Display for BackendKind {
 pub struct AArch64TargetInfo;
 
 impl TargetInfo for AArch64TargetInfo {
-    fn isa_name(&self) -> &'static str { "aarch64" }
-    fn target_triple(&self) -> &'static str { "aarch64-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 183 } // EM_AARCH64
-    fn default_base_address(&self) -> u64 { 0x400000 }
-    fn pointer_width(&self) -> usize { 8 }
+    fn isa_name(&self) -> &'static str {
+        "aarch64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "aarch64-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        183
+    } // EM_AARCH64
+    fn default_base_address(&self) -> u64 {
+        0x400000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
 
     fn size_of(&self, ty: &IRType) -> usize {
         crate::ir::size_of(ty) // Uses existing ARM64 LP64 logic
@@ -460,22 +449,54 @@ impl TargetInfo for AArch64TargetInfo {
         crate::ir::alignment_of(ty) // Uses existing ARM64 LP64 logic
     }
 
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 31 } // X0-X30 (SP/XZR are special)
-    fn num_simd_fp_regs(&self) -> usize { 32 } // V0-V31
-    fn has_hardwired_zero(&self) -> bool { true } // XZR
-    fn has_link_register(&self) -> bool { true } // X30 (LR)
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "aapcs64" }
-    fn num_int_arg_regs(&self) -> usize { 8 } // X0-X7
-    fn num_fp_arg_regs(&self) -> usize { 8 } // V0-V7
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 4 }
-    fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        31
+    } // X0-X30 (SP/XZR are special)
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // V0-V31
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    } // XZR
+    fn has_link_register(&self) -> bool {
+        true
+    } // X30 (LR)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "aapcs64"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        8
+    } // X0-X7
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // V0-V7
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (4, 4)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,29 +507,75 @@ impl TargetInfo for AArch64TargetInfo {
 pub struct RiscV64TargetInfo;
 
 impl TargetInfo for RiscV64TargetInfo {
-    fn isa_name(&self) -> &'static str { "riscv64" }
-    fn target_triple(&self) -> &'static str { "riscv64-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 243 } // EM_RISCV
-    fn default_base_address(&self) -> u64 { 0x10000 }
-    fn pointer_width(&self) -> usize { 8 }
-    fn size_of(&self, ty: &IRType) -> usize { crate::ir::size_of(ty) }
-    fn alignment_of(&self, ty: &IRType) -> usize { crate::ir::alignment_of(ty) }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 32 } // x0-x31
-    fn num_simd_fp_regs(&self) -> usize { 32 } // f0-f31
-    fn has_hardwired_zero(&self) -> bool { true } // x0
-    fn has_link_register(&self) -> bool { true } // x1 (ra)
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "lp64d" }
-    fn num_int_arg_regs(&self) -> usize { 8 } // a0-a7
-    fn num_fp_arg_regs(&self) -> usize { 8 } // fa0-fa7
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 2 } // RVC allows 16-bit alignment
-    fn instruction_width_range(&self) -> (usize, usize) { (2, 4) } // RVC + 32-bit
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn isa_name(&self) -> &'static str {
+        "riscv64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "riscv64-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        243
+    } // EM_RISCV
+    fn default_base_address(&self) -> u64 {
+        0x10000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        crate::ir::size_of(ty)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        crate::ir::alignment_of(ty)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    } // x0-x31
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // f0-f31
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    } // x0
+    fn has_link_register(&self) -> bool {
+        true
+    } // x1 (ra)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "lp64d"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        8
+    } // a0-a7
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // fa0-fa7
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        2
+    } // RVC allows 16-bit alignment
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (2, 4)
+    } // RVC + 32-bit
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -519,11 +586,21 @@ impl TargetInfo for RiscV64TargetInfo {
 pub struct Wasm32TargetInfo;
 
 impl TargetInfo for Wasm32TargetInfo {
-    fn isa_name(&self) -> &'static str { "wasm32" }
-    fn target_triple(&self) -> &'static str { "wasm32-unknown-unknown" }
-    fn elf_machine_type(&self) -> u16 { 0 } // Not ELF
-    fn default_base_address(&self) -> u64 { 0 } // Linear memory base
-    fn pointer_width(&self) -> usize { 4 }
+    fn isa_name(&self) -> &'static str {
+        "wasm32"
+    }
+    fn target_triple(&self) -> &'static str {
+        "wasm32-unknown-unknown"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        0
+    } // Not ELF
+    fn default_base_address(&self) -> u64 {
+        0
+    } // Linear memory base
+    fn pointer_width(&self) -> usize {
+        4
+    }
     fn size_of(&self, ty: &IRType) -> usize {
         match ty {
             IRType::Ptr | IRType::Func => 4, // 32-bit pointers in wasm32
@@ -536,22 +613,54 @@ impl TargetInfo for Wasm32TargetInfo {
             _ => crate::ir::alignment_of(ty),
         }
     }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { false } // Stack machine!
-    fn num_gp_regs(&self) -> usize { 0 }
-    fn num_simd_fp_regs(&self) -> usize { 0 }
-    fn has_hardwired_zero(&self) -> bool { false }
-    fn has_link_register(&self) -> bool { false }
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "wasm-stack" }
-    fn num_int_arg_regs(&self) -> usize { 0 } // Stack-based calling
-    fn num_fp_arg_regs(&self) -> usize { 0 }
-    fn stack_alignment(&self) -> usize { 8 } // Wasm stack alignment
-    fn instruction_alignment(&self) -> usize { 1 }
-    fn instruction_width_range(&self) -> (usize, usize) { (1, 15) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::WasmBinary }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        false
+    } // Stack machine!
+    fn num_gp_regs(&self) -> usize {
+        0
+    }
+    fn num_simd_fp_regs(&self) -> usize {
+        0
+    }
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    }
+    fn has_link_register(&self) -> bool {
+        false
+    }
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "wasm-stack"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        0
+    } // Stack-based calling
+    fn num_fp_arg_regs(&self) -> usize {
+        0
+    }
+    fn stack_alignment(&self) -> usize {
+        8
+    } // Wasm stack alignment
+    fn instruction_alignment(&self) -> usize {
+        1
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (1, 15)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::WasmBinary
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -562,29 +671,75 @@ impl TargetInfo for Wasm32TargetInfo {
 pub struct LoongArch64TargetInfo;
 
 impl TargetInfo for LoongArch64TargetInfo {
-    fn isa_name(&self) -> &'static str { "loongarch64" }
-    fn target_triple(&self) -> &'static str { "loongarch64-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 258 } // EM_LOONGARCH
-    fn default_base_address(&self) -> u64 { 0x120000000 }
-    fn pointer_width(&self) -> usize { 8 }
-    fn size_of(&self, ty: &IRType) -> usize { crate::ir::size_of(ty) }
-    fn alignment_of(&self, ty: &IRType) -> usize { crate::ir::alignment_of(ty) }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 32 } // r0-r31
-    fn num_simd_fp_regs(&self) -> usize { 32 } // f0-f31
-    fn has_hardwired_zero(&self) -> bool { true } // r0
-    fn has_link_register(&self) -> bool { true } // r1 (ra)
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "lp64" }
-    fn num_int_arg_regs(&self) -> usize { 8 } // a0-a7 (r4-r11)
-    fn num_fp_arg_regs(&self) -> usize { 8 } // fa0-fa7
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 4 }
-    fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn isa_name(&self) -> &'static str {
+        "loongarch64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "loongarch64-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        258
+    } // EM_LOONGARCH
+    fn default_base_address(&self) -> u64 {
+        0x120000000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        crate::ir::size_of(ty)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        crate::ir::alignment_of(ty)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    } // r0-r31
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // f0-f31
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    } // r0
+    fn has_link_register(&self) -> bool {
+        true
+    } // r1 (ra)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "lp64"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        8
+    } // a0-a7 (r4-r11)
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // fa0-fa7
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (4, 4)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -595,29 +750,75 @@ impl TargetInfo for LoongArch64TargetInfo {
 pub struct X86_64TargetInfo;
 
 impl TargetInfo for X86_64TargetInfo {
-    fn isa_name(&self) -> &'static str { "x86_64" }
-    fn target_triple(&self) -> &'static str { "x86_64-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 62 } // EM_X86_64
-    fn default_base_address(&self) -> u64 { 0x400000 }
-    fn pointer_width(&self) -> usize { 8 }
-    fn size_of(&self, ty: &IRType) -> usize { crate::ir::size_of(ty) }
-    fn alignment_of(&self, ty: &IRType) -> usize { crate::ir::alignment_of(ty) }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 16 } // RAX-R15
-    fn num_simd_fp_regs(&self) -> usize { 16 } // XMM0-XMM15
-    fn has_hardwired_zero(&self) -> bool { false } // No hardwired zero reg
-    fn has_link_register(&self) -> bool { false } // Return addr pushed on stack
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "systemv" }
-    fn num_int_arg_regs(&self) -> usize { 6 } // RDI, RSI, RDX, RCX, R8, R9
-    fn num_fp_arg_regs(&self) -> usize { 8 } // XMM0-XMM7
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 1 } // Variable-length
-    fn instruction_width_range(&self) -> (usize, usize) { (1, 15) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn isa_name(&self) -> &'static str {
+        "x86_64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "x86_64-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        62
+    } // EM_X86_64
+    fn default_base_address(&self) -> u64 {
+        0x400000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        crate::ir::size_of(ty)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        crate::ir::alignment_of(ty)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        16
+    } // RAX-R15
+    fn num_simd_fp_regs(&self) -> usize {
+        16
+    } // XMM0-XMM15
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    } // No hardwired zero reg
+    fn has_link_register(&self) -> bool {
+        false
+    } // Return addr pushed on stack
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "systemv"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        6
+    } // RDI, RSI, RDX, RCX, R8, R9
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // XMM0-XMM7
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        1
+    } // Variable-length
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (1, 15)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -628,11 +829,21 @@ impl TargetInfo for X86_64TargetInfo {
 pub struct Arm32TargetInfo;
 
 impl TargetInfo for Arm32TargetInfo {
-    fn isa_name(&self) -> &'static str { "arm32" }
-    fn target_triple(&self) -> &'static str { "arm-unknown-linux-gnueabihf" }
-    fn elf_machine_type(&self) -> u16 { 40 } // EM_ARM
-    fn default_base_address(&self) -> u64 { 0x10000 }
-    fn pointer_width(&self) -> usize { 4 }
+    fn isa_name(&self) -> &'static str {
+        "arm32"
+    }
+    fn target_triple(&self) -> &'static str {
+        "arm-unknown-linux-gnueabihf"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        40
+    } // EM_ARM
+    fn default_base_address(&self) -> u64 {
+        0x10000
+    }
+    fn pointer_width(&self) -> usize {
+        4
+    }
     fn size_of(&self, ty: &IRType) -> usize {
         match ty {
             IRType::Ptr | IRType::Func => 4, // 32-bit pointers
@@ -647,22 +858,54 @@ impl TargetInfo for Arm32TargetInfo {
             _ => crate::ir::alignment_of(ty),
         }
     }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 16 } // R0-R15
-    fn num_simd_fp_regs(&self) -> usize { 32 } // D0-D31
-    fn has_hardwired_zero(&self) -> bool { false }
-    fn has_link_register(&self) -> bool { true } // R14 (LR)
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "aapcs" }
-    fn num_int_arg_regs(&self) -> usize { 4 } // R0-R3
-    fn num_fp_arg_regs(&self) -> usize { 16 } // D0-D15 (AAPCS VFP)
-    fn stack_alignment(&self) -> usize { 8 }
-    fn instruction_alignment(&self) -> usize { 2 } // Thumb allows 16-bit
-    fn instruction_width_range(&self) -> (usize, usize) { (2, 4) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        16
+    } // R0-R15
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // D0-D31
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    }
+    fn has_link_register(&self) -> bool {
+        true
+    } // R14 (LR)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "aapcs"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        4
+    } // R0-R3
+    fn num_fp_arg_regs(&self) -> usize {
+        16
+    } // D0-D15 (AAPCS VFP)
+    fn stack_alignment(&self) -> usize {
+        8
+    }
+    fn instruction_alignment(&self) -> usize {
+        2
+    } // Thumb allows 16-bit
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (2, 4)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -673,29 +916,75 @@ impl TargetInfo for Arm32TargetInfo {
 pub struct Mips64TargetInfo;
 
 impl TargetInfo for Mips64TargetInfo {
-    fn isa_name(&self) -> &'static str { "mips64" }
-    fn target_triple(&self) -> &'static str { "mips64-unknown-linux-gnuabi64" }
-    fn elf_machine_type(&self) -> u16 { 8 } // EM_MIPS
-    fn default_base_address(&self) -> u64 { 0x120000000 }
-    fn pointer_width(&self) -> usize { 8 }
-    fn size_of(&self, ty: &IRType) -> usize { crate::ir::size_of(ty) }
-    fn alignment_of(&self, ty: &IRType) -> usize { crate::ir::alignment_of(ty) }
-    fn endianness(&self) -> Endianness { Endianness::Big }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 32 } // $0-$31
-    fn num_simd_fp_regs(&self) -> usize { 32 } // $f0-$f31
-    fn has_hardwired_zero(&self) -> bool { true } // $zero ($0)
-    fn has_link_register(&self) -> bool { true } // $ra ($31)
-    fn has_branch_delay_slots(&self) -> bool { true } // THE defining feature
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "n64" }
-    fn num_int_arg_regs(&self) -> usize { 4 } // $a0-$a3 (but N64 extends to 8)
-    fn num_fp_arg_regs(&self) -> usize { 8 } // $f12-$f19 (N64 FP args)
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 4 }
-    fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn isa_name(&self) -> &'static str {
+        "mips64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "mips64-unknown-linux-gnuabi64"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        8
+    } // EM_MIPS
+    fn default_base_address(&self) -> u64 {
+        0x120000000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        crate::ir::size_of(ty)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        crate::ir::alignment_of(ty)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Big
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    } // $0-$31
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // $f0-$f31
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    } // $zero ($0)
+    fn has_link_register(&self) -> bool {
+        true
+    } // $ra ($31)
+    fn has_branch_delay_slots(&self) -> bool {
+        true
+    } // THE defining feature
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "n64"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        4
+    } // $a0-$a3 (but N64 extends to 8)
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // $f12-$f19 (N64 FP args)
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (4, 4)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -706,29 +995,75 @@ impl TargetInfo for Mips64TargetInfo {
 pub struct PowerPC64TargetInfo;
 
 impl TargetInfo for PowerPC64TargetInfo {
-    fn isa_name(&self) -> &'static str { "ppc64" }
-    fn target_triple(&self) -> &'static str { "powerpc64le-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 21 } // EM_PPC64
-    fn default_base_address(&self) -> u64 { 0x10000000 }
-    fn pointer_width(&self) -> usize { 8 }
-    fn size_of(&self, ty: &IRType) -> usize { crate::ir::size_of(ty) }
-    fn alignment_of(&self, ty: &IRType) -> usize { crate::ir::alignment_of(ty) }
-    fn endianness(&self) -> Endianness { Endianness::Bi } // Bi-endian
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 32 } // R0-R31
-    fn num_simd_fp_regs(&self) -> usize { 64 } // 32 FPR + 32 VMX (VSX overlaps)
-    fn has_hardwired_zero(&self) -> bool { false } // R0 is NOT hardwired zero (it's volatile)
-    fn has_link_register(&self) -> bool { true } // LR (SPR)
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { true } // R2 = TOC
-    fn has_condition_registers(&self) -> bool { true } // CR0-CR7
-    fn calling_convention_name(&self) -> &'static str { "elfv2" }
-    fn num_int_arg_regs(&self) -> usize { 8 } // R3-R10
-    fn num_fp_arg_regs(&self) -> usize { 13 } // F1-F13
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 4 }
-    fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf64 }
+    fn isa_name(&self) -> &'static str {
+        "ppc64"
+    }
+    fn target_triple(&self) -> &'static str {
+        "powerpc64le-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        21
+    } // EM_PPC64
+    fn default_base_address(&self) -> u64 {
+        0x10000000
+    }
+    fn pointer_width(&self) -> usize {
+        8
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        crate::ir::size_of(ty)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        crate::ir::alignment_of(ty)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Bi
+    } // Bi-endian
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    } // R0-R31
+    fn num_simd_fp_regs(&self) -> usize {
+        64
+    } // 32 FPR + 32 VMX (VSX overlaps)
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    } // R0 is NOT hardwired zero (it's volatile)
+    fn has_link_register(&self) -> bool {
+        true
+    } // LR (SPR)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        true
+    } // R2 = TOC
+    fn has_condition_registers(&self) -> bool {
+        true
+    } // CR0-CR7
+    fn calling_convention_name(&self) -> &'static str {
+        "elfv2"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        8
+    } // R3-R10
+    fn num_fp_arg_regs(&self) -> usize {
+        13
+    } // F1-F13
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (4, 4)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,10 +1173,22 @@ fn decode_aarch64(word: u32) -> String {
     // --- B.cond: 0101010x xxxxxxxxxx xxxxxx cond
     if (word >> 24) & 0xFF == 0x54 {
         let cond_name = match cond {
-            0 => "eq", 1 => "ne", 2 => "cs", 3 => "cc",
-            4 => "mi", 5 => "pl", 6 => "vs", 7 => "vc",
-            8 => "hi", 9 => "ls", 10 => "ge", 11 => "lt",
-            12 => "gt", 13 => "le", 14 => "al", _ => "??",
+            0 => "eq",
+            1 => "ne",
+            2 => "cs",
+            3 => "cc",
+            4 => "mi",
+            5 => "pl",
+            6 => "vs",
+            7 => "vc",
+            8 => "hi",
+            9 => "ls",
+            10 => "ge",
+            11 => "lt",
+            12 => "gt",
+            13 => "le",
+            14 => "al",
+            _ => "??",
         };
         let imm19 = (word >> 5) & 0x7FFFF;
         let offset = ((imm19 as i32) << 13) >> 11; // sign-extend and *4
@@ -973,37 +1320,37 @@ fn build_minimal_aarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
-    elf.push(2);   // ELFCLASS64
-    elf.push(1);   // ELFDATA2LSB
-    elf.push(1);   // EV_CURRENT
-    elf.push(3);   // ELFOSABI_LINUX
-    elf.push(0);   // padding
+    elf.push(2); // ELFCLASS64
+    elf.push(1); // ELFDATA2LSB
+    elf.push(1); // EV_CURRENT
+    elf.push(3); // ELFOSABI_LINUX
+    elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
     // --- ELF header fields ---
-    elf.extend_from_slice(&2u16.to_le_bytes());       // e_type = ET_EXEC
-    elf.extend_from_slice(&183u16.to_le_bytes());     // e_machine = EM_AARCH64
-    elf.extend_from_slice(&1u32.to_le_bytes());       // e_version
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&183u16.to_le_bytes()); // e_machine = EM_AARCH64
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes());       // e_shoff (no section headers)
-    elf.extend_from_slice(&0u32.to_le_bytes());       // e_flags
-    elf.extend_from_slice(&64u16.to_le_bytes());      // e_ehsize
-    elf.extend_from_slice(&56u16.to_le_bytes());      // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes());       // e_phnum
-    elf.extend_from_slice(&64u16.to_le_bytes());      // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes());       // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes());       // e_shstrndx
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header (single LOAD segment: PF_R | PF_X) ---
-    elf.extend_from_slice(&1u32.to_le_bytes());       // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_le_bytes());       // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_le_bytes());  // p_filesz
-    elf.extend_from_slice(&text_size.to_le_bytes());  // p_memsz
-    elf.extend_from_slice(&16u64.to_le_bytes());      // p_align
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
 
     // --- Code section ---
     elf.extend_from_slice(code);
@@ -1020,10 +1367,12 @@ impl Backend for AArch64Backend {
         // Use the existing Emitter to emit the function, which internally
         // performs register allocation and instruction encoding.
         let mut emitter = crate::emit::Emitter::new();
-        let code = emitter.emit_function(func).map_err(|e| BackendError::RegisterAllocFailed {
-            isa: "aarch64",
-            reason: e.to_string(),
-        })?;
+        let code = emitter
+            .emit_function(func)
+            .map_err(|e| BackendError::RegisterAllocFailed {
+                isa: "aarch64",
+                reason: e.to_string(),
+            })?;
 
         let func_name = func.name.clone();
         let frame_size = aarch64_compute_frame_size(func);
@@ -1166,10 +1515,30 @@ mod tests {
     fn validate_target_info(info: &dyn TargetInfo) {
         // If there are no registers, register counts must be zero.
         if !info.has_registers() {
-            assert_eq!(info.num_gp_regs(), 0, "{}: has_registers=false but num_gp_regs != 0", info.isa_name());
-            assert_eq!(info.num_simd_fp_regs(), 0, "{}: has_registers=false but num_simd_fp_regs != 0", info.isa_name());
-            assert_eq!(info.num_int_arg_regs(), 0, "{}: has_registers=false but num_int_arg_regs != 0", info.isa_name());
-            assert_eq!(info.num_fp_arg_regs(), 0, "{}: has_registers=false but num_fp_arg_regs != 0", info.isa_name());
+            assert_eq!(
+                info.num_gp_regs(),
+                0,
+                "{}: has_registers=false but num_gp_regs != 0",
+                info.isa_name()
+            );
+            assert_eq!(
+                info.num_simd_fp_regs(),
+                0,
+                "{}: has_registers=false but num_simd_fp_regs != 0",
+                info.isa_name()
+            );
+            assert_eq!(
+                info.num_int_arg_regs(),
+                0,
+                "{}: has_registers=false but num_int_arg_regs != 0",
+                info.isa_name()
+            );
+            assert_eq!(
+                info.num_fp_arg_regs(),
+                0,
+                "{}: has_registers=false but num_fp_arg_regs != 0",
+                info.isa_name()
+            );
         }
 
         // Pointer width must be 4 or 8.
@@ -1182,8 +1551,18 @@ mod tests {
 
         // Stack alignment must be a power of 2 and at least 8.
         let sa = info.stack_alignment();
-        assert!(sa >= 8, "{}: stack_alignment must be >= 8, got {}", info.isa_name(), sa);
-        assert!(sa.is_power_of_two(), "{}: stack_alignment must be a power of 2, got {}", info.isa_name(), sa);
+        assert!(
+            sa >= 8,
+            "{}: stack_alignment must be >= 8, got {}",
+            info.isa_name(),
+            sa
+        );
+        assert!(
+            sa.is_power_of_two(),
+            "{}: stack_alignment must be a power of 2, got {}",
+            info.isa_name(),
+            sa
+        );
 
         // Instruction alignment must be 1, 2, or 4.
         let ia = info.instruction_alignment();
@@ -1196,27 +1575,52 @@ mod tests {
 
         // Width range must be sane.
         let (min_w, max_w) = info.instruction_width_range();
-        assert!(min_w >= 1, "{}: min instruction width must be >= 1", info.isa_name());
-        assert!(max_w >= min_w, "{}: max instruction width must be >= min", info.isa_name());
+        assert!(
+            min_w >= 1,
+            "{}: min instruction width must be >= 1",
+            info.isa_name()
+        );
+        assert!(
+            max_w >= min_w,
+            "{}: max instruction width must be >= min",
+            info.isa_name()
+        );
 
         // Only MIPS has branch delay slots.
         if info.has_branch_delay_slots() {
-            assert_eq!(info.isa_name(), "mips64", "Only MIPS64 should have branch delay slots");
+            assert_eq!(
+                info.isa_name(),
+                "mips64",
+                "Only MIPS64 should have branch delay slots"
+            );
         }
 
         // Only PPC64 has a TOC pointer.
         if info.has_toc_pointer() {
-            assert_eq!(info.isa_name(), "ppc64", "Only PPC64 should have a TOC pointer");
+            assert_eq!(
+                info.isa_name(),
+                "ppc64",
+                "Only PPC64 should have a TOC pointer"
+            );
         }
 
         // Only PPC64 has condition registers.
         if info.has_condition_registers() {
-            assert_eq!(info.isa_name(), "ppc64", "Only PPC64 should have condition registers");
+            assert_eq!(
+                info.isa_name(),
+                "ppc64",
+                "Only PPC64 should have condition registers"
+            );
         }
 
         // size_of and alignment_of for basic types.
         let ptr_size = info.size_of(&IRType::Ptr);
-        assert_eq!(ptr_size, info.pointer_width(), "{}: Ptr size must match pointer_width", info.isa_name());
+        assert_eq!(
+            ptr_size,
+            info.pointer_width(),
+            "{}: Ptr size must match pointer_width",
+            info.isa_name()
+        );
     }
 
     #[test]
@@ -1402,7 +1806,11 @@ mod tests {
         let backend = AArch64Backend::new();
         // ADD X0, X1, #42: 0x9100A820
         use crate::arm64::{Instruction, Operand, Register};
-        let instr = Instruction::ADD { rd: Register::X0, rn: Register::X1, rm: Operand::Imm12(42) };
+        let instr = Instruction::ADD {
+            rd: Register::X0,
+            rn: Register::X1,
+            rm: Operand::Imm12(42),
+        };
         let encoded = instr.encode().unwrap();
         let bytes: Vec<u8> = encoded.to_le_bytes().to_vec();
         let lines = backend.disassemble(&bytes, 0);
@@ -1417,7 +1825,15 @@ mod tests {
             feature: "branch delay slots".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("[aarch64]"), "Error should include ISA name: {}", msg);
-        assert!(msg.contains("branch delay slots"), "Error should include feature: {}", msg);
+        assert!(
+            msg.contains("[aarch64]"),
+            "Error should include ISA name: {}",
+            msg
+        );
+        assert!(
+            msg.contains("branch delay slots"),
+            "Error should include feature: {}",
+            msg
+        );
     }
 }

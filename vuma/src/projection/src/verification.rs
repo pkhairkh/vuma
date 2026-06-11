@@ -17,8 +17,8 @@
 mod tests {
     use vuma_scg::{
         AccessMode, AccessNode, AllocationNode, ComputationNode, ControlKind, ControlNode,
-        DeallocationNode, EdgeKind, EffectNode, NodeId, NodePayload, NodeType, ProgramPoint,
-        RegionId, SCG, SCGRegion, DeploymentTarget,
+        DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload, NodeType,
+        ProgramPoint, RegionId, SCGRegion, SCG,
     };
 
     /// Helper: a blank program point.
@@ -192,7 +192,10 @@ mod tests {
         );
 
         // Verify each node type is preserved
-        let expected_types: Vec<NodeType> = types_and_payloads.iter().map(|(nt, _)| nt.clone()).collect();
+        let expected_types: Vec<NodeType> = types_and_payloads
+            .iter()
+            .map(|(nt, _)| nt.clone())
+            .collect();
         for (i, expected) in expected_types.iter().enumerate() {
             let id = node_ids[i];
             let rt_type = rt.get_node(id).map(|n| n.node_type.clone());
@@ -274,22 +277,34 @@ mod tests {
         // Verify the round-tripped edge kinds
         let rt_kinds: Vec<EdgeKind> = rt.edges().map(|e| e.kind.clone()).collect();
         assert_eq!(
-            rt_kinds.iter().filter(|k| matches!(k, EdgeKind::DataFlow)).count(),
+            rt_kinds
+                .iter()
+                .filter(|k| matches!(k, EdgeKind::DataFlow))
+                .count(),
             1,
             "DataFlow edges after roundtrip"
         );
         assert_eq!(
-            rt_kinds.iter().filter(|k| matches!(k, EdgeKind::ControlFlow)).count(),
+            rt_kinds
+                .iter()
+                .filter(|k| matches!(k, EdgeKind::ControlFlow))
+                .count(),
             1,
             "ControlFlow edges after roundtrip"
         );
         assert_eq!(
-            rt_kinds.iter().filter(|k| matches!(k, EdgeKind::Derivation)).count(),
+            rt_kinds
+                .iter()
+                .filter(|k| matches!(k, EdgeKind::Derivation))
+                .count(),
             1,
             "Derivation edges after roundtrip"
         );
         assert_eq!(
-            rt_kinds.iter().filter(|k| matches!(k, EdgeKind::Annotation)).count(),
+            rt_kinds
+                .iter()
+                .filter(|k| matches!(k, EdgeKind::Annotation))
+                .count(),
             1,
             "Annotation edges after roundtrip"
         );

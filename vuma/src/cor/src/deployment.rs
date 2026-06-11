@@ -78,7 +78,10 @@ pub enum DeploymentTarget {
 impl DeploymentTarget {
     /// Returns `true` if this target is any Raspberry Pi 5 variant.
     pub fn is_pi5(&self) -> bool {
-        matches!(self, DeploymentTarget::Pi5Bare { .. } | DeploymentTarget::Pi5Linux { .. })
+        matches!(
+            self,
+            DeploymentTarget::Pi5Bare { .. } | DeploymentTarget::Pi5Linux { .. }
+        )
     }
 
     /// Returns `true` if this target supports hot-swapping of code.
@@ -107,12 +110,13 @@ impl std::fmt::Display for DeploymentTarget {
             DeploymentTarget::Pi5Bare { board_id, core_id } => {
                 write!(f, "Pi5Bare({}/core{})", board_id, core_id)
             }
-            DeploymentTarget::Pi5Linux { host, core_affinity } => {
-                match core_affinity {
-                    Some(c) => write!(f, "Pi5Linux({}/core{})", host, c),
-                    None => write!(f, "Pi5Linux({})", host),
-                }
-            }
+            DeploymentTarget::Pi5Linux {
+                host,
+                core_affinity,
+            } => match core_affinity {
+                Some(c) => write!(f, "Pi5Linux({}/core{})", host, c),
+                None => write!(f, "Pi5Linux({})", host),
+            },
             DeploymentTarget::Remote { endpoint } => write!(f, "Remote({})", endpoint),
         }
     }
@@ -259,9 +263,7 @@ impl DeploymentDelta {
             offset += BLOCK;
         }
         // Handle the tail (< BLOCK bytes).
-        if offset < min_len
-            && old_code[offset..min_len] != new_code[offset..min_len]
-        {
+        if offset < min_len && old_code[offset..min_len] != new_code[offset..min_len] {
             patches.push((offset, new_code[offset..min_len].to_vec()));
         }
 
@@ -333,7 +335,11 @@ impl DeploymentDelta {
             if *offset > result.len() {
                 return Err(DeploymentError::DeltaApplyFailed(
                     self.region_id,
-                    format!("insertion at {} exceeds buffer len {}", offset, result.len()),
+                    format!(
+                        "insertion at {} exceeds buffer len {}",
+                        offset,
+                        result.len()
+                    ),
                 ));
             }
             result.splice(*offset..*offset, data.iter().copied());
@@ -542,10 +548,7 @@ impl DeploymentPlan {
 
     /// Returns the number of regions assigned to the given target type.
     pub fn count_by_target(&self, target: &DeploymentTarget) -> usize {
-        self.regions
-            .iter()
-            .filter(|(_, t)| t == target)
-            .count()
+        self.regions.iter().filter(|(_, t)| t == target).count()
     }
 }
 
@@ -645,12 +648,11 @@ impl DeploymentPlanner {
     }
 
     /// Rebalances the deployment plan by re-running the planner logic.
-    pub fn rebalance(
-        &mut self,
-        region_ids: &[RegionId],
-        profile: &ProfileData,
-    ) -> &DeploymentPlan {
-        log::info!("Rebalancing deployment plan for {} regions", region_ids.len());
+    pub fn rebalance(&mut self, region_ids: &[RegionId], profile: &ProfileData) -> &DeploymentPlan {
+        log::info!(
+            "Rebalancing deployment plan for {} regions",
+            region_ids.len()
+        );
         self.compute_deployment_plan(region_ids, profile)
     }
 
@@ -719,7 +721,9 @@ impl DeploymentManager {
     ) -> Result<DeploymentResult, DeploymentError> {
         // Step 1: Validate checksum.
         if !package.validate_checksum() {
-            return Err(DeploymentError::ChecksumMismatch(package.metadata.region_id));
+            return Err(DeploymentError::ChecksumMismatch(
+                package.metadata.region_id,
+            ));
         }
 
         let start = Instant::now();
@@ -771,7 +775,9 @@ impl DeploymentManager {
         target: &DeploymentTarget,
     ) -> Result<HotSwapPhase, DeploymentError> {
         if !target.supports_hot_swap() {
-            return Err(DeploymentError::HotSwapNotSupported(target.kind_label().to_owned()));
+            return Err(DeploymentError::HotSwapNotSupported(
+                target.kind_label().to_owned(),
+            ));
         }
 
         let region_id = package.metadata.region_id;
@@ -815,10 +821,7 @@ impl DeploymentManager {
     ///
     /// The previous version's code is re-deployed to the same target. The
     /// rollback itself is recorded in the version log.
-    pub fn rollback(
-        &mut self,
-        region_id: RegionId,
-    ) -> Result<DeploymentResult, DeploymentError> {
+    pub fn rollback(&mut self, region_id: RegionId) -> Result<DeploymentResult, DeploymentError> {
         let prev_record = self
             .version_log
             .previous(region_id)
@@ -881,9 +884,9 @@ impl DeploymentManager {
         );
 
         // Simulate applying the delta on the remote side.
-        let reconstructed = delta.apply(&prev_code).map_err(|e| {
-            DeploymentError::DeltaApplyFailed(region_id, format!("{:?}", e))
-        })?;
+        let reconstructed = delta
+            .apply(&prev_code)
+            .map_err(|e| DeploymentError::DeltaApplyFailed(region_id, format!("{:?}", e)))?;
 
         // Verify the reconstructed code matches.
         if reconstructed != package.code {
@@ -1046,12 +1049,7 @@ mod tests {
     }
 
     fn make_package(region_id: RegionId, version: u64, code: &[u8]) -> DeploymentPackage {
-        DeploymentPackage::new(
-            code.to_vec(),
-            region_id,
-            PackageVersion(version),
-            "basic",
-        )
+        DeploymentPackage::new(code.to_vec(), region_id, PackageVersion(version), "basic")
     }
 
     fn make_package_with_opt(

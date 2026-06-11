@@ -417,6 +417,9 @@ mod tests {
     #[test]
     fn display_msg() {
         let g = MSG::new();
-        assert_eq!(format!("{}", g), "MSG { regions: 0, derivations: 0, accesses: 0, sync_edges: 0 }");
+        assert_eq!(
+            format!("{}", g),
+            "MSG { regions: 0, derivations: 0, accesses: 0, sync_edges: 0 }"
+        );
     }
 }

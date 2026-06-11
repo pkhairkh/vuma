@@ -337,15 +337,21 @@ mod tests {
     #[test]
     fn outlives_composition() {
         let a_outlives_b = RelD {
-            relations: [Relation::Temporal(TemporalKind::Outlives)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Outlives)]
+                .into_iter()
+                .collect(),
         };
         let b_outlives_c = RelD {
-            relations: [Relation::Temporal(TemporalKind::Outlives)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Outlives)]
+                .into_iter()
+                .collect(),
         };
         // Composing Outlives + Outlives should still be consistent
         let composed = a_outlives_b.compose(&b_outlives_c);
         assert!(composed.is_consistent());
-        assert!(composed.relations.contains(&Relation::Temporal(TemporalKind::Outlives)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Temporal(TemporalKind::Outlives)));
     }
 
     // -- BorrowsFrom transitivity --
@@ -354,10 +360,14 @@ mod tests {
     fn borrows_from_transitivity() {
         // If A borrows from B and B borrows from C, then A indirectly borrows from C
         let a_borrows_b = RelD {
-            relations: [Relation::Dependency(DepKind::AliasDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::AliasDep)]
+                .into_iter()
+                .collect(),
         };
         let b_borrows_c = RelD {
-            relations: [Relation::Dependency(DepKind::AliasDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::AliasDep)]
+                .into_iter()
+                .collect(),
         };
         let composed = a_borrows_b.compose(&b_borrows_c);
         assert!(composed.is_consistent());
@@ -368,30 +378,44 @@ mod tests {
     #[test]
     fn depends_on_composition() {
         let a_depends_b = RelD {
-            relations: [Relation::Dependency(DepKind::DataDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::DataDep)]
+                .into_iter()
+                .collect(),
         };
         let b_depends_a = RelD {
-            relations: [Relation::Dependency(DepKind::DataDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::DataDep)]
+                .into_iter()
+                .collect(),
         };
         // Composing data dependencies is still consistent at the syntactic level
         let composed = a_depends_b.compose(&b_depends_a);
         assert!(composed.is_consistent());
         // Both DataDep relations present
-        assert!(composed.relations.contains(&Relation::Dependency(DepKind::DataDep)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)));
     }
 
     #[test]
     fn depends_on_and_control_dep() {
         let data = RelD {
-            relations: [Relation::Dependency(DepKind::DataDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::DataDep)]
+                .into_iter()
+                .collect(),
         };
         let ctrl = RelD {
-            relations: [Relation::Dependency(DepKind::ControlDep)].into_iter().collect(),
+            relations: [Relation::Dependency(DepKind::ControlDep)]
+                .into_iter()
+                .collect(),
         };
         let composed = data.compose(&ctrl);
         assert!(composed.is_consistent());
-        assert!(composed.relations.contains(&Relation::Dependency(DepKind::DataDep)));
-        assert!(composed.relations.contains(&Relation::Dependency(DepKind::ControlDep)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Dependency(DepKind::DataDep)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Dependency(DepKind::ControlDep)));
     }
 
     // -- ContainedIn hierarchy --
@@ -402,7 +426,9 @@ mod tests {
             relations: [Relation::Containment].into_iter().collect(),
         };
         let outer = RelD {
-            relations: [Relation::Containment, Relation::Liveness].into_iter().collect(),
+            relations: [Relation::Containment, Relation::Liveness]
+                .into_iter()
+                .collect(),
         };
         // outer refines inner
         assert!(outer.refines(&inner));
@@ -416,7 +442,9 @@ mod tests {
             relations: [
                 Relation::Containment,
                 Relation::Dependency(DepKind::DataDep),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -443,7 +471,9 @@ mod tests {
             relations: [
                 Relation::Dependency(DepKind::AliasDep),
                 Relation::Dependency(DepKind::DataDep),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -456,7 +486,9 @@ mod tests {
             relations: [
                 Relation::Temporal(TemporalKind::Outlives),
                 Relation::Temporal(TemporalKind::Succeeds),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(!r.is_consistent());
     }
@@ -467,7 +499,9 @@ mod tests {
             relations: [
                 Relation::Temporal(TemporalKind::Precedes),
                 Relation::Temporal(TemporalKind::Succeeds),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(!r.is_consistent());
     }
@@ -478,7 +512,9 @@ mod tests {
             relations: [
                 Relation::Temporal(TemporalKind::Outlives),
                 Relation::Temporal(TemporalKind::Coincides),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -489,7 +525,9 @@ mod tests {
             relations: [
                 Relation::Temporal(TemporalKind::Precedes),
                 Relation::Temporal(TemporalKind::Coincides),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -499,10 +537,14 @@ mod tests {
     #[test]
     fn refinement_contradictory_compose() {
         let a = RelD {
-            relations: [Relation::Temporal(TemporalKind::Outlives)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Outlives)]
+                .into_iter()
+                .collect(),
         };
         let b = RelD {
-            relations: [Relation::Temporal(TemporalKind::Succeeds)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Succeeds)]
+                .into_iter()
+                .collect(),
         };
         let composed = a.compose(&b);
         assert!(!composed.is_consistent());
@@ -511,14 +553,18 @@ mod tests {
     #[test]
     fn refinement_non_contradictory_compose() {
         let a = RelD {
-            relations: [Relation::Temporal(TemporalKind::Outlives)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Outlives)]
+                .into_iter()
+                .collect(),
         };
         let b = RelD {
             relations: [Relation::Containment].into_iter().collect(),
         };
         let composed = a.compose(&b);
         assert!(composed.is_consistent());
-        assert!(composed.relations.contains(&Relation::Temporal(TemporalKind::Outlives)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Temporal(TemporalKind::Outlives)));
         assert!(composed.relations.contains(&Relation::Containment));
     }
 
@@ -527,17 +573,23 @@ mod tests {
     #[test]
     fn outlives_chain_composition() {
         let a = RelD {
-            relations: [Relation::Temporal(TemporalKind::Outlives)].into_iter().collect(),
+            relations: [Relation::Temporal(TemporalKind::Outlives)]
+                .into_iter()
+                .collect(),
         };
         let b = RelD {
             relations: [
                 Relation::Temporal(TemporalKind::Outlives),
                 Relation::Containment,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let composed = a.compose(&b);
         assert!(composed.is_consistent());
-        assert!(composed.relations.contains(&Relation::Temporal(TemporalKind::Outlives)));
+        assert!(composed
+            .relations
+            .contains(&Relation::Temporal(TemporalKind::Outlives)));
         assert!(composed.relations.contains(&Relation::Containment));
     }
 
@@ -547,7 +599,9 @@ mod tests {
             relations: [
                 Relation::Temporal(TemporalKind::Outlives),
                 Relation::Liveness,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let b = RelD {
             relations: [Relation::Liveness].into_iter().collect(),
@@ -564,7 +618,9 @@ mod tests {
             relations: [
                 Relation::Security(FlowPolicy::NoDowngrade),
                 Relation::Containment,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -575,7 +631,9 @@ mod tests {
             relations: [
                 Relation::Security(FlowPolicy::Sanitized),
                 Relation::Liveness,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -586,7 +644,9 @@ mod tests {
             relations: [
                 Relation::Security(FlowPolicy::NoCrossBoundary),
                 Relation::Equivalence,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert!(r.is_consistent());
     }
@@ -600,13 +660,14 @@ mod tests {
                 Relation::Containment,
                 Relation::Liveness,
                 Relation::Equivalence,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
         };
         let b = RelD {
-            relations: [
-                Relation::Containment,
-                Relation::Liveness,
-            ].into_iter().collect(),
+            relations: [Relation::Containment, Relation::Liveness]
+                .into_iter()
+                .collect(),
         };
         let m = a.merge(&b);
         assert!(m.relations.contains(&Relation::Containment));

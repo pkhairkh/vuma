@@ -26,78 +26,79 @@
 
 // VUMA-VERIFIED: module-level re-exports are BD-transparent
 
-pub mod primitives;
 pub mod alloc;
 pub mod collections;
-pub mod io;
-pub mod sync;
-pub mod net;
-pub mod time;
-pub mod process;
-pub mod fs;
-pub mod path;
 pub mod env;
-pub mod thread;
 pub mod error;
+pub mod fs;
+pub mod io;
+pub mod net;
+pub mod path;
+pub mod primitives;
+pub mod process;
+pub mod sync;
+pub mod thread;
+pub mod time;
 
 // Re-export core BD types for convenience
 pub use primitives::{
-    BD, RelD, RelKind, HasBD,
-    RepD, CapD, CapFlag, SyncEdge,
-    uint8_repd, uint16_repd, uint32_repd, uint64_repd,
-    int8_repd, int16_repd, int32_repd, int64_repd,
-    float32_repd, float64_repd,
-    bool_repd, byte_repd, ptr_repd,
-    numeric_capd, string_capd,
-    ptr_reld, region_ptr_reld, slice_reld, result_reld, option_reld, numeric_reld,
+    bool_repd, byte_repd, float32_repd, float64_repd, int16_repd, int32_repd, int64_repd,
+    int8_repd, numeric_capd, numeric_reld, option_reld, ptr_reld, ptr_repd, region_ptr_reld,
+    result_reld, slice_reld, string_capd, uint16_repd, uint32_repd, uint64_repd, uint8_repd, CapD,
+    CapFlag, HasBD, RelD, RelKind, RepD, SyncEdge, BD,
 };
 
 // Re-export VUMA primitive types
-pub use primitives::{
-    Ptr, RegionPtr, Slice, VumaResult, VumaOption, Range,
-};
+pub use primitives::{Ptr, Range, RegionPtr, Slice, VumaOption, VumaResult};
 
 // Re-export allocation types
 pub use alloc::{
-    Address, GlobalAllocator, ArenaAllocator, PoolAllocator,
-    BumpAllocator, FreeListAllocator, VumaAllocator,
-    AllocError, AllocResult,
-    MemoryStats, AllocRecord, AllocEventKind, AllocTracker,
+    Address, AllocError, AllocEventKind, AllocRecord, AllocResult, AllocTracker, ArenaAllocator,
+    BumpAllocator, FreeListAllocator, GlobalAllocator, MemoryStats, PoolAllocator, VumaAllocator,
 };
 
 // Re-export collection types
 pub use collections::{
-    DoublyLinkedList, Vec as VumaVec, HashMap as VumaHashMap, RingBuffer,
-    VumaString, SipHasher13, siphash_key,
-    BdVecStats, BdHashMapStats,
-    VecIter, VecIterMut, VecIntoIter,
-    VumaStringChars, HashMapIter, HashMapKeys, HashMapValues,
+    siphash_key, BdHashMapStats, BdVecStats, DoublyLinkedList, HashMap as VumaHashMap, HashMapIter,
+    HashMapKeys, HashMapValues, RingBuffer, SipHasher13, Vec as VumaVec, VecIntoIter, VecIter,
+    VecIterMut, VumaString, VumaStringChars,
 };
 
 // Re-export I/O types
 pub use io::{
-    // Core I/O traits
-    VumaReader, VumaWriter,
+    // Legacy types (backward compatible)
+    File,
+    FileCapD,
+    FileMode,
+    NetworkCapD,
+    Stderr,
+    Stdin,
+    Stdout,
+    TcpListener,
+    TcpStream,
+    UdpSocket,
     // Buffered I/O
-    VumaBufReader, VumaBufWriter,
-    // VUMA standard streams
-    VumaStdin, VumaStdout, VumaStderr,
+    VumaBufReader,
+    VumaBufWriter,
     // VUMA file I/O
     VumaFile,
     // VUMA error types
-    VumaIoError, VumaIoErrorKind, VumaIoResult,
-    // Legacy types (backward compatible)
-    File, FileMode, FileCapD,
-    Stdin, Stdout, Stderr,
-    TcpStream, TcpListener, UdpSocket,
-    NetworkCapD,
+    VumaIoError,
+    VumaIoErrorKind,
+    VumaIoResult,
+    // Core I/O traits
+    VumaReader,
+    VumaStderr,
+    // VUMA standard streams
+    VumaStdin,
+    VumaStdout,
+    VumaWriter,
 };
 
 // Re-export sync types
 pub use sync::{
-    Mutex, RwLock, Channel, Barrier,
-    MutexGuard, RwLockReadGuard, RwLockWriteGuard,
-    MutexCapD, RwLockCapD, ChannelCapD, BarrierCapD,
+    Barrier, BarrierCapD, Channel, ChannelCapD, Mutex, MutexCapD, MutexGuard, RwLock, RwLockCapD,
+    RwLockReadGuard, RwLockWriteGuard,
 };
 
 /// VUMA Standard Library version

@@ -360,11 +360,8 @@ impl ProfileData {
         }
 
         // Sort nodes by cumulative time, descending.
-        let mut nodes: Vec<(NodeId, u64)> = self
-            .node_time_ns
-            .iter()
-            .map(|(&n, &t)| (n, t))
-            .collect();
+        let mut nodes: Vec<(NodeId, u64)> =
+            self.node_time_ns.iter().map(|(&n, &t)| (n, t)).collect();
         nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut accumulated: u64 = 0;
@@ -428,11 +425,8 @@ impl ProfileData {
         let mut suggestions = Vec::new();
 
         // Suggest inlining for the top 3 hottest nodes.
-        let mut nodes: Vec<(NodeId, u64)> = self
-            .call_counts
-            .iter()
-            .map(|(&n, &c)| (n, c))
-            .collect();
+        let mut nodes: Vec<(NodeId, u64)> =
+            self.call_counts.iter().map(|(&n, &c)| (n, c)).collect();
         nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (node_id, count) in nodes.iter().take(3) {
             if *count > 100 {
@@ -818,11 +812,9 @@ mod tests {
             profile.record_call(99);
         }
         let suggestions = profile.suggest_optimizations();
-        assert!(
-            suggestions
-                .iter()
-                .any(|s| s.kind == SuggestionKind::Inline && s.target_node == 99)
-        );
+        assert!(suggestions
+            .iter()
+            .any(|s| s.kind == SuggestionKind::Inline && s.target_node == 99));
     }
 
     #[test]

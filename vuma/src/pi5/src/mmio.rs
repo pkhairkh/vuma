@@ -379,9 +379,7 @@ mod tests {
             let index = (offset / 4) as usize;
             assert!(index < MOCK_REG_COUNT, "register index out of range");
             // SAFETY: single-threaded test; no data race.
-            unsafe {
-                ptr::write_volatile((*self.regs.get()).as_mut_ptr().add(index), value)
-            }
+            unsafe { ptr::write_volatile((*self.regs.get()).as_mut_ptr().add(index), value) }
         }
 
         fn read_reg64(&self, offset: Address) -> u64 {

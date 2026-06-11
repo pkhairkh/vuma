@@ -51,14 +51,14 @@ pub mod access;
 pub mod access_analysis;
 pub mod address;
 pub mod derivation;
-pub mod invariant_exclusivity;
 pub mod invariant_cleanup;
+pub mod invariant_exclusivity;
 pub mod invariant_interpretation;
 pub mod invariant_liveness;
 pub mod invariant_origin;
-pub mod msg_incremental;
 pub mod msg;
 pub mod msg_builder;
+pub mod msg_incremental;
 pub mod program_point;
 pub mod region;
 pub mod repl;
@@ -71,20 +71,18 @@ pub use access::{Access, AccessId, AccessKind};
 pub use address::Address;
 pub use derivation::{Derivation, DerivationId, DerivationKind, DerivationSource};
 pub use msg::MSG;
+pub use msg_incremental::{
+    apply_delta, compute_delta, compute_scg_delta, DeltaError, DeltaResult, EntityDelta, MSGDelta,
+    SCGNode, SCGSnapshot, VerificationStatus,
+};
 pub use program_point::{NodeId, ProgramPoint};
 pub use region::{Region, RegionId, RegionStatus};
-pub use sync::{LockId, Ordering, SyncEdge, SyncEdgeId};
-pub use msg_incremental::{
-    MSGDelta, DeltaResult, DeltaError, VerificationStatus,
-    apply_delta, compute_delta, compute_scg_delta,
-    SCGSnapshot, SCGNode, EntityDelta,
-};
-pub use repl::{VumaRepl, ReplError, ReplResult, ReplProfile};
+pub use repl::{ReplError, ReplProfile, ReplResult, VumaRepl};
 pub use security::{
-    SecurityLevel, FlowPolicy, TaintSource, TaintLabel, TaintStatus, TaintTracker,
-    SecurityRel, SecurityCapability, SecurityBoundary, BoundaryId,
-    DeclassificationRecord, DeclassificationProof, GateFunctionId,
-    SecurityViolation, Arm64SecurityMapping, Arm64Feature, PacKey, MteMode, BtiType,
-    SecNode, SecEdge, SecurityVerifier, VerificationResult,
-    propagate_taint_through_chain,
+    propagate_taint_through_chain, Arm64Feature, Arm64SecurityMapping, BoundaryId, BtiType,
+    DeclassificationProof, DeclassificationRecord, FlowPolicy, GateFunctionId, MteMode, PacKey,
+    SecEdge, SecNode, SecurityBoundary, SecurityCapability, SecurityLevel, SecurityRel,
+    SecurityVerifier, SecurityViolation, TaintLabel, TaintSource, TaintStatus, TaintTracker,
+    VerificationResult,
 };
+pub use sync::{LockId, Ordering, SyncEdge, SyncEdgeId};

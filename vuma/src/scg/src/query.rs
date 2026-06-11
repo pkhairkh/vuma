@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::SCG;
-use crate::node::{NodeId, NodeType, NodePayload};
+use crate::node::{NodeId, NodePayload, NodeType};
 use crate::region::RegionId;
 
 /// A query that can be executed against an SCG.
@@ -224,11 +224,7 @@ fn query_access_nodes_to_region(scg: &SCG, region_id: RegionId) -> QueryResult {
 ///
 /// Traverses `EdgeKind::Derivation` edges in a depth-first manner,
 /// collecting all paths from the start node.
-pub fn find_derivation_chains(
-    scg: &SCG,
-    start: NodeId,
-    max_depth: usize,
-) -> Vec<DerivationChain> {
+pub fn find_derivation_chains(scg: &SCG, start: NodeId, max_depth: usize) -> Vec<DerivationChain> {
     if scg.get_node(start).is_none() || max_depth == 0 {
         return Vec::new();
     }
@@ -411,7 +407,15 @@ fn query_paths_between(scg: &SCG, from: NodeId, to: NodeId, max_length: usize) -
     let mut visited = HashSet::new();
     visited.insert(from);
 
-    dfs_paths(scg, from, to, max_length, &mut current_path, &mut visited, &mut paths);
+    dfs_paths(
+        scg,
+        from,
+        to,
+        max_length,
+        &mut current_path,
+        &mut visited,
+        &mut paths,
+    );
 
     let node_ids: SmallVec<[NodeId; 8]> = paths
         .iter()
@@ -450,7 +454,15 @@ fn dfs_paths(
         for succ in succs {
             if visited.insert(succ) {
                 path.push(succ);
-                dfs_paths(scg, succ, target, remaining_length - 1, path, visited, results);
+                dfs_paths(
+                    scg,
+                    succ,
+                    target,
+                    remaining_length - 1,
+                    path,
+                    visited,
+                    results,
+                );
                 path.pop();
                 visited.remove(&succ);
             }
@@ -485,7 +497,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "add".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         scg.add_node(
@@ -502,7 +516,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "sub".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
 
@@ -616,14 +632,18 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "b".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
@@ -643,7 +663,9 @@ mod tests {
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
                 operation: "a".to_string(),
-                result_type: None, tail_call: false }),
+                result_type: None,
+                tail_call: false,
+            }),
             pp(),
         );
         let mut region = SCGRegion::new(RegionId::new(1), DeploymentTarget::Heap);

@@ -80,10 +80,14 @@ impl std::fmt::Display for EdgeKind {
             EdgeKind::Derivation => write!(f, "Derivation"),
             EdgeKind::Annotation => write!(f, "Annotation"),
             EdgeKind::Dispatch => write!(f, "Dispatch"),
-            EdgeKind::Call { from_node, to_node, .. } => {
+            EdgeKind::Call {
+                from_node, to_node, ..
+            } => {
                 write!(f, "Call({} -> {})", from_node, to_node)
             }
-            EdgeKind::Return { from_node, to_node, .. } => {
+            EdgeKind::Return {
+                from_node, to_node, ..
+            } => {
                 write!(f, "Return({} -> {})", from_node, to_node)
             }
         }
