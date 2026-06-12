@@ -1584,6 +1584,8 @@ impl Instruction {
             }
 
             // ---- BLR ----
+            // BLR Xn: 1101_0111_0000_11111_000000_Rn_00001
+            // Base = 0xD63F0001
             Instruction::BLR { rn } => {
                 Ok(0xD63F0000u32 | (rn.encoding() << 5))
             }
@@ -1626,6 +1628,8 @@ impl Instruction {
             }
 
             // ---- TBNZ ----
+            // TBNZ: b5 011011 1 imm14 Rt
+            // Base = 0x37000000
             Instruction::TBNZ { rt, bit, offset } => {
                 let b5 = *bit >> 5;
                 let imm14 = (*offset) >> 2;
@@ -1736,11 +1740,15 @@ impl Instruction {
             }
 
             // ---- DMB ----
+            // DMB: 1101_0101_0000_0011_1011_1_CRm_111_11111
+            // Base (CRm=0) = 0xD50330BF
             Instruction::DMB { option } => {
                 Ok(0xD5033BBFu32 | (option.encoding() << 8))
             }
 
             // ---- DSB ----
+            // DSB: 1101_0101_0000_0011_1011_1_CRm_101_11111
+            // Base (CRm=0) = 0xD50330AF
             Instruction::DSB { option } => {
                 Ok(0xD5033BB9u32 | (option.encoding() << 8))
             }
@@ -1922,6 +1930,8 @@ impl Instruction {
                     let n_bit = if size == 64 { 1u32 } else { 0 };
                     let immr = (size - shift_val) & (size - 1);
                     let imms = (size - 1 - shift_val) & (size - 1);
+                    // UBFM: sf opc 100110 N immr imms Rn Rd
+                    // opc=10 for UBFM, base with sf=0,N=0 = 0x53000000
                     Ok((sf << 31)
                         | (n_bit << 22)
                         | 0x53000000u32  // UBFM base (no sf, no N)
@@ -1946,6 +1956,7 @@ impl Instruction {
                     let n_bit = if size == 64 { 1u32 } else { 0 };
                     let immr = *imm as u32;
                     let imms = size - 1;
+                    // UBFM base with sf=0,N=0 = 0x53000000
                     Ok((sf << 31)
                         | (n_bit << 22)
                         | 0x53000000u32  // UBFM base (no sf, no N)
@@ -1970,6 +1981,8 @@ impl Instruction {
                     let n_bit = if size == 64 { 1u32 } else { 0 };
                     let immr = *imm as u32;
                     let imms = size - 1;
+                    // SBFM: sf opc 100110 N immr imms Rn Rd
+                    // opc=00 for SBFM, base with sf=0,N=0 = 0x13000000
                     Ok((sf << 31)
                         | (n_bit << 22)
                         | 0x13000000u32  // SBFM base (no sf, no N)
@@ -2046,16 +2059,21 @@ impl Instruction {
                 | (rn.encoding() << 5)),
 
             // ---- CSEL ----
+            // CSEL: sf 00 1101 0100 Rm cond Rn Rd
+            // 32-bit base = 0x1A800000, 64-bit = 0x9A800000
             Instruction::CSEL { rd, rn, rm, cond } => Ok((sf << 31)
-                | 0x0A800000u32
+                | 0x1A800000u32
                 | (rm.encoding() << 16)
                 | (cond.encoding() << 12)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
             // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
+            // CSINC: sf 00 1101 0100 Rm cond 01 Rn Rd
+            // 32-bit base = 0x1A800400, 64-bit = 0x9A800400
+            // Combined: (sf << 31) | 0x1A800400
             Instruction::CSET { rd, cond } => Ok((sf << 31)
-                | 0x0A800000u32
+                | 0x1A800400u32
                 | (Register::XZR.encoding() << 16)
                 | (cond.invert().encoding() << 12)
                 | (Register::XZR.encoding() << 5)

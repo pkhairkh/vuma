@@ -63,6 +63,23 @@ use crate::CodegenError;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
+// Branch fixup format
+// ---------------------------------------------------------------------------
+
+/// The encoding format of a branch instruction, used during fixup resolution
+/// to know which bits contain the offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchFormat {
+    /// B / BL: 26-bit offset in bits[25:0] (word-aligned, offset = imm26 * 4)
+    B26,
+    /// CBZ / CBNZ: 19-bit offset in bits[23:5] (word-aligned, offset = imm19 * 4)
+    Cond19,
+    /// B.cond: 19-bit offset in bits[23:5] (word-aligned)
+    BCond19,
+}
+
+
+// ---------------------------------------------------------------------------
 // ELF Constants (ARM64 / AArch64)
 // ---------------------------------------------------------------------------
 
@@ -539,8 +556,8 @@ pub struct Emitter {
     reg_alloc: RegAllocator,
     /// Accumulated machine code for the current function (32-bit words).
     code: Vec<u32>,
-    /// Fixup records for intra-function branches: (word index, target label name).
-    fixups: Vec<(usize, String)>,
+    /// Fixup records for intra-function branches: (word index, target label name, format).
+    fixups: Vec<(usize, String, BranchFormat)>,
     /// Map from label name to code offset (in words) within the current function.
     label_offsets: HashMap<String, usize>,
     /// Inter-function call relocations for the current function.
@@ -963,8 +980,27 @@ impl Emitter {
             } => {
                 let width = RegWidth::from_ir_type(ty.as_ref());
                 let rd = self.resolve_reg(dst)?;
+                // IMPORTANT: resolve_reg uses X9 for immediates, so if both lhs and rhs
+                // are immediates, the second load would overwrite the first. Use X10 for
+                // the RHS when both are immediates.
                 let rn = self.resolve_reg(lhs)?;
-                let rm = self.resolve_reg(rhs)?;
+                let rm = match rhs {
+                    IRValue::Immediate(_) | IRValue::Address(_) => {
+                        // If lhs was also an immediate, it's in X9; use X10 for rhs
+                        let temp = if matches!(lhs, IRValue::Immediate(_) | IRValue::Address(_)) {
+                            Register::X10
+                        } else {
+                            Register::X9
+                        };
+                        match rhs {
+                            IRValue::Immediate(v) => self.emit_load_immediate(temp, *v)?,
+                            IRValue::Address(a) => self.emit_load_immediate(temp, *a as i64)?,
+                            _ => unreachable!(),
+                        }
+                        temp
+                    }
+                    _ => self.resolve_reg(rhs)?,
+                };
                 self.emit_instruction_with_width(
                     Instruction::CMP {
                         rn,
@@ -1008,7 +1044,7 @@ impl Emitter {
 
             IRInstr::Branch { target } => {
                 let fixup_idx = self.code.len();
-                self.fixups.push((fixup_idx, target.clone()));
+                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
 
@@ -1018,11 +1054,13 @@ impl Emitter {
                 false_target,
             } => {
                 let rt = self.resolve_reg(cond)?;
+                // CBNZ: if cond != 0, branch to true_target
                 let fixup_cbz = self.code.len();
-                self.fixups.push((fixup_cbz, false_target.clone()));
+                self.fixups.push((fixup_cbz, true_target.clone(), BranchFormat::Cond19));
                 self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
+                // Otherwise (cond == 0), branch to false_target
                 let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, true_target.clone()));
+                self.fixups.push((fixup_b, false_target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
 
@@ -1212,7 +1250,7 @@ impl Emitter {
         match term {
             IRTerminator::Jump(target) => {
                 let fixup_idx = self.code.len();
-                self.fixups.push((fixup_idx, target.clone()));
+                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
             IRTerminator::Branch {
@@ -1222,10 +1260,10 @@ impl Emitter {
             } => {
                 let rt = self.resolve_reg(cond)?;
                 let fixup_cbnz = self.code.len();
-                self.fixups.push((fixup_cbnz, true_block.clone()));
+                self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
                 self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
                 let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, false_block.clone()));
+                self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
             IRTerminator::Return(vals) => {
@@ -1699,11 +1737,27 @@ impl Emitter {
 
     fn apply_fixups(&mut self) -> Result<()> {
         let fixups = std::mem::take(&mut self.fixups);
-        for (word_idx, label) in &fixups {
+        for (word_idx, label, format) in &fixups {
             let target_offset = self.label_offsets.get(label).copied().unwrap_or(0);
             let offset = (target_offset as i32) - (*word_idx as i32);
             let old_word = self.code[*word_idx];
-            let patched = (old_word & !0x03FFFFFF) | ((offset & 0x03FFFFFF) as u32);
+            let patched = match format {
+                BranchFormat::B26 => {
+                    // B / BL: offset in bits[25:0], word-aligned
+                    (old_word & !0x03FFFFFF) | ((offset & 0x03FFFFFF) as u32)
+                }
+                BranchFormat::Cond19 => {
+                    // CBZ / CBNZ: imm19 in bits[23:5], word-aligned
+                    // Clear bits[23:5], then set imm19 there
+                    let imm19 = offset & 0x7FFFF;
+                    (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5)
+                }
+                BranchFormat::BCond19 => {
+                    // B.cond: imm19 in bits[23:5], word-aligned
+                    let imm19 = offset & 0x7FFFF;
+                    (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5)
+                }
+            };
             self.code[*word_idx] = patched;
         }
         Ok(())

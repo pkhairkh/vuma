@@ -1598,6 +1598,9 @@ impl RegAllocator {
     /// Create a new allocator with the default ARM64 caller-saved register
     /// pool.
     pub fn new() -> Self {
+        // NOTE: X9, X10, X16, X17 are reserved for the emitter's scratch use
+        // (resolve_reg loads immediates into X9/X10, emit_binop uses X16 for
+        // large immediates, CSET uses X17). Do NOT include them here.
         let free_regs = vec![
             Register::X0,
             Register::X1,
@@ -1607,14 +1610,11 @@ impl RegAllocator {
             Register::X5,
             Register::X6,
             Register::X7,
-            Register::X9,
-            Register::X10,
             Register::X11,
             Register::X12,
             Register::X13,
             Register::X14,
             Register::X15,
-            Register::X17,
         ];
 
         let callee_saved_pool = vec![
