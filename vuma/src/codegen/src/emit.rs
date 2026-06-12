@@ -591,11 +591,17 @@ impl Emitter {
         self.current_func_name = func.name.clone();
         self.reg_alloc.reset();
 
-        // Allocate registers for parameters (AAPCS64: X0–X7).
+        // Pre-allocate registers for parameters (AAPCS64: X0–X7).
+        // We must explicitly assign parameter virtual registers to the
+        // correct argument registers so the calling convention is respected.
+        let arg_regs = [
+            Register::X0, Register::X1, Register::X2, Register::X3,
+            Register::X4, Register::X5, Register::X6, Register::X7,
+        ];
         for (i, param) in func.params.iter().enumerate() {
             if let IRValue::Register(vreg_id) = param {
                 if i < 8 {
-                    let _ = self.reg_alloc.allocate(*vreg_id);
+                    self.reg_alloc.preassign(*vreg_id, arg_regs[i]);
                 }
             }
         }

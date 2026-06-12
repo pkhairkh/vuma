@@ -1,0 +1,2002 @@
+     1→//! # ARM64 (AArch64) Instruction Definitions & Instruction Selection
+     2→//!
+     3→//! Defines the ARM64 register set, condition codes, instruction
+     4→//! representations, addressing modes, and the instruction selector that maps
+     5→//! SCG/IR node types to ARM64 instructions for the Raspberry Pi 5
+     6→//! (Cortex-A76, ARMv8.2-A).
+     7→//!
+     8→//! ## Instruction Selection (SCG → ARM64)
+     9→//!
+    10→//! | SCG / IR Node          | ARM64 Instructions                                  |
+    11→//! |------------------------|-----------------------------------------------------|
+    12→//! | Computation(add)       | ADD, SUB, MUL, SDIV, UDIV                          |
+    13→//! | Computation(cmp)       | CMP, CSEL                                           |
+    14→//! | Computation(bitwise)   | AND, ORR, EOR, LSL, LSR, ASR                       |
+    15→//! | Allocation             | SUB SP, SP, #size / BL malloc                      |
+    16→//! | Deallocation           | ADD SP, SP, #size / BL free                        |
+    17→//! | Access(read)           | LDR, LDRB, LDRH, LDRSW                             |
+    18→//! | Access(write)          | STR, STRB, STRH                                    |
+    19→//! | Cast                   | MOV (no-op) / FCVT / SCVTF / FCVTZS / SXTW        |
+    20→//! | ControlFlow            | B, B.cond, CBZ, CBNZ, TBZ, TBNZ                   |
+    21→//!
+    22→//! ## AAPCS64 Calling Convention
+    23→//!
+    24→//! | Register(s) | Role                                  |
+    25→//! |-------------|---------------------------------------|
+    26→//! | X0–X7       | Argument / result registers            |
+    27→//! | X8          | Indirect result location register      |
+    28→//! | X9–X15      | Caller-saved temporary registers       |
+    29→//! | X16–X17     | Intra-procedure-call scratch (IP0/IP1) |
+    30→//! | X18         | Platform register                      |
+    31→//! | X19–X28     | Callee-saved registers                 |
+    32→//! | X29         | Frame pointer (FP)                     |
+    33→//! | X30         | Link register (LR)                     |
+    34→//! | SP          | Stack pointer                          |
+    35→//! | XZR         | Zero register                          |
+    36→//!
+    37→//! ## References
+    38→//!
+    39→//! - ARM Architecture Reference Manual ARMv8, for ARMv8-A architecture profile
+    40→//! - <https://developer.arm.com/documentation/ddi0487/latest>
+    41→
+    42→use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator, IRType, IRValue};
+    43→use crate::CodegenError;
+    44→use crate::Result;
+    45→
+    46→// ---------------------------------------------------------------------------
+    47→// Register Width
+    48→// ---------------------------------------------------------------------------
+    49→
+    50→/// ARM64 register width — selects between 64-bit X registers and 32-bit W
+    51→/// sub-registers.
+    52→///
+    53→/// On AArch64, the 5-bit register encoding is the same for Xn and Wn; the
+    54→/// instruction's **sf** bit (bit 31) or **size** field (bits 31:30) selects
+    55→/// the operand width. Using W registers gives automatic 32-bit wrapping
+    56→/// arithmetic, which is required for algorithms like SHA-256 that operate on
+    57→/// `u32` values.
+    58→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    59→pub enum RegWidth {
+    60→    /// 32-bit W registers (W0–W30, WZR, WSP).
+    61→    W32,
+    62→    /// 64-bit X registers (X0–X30, XZR, SP) — default.
+    63→    X64,
+    64→}
+    65→
+    66→impl RegWidth {
+    67→    /// Returns `true` if this is a 32-bit register width.
+    68→    pub fn is_32bit(&self) -> bool {
+    69→        matches!(self, RegWidth::W32)
+    70→    }
+    71→
+    72→    /// Returns the **sf** bit value for this width (bit 31 of the encoding).
+    73→    ///
+    74→    /// - `X64` → 1
+    75→    /// - `W32` → 0
+    76→    pub fn sf_bit(&self) -> u32 {
+    77→        match self {
+    78→            RegWidth::X64 => 1,
+    79→            RegWidth::W32 => 0,
+    80→        }
+    81→    }
+    82→
+    83→    /// Returns the register size in bits (64 or 32).
+    84→    pub fn bits(&self) -> u32 {
+    85→        match self {
+    86→            RegWidth::X64 => 64,
+    87→            RegWidth::W32 => 32,
+    88→        }
+    89→    }
+    90→
+    91→    /// Returns the register size in bytes (8 or 4).
+    92→    pub fn bytes(&self) -> u32 {
+    93→        self.bits() / 8
+    94→    }
+    95→
+    96→    /// Returns the log2 scale for unsigned-offset load/store encoding.
+    97→    ///
+    98→    /// - `X64` → 3 (offset is divided by 8 for 64-bit LDR/STR)
+    99→    /// - `W32` → 2 (offset is divided by 4 for 32-bit LDR/STR)
+   100→    pub fn scale(&self) -> u32 {
+   101→        match self {
+   102→            RegWidth::X64 => 3,
+   103→            RegWidth::W32 => 2,
+   104→        }
+   105→    }
+   106→
+   107→    /// Returns the mask value used in UBFM/SBFM for the `imms` field
+   108→    /// (register size - 1).
+   109→    pub fn size_minus_1(&self) -> u32 {
+   110→        match self {
+   111→            RegWidth::X64 => 63,
+   112→            RegWidth::W32 => 31,
+   113→        }
+   114→    }
+   115→
+   116→    /// Derive the register width from an optional IR type.
+   117→    ///
+   118→    /// Returns `W32` for `I32`/`U32` types, `X64` otherwise (including `None`).
+   119→    pub fn from_ir_type(ty: Option<&IRType>) -> RegWidth {
+   120→        match ty {
+   121→            Some(IRType::I32) | Some(IRType::U32) => RegWidth::W32,
+   122→            _ => RegWidth::X64,
+   123→        }
+   124→    }
+   125→}
+   126→
+   127→impl Default for RegWidth {
+   128→    fn default() -> Self {
+   129→        RegWidth::X64
+   130→    }
+   131→}
+   132→
+   133→impl std::fmt::Display for RegWidth {
+   134→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   135→        match self {
+   136→            RegWidth::W32 => write!(f, "w32"),
+   137→            RegWidth::X64 => write!(f, "x64"),
+   138→        }
+   139→    }
+   140→}
+   141→
+   142→// ---------------------------------------------------------------------------
+   143→// Register
+   144→// ---------------------------------------------------------------------------
+   145→
+   146→/// ARM64 general-purpose registers (X0–X30) and special-purpose registers.
+   147→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   148→pub enum Register {
+   149→    X0,
+   150→    X1,
+   151→    X2,
+   152→    X3,
+   153→    X4,
+   154→    X5,
+   155→    X6,
+   156→    X7,
+   157→    /// Indirect result location register (AAPCS64).
+   158→    X8,
+   159→    X9,
+   160→    X10,
+   161→    X11,
+   162→    X12,
+   163→    X13,
+   164→    X14,
+   165→    X15,
+   166→    /// Intra-procedure-call scratch register IP0.
+   167→    X16,
+   168→    /// Intra-procedure-call scratch register IP1.
+   169→    X17,
+   170→    /// Platform register (OS-specific use).
+   171→    X18,
+   172→    X19,
+   173→    X20,
+   174→    X21,
+   175→    X22,
+   176→    X23,
+   177→    X24,
+   178→    X25,
+   179→    X26,
+   180→    X27,
+   181→    X28,
+   182→    /// Frame pointer.
+   183→    X29,
+   184→    /// Link register.
+   185→    X30,
+   186→    /// Stack pointer.
+   187→    SP,
+   188→    /// Zero register — reads as 0, writes are discarded.
+   189→    XZR,
+   190→}
+   191→
+   192→impl Register {
+   193→    /// Returns the 5-bit encoding index used in ARM64 instruction encodings.
+   194→    ///
+   195→    /// `SP` and `XZR` both encode as `31` — the distinction is determined by
+   196→    /// context (the specific instruction encoding).
+   197→    pub fn encoding(&self) -> u32 {
+   198→        match self {
+   199→            Register::X0 => 0,
+   200→            Register::X1 => 1,
+   201→            Register::X2 => 2,
+   202→            Register::X3 => 3,
+   203→            Register::X4 => 4,
+   204→            Register::X5 => 5,
+   205→            Register::X6 => 6,
+   206→            Register::X7 => 7,
+   207→            Register::X8 => 8,
+   208→            Register::X9 => 9,
+   209→            Register::X10 => 10,
+   210→            Register::X11 => 11,
+   211→            Register::X12 => 12,
+   212→            Register::X13 => 13,
+   213→            Register::X14 => 14,
+   214→            Register::X15 => 15,
+   215→            Register::X16 => 16,
+   216→            Register::X17 => 17,
+   217→            Register::X18 => 18,
+   218→            Register::X19 => 19,
+   219→            Register::X20 => 20,
+   220→            Register::X21 => 21,
+   221→            Register::X22 => 22,
+   222→            Register::X23 => 23,
+   223→            Register::X24 => 24,
+   224→            Register::X25 => 25,
+   225→            Register::X26 => 26,
+   226→            Register::X27 => 27,
+   227→            Register::X28 => 28,
+   228→            Register::X29 => 29,
+   229→            Register::X30 => 30,
+   230→            Register::SP => 31,
+   231→            Register::XZR => 31,
+   232→        }
+   233→    }
+   234→
+   235→    /// Returns the standard assembly name for this register (64-bit X name).
+   236→    pub fn asm_name(&self) -> &'static str {
+   237→        match self {
+   238→            Register::X0 => "x0",
+   239→            Register::X1 => "x1",
+   240→            Register::X2 => "x2",
+   241→            Register::X3 => "x3",
+   242→            Register::X4 => "x4",
+   243→            Register::X5 => "x5",
+   244→            Register::X6 => "x6",
+   245→            Register::X7 => "x7",
+   246→            Register::X8 => "x8",
+   247→            Register::X9 => "x9",
+   248→            Register::X10 => "x10",
+   249→            Register::X11 => "x11",
+   250→            Register::X12 => "x12",
+   251→            Register::X13 => "x13",
+   252→            Register::X14 => "x14",
+   253→            Register::X15 => "x15",
+   254→            Register::X16 => "x16",
+   255→            Register::X17 => "x17",
+   256→            Register::X18 => "x18",
+   257→            Register::X19 => "x19",
+   258→            Register::X20 => "x20",
+   259→            Register::X21 => "x21",
+   260→            Register::X22 => "x22",
+   261→            Register::X23 => "x23",
+   262→            Register::X24 => "x24",
+   263→            Register::X25 => "x25",
+   264→            Register::X26 => "x26",
+   265→            Register::X27 => "x27",
+   266→            Register::X28 => "x28",
+   267→            Register::X29 => "x29",
+   268→            Register::X30 => "x30",
+   269→            Register::SP => "sp",
+   270→            Register::XZR => "xzr",
+   271→        }
+   272→    }
+   273→
+   274→    /// Returns the 32-bit W-register assembly name for this register.
+   275→    ///
+   276→    /// `SP` maps to `wsp` and `XZR` maps to `wzr`; all others map from
+   277→    /// `Xn` to `Wn`.
+   278→    pub fn w_name(&self) -> &'static str {
+   279→        match self {
+   280→            Register::X0 => "w0",
+   281→            Register::X1 => "w1",
+   282→            Register::X2 => "w2",
+   283→            Register::X3 => "w3",
+   284→            Register::X4 => "w4",
+   285→            Register::X5 => "w5",
+   286→            Register::X6 => "w6",
+   287→            Register::X7 => "w7",
+   288→            Register::X8 => "w8",
+   289→            Register::X9 => "w9",
+   290→            Register::X10 => "w10",
+   291→            Register::X11 => "w11",
+   292→            Register::X12 => "w12",
+   293→            Register::X13 => "w13",
+   294→            Register::X14 => "w14",
+   295→            Register::X15 => "w15",
+   296→            Register::X16 => "w16",
+   297→            Register::X17 => "w17",
+   298→            Register::X18 => "w18",
+   299→            Register::X19 => "w19",
+   300→            Register::X20 => "w20",
+   301→            Register::X21 => "w21",
+   302→            Register::X22 => "w22",
+   303→            Register::X23 => "w23",
+   304→            Register::X24 => "w24",
+   305→            Register::X25 => "w25",
+   306→            Register::X26 => "w26",
+   307→            Register::X27 => "w27",
+   308→            Register::X28 => "w28",
+   309→            Register::X29 => "w29",
+   310→            Register::X30 => "w30",
+   311→            Register::SP => "wsp",
+   312→            Register::XZR => "wzr",
+   313→        }
+   314→    }
+   315→
+   316→    /// Returns the assembly name for this register at the given width.
+   317→    pub fn name_for_width(&self, width: RegWidth) -> &'static str {
+   318→        match width {
+   319→            RegWidth::X64 => self.asm_name(),
+   320→            RegWidth::W32 => self.w_name(),
+   321→        }
+   322→    }
+   323→
+   324→    /// Returns the register for a 5-bit encoding index.
+   325→    ///
+   326→    /// Index 31 maps to `SP` by default; callers that know the context is
+   327→    /// the zero-register should map 31 → `XZR` themselves.
+   328→    pub fn from_encoding(idx: u32) -> Option<Register> {
+   329→        match idx {
+   330→            0 => Some(Register::X0),
+   331→            1 => Some(Register::X1),
+   332→            2 => Some(Register::X2),
+   333→            3 => Some(Register::X3),
+   334→            4 => Some(Register::X4),
+   335→            5 => Some(Register::X5),
+   336→            6 => Some(Register::X6),
+   337→            7 => Some(Register::X7),
+   338→            8 => Some(Register::X8),
+   339→            9 => Some(Register::X9),
+   340→            10 => Some(Register::X10),
+   341→            11 => Some(Register::X11),
+   342→            12 => Some(Register::X12),
+   343→            13 => Some(Register::X13),
+   344→            14 => Some(Register::X14),
+   345→            15 => Some(Register::X15),
+   346→            16 => Some(Register::X16),
+   347→            17 => Some(Register::X17),
+   348→            18 => Some(Register::X18),
+   349→            19 => Some(Register::X19),
+   350→            20 => Some(Register::X20),
+   351→            21 => Some(Register::X21),
+   352→            22 => Some(Register::X22),
+   353→            23 => Some(Register::X23),
+   354→            24 => Some(Register::X24),
+   355→            25 => Some(Register::X25),
+   356→            26 => Some(Register::X26),
+   357→            27 => Some(Register::X27),
+   358→            28 => Some(Register::X28),
+   359→            29 => Some(Register::X29),
+   360→            30 => Some(Register::X30),
+   361→            31 => Some(Register::SP),
+   362→            _ => None,
+   363→        }
+   364→    }
+   365→
+   366→    /// Returns `true` if this register is callee-saved (X19–X28).
+   367→    pub fn is_callee_saved(&self) -> bool {
+   368→        matches!(
+   369→            self,
+   370→            Register::X19
+   371→                | Register::X20
+   372→                | Register::X21
+   373→                | Register::X22
+   374→                | Register::X23
+   375→                | Register::X24
+   376→                | Register::X25
+   377→                | Register::X26
+   378→                | Register::X27
+   379→                | Register::X28
+   380→        )
+   381→    }
+   382→
+   383→    /// Returns `true` if this register is caller-saved / temporary (X0–X18,
+   384→    /// excluding SP and XZR).
+   385→    pub fn is_caller_saved(&self) -> bool {
+   386→        !self.is_callee_saved() && !matches!(self, Register::SP | Register::XZR)
+   387→    }
+   388→
+   389→    /// Returns the AAPCS64 argument register for the given argument index
+   390→    /// (0–7). Returns `None` for indices ≥ 8 (stack arguments).
+   391→    pub fn arg_register(index: usize) -> Option<Register> {
+   392→        match index {
+   393→            0 => Some(Register::X0),
+   394→            1 => Some(Register::X1),
+   395→            2 => Some(Register::X2),
+   396→            3 => Some(Register::X3),
+   397→            4 => Some(Register::X4),
+   398→            5 => Some(Register::X5),
+   399→            6 => Some(Register::X6),
+   400→            7 => Some(Register::X7),
+   401→            _ => None,
+   402→        }
+   403→    }
+   404→
+   405→    /// Returns the index of this register if it is an AAPCS64 argument
+   406→    /// register (X0–X7). Returns `None` otherwise.
+   407→    pub fn arg_index(&self) -> Option<usize> {
+   408→        match self {
+   409→            Register::X0 => Some(0),
+   410→            Register::X1 => Some(1),
+   411→            Register::X2 => Some(2),
+   412→            Register::X3 => Some(3),
+   413→            Register::X4 => Some(4),
+   414→            Register::X5 => Some(5),
+   415→            Register::X6 => Some(6),
+   416→            Register::X7 => Some(7),
+   417→            _ => None,
+   418→        }
+   419→    }
+   420→}
+   421→
+   422→impl std::fmt::Display for Register {
+   423→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   424→        f.write_str(self.asm_name())
+   425→    }
+   426→}
+   427→
+   428→// ---------------------------------------------------------------------------
+   429→// Condition Code
+   430→// ---------------------------------------------------------------------------
+   431→
+   432→/// ARM64 condition codes used in conditional branches and instructions.
+   433→///
+   434→/// Each condition code tests the NZCV flags set by a preceding comparison or
+   435→/// arithmetic instruction.
+   436→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   437→pub enum Condition {
+   438→    /// Equal / zero (Z == 1)
+   439→    EQ,
+   440→    /// Not equal / not zero (Z == 0)
+   441→    NE,
+   442→    /// Carry set / unsigned higher or same (C == 1)
+   443→    CS,
+   444→    /// Carry clear / unsigned lower (C == 0)
+   445→    CC,
+   446→    /// Minus / negative (N == 1)
+   447→    MI,
+   448→    /// Plus / positive or zero (N == 0)
+   449→    PL,
+   450→    /// Overflow (V == 1)
+   451→    VS,
+   452→    /// No overflow (V == 0)
+   453→    VC,
+   454→    /// Unsigned higher (C == 1 && Z == 0)
+   455→    HI,
+   456→    /// Unsigned lower or same (C == 0 || Z == 1)
+   457→    LS,
+   458→    /// Signed greater than or equal (N == V)
+   459→    GE,
+   460→    /// Signed less than (N != V)
+   461→    LT,
+   462→    /// Signed greater than (Z == 0 && N == V)
+   463→    GT,
+   464→    /// Signed less than or equal (Z == 1 || N != V)
+   465→    LE,
+   466→}
+   467→
+   468→impl Condition {
+   469→    /// Returns the 4-bit condition code encoding used in ARM64 instructions.
+   470→    pub fn encoding(&self) -> u32 {
+   471→        match self {
+   472→            Condition::EQ => 0b0000,
+   473→            Condition::NE => 0b0001,
+   474→            Condition::CS => 0b0010,
+   475→            Condition::CC => 0b0011,
+   476→            Condition::MI => 0b0100,
+   477→            Condition::PL => 0b0101,
+   478→            Condition::VS => 0b0110,
+   479→            Condition::VC => 0b0111,
+   480→            Condition::HI => 0b1000,
+   481→            Condition::LS => 0b1001,
+   482→            Condition::GE => 0b1010,
+   483→            Condition::LT => 0b1011,
+   484→            Condition::GT => 0b1100,
+   485→            Condition::LE => 0b1101,
+   486→        }
+   487→    }
+   488→
+   489→    /// Returns the standard assembly mnemonic suffix for this condition.
+   490→    pub fn asm_suffix(&self) -> &'static str {
+   491→        match self {
+   492→            Condition::EQ => "eq",
+   493→            Condition::NE => "ne",
+   494→            Condition::CS => "cs",
+   495→            Condition::CC => "cc",
+   496→            Condition::MI => "mi",
+   497→            Condition::PL => "pl",
+   498→            Condition::VS => "vs",
+   499→            Condition::VC => "vc",
+   500→            Condition::HI => "hi",
+   501→            Condition::LS => "ls",
+   502→            Condition::GE => "ge",
+   503→            Condition::LT => "lt",
+   504→            Condition::GT => "gt",
+   505→            Condition::LE => "le",
+   506→        }
+   507→    }
+   508→
+   509→    /// Returns the condition code for a 4-bit encoding index.
+   510→    pub fn from_encoding(idx: u32) -> Option<Condition> {
+   511→        match idx {
+   512→            0b0000 => Some(Condition::EQ),
+   513→            0b0001 => Some(Condition::NE),
+   514→            0b0010 => Some(Condition::CS),
+   515→            0b0011 => Some(Condition::CC),
+   516→            0b0100 => Some(Condition::MI),
+   517→            0b0101 => Some(Condition::PL),
+   518→            0b0110 => Some(Condition::VS),
+   519→            0b0111 => Some(Condition::VC),
+   520→            0b1000 => Some(Condition::HI),
+   521→            0b1001 => Some(Condition::LS),
+   522→            0b1010 => Some(Condition::GE),
+   523→            0b1011 => Some(Condition::LT),
+   524→            0b1100 => Some(Condition::GT),
+   525→            0b1101 => Some(Condition::LE),
+   526→            _ => None,
+   527→        }
+   528→    }
+   529→
+   530→    /// Returns the inverse (complementary) condition code.
+   531→    pub fn invert(&self) -> Condition {
+   532→        match self {
+   533→            Condition::EQ => Condition::NE,
+   534→            Condition::NE => Condition::EQ,
+   535→            Condition::CS => Condition::CC,
+   536→            Condition::CC => Condition::CS,
+   537→            Condition::MI => Condition::PL,
+   538→            Condition::PL => Condition::MI,
+   539→            Condition::VS => Condition::VC,
+   540→            Condition::VC => Condition::VS,
+   541→            Condition::HI => Condition::LS,
+   542→            Condition::LS => Condition::HI,
+   543→            Condition::GE => Condition::LT,
+   544→            Condition::LT => Condition::GE,
+   545→            Condition::GT => Condition::LE,
+   546→            Condition::LE => Condition::GT,
+   547→        }
+   548→    }
+   549→}
+   550→
+   551→impl std::fmt::Display for Condition {
+   552→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   553→        f.write_str(self.asm_suffix())
+   554→    }
+   555→}
+   556→
+   557→// ---------------------------------------------------------------------------
+   558→// Shift Kind
+   559→// ---------------------------------------------------------------------------
+   560→
+   561→/// Shift type used in shifted-register operand encodings.
+   562→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   563→pub enum ShiftKind {
+   564→    /// Logical shift left.
+   565→    LSL,
+   566→    /// Logical shift right.
+   567→    LSR,
+   568→    /// Arithmetic shift right.
+   569→    ASR,
+   570→    /// Rotate right.
+   571→    ROR,
+   572→}
+   573→
+   574→impl ShiftKind {
+   575→    /// Returns the 2-bit shift-type encoding.
+   576→    pub fn encoding(&self) -> u32 {
+   577→        match self {
+   578→            ShiftKind::LSL => 0b00,
+   579→            ShiftKind::LSR => 0b01,
+   580→            ShiftKind::ASR => 0b10,
+   581→            ShiftKind::ROR => 0b11,
+   582→        }
+   583→    }
+   584→}
+   585→
+   586→impl std::fmt::Display for ShiftKind {
+   587→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   588→        f.write_str(match self {
+   589→            ShiftKind::LSL => "lsl",
+   590→            ShiftKind::LSR => "lsr",
+   591→            ShiftKind::ASR => "asr",
+   592→            ShiftKind::ROR => "ror",
+   593→        })
+   594→    }
+   595→}
+   596→
+   597→// ---------------------------------------------------------------------------
+   598→// Barrier Option
+   599→// ---------------------------------------------------------------------------
+   600→
+   601→/// Barrier option for DMB / DSB instructions.
+   602→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   603→pub enum BarrierOption {
+   604→    /// Full system barrier.
+   605→    SY,
+   606→    /// Load-load / load-store barrier.
+   607→    LD,
+   608→    /// Store-store barrier.
+   609→    ST,
+   610→    /// Inner shareable domain.
+   611→    ISH,
+   612→    /// Inner shareable load-load / load-store.
+   613→    ISHLD,
+   614→    /// Inner shareable store-store.
+   615→    ISHST,
+   616→    /// Outer shareable domain.
+   617→    OSH,
+   618→    /// Outer shareable load-load / load-store.
+   619→    OSHLD,
+   620→    /// Outer shareable store-store.
+   621→    OSHST,
+   622→}
+   623→
+   624→impl BarrierOption {
+   625→    /// Returns the 4-bit option encoding used in barrier instructions.
+   626→    pub fn encoding(&self) -> u32 {
+   627→        match self {
+   628→            BarrierOption::SY => 0b1111,
+   629→            BarrierOption::ST => 0b1110,
+   630→            BarrierOption::LD => 0b1101,
+   631→            BarrierOption::ISH => 0b1011,
+   632→            BarrierOption::ISHST => 0b1010,
+   633→            BarrierOption::ISHLD => 0b1001,
+   634→            BarrierOption::OSH => 0b0011,
+   635→            BarrierOption::OSHST => 0b0010,
+   636→            BarrierOption::OSHLD => 0x0001,
+   637→        }
+   638→    }
+   639→}
+   640→
+   641→impl std::fmt::Display for BarrierOption {
+   642→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   643→        f.write_str(match self {
+   644→            BarrierOption::SY => "sy",
+   645→            BarrierOption::LD => "ld",
+   646→            BarrierOption::ST => "st",
+   647→            BarrierOption::ISH => "ish",
+   648→            BarrierOption::ISHLD => "ishld",
+   649→            BarrierOption::ISHST => "ishst",
+   650→            BarrierOption::OSH => "osh",
+   651→            BarrierOption::OSHLD => "oshld",
+   652→            BarrierOption::OSHST => "oshst",
+   653→        })
+   654→    }
+   655→}
+   656→
+   657→// ---------------------------------------------------------------------------
+   658→// Memory Size (for typed load/store selection)
+   659→// ---------------------------------------------------------------------------
+   660→
+   661→/// The size of a memory operation, used to select the correct load/store
+   662→/// variant (LDR vs LDRB vs LDRH vs LDRSW, etc.).
+   663→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   664→pub enum MemorySize {
+   665→    /// 8-bit byte.
+   666→    Byte,
+   667→    /// 16-bit halfword.
+   668→    HalfWord,
+   669→    /// 32-bit word.
+   670→    Word,
+   671→    /// 32-bit word, sign-extended to 64 bits.
+   672→    SignedWord,
+   673→    /// 64-bit doubleword.
+   674→    DoubleWord,
+   675→}
+   676→
+   677→impl MemorySize {
+   678→    /// Returns the scale (log2 of byte size) for unsigned-offset encoding.
+   679→    pub fn scale(&self) -> u32 {
+   680→        match self {
+   681→            MemorySize::Byte => 0,
+   682→            MemorySize::HalfWord => 1,
+   683→            MemorySize::Word | MemorySize::SignedWord => 2,
+   684→            MemorySize::DoubleWord => 3,
+   685→        }
+   686→    }
+   687→
+   688→    /// Returns the byte size of this memory access.
+   689→    pub fn byte_size(&self) -> u32 {
+   690→        1u32 << self.scale()
+   691→    }
+   692→}
+   693→
+   694→// ---------------------------------------------------------------------------
+   695→// Addressing Mode
+   696→// ---------------------------------------------------------------------------
+   697→
+   698→/// Addressing mode for load/store instructions.
+   699→///
+   700→/// Supports the three primary ARM64 addressing patterns:
+   701→/// - **Base + offset**: `LDR Xt, [Xn, #offset]`
+   702→/// - **Pre-indexed**: `LDR Xt, [Xn, #offset]!` (update base before load)
+   703→/// - **Post-indexed**: `LDR Xt, [Xn], #offset` (update base after load)
+   704→/// - **Register offset**: `LDR Xt, [Xn, Xm, LSL #scale]`
+   705→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   706→pub enum AddressingMode {
+   707→    /// Unsigned offset: `[Xn, #offset]` where offset is an unsigned multiple
+   708→    /// of the access size.
+   709→    UnsignedOffset { base: Register, offset: u32 },
+   710→    /// Pre-indexed: `[Xn, #offset]!` — base is updated before the memory
+   711→    /// access.
+   712→    PreIndex { base: Register, offset: i32 },
+   713→    /// Post-indexed: `[Xn], #offset` — base is updated after the memory
+   714→    /// access.
+   715→    PostIndex { base: Register, offset: i32 },
+   716→    /// Register offset: `[Xn, Xm, LSL #scale]` — index register shifted by
+   717→    /// the element size.
+   718→    RegisterOffset {
+   719→        base: Register,
+   720→        index: Register,
+   721→        shift: Option<(ShiftKind, u32)>,
+   722→    },
+   723→}
+   724→
+   725→impl AddressingMode {
+   726→    /// Convenience: create an unsigned-offset addressing mode.
+   727→    pub fn offset(base: Register, offset: u32) -> Self {
+   728→        AddressingMode::UnsignedOffset { base, offset }
+   729→    }
+   730→
+   731→    /// Convenience: create a register-offset addressing mode with optional
+   732→    /// shift (used for array indexing with element-size scaling).
+   733→    pub fn reg_offset(base: Register, index: Register, shift: Option<(ShiftKind, u32)>) -> Self {
+   734→        AddressingMode::RegisterOffset { base, index, shift }
+   735→    }
+   736→}
+   737→
+   738→impl std::fmt::Display for AddressingMode {
+   739→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   740→        match self {
+   741→            AddressingMode::UnsignedOffset { base, offset } => {
+   742→                if *offset == 0 {
+   743→                    write!(f, "[{}]", base)
+   744→                } else {
+   745→                    write!(f, "[{}, #{}]", base, offset)
+   746→                }
+   747→            }
+   748→            AddressingMode::PreIndex { base, offset } => {
+   749→                write!(f, "[{}, #{}]!", base, offset)
+   750→            }
+   751→            AddressingMode::PostIndex { base, offset } => {
+   752→                write!(f, "[{}], #{}", base, offset)
+   753→            }
+   754→            AddressingMode::RegisterOffset { base, index, shift } => match shift {
+   755→                Some((kind, amount)) => {
+   756→                    write!(f, "[{}, {}, {} #{}]", base, index, kind, amount)
+   757→                }
+   758→                None => {
+   759→                    write!(f, "[{}, {}]", base, index)
+   760→                }
+   761→            },
+   762→        }
+   763→    }
+   764→}
+   765→
+   766→// ---------------------------------------------------------------------------
+   767→// Operand (register or immediate)
+   768→// ---------------------------------------------------------------------------
+   769→
+   770→/// A flexible operand — either a register (optionally shifted) or a 12-bit
+   771→/// immediate.
+   772→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   773→pub enum Operand {
+   774→    /// Register operand with optional shift.
+   775→    Reg {
+   776→        reg: Register,
+   777→        shift: Option<(ShiftKind, u32)>,
+   778→    },
+   779→    /// 12-bit unsigned immediate (0–4095) for arithmetic / logical ops.
+   780→    Imm12(u16),
+   781→}
+   782→
+   783→impl Operand {
+   784→    /// Create a plain register operand with no shift.
+   785→    pub fn reg(r: Register) -> Self {
+   786→        Operand::Reg {
+   787→            reg: r,
+   788→            shift: None,
+   789→        }
+   790→    }
+   791→
+   792→    /// Create a shifted register operand.
+   793→    pub fn shifted(r: Register, kind: ShiftKind, amount: u32) -> Self {
+   794→        Operand::Reg {
+   795→            reg: r,
+   796→            shift: Some((kind, amount)),
+   797→        }
+   798→    }
+   799→
+   800→    /// Extract the register, if this is a register operand.
+   801→    pub fn as_reg(&self) -> Option<Register> {
+   802→        match self {
+   803→            Operand::Reg { reg, .. } => Some(*reg),
+   804→            Operand::Imm12(_) => None,
+   805→        }
+   806→    }
+   807→}
+   808→
+   809→// ---------------------------------------------------------------------------
+   810→// Instruction
+   811→// ---------------------------------------------------------------------------
+   812→
+   813→/// ARM64 instruction representations for code generation.
+   814→///
+   815→/// Each variant captures the operands needed for both encoding and
+   816→/// disassembly. The `encode()` method produces a 32-bit machine code word;
+   817→/// the `Display` impl produces a human-readable assembly line.
+   818→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   819→#[allow(non_camel_case_types)]
+   820→pub enum Instruction {
+   821→    // ---- Arithmetic ----
+   822→    /// Add: `ADD Rd, Rn, Rm` or `ADD Rd, Rn, #imm`
+   823→    ADD {
+   824→        rd: Register,
+   825→        rn: Register,
+   826→        rm: Operand,
+   827→    },
+   828→    /// Subtract: `SUB Rd, Rn, Rm` or `SUB Rd, Rn, #imm`
+   829→    SUB {
+   830→        rd: Register,
+   831→        rn: Register,
+   832→        rm: Operand,
+   833→    },
+   834→    /// Multiply: `MUL Rd, Rn, Rm`
+   835→    MUL {
+   836→        rd: Register,
+   837→        rn: Register,
+   838→        rm: Register,
+   839→    },
+   840→    /// Signed divide: `SDIV Rd, Rn, Rm`
+   841→    SDIV {
+   842→        rd: Register,
+   843→        rn: Register,
+   844→        rm: Register,
+   845→    },
+   846→    /// Unsigned divide: `UDIV Rd, Rn, Rm`
+   847→    UDIV {
+   848→        rd: Register,
+   849→        rn: Register,
+   850→        rm: Register,
+   851→    },
+   852→
+   853→    // ---- Bitwise / Shift ----
+   854→    /// Bitwise AND: `AND Rd, Rn, Rm`
+   855→    AND {
+   856→        rd: Register,
+   857→        rn: Register,
+   858→        rm: Register,
+   859→    },
+   860→    /// Bitwise OR: `ORR Rd, Rn, Rm`
+   861→    ORR {
+   862→        rd: Register,
+   863→        rn: Register,
+   864→        rm: Register,
+   865→    },
+   866→    /// Bitwise exclusive OR: `EOR Rd, Rn, Rm`
+   867→    EOR {
+   868→        rd: Register,
+   869→        rn: Register,
+   870→        rm: Register,
+   871→    },
+   872→    /// Logical shift left: `LSL Rd, Rn, Rm` or `LSL Rd, Rn, #imm`
+   873→    LSL {
+   874→        rd: Register,
+   875→        rn: Register,
+   876→        rm: Operand,
+   877→    },
+   878→    /// Logical shift right: `LSR Rd, Rn, Rm` or `LSR Rd, Rn, #imm`
+   879→    LSR {
+   880→        rd: Register,
+   881→        rn: Register,
+   882→        rm: Operand,
+   883→    },
+   884→    /// Arithmetic shift right: `ASR Rd, Rn, Rm` or `ASR Rd, Rn, #imm`
+   885→    ASR {
+   886→        rd: Register,
+   887→        rn: Register,
+   888→        rm: Operand,
+   889→    },
+   890→
+   891→    // ---- Load / Store (64-bit) ----
+   892→    /// Load register (64-bit): `LDR Xt, [addr]`
+   893→    LDR {
+   894→        rt: Register,
+   895→        rn: Register,
+   896→        offset: i32,
+   897→    },
+   898→    /// Store register (64-bit): `STR Xt, [addr]`
+   899→    STR {
+   900→        rt: Register,
+   901→        rn: Register,
+   902→        offset: i32,
+   903→    },
+   904→
+   905→    // ---- Load / Store (32-bit) ----
+   906→    /// Load register (32-bit, zero-extended): `LDR Wt, [addr]`
+   907→    LDR_W {
+   908→        rt: Register,
+   909→        rn: Register,
+   910→        offset: i32,
+   911→    },
+   912→    /// Store register (32-bit): `STR Wt, [addr]`
+   913→    STR_W {
+   914→        rt: Register,
+   915→        rn: Register,
+   916→        offset: i32,
+   917→    },
+   918→
+   919→    // ---- Load / Store (sub-word) ----
+   920→    /// Load byte (zero-extended): `LDRB Wt, [addr]`
+   921→    LDRB {
+   922→        rt: Register,
+   923→        rn: Register,
+   924→        offset: i32,
+   925→    },
+   926→    /// Load halfword (zero-extended): `LDRH Wt, [addr]`
+   927→    LDRH {
+   928→        rt: Register,
+   929→        rn: Register,
+   930→        offset: i32,
+   931→    },
+   932→    /// Load word (sign-extended to 64-bit): `LDRSW Xt, [addr]`
+   933→    LDRSW {
+   934→        rt: Register,
+   935→        rn: Register,
+   936→        offset: i32,
+   937→    },
+   938→    /// Store byte: `STRB Wt, [addr]`
+   939→    STRB {
+   940→        rt: Register,
+   941→        rn: Register,
+   942→        offset: i32,
+   943→    },
+   944→    /// Store halfword: `STRH Wt, [addr]`
+   945→    STRH {
+   946→        rt: Register,
+   947→        rn: Register,
+   948→        offset: i32,
+   949→    },
+   950→
+   951→    // ---- Load / Store Pair ----
+   952→    /// Load pair: `LDP Rt1, Rt2, [Rn, #offset]`
+   953→    LDP {
+   954→        rt1: Register,
+   955→        rt2: Register,
+   956→        rn: Register,
+   957→        offset: i32,
+   958→    },
+   959→    /// Store pair: `STP Rt1, Rt2, [Rn, #offset]`
+   960→    STP {
+   961→        rt1: Register,
+   962→        rt2: Register,
+   963→        rn: Register,
+   964→        offset: i32,
+   965→    },
+   966→
+   967→    // ---- Atomic ----
+   968→    /// Load-exclusive register: `LDXR Rt, [Rn]`
+   969→    LDXR { rt: Register, rn: Register },
+   970→    /// Store-exclusive register: `STXR Rs, Rt, [Rn]`
+   971→    STXR {
+   972→        rs: Register,
+   973→        rt: Register,
+   974→        rn: Register,
+   975→    },
+   976→    /// Load-acquire exclusive register: `LDAXR Rt, [Rn]`
+   977→    /// Used in atomic CAS loops per ARMv8-A acquire-release semantics.
+   978→    LDAXR { rt: Register, rn: Register },
+   979→    /// Store-release exclusive register: `STLXR Rs, Rt, [Rn]`
+   980→    /// Used in atomic CAS loops per ARMv8-A acquire-release semantics.
+   981→    STLXR {
+   982→        rs: Register,
+   983→        rt: Register,
+   984→        rn: Register,
+   985→    },
+   986→    /// Compare-and-swap: `CAS Rs, Rt, [Rn]`
+   987→    CAS {
+   988→        rs: Register,
+   989→        rt: Register,
+   990→        rn: Register,
+   991→    },
+   992→
+   993→    // ---- Acquire/Release Load/Store ----
+   994→    /// Load-acquire: `LDAR Rt, [Rn]` — ensures subsequent memory ops are
+   995→    /// observed after this load. Used for SyncEdge::AtomicAcquireRelease.
+   996→    LDAR { rt: Register, rn: Register },
+   997→    /// Store-release: `STLR Rt, [Rn]` — ensures all prior memory ops are
+   998→    /// globally visible before this store. Used for SyncEdge::AtomicAcquireRelease.
+   999→    STLR { rt: Register, rn: Register },
+  1000→
+  1001→    // ---- Branch ----
+  1002→    /// Unconditional branch: `B offset`
+  1003→    B { offset: i32 },
+  1004→    /// Branch with link: `BL offset`
+  1005→    BL { offset: i32 },
+  1006→    /// Branch to register: `BR Rn`
+  1007→    BR { rn: Register },
+  1008→    /// Branch with link to register: `BLR Rn`
+  1009→    BLR { rn: Register },
+  1010→    /// Return: `RET {Rn}`
+  1011→    RET { rn: Option<Register> },
+  1012→    /// Conditional branch: `B.cond offset`
+  1013→    BCond { cond: Condition, offset: i32 },
+  1014→    /// Compare and branch on zero: `CBZ Rt, offset`
+  1015→    CBZ { rt: Register, offset: i32 },
+  1016→    /// Compare and branch on non-zero: `CBNZ Rt, offset`
+  1017→    CBNZ { rt: Register, offset: i32 },
+  1018→    /// Test bit and branch on zero: `TBZ Rt, bit, offset`
+  1019→    TBZ { rt: Register, bit: u32, offset: i32 },
+  1020→    /// Test bit and branch on non-zero: `TBNZ Rt, bit, offset`
+  1021→    TBNZ { rt: Register, bit: u32, offset: i32 },
+  1022→
+  1023→    // ---- Compare / Conditional Select ----
+  1024→    /// Compare (subtract, discard result): `CMP Rn, Rm` or `CMP Rn, #imm`
+  1025→    CMP { rn: Register, rm: Operand },
+  1026→    /// Compare negative: `CMN Rn, Rm` or `CMN Rn, #imm`
+  1027→    CMN { rn: Register, rm: Operand },
+  1028→    /// Test (bitwise AND, discard result): `TST Rn, Rm`
+  1029→    TST { rn: Register, rm: Register },
+  1030→    /// Conditional select: `CSEL Rd, Rn, Rm, cond`
+  1031→    CSEL {
+  1032→        rd: Register,
+  1033→        rn: Register,
+  1034→        rm: Register,
+  1035→        cond: Condition,
+  1036→    },
+  1037→
+  1038→    // ---- Conditional Set ----
+  1039→    /// Conditional set: `CSET Rd, cond` (alias for CSINC Rd, XZR, XZR, invert(cond))
+  1040→    CSET { rd: Register, cond: Condition },
+  1041→
+  1042→    // ---- Multiply-Subtract ----
+  1043→    /// Multiply-subtract: `MSUB Rd, Rn, Rm, Ra` — computes `Ra - Rn * Rm`
+  1044→    MSUB {
+  1045→        rd: Register,
+  1046→        rn: Register,
+  1047→        rm: Register,
+  1048→        ra: Register,
+  1049→    },
+  1050→
+  1051→    // ---- Bitfield Move ----
+  1052→    /// Unsigned bitfield move: `UBFM Rd, Rn, #immr, #imms`
+  1053→    /// Used for zero-extension (e.g. UBFM Xd, Xn, #0, #31 = UXTW/Xd)
+  1054→    UBFM {
+  1055→        rd: Register,
+  1056→        rn: Register,
+  1057→        immr: u32,
+  1058→        imms: u32,
+  1059→    },
+  1060→    /// Signed bitfield move: `SBFM Rd, Rn, #immr, #imms`
+  1061→    /// Used for sign-extension (e.g. SBFM Xd, Xn, #0, #31 = SXTW)
+  1062→    SBFM {
+  1063→        rd: Register,
+  1064→        rn: Register,
+  1065→        immr: u32,
+  1066→        imms: u32,
+  1067→    },
+  1068→
+  1069→    // ---- Cast / Convert ----
+  1070→    /// Sign-extend word to doubleword: `SXTW Xd, Wn` (alias for SBFM Xd, Xn, #0, #31)
+  1071→    SXTW { rd: Register, rn: Register },
+  1072→    /// Signed integer to float: `SCVTF Dd, Xn`
+  1073→    SCVTF { rd: Register, rn: Register },
+  1074→    /// Float to signed integer: `FCVTZS Xd, Dn`
+  1075→    FCVTZS { rd: Register, rn: Register },
+  1076→    /// Float convert (single ↔ double): `FCVT Sd, Dn` or `FCVT Dd, Sn`
+  1077→    FCVT {
+  1078→        rd: Register,
+  1079→        rn: Register,
+  1080→        to_double: bool,
+  1081→    },
+  1082→
+  1083→    // ---- Barriers ----
+  1084→    /// Data memory barrier: `DMB option`
+  1085→    DMB { option: BarrierOption },
+  1086→    /// Data synchronization barrier: `DSB option`
+  1087→    DSB { option: BarrierOption },
+  1088→    /// Instruction synchronization barrier: `ISB`
+  1089→    ISB,
+  1090→
+  1091→    // ---- Move ----
+  1092→    /// Move register: `MOV Rd, Rm` (alias for `ORR Rd, XZR, Rm`)
+  1093→    MOV { rd: Register, rm: Register },
+  1094→    /// Move wide with zero: `MOVZ Rd, #imm16, shift`
+  1095→    MOVZ {
+  1096→        rd: Register,
+  1097→        imm16: u16,
+  1098→        shift: u32,
+  1099→    },
+  1100→    /// Move wide with keep: `MOVK Rd, #imm16, shift`
+  1101→    MOVK {
+  1102→        rd: Register,
+  1103→        imm16: u16,
+  1104→        shift: u32,
+  1105→    },
+  1106→
+  1107→    // ---- Bit manipulation (one-source) ----
+  1108→    /// Count leading zeros: `CLZ Xd, Xn`
+  1109→    CLZ { rd: Register, rn: Register },
+  1110→    /// Reverse bits: `RBIT Xd, Xn`
+  1111→    RBIT { rd: Register, rn: Register },
+  1112→
+  1113→    // ---- SIMD/FP move ----
+  1114→    /// Move GPR to FP double register: `FMOV Dd, Xn`
+  1115→    /// `vd` is the 5-bit SIMD/FP destination register index (0–31).
+  1116→    FMOV_DX { vd: u8, rn: Register },
+  1117→    /// Move FP double register to GPR: `FMOV Xd, Dn`
+  1118→    /// `vn` is the 5-bit SIMD/FP source register index (0–31).
+  1119→    FMOV_XD { rd: Register, vn: u8 },
+  1120→
+  1121→    // ---- SIMD integer ----
+  1122→    /// Population count per byte: `CNT Vd.8B, Vn.8B`
+  1123→    /// `vd` and `vn` are 5-bit SIMD/FP register indices (0–31).
+  1124→    CNT { vd: u8, vn: u8 },
+  1125→    /// Add across vector: `ADDV Bd, Vn.8B`
+  1126→    /// `vd` and `vn` are 5-bit SIMD/FP register indices (0–31).
+  1127→    ADDV { vd: u8, vn: u8 },
+  1128→    /// Unsigned move vector element to GPR: `UMOV Wd, Vn.B[0]`
+  1129→    /// `vn` is the 5-bit SIMD/FP source register index (0–31).
+  1130→    /// Only index=0 is supported (sufficient for POPCNT result extraction).
+  1131→    UMOV { rd: Register, vn: u8 },
+  1132→
+  1133→    // ---- System ----
+  1134→    /// Supervisor call: `SVC #imm16`
+  1135→    SVC { imm16: u16 },
+  1136→    /// No-operation: `NOP`
+  1137→    NOP,
+  1138→}
+  1139→
+  1140→// ---------------------------------------------------------------------------
+  1141→// Instruction — encode
+  1142→// ---------------------------------------------------------------------------
+  1143→
+  1144→impl Instruction {
+  1145→    /// Encode this instruction into a 32-bit ARM64 machine-code word.
+  1146→    ///
+  1147→    /// Encoding follows the ARM Architecture Reference Manual (ARMv8-A).
+  1148→    /// Paths that require multi-instruction sequences or are not yet
+  1149→    /// implemented return `Err(CodegenError::EncodingError)`.
+  1150→    pub fn encode(&self) -> Result<u32> {
+  1151→        match self {
+  1152→            // ---- ADD (shifted register): 1 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1153→            Instruction::ADD { rd, rn, rm } => match rm {
+  1154→                Operand::Reg { reg, shift } => {
+  1155→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1156→                    Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+  1157→                        | (hw << 22)
+  1158→                        | (reg.encoding() << 16)
+  1159→                        | (imm6 << 10)
+  1160→                        | (rn.encoding() << 5)
+  1161→                        | rd.encoding())
+  1162→                }
+  1163→                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0000_0000
+  1164→                    | ((*imm as u32) << 10)
+  1165→                    | (rn.encoding() << 5)
+  1166→                    | rd.encoding()),
+  1167→            },
+  1168→
+  1169→            // ---- SUB (shifted register): 1 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1170→            Instruction::SUB { rd, rn, rm } => match rm {
+  1171→                Operand::Reg { reg, shift } => {
+  1172→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1173→                    Ok(0xCB000000u32
+  1174→                        | (hw << 22)
+  1175→                        | (reg.encoding() << 16)
+  1176→                        | (imm6 << 10)
+  1177→                        | (rn.encoding() << 5)
+  1178→                        | rd.encoding())
+  1179→                }
+  1180→                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0000_0000
+  1181→                    | (1 << 30)
+  1182→                    | ((*imm as u32) << 10)
+  1183→                    | (rn.encoding() << 5)
+  1184→                    | rd.encoding()),
+  1185→            },
+  1186→
+  1187→            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
+  1188→            Instruction::MUL { rd, rn, rm } => Ok(0b1001_1011_0000_0000_0111_1100_0000_0000
+  1189→                | (rm.encoding() << 16)
+  1190→                | (rn.encoding() << 5)
+  1191→                | rd.encoding()),
+  1192→
+  1193→            // ---- SDIV ----
+  1194→            Instruction::SDIV { rd, rn, rm } => Ok(0b100_1101_1000_0000_0000_1100_0000_0000
+  1195→                | (rm.encoding() << 16)
+  1196→                | (rn.encoding() << 5)
+  1197→                | rd.encoding()),
+  1198→
+  1199→            // ---- UDIV ----
+  1200→            Instruction::UDIV { rd, rn, rm } => Ok(0b100_1101_1000_0000_0000_1000_0000_0000
+  1201→                | (rm.encoding() << 16)
+  1202→                | (rn.encoding() << 5)
+  1203→                | rd.encoding()),
+  1204→
+  1205→            // ---- AND (shifted register) ----
+  1206→            Instruction::AND { rd, rn, rm } => Ok(0b100_0101_0000_0000_0000_0000_0000_0000
+  1207→                | (rm.encoding() << 16)
+  1208→                | (rn.encoding() << 5)
+  1209→                | rd.encoding()),
+  1210→
+  1211→            // ---- ORR (shifted register) ----
+  1212→            Instruction::ORR { rd, rn, rm } => Ok(0b101_0101_0000_0000_0000_0000_0000_0000
+  1213→                | (rm.encoding() << 16)
+  1214→                | (rn.encoding() << 5)
+  1215→                | rd.encoding()),
+  1216→
+  1217→            // ---- EOR (shifted register) ----
+  1218→            Instruction::EOR { rd, rn, rm } => Ok(0b110_0101_0000_0000_0000_0000_0000_0000
+  1219→                | (rm.encoding() << 16)
+  1220→                | (rn.encoding() << 5)
+  1221→                | rd.encoding()),
+  1222→
+  1223→            // ---- LSL / LSR / ASR (shifted register or immediate) ----
+  1224→            Instruction::LSL { rd, rn, rm } => match rm {
+  1225→                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+  1226→                    | (ShiftKind::LSL.encoding() << 22)
+  1227→                    | (reg.encoding() << 16)
+  1228→                    | (rn.encoding() << 5)
+  1229→                    | rd.encoding()),
+  1230→                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
+  1231→                    | ((*imm as u32) << 16)
+  1232→                    | (rn.encoding() << 5)
+  1233→                    | rd.encoding()),
+  1234→            },
+  1235→
+  1236→            Instruction::LSR { rd, rn, rm } => match rm {
+  1237→                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+  1238→                    | (ShiftKind::LSR.encoding() << 22)
+  1239→                    | (reg.encoding() << 16)
+  1240→                    | (rn.encoding() << 5)
+  1241→                    | rd.encoding()),
+  1242→                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
+  1243→                    | ((*imm as u32) << 16)
+  1244→                    | (63u32 << 10)
+  1245→                    | (rn.encoding() << 5)
+  1246→                    | rd.encoding()),
+  1247→            },
+  1248→
+  1249→            Instruction::ASR { rd, rn, rm } => match rm {
+  1250→                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+  1251→                    | (ShiftKind::ASR.encoding() << 22)
+  1252→                    | (reg.encoding() << 16)
+  1253→                    | (rn.encoding() << 5)
+  1254→                    | rd.encoding()),
+  1255→                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
+  1256→                    | ((*imm as u32) << 16)
+  1257→                    | (63u32 << 10)
+  1258→                    | (rn.encoding() << 5)
+  1259→                    | rd.encoding()),
+  1260→            },
+  1261→
+  1262→            // ---- LDR (unsigned offset, 64-bit) ----
+  1263→            Instruction::LDR { rt, rn, offset } => {
+  1264→                if *offset >= 0 && *offset % 8 == 0 {
+  1265→                    let imm12 = (*offset as u32) / 8;
+  1266→                    if imm12 <= 4095 {
+  1267→                        Ok(0b1111_1001_0100_0000_0000_0000_0000_0000
+  1268→                            | (imm12 << 10)
+  1269→                            | (rn.encoding() << 5)
+  1270→                            | rt.encoding())
+  1271→                    } else {
+  1272→                        Err(CodegenError::EncodingError(format!(
+  1273→                            "LDR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1274→                            offset, imm12
+  1275→                        )))
+  1276→                    }
+  1277→                } else {
+  1278→                    Err(CodegenError::EncodingError(format!(
+  1279→                        "LDR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
+  1280→                        offset
+  1281→                    )))
+  1282→                }
+  1283→            }
+  1284→
+  1285→            // ---- STR (unsigned offset, 64-bit) ----
+  1286→            Instruction::STR { rt, rn, offset } => {
+  1287→                if *offset >= 0 && *offset % 8 == 0 {
+  1288→                    let imm12 = (*offset as u32) / 8;
+  1289→                    if imm12 <= 4095 {
+  1290→                        Ok(0b1111_1000_0100_0000_0000_0000_0000_0000
+  1291→                            | (imm12 << 10)
+  1292→                            | (rn.encoding() << 5)
+  1293→                            | rt.encoding())
+  1294→                    } else {
+  1295→                        Err(CodegenError::EncodingError(format!(
+  1296→                            "STR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1297→                            offset, imm12
+  1298→                        )))
+  1299→                    }
+  1300→                } else {
+  1301→                    Err(CodegenError::EncodingError(format!(
+  1302→                        "STR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
+  1303→                        offset
+  1304→                    )))
+  1305→                }
+  1306→            }
+  1307→
+  1308→            // ---- LDR_W (32-bit, unsigned offset) ----
+  1309→            // LDR Wt: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+  1310→            Instruction::LDR_W { rt, rn, offset } => {
+  1311→                if *offset >= 0 && *offset % 4 == 0 {
+  1312→                    let imm12 = (*offset as u32) / 4;
+  1313→                    if imm12 <= 4095 {
+  1314→                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+  1315→                            | (imm12 << 10)
+  1316→                            | (rn.encoding() << 5)
+  1317→                            | rt.encoding())
+  1318→                    } else {
+  1319→                        Err(CodegenError::EncodingError(format!(
+  1320→                            "LDR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1321→                            offset, imm12
+  1322→                        )))
+  1323→                    }
+  1324→                } else {
+  1325→                    Err(CodegenError::EncodingError(format!(
+  1326→                        "LDR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1327→                        offset
+  1328→                    )))
+  1329→                }
+  1330→            }
+  1331→
+  1332→            // ---- STR_W (32-bit, unsigned offset) ----
+  1333→            // STR Wt: 1 0 1 1 1 0 0 0 01 imm12 Rn Rt  (imm12 = offset/4)
+  1334→            Instruction::STR_W { rt, rn, offset } => {
+  1335→                if *offset >= 0 && *offset % 4 == 0 {
+  1336→                    let imm12 = (*offset as u32) / 4;
+  1337→                    if imm12 <= 4095 {
+  1338→                        Ok(0b1011_1000_0100_0000_0000_0000_0000_0000
+  1339→                            | (imm12 << 10)
+  1340→                            | (rn.encoding() << 5)
+  1341→                            | rt.encoding())
+  1342→                    } else {
+  1343→                        Err(CodegenError::EncodingError(format!(
+  1344→                            "STR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1345→                            offset, imm12
+  1346→                        )))
+  1347→                    }
+  1348→                } else {
+  1349→                    Err(CodegenError::EncodingError(format!(
+  1350→                        "STR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1351→                        offset
+  1352→                    )))
+  1353→                }
+  1354→            }
+  1355→
+  1356→            // ---- LDRB (unsigned offset) ----
+  1357→            // LDRB: 0 0 1 1 1 0 0 1 01 imm12 Rn Rt
+  1358→            Instruction::LDRB { rt, rn, offset } => {
+  1359→                if *offset >= 0 {
+  1360→                    let imm12 = *offset as u32;
+  1361→                    if imm12 <= 4095 {
+  1362→                        Ok(0b0011_1001_0100_0000_0000_0000_0000_0000
+  1363→                            | (imm12 << 10)
+  1364→                            | (rn.encoding() << 5)
+  1365→                            | rt.encoding())
+  1366→                    } else {
+  1367→                        Err(CodegenError::EncodingError(format!(
+  1368→                            "LDRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1369→                            offset, imm12
+  1370→                        )))
+  1371→                    }
+  1372→                } else {
+  1373→                    Err(CodegenError::EncodingError(format!(
+  1374→                        "LDRB with negative offset {} not supported; use address computation instead",
+  1375→                        offset
+  1376→                    )))
+  1377→                }
+  1378→            }
+  1379→
+  1380→            // ---- LDRH (unsigned offset) ----
+  1381→            // LDRH: 0 1 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/2)
+  1382→            Instruction::LDRH { rt, rn, offset } => {
+  1383→                if *offset >= 0 && *offset % 2 == 0 {
+  1384→                    let imm12 = (*offset as u32) / 2;
+  1385→                    if imm12 <= 4095 {
+  1386→                        Ok(0b0111_1001_0100_0000_0000_0000_0000_0000
+  1387→                            | (imm12 << 10)
+  1388→                            | (rn.encoding() << 5)
+  1389→                            | rt.encoding())
+  1390→                    } else {
+  1391→                        Err(CodegenError::EncodingError(format!(
+  1392→                            "LDRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1393→                            offset, imm12
+  1394→                        )))
+  1395→                    }
+  1396→                } else {
+  1397→                    Err(CodegenError::EncodingError(format!(
+  1398→                        "LDRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
+  1399→                        offset
+  1400→                    )))
+  1401→                }
+  1402→            }
+  1403→
+  1404→            // ---- LDRSW (unsigned offset) ----
+  1405→            // LDRSW: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+  1406→            Instruction::LDRSW { rt, rn, offset } => {
+  1407→                if *offset >= 0 && *offset % 4 == 0 {
+  1408→                    let imm12 = (*offset as u32) / 4;
+  1409→                    if imm12 <= 4095 {
+  1410→                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+  1411→                            | (imm12 << 10)
+  1412→                            | (rn.encoding() << 5)
+  1413→                            | rt.encoding())
+  1414→                    } else {
+  1415→                        Err(CodegenError::EncodingError(format!(
+  1416→                            "LDRSW offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1417→                            offset, imm12
+  1418→                        )))
+  1419→                    }
+  1420→                } else {
+  1421→                    Err(CodegenError::EncodingError(format!(
+  1422→                        "LDRSW with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1423→                        offset
+  1424→                    )))
+  1425→                }
+  1426→            }
+  1427→
+  1428→            // ---- STRB (unsigned offset) ----
+  1429→            // STRB: 0 0 1 1 1 0 0 0 01 imm12 Rn Rt
+  1430→            Instruction::STRB { rt, rn, offset } => {
+  1431→                if *offset >= 0 {
+  1432→                    let imm12 = *offset as u32;
+  1433→                    if imm12 <= 4095 {
+  1434→                        Ok(0b0011_1000_0100_0000_0000_0000_0000_0000
+  1435→                            | (imm12 << 10)
+  1436→                            | (rn.encoding() << 5)
+  1437→                            | rt.encoding())
+  1438→                    } else {
+  1439→                        Err(CodegenError::EncodingError(format!(
+  1440→                            "STRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1441→                            offset, imm12
+  1442→                        )))
+  1443→                    }
+  1444→                } else {
+  1445→                    Err(CodegenError::EncodingError(format!(
+  1446→                        "STRB with negative offset {} not supported; use address computation instead",
+  1447→                        offset
+  1448→                    )))
+  1449→                }
+  1450→            }
+  1451→
+  1452→            // ---- STRH (unsigned offset) ----
+  1453→            // STRH: 0 1 1 1 1 0 0 0 01 imm12 Rn Rt  (imm12 = offset/2)
+  1454→            Instruction::STRH { rt, rn, offset } => {
+  1455→                if *offset >= 0 && *offset % 2 == 0 {
+  1456→                    let imm12 = (*offset as u32) / 2;
+  1457→                    if imm12 <= 4095 {
+  1458→                        Ok(0b0111_1000_0100_0000_0000_0000_0000_0000
+  1459→                            | (imm12 << 10)
+  1460→                            | (rn.encoding() << 5)
+  1461→                            | rt.encoding())
+  1462→                    } else {
+  1463→                        Err(CodegenError::EncodingError(format!(
+  1464→                            "STRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1465→                            offset, imm12
+  1466→                        )))
+  1467→                    }
+  1468→                } else {
+  1469→                    Err(CodegenError::EncodingError(format!(
+  1470→                        "STRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
+  1471→                        offset
+  1472→                    )))
+  1473→                }
+  1474→            }
+  1475→
+  1476→            // ---- LDP (signed offset, 64-bit) ----
+  1477→            // Encoding: 10 101 0 01 1 imm7 Rt2 Rn Rt1
+  1478→            // Base = 0xA9400000
+  1479→            Instruction::LDP {
+  1480→                rt1,
+  1481→                rt2,
+  1482→                rn,
+  1483→                offset,
+  1484→            } => {
+  1485→                let imm7 = *offset / 8;
+  1486→                // Encoding: 10 101 0 01 1 imm7[21:15] Rt2[14:10] Rn[9:5] Rt1[4:0]
+  1487→                Ok(0xA9400000u32
+  1488→                    | (((imm7 as u32) & 0x7F) << 15)
+  1489→                    | (rt2.encoding() << 10)
+  1490→                    | (rn.encoding() << 5)
+  1491→                    | rt1.encoding())
+  1492→            }
+  1493→
+  1494→            // ---- STP (signed offset, 64-bit) ----
+  1495→            // Encoding: 10 101 0 01 0 imm7 Rt2 Rn Rt1
+  1496→            // Base = 0xA9000000
+  1497→            Instruction::STP {
+  1498→                rt1,
+  1499→                rt2,
+  1500→                rn,
+  1501→                offset,
+  1502→            } => {
+  1503→                let imm7 = *offset / 8;
+  1504→                // Encoding: 10 101 0 01 0 imm7[21:15] Rt2[14:10] Rn[9:5] Rt1[4:0]
+  1505→                Ok(0xA9000000u32
+  1506→                    | (((imm7 as u32) & 0x7F) << 15)
+  1507→                    | (rt2.encoding() << 10)
+  1508→                    | (rn.encoding() << 5)
+  1509→                    | rt1.encoding())
+  1510→            }
+  1511→
+  1512→            // ---- LDXR ----
+  1513→            Instruction::LDXR { rt, rn } => {
+  1514→                Ok(0b1100_1000_0111_1000_0000_0000_0000 | (rn.encoding() << 5) | rt.encoding())
+  1515→            }
+  1516→
+  1517→            // ---- STXR ----
+  1518→            Instruction::STXR { rs, rt, rn } => Ok(0b1100_1000_0000_0000_0000_0000_0000
+  1519→                | (rs.encoding() << 16)
+  1520→                | (rn.encoding() << 5)
+  1521→                | rt.encoding()),
+  1522→
+  1523→            // ---- LDAXR (load-acquire exclusive) ----
+  1524→            // LDAXR: 1 1 0 0 1 0 0 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1525→            Instruction::LDAXR { rt, rn } => {
+  1526→                Ok(0x08DFFC00u32 | (rn.encoding() << 5) | rt.encoding())
+  1527→            }
+  1528→
+  1529→            // ---- STLXR (store-release exclusive) ----
+  1530→            // STLXR: 1 1 0 0 1 0 0 0 0 0 Rs 0 0 0 0 0 Rn Rt
+  1531→            Instruction::STLXR { rs, rt, rn } => {
+  1532→                Ok(0x0800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+  1533→            }
+  1534→
+  1535→            // ---- CAS ----
+  1536→            Instruction::CAS { rs, rt, rn } => {
+  1537→                Ok(0x1800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+  1538→            }
+  1539→
+  1540→            // ---- LDAR (load-acquire) ----
+  1541→            // LDAR: 1 0 0 0 1 0 0 1 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1542→            Instruction::LDAR { rt, rn } => {
+  1543→                Ok(0x08DFF800u32 | (rn.encoding() << 5) | rt.encoding())
+  1544→            }
+  1545→
+  1546→            // ---- STLR (store-release) ----
+  1547→            // STLR: 1 0 0 0 1 0 0 0 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1548→            Instruction::STLR { rt, rn } => {
+  1549→                Ok(0x089FF800u32 | (rn.encoding() << 5) | rt.encoding())
+  1550→            }
+  1551→
+  1552→            // ---- B ----
+  1553→            Instruction::B { offset } => {
+  1554→                let imm26 = (*offset) >> 2;
+  1555→                Ok(0b000101_00000000000000000000000000 | ((imm26 as u32) & 0x03FFFFFF))
+  1556→            }
+  1557→
+  1558→            // ---- BL ----
+  1559→            Instruction::BL { offset } => {
+  1560→                let imm26 = (*offset) >> 2;
+  1561→                Ok(0b100101_00000000000000000000000000 | ((imm26 as u32) & 0x03FFFFFF))
+  1562→            }
+  1563→
+  1564→            // ---- BR ----
+  1565→            Instruction::BR { rn } => {
+  1566→                Ok(0b1101_0110_0001_1111_0000_0000_0000_0000 | (rn.encoding() << 5))
+  1567→            }
+  1568→
+  1569→            // ---- BLR ----
+  1570→            Instruction::BLR { rn } => {
+  1571→                Ok(0b1101_0110_0001_1111_0000_0000_0000_0001 | (rn.encoding() << 5))
+  1572→            }
+  1573→
+  1574→            // ---- RET ----
+  1575→            Instruction::RET { rn } => {
+  1576→                let reg = rn.unwrap_or(Register::X30);
+  1577→                Ok(0b1101_0110_0101_1111_0000_0000_0000_0000 | (reg.encoding() << 5))
+  1578→            }
+  1579→
+  1580→            // ---- B.cond ----
+  1581→            // B.cond: 0 1 0 1 0 1 0 0 imm19 0 cond
+  1582→            Instruction::BCond { cond, offset } => {
+  1583→                let imm19 = (*offset) >> 2;
+  1584→                Ok(0x54000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | cond.encoding())
+  1585→            }
+  1586→
+  1587→            // ---- CBZ ----
+  1588→            Instruction::CBZ { rt, offset } => {
+  1589→                let imm19 = (*offset) >> 2;
+  1590→                Ok(0xB4000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
+  1591→            }
+  1592→
+  1593→            // ---- CBNZ ----
+  1594→            Instruction::CBNZ { rt, offset } => {
+  1595→                let imm19 = (*offset) >> 2;
+  1596→                Ok(0xB5000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
+  1597→            }
+  1598→
+  1599→            // ---- TBZ ----
+  1600→            Instruction::TBZ { rt, bit, offset } => {
+  1601→                let b5 = *bit >> 5;
+  1602→                let imm14 = (*offset) >> 2;
+  1603→                Ok(0b0110_1100_0000_0000_0000_0000_0000_0000
+  1604→                    | (b5 << 31)
+  1605→                    | ((*bit & 0x1F) << 19)
+  1606→                    | (((imm14 as u32) & 0x3FFF) << 5)
+  1607→                    | rt.encoding())
+  1608→            }
+  1609→
+  1610→            // ---- TBNZ ----
+  1611→            Instruction::TBNZ { rt, bit, offset } => {
+  1612→                let b5 = *bit >> 5;
+  1613→                let imm14 = (*offset) >> 2;
+  1614→                Ok(0b0110_1110_0000_0000_0000_0000_0000_0000
+  1615→                    | (b5 << 31)
+  1616→                    | ((*bit & 0x1F) << 19)
+  1617→                    | (((imm14 as u32) & 0x3FFF) << 5)
+  1618→                    | rt.encoding())
+  1619→            }
+  1620→
+  1621→            // ---- CMP (alias for SUBS XZR, Rn, Rm) ----
+  1622→            Instruction::CMP { rn, rm } => match rm {
+  1623→                Operand::Reg { reg, shift: _ } => Ok(0b111_0101_1000_0000_0000_0000_0001_1111
+  1624→                    | (reg.encoding() << 16)
+  1625→                    | (rn.encoding() << 5)),
+  1626→                Operand::Imm12(imm) => Ok(0b1111_0001_0000_0000_0000_0000_0001_1111
+  1627→                    | ((*imm as u32) << 10)
+  1628→                    | (rn.encoding() << 5)),
+  1629→            },
+  1630→
+  1631→            // ---- CMN (alias for ADDS XZR, Rn, Rm) ----
+  1632→            Instruction::CMN { rn, rm } => match rm {
+  1633→                Operand::Reg { reg, shift: _ } => Ok(0b101_0101_1000_0000_0000_0000_0001_1111
+  1634→                    | (reg.encoding() << 16)
+  1635→                    | (rn.encoding() << 5)),
+  1636→                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0001_1111
+  1637→                    | ((*imm as u32) << 10)
+  1638→                    | (rn.encoding() << 5)),
+  1639→            },
+  1640→
+  1641→            // ---- TST (alias for ANDS XZR, Rn, Rm) ----
+  1642→            Instruction::TST { rn, rm } => Ok(0b111_0101_0000_0000_0000_0000_0001_1111
+  1643→                | (rm.encoding() << 16)
+  1644→                | (rn.encoding() << 5)),
+  1645→
+  1646→            // ---- CSEL ----
+  1647→            // CSEL: 1 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
+  1648→            Instruction::CSEL { rd, rn, rm, cond } => Ok((0x1A800000u64
+  1649→                | (rm.encoding() as u64) << 16
+  1650→                | (cond.encoding() as u64) << 12
+  1651→                | (rn.encoding() as u64) << 5
+  1652→                | rd.encoding() as u64)
+  1653→                as u32),
+  1654→
+  1655→            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
+  1656→            // CSINC: 1 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
+  1657→            // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
+  1658→            Instruction::CSET { rd, cond } => {
+  1659→                Ok(0x1A800000u32
+  1660→                    | (Register::XZR.encoding() << 16)  // Rm = XZR
+  1661→                    | (cond.invert().encoding() << 12)    // invert(cond)
+  1662→                    | (Register::XZR.encoding() << 5)     // Rn = XZR
+  1663→                    | rd.encoding())
+  1664→            }
+  1665→
+  1666→            // ---- MSUB: Rd = Ra - Rn * Rm ----
+  1667→            // MSUB: 1 0 0 1 1 0 1 1 0 0 0 Rm 0 Ra Rn Rd
+  1668→            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x1B000000u32
+  1669→                | (rm.encoding() << 16)
+  1670→                | (ra.encoding() << 10)
+  1671→                | (rn.encoding() << 5)
+  1672→                | rd.encoding()),
+  1673→
+  1674→            // ---- UBFM (unsigned bitfield move) ----
+  1675→            // UBFM: 1 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+  1676→            Instruction::UBFM { rd, rn, immr, imms } => Ok(0x53000000u32
+  1677→                | ((*immr & 0x3F) << 16)
+  1678→                | ((*imms & 0x3F) << 10)
+  1679→                | (rn.encoding() << 5)
+  1680→                | rd.encoding()),
+  1681→
+  1682→            // ---- SBFM (signed bitfield move) ----
+  1683→            // SBFM: 0 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+  1684→            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x13000000u32
+  1685→                | ((*immr & 0x3F) << 16)
+  1686→                | ((*imms & 0x3F) << 10)
+  1687→                | (rn.encoding() << 5)
+  1688→                | rd.encoding()),
+  1689→
+  1690→            // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
+  1691→            // SBFM: 1 0 0 1 1 0 1 1 0 0 N immr imms Rn Rd
+  1692→            // For SXTW: N=1, immr=0, imms=31
+  1693→            Instruction::SXTW { rd, rn } => Ok(0b1001_0011_0100_0000_0111_1100_0000_0000
+  1694→                | (rn.encoding() << 5)
+  1695→                | rd.encoding()),
+  1696→
+  1697→            // ---- SCVTF (signed integer to double-precision float) ----
+  1698→            // SCVTF: 1 0 0 1 1 0 1 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 Rn Rd (64-bit to double)
+  1699→            Instruction::SCVTF { rd, rn } => {
+  1700→                Ok(0b10_0110_1000_0100_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+  1701→            }
+  1702→
+  1703→            // ---- FCVTZS (double-precision float to signed integer) ----
+  1704→            // FCVTZS: 1 0 0 1 1 0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0 0 Rn Rd
+  1705→            Instruction::FCVTZS { rd, rn } => {
+  1706→                Ok(0b10_0110_1100_0110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+  1707→            }
+  1708→
+  1709→            // ---- FCVT (convert between single and double) ----
+  1710→            // This is a floating-point instruction using the FP register bank.
+  1711→            // For now, we provide a placeholder encoding.
+  1712→            Instruction::FCVT {
+  1713→                rd,
+  1714→                rn,
+  1715→                to_double: _,
+  1716→            } => {
+  1717→                // FCVT Dd, Sn: 0 0 0 1 1 1 1 0 0 1 1 0 0 0 1 1 1 0 0 0 0 0 Rn Rd
+  1718→                // Placeholder — real encoding requires FP register bank
+  1719→                Ok(
+  1720→                    0b0001_1110_0110_0011_1000_0000_0000_0000
+  1721→                        | (rn.encoding() << 5)
+  1722→                        | rd.encoding(),
+  1723→                )
+  1724→            }
+  1725→
+  1726→            // ---- DMB ----
+  1727→            Instruction::DMB { option } => {
+  1728→                Ok(0b1101_0101_0000_1011_1011_1011_0000_1011 | (option.encoding() << 8))
+  1729→            }
+  1730→
+  1731→            // ---- DSB ----
+  1732→            Instruction::DSB { option } => {
+  1733→                Ok(0b1101_0101_0000_1011_1011_1011_0000_1001 | (option.encoding() << 8))
+  1734→            }
+  1735→
+  1736→            // ---- ISB ----
+  1737→            Instruction::ISB => Ok(0b1101_0101_0000_1011_1011_1011_0000_1110),
+  1738→
+  1739→            // ---- MOV (alias for ORR Xd, XZR, Xm) ----
+  1740→            // IMPORTANT: When rm is SP, ORR Xd, XZR, SP treats Rm=31 as XZR (not SP),
+  1741→            // giving zero. We must emit ADD Xd, SP, #0 instead.
+  1742→            // ADD Xd, SP, #0 = 0x910003E0 | rd.encoding()
+  1743→            //   sf=1, op=0, S=0, shift=01, imm12=0, Rn=SP(31)
+  1744→            //
+  1745→            // ORR Xd, XZR, Xm encoding (64-bit default):
+  1746→            //   sf=1, opc=01, 01011, N=0, shift=00, Rm, imm6=000000, Rn=11111(XZR), Rd
+  1747→            //   = 0xAA0003E0 | (Rm << 16) | Rd
+  1748→            Instruction::MOV { rd, rm } => {
+  1749→                if matches!(rm, Register::SP) {
+  1750→                    Ok(0x910003E0 | rd.encoding())
+  1751→                } else {
+  1752→                    Ok(0xAA0003E0u32
+  1753→                        | (rm.encoding() << 16)
+  1754→                        | rd.encoding())
+  1755→                }
+  1756→            }
+  1757→
+  1758→            // ---- MOVZ ----
+  1759→            Instruction::MOVZ { rd, imm16, shift } => {
+  1760→                let hw = *shift / 16;
+  1761→                Ok(0b1101_0010_1000_0000_0000_0000_0000_0000
+  1762→                    | (hw << 21)
+  1763→                    | ((*imm16 as u32) << 5)
+  1764→                    | rd.encoding())
+  1765→            }
+  1766→
+  1767→            // ---- MOVK ----
+  1768→            Instruction::MOVK { rd, imm16, shift } => {
+  1769→                let hw = *shift / 16;
+  1770→                Ok(0b1111_0010_1000_0000_0000_0000_0000_0000
+  1771→                    | (hw << 21)
+  1772→                    | ((*imm16 as u32) << 5)
+  1773→                    | rd.encoding())
+  1774→            }
+  1775→
+  1776→            // ---- CLZ Xd, Xn ----
+  1777→            // One-source data processing: 1 10 1101 0110 0000 0000 010 Rn Rd
+  1778→            // CLZ X0, X0 = 0xDAC01000
+  1779→            Instruction::CLZ { rd, rn } => Ok(0xDAC01000 | (rn.encoding() << 5) | rd.encoding()),
+  1780→
+  1781→            // ---- RBIT Xd, Xn ----
+  1782→            // One-source data processing: 1 10 1101 0110 0000 0000 000 Rn Rd
+  1783→            // RBIT X0, X0 = 0xDAC00000
+  1784→            Instruction::RBIT { rd, rn } => Ok(0xDAC00000 | (rn.encoding() << 5) | rd.encoding()),
+  1785→
+  1786→            // ---- FMOV Dd, Xn (GPR → FP double) ----
+  1787→            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 110 000 Rn Rd
+  1788→            // FMOV D0, X0 = 0x9E670000
+  1789→            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32)),
+  1790→
+  1791→            // ---- FMOV Xd, Dn (FP double → GPR) ----
+  1792→            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
+  1793→            // FMOV X0, D0 = 0x9E6F0000
+  1794→            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding()),
+  1795→
+  1796→            // ---- CNT Vd.8B, Vn.8B ----
+  1797→            // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
+  1798→            // CNT V0.8B, V0.8B = 0x0E205800
+  1799→            Instruction::CNT { vd, vn } => Ok(0x0E205800 | ((*vn as u32) << 5) | (*vd as u32)),
+  1800→
+  1801→            // ---- ADDV Bd, Vn.8B ----
+  1802→            // Advanced SIMD reduction: 0 0 001110 01 11000 11011 1 Vn Vd
+  1803→            // ADDV B0, V0.8B = 0x0E71B800
+  1804→            Instruction::ADDV { vd, vn } => Ok(0x0E71B800 | ((*vn as u32) << 5) | (*vd as u32)),
+  1805→
+  1806→            // ---- UMOV Wd, Vn.B[0] ----
+  1807→            // Advanced SIMD copy: 0 0 001110 00 1 00 0000 1 0 000 Vn Rd
+  1808→            // UMOV W0, V0.B[0] = 0x0E204000
+  1809→            Instruction::UMOV { rd, vn } => Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding()),
+  1810→
+  1811→            // ---- SVC ----
+  1812→            Instruction::SVC { imm16 } => {
+  1813→                Ok(0b110_1010_0000_0000_0000_0000_0000_0001 | ((*imm16 as u32) << 5))
+  1814→            }
+  1815→
+  1816→            // ---- NOP ----
+  1817→            // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
+  1818→            Instruction::NOP => Ok(0xD503201F),
+  1819→        }
+  1820→    }
+  1821→
+  1822→    /// Encode this instruction with a specific register width.
+  1823→    ///
+  1824→    /// For instructions that support 32-bit W-register mode (arithmetic,
+  1825→    /// logical, shift, move, load/store, compare, conditional select, and
+  1826→    /// bitfield operations), the `width` parameter controls whether the
+  1827→    /// sf bit (bit 31) or size field (bits 31:30) is set for 32-bit or
+  1828→    /// 64-bit operation.
+  1829→    ///
+  1830→    /// For instructions that do not have a width variant (branches, system,
+  1831→    /// SIMD, etc.), the width parameter is ignored and the default 64-bit
+  1832→    /// encoding is used.
+  1833→    ///
+  1834→    /// Using `RegWidth::W32` produces instructions that operate on W
+  1835→    /// sub-registers, giving automatic 32-bit wrapping arithmetic — essential
+  1836→    /// for algorithms like SHA-256 that require `u32` modular arithmetic.
+  1837→    pub fn encode_with_width(&self, width: RegWidth) -> Result<u32> {
+  1838→        let sf = width.sf_bit();
+  1839→        match self {
+  1840→            // ---- ADD (shifted register): sf 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1841→            Instruction::ADD { rd, rn, rm } => match rm {
+  1842→                Operand::Reg { reg, shift } => {
+  1843→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1844→                    Ok((sf << 31)
+  1845→                        | 0b00_0101_1000_0000_0000_0000_0000_0000
+  1846→                        | (hw << 22)
+  1847→                        | (reg.encoding() << 16)
+  1848→                        | (imm6 << 10)
+  1849→                        | (rn.encoding() << 5)
+  1850→                        | rd.encoding())
+  1851→                }
+  1852→                Operand::Imm12(imm) => Ok((sf << 31)
+  1853→                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
+  1854→                    | ((*imm as u32) << 10)
+  1855→                    | (rn.encoding() << 5)
+  1856→                    | rd.encoding()),
+  1857→            },
+  1858→
+  1859→            // ---- SUB (shifted register): sf 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1860→            Instruction::SUB { rd, rn, rm } => match rm {
+  1861→                Operand::Reg { reg, shift } => {
+  1862→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1863→                    Ok((sf << 31)
+  1864→                        | 0b01_0101_1000_0000_0000_0000_0000_0000
+  1865→                        | (hw << 22)
+  1866→                        | (reg.encoding() << 16)
+  1867→                        | (imm6 << 10)
+  1868→                        | (rn.encoding() << 5)
+  1869→                        | rd.encoding())
+  1870→                }
+  1871→                Operand::Imm12(imm) => Ok((sf << 31)
+  1872→                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
+  1873→                    | (1 << 30)
+  1874→                    | ((*imm as u32) << 10)
+  1875→                    | (rn.encoding() << 5)
+  1876→                    | rd.encoding()),
+  1877→            },
+  1878→
+  1879→            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
+  1880→            // MADD: sf 0 0 1 1 0 1 1 000 Rm 0 Ra Rn Rd
+  1881→            Instruction::MUL { rd, rn, rm } => Ok((sf << 31)
+  1882→                | 0b00_1101_1000_0000_0111_1100_0000_0000
+  1883→                | (rm.encoding() << 16)
+  1884→                | (rn.encoding() << 5)
+  1885→                | rd.encoding()),
+  1886→
+  1887→            // ---- SDIV ----
+  1888→            Instruction::SDIV { rd, rn, rm } => Ok((sf << 31)
+  1889→                | 0b00_1101_1000_0000_0000_1100_0000_0000
+  1890→                | (rm.encoding() << 16)
+  1891→                | (rn.encoding() << 5)
+  1892→                | rd.encoding()),
+  1893→
+  1894→            // ---- UDIV ----
+  1895→            Instruction::UDIV { rd, rn, rm } => Ok((sf << 31)
+  1896→                | 0b00_1101_1000_0000_0000_1000_0000_0000
+  1897→                | (rm.encoding() << 16)
+  1898→                | (rn.encoding() << 5)
+  1899→                | rd.encoding()),
+  1900→
+  1901→            // ---- AND (shifted register) ----
+  1902→            Instruction::AND { rd, rn, rm } => Ok((sf << 31)
+  1903→                | 0b00_0101_0000_0000_0000_0000_0000_0000
+  1904→                | (rm.encoding() << 16)
+  1905→                | (rn.encoding() << 5)
+  1906→                | rd.encoding()),
+  1907→
+  1908→            // ---- ORR (shifted register) ----
+  1909→            Instruction::ORR { rd, rn, rm } => Ok((sf << 31)
+  1910→                | 0b01_0101_0000_0000_0000_0000_0000_0000
+  1911→                | (rm.encoding() << 16)
+  1912→                | (rn.encoding() << 5)
+  1913→                | rd.encoding()),
+  1914→
+  1915→            // ---- EOR (shifted register) ----
+  1916→            Instruction::EOR { rd, rn, rm } => Ok((sf << 31)
+  1917→                | 0b10_0101_0000_0000_0000_0000_0000_0000
+  1918→                | (rm.encoding() << 16)
+  1919→                | (rn.encoding() << 5)
+  1920→                | rd.encoding()),
+  1921→
+  1922→            // ---- LSL (shifted register or UBFM immediate) ----
+  1923→            Instruction::LSL { rd, rn, rm } => match rm {
+  1924→                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+  1925→                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+  1926→                    | (ShiftKind::LSL.encoding() << 22)
+  1927→                    | (reg.encoding() << 16)
+  1928→                    | (rn.encoding() << 5)
+  1929→                    | rd.encoding()),
+  1930→                Operand::Imm12(imm) => {
+  1931→                    // LSL Rd, Rn, #shift = UBFM Rd, Rn, #(size-shift), #(size-1-shift)
+  1932→                    let size = width.bits();
+  1933→                    let shift_val = *imm as u32;
+  1934→                    let n_bit = if size == 64 { 1u32 } else { 0 };
+  1935→                    let immr = (size - shift_val) & (size - 1);
+  1936→                    let imms = (size - 1 - shift_val) & (size - 1);
+  1937→                    Ok((sf << 31)
+  1938→                        | (n_bit << 22)
+  1939→                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+  1940→                        | (immr << 16)
+  1941→                        | (imms << 10)
+  1942→                        | (rn.encoding() << 5)
+  1943→                        | rd.encoding())
+  1944→                }
+  1945→            },
+  1946→
+  1947→            // ---- LSR (shifted register or UBFM immediate) ----
+  1948→            Instruction::LSR { rd, rn, rm } => match rm {
+  1949→                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+  1950→                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+  1951→                    | (ShiftKind::LSR.encoding() << 22)
+  1952→                    | (reg.encoding() << 16)
+  1953→                    | (rn.encoding() << 5)
+  1954→                    | rd.encoding()),
+  1955→                Operand::Imm12(imm) => {
+  1956→                    // LSR Rd, Rn, #shift = UBFM Rd, Rn, #shift, #(size-1)
+  1957→                    let size = width.bits();
+  1958→                    let n_bit = if size == 64 { 1u32 } else { 0 };
+  1959→                    let immr = *imm as u32;
+  1960→                    let imms = size - 1;
+  1961→                    Ok((sf << 31)
+  1962→                        | (n_bit << 22)
+  1963→                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+  1964→                        | (immr << 16)
+  1965→                        | (imms << 10)
+  1966→                        | (rn.encoding() << 5)
+  1967→                        | rd.encoding())
+  1968→                }
+  1969→            },
+  1970→
+  1971→            // ---- ASR (shifted register or SBFM immediate) ----
+  1972→            Instruction::ASR { rd, rn, rm } => match rm {
+  1973→                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
+  1974→                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+  1975→                    | (ShiftKind::ASR.encoding() << 22)
+  1976→                    | (reg.encoding() << 16)
+  1977→                    | (rn.encoding() << 5)
+  1978→                    | rd.encoding()),
+  1979→                Operand::Imm12(imm) => {
+  1980→                    // ASR Rd, Rn, #shift = SBFM Rd, Rn, #shift, #(size-1)
+  1981→                    let size = width.bits();
+  1982→                    let n_bit = if size == 64 { 1u32 } else { 0 };
+  1983→                    let immr = *imm as u32;
+  1984→                    let imms = size - 1;
+  1985→                    Ok((sf << 31)
+  1986→                        | (n_bit << 22)
+  1987→                        | 0b0001_0010_0000_0000_0000_0000_0000_0000
+  1988→                        | (immr << 16)
+  1989→                        | (imms << 10)
+  1990→                        | (rn.encoding() << 5)
+  1991→                        | rd.encoding())
+  1992→                }
+  1993→            },
+  1994→
+  1995→            // ---- LDR (unsigned offset) ----
+  1996→            // LDR Wt: size=10, opc=01 → 0b10_111_0_01_01
+  1997→            // LDR Xt: size=11, opc=01 → 0b11_111_0_01_01
+  1998→            Instruction::LDR { rt, rn, offset } => {
+  1999→                let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
+  2000→                let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
+
+[showing lines 1-2000 of 5071; use offset=2001 with limit to continue reading]

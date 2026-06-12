@@ -545,9 +545,26 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
 
             // Ensure every function ends with a Return statement.
             // If the body doesn't end with a Return, add an implicit one.
+            // When the function has a return type and the last statement was an
+            // expression, use ctx.last_expr_result as the return value.
             let has_return = body.last().map_or(false, |s| matches!(s, ScgStatement::Return(_)));
             if !has_return {
-                body.push(ScgStatement::Return(vec![]));
+                let ret_val = if !results.is_empty() {
+                    // First check if the last expression was tracked.
+                    if let Some(ref expr) = ctx.last_expr_result {
+                        Some(expr.clone())
+                    } else {
+                        // Otherwise, look for the last computation/call result.
+                        body.iter().rev().find_map(|s| match s {
+                            ScgStatement::Computation(comp) => Some(ScgExpr::Var(comp.dst.clone())),
+                            ScgStatement::Call(call) => call.dst.as_ref().map(|d| ScgExpr::Var(d.clone())),
+                            _ => None,
+                        })
+                    }
+                } else {
+                    None
+                };
+                body.push(ScgStatement::Return(ret_val.into_iter().collect()));
             }
 
             nodes.push(ScgNode::Function(ScgFunction {
@@ -562,14 +579,18 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
     Scg { nodes }
 }
 
-/// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter.
+/// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
+/// and the last expression result for implicit returns.
 struct BridgeCtx {
     temp_counter: u32,
+    /// The result of the last expression statement, if any.
+    /// Used for implicit return when a function body ends with an expression.
+    last_expr_result: Option<ScgExpr>,
 }
 
 impl BridgeCtx {
     fn new() -> Self {
-        Self { temp_counter: 0 }
+        Self { temp_counter: 0, last_expr_result: None }
     }
 
     /// Allocate a unique temporary variable name.
@@ -1045,7 +1066,8 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
 
         PStmt::Expr(expr_stmt) => {
             let mut stmts = Vec::new();
-            let _ = flatten_expr(&expr_stmt.expr, &mut stmts, ctx);
+            let result = flatten_expr(&expr_stmt.expr, &mut stmts, ctx);
+            ctx.last_expr_result = Some(result);
             stmts
         }
 

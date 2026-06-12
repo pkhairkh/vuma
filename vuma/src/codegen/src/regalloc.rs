@@ -1758,6 +1758,16 @@ impl RegAllocator {
         *self = Self::new();
     }
 
+    /// Pre-assign a virtual register to a specific physical register.
+    ///
+    /// Used to enforce calling conventions: function parameter virtual
+    /// registers must be mapped to the correct argument registers (X0–X7).
+    pub fn preassign(&mut self, vreg: IRValueId, reg: Register) {
+        // Remove the physical register from free_regs if present
+        self.free_regs.retain(|r| *r != reg);
+        self.used_regs.insert(vreg, reg);
+    }
+
     /// Run allocation over an entire IR program.
     pub fn allocate_program(
         &mut self,
@@ -1773,7 +1783,26 @@ impl RegAllocator {
     }
 
     /// Run allocation over a single IR function.
+    ///
+    /// If the function has parameters, the first N virtual registers
+    /// (corresponding to the parameter IRValues) are pre-assigned to
+    /// X0 through X(N-1) to respect the AAPCS64 calling convention.
     pub fn allocate_function(&mut self, func: &IRFunction) -> Result<HashMap<IRValueId, Register>> {
+        // Pre-assign function parameter virtual registers to argument registers.
+        let arg_regs = [
+            Register::X0, Register::X1, Register::X2, Register::X3,
+            Register::X4, Register::X5, Register::X6, Register::X7,
+        ];
+        for (i, param) in func.params.iter().enumerate() {
+            if let IRValue::Register(vreg_id) = param {
+                if i < 8 {
+                    let arg_reg = arg_regs[i];
+                    self.free_regs.retain(|r| *r != arg_reg);
+                    self.used_regs.insert(*vreg_id, arg_reg);
+                }
+            }
+        }
+
         for block in &func.blocks {
             for instr in &block.instructions {
                 for vreg_id in instr.used_regs() {

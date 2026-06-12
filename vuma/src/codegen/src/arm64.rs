@@ -1239,6 +1239,7 @@ impl Instruction {
                 }
             },
 
+            // LSR Xd, Xn, Xm: same base as ADD shifted
             Instruction::LSR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
                     | (ShiftKind::LSR.encoding() << 22)
@@ -1256,6 +1257,7 @@ impl Instruction {
                 }
             },
 
+            // ASR Xd, Xn, Xm: same base as ADD shifted
             Instruction::ASR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
                     | (ShiftKind::ASR.encoding() << 22)
@@ -1905,6 +1907,8 @@ impl Instruction {
                 | rd.encoding()),
 
             // ---- LSL (shifted register or UBFM immediate) ----
+            // LSL (shifted register): same base as ADD
+            // 64-bit base=0x8B000000, 32-bit base=0x0B000000
             Instruction::LSL { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::LSL.encoding() << 22)
@@ -1929,6 +1933,7 @@ impl Instruction {
             },
 
             // ---- LSR (shifted register or UBFM immediate) ----
+            // LSR (shifted register): same base as ADD
             Instruction::LSR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::LSR.encoding() << 22)
@@ -1952,6 +1957,7 @@ impl Instruction {
             },
 
             // ---- ASR (shifted register or SBFM immediate) ----
+            // ASR (shifted register): same base as ADD
             Instruction::ASR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::ASR.encoding() << 22)
@@ -2013,6 +2019,7 @@ impl Instruction {
             }
 
             // ---- CMP (alias for SUBS XZR/WZR, Rn, Rm) ----
+            // CMP: 64-bit base=0xEB00001F, 32-bit base=0x6B00001F
             Instruction::CMP { rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x6B00001Fu32
                     | (reg.encoding() << 16)
@@ -2023,6 +2030,7 @@ impl Instruction {
             },
 
             // ---- CMN (alias for ADDS XZR/WZR, Rn, Rm) ----
+            // CMN: 64-bit base=0xAB00001F, 32-bit base=0x2B00001F
             Instruction::CMN { rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x2B00001Fu32
                     | (reg.encoding() << 16)
