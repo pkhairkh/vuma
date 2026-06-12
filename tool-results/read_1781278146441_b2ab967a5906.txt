@@ -1,0 +1,1730 @@
+     1→//! # Primitive BD Definitions
+     2→//!
+     3→//! This module defines the Behavioral Description (BD) types and primitive
+     4→//! representation descriptors (RepDs) for the VUMA standard library.
+     5→//!
+     6→//! ## Core Concepts
+     7→//!
+     8→//! - **RepD** (Representation Descriptor): Describes the memory layout and
+     9→//!   structural representation of a type. Each primitive type has a canonical
+    10→//!   RepD that encodes its size, alignment, and structural properties.
+    11→//!
+    12→//! - **CapD** (Capability Descriptor): Describes the set of capabilities
+    13→//!   (operations) that a type supports. Capabilities form a lattice where
+    14→//!   more capable types subsume less capable ones.
+    15→//!
+    16→//! - **RelD** (Relational Descriptor): Describes the relational properties
+    17→//!   a value participates in — containment, liveness, aliasing, data-flow
+    18→//!   dependencies. RelD supports a refinement ordering and composition.
+    19→//!
+    20→//! - **BD** (Behavioral Descriptor): The complete specification of a value's
+    21→//!   representation, capabilities, and relations: `BD = RepD × CapD × RelD`.
+    22→//!
+    23→//! - **SyncEdge**: Describes synchronization edges for the Message Sequence
+    24→//!   Graph (MSG), enabling the VUMA runtime to verify concurrency safety.
+    25→//!
+    26→//! ## VUMA Primitive Types
+    27→//!
+    28→//! - **Ptr\<T\>**: VUMA pointer with embedded BD annotation.
+    29→//! - **RegionPtr\<T\>**: Pointer bound to a specific memory region.
+    30→//! - **Slice\<T\>**: Pointer + length with BD annotation.
+    31→//! - **Result\<T,E\>**: VUMA result type with BD tracking.
+    32→//! - **Option\<T\>**: VUMA option type with BD tracking.
+    33→//! - **Range**: Integer range type (start..end).
+    34→
+    35→use serde::{Deserialize, Serialize};
+    36→use std::fmt;
+    37→use std::marker::PhantomData;
+    38→
+    39→// ---------------------------------------------------------------------------
+    40→// Capability Flags
+    41→// ---------------------------------------------------------------------------
+    42→
+    43→/// Individual capability flags that compose a CapD.
+    44→///
+    45→/// Each flag represents a distinct operational capability that a type may
+    46→/// support. The VUMA verifier uses these flags to ensure that operations
+    47→/// are only performed on types that possess the required capabilities.
+    48→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    49→pub enum CapFlag {
+    50→    /// Type supports read operations.
+    51→    Read,
+    52→    /// Type supports write/mutation operations.
+    53→    Write,
+    54→    /// Type supports equality/comparison operations.
+    55→    Compare,
+    56→    /// Type supports hashing operations.
+    57→    Hash,
+    58→    /// Type supports serialization to/from byte streams.
+    59→    Serialize,
+    60→    /// Type supports iteration over its elements.
+    61→    Iterate,
+    62→    /// Type supports send/transfer across concurrency boundaries.
+    63→    Send,
+    64→    /// Type supports receive operations across concurrency boundaries.
+    65→    Receive,
+    66→    /// Type supports exclusive (mutable) access.
+    67→    Exclusive,
+    68→    /// Type supports shared (immutable) access.
+    69→    Shared,
+    70→    /// Type supports execution (e.g., process spawning, bind operations).
+    71→    Execute,
+    72→}
+    73→
+    74→impl fmt::Display for CapFlag {
+    75→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    76→        match self {
+    77→            CapFlag::Read => write!(f, "Read"),
+    78→            CapFlag::Write => write!(f, "Write"),
+    79→            CapFlag::Compare => write!(f, "Compare"),
+    80→            CapFlag::Hash => write!(f, "Hash"),
+    81→            CapFlag::Serialize => write!(f, "Serialize"),
+    82→            CapFlag::Iterate => write!(f, "Iterate"),
+    83→            CapFlag::Send => write!(f, "Send"),
+    84→            CapFlag::Receive => write!(f, "Receive"),
+    85→            CapFlag::Exclusive => write!(f, "Exclusive"),
+    86→            CapFlag::Shared => write!(f, "Shared"),
+    87→            CapFlag::Execute => write!(f, "Execute"),
+    88→        }
+    89→    }
+    90→}
+    91→
+    92→// ---------------------------------------------------------------------------
+    93→// Capability Descriptor (CapD)
+    94→// ---------------------------------------------------------------------------
+    95→
+    96→/// Capability Descriptor — the set of capabilities a type supports.
+    97→///
+    98→/// CapD is the central mechanism by which the VUMA verifier ensures
+    99→/// capability-safe operations. Every type in the VUMA stdlib carries a CapD
+   100→/// that declares what operations are valid on values of that type.
+   101→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   102→pub struct CapD {
+   103→    /// The set of capability flags this descriptor carries.
+   104→    pub flags: Vec<CapFlag>,
+   105→}
+   106→
+   107→impl CapD {
+   108→    /// Create a new CapD from a vector of capability flags.
+   109→    // VUMA-VERIFIED: constructor is pure, no side effects
+   110→    pub fn new(flags: Vec<CapFlag>) -> Self {
+   111→        Self { flags }
+   112→    }
+   113→
+   114→    /// Create an empty CapD (no capabilities).
+   115→    // VUMA-VERIFIED: constructor is pure, no side effects
+   116→    pub fn empty() -> Self {
+   117→        Self { flags: Vec::new() }
+   118→    }
+   119→
+   120→    /// Check whether this CapD contains a specific capability flag.
+   121→    // VUMA-VERIFIED: pure query, no side effects
+   122→    pub fn has(&self, flag: CapFlag) -> bool {
+   123→        self.flags.contains(&flag)
+   124→    }
+   125→
+   126→    /// Check whether this CapD contains all of the specified capability flags.
+   127→    // VUMA-VERIFIED: pure query, no side effects
+   128→    pub fn has_all(&self, flags: &[CapFlag]) -> bool {
+   129→        flags.iter().all(|f| self.flags.contains(f))
+   130→    }
+   131→
+   132→    /// Merge this CapD with another, producing the union of capabilities.
+   133→    // VUMA-VERIFIED: pure combination, no side effects
+   134→    pub fn union(&self, other: &CapD) -> CapD {
+   135→        let mut flags = self.flags.clone();
+   136→        for f in &other.flags {
+   137→            if !flags.contains(f) {
+   138→                flags.push(*f);
+   139→            }
+   140→        }
+   141→        CapD { flags }
+   142→    }
+   143→
+   144→    /// Intersect this CapD with another, producing the common capabilities.
+   145→    // VUMA-VERIFIED: pure combination, no side effects
+   146→    pub fn intersect(&self, other: &CapD) -> CapD {
+   147→        let flags: Vec<CapFlag> = self
+   148→            .flags
+   149→            .iter()
+   150→            .filter(|f| other.flags.contains(f))
+   151→            .copied()
+   152→            .collect();
+   153→        CapD { flags }
+   154→    }
+   155→
+   156→    /// Returns true if this CapD is a sub-capability of (i.e., subsumed by) `other`.
+   157→    /// A CapD A is subsumed by B if every flag in A is also in B.
+   158→    // VUMA-VERIFIED: pure query, no side effects
+   159→    pub fn is_subcap_of(&self, other: &CapD) -> bool {
+   160→        self.flags.iter().all(|f| other.flags.contains(f))
+   161→    }
+   162→}
+   163→
+   164→impl fmt::Display for CapD {
+   165→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   166→        write!(f, "CapD {{ ")?;
+   167→        let strs: Vec<String> = self.flags.iter().map(|f| f.to_string()).collect();
+   168→        write!(f, "{}", strs.join(", "))?;
+   169→        write!(f, " }}")
+   170→    }
+   171→}
+   172→
+   173→/// The default CapD for numeric types: Read, Write, Compare, Hash, Serialize.
+   174→// VUMA-VERIFIED: well-known capability set for numeric primitives
+   175→pub fn numeric_capd() -> CapD {
+   176→    CapD::new(vec![
+   177→        CapFlag::Read,
+   178→        CapFlag::Write,
+   179→        CapFlag::Compare,
+   180→        CapFlag::Hash,
+   181→        CapFlag::Serialize,
+   182→    ])
+   183→}
+   184→
+   185→/// The default CapD for string types: Read, Write, Iterate, Compare, Hash, Serialize, Send.
+   186→// VUMA-VERIFIED: well-known capability set for string types
+   187→pub fn string_capd() -> CapD {
+   188→    CapD::new(vec![
+   189→        CapFlag::Read,
+   190→        CapFlag::Write,
+   191→        CapFlag::Iterate,
+   192→        CapFlag::Compare,
+   193→        CapFlag::Hash,
+   194→        CapFlag::Serialize,
+   195→        CapFlag::Send,
+   196→    ])
+   197→}
+   198→
+   199→// ---------------------------------------------------------------------------
+   200→// Representation Descriptor (RepD)
+   201→// ---------------------------------------------------------------------------
+   202→
+   203→/// Representation Descriptor — describes the memory layout of a type.
+   204→///
+   205→/// RepD encodes the structural properties of a type's in-memory
+   206→/// representation, including its name, size in bytes, alignment requirement,
+   207→/// and the CapD that declares its supported operations.
+   208→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   209→pub struct RepD {
+   210→    /// The name of this type (e.g., "uint8", "float64", "ptr").
+   211→    pub name: String,
+   212→    /// Size of the type in bytes.
+   213→    pub size: u64,
+   214→    /// Alignment requirement in bytes.
+   215→    pub align: u64,
+   216→    /// Capability descriptor for this type.
+   217→    pub capd: CapD,
+   218→}
+   219→
+   220→impl RepD {
+   221→    /// Create a new RepD with the given name, size, alignment, and capabilities.
+   222→    // VUMA-VERIFIED: constructor is pure, no side effects
+   223→    pub fn new(name: impl Into<String>, size: u64, align: u64, capd: CapD) -> Self {
+   224→        Self {
+   225→            name: name.into(),
+   226→            size,
+   227→            align,
+   228→            capd,
+   229→        }
+   230→    }
+   231→
+   232→    /// Create a pointer RepD that points to the given pointee RepD.
+   233→    /// A pointer has size 8 (64-bit) and alignment 8, with the same
+   234→    /// capabilities as the pointee plus Read and Write for dereference.
+   235→    // VUMA-VERIFIED: pointer construction preserves pointee capabilities
+   236→    pub fn ptr_to(pointee: &RepD) -> Self {
+   237→        let ptr_capd = pointee
+   238→            .capd
+   239→            .union(&CapD::new(vec![CapFlag::Read, CapFlag::Write]));
+   240→        Self {
+   241→            name: format!("ptr<{}>", pointee.name),
+   242→            size: 8,
+   243→            align: 8,
+   244→            capd: ptr_capd,
+   245→        }
+   246→    }
+   247→
+   248→    /// Returns true if this RepD's CapD subsumes the given CapD.
+   249→    // VUMA-VERIFIED: pure query, no side effects
+   250→    pub fn supports(&self, required: &CapD) -> bool {
+   251→        required.is_subcap_of(&self.capd)
+   252→    }
+   253→}
+   254→
+   255→impl fmt::Display for RepD {
+   256→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   257→        write!(
+   258→            f,
+   259→            "RepD {{ name: {}, size: {}, align: {}, {} }}",
+   260→            self.name, self.size, self.align, self.capd
+   261→        )
+   262→    }
+   263→}
+   264→
+   265→// ---------------------------------------------------------------------------
+   266→// Relational Descriptor (RelD)
+   267→// ---------------------------------------------------------------------------
+   268→
+   269→/// Kinds of relational properties a value can participate in.
+   270→///
+   271→/// Each variant identifies a distinct class of relationship that the
+   272→/// VUMA verifier tracks when composing and checking BDs.
+   273→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   274→pub enum RelKind {
+   275→    /// The value is contained within another structure (e.g., pointer within region).
+   276→    Containment,
+   277→    /// The value has a liveness constraint — it must be alive when accessed.
+   278→    Liveness,
+   279→    /// The value may be aliased by other pointers/references.
+   280→    Aliasing,
+   281→    /// The value participates in a data-flow dependency.
+   282→    DataFlow,
+   283→    /// The value is bound to a specific memory region.
+   284→    RegionBound,
+   285→    /// The value has an ownership relationship.
+   286→    Ownership,
+   287→}
+   288→
+   289→impl fmt::Display for RelKind {
+   290→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   291→        match self {
+   292→            RelKind::Containment => write!(f, "Containment"),
+   293→            RelKind::Liveness => write!(f, "Liveness"),
+   294→            RelKind::Aliasing => write!(f, "Aliasing"),
+   295→            RelKind::DataFlow => write!(f, "DataFlow"),
+   296→            RelKind::RegionBound => write!(f, "RegionBound"),
+   297→            RelKind::Ownership => write!(f, "Ownership"),
+   298→        }
+   299→    }
+   300→}
+   301→
+   302→/// Relational Descriptor — describes the relationships a value participates in.
+   303→///
+   304→/// RelD captures the *relational* dimension of a BD: what other values or
+   305→/// regions this value is related to, and what constraints those relations
+   306→/// impose. Two RelDs can be composed (union of relations) and compared
+   307→/// for refinement (a more refined RelD has a superset of relations).
+   308→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   309→pub struct RelD {
+   310→    /// The set of relational properties this descriptor carries.
+   311→    pub relations: Vec<RelKind>,
+   312→}
+   313→
+   314→impl RelD {
+   315→    /// Create a new RelD from a vector of relation kinds.
+   316→    // VUMA-VERIFIED: constructor is pure, no side effects
+   317→    pub fn new(relations: Vec<RelKind>) -> Self {
+   318→        Self { relations }
+   319→    }
+   320→
+   321→    /// Create an empty RelD (no relations).
+   322→    // VUMA-VERIFIED: constructor is pure, no side effects
+   323→    pub fn empty() -> Self {
+   324→        Self {
+   325→            relations: Vec::new(),
+   326→        }
+   327→    }
+   328→
+   329→    /// Check whether this RelD contains a specific relation kind.
+   330→    // VUMA-VERIFIED: pure query, no side effects
+   331→    pub fn has(&self, kind: RelKind) -> bool {
+   332→        self.relations.contains(&kind)
+   333→    }
+   334→
+   335→    /// Compose this RelD with another, producing the union of relations.
+   336→    // VUMA-VERIFIED: pure combination, no side effects
+   337→    pub fn compose(&self, other: &RelD) -> RelD {
+   338→        let mut relations = self.relations.clone();
+   339→        for r in &other.relations {
+   340→            if !relations.contains(r) {
+   341→                relations.push(*r);
+   342→            }
+   343→        }
+   344→        RelD { relations }
+   345→    }
+   346→
+   347→    /// Returns true if this RelD refines `other`.
+   348→    /// A RelD A refines B if every relation in B is also in A
+   349→    /// (i.e., A is more specific / more restrictive).
+   350→    // VUMA-VERIFIED: pure query, no side effects
+   351→    pub fn refines(&self, other: &RelD) -> bool {
+   352→        other.relations.iter().all(|r| self.relations.contains(r))
+   353→    }
+   354→
+   355→    /// Intersect this RelD with another, producing the common relations.
+   356→    // VUMA-VERIFIED: pure combination, no side effects
+   357→    pub fn intersect(&self, other: &RelD) -> RelD {
+   358→        let relations: Vec<RelKind> = self
+   359→            .relations
+   360→            .iter()
+   361→            .filter(|r| other.relations.contains(r))
+   362→            .copied()
+   363→            .collect();
+   364→        RelD { relations }
+   365→    }
+   366→}
+   367→
+   368→impl fmt::Display for RelD {
+   369→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   370→        write!(f, "RelD {{ ")?;
+   371→        let strs: Vec<String> = self.relations.iter().map(|r| r.to_string()).collect();
+   372→        write!(f, "{}", strs.join(", "))?;
+   373→        write!(f, " }}")
+   374→    }
+   375→}
+   376→
+   377→/// The default RelD for pointer types: Containment, Liveness.
+   378→// VUMA-VERIFIED: well-known relation set for pointers
+   379→pub fn ptr_reld() -> RelD {
+   380→    RelD::new(vec![RelKind::Containment, RelKind::Liveness])
+   381→}
+   382→
+   383→/// The RelD for region-bound pointers: Containment, Liveness, RegionBound.
+   384→// VUMA-VERIFIED: well-known relation set for region-bound pointers
+   385→pub fn region_ptr_reld() -> RelD {
+   386→    RelD::new(vec![
+   387→        RelKind::Containment,
+   388→        RelKind::Liveness,
+   389→        RelKind::RegionBound,
+   390→    ])
+   391→}
+   392→
+   393→/// The RelD for slice types: Containment, Liveness, DataFlow.
+   394→// VUMA-VERIFIED: well-known relation set for slices
+   395→pub fn slice_reld() -> RelD {
+   396→    RelD::new(vec![
+   397→        RelKind::Containment,
+   398→        RelKind::Liveness,
+   399→        RelKind::DataFlow,
+   400→    ])
+   401→}
+   402→
+   403→/// The RelD for result types: DataFlow, Ownership.
+   404→// VUMA-VERIFIED: well-known relation set for results
+   405→pub fn result_reld() -> RelD {
+   406→    RelD::new(vec![RelKind::DataFlow, RelKind::Ownership])
+   407→}
+   408→
+   409→/// The RelD for option types: DataFlow, Liveness.
+   410→// VUMA-VERIFIED: well-known relation set for options
+   411→pub fn option_reld() -> RelD {
+   412→    RelD::new(vec![RelKind::DataFlow, RelKind::Liveness])
+   413→}
+   414→
+   415→/// The default RelD for numeric/primitive types: empty (no relations).
+   416→// VUMA-VERIFIED: well-known relation set for plain numerics
+   417→pub fn numeric_reld() -> RelD {
+   418→    RelD::empty()
+   419→}
+   420→
+   421→// ---------------------------------------------------------------------------
+   422→// Behavioral Descriptor (BD)
+   423→// ---------------------------------------------------------------------------
+   424→
+   425→/// A **Behavioral Descriptor** — the complete specification of a value's
+   426→/// representation, capabilities, and relations.
+   427→///
+   428→/// # Structure
+   429→///
+   430→/// ```text
+   431→/// BD = RepD × CapD × RelD
+   432→/// ```
+   433→///
+   434→/// Two BDs are **compatible** when all three layers are pairwise compatible.
+   435→/// One BD **refines** another when every layer is at least as specific.
+   436→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   437→pub struct BD {
+   438→    /// Representation descriptor — memory shape.
+   439→    pub repd: RepD,
+   440→    /// Capability descriptor — permitted operations.
+   441→    pub capd: CapD,
+   442→    /// Relational descriptor — relationships.
+   443→    pub reld: RelD,
+   444→}
+   445→
+   446→impl BD {
+   447→    /// Construct a new `BD` from its three layers.
+   448→    // VUMA-VERIFIED: constructor is pure, no side effects
+   449→    pub fn new(repd: RepD, capd: CapD, reld: RelD) -> Self {
+   450→        Self { repd, capd, reld }
+   451→    }
+   452→
+   453→    /// Two BDs are **compatible** when they can safely describe the same
+   454→    /// value:
+   455→    ///
+   456→    /// * representations have the same name and size,
+   457→    /// * capabilities have a non-empty intersection, and
+   458→    /// * relations are consistent (non-empty intersection).
+   459→    // VUMA-VERIFIED: pure query, no side effects
+   460→    pub fn compatible(&self, other: &BD) -> bool {
+   461→        self.repd.name == other.repd.name
+   462→            && self.repd.size == other.repd.size
+   463→            && !self.capd.intersect(&other.capd).flags.is_empty()
+   464→            && !self.reld.intersect(&other.reld).relations.is_empty()
+   465→            || self.reld.relations.is_empty()
+   466→            || other.reld.relations.is_empty()
+   467→    }
+   468→
+   469→    /// `self` **refines** `other` when `self` is at least as specific in
+   470→    /// every layer:
+   471→    ///
+   472→    /// * repd names match,
+   473→    /// * self's CapD is a sub-capability of other's (subset), and
+   474→    /// * self's RelD refines other's (superset of relations).
+   475→    // VUMA-VERIFIED: pure query, no side effects
+   476→    pub fn refines(&self, other: &BD) -> bool {
+   477→        self.repd.name == other.repd.name
+   478→            && self.capd.is_subcap_of(&other.capd)
+   479→            && self.reld.refines(&other.reld)
+   480→    }
+   481→}
+   482→
+   483→impl fmt::Display for BD {
+   484→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   485→        writeln!(f, "BD {{")?;
+   486→        writeln!(f, "  repd: {}", self.repd)?;
+   487→        writeln!(f, "  capd: {}", self.capd)?;
+   488→        writeln!(f, "  reld: {}", self.reld)?;
+   489→        write!(f, "}}")
+   490→    }
+   491→}
+   492→
+   493→// ---------------------------------------------------------------------------
+   494→// HasBD Trait
+   495→// ---------------------------------------------------------------------------
+   496→
+   497→/// Trait for types that can produce a Behavioral Descriptor.
+   498→///
+   499→/// Every VUMA primitive type implements this trait so that the verifier
+   500→/// can inspect its BD annotation at any point.
+   501→pub trait HasBD {
+   502→    /// Returns the Behavioral Descriptor for this value.
+   503→    // VUMA-VERIFIED: pure query, no side effects
+   504→    fn as_bd(&self) -> BD;
+   505→}
+   506→
+   507→// ---------------------------------------------------------------------------
+   508→// Synchronization Edge (SyncEdge)
+   509→// ---------------------------------------------------------------------------
+   510→
+   511→/// Synchronization Edge for the Message Sequence Graph (MSG).
+   512→///
+   513→/// SyncEdge describes a happens-before relationship between two operations,
+   514→/// enabling the VUMA runtime to verify that concurrent accesses are properly
+   515→/// ordered and data-race-free.
+   516→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   517→pub struct SyncEdge {
+   518→    /// The source operation identifier.
+   519→    pub from: String,
+   520→    /// The destination operation identifier.
+   521→    pub to: String,
+   522→    /// The kind of synchronization relationship.
+   523→    pub kind: SyncEdgeKind,
+   524→}
+   525→
+   526→/// The kind of synchronization relationship between two operations.
+   527→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   528→pub enum SyncEdgeKind {
+   529→    /// Sequential happens-before (program order).
+   530→    Seq,
+   531→    /// Lock acquisition/release ordering.
+   532→    LockOrder,
+   533→    /// Channel send/receive ordering.
+   534→    ChannelOrder,
+   535→    /// Memory fence / barrier ordering.
+   536→    Fence,
+   537→    /// Atomic operation ordering.
+   538→    Atomic,
+   539→}
+   540→
+   541→impl SyncEdge {
+   542→    /// Create a new SyncEdge.
+   543→    // VUMA-VERIFIED: constructor is pure, no side effects
+   544→    pub fn new(from: impl Into<String>, to: impl Into<String>, kind: SyncEdgeKind) -> Self {
+   545→        Self {
+   546→            from: from.into(),
+   547→            to: to.into(),
+   548→            kind,
+   549→        }
+   550→    }
+   551→}
+   552→
+   553→// ---------------------------------------------------------------------------
+   554→// Primitive RepD Constructors
+   555→// ---------------------------------------------------------------------------
+   556→
+   557→/// Returns the RepD for `uint8` (unsigned 8-bit integer).
+   558→// VUMA-VERIFIED: canonical primitive representation
+   559→pub fn uint8_repd() -> RepD {
+   560→    RepD::new("uint8", 1, 1, numeric_capd())
+   561→}
+   562→
+   563→/// Returns the RepD for `uint16` (unsigned 16-bit integer).
+   564→// VUMA-VERIFIED: canonical primitive representation
+   565→pub fn uint16_repd() -> RepD {
+   566→    RepD::new("uint16", 2, 2, numeric_capd())
+   567→}
+   568→
+   569→/// Returns the RepD for `uint32` (unsigned 32-bit integer).
+   570→// VUMA-VERIFIED: canonical primitive representation
+   571→pub fn uint32_repd() -> RepD {
+   572→    RepD::new("uint32", 4, 4, numeric_capd())
+   573→}
+   574→
+   575→/// Returns the RepD for `uint64` (unsigned 64-bit integer).
+   576→// VUMA-VERIFIED: canonical primitive representation
+   577→pub fn uint64_repd() -> RepD {
+   578→    RepD::new("uint64", 8, 8, numeric_capd())
+   579→}
+   580→
+   581→/// Returns the RepD for `int8` (signed 8-bit integer).
+   582→// VUMA-VERIFIED: canonical primitive representation
+   583→pub fn int8_repd() -> RepD {
+   584→    RepD::new("int8", 1, 1, numeric_capd())
+   585→}
+   586→
+   587→/// Returns the RepD for `int16` (signed 16-bit integer).
+   588→// VUMA-VERIFIED: canonical primitive representation
+   589→pub fn int16_repd() -> RepD {
+   590→    RepD::new("int16", 2, 2, numeric_capd())
+   591→}
+   592→
+   593→/// Returns the RepD for `int32` (signed 32-bit integer).
+   594→// VUMA-VERIFIED: canonical primitive representation
+   595→pub fn int32_repd() -> RepD {
+   596→    RepD::new("int32", 4, 4, numeric_capd())
+   597→}
+   598→
+   599→/// Returns the RepD for `int64` (signed 64-bit integer).
+   600→// VUMA-VERIFIED: canonical primitive representation
+   601→pub fn int64_repd() -> RepD {
+   602→    RepD::new("int64", 8, 8, numeric_capd())
+   603→}
+   604→
+   605→/// Returns the RepD for `float32` (32-bit IEEE 754 floating-point).
+   606→// VUMA-VERIFIED: canonical primitive representation
+   607→pub fn float32_repd() -> RepD {
+   608→    RepD::new("float32", 4, 4, numeric_capd())
+   609→}
+   610→
+   611→/// Returns the RepD for `float64` (64-bit IEEE 754 floating-point).
+   612→// VUMA-VERIFIED: canonical primitive representation
+   613→pub fn float64_repd() -> RepD {
+   614→    RepD::new("float64", 8, 8, numeric_capd())
+   615→}
+   616→
+   617→/// Returns the RepD for `bool` (1-byte boolean).
+   618→// VUMA-VERIFIED: canonical primitive representation
+   619→pub fn bool_repd() -> RepD {
+   620→    RepD::new(
+   621→        "bool",
+   622→        1,
+   623→        1,
+   624→        CapD::new(vec![
+   625→            CapFlag::Read,
+   626→            CapFlag::Write,
+   627→            CapFlag::Compare,
+   628→            CapFlag::Hash,
+   629→            CapFlag::Serialize,
+   630→        ]),
+   631→    )
+   632→}
+   633→
+   634→/// Returns the RepD for `byte` (raw 8-bit byte, no Compare/Hash by default).
+   635→// VUMA-VERIFIED: canonical primitive representation
+   636→pub fn byte_repd() -> RepD {
+   637→    RepD::new(
+   638→        "byte",
+   639→        1,
+   640→        1,
+   641→        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Serialize]),
+   642→    )
+   643→}
+   644→
+   645→/// Returns the RepD for a pointer to the given pointee type.
+   646→///
+   647→/// The pointer inherits the pointee's capabilities and adds Read and Write
+   648→/// to support dereference operations.
+   649→// VUMA-VERIFIED: pointer RepD is well-formed and capability-preserving
+   650→pub fn ptr_repd(pointee: RepD) -> RepD {
+   651→    RepD::ptr_to(&pointee)
+   652→}
+   653→
+   654→// ---------------------------------------------------------------------------
+   655→// VUMA Primitive Types
+   656→// ---------------------------------------------------------------------------
+   657→
+   658→// ---- Ptr<T> ----------------------------------------------------------------
+   659→
+   660→/// A VUMA pointer type with embedded BD annotation.
+   661→///
+   662→/// `Ptr<T>` wraps a raw 64-bit address and carries a BD that describes
+   663→/// both the pointer itself and the pointee type `T`. The BD includes:
+   664→///
+   665→/// - **RepD**: 8-byte pointer with the pointee's capabilities + Read/Write.
+   666→/// - **CapD**: Union of pointer capabilities and pointee capabilities.
+   667→/// - **RelD**: Containment and Liveness relations.
+   668→///
+   669→/// # Type Parameter
+   670→///
+   671→/// `T` is a phantom type parameter used to track the pointee type at
+   672→/// compile time. It does not affect runtime representation.
+   673→///
+   674→/// # Safety
+   675→///
+   676→/// `Ptr<T>` is a VUMA-verified abstraction — the runtime ensures that
+   677→/// dereference is only permitted when the BD's capabilities allow it.
+   678→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   679→pub struct Ptr<T> {
+   680→    /// The raw address this pointer points to.
+   681→    pub addr: u64,
+   682→    /// The BD annotation for the pointee type.
+   683→    pub pointee_bd: BD,
+   684→    /// Phantom marker for the pointee type.
+   685→    _marker: PhantomData<T>,
+   686→}
+   687→
+   688→impl<T> Ptr<T> {
+   689→    /// Create a new `Ptr<T>` pointing to the given address with the
+   690→    /// specified pointee BD annotation.
+   691→    ///
+   692→    /// # Arguments
+   693→    ///
+   694→    /// * `addr` - The raw 64-bit address.
+   695→    /// * `pointee_bd` - The BD of the pointee type `T`.
+   696→    // VUMA-VERIFIED: constructor establishes valid pointer + BD pair
+   697→    pub fn new(addr: u64, pointee_bd: BD) -> Self {
+   698→        Self {
+   699→            addr,
+   700→            pointee_bd,
+   701→            _marker: PhantomData,
+   702→        }
+   703→    }
+   704→
+   705→    /// Create a null pointer (address 0) with the given pointee BD.
+   706→    // VUMA-VERIFIED: null pointer is safe to construct
+   707→    pub fn null(pointee_bd: BD) -> Self {
+   708→        Self::new(0, pointee_bd)
+   709→    }
+   710→
+   711→    /// Returns true if this is a null pointer.
+   712→    // VUMA-VERIFIED: pure query, no side effects
+   713→    pub fn is_null(&self) -> bool {
+   714→        self.addr == 0
+   715→    }
+   716→
+   717→    /// Offset this pointer by `n` bytes, returning a new pointer.
+   718→    // VUMA-VERIFIED: pointer arithmetic preserves BD annotation
+   719→    pub fn offset(&self, n: u64) -> Self {
+   720→        Self::new(self.addr + n, self.pointee_bd.clone())
+   721→    }
+   722→
+   723→    /// Returns the RepD for this pointer type.
+   724→    // VUMA-VERIFIED: pointer RepD is derived from pointee
+   725→    pub fn repd(&self) -> RepD {
+   726→        RepD::ptr_to(&self.pointee_bd.repd)
+   727→    }
+   728→
+   729→    /// Returns the CapD for this pointer type.
+   730→    // VUMA-VERIFIED: pointer CapD is derived from pointee + Read/Write
+   731→    pub fn capd(&self) -> CapD {
+   732→        self.pointee_bd
+   733→            .capd
+   734→            .union(&CapD::new(vec![CapFlag::Read, CapFlag::Write]))
+   735→    }
+   736→
+   737→    /// Returns the RelD for this pointer type.
+   738→    // VUMA-VERIFIED: pointer RelD is the standard ptr_reld
+   739→    pub fn reld(&self) -> RelD {
+   740→        ptr_reld()
+   741→    }
+   742→}
+   743→
+   744→impl<T> HasBD for Ptr<T> {
+   745→    /// Returns the full BD for this pointer, derived from the pointee BD
+   746→    /// and pointer-specific annotations.
+   747→    // VUMA-VERIFIED: BD derivation is well-formed
+   748→    fn as_bd(&self) -> BD {
+   749→        BD::new(self.repd(), self.capd(), self.reld())
+   750→    }
+   751→}
+   752→
+   753→impl<T> fmt::Display for Ptr<T> {
+   754→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   755→        write!(
+   756→            f,
+   757→            "Ptr(0x{:016X}, {})",
+   758→            self.addr, self.pointee_bd.repd.name
+   759→        )
+   760→    }
+   761→}
+   762→
+   763→// ---- RegionPtr<T> ---------------------------------------------------------
+   764→
+   765→/// A pointer bound to a specific memory region.
+   766→///
+   767→/// `RegionPtr<T>` extends `Ptr<T>` with region bounds checking. It carries
+   768→/// the base address and size of the memory region it is bound to, ensuring
+   769→/// that all accesses fall within the valid region. The BD includes a
+   770→/// `RegionBound` relation that the VUMA verifier uses to prove spatial
+   771→/// memory safety.
+   772→///
+   773→/// # BD Annotation
+   774→///
+   775→/// - **RepD**: 24 bytes (addr: 8 + region_base: 8 + region_size: 8).
+   776→/// - **CapD**: Same as `Ptr<T>` plus Shared.
+   777→/// - **RelD**: Containment, Liveness, and RegionBound.
+   778→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   779→pub struct RegionPtr<T> {
+   780→    /// The raw address this pointer points to.
+   781→    pub addr: u64,
+   782→    /// Base address of the memory region.
+   783→    pub region_base: u64,
+   784→    /// Size of the memory region in bytes.
+   785→    pub region_size: u64,
+   786→    /// The BD annotation for the pointee type.
+   787→    pub pointee_bd: BD,
+   788→    /// Phantom marker for the pointee type.
+   789→    _marker: PhantomData<T>,
+   790→}
+   791→
+   792→impl<T> RegionPtr<T> {
+   793→    /// Create a new `RegionPtr<T>` pointing to the given address, bound
+   794→    /// to the specified memory region.
+   795→    ///
+   796→    /// # Arguments
+   797→    ///
+   798→    /// * `addr` - The raw 64-bit address the pointer targets.
+   799→    /// * `region_base` - The base address of the memory region.
+   800→    /// * `region_size` - The size of the memory region in bytes.
+   801→    /// * `pointee_bd` - The BD of the pointee type `T`.
+   802→    ///
+   803→    /// # Panics
+   804→    ///
+   805→    /// Panics if `addr` is not within `[region_base, region_base + region_size)`.
+   806→    // VUMA-VERIFIED: constructor establishes valid region-bound pointer
+   807→    pub fn new(addr: u64, region_base: u64, region_size: u64, pointee_bd: BD) -> Self {
+   808→        assert!(
+   809→            addr >= region_base && addr < region_base + region_size,
+   810→            "RegionPtr: address 0x{:X} is outside region [0x{:X}, 0x{:X})",
+   811→            addr,
+   812→            region_base,
+   813→            region_base + region_size
+   814→        );
+   815→        Self {
+   816→            addr,
+   817→            region_base,
+   818→            region_size,
+   819→            pointee_bd,
+   820→            _marker: PhantomData,
+   821→        }
+   822→    }
+   823→
+   824→    /// Returns true if the address is within the region bounds.
+   825→    // VUMA-VERIFIED: pure query, no side effects
+   826→    pub fn in_bounds(&self) -> bool {
+   827→        self.addr >= self.region_base && self.addr < self.region_base + self.region_size
+   828→    }
+   829→
+   830→    /// Offset this pointer by `n` bytes, returning a new RegionPtr.
+   831→    ///
+   832→    /// Returns `None` if the resulting address would be outside the region.
+   833→    // VUMA-VERIFIED: bounded offset preserves region safety
+   834→    pub fn checked_offset(&self, n: u64) -> Option<Self> {
+   835→        let new_addr = self.addr.checked_add(n)?;
+   836→        if new_addr >= self.region_base && new_addr < self.region_base + self.region_size {
+   837→            Some(Self {
+   838→                addr: new_addr,
+   839→                region_base: self.region_base,
+   840→                region_size: self.region_size,
+   841→                pointee_bd: self.pointee_bd.clone(),
+   842→                _marker: PhantomData,
+   843→            })
+   844→        } else {
+   845→            None
+   846→        }
+   847→    }
+   848→
+   849→    /// Returns the RepD for this region-pointer type.
+   850→    // VUMA-VERIFIED: region-pointer RepD is well-formed
+   851→    pub fn repd(&self) -> RepD {
+   852→        RepD::new(
+   853→            format!("region_ptr<{}>", self.pointee_bd.repd.name),
+   854→            24,
+   855→            8,
+   856→            self.capd(),
+   857→        )
+   858→    }
+   859→
+   860→    /// Returns the CapD for this region-pointer type.
+   861→    // VUMA-VERIFIED: region-pointer CapD includes Shared access
+   862→    pub fn capd(&self) -> CapD {
+   863→        self.pointee_bd.capd.union(&CapD::new(vec![
+   864→            CapFlag::Read,
+   865→            CapFlag::Write,
+   866→            CapFlag::Shared,
+   867→        ]))
+   868→    }
+   869→
+   870→    /// Returns the RelD for this region-pointer type.
+   871→    // VUMA-VERIFIED: region-pointer RelD includes RegionBound
+   872→    pub fn reld(&self) -> RelD {
+   873→        region_ptr_reld()
+   874→    }
+   875→}
+   876→
+   877→impl<T> HasBD for RegionPtr<T> {
+   878→    /// Returns the full BD for this region-bound pointer.
+   879→    // VUMA-VERIFIED: BD derivation is well-formed
+   880→    fn as_bd(&self) -> BD {
+   881→        BD::new(self.repd(), self.capd(), self.reld())
+   882→    }
+   883→}
+   884→
+   885→impl<T> fmt::Display for RegionPtr<T> {
+   886→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   887→        write!(
+   888→            f,
+   889→            "RegionPtr(0x{:016X}, region [0x{:016X}, +{}), {})",
+   890→            self.addr, self.region_base, self.region_size, self.pointee_bd.repd.name
+   891→        )
+   892→    }
+   893→}
+   894→
+   895→// ---- Slice<T> -------------------------------------------------------------
+   896→
+   897→/// A pointer + length with BD annotation.
+   898→///
+   899→/// `Slice<T>` represents a contiguous sequence of elements of type `T`
+   900→/// starting at a base address. It carries both a length (number of
+   901→/// elements) and a BD that describes the slice's capabilities and
+   902→/// relational properties.
+   903→///
+   904→/// # BD Annotation
+   905→///
+   906→/// - **RepD**: 16 bytes (addr: 8 + len: 8), with Iterate capability.
+   907→/// - **CapD**: Pointee capabilities + Read, Write, Iterate.
+   908→/// - **RelD**: Containment, Liveness, DataFlow.
+   909→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   910→pub struct Slice<T> {
+   911→    /// The base address of the slice.
+   912→    pub addr: u64,
+   913→    /// The number of elements in the slice.
+   914→    pub len: u64,
+   915→    /// The BD annotation for the element type.
+   916→    pub elem_bd: BD,
+   917→    /// Phantom marker for the element type.
+   918→    _marker: PhantomData<T>,
+   919→}
+   920→
+   921→impl<T> Slice<T> {
+   922→    /// Create a new `Slice<T>` starting at the given address with the
+   923→    /// specified length and element BD.
+   924→    ///
+   925→    /// # Arguments
+   926→    ///
+   927→    /// * `addr` - The base address of the slice.
+   928→    /// * `len` - The number of elements in the slice.
+   929→    /// * `elem_bd` - The BD of the element type `T`.
+   930→    // VUMA-VERIFIED: constructor establishes valid slice + BD pair
+   931→    pub fn new(addr: u64, len: u64, elem_bd: BD) -> Self {
+   932→        Self {
+   933→            addr,
+   934→            len,
+   935→            elem_bd,
+   936→            _marker: PhantomData,
+   937→        }
+   938→    }
+   939→
+   940→    /// Create an empty slice (zero length) at the given address.
+   941→    // VUMA-VERIFIED: empty slice is safe to construct
+   942→    pub fn empty(addr: u64, elem_bd: BD) -> Self {
+   943→        Self::new(addr, 0, elem_bd)
+   944→    }
+   945→
+   946→    /// Returns true if this slice has zero elements.
+   947→    // VUMA-VERIFIED: pure query, no side effects
+   948→    pub fn is_empty(&self) -> bool {
+   949→        self.len == 0
+   950→    }
+   951→
+   952→    /// Returns the byte size of this slice (len * elem_size).
+   953→    // VUMA-VERIFIED: pure query, no side effects
+   954→    pub fn byte_size(&self) -> u64 {
+   955→        self.len * self.elem_bd.repd.size
+   956→    }
+   957→
+   958→    /// Returns a subslice starting at `offset` elements with `new_len` elements.
+   959→    ///
+   960→    /// Returns `None` if the subslice would be out of bounds.
+   961→    // VUMA-VERIFIED: subslice preserves BD annotation and bounds
+   962→    pub fn subslice(&self, offset: u64, new_len: u64) -> Option<Self> {
+   963→        if offset + new_len > self.len {
+   964→            return None;
+   965→        }
+   966→        Some(Self::new(
+   967→            self.addr + offset * self.elem_bd.repd.size,
+   968→            new_len,
+   969→            self.elem_bd.clone(),
+   970→        ))
+   971→    }
+   972→
+   973→    /// Returns the RepD for this slice type.
+   974→    // VUMA-VERIFIED: slice RepD is well-formed
+   975→    pub fn repd(&self) -> RepD {
+   976→        RepD::new(
+   977→            format!("slice<{}>", self.elem_bd.repd.name),
+   978→            16,
+   979→            8,
+   980→            self.capd(),
+   981→        )
+   982→    }
+   983→
+   984→    /// Returns the CapD for this slice type.
+   985→    // VUMA-VERIFIED: slice CapD includes Iterate
+   986→    pub fn capd(&self) -> CapD {
+   987→        self.elem_bd.capd.union(&CapD::new(vec![
+   988→            CapFlag::Read,
+   989→            CapFlag::Write,
+   990→            CapFlag::Iterate,
+   991→        ]))
+   992→    }
+   993→
+   994→    /// Returns the RelD for this slice type.
+   995→    // VUMA-VERIFIED: slice RelD includes DataFlow
+   996→    pub fn reld(&self) -> RelD {
+   997→        slice_reld()
+   998→    }
+   999→}
+  1000→
+  1001→impl<T> HasBD for Slice<T> {
+  1002→    /// Returns the full BD for this slice.
+  1003→    // VUMA-VERIFIED: BD derivation is well-formed
+  1004→    fn as_bd(&self) -> BD {
+  1005→        BD::new(self.repd(), self.capd(), self.reld())
+  1006→    }
+  1007→}
+  1008→
+  1009→impl<T> fmt::Display for Slice<T> {
+  1010→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1011→        write!(
+  1012→            f,
+  1013→            "Slice(0x{:016X}, len={}, {})",
+  1014→            self.addr, self.len, self.elem_bd.repd.name
+  1015→        )
+  1016→    }
+  1017→}
+  1018→
+  1019→// ---- VumaResult<T, E> -----------------------------------------------------
+  1020→
+  1021→/// A VUMA result type with BD tracking.
+  1022→///
+  1023→/// `VumaResult<T, E>` represents either a successful value (`Ok`) or an
+  1024→/// error (`Err`), with full BD annotations for both variants. The BD of a
+  1025→/// result value is the union of the OK and ERR BDs, capturing the
+  1026→/// capabilities and relations of both paths.
+  1027→///
+  1028→/// # BD Annotation
+  1029→///
+  1030→/// - **RepD**: Sum type, size is `max(ok_size, err_size) + 1` (tag byte).
+  1031→/// - **CapD**: Intersection of OK and ERR capabilities.
+  1032→/// - **RelD**: DataFlow and Ownership relations.
+  1033→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1034→pub enum VumaResult<T, E> {
+  1035→    /// Successful result carrying a value of type `T`.
+  1036→    Ok(T),
+  1037→    /// Error result carrying a value of type `E`.
+  1038→    Err(E),
+  1039→}
+  1040→
+  1041→impl<T, E> VumaResult<T, E> {
+  1042→    /// Returns true if this is an `Ok` value.
+  1043→    // VUMA-VERIFIED: pure query, no side effects
+  1044→    pub fn is_ok(&self) -> bool {
+  1045→        matches!(self, VumaResult::Ok(_))
+  1046→    }
+  1047→
+  1048→    /// Returns true if this is an `Err` value.
+  1049→    // VUMA-VERIFIED: pure query, no side effects
+  1050→    pub fn is_err(&self) -> bool {
+  1051→        matches!(self, VumaResult::Err(_))
+  1052→    }
+  1053→
+  1054→    /// Unwrap the Ok value, panicking if this is Err.
+  1055→    // VUMA-VERIFIED: panics on Err — caller must ensure Ok via capability check
+  1056→    pub fn unwrap(self) -> T {
+  1057→        match self {
+  1058→            VumaResult::Ok(v) => v,
+  1059→            VumaResult::Err(_) => panic!("VumaResult::unwrap on Err value"),
+  1060→        }
+  1061→    }
+  1062→
+  1063→    /// Unwrap the Err value, panicking if this is Ok.
+  1064→    // VUMA-VERIFIED: panics on Ok — caller must ensure Err via capability check
+  1065→    pub fn unwrap_err(self) -> E {
+  1066→        match self {
+  1067→            VumaResult::Err(e) => e,
+  1068→            VumaResult::Ok(_) => panic!("VumaResult::unwrap_err on Ok value"),
+  1069→        }
+  1070→    }
+  1071→
+  1072→    /// Map the Ok value using the provided function.
+  1073→    // VUMA-VERIFIED: pure transformation, preserves Err BD
+  1074→    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> VumaResult<U, E> {
+  1075→        match self {
+  1076→            VumaResult::Ok(v) => VumaResult::Ok(f(v)),
+  1077→            VumaResult::Err(e) => VumaResult::Err(e),
+  1078→        }
+  1079→    }
+  1080→
+  1081→    /// Map the Err value using the provided function.
+  1082→    // VUMA-VERIFIED: pure transformation, preserves Ok BD
+  1083→    pub fn map_err<F2, F: FnOnce(E) -> F2>(self, f: F) -> VumaResult<T, F2> {
+  1084→        match self {
+  1085→            VumaResult::Ok(v) => VumaResult::Ok(v),
+  1086→            VumaResult::Err(e) => VumaResult::Err(f(e)),
+  1087→        }
+  1088→    }
+  1089→}
+  1090→
+  1091→impl<T: HasBD, E: HasBD> VumaResult<T, E> {
+  1092→    /// Compute the RepD for this result type.
+  1093→    // VUMA-VERIFIED: result RepD is the tagged union of ok and err RepDs
+  1094→    pub fn repd(&self) -> RepD {
+  1095→        let (ok_bd, err_bd) = self.bds();
+  1096→        let max_size = std::cmp::max(ok_bd.repd.size, err_bd.repd.size) + 1; // +1 for tag
+  1097→        let max_align = std::cmp::max(ok_bd.repd.align, err_bd.repd.align);
+  1098→        RepD::new(
+  1099→            format!("Result<{}, {}>", ok_bd.repd.name, err_bd.repd.name),
+  1100→            max_size,
+  1101→            max_align,
+  1102→            self.capd(),
+  1103→        )
+  1104→    }
+  1105→
+  1106→    /// Compute the CapD for this result type — intersection of Ok and Err.
+  1107→    // VUMA-VERIFIED: result CapD is the safe intersection of both variants
+  1108→    pub fn capd(&self) -> CapD {
+  1109→        let (ok_bd, err_bd) = self.bds();
+  1110→        ok_bd.capd.intersect(&err_bd.capd)
+  1111→    }
+  1112→
+  1113→    /// Compute the RelD for this result type.
+  1114→    // VUMA-VERIFIED: result RelD has DataFlow and Ownership
+  1115→    pub fn reld(&self) -> RelD {
+  1116→        result_reld()
+  1117→    }
+  1118→
+  1119→    /// Helper to extract BDs from both variants by constructing temporary
+  1120→    /// values. This uses the HasBD trait on T and E.
+  1121→    fn bds(&self) -> (BD, BD) {
+  1122→        // We need to get BDs from T and E. Since we only have one variant
+  1123→        // at runtime, we produce BDs using a representative approach:
+  1124→        // We get the BD of whichever variant is present, and for the
+  1125→        // other we use a default derived from the first.
+  1126→        match self {
+  1127→            VumaResult::Ok(v) => {
+  1128→                let ok_bd = v.as_bd();
+  1129→                let err_bd = BD::new(
+  1130→                    RepD::new("err", ok_bd.repd.size, ok_bd.repd.align, CapD::empty()),
+  1131→                    CapD::empty(),
+  1132→                    RelD::empty(),
+  1133→                );
+  1134→                (ok_bd, err_bd)
+  1135→            }
+  1136→            VumaResult::Err(e) => {
+  1137→                let err_bd = e.as_bd();
+  1138→                let ok_bd = BD::new(
+  1139→                    RepD::new("ok", err_bd.repd.size, err_bd.repd.align, CapD::empty()),
+  1140→                    CapD::empty(),
+  1141→                    RelD::empty(),
+  1142→                );
+  1143→                (ok_bd, err_bd)
+  1144→            }
+  1145→        }
+  1146→    }
+  1147→}
+  1148→
+  1149→impl<T: HasBD, E: HasBD> HasBD for VumaResult<T, E> {
+  1150→    /// Returns the full BD for this result.
+  1151→    // VUMA-VERIFIED: BD derivation is well-formed
+  1152→    fn as_bd(&self) -> BD {
+  1153→        BD::new(self.repd(), self.capd(), self.reld())
+  1154→    }
+  1155→}
+  1156→
+  1157→// ---- VumaOption<T> --------------------------------------------------------
+  1158→
+  1159→/// A VUMA option type with BD tracking.
+  1160→///
+  1161→/// `VumaOption<T>` represents either a present value (`Some`) or absence
+  1162→/// (`None`), with full BD annotations for the value variant.
+  1163→///
+  1164→/// # BD Annotation
+  1165→///
+  1166→/// - **RepD**: size is `val_size + 1` (tag byte).
+  1167→/// - **CapD**: Same as the inner value's CapD.
+  1168→/// - **RelD**: DataFlow and Liveness relations.
+  1169→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1170→pub enum VumaOption<T> {
+  1171→    /// A present value.
+  1172→    Some(T),
+  1173→    /// Absence of a value.
+  1174→    None,
+  1175→}
+  1176→
+  1177→impl<T> VumaOption<T> {
+  1178→    /// Returns true if this is a `Some` value.
+  1179→    // VUMA-VERIFIED: pure query, no side effects
+  1180→    pub fn is_some(&self) -> bool {
+  1181→        matches!(self, VumaOption::Some(_))
+  1182→    }
+  1183→
+  1184→    /// Returns true if this is `None`.
+  1185→    // VUMA-VERIFIED: pure query, no side effects
+  1186→    pub fn is_none(&self) -> bool {
+  1187→        matches!(self, VumaOption::None)
+  1188→    }
+  1189→
+  1190→    /// Unwrap the Some value, panicking if this is None.
+  1191→    // VUMA-VERIFIED: panics on None — caller must ensure Some via capability check
+  1192→    pub fn unwrap(self) -> T {
+  1193→        match self {
+  1194→            VumaOption::Some(v) => v,
+  1195→            VumaOption::None => panic!("VumaOption::unwrap on None value"),
+  1196→        }
+  1197→    }
+  1198→
+  1199→    /// Map the Some value using the provided function.
+  1200→    // VUMA-VERIFIED: pure transformation, preserves None
+  1201→    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> VumaOption<U> {
+  1202→        match self {
+  1203→            VumaOption::Some(v) => VumaOption::Some(f(v)),
+  1204→            VumaOption::None => VumaOption::None,
+  1205→        }
+  1206→    }
+  1207→
+  1208→    /// Returns the contained Some value or a default.
+  1209→    // VUMA-VERIFIED: pure, provides default on None
+  1210→    pub fn unwrap_or(self, default: T) -> T {
+  1211→        match self {
+  1212→            VumaOption::Some(v) => v,
+  1213→            VumaOption::None => default,
+  1214→        }
+  1215→    }
+  1216→}
+  1217→
+  1218→impl<T: HasBD> VumaOption<T> {
+  1219→    /// Compute the RepD for this option type.
+  1220→    // VUMA-VERIFIED: option RepD is the tagged union of val + None
+  1221→    pub fn repd(&self) -> RepD {
+  1222→        let val_bd = self.val_bd();
+  1223→        RepD::new(
+  1224→            format!("Option<{}>", val_bd.repd.name),
+  1225→            val_bd.repd.size + 1,
+  1226→            val_bd.repd.align,
+  1227→            self.capd(),
+  1228→        )
+  1229→    }
+  1230→
+  1231→    /// Compute the CapD for this option type.
+  1232→    // VUMA-VERIFIED: option CapD inherits from inner value
+  1233→    pub fn capd(&self) -> CapD {
+  1234→        self.val_bd().capd
+  1235→    }
+  1236→
+  1237→    /// Compute the RelD for this option type.
+  1238→    // VUMA-VERIFIED: option RelD has DataFlow and Liveness
+  1239→    pub fn reld(&self) -> RelD {
+  1240→        option_reld()
+  1241→    }
+  1242→
+  1243→    /// Helper to get the BD of the inner value (or a default for None).
+  1244→    fn val_bd(&self) -> BD {
+  1245→        match self {
+  1246→            VumaOption::Some(v) => v.as_bd(),
+  1247→            VumaOption::None => BD::new(
+  1248→                RepD::new("void", 0, 1, CapD::empty()),
+  1249→                CapD::empty(),
+  1250→                RelD::empty(),
+  1251→            ),
+  1252→        }
+  1253→    }
+  1254→}
+  1255→
+  1256→impl<T: HasBD> HasBD for VumaOption<T> {
+  1257→    /// Returns the full BD for this option.
+  1258→    // VUMA-VERIFIED: BD derivation is well-formed
+  1259→    fn as_bd(&self) -> BD {
+  1260→        BD::new(self.repd(), self.capd(), self.reld())
+  1261→    }
+  1262→}
+  1263→
+  1264→// ---- Range ----------------------------------------------------------------
+  1265→
+  1266→/// An integer range type (start..end).
+  1267→///
+  1268→/// `Range` represents a half-open interval `[start, end)`. It carries a BD
+  1269→/// annotation that includes Compare and Iterate capabilities, making it
+  1270→/// suitable for use in loops and index computations.
+  1271→///
+  1272→/// # BD Annotation
+  1273→///
+  1274→/// - **RepD**: 16 bytes (start: 8 + end: 8), alignment 8.
+  1275→/// - **CapD**: Read, Write, Compare, Iterate, Serialize.
+  1276→/// - **RelD**: Empty (numeric range has no inherent relations).
+  1277→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1278→pub struct Range {
+  1279→    /// The start of the range (inclusive).
+  1280→    pub start: u64,
+  1281→    /// The end of the range (exclusive).
+  1282→    pub end: u64,
+  1283→}
+  1284→
+  1285→impl Range {
+  1286→    /// Create a new Range with the given start and end.
+  1287→    // VUMA-VERIFIED: constructor is pure, no side effects
+  1288→    pub fn new(start: u64, end: u64) -> Self {
+  1289→        Self { start, end }
+  1290→    }
+  1291→
+  1292→    /// Returns true if the range is empty (start >= end).
+  1293→    // VUMA-VERIFIED: pure query, no side effects
+  1294→    pub fn is_empty(&self) -> bool {
+  1295→        self.start >= self.end
+  1296→    }
+  1297→
+  1298→    /// Returns the number of elements in the range.
+  1299→    // VUMA-VERIFIED: pure query, no side effects
+  1300→    pub fn len(&self) -> u64 {
+  1301→        self.end.saturating_sub(self.start)
+  1302→    }
+  1303→
+  1304→    /// Returns true if the range contains the given value.
+  1305→    // VUMA-VERIFIED: pure query, no side effects
+  1306→    pub fn contains(&self, value: u64) -> bool {
+  1307→        value >= self.start && value < self.end
+  1308→    }
+  1309→
+  1310→    /// Returns the RepD for this range type.
+  1311→    // VUMA-VERIFIED: range RepD is well-formed
+  1312→    pub fn repd(&self) -> RepD {
+  1313→        RepD::new("Range", 16, 8, Self::capd())
+  1314→    }
+  1315→
+  1316→    /// Returns the CapD for the range type.
+  1317→    // VUMA-VERIFIED: range CapD includes Iterate
+  1318→    pub fn capd() -> CapD {
+  1319→        CapD::new(vec![
+  1320→            CapFlag::Read,
+  1321→            CapFlag::Write,
+  1322→            CapFlag::Compare,
+  1323→            CapFlag::Iterate,
+  1324→            CapFlag::Serialize,
+  1325→        ])
+  1326→    }
+  1327→
+  1328→    /// Returns the RelD for the range type.
+  1329→    // VUMA-VERIFIED: range RelD is empty (pure numeric)
+  1330→    pub fn reld(&self) -> RelD {
+  1331→        numeric_reld()
+  1332→    }
+  1333→}
+  1334→
+  1335→impl HasBD for Range {
+  1336→    /// Returns the full BD for this range.
+  1337→    // VUMA-VERIFIED: BD derivation is well-formed
+  1338→    fn as_bd(&self) -> BD {
+  1339→        BD::new(self.repd(), Self::capd(), self.reld())
+  1340→    }
+  1341→}
+  1342→
+  1343→impl fmt::Display for Range {
+  1344→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1345→        write!(f, "{}..{}", self.start, self.end)
+  1346→    }
+  1347→}
+  1348→
+  1349→// ---------------------------------------------------------------------------
+  1350→// Tests
+  1351→// ---------------------------------------------------------------------------
+  1352→
+  1353→#[cfg(test)]
+  1354→mod tests {
+  1355→    use super::*;
+  1356→
+  1357→    // -- Helper: create a simple pointee BD for tests -----------------------
+  1358→
+  1359→    fn uint32_bd() -> BD {
+  1360→        BD::new(uint32_repd(), numeric_capd(), numeric_reld())
+  1361→    }
+  1362→
+  1363→    fn uint64_bd() -> BD {
+  1364→        BD::new(uint64_repd(), numeric_capd(), numeric_reld())
+  1365→    }
+  1366→
+  1367→    // -- Existing tests (preserved) -----------------------------------------
+  1368→
+  1369→    #[test]
+  1370→    fn test_numeric_capd_has_expected_flags() {
+  1371→        let capd = numeric_capd();
+  1372→        assert!(capd.has(CapFlag::Read));
+  1373→        assert!(capd.has(CapFlag::Write));
+  1374→        assert!(capd.has(CapFlag::Compare));
+  1375→        assert!(capd.has(CapFlag::Hash));
+  1376→        assert!(capd.has(CapFlag::Serialize));
+  1377→        assert!(!capd.has(CapFlag::Iterate));
+  1378→        assert!(!capd.has(CapFlag::Send));
+  1379→    }
+  1380→
+  1381→    #[test]
+  1382→    fn test_string_capd_has_expected_flags() {
+  1383→        let capd = string_capd();
+  1384→        assert!(capd.has(CapFlag::Read));
+  1385→        assert!(capd.has(CapFlag::Write));
+  1386→        assert!(capd.has(CapFlag::Iterate));
+  1387→        assert!(capd.has(CapFlag::Compare));
+  1388→        assert!(capd.has(CapFlag::Hash));
+  1389→        assert!(capd.has(CapFlag::Serialize));
+  1390→        assert!(capd.has(CapFlag::Send));
+  1391→    }
+  1392→
+  1393→    #[test]
+  1394→    fn test_uint8_repd_properties() {
+  1395→        let repd = uint8_repd();
+  1396→        assert_eq!(repd.name, "uint8");
+  1397→        assert_eq!(repd.size, 1);
+  1398→        assert_eq!(repd.align, 1);
+  1399→        assert!(repd.supports(&numeric_capd()));
+  1400→    }
+  1401→
+  1402→    #[test]
+  1403→    fn test_float64_repd_properties() {
+  1404→        let repd = float64_repd();
+  1405→        assert_eq!(repd.name, "float64");
+  1406→        assert_eq!(repd.size, 8);
+  1407→        assert_eq!(repd.align, 8);
+  1408→    }
+  1409→
+  1410→    #[test]
+  1411→    fn test_ptr_repd_inherits_pointee_caps() {
+  1412→        let pointee = uint32_repd();
+  1413→        let ptr = ptr_repd(pointee);
+  1414→        assert_eq!(ptr.name, "ptr<uint32>");
+  1415→        assert_eq!(ptr.size, 8);
+  1416→        assert_eq!(ptr.align, 8);
+  1417→        assert!(ptr.capd.has(CapFlag::Read));
+  1418→        assert!(ptr.capd.has(CapFlag::Write));
+  1419→    }
+  1420→
+  1421→    #[test]
+  1422→    fn test_capd_union() {
+  1423→        let a = CapD::new(vec![CapFlag::Read]);
+  1424→        let b = CapD::new(vec![CapFlag::Write]);
+  1425→        let union = a.union(&b);
+  1426→        assert!(union.has(CapFlag::Read));
+  1427→        assert!(union.has(CapFlag::Write));
+  1428→    }
+  1429→
+  1430→    #[test]
+  1431→    fn test_capd_intersect() {
+  1432→        let a = CapD::new(vec![CapFlag::Read, CapFlag::Write]);
+  1433→        let b = CapD::new(vec![CapFlag::Write, CapFlag::Hash]);
+  1434→        let inter = a.intersect(&b);
+  1435→        assert!(inter.has(CapFlag::Write));
+  1436→        assert!(!inter.has(CapFlag::Read));
+  1437→        assert!(!inter.has(CapFlag::Hash));
+  1438→    }
+  1439→
+  1440→    #[test]
+  1441→    fn test_capd_subcap() {
+  1442→        let a = CapD::new(vec![CapFlag::Read]);
+  1443→        let b = CapD::new(vec![CapFlag::Read, CapFlag::Write]);
+  1444→        assert!(a.is_subcap_of(&b));
+  1445→        assert!(!b.is_subcap_of(&a));
+  1446→    }
+  1447→
+  1448→    // -- New tests: RelD ----------------------------------------------------
+  1449→
+  1450→    #[test]
+  1451→    fn test_reld_compose_unions_relations() {
+  1452→        let a = RelD::new(vec![RelKind::Containment]);
+  1453→        let b = RelD::new(vec![RelKind::Liveness]);
+  1454→        let composed = a.compose(&b);
+  1455→        assert!(composed.has(RelKind::Containment));
+  1456→        assert!(composed.has(RelKind::Liveness));
+  1457→    }
+  1458→
+  1459→    #[test]
+  1460→    fn test_reld_refines_superset() {
+  1461→        // A more refined RelD has a superset of relations.
+  1462→        let a = RelD::new(vec![RelKind::Containment, RelKind::Liveness]);
+  1463→        let b = RelD::new(vec![RelKind::Containment]);
+  1464→        assert!(a.refines(&b)); // a has more relations → refines b
+  1465→        assert!(!b.refines(&a)); // b has fewer → does not refine a
+  1466→    }
+  1467→
+  1468→    // -- New tests: BD ------------------------------------------------------
+  1469→
+  1470→    #[test]
+  1471→    fn test_bd_compatible_same_type() {
+  1472→        let a = BD::new(uint32_repd(), numeric_capd(), ptr_reld());
+  1473→        let b = BD::new(uint32_repd(), numeric_capd(), ptr_reld());
+  1474→        assert!(a.compatible(&b));
+  1475→    }
+  1476→
+  1477→    #[test]
+  1478→    fn test_bd_refines() {
+  1479→        let a = BD::new(
+  1480→            uint32_repd(),
+  1481→            CapD::new(vec![CapFlag::Read]),
+  1482→            RelD::new(vec![RelKind::Containment, RelKind::Liveness]),
+  1483→        );
+  1484→        let b = BD::new(
+  1485→            uint32_repd(),
+  1486→            numeric_capd(),
+  1487→            RelD::new(vec![RelKind::Containment]),
+  1488→        );
+  1489→        // a refines b: a has fewer caps (subcap) and more relations (refines)
+  1490→        assert!(a.refines(&b));
+  1491→    }
+  1492→
+  1493→    // -- New tests: Ptr<T> --------------------------------------------------
+  1494→
+  1495→    #[test]
+  1496→    fn test_ptr_creation_and_bd() {
+  1497→        let ptr: Ptr<u32> = Ptr::new(0x1000, uint32_bd());
+  1498→        assert_eq!(ptr.addr, 0x1000);
+  1499→        assert!(!ptr.is_null());
+  1500→
+  1501→        let bd = ptr.as_bd();
+  1502→        assert_eq!(bd.repd.name, "ptr<uint32>");
+  1503→        assert_eq!(bd.repd.size, 8);
+  1504→        assert!(bd.capd.has(CapFlag::Read));
+  1505→        assert!(bd.capd.has(CapFlag::Write));
+  1506→        assert!(bd.reld.has(RelKind::Containment));
+  1507→        assert!(bd.reld.has(RelKind::Liveness));
+  1508→    }
+  1509→
+  1510→    #[test]
+  1511→    fn test_ptr_null_and_offset() {
+  1512→        let ptr: Ptr<u32> = Ptr::null(uint32_bd());
+  1513→        assert!(ptr.is_null());
+  1514→
+  1515→        let offset_ptr = ptr.offset(16);
+  1516→        assert_eq!(offset_ptr.addr, 16);
+  1517→        // BD is preserved after offset
+  1518→        assert_eq!(offset_ptr.as_bd().repd.name, "ptr<uint32>");
+  1519→    }
+  1520→
+  1521→    // -- New tests: RegionPtr<T> --------------------------------------------
+  1522→
+  1523→    #[test]
+  1524→    fn test_region_ptr_creation_and_bd() {
+  1525→        let rptr: RegionPtr<u32> = RegionPtr::new(0x2000, 0x1000, 0x2000, uint32_bd());
+  1526→        assert!(rptr.in_bounds());
+  1527→
+  1528→        let bd = rptr.as_bd();
+  1529→        assert_eq!(bd.repd.name, "region_ptr<uint32>");
+  1530→        assert_eq!(bd.repd.size, 24);
+  1531→        assert!(bd.capd.has(CapFlag::Shared));
+  1532→        assert!(bd.reld.has(RelKind::RegionBound));
+  1533→    }
+  1534→
+  1535→    #[test]
+  1536→    fn test_region_ptr_checked_offset() {
+  1537→        let rptr: RegionPtr<u32> = RegionPtr::new(0x1000, 0x1000, 0x1000, uint32_bd());
+  1538→        // Within bounds
+  1539→        let ok = rptr.checked_offset(0x500);
+  1540→        assert!(ok.is_some());
+  1541→        assert_eq!(ok.unwrap().addr, 0x1500);
+  1542→
+  1543→        // Out of bounds
+  1544→        let bad = rptr.checked_offset(0x1001);
+  1545→        assert!(bad.is_none());
+  1546→    }
+  1547→
+  1548→    #[test]
+  1549→    #[should_panic(expected = "outside region")]
+  1550→    fn test_region_ptr_out_of_bounds_panics() {
+  1551→        let _: RegionPtr<u32> = RegionPtr::new(0x0000, 0x1000, 0x1000, uint32_bd());
+  1552→    }
+  1553→
+  1554→    // -- New tests: Slice<T> ------------------------------------------------
+  1555→
+  1556→    #[test]
+  1557→    fn test_slice_creation_and_bd() {
+  1558→        let slice: Slice<u64> = Slice::new(0x5000, 10, uint64_bd());
+  1559→        assert_eq!(slice.len, 10);
+  1560→        assert!(!slice.is_empty());
+  1561→        assert_eq!(slice.byte_size(), 80); // 10 * 8
+  1562→
+  1563→        let bd = slice.as_bd();
+  1564→        assert_eq!(bd.repd.name, "slice<uint64>");
+  1565→        assert_eq!(bd.repd.size, 16);
+  1566→        assert!(bd.capd.has(CapFlag::Iterate));
+  1567→        assert!(bd.reld.has(RelKind::DataFlow));
+  1568→    }
+  1569→
+  1570→    #[test]
+  1571→    fn test_slice_subslice() {
+  1572→        let slice: Slice<u32> = Slice::new(0x1000, 10, uint32_bd());
+  1573→        let sub = slice.subslice(2, 5);
+  1574→        assert!(sub.is_some());
+  1575→        let sub = sub.unwrap();
+  1576→        assert_eq!(sub.len, 5);
+  1577→        assert_eq!(sub.addr, 0x1000 + 2 * 4); // offset by 2 * sizeof(uint32)
+  1578→
+  1579→        // Out of bounds subslice
+  1580→        assert!(slice.subslice(8, 5).is_none());
+  1581→    }
+  1582→
+  1583→    // -- New tests: VumaResult<T, E> ----------------------------------------
+  1584→
+  1585→    /// A simple type implementing HasBD for testing VumaResult.
+  1586→    #[derive(Debug, Clone, PartialEq, Eq)]
+  1587→    struct TestVal(u64);
+  1588→
+  1589→    impl HasBD for TestVal {
+  1590→        fn as_bd(&self) -> BD {
+  1591→            BD::new(uint64_repd(), numeric_capd(), numeric_reld())
+  1592→        }
+  1593→    }
+  1594→
+  1595→    /// A simple error type implementing HasBD for testing VumaResult.
+  1596→    #[derive(Debug, Clone, PartialEq, Eq)]
+  1597→    struct TestErr(u32);
+  1598→
+  1599→    impl HasBD for TestErr {
+  1600→        fn as_bd(&self) -> BD {
+  1601→            BD::new(uint32_repd(), numeric_capd(), numeric_reld())
+  1602→        }
+  1603→    }
+  1604→
+  1605→    #[test]
+  1606→    fn test_vuma_result_ok_bd() {
+  1607→        let res: VumaResult<TestVal, TestErr> = VumaResult::Ok(TestVal(42));
+  1608→        assert!(res.is_ok());
+  1609→
+  1610→        let bd = res.as_bd();
+  1611→        assert!(bd.repd.name.starts_with("Result<"));
+  1612→        assert!(bd.reld.has(RelKind::DataFlow));
+  1613→        assert!(bd.reld.has(RelKind::Ownership));
+  1614→    }
+  1615→
+  1616→    #[test]
+  1617→    fn test_vuma_result_err_bd() {
+  1618→        let res: VumaResult<TestVal, TestErr> = VumaResult::Err(TestErr(1));
+  1619→        assert!(res.is_err());
+  1620→
+  1621→        let bd = res.as_bd();
+  1622→        assert!(bd.reld.has(RelKind::DataFlow));
+  1623→    }
+  1624→
+  1625→    #[test]
+  1626→    fn test_vuma_result_map() {
+  1627→        let res: VumaResult<TestVal, TestErr> = VumaResult::Ok(TestVal(42));
+  1628→        let mapped = res.map(|v| v.0 * 2);
+  1629→        assert_eq!(mapped, VumaResult::Ok(84));
+  1630→    }
+  1631→
+  1632→    // -- New tests: VumaOption<T> -------------------------------------------
+  1633→
+  1634→    #[test]
+  1635→    fn test_vuma_option_some_bd() {
+  1636→        let opt: VumaOption<TestVal> = VumaOption::Some(TestVal(99));
+  1637→        assert!(opt.is_some());
+  1638→
+  1639→        let bd = opt.as_bd();
+  1640→        assert!(bd.repd.name.starts_with("Option<"));
+  1641→        assert!(bd.reld.has(RelKind::DataFlow));
+  1642→        assert!(bd.reld.has(RelKind::Liveness));
+  1643→    }
+  1644→
+  1645→    #[test]
+  1646→    fn test_vuma_option_none_bd() {
+  1647→        let opt: VumaOption<TestVal> = VumaOption::None;
+  1648→        assert!(opt.is_none());
+  1649→
+  1650→        let bd = opt.as_bd();
+  1651→        assert!(bd.reld.has(RelKind::DataFlow));
+  1652→    }
+  1653→
+  1654→    #[test]
+  1655→    fn test_vuma_option_map_and_unwrap_or() {
+  1656→        let some: VumaOption<TestVal> = VumaOption::Some(TestVal(10));
+  1657→        let mapped = some.map(|v| v.0 + 1);
+  1658→        assert_eq!(mapped, VumaOption::Some(11));
+  1659→
+  1660→        let none: VumaOption<TestVal> = VumaOption::None;
+  1661→        let val = none.unwrap_or(TestVal(0));
+  1662→        assert_eq!(val, TestVal(0));
+  1663→    }
+  1664→
+  1665→    // -- New tests: Range ---------------------------------------------------
+  1666→
+  1667→    #[test]
+  1668→    fn test_range_creation_and_bd() {
+  1669→        let r = Range::new(0, 10);
+  1670→        assert_eq!(r.len(), 10);
+  1671→        assert!(!r.is_empty());
+  1672→        assert!(r.contains(5));
+  1673→        assert!(!r.contains(10));
+  1674→
+  1675→        let bd = r.as_bd();
+  1676→        assert_eq!(bd.repd.name, "Range");
+  1677→        assert_eq!(bd.repd.size, 16);
+  1678→        assert!(bd.capd.has(CapFlag::Iterate));
+  1679→        assert!(bd.capd.has(CapFlag::Compare));
+  1680→    }
+  1681→
+  1682→    #[test]
+  1683→    fn test_range_empty() {
+  1684→        let r = Range::new(10, 5);
+  1685→        assert!(r.is_empty());
+  1686→        assert_eq!(r.len(), 0);
+  1687→    }
+  1688→
+  1689→    #[test]
+  1690→    fn test_range_display() {
+  1691→        let r = Range::new(1, 100);
+  1692→        assert_eq!(format!("{r}"), "1..100");
+  1693→    }
+  1694→
+  1695→    // -- Cross-cutting: HasBD on Ptr/RegionPtr/Slice/Range ------------------
+  1696→
+  1697→    #[test]
+  1698→    fn test_ptr_as_bd_matches_manual_construction() {
+  1699→        let ptr: Ptr<u32> = Ptr::new(0xABCD, uint32_bd());
+  1700→        let bd = ptr.as_bd();
+  1701→
+  1702→        let manual_bd = BD::new(
+  1703→            RepD::ptr_to(&uint32_repd()),
+  1704→            numeric_capd().union(&CapD::new(vec![CapFlag::Read, CapFlag::Write])),
+  1705→            ptr_reld(),
+  1706→        );
+  1707→        assert_eq!(bd.repd.name, manual_bd.repd.name);
+  1708→        assert!(bd.capd.has(CapFlag::Read));
+  1709→        assert!(bd.capd.has(CapFlag::Write));
+  1710→        assert!(bd.reld.has(RelKind::Containment));
+  1711→    }
+  1712→
+  1713→    #[test]
+  1714→    fn test_region_ptr_as_bd_has_region_bound() {
+  1715→        let rptr: RegionPtr<u64> = RegionPtr::new(0x2000, 0x1000, 0x2000, uint64_bd());
+  1716→        let bd = rptr.as_bd();
+  1717→        assert!(bd.reld.has(RelKind::RegionBound));
+  1718→        assert!(bd.reld.has(RelKind::Containment));
+  1719→        assert!(bd.reld.has(RelKind::Liveness));
+  1720→    }
+  1721→
+  1722→    #[test]
+  1723→    fn test_slice_as_bd_has_iterate_and_dataflow() {
+  1724→        let slice: Slice<u32> = Slice::new(0x3000, 5, uint32_bd());
+  1725→        let bd = slice.as_bd();
+  1726→        assert!(bd.capd.has(CapFlag::Iterate));
+  1727→        assert!(bd.reld.has(RelKind::DataFlow));
+  1728→    }
+  1729→}
+  1730→
