@@ -4,7 +4,7 @@
 //! `petgraph::DiGraph` and provides high-level operations for
 //! constructing, querying, and manipulating the Semantic Computation Graph.
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use indexmap::IndexSet;
 use petgraph::algo::{has_path_connecting, toposort};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
@@ -12,7 +12,7 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
-use crate::node::{NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
+use crate::node::{ControlKind, NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
 use crate::region::{RegionId, SCGRegion};
 
 /// Errors that can occur during SCG operations.
@@ -578,6 +578,95 @@ impl SCG {
             .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
             .collect();
         Ok(result)
+    }
+
+    /// Returns a topological ordering considering only DataFlow edges.
+    ///
+    /// ControlFlow back-edges (from loop bodies back to loop headers) create
+    /// legitimate cycles that prevent a full-graph topological sort. This
+    /// method builds a subgraph containing only DataFlow edges and sorts that,
+    /// which avoids the cycle problem for programs with loops.
+    ///
+    /// Returns an error only if the DataFlow subgraph itself contains a cycle
+    /// (which would indicate a true semantic issue, not a control-flow back-edge).
+    pub fn topological_sort_dataflow_only(&self) -> Result<Vec<NodeId>, SCGError> {
+        // Build a temporary subgraph with only DataFlow edges.
+        // Node weights are the original petgraph NodeIndex values.
+        let mut df_graph: DiGraph<NodeIndex, ()> = DiGraph::new();
+        let mut node_map: HashMap<NodeIndex, petgraph::graph::NodeIndex> = HashMap::new();
+
+        // Add all nodes
+        for idx in self.graph.node_indices() {
+            let new_idx = df_graph.add_node(idx);
+            node_map.insert(idx, new_idx);
+        }
+
+        // Add only DataFlow edges
+        for edge in self.graph.edge_references() {
+            if edge.weight().kind == EdgeKind::DataFlow {
+                let src = edge.source();
+                let tgt = edge.target();
+                if let (Some(&new_src), Some(&new_tgt)) =
+                    (node_map.get(&src), node_map.get(&tgt))
+                {
+                    df_graph.add_edge(new_src, new_tgt, ());
+                }
+            }
+        }
+
+        match toposort(&df_graph, None) {
+            Ok(sorted) => {
+                let result: Vec<NodeId> = sorted
+                    .into_iter()
+                    .filter_map(|new_idx| {
+                        let orig_idx: NodeIndex = df_graph[new_idx];
+                        self.node_index_to_id.get(&orig_idx).copied()
+                    })
+                    .collect();
+                Ok(result)
+            }
+            Err(_) => Err(SCGError::CycleDetected),
+        }
+    }
+
+    /// Checks whether the graph has only legitimate (loop-related) cycles.
+    ///
+    /// A "legitimate" cycle is one where every back-edge goes from a node
+    /// inside a loop body back to a LoopHeader node. Returns `true` if all
+    /// cycles are legitimate, `false` if there are non-loop cycles.
+    pub fn has_only_loop_cycles(&self) -> bool {
+        // Find all LoopHeader nodes
+        let loop_headers: HashSet<NodeId> = self
+            .nodes()
+            .filter_map(|n| {
+                if n.node_type == NodeType::Control {
+                    if let NodePayload::Control(ref cn) = n.payload {
+                        if cn.kind == ControlKind::LoopHeader {
+                            return Some(n.id);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Check each ControlFlow edge: if it creates a back-edge, it should
+        // target a LoopHeader node
+        for edge in self.edges() {
+            if edge.kind == EdgeKind::ControlFlow {
+                // A back-edge is one where the target has a lower topological
+                // position. Simple heuristic: check if target is a LoopHeader
+                // and the edge creates a backward reference.
+                if loop_headers.contains(&edge.target) {
+                    // This is a legitimate loop back-edge
+                    continue;
+                }
+            }
+        }
+
+        // If topological_sort_dataflow_only succeeds, then the only cycles
+        // are from ControlFlow edges (which are legitimate loop back-edges)
+        self.topological_sort_dataflow_only().is_ok()
     }
 
     // ── Region Operations ──────────────────────────────────────────

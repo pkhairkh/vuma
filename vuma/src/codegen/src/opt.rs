@@ -1091,6 +1091,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(3),
                 rhs: IRValue::Immediate(4),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1107,6 +1108,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(10),
                 rhs: IRValue::Immediate(3),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1122,6 +1124,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(6),
                 rhs: IRValue::Immediate(7),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1138,6 +1141,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(10),
                 rhs: IRValue::Immediate(0),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1154,12 +1158,14 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(3),
                 rhs: IRValue::Immediate(4),
+                ty: None,
             },
             IRInstr::BinOp {
                 op: BinOpKind::Add,
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(5),
+                ty: None,
             },
         ];
         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
@@ -1184,6 +1190,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(5),
                 rhs: IRValue::Immediate(8),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1204,6 +1211,7 @@ mod tests {
                     dst: IRValue::Register(0),
                     lhs: IRValue::Immediate(0b1010),
                     rhs: IRValue::Immediate(0b1100),
+                    ty: None,
                 }],
             );
             let result = constant_fold(func);
@@ -1220,6 +1228,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(0b1010),
                 rhs: IRValue::Immediate(0b1100),
+                ty: None,
             }];
             func2.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
             let result2 = constant_fold(func2);
@@ -1242,12 +1251,14 @@ mod tests {
                     dst: IRValue::Register(0),
                     lhs: IRValue::Immediate(1),
                     rhs: IRValue::Immediate(4),
+                    ty: None,
                 },
                 IRInstr::BinOp {
                     op: BinOpKind::ShrL,
                     dst: IRValue::Register(1),
                     lhs: IRValue::Immediate(256),
                     rhs: IRValue::Immediate(4),
+                    ty: None,
                 },
             ],
         );
@@ -1263,11 +1274,13 @@ mod tests {
                 op: UnaryOpKind::Neg,
                 dst: IRValue::Register(0),
                 operand: IRValue::Immediate(42),
+                ty: None,
             },
             IRInstr::UnaryOp {
                 op: UnaryOpKind::Not,
                 dst: IRValue::Register(1),
                 operand: IRValue::Immediate(0),
+                ty: None,
             },
         ];
         func.blocks[0].terminator =
@@ -1292,6 +1305,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(3),
                 rhs: IRValue::Immediate(5),
+                ty: None,
             }],
         );
         let result = constant_fold(func);
@@ -1309,6 +1323,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(1),
                 rhs: IRValue::Immediate(2),
+                ty: None,
             },
             // v0 is never used → should be eliminated.
         ];
@@ -1325,6 +1340,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Immediate(1),
             rhs: IRValue::Immediate(2),
+            ty: None,
         }];
         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
         let result = dead_code_eliminate(func);
@@ -1337,6 +1353,8 @@ mod tests {
         func.blocks[0].instructions = vec![IRInstr::Store {
             value: IRValue::Immediate(42),
             addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::I64,
         }];
         func.blocks[0].terminator = IRTerminator::Return(vec![]);
         let result = dead_code_eliminate(func);
@@ -1380,12 +1398,14 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
             IRInstr::BinOp {
                 op: BinOpKind::Add,
                 dst: IRValue::Register(2),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
         ];
         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -1412,11 +1432,13 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
             IRInstr::Add {
                 dst: IRValue::Register(2),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
         ];
         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -1435,12 +1457,14 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
             IRInstr::BinOp {
                 op: BinOpKind::Sub,
                 dst: IRValue::Register(2),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             },
         ];
         func.blocks[0].terminator = IRTerminator::Return(vec![]);
@@ -1461,6 +1485,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         }];
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         callee.results = vec![IRValue::Register(1)];
@@ -1504,6 +1529,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(7)]);
@@ -1539,6 +1565,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(2),
+            ty: None,
         }];
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         callee.results = vec![IRValue::Register(1)];
@@ -1592,6 +1619,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         }];
         func.blocks[0].terminator = IRTerminator::Jump("loop_header".to_string());
 
@@ -1603,6 +1631,7 @@ mod tests {
                 dst: IRValue::Register(2),
                 lhs: IRValue::Register(1), // v1 is defined in entry (outside loop)
                 rhs: IRValue::Immediate(5),
+                ty: None,
             },
             IRInstr::Phi {
                 dst: IRValue::Register(3),
@@ -1644,6 +1673,7 @@ mod tests {
                 i,
                 IRInstr::BinOp {
                     op: BinOpKind::Add,
+                    ty: None,
                     ..
                 }
             )
@@ -1663,6 +1693,7 @@ mod tests {
                 IRInstr::BinOp {
                     op: BinOpKind::Add,
                     dst: IRValue::Register(2),
+                    ty: None,
                     ..
                 }
             )
@@ -1688,6 +1719,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(2),
+            ty: None,
         }];
         loop_header.terminator = IRTerminator::Branch {
             cond: IRValue::Immediate(1),
@@ -1737,6 +1769,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(0),
+            ty: None,
         }];
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         callee.results = vec![IRValue::Register(1)];
@@ -1750,6 +1783,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(1),
                 rhs: IRValue::Immediate(2),
+                ty: None,
             },
             IRInstr::Call {
                 dst: Some(IRValue::Register(1)),
@@ -1777,6 +1811,7 @@ mod tests {
                     IRInstr::BinOp {
                         op: BinOpKind::Add,
                         dst: IRValue::Register(0),
+                        ty: None,
                         ..
                     }
                 )

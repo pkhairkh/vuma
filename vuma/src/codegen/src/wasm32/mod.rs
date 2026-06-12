@@ -3061,6 +3061,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(42),
+                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3109,6 +3110,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(10),
+                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3138,6 +3140,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Register(0),
+                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3228,6 +3231,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(3),
+                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3258,6 +3262,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(2),
+                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3368,6 +3373,7 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Immediate(10),
                 rhs: IRValue::Immediate(20),
+                ty: None,
             }],
         );
 

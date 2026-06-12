@@ -1505,11 +1505,52 @@ const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
 // ── ISel helpers ─────────────────────────────────────────────────────────
 
 /// Resolve an IRValue to a physical GPR.
-/// For registers, looks up in the reg_map. For immediates, loads the value
-/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
-fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+/// For registers, looks up in the reg_map (or spill_map for spilled vregs).
+/// For immediates, loads the value into `scratch` and returns `scratch`.
+/// For addresses, loads into `scratch`.
+fn resolve_gpr(
+    val: &IRValue,
+    reg_map: &HashMap<u32, Gpr>,
+    spill_map: &HashMap<u32, i32>,
+    scratch: Gpr,
+) -> (Gpr, Vec<u8>) {
     match val {
-        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
+        IRValue::Register(id) => {
+            if let Some(&reg) = reg_map.get(id) {
+                (reg, Vec::new())
+            } else if let Some(&offset) = spill_map.get(id) {
+                // Load spilled vreg from [rbp + offset] into scratch
+                let code = if (-128..=127).contains(&offset) {
+                    // mov scratch, [rbp + disp8]
+                    let mut c = Vec::new();
+                    if let Some(rex) = rex_prefix(true, scratch.needs_rex(), false, Gpr::Rbp.needs_rex()) {
+                        c.push(rex);
+                    } else {
+                        c.push(0x48);
+                    }
+                    c.push(0x8B); // MOV r64, r/m64
+                    c.push(modrm(1, scratch.encoding() & 7, Gpr::Rbp.encoding() & 7));
+                    c.push(offset as u8);
+                    c
+                } else {
+                    // mov scratch, [rbp + disp32]
+                    let mut c = Vec::new();
+                    if let Some(rex) = rex_prefix(true, scratch.needs_rex(), false, Gpr::Rbp.needs_rex()) {
+                        c.push(rex);
+                    } else {
+                        c.push(0x48);
+                    }
+                    c.push(0x8B); // MOV r64, r/m64
+                    c.push(modrm(2, scratch.encoding() & 7, Gpr::Rbp.encoding() & 7));
+                    c.extend_from_slice(&offset.to_le_bytes());
+                    c
+                };
+                (scratch, code)
+            } else {
+                // Unknown vreg — fall back to RAX (shouldn't happen with proper allocation)
+                (Gpr::Rax, Vec::new())
+            }
+        }
         IRValue::Immediate(imm) => {
             let imm = *imm;
             let code = if (-2147483648..=2147483647).contains(&imm) {
@@ -1531,6 +1572,36 @@ fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr
     }
 }
 
+/// Encode a store of a register to a spill slot on the stack.
+/// Stores `src` to [rbp + offset].
+fn encode_spill_store(src: Gpr, offset: i32) -> Vec<u8> {
+    if (-128..=127).contains(&offset) {
+        // mov [rbp + disp8], src
+        let mut c = Vec::new();
+        if let Some(rex) = rex_prefix(true, src.needs_rex(), false, Gpr::Rbp.needs_rex()) {
+            c.push(rex);
+        } else {
+            c.push(0x48);
+        }
+        c.push(0x89); // MOV r/m64, r64
+        c.push(modrm(1, src.encoding() & 7, Gpr::Rbp.encoding() & 7));
+        c.push(offset as u8);
+        c
+    } else {
+        // mov [rbp + disp32], src
+        let mut c = Vec::new();
+        if let Some(rex) = rex_prefix(true, src.needs_rex(), false, Gpr::Rbp.needs_rex()) {
+            c.push(rex);
+        } else {
+            c.push(0x48);
+        }
+        c.push(0x89); // MOV r/m64, r64
+        c.push(modrm(2, src.encoding() & 7, Gpr::Rbp.encoding() & 7));
+        c.extend_from_slice(&offset.to_le_bytes());
+        c
+    }
+}
+
 /// Map an IR CmpKind to an x86_64 condition code.
 fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
     match kind {
@@ -1544,6 +1615,30 @@ fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
         CmpKind::ULe => Cc::BelowEqual,
         CmpKind::UGt => Cc::Above,
         CmpKind::UGe => Cc::AboveEqual,
+    }
+}
+
+/// Resolve the destination register for an instruction that defines a value.
+/// Returns (physical_register, spill_store_code).
+/// If the vreg is spilled, computes into RAX and returns a store instruction
+/// to move the result from RAX to the spill slot on the stack.
+#[allow(dead_code)]
+fn resolve_dst_with_spill(
+    dst: &IRValue,
+    reg_map: &HashMap<u32, Gpr>,
+    spill_map: &HashMap<u32, i32>,
+) -> (Gpr, Vec<u8>) {
+    if let Some(id) = dst.as_register() {
+        if let Some(&reg) = reg_map.get(&id) {
+            (reg, Vec::new())
+        } else if let Some(&offset) = spill_map.get(&id) {
+            // Spilled: compute into RAX, then store to spill slot
+            (Gpr::Rax, encode_spill_store(Gpr::Rax, offset))
+        } else {
+            (Gpr::Rax, Vec::new())
+        }
+    } else {
+        (Gpr::Rax, Vec::new())
     }
 }
 
@@ -1583,6 +1678,8 @@ impl Backend for X86_64Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Simple register allocation: map virtual registers to physical registers
         // in a round-robin fashion over allocatable GPRs.
+        // NOTE: RBP is the frame pointer and RSP is the stack pointer — neither
+        //       is available for register allocation.
         let allocatable: Vec<Gpr> = [
             Gpr::Rax,
             Gpr::Rcx,
@@ -1598,7 +1695,6 @@ impl Backend for X86_64Backend {
             Gpr::R14,
             Gpr::R15,
             Gpr::Rbx,
-            Gpr::Rbp,
         ]
         .to_vec();
 
@@ -1625,11 +1721,28 @@ impl Backend for X86_64Backend {
             }
         }
 
-        // Map virtual registers to physical registers
+        // Map virtual registers to physical registers (no wrap-around: excess
+        // vregs are spilled to the stack).
         let mut reg_map: HashMap<u32, Gpr> = HashMap::new();
+        let mut spill_map: HashMap<u32, i32> = HashMap::new(); // vreg → RBP offset (negative)
+        let num_regs = allocatable.len();
+        let mut next_spill_offset: i32 = 8; // Start past saved RBP
+
         for (i, &id) in vreg_ids.iter().enumerate() {
-            reg_map.insert(id, allocatable[i % allocatable.len()]);
+            if i < num_regs {
+                reg_map.insert(id, allocatable[i]);
+            } else {
+                // Spill: assign a stack slot at [rbp - offset]
+                spill_map.insert(id, -next_spill_offset);
+                next_spill_offset += 8; // 8 bytes per spill slot
+            }
         }
+
+        // The effective frame size must include spill slots
+        let spill_bytes = spill_map.len() as i32 * 8;
+        let frame_size = (frame_size as i32 + spill_bytes) as usize;
+        // Re-align to 16 bytes
+        let frame_size = (frame_size + 15) & !15;
 
         // Determine callee-saved registers used
         let callee_saved: Vec<PhysicalReg> = reg_map
@@ -1677,17 +1790,21 @@ impl Backend for X86_64Backend {
             });
         }
 
+        // Running offset for Alloc instructions — each Alloc gets a unique
+        // stack slot starting at offset 8 from RBP (past the saved RBP).
+        let mut alloc_offset: i32 = 8;
+
         // Encode each IR instruction
         for block in &func.blocks {
             for instr in &block.instructions {
-                let encoded = match instr {
+                let mut encoded = match instr {
                     // ── Dedicated Add/Sub/Mul (with immediate-form optimisations) ──
                     IRInstr::Add { dst, lhs, rhs, .. } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
                         if l != d {
                             code.extend(encode_mov_reg_reg(d, l));
                         }
@@ -1695,12 +1812,12 @@ impl Backend for X86_64Backend {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_add_reg_imm32(d, *imm as i32));
                             } else {
-                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                                 code.extend(pre);
                                 code.extend(encode_add_reg_reg(d, r));
                             }
                         } else {
-                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                             code.extend(pre);
                             code.extend(encode_add_reg_reg(d, r));
                         }
@@ -1711,7 +1828,7 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
                         if l != d {
                             code.extend(encode_mov_reg_reg(d, l));
                         }
@@ -1719,12 +1836,12 @@ impl Backend for X86_64Backend {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_sub_reg_imm32(d, *imm as i32));
                             } else {
-                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                                 code.extend(pre);
                                 code.extend(encode_sub_reg_reg(d, r));
                             }
                         } else {
-                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                             code.extend(pre);
                             code.extend(encode_sub_reg_reg(d, r));
                         }
@@ -1735,8 +1852,8 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
-                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                         code.extend(pre);
                         if l != d {
                             code.extend(encode_mov_reg_reg(d, l));
@@ -1751,8 +1868,8 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
-                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                         code.extend(pre);
                         // Move lhs into RAX
                         if l != Gpr::Rax {
@@ -1775,8 +1892,8 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
-                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
+                        let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                         code.extend(pre);
 
                         match op {
@@ -1930,7 +2047,7 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (s, mut code) = resolve_gpr(operand, &reg_map, Gpr::R10);
+                        let (s, mut code) = resolve_gpr(operand, &reg_map, &spill_map, Gpr::R10);
 
                         match op {
                             UnaryOpKind::Neg => {
@@ -2020,7 +2137,7 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+                        let (l, mut code) = resolve_gpr(lhs, &reg_map, &spill_map, Gpr::R10);
                         let cc = cmp_kind_to_cc(kind);
                         if l != d {
                             code.extend(encode_mov_reg_reg(d, l));
@@ -2029,14 +2146,14 @@ impl Backend for X86_64Backend {
                             if (-2147483648..=2147483647).contains(imm) {
                                 code.extend(encode_cmp_reg_imm32(d, *imm as i32));
                             } else {
-                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                                let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                                 code.extend(pre);
                                 code.extend(encode_cmp_reg_reg(d, r));
                             }
                             code.extend(encode_setcc(cc, d));
                             code.extend(encode_movzx_reg8(d, d));
                         } else {
-                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+                            let (r, pre) = resolve_gpr(rhs, &reg_map, &spill_map, Gpr::R11);
                             code.extend(pre);
                             code.extend(emit_cmp_setcc(d, d, r, cc));
                         }
@@ -2054,9 +2171,9 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
-                        let (tv, pre_tv) = resolve_gpr(true_val, &reg_map, Gpr::R11);
-                        let (fv, pre_fv) = resolve_gpr(false_val, &reg_map, Gpr::R8);
+                        let (c, mut code) = resolve_gpr(cond, &reg_map, &spill_map, Gpr::R10);
+                        let (tv, pre_tv) = resolve_gpr(true_val, &reg_map, &spill_map, Gpr::R11);
+                        let (fv, pre_fv) = resolve_gpr(false_val, &reg_map, &spill_map, Gpr::R8);
                         code.extend(pre_tv);
                         code.extend(pre_fv);
 
@@ -2077,15 +2194,15 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (a, mut code) = resolve_gpr(addr, &reg_map, Gpr::R10);
+                        let (a, mut code) = resolve_gpr(addr, &reg_map, &spill_map, Gpr::R10);
                         code.extend(encode_mov_reg_mem(d, a, 0));
                         code
                     }
 
                     // ── Memory: Store ────────────────────────────────────
                     IRInstr::Store { value, addr, .. } => {
-                        let (v, mut code) = resolve_gpr(value, &reg_map, Gpr::R10);
-                        let (a, pre) = resolve_gpr(addr, &reg_map, Gpr::R11);
+                        let (v, mut code) = resolve_gpr(value, &reg_map, &spill_map, Gpr::R10);
+                        let (a, pre) = resolve_gpr(addr, &reg_map, &spill_map, Gpr::R11);
                         code.extend(pre);
                         code.extend(encode_mov_mem_reg(a, 0, v));
                         code
@@ -2097,7 +2214,7 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (b, mut code) = resolve_gpr(base, &reg_map, Gpr::R10);
+                        let (b, mut code) = resolve_gpr(base, &reg_map, &spill_map, Gpr::R10);
                         // If offset is an immediate, use LEA
                         match offset {
                             IRValue::Immediate(imm) => {
@@ -2105,7 +2222,7 @@ impl Backend for X86_64Backend {
                                 code.extend(encode_lea_reg_mem(d, b, off));
                             }
                             _ => {
-                                let (o, pre) = resolve_gpr(offset, &reg_map, Gpr::R11);
+                                let (o, pre) = resolve_gpr(offset, &reg_map, &spill_map, Gpr::R11);
                                 code.extend(pre);
                                 if b != d {
                                     code.extend(encode_mov_reg_reg(d, b));
@@ -2140,14 +2257,20 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Alloc ────────────────────────────────────────────
-                    IRInstr::Alloc { dst, size: _ } => {
+                    IRInstr::Alloc { dst, size } => {
                         let d = reg_map
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        // Alloc is handled by the frame layout; compute the address
-                        // using LEA from RBP at the appropriate offset
-                        encode_lea_reg_mem(d, Gpr::Rbp, -(frame_size as i32))
+                        // Each Alloc gets a unique stack offset.
+                        // alloc_offset tracks the running offset from RBP,
+                        // starting at 8 (past the saved RBP) and growing
+                        // downward.
+                        let alloc_size = (*size as i32).max(8);
+                        let aligned_size = ((alloc_size + 7) / 8) * 8; // align to 8 bytes
+                        let code = encode_lea_reg_mem(d, Gpr::Rbp, -(alloc_offset));
+                        alloc_offset += aligned_size;
+                        code
                     }
 
                     // ── Free ─────────────────────────────────────────────
@@ -2166,7 +2289,7 @@ impl Backend for X86_64Backend {
                             // Heap allocation — call __vuma_free(ptr)
                             let mut code = Vec::new();
                             // Move the pointer address to RDI (SystemV first argument register)
-                            let (p, pre) = resolve_gpr(ptr, &reg_map, Gpr::R10);
+                            let (p, pre) = resolve_gpr(ptr, &reg_map, &spill_map, Gpr::R10);
                             code.extend(pre);
                             if p != Gpr::Rdi {
                                 code.extend(encode_mov_reg_reg(Gpr::Rdi, p));
@@ -2189,7 +2312,7 @@ impl Backend for X86_64Backend {
                             .get(&dst.as_register().unwrap_or(0))
                             .copied()
                             .unwrap_or(Gpr::Rax);
-                        let (s, mut code) = resolve_gpr(src, &reg_map, Gpr::R10);
+                        let (s, mut code) = resolve_gpr(src, &reg_map, &spill_map, Gpr::R10);
 
                         match kind {
                             CastKind::ZExt => {
@@ -2254,6 +2377,31 @@ impl Backend for X86_64Backend {
                                     if src != Gpr::Rax {
                                         code.extend(encode_mov_reg_reg(Gpr::Rax, src));
                                     }
+                                } else if let Some(&offset) = spill_map.get(&id) {
+                                    // Load spilled return value from stack into RAX
+                                    code.extend(if (-128..=127).contains(&offset) {
+                                        let mut c = Vec::new();
+                                        if let Some(rex) = rex_prefix(true, false, false, Gpr::Rbp.needs_rex()) {
+                                            c.push(rex);
+                                        } else {
+                                            c.push(0x48);
+                                        }
+                                        c.push(0x8B);
+                                        c.push(modrm(1, Gpr::Rax.encoding() & 7, Gpr::Rbp.encoding() & 7));
+                                        c.push(offset as u8);
+                                        c
+                                    } else {
+                                        let mut c = Vec::new();
+                                        if let Some(rex) = rex_prefix(true, false, false, Gpr::Rbp.needs_rex()) {
+                                            c.push(rex);
+                                        } else {
+                                            c.push(0x48);
+                                        }
+                                        c.push(0x8B);
+                                        c.push(modrm(2, Gpr::Rax.encoding() & 7, Gpr::Rbp.encoding() & 7));
+                                        c.extend_from_slice(&offset.to_le_bytes());
+                                        c
+                                    });
                                 }
                             } else if let Some(imm) = val.as_immediate() {
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
@@ -2269,39 +2417,55 @@ impl Backend for X86_64Backend {
                     }
 
                     // ── Control: Branch (unconditional) ──────────────────
-                    IRInstr::Branch { target: _ } => {
-                        // JMP rel32 — branch offset patched by R_X86_64_PLT32
-                        // relocation during linking
-                        encode_jmp_rel32(0)
+                    IRInstr::Branch { target } => {
+                        // JMP rel32 — branch offset patched by relocation
+                        let jmp_offset = byte_offset + 1; // +1 for the 0xE9 opcode byte
+                        let code = encode_jmp_rel32(0);
+                        relocations.push(RelocationEntry {
+                            offset: jmp_offset as u64,
+                            symbol: target.clone(),
+                            reloc_type: R_X86_64_PLT32.to_string(),
+                        });
+                        code
                     }
 
                     // ── Control: CondBranch ──────────────────────────────
                     IRInstr::CondBranch {
                         cond,
-                        true_target: _,
-                        false_target: _,
+                        true_target,
+                        false_target,
                     } => {
-                        let (c, mut code) = resolve_gpr(cond, &reg_map, Gpr::R10);
+                        let (c, mut code) = resolve_gpr(cond, &reg_map, &spill_map, Gpr::R10);
                         // Test cond != 0; JNZ to true_target; JMP to false_target
                         code.extend(encode_test_reg_reg(c, c));
-                        // JNZ rel32 — branch offset patched by R_X86_64_PLT32
-                        // relocation during linking
+                        // JNZ rel32 — branch offset patched by relocation
+                        let jnz_offset = byte_offset + code.len() + 2; // +2 for 0F 8x opcode bytes
                         code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
-                        // JMP rel32 — branch offset patched by R_X86_64_PLT32
-                        // relocation during linking
+                        relocations.push(RelocationEntry {
+                            offset: jnz_offset as u64,
+                            symbol: true_target.clone(),
+                            reloc_type: R_X86_64_PLT32.to_string(),
+                        });
+                        // JMP rel32 — branch offset patched by relocation
+                        let jmp_offset = byte_offset + code.len() + 1; // +1 for the 0xE9 opcode byte
                         code.extend(encode_jmp_rel32(0));
+                        relocations.push(RelocationEntry {
+                            offset: jmp_offset as u64,
+                            symbol: false_target.clone(),
+                            reloc_type: R_X86_64_PLT32.to_string(),
+                        });
                         code
                     }
 
                     // ── Call ─────────────────────────────────────────────
-                    IRInstr::Call { dst, func: _, args } => {
+                    IRInstr::Call { dst, func, args } => {
                         let mut code = Vec::new();
 
                         // Move arguments into SystemV arg registers (RDI, RSI, RDX, RCX, R8, R9)
                         let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
                         for (i, arg) in args.iter().enumerate() {
                             if i < arg_regs.len() {
-                                let (a, pre) = resolve_gpr(arg, &reg_map, Gpr::R10);
+                                let (a, pre) = resolve_gpr(arg, &reg_map, &spill_map, Gpr::R10);
                                 code.extend(pre);
                                 if a != arg_regs[i] {
                                     code.extend(encode_mov_reg_reg(arg_regs[i], a));
@@ -2309,8 +2473,14 @@ impl Backend for X86_64Backend {
                             }
                         }
 
-                        // CALL rel32 — placeholder offset
+                        // CALL rel32 — needs relocation for the target function
+                        let call_offset = byte_offset + code.len() + 1; // +1 for the 0xE8 opcode byte
                         code.extend(encode_call_rel32(0));
+                        relocations.push(RelocationEntry {
+                            offset: call_offset as u64,
+                            symbol: func.clone(),
+                            reloc_type: R_X86_64_PLT32.to_string(),
+                        });
 
                         // Move return value from RAX to dst if needed
                         if let Some(d) = dst {
@@ -2331,6 +2501,15 @@ impl Backend for X86_64Backend {
                         encode_nop()
                     }
                 };
+
+                // If this instruction defines a spilled vreg, append a spill store.
+                // The instruction computed the result into RAX (the fallback
+                // destination for spilled vregs).  Store RAX to the spill slot.
+                for id in instr.defined_regs() {
+                    if let Some(&offset) = spill_map.get(&id) {
+                        encoded.extend(encode_spill_store(Gpr::Rax, offset));
+                    }
+                }
 
                 if !encoded.is_empty() {
                     byte_offset += encoded.len();
@@ -2359,7 +2538,7 @@ impl Backend for X86_64Backend {
             }],
             frame_size,
             callee_saved,
-            spill_slots: 0,
+            spill_slots: spill_map.len(),
             code_size,
             relocations,
         })
@@ -2376,14 +2555,121 @@ impl Backend for X86_64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        let mut all_code = Vec::new();
+        // ── Phase 1: Concatenate all function code, recording byte offsets ──
+        let mut all_code: Vec<u8> = Vec::new();
+        let mut func_offsets: Vec<(String, usize)> = Vec::new(); // (name, start_offset)
+        // Collect all relocations from all functions, adjusting their offsets
+        // to be relative to the combined code buffer.
+        let mut all_relocations: Vec<(usize, String, String)> = Vec::new(); // (abs_offset, symbol, reloc_type)
+
         for func in &program.functions {
+            let func_start = all_code.len();
+            func_offsets.push((func.name.clone(), func_start));
+
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
                 }
             }
+
+            // Collect relocations, adjusting offsets to be absolute in the combined code
+            for reloc in &func.relocations {
+                all_relocations.push((
+                    func_start + reloc.offset as usize,
+                    reloc.symbol.clone(),
+                    reloc.reloc_type.clone(),
+                ));
+            }
         }
+
+        // ── Phase 2: Patch relocations for inter-function calls ──
+        // Build a map from function name → byte offset in the combined code
+        let func_offset_map: HashMap<String, usize> = func_offsets.into_iter().collect();
+
+        for (abs_offset, symbol, reloc_type) in &all_relocations {
+            if reloc_type == R_X86_64_PLT32 {
+                if let Some(&target_offset) = func_offset_map.get(symbol) {
+                    // R_X86_64_PLT32: patch = L + A - P
+                    // L = target offset, A = addend (0), P = relocation position
+                    let patch_offset = (target_offset as i64 - *abs_offset as i64) as i32;
+                    // Write the 4-byte relative offset at the relocation position
+                    all_code[*abs_offset..*abs_offset + 4]
+                        .copy_from_slice(&patch_offset.to_le_bytes());
+                }
+                // If the symbol is not found (e.g., external like __vuma_free),
+                // leave the placeholder — would need a real linker for those.
+            } else if reloc_type == R_X86_64_64 {
+                if let Some(&target_offset) = func_offset_map.get(symbol) {
+                    // R_X86_64_64: patch = S + A (absolute 64-bit)
+                    let target_addr = 0x400000u64
+                        + 64u64  // ELF header size
+                        + 56u64  // PHDR size
+                        + target_offset as u64;
+                    all_code[*abs_offset..*abs_offset + 8]
+                        .copy_from_slice(&target_addr.to_le_bytes());
+                }
+            }
+        }
+
+        // ── Phase 3: Replace ret in the entry function with exit syscall ──
+        // The first function is the ELF entry point, which is jumped to by the
+        // kernel — there is no return address on the stack, so `ret` would
+        // SIGSEGV.  Replace the final `ret` (0xC3) with:
+        //   mov rdi, rax      ; exit code = return value of main
+        //   mov eax, 60       ; sys_exit
+        //   syscall
+        if !program.functions.is_empty() {
+            let first_func = &program.functions[0];
+            // Find the last instruction of the first function's last block
+            if let Some(last_block) = first_func.blocks.last() {
+                if let Some(last_instr) = last_block.instructions.last() {
+                    let encoded = &last_instr.encoded;
+                    // The ret instruction is a single byte 0xC3.
+                    // It may be preceded by `pop rbp` (1-2 bytes).
+                    // Search for the last 0xC3 in this instruction's encoded bytes.
+                    if let Some(ret_pos) = encoded.iter().rposition(|&b| b == 0xC3) {
+                        // We need to find where this byte falls in all_code.
+                        // Reconstruct the byte offset of the first function's code.
+                        let func_code_start = 0; // First function starts at offset 0
+                        let mut instr_offset = func_code_start;
+                        // Walk all instructions of the first function to find the byte offset
+                        // of the target instruction
+                        let mut found_offset: Option<usize> = None;
+                        for block in &first_func.blocks {
+                            for instr in &block.instructions {
+                                if std::ptr::eq(instr as *const _, last_instr as *const _) {
+                                    found_offset = Some(instr_offset + ret_pos);
+                                    break;
+                                }
+                                instr_offset += instr.encoded.len();
+                            }
+                            if found_offset.is_some() {
+                                break;
+                            }
+                        }
+                        if let Some(offset) = found_offset {
+                            // Replace the 1-byte `ret` (0xC3) with the exit syscall sequence:
+                            //   mov rdi, rax      → 48 89 C7
+                            //   mov eax, 60       → B8 3C 00 00 00
+                            //   syscall            → 0F 05
+                            let exit_syscall: [u8; 10] = [
+                                0x48, 0x89, 0xC7, // mov rdi, rax
+                                0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
+                                0x0F, 0x05, // syscall
+                            ];
+                            // The ret is 1 byte; the exit syscall is 10 bytes.
+                            // We need to splice: all_code[..offset] + exit_syscall + all_code[offset+1..]
+                            let mut new_code = Vec::with_capacity(all_code.len() + 9);
+                            new_code.extend_from_slice(&all_code[..offset]);
+                            new_code.extend_from_slice(&exit_syscall);
+                            new_code.extend_from_slice(&all_code[offset + 1..]);
+                            all_code = new_code;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(build_minimal_x86_64_elf(&all_code, 0x400000))
     }
 
@@ -3051,6 +3337,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(2),
+            ty: None,
         });
         // Should contain an ADD r64, r64 instruction (opcode 0x01)
         assert!(
@@ -3065,6 +3352,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(42),
+            ty: None,
         });
         // With immediate rhs, should use ADD r64, imm32 (opcode 0x81 /0)
         let has_add_imm = code
@@ -3079,6 +3367,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(2),
+            ty: None,
         });
         // Should contain SUB r64, r64 (opcode 0x29)
         assert!(code.iter().any(|&b| b == 0x29), "SUB opcode 0x29 not found");
@@ -3090,6 +3379,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(10),
+            ty: None,
         });
         // With immediate, should use SUB r64, imm32 (0x81 /5)
         let has_sub_imm = code
@@ -3105,6 +3395,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(2),
+            ty: None,
         });
         // AND r64, r64 (opcode 0x21)
         assert!(code.iter().any(|&b| b == 0x21), "AND opcode 0x21 not found");
@@ -3117,6 +3408,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(2),
+            ty: None,
         });
         // XOR r64, r64 (opcode 0x31)
         assert!(code.iter().any(|&b| b == 0x31), "XOR opcode 0x31 not found");
@@ -3129,6 +3421,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(2),
+            ty: None,
         });
         // SDiv uses CQO (0x48 0x99) + IDIV (0xF7 /7)
         assert!(
@@ -3147,6 +3440,7 @@ mod tests {
             op: UnaryOpKind::Neg,
             dst: IRValue::Register(0),
             operand: IRValue::Register(1),
+            ty: None,
         });
         // NEG r64 (0xF7 /3)
         assert!(code.iter().any(|&b| b == 0xF7), "NEG opcode 0xF7 not found");
@@ -3158,6 +3452,7 @@ mod tests {
             op: UnaryOpKind::Not,
             dst: IRValue::Register(0),
             operand: IRValue::Register(1),
+            ty: None,
         });
         // NOT r64 (0xF7 /2)
         assert!(code.iter().any(|&b| b == 0xF7), "NOT opcode 0xF7 not found");
@@ -3170,6 +3465,7 @@ mod tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(5),
+            ty: None,
         });
         // CMP r64, imm32 (0x81 /7)
         let has_cmp_imm = code
@@ -3219,6 +3515,7 @@ mod tests {
             cond: IRValue::Register(1),
             true_val: IRValue::Register(2),
             false_val: IRValue::Register(3),
+            ty: None,
         });
         // Select uses TEST + CMOVcc
         assert!(

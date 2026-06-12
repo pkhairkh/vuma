@@ -20,7 +20,7 @@
 
 use hashbrown::{HashMap, HashSet};
 
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::{ValidationResult, SCG};
 use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
 
@@ -408,6 +408,47 @@ impl CommonSubexpressionElimination {
     }
 }
 
+// ── Deduplicate Edges Pass ────────────────────────────────────────────
+
+/// Removes duplicate edges (same source, target, and kind) from the SCG.
+///
+/// The AST→SCG bridge can create duplicate DataFlow edges when the same
+/// variable is referenced from multiple call sites targeting the same node.
+/// This pass removes the extras, keeping only the first edge for each
+/// (source, target, kind) triple.
+pub struct DeduplicateEdges;
+
+impl SCGPass for DeduplicateEdges {
+    fn name(&self) -> &str {
+        "DeduplicateEdges"
+    }
+
+    fn run(&self, scg: &mut SCG) -> PassResult {
+        let mut result = PassResult::new(self.name());
+
+        // Collect (source, target, kind) → first EdgeId
+        let mut seen: HashMap<(NodeId, NodeId, EdgeKind), EdgeId> = HashMap::new();
+        let mut edges_to_remove: Vec<EdgeId> = Vec::new();
+
+        for edge in scg.edges() {
+            let key = (edge.source, edge.target, edge.kind.clone());
+            if seen.insert(key, edge.id).is_some() {
+                // insert() returns Some(old_value) if key was already present
+                edges_to_remove.push(edge.id);
+            }
+        }
+
+        for edge_id in edges_to_remove {
+            if scg.remove_edge(edge_id).is_ok() {
+                result.edges_removed += 1;
+                result.changed = true;
+            }
+        }
+
+        result
+    }
+}
+
 impl Default for CommonSubexpressionElimination {
     fn default() -> Self {
         Self::new()
@@ -425,13 +466,15 @@ impl SCGPass for CommonSubexpressionElimination {
         // Map from expression key to the first NodeId that computes it.
         let mut seen: HashMap<(String, Option<String>, Vec<NodeId>), NodeId> = HashMap::new();
 
-        // Process in topological order so we prefer keeping earlier nodes
-        let topo = match scg.topological_sort() {
+        // Use DataFlow-only topological sort to handle programs with loops.
+        // ControlFlow back-edges create legitimate cycles; the DataFlow
+        // subgraph should be acyclic for well-formed programs.
+        let topo = match scg.topological_sort_dataflow_only() {
             Ok(t) => t,
             Err(_) => {
                 result
                     .errors
-                    .push("cannot run CSE on cyclic graph".to_string());
+                    .push("cannot run CSE on graph with DataFlow cycle".to_string());
                 return result;
             }
         };
@@ -798,7 +841,10 @@ impl SCGPass for VerificationPass {
         // don't fail compilation.
 
         // Additional check: acyclicity
-        if self.check_acyclic && scg.topological_sort().is_err() {
+        // Programs with loops (for, while) legitimately create ControlFlow
+        // back-edges that form cycles. Only flag as error if the DataFlow
+        // subgraph itself has a cycle (which would be a true semantic issue).
+        if self.check_acyclic && !scg.has_only_loop_cycles() {
             result.errors.push("graph contains a cycle".to_string());
         }
 

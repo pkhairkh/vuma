@@ -11,6 +11,7 @@ use crate::mips64::Mips64Backend;
 use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -1420,6 +1421,18 @@ impl Backend for AArch64Backend {
         let func_name = func.name.clone();
         let frame_size = aarch64_compute_frame_size(func);
 
+        // Collect relocations from the emitter and adjust offsets from
+        // absolute text-section offsets to function-relative byte offsets.
+        let relocations: Vec<RelocationEntry> = emitter
+            .relocations()
+            .iter()
+            .map(|r| RelocationEntry {
+                offset: r.offset,
+                symbol: r.symbol.clone(),
+                reloc_type: r.reloc_type.clone(),
+            })
+            .collect();
+
         // Convert each 32-bit ARM64 instruction word into an AllocatedInstruction
         // with its little-endian encoded bytes.
         let instructions: Vec<AllocatedInstruction> = code
@@ -1446,7 +1459,7 @@ impl Backend for AArch64Backend {
             callee_saved: vec![],
             spill_slots: 0,
             code_size,
-            relocations: Vec::new(),
+            relocations,
         })
     }
 
@@ -1461,13 +1474,100 @@ impl Backend for AArch64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Collect all encoded bytes from every function and block.
-        let mut all_code = Vec::new();
+        // ── Phase 1: Concatenate all function code, recording byte offsets ──
+        let mut all_code: Vec<u8> = Vec::new();
+        let mut func_offsets: Vec<(String, usize)> = Vec::new(); // (name, start_offset)
+        // Collect all relocations from all functions, adjusting their offsets
+        // to be relative to the combined code buffer.
+        let mut all_relocations: Vec<(usize, String, String)> = Vec::new(); // (abs_offset, symbol, reloc_type)
+
         for func in &program.functions {
+            let func_start = all_code.len();
+            func_offsets.push((func.name.clone(), func_start));
+
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
                 }
+            }
+
+            // Collect relocations, adjusting offsets to be absolute in the combined code
+            for reloc in &func.relocations {
+                all_relocations.push((
+                    func_start + reloc.offset as usize,
+                    reloc.symbol.clone(),
+                    reloc.reloc_type.clone(),
+                ));
+            }
+        }
+
+        // ── Phase 2: Patch relocations for inter-function calls ──
+        // Build a map from function name → byte offset in the combined code
+        let func_offset_map: HashMap<String, usize> = func_offsets.into_iter().collect();
+
+        for (abs_offset, symbol, reloc_type) in &all_relocations {
+            if reloc_type == "R_AARCH64_CALL26" {
+                if let Some(&target_offset) = func_offset_map.get(symbol) {
+                    // R_AARCH64_CALL26: patch = (S + A - P) >> 2, encoded in bits [25:0]
+                    // S = target offset in code buffer, A = addend (0), P = relocation position
+                    // The offset is in units of 4 bytes (instructions).
+                    let text_offset: u64 = 64 + 56; // ELF header + PHDR
+                    let s = text_offset + target_offset as u64;
+                    let p = text_offset + *abs_offset as u64;
+                    let offset_words = ((s as i64) - (p as i64)) >> 2;
+                    // Read the existing 4-byte instruction, clear bits [25:0],
+                    // and insert the new 26-bit offset.
+                    let instr_start = *abs_offset;
+                    let mut word = u32::from_le_bytes([
+                        all_code[instr_start],
+                        all_code[instr_start + 1],
+                        all_code[instr_start + 2],
+                        all_code[instr_start + 3],
+                    ]);
+                    word = (word & !0x03FF_FFFF) | ((offset_words as u32) & 0x03FF_FFFF);
+                    all_code[instr_start..instr_start + 4].copy_from_slice(&word.to_le_bytes());
+                }
+                // If the symbol is not found (e.g., external like __vuma_free),
+                // leave the placeholder — would need a real linker for those.
+            }
+        }
+
+        // ── Phase 3: Replace RET in the entry function with exit syscall ──
+        // The first function is the ELF entry point, which is jumped to by the
+        // kernel — there is no return address on the stack, so `RET` would
+        // jump to garbage.  Replace the final `RET` with:
+        //   MOV X0, X0       ; nop (keep return value in X0)
+        //   MOV X8, #93      ; sys_exit on AArch64
+        //   SVC #0           ; supervisor call
+        if !program.functions.is_empty() {
+            let first_func = &program.functions[0];
+            // Find the last RET instruction (0xD65F03C0, little-endian: C0 03 5F D6)
+            // in the first function's code by walking all instructions.
+            let ret_bytes: [u8; 4] = [0xC0, 0x03, 0x5F, 0xD6];
+            let mut instr_offset = 0usize;
+            let mut found_offset: Option<usize> = None;
+            for block in &first_func.blocks {
+                for instr in &block.instructions {
+                    if instr.encoded.len() == 4 && instr.encoded[..] == ret_bytes[..] {
+                        found_offset = Some(instr_offset);
+                    }
+                    instr_offset += instr.encoded.len();
+                }
+            }
+            if let Some(offset) = found_offset {
+                // Replace the 4-byte RET with the exit syscall sequence:
+                //   MOV X8, #93      → 0xD2800BA8 (little-endian: A8 0B 80 D2) — sys_exit = 93
+                //   SVC #0           → 0xD4000001 (little-endian: 01 00 00 D4)
+                // That's 8 bytes replacing 4 bytes — we need to splice.
+                let exit_syscall: [u8; 8] = [
+                    0xA8, 0x0B, 0x80, 0xD2, // MOV X8, #93
+                    0x01, 0x00, 0x00, 0xD4, // SVC #0
+                ];
+                let mut new_code = Vec::with_capacity(all_code.len() + 4);
+                new_code.extend_from_slice(&all_code[..offset]);
+                new_code.extend_from_slice(&exit_syscall);
+                new_code.extend_from_slice(&all_code[offset + 4..]);
+                all_code = new_code;
             }
         }
 

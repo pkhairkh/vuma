@@ -17,7 +17,8 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use vuma::pipeline::{
-    compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
+    compile, compile_for_isa, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+    VumaError,
 };
 use vuma_codegen::backend::{create_backend, BackendKind};
 
@@ -415,12 +416,8 @@ fn cmd_emit(
     let source = read_source(file)?;
     let backend_kind = BackendKind::from(isa);
     let config = make_config(cli, CompileTarget::Pi5Linux);
-    let result = compile(&source, &config).map_err(|errors| {
-        print_errors(&errors);
-        format!("compilation failed with {} error(s)", errors.len())
-    })?;
 
-    // Use the multi-arch backend to produce ISA-specific output.
+    // Create the target backend
     let backend = create_backend(backend_kind).map_err(|e| {
         format!(
             "error: cannot create {} backend: {}",
@@ -429,90 +426,36 @@ fn cmd_emit(
         )
     })?;
 
-    // Allocate registers and encode using the target backend.
-    let mut allocated_functions = Vec::new();
-    if let Some(ref debug_info) = result.debug_info {
-        if let Some(ref ir_program) = debug_info.ir_pre_regalloc {
-            for func in &ir_program.functions {
-                match backend.allocate_registers(func) {
-                    Ok(allocated) => allocated_functions.push(allocated),
-                    Err(e) => {
-                        eprintln!(
-                            "warning: register allocation failed for '{}': {}",
-                            func.name, e
-                        );
-                    }
-                }
-            }
-        }
-    }
+    // Use compile_for_isa which drives the pipeline end-to-end
+    // with the target backend for register allocation and encoding.
+    let result = compile_for_isa(&source, &config, backend.as_ref()).map_err(|errors| {
+        print_errors(&errors);
+        format!("compilation failed with {} error(s)", errors.len())
+    })?;
 
     let out_path = output
         .as_ref()
         .cloned()
         .unwrap_or_else(|| default_output_path(file));
 
-    // If we have allocated functions, encode them; otherwise write the ARM64 binary.
-    if !allocated_functions.is_empty() {
-        let allocated_program = vuma_codegen::backend::AllocatedProgram {
-            functions: allocated_functions,
-            total_code_size: 0,
-            total_data_size: 0,
-        };
-        match backend.encode_program(&allocated_program) {
-            Ok(bytes) => {
-                fs::write(&out_path, &bytes).map_err(|e| {
-                    format!(
-                        "error: cannot write output file '{}': {}",
-                        out_path.display(),
-                        e
-                    )
-                })?;
-                println!(
-                    "Emitted {} -> {} ({} bytes, ISA: {})",
-                    file.display(),
-                    out_path.display(),
-                    bytes.len(),
-                    backend.name(),
-                );
-            }
-            Err(e) => {
-                // Backend encode failed; fall back to writing the ARM64 ELF.
-                eprintln!(
-                    "warning: {} encoding failed ({}), writing ARM64 ELF instead",
-                    backend.name(),
-                    e
-                );
-                fs::write(&out_path, &result.binary).map_err(|e2| {
-                    format!(
-                        "error: cannot write output file '{}': {}",
-                        out_path.display(),
-                        e2
-                    )
-                })?;
-                println!(
-                    "Emitted {} -> {} ({} bytes, ARM64 ELF fallback)",
-                    file.display(),
-                    out_path.display(),
-                    result.binary.len(),
-                );
-            }
-        }
-    } else {
-        // No IR program available (debug info not captured), write the ARM64 binary.
-        fs::write(&out_path, &result.binary).map_err(|e| {
-            format!(
-                "error: cannot write output file '{}': {}",
-                out_path.display(),
-                e
-            )
-        })?;
-        println!(
-            "Emitted {} -> {} ({} bytes, ARM64 ELF)",
-            file.display(),
+    fs::write(&out_path, &result.binary).map_err(|e| {
+        format!(
+            "error: cannot write output file '{}': {}",
             out_path.display(),
-            result.binary.len(),
-        );
+            e
+        )
+    })?;
+    println!(
+        "Emitted {} -> {} ({} bytes, ISA: {})",
+        file.display(),
+        out_path.display(),
+        result.binary.len(),
+        backend.name(),
+    );
+
+    // Print stage timings.
+    for (stage, ms) in &result.stage_timings {
+        println!("  {:20} {}ms", stage, ms);
     }
 
     Ok(())

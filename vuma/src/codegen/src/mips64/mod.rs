@@ -50,7 +50,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, Mips64TargetInfo, PhysicalReg, RegClass, TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::fmt;
 
 // ===========================================================================
@@ -196,12 +196,12 @@ impl Gpr {
 
     /// Returns `true` if this register is available for register allocation.
     ///
-    /// Zero ($0), At ($1), K0–K1 ($26–$27), Gp ($28), Sp ($29), and Ra ($31)
+    /// Zero ($0), At ($1), K0–K1 ($26–$27), Gp ($28), Sp ($29), Fp ($30), and Ra ($31)
     /// are reserved.
     pub fn is_allocatable(&self) -> bool {
         !matches!(
             self,
-            Gpr::Zero | Gpr::At | Gpr::K0 | Gpr::K1 | Gpr::Gp | Gpr::Sp | Gpr::Ra
+            Gpr::Zero | Gpr::At | Gpr::K0 | Gpr::K1 | Gpr::Gp | Gpr::Sp | Gpr::Fp | Gpr::Ra
         )
     }
 
@@ -1428,7 +1428,7 @@ impl Default for Mips64Backend {
 /// Sums `Alloc` instruction sizes, adds 8 bytes for the $ra save slot,
 /// and rounds up to 16-byte alignment.
 fn mips64_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: u32 = 8; // $ra save slot
+    let mut total: u32 = 16; // $ra save slot + $fp save slot
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
@@ -1474,8 +1474,6 @@ const ALLOCATABLE_GPRS: &[Gpr] = &[
     Gpr::S5,
     Gpr::S6,
     Gpr::S7,
-    // Frame pointer is last — we prefer not to use it
-    Gpr::Fp,
 ];
 
 /// Map from virtual register ID to a physical GPR using a simple linear scan.
@@ -1890,6 +1888,7 @@ fn lower_ir_instr(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
     frame_size: usize,
+    alloc_offset: &mut i32,
 ) -> Vec<AllocatedInstruction> {
     let mut result = Vec::new();
 
@@ -2033,33 +2032,24 @@ fn lower_ir_instr(
 
         IRInstr::Alloc { dst, size } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // Adjust stack pointer: daddiu $sp, $sp, -size
-            let neg_size = -(*size as i32);
+            // The prologue already decremented SP by frame_size (which includes
+            // all Alloc sizes), so we must NOT decrement SP again.  Instead,
+            // compute the address from $fp using a negative offset.
+            let aligned_size = ((*size as i32 + 15) / 16) * 16;
+            *alloc_offset += aligned_size;
+            let neg_offset = -*alloc_offset;
+            // daddiu dst, $fp, neg_offset  (compute address from FP)
             let daddiu = Instruction::Daddiu {
-                rt: Gpr::Sp,
-                rs: Gpr::Sp,
-                imm: neg_size,
+                rt: dst_reg,
+                rs: Gpr::Fp,
+                imm: neg_offset,
             };
             result.push(AllocatedInstruction {
                 opcode: "daddiu".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
-                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
                 encoded: daddiu.encode().to_vec(),
             });
-            // Copy updated $sp to dst: daddu dst, $sp, $zero
-            if dst_reg != Gpr::Sp {
-                let mov_sp = Instruction::Daddu {
-                    rd: dst_reg,
-                    rs: Gpr::Sp,
-                    rt: Gpr::Zero,
-                };
-                result.push(AllocatedInstruction {
-                    opcode: "daddu".to_string(),
-                    reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
-                    writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-                    encoded: mov_sp.encode().to_vec(),
-                });
-            }
         }
 
         IRInstr::Ret { values } => {
@@ -2080,8 +2070,21 @@ fn lower_ir_instr(
                     });
                 }
             }
-            // Epilogue: restore $ra and deallocate frame
+            // Epilogue: restore $fp, $ra and deallocate frame
             if frame_size > 0 {
+                // ld $fp, frame_size-16($sp)
+                let fp_offset = (frame_size - 16) as i32;
+                let load_fp = Instruction::Ld {
+                    rt: Gpr::Fp,
+                    base: Gpr::Sp,
+                    offset: fp_offset,
+                };
+                result.push(AllocatedInstruction {
+                    opcode: "ld".to_string(),
+                    reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
+                    encoded: load_fp.encode().to_vec(),
+                });
                 // ld $ra, frame_size-8($sp)
                 let ra_offset = (frame_size - 8) as i32;
                 let load_ra = Instruction::Ld {
@@ -2498,10 +2501,45 @@ impl Backend for Mips64Backend {
             encoded: save_ra.encode().to_vec(),
         });
 
+        // Save $fp: sd $fp, frame_size-16($sp)
+        let fp_save_offset = (frame_size - 16) as i32;
+        let save_fp = Instruction::Sd {
+            rt: Gpr::Fp,
+            base: Gpr::Sp,
+            offset: fp_save_offset,
+        };
+        instructions.push(AllocatedInstruction {
+            opcode: "sd".to_string(),
+            reads: vec![
+                PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()),
+                PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding()),
+            ],
+            writes: vec![],
+            encoded: save_fp.encode().to_vec(),
+        });
+
+        // Set up $fp = $sp + frame_size (point to top of frame = old SP)
+        let fp_setup = Instruction::Daddiu {
+            rt: Gpr::Fp,
+            rs: Gpr::Sp,
+            imm: frame_size as i32,
+        };
+        instructions.push(AllocatedInstruction {
+            opcode: "daddiu".to_string(),
+            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
+            encoded: fp_setup.encode().to_vec(),
+        });
+
         // Lower IR instructions.
+        // Track the cumulative allocation offset from FP.  The prologue
+        // already decremented SP by frame_size (which includes all Alloc
+        // sizes), so Alloc must NOT decrement SP again.  Instead, each
+        // Alloc computes its address as FP - alloc_offset.
+        let mut alloc_offset: i32 = 16; // skip ra/fp save pair
         for block in &func.blocks {
             for instr in &block.instructions {
-                let lowered = lower_ir_instr(instr, &mut vreg_map, frame_size);
+                let lowered = lower_ir_instr(instr, &mut vreg_map, frame_size, &mut alloc_offset);
                 instructions.extend(lowered);
             }
         }
@@ -2516,7 +2554,10 @@ impl Backend for Mips64Backend {
                 code_offset: 0,
             }],
             frame_size,
-            callee_saved: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
+            callee_saved: vec![
+                PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()),
+                PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding()),
+            ],
             spill_slots: 0,
             code_size,
             relocations: Vec::new(),
@@ -2540,6 +2581,75 @@ impl Backend for Mips64Backend {
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
+                }
+            }
+        }
+
+        // ── Phase 3: Replace jr $ra; nop in the entry function with exit syscall ──
+        // The first function is the ELF entry point, which is jumped to by the
+        // kernel — there is no return address, so `jr $ra` would SIGSEGV.
+        // Replace it with:
+        //   daddu $a0, $v0, $zero      ; exit code = return value (was in $v0)
+        //   daddiu $v0, $zero, 5001    ; __NR_exit = 5001 on MIPS N64
+        //   syscall                     ; invoke kernel
+        //   nop                         ; delay slot
+        if !program.functions.is_empty() {
+            let first_func = &program.functions[0];
+            if let Some(last_block) = first_func.blocks.last() {
+                // The last two instructions should be jr $ra; nop (8 bytes total)
+                let instrs = &last_block.instructions;
+                if instrs.len() >= 2 {
+                    let last = &instrs[instrs.len() - 1];
+                    let second_last = &instrs[instrs.len() - 2];
+                    let expected_jr = Instruction::Jr { rs: Gpr::Ra }.encode();
+                    let expected_nop = encode_nop();
+                    if second_last.encoded.len() == 4
+                        && last.encoded.len() == 4
+                        && second_last.encoded[..] == expected_jr[..]
+                        && last.encoded[..] == expected_nop[..]
+                    {
+                        // Find the byte offset of the jr $ra instruction
+                        let mut instr_offset = 0usize;
+                        let mut found_offset: Option<usize> = None;
+                        for block in &first_func.blocks {
+                            for instr in &block.instructions {
+                                if std::ptr::eq(instr as *const _, second_last as *const _) {
+                                    found_offset = Some(instr_offset);
+                                    break;
+                                }
+                                instr_offset += instr.encoded.len();
+                            }
+                            if found_offset.is_some() {
+                                break;
+                            }
+                        }
+                        if let Some(offset) = found_offset {
+                            let exit_move = Instruction::Daddu {
+                                rd: Gpr::A0,
+                                rs: Gpr::V0,
+                                rt: Gpr::Zero,
+                            }
+                            .encode();
+                            let exit_daddiu = Instruction::Daddiu {
+                                rt: Gpr::V0,
+                                rs: Gpr::Zero,
+                                imm: 5058, // __NR_exit for MIPS64 N64 ABI
+                            }
+                            .encode();
+                            let exit_syscall = Instruction::Syscall { code: 0 }.encode();
+                            let exit_nop = encode_nop();
+                            // jr+ nop = 8 bytes; exit sequence = 16 bytes.
+                            let mut new_code =
+                                Vec::with_capacity(all_code.len() + 8);
+                            new_code.extend_from_slice(&all_code[..offset]);
+                            new_code.extend_from_slice(&exit_move);
+                            new_code.extend_from_slice(&exit_daddiu);
+                            new_code.extend_from_slice(&exit_syscall);
+                            new_code.extend_from_slice(&exit_nop);
+                            new_code.extend_from_slice(&all_code[offset + 8..]);
+                            all_code = new_code;
+                        }
+                    }
                 }
             }
         }
@@ -2706,7 +2816,7 @@ mod tests {
         assert!(Gpr::A0.is_allocatable());
         assert!(Gpr::T0.is_allocatable());
         assert!(Gpr::S0.is_allocatable());
-        assert!(Gpr::Fp.is_allocatable());
+        assert!(!Gpr::Fp.is_allocatable());
     }
 
     #[test]
@@ -3168,6 +3278,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
+                ty: None,
             }],
         );
         // Skip prologue (2 instructions: daddiu + sd), look for daddu
@@ -3188,6 +3299,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
+                ty: None,
             }],
         );
         let instrs = &result.blocks[0].instructions;
@@ -3228,6 +3340,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
+                ty: None,
             }],
         );
         let instrs = &result.blocks[0].instructions;
@@ -3260,6 +3373,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
+                ty: None,
             }],
         );
         let instrs = &result.blocks[0].instructions;
@@ -3277,10 +3391,14 @@ mod tests {
                 IRInstr::Load {
                     dst: IRValue::Register(0),
                     addr: IRValue::Register(1),
+                    offset: 0,
+                    ty: IRType::I64,
                 },
                 IRInstr::Store {
                     value: IRValue::Register(0),
                     addr: IRValue::Register(1),
+                    offset: 0,
+                    ty: IRType::I64,
                 },
             ],
         );

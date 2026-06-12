@@ -331,11 +331,16 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
 // Main entry point
 // ===========================================================================
 // Hashes the 3-byte ASCII string "abc" using SHA256d.
+//
+// Expected (NIST FIPS 180-4 verified):
+//   SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+//   SHA256d("abc") = SHA-256(SHA-256("abc"))
+//     = 4f8b42c2 2dd292de 1a1f4778 a1c051e9 9e9c9b8a 8c0f3dc7 0e4e906e 2ce3a265
+//
+// Verification: compare first 4 bytes of digest with 0x4f8b42c2 = 1334017730
 
 fn main() -> i32 {
     // "abc" — NIST FIPS 180-4 test vector
-    // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-    // SHA256d("abc") = SHA-256(SHA-256("abc"))
     msg = allocate(3);
     *(msg + 0) = 97;   // 'a'
     *(msg + 1) = 98;   // 'b'
@@ -344,9 +349,18 @@ fn main() -> i32 {
     digest = allocate(32);
     sha256d(msg, 3, digest);
 
+    // Verify: first 4 bytes of SHA256d("abc") should be 0x4f8b42c2
+    // read_u32_be returns big-endian u32
+    result: u32 = read_u32_be(digest, 0);
+    expected: u32 = 1334526658;   // 0x4f8b42c2
+
     // Clean up
     free(msg);
     free(digest);
 
-    return 0;
+    if result == expected {
+        return 0;
+    } else {
+        return 1;
+    }
 }

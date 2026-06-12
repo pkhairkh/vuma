@@ -2495,6 +2495,7 @@ mod tests {
             IRInstr::Cmp {
                 kind: CmpKind::Eq,
                 rhs: IRValue::Immediate(1),
+                ty: None,
                 ..
             }
         ));
@@ -2531,6 +2532,7 @@ mod tests {
             first_instr,
             IRInstr::Cmp {
                 kind: CmpKind::SLt,
+                ty: None,
                 ..
             }
         ));
@@ -2728,7 +2730,6 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
-        ty: None,
             ty: None,
         });
         func.blocks[2].terminator = IRTerminator::Jump("loop_header".to_string());

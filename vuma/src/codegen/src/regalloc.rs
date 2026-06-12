@@ -2535,6 +2535,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -2558,6 +2559,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -2596,6 +2598,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -2622,6 +2625,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();
@@ -2656,6 +2660,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
 
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -2682,6 +2687,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         // v2 = v1 + 1  (v1 is used, v2 is defined; v0 is dead)
         block.push(IRInstr::BinOp {
@@ -2689,6 +2695,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         // Only v2 is returned — v0 and v1 are dead here.
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -2717,6 +2724,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -2744,6 +2752,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -2758,6 +2767,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(0),
+            ty: None,
         });
         then_block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -2768,6 +2778,7 @@ mod tests {
             dst: IRValue::Register(3),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(0),
+            ty: None,
         });
         else_block.terminator = IRTerminator::Return(vec![IRValue::Register(3)]);
 
@@ -2846,6 +2857,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block1.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func1);
@@ -2860,6 +2872,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block2.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
         program.functions.push(func2);
@@ -2895,6 +2908,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -2938,6 +2952,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=35u32).map(IRValue::Register).collect();
@@ -2979,6 +2994,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -3072,6 +3088,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block1.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func1);
@@ -3085,6 +3102,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block2.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func2);
@@ -3124,6 +3142,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();

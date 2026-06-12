@@ -62,8 +62,8 @@ use vuma_ive::{
 use vuma_parser::{AstToScg, ParseError, Parser, Program as AstProgram};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
-    PipelineResult as ScgPipelineResult, SCG,
+    DeduplicateEdges, EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType,
+    PassManager, PipelineResult as ScgPipelineResult, SCG,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -354,7 +354,11 @@ impl fmt::Display for VumaError {
                 write!(f, "[ive-verification] verdict: {}", result.overall)
             }
             VumaError::Transform { pass_name, errors } => {
-                write!(f, "[scg-transform:{}] {} error(s)", pass_name, errors.len())
+                write!(f, "[scg-transform:{}] {} error(s)", pass_name, errors.len())?;
+                for e in errors {
+                    write!(f, "\n  - {}", e)?;
+                }
+                Ok(())
             }
             VumaError::Codegen { error } => write!(f, "[codegen] {}", error),
             VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
@@ -1126,7 +1130,9 @@ fn walk_control_flow(
                 },
 
                 ControlKind::FunctionReturn => {
-                    stmts.push(ScgStatement::Return(vec![]));
+                    // Look at incoming DataFlow edges to find the return value.
+                    let ret_val = resolve_df_input(node_id, 0, edge_idx, scg);
+                    stmts.push(ScgStatement::Return(vec![ret_val]));
                     current = None;
                     continue;
                 }
@@ -1932,6 +1938,206 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     })
 }
 
+/// Compile a VUMA source program to a specific ISA target.
+///
+/// This is similar to [`compile`] but uses the specified backend for
+/// register allocation and code emission instead of the default ARM64.
+/// The pipeline stages 1–8 (through IR lowering) are shared; only
+/// stages 9–10 (register allocation + encoding) use the target backend.
+pub fn compile_for_isa(
+    source: &str,
+    config: &CompileConfig,
+    backend: &dyn vuma_codegen::backend::Backend,
+) -> Result<CompilationOutput, Vec<VumaError>> {
+    // Run the standard pipeline to get through IR lowering.
+    let mut errors: Vec<VumaError> = Vec::new();
+    let mut timings: Vec<(String, u64)> = Vec::new();
+
+    // ── Stage 1: Parse ────────────────────────────────────────────────
+    let t = Instant::now();
+    let ast = match parse_source(source) {
+        Ok(ast) => ast,
+        Err(e) => {
+            errors.push(e);
+            return Err(errors);
+        }
+    };
+    timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 2: AST → SCG ───────────────────────────────────────────
+    let t = Instant::now();
+    let mut scg = match ast_to_scg(&ast) {
+        Ok(scg) => scg,
+        Err(e) => {
+            errors.push(e);
+            return Err(errors);
+        }
+    };
+    timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 3: SCG Validation ──────────────────────────────────────
+    let t = Instant::now();
+    let validation = scg.validate();
+    if !validation.is_valid {
+        errors.push(VumaError::ScgValidation {
+            errors: validation.errors.clone(),
+        });
+        if config.stop_on_first_error {
+            return Err(errors);
+        }
+    }
+    timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 4: BD Inference ─────────────────────────────────────────
+    let t = Instant::now();
+    let inference_engine = InferenceEngine::new();
+    let bd_results = inference_engine.infer_types(&scg);
+    refine_scg_types_with_bd(&mut scg, &bd_results);
+    timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 5: MSG Construction ─────────────────────────────────────
+    let t = Instant::now();
+    let msg = match scg_to_msg(&scg) {
+        Ok(msg) => msg,
+        Err(ConversionError::CycleDetected) => MSG::new(),
+        Err(e) => {
+            errors.push(VumaError::ScgToMsg { error: e });
+            if config.stop_on_first_error {
+                return Err(errors);
+            }
+            MSG::new()
+        }
+    };
+    timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 6: IVE Verification ─────────────────────────────────────
+    let t = Instant::now();
+    let verification = if config.verification_level != VerificationLevel::None {
+        let ive_level = match config.verification_level {
+            VerificationLevel::Quick => IveVerificationLevel::Quick,
+            VerificationLevel::Normal => IveVerificationLevel::Normal,
+            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::None => unreachable!(),
+        };
+        let aggregator = InvariantAggregator::new().with_level(ive_level);
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let result = aggregator.verify_all(&input);
+        Some(result)
+    } else {
+        None
+    };
+    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 7: SCG Transforms ───────────────────────────────────────
+    let t = Instant::now();
+    let transform_result = run_scg_transforms(&mut scg, config);
+    if let Some(ref tr) = transform_result {
+        if tr.has_errors {
+            let pass_errors: Vec<String> = tr
+                .pass_results
+                .iter()
+                .flat_map(|pr| pr.errors.clone())
+                .collect();
+            if !pass_errors.is_empty() {
+                errors.push(VumaError::Transform {
+                    pass_name: "pipeline".to_string(),
+                    errors: pass_errors,
+                });
+                if config.stop_on_first_error {
+                    return Err(errors);
+                }
+            }
+        }
+    }
+    timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 8: IR Lowering ──────────────────────────────────────────
+    let t = Instant::now();
+    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let mut ir_builder = IRBuilder::new();
+    let ir_program = match ir_builder.build(&codegen_scg) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(VumaError::Codegen { error: e });
+            return Err(errors);
+        }
+    };
+    let ir_function_count = ir_program.functions.len();
+    let ir_instruction_count: usize = ir_program
+        .functions
+        .iter()
+        .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+        .sum();
+    timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 9: Register Allocation (target backend) ────────────────
+    let t = Instant::now();
+    let mut regalloc_results = Vec::new();
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => {
+                regalloc_results.push(AllocationResult::default());
+                allocated_functions.push(allocated);
+            }
+            Err(e) => {
+                errors.push(VumaError::RegisterAlloc {
+                    message: format!("{}: {}", func.name, e),
+                });
+                if config.stop_on_first_error {
+                    return Err(errors);
+                }
+            }
+        }
+    }
+    timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 10: Code Emission (target backend) ──────────────────────
+    let t = Instant::now();
+    let allocated_program = vuma_codegen::backend::AllocatedProgram {
+        functions: allocated_functions,
+        total_code_size: 0,
+        total_data_size: 0,
+    };
+    let binary = match backend.encode_program(&allocated_program) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            errors.push(VumaError::Emission {
+                message: format!("{} encoding failed: {}", backend.name(), e),
+            });
+            return Err(errors);
+        }
+    };
+    let code_words = 0; // Not applicable for all ISAs
+    timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    Ok(CompilationOutput {
+        binary,
+        scg,
+        msg,
+        verification,
+        stage_timings: timings,
+        ir_function_count,
+        ir_instruction_count,
+        code_words,
+        debug_info: if config.debug_info {
+            Some(DebugInfo {
+                ast: Some(ast),
+                ir_pre_regalloc: Some(ir_program),
+                regalloc_results,
+                transform_results: transform_result,
+            })
+        } else {
+            None
+        },
+        cor_runtime: None, // COR not initialized for cross-compilation
+    })
+}
+
 // ── ELF .text section instruction counting ─────────────────────────────
 
 /// Count the number of ARM64 instructions in the `.text` section of an
@@ -2132,19 +2338,24 @@ fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipeli
 
     match config.opt_level {
         OptLevel::O0 => {
-            // No optimisation passes.
+            // No optimisation passes, but always deduplicate edges
+            // to keep the graph clean for downstream stages.
+            pm.add_pass(DeduplicateEdges);
         }
         OptLevel::O1 => {
+            pm.add_pass(DeduplicateEdges);
             pm.add_pass(DeadCodeElimination::new());
             pm.add_pass(ConstantFolding::new());
         }
         OptLevel::O2 => {
+            pm.add_pass(DeduplicateEdges);
             pm.add_pass(DeadCodeElimination::new());
             pm.add_pass(ConstantFolding::new());
             pm.add_pass(CommonSubexpressionElimination::new());
             pm.add_pass(DeadCodeElimination::new()); // second pass after CSE
         }
         OptLevel::O3 => {
+            pm.add_pass(DeduplicateEdges);
             pm.add_pass(DeadCodeElimination::new());
             pm.add_pass(ConstantFolding::new());
             pm.add_pass(CommonSubexpressionElimination::new());
