@@ -1765,9 +1765,13 @@ fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u
 /// Produces a static executable with a single LOAD segment containing the
 /// `.text` section. Entry point is at `base_addr` + header offset.
 fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let text_offset = elf_header_size + phdr_size;
+    let phdr_end = elf_header_size + phdr_size;
+    // Page-align the text segment start for mmap compatibility (required by QEMU).
+    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
     let entry_point = base_addr + text_offset;
 
@@ -1805,9 +1809,13 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
-    // --- Code section ---
+    // --- Padding + Code section ---
+    // Pad to page-aligned text_offset
+    while (elf.len() as u64) < text_offset {
+        elf.push(0);
+    }
     elf.extend_from_slice(code);
 
     elf

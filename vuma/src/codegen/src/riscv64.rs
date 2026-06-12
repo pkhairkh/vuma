@@ -35,6 +35,7 @@ use crate::backend::{
     BackendError, PhysicalReg, RegClass, RiscV64TargetInfo,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+use std::collections::HashMap;
 
 // ===========================================================================
 // Opcodes
@@ -1940,17 +1941,31 @@ impl std::fmt::Display for Instruction {
 
 /// Build a minimal ELF64 binary for RISC-V 64-bit from raw code bytes.
 ///
-/// Produces a static executable with a single LOAD segment containing the
-/// `.text` section.  Uses EM_RISCV (243) as the machine type.
-fn build_minimal_riscv64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
-    // Layout: ELF header (64) | 1 program header (56) | code
+/// Produces a static executable with 2 LOAD segments:
+/// - Segment 1: PF_R | PF_X — contains .text (code)
+/// - Segment 2: PF_R | PF_W — writable data/stack space
+///
+/// The two segments are page-aligned to ensure the kernel maps them
+/// with different permissions.
+fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
+    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let text_offset = elf_header_size + phdr_size;
+    let num_phdrs: u64 = 2;
+    let phdr_end = elf_header_size + num_phdrs * phdr_size;
+    // Page-align the text segment start in the file for mmap compatibility.
+    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
+
+    // The data segment starts on the next page after the text.
+    let text_file_end = text_offset + text_size;
+    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_offset = data_vaddr - base_addr;
+    let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -1967,19 +1982,18 @@ fn build_minimal_riscv64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
-                                                // e_flags: RISC-V-specific flags. Float ABI = double (0x5), RVC = 0.
-                                                // EF_RISCV_FLOAT_ABI_DOUBLE = 0x5 << 5 = 0xA0
-                                                // EF_RISCV_RVC = 0x0001 (we don't set it for now)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
+    // e_flags: RISC-V float ABI = double (0x5), RVC = 0
+    // EF_RISCV_FLOAT_ABI_DOUBLE = 0x5 << 5 = 0xA0
     elf.extend_from_slice(&0xA0u32.to_le_bytes()); // e_flags (LP64D ABI)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
-    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+    // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
@@ -1987,12 +2001,289 @@ fn build_minimal_riscv64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
-    // --- Code section ---
+    // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&data_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+
+    // --- .text section ---
+    // Pad to page-aligned text_offset
+    while (elf.len() as u64) < text_offset {
+        elf.push(0);
+    }
     elf.extend_from_slice(code);
 
+    // --- Pad to data segment offset ---
+    while (elf.len() as u64) < data_offset {
+        elf.push(0);
+    }
+
     elf
+}
+
+/// Build RISC-V 64 runtime I/O functions using Linux ECALL syscalls.
+///
+/// Provides:
+/// - `__vuma_print_hex`: Print a0 as 8 hex digits to stdout (FD=1)
+///   Uses sys_write (a7=64) via ECALL.
+///
+/// - `__vuma_print_int`: Print a0 as a decimal integer to stdout (FD=1)
+///   Converts digit-by-digit into a stack buffer, then sys_write.
+///
+/// - `__vuma_print_newline`: Print a newline character to stdout.
+///
+/// All functions follow the LP64D calling convention.
+fn build_riscv64_runtime() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    // ── __vuma_print_hex ──
+    // Input: a0 = 64-bit value to print as 8 hex digits
+    // Clobbers: t0, t1, t2, t3, a7
+    // Stack frame: 32 bytes (save ra + s0 + buffer)
+
+    // Prologue
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+
+    // t0 = loop counter (0..8), t1 = shift amount (28, 24, ..., 0)
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 28 }.encode());
+
+    // hex_loop:
+    let hex_loop_start = code.len();
+
+    // Extract nibble: t2 = (a0 >> t1) & 0xF
+    code.extend(Instruction::Srl { rd: Gpr::T2, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
+    code.extend(Instruction::Andi { rd: Gpr::T2, rs1: Gpr::T2, imm: 15 }.encode());
+
+    // Convert nibble to hex char:
+    // t3 = t2 + 48 ('0')  (default)
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
+    // if t2 > 9: t3 = t2 + 87 ('a' - 10)
+    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T2, imm: -10 }.encode()); // t4 = t2 - 10 (temp)
+    // Use SLTIU to check: if t2 >= 10, t4 = 1, else t4 = 0
+    // Actually: SLTIU t4, t2, 10 → if t2 < 10 then t4=1 else t4=0
+    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
+    // If t4 == 0 (t2 >= 10), use alpha: t3 = t2 + 87
+    // BNE t4, zero, store_digit (t2 < 10, use default t3 = t2 + 48)
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode()); // t3 = t2 + 87 (alpha)
+    // Now we have two possibilities: if t2 < 10, use t2+48, else use t2+87
+    // Simple approach: use CSEL-like pattern
+    // t3 = t2 + 48 always, then if t2 >= 10, add 39 more (87-48=39)
+    // Actually let me redo this properly:
+    // t3 = t2 + 48
+    // if t2 >= 10: t3 += 39
+    // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10, 0 if t2 >= 10
+    // We need to add 39 only when t2 >= 10 (t4 == 0)
+    // XORI t4, t4, 1 → invert: t4 = 1 if t2 >= 10
+    // But this is getting complicated. Let me just use a branch.
+
+    // Let me restart the nibble conversion with a simpler approach.
+    // Remove the last 2 instructions we just added.
+    code.truncate(code.len() - 2);
+
+    // t3 = t2 + 48  (default for 0-9)
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
+    // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10
+    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
+    // BNE t4, zero, +2 (skip alpha adjustment if t2 < 10)
+    // We'll compute the branch offset after we know where we are
+    let bne_offset_pos = code.len();
+    code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    // Alpha: t3 = t2 + 87
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode());
+    // Patch the BNE to skip this instruction
+    let bne_patch_pos = code.len();
+    let bne_offset = (bne_patch_pos - bne_offset_pos) as i32;
+    let bne_patched = Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: bne_offset };
+    code[bne_offset_pos..bne_offset_pos + 4].copy_from_slice(&bne_patched.encode());
+
+    // Store char at sp + t0
+    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T5, imm: 0 }.encode());
+
+    // Increment: SUB t1, t1, 4; ADD t0, t0, 1; BLT t0, 8, hex_loop
+    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -4 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    // Compute branch back to hex_loop_start
+    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
+    // Wait, t4 was used above. Let me use a different register for the limit.
+    // Actually BLT t0, 8 → we need imm=8 in a register. Use ADDI t4, zero, 8.
+    // Remove the last BLT and redo.
+    code.truncate(code.len() - 1);
+    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Zero, imm: 8 }.encode());
+    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
+
+    // ── sys_write(1, sp, 8) ──
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd=1
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf=sp
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode()); // len=8
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(Instruction::Ecall.encode());
+
+    // Epilogue
+    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 32 }.encode());
+    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+
+    // ── __vuma_print_int ──
+    // Input: a0 = 64-bit signed integer to print as decimal
+    // Strategy: divide by 10, store digits, reverse, write.
+
+    // Prologue
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -64 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 56 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 48 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+
+    // Handle negative: if a0 < 0, print '-' and negate
+    code.extend(Instruction::Bge { rs1: Gpr::A0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    let bge_pos = code.len() - 4;
+
+    // Print '-'
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 45 }.encode()); // '-'
+    code.extend(Instruction::Sb { rs1: Gpr::T0, rs2: Gpr::Sp, imm: 0 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode()); // len
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(Instruction::Ecall.encode());
+
+    // Negate a0
+    code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::Zero, rs2: Gpr::A0 }.encode());
+
+    // Patch BGE to skip to here
+    let bge_target = code.len() as i32;
+    let bge_offset = bge_target - (bge_pos as i32);
+    let bge_patched = Instruction::Bge { rs1: Gpr::A0, rs2: Gpr::Zero, offset: bge_offset };
+    code[bge_pos..bge_pos + 4].copy_from_slice(&bge_patched.encode());
+
+    // Convert digits: t0 = digit count, t1 = 10
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode()); // count=0
+    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 10 }.encode()); // divisor=10
+
+    let div_loop_start = code.len();
+
+    // CBZ-like: if a0 == 0, jump to done
+    code.extend(Instruction::Beq { rs1: Gpr::A0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    let beq_pos = code.len() - 4;
+
+    // UDIV: t2 = a0 / 10
+    code.extend(Instruction::Divu { rd: Gpr::T2, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
+    // REM: t3 = a0 % 10
+    code.extend(Instruction::Remu { rd: Gpr::T3, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
+    // Add '0'
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: 48 }.encode());
+    // Store at sp + 16 + t0 (use s0+16 area as buffer)
+    code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T0 }.encode());
+    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T5, imm: 0 }.encode());
+    // Increment count
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    // a0 = quotient
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::T2, imm: 0 }.encode());
+    // Loop back
+    let div_back = (div_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: div_back }.encode());
+
+    // done_digits: Patch BEQ
+    let beq_target = code.len() as i32;
+    let beq_offset = beq_target - (beq_pos as i32);
+    let beq_patched = Instruction::Beq { rs1: Gpr::A0, rs2: Gpr::Zero, offset: beq_offset };
+    code[beq_pos..beq_pos + 4].copy_from_slice(&beq_patched.encode());
+
+    // If count == 0, print "0"
+    code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    let bne_notzero_pos = code.len() - 4;
+
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 48 }.encode()); // '0'
+    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 1 }.encode()); // count=1
+    // B write_digits
+    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    let j_write_pos = code.len() - 4;
+
+    // Patch BNE to skip to reverse section
+    let rev_start = code.len() as i32;
+    let bne_offset = rev_start - (bne_notzero_pos as i32);
+    let bne_patched = Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: bne_offset };
+    code[bne_notzero_pos..bne_notzero_pos + 4].copy_from_slice(&bne_patched.encode());
+
+    // Reverse digits in buffer [sp+16, sp+16+t0)
+    // t2 = left = 0, t3 = right = t0 - 1
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::Zero, imm: 0 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T0, imm: -1 }.encode());
+
+    let rev_loop = code.len();
+    // BGE t2, t3, rev_done
+    code.extend(Instruction::Bge { rs1: Gpr::T2, rs2: Gpr::T3, offset: 0 }.encode()); // placeholder
+    let bge_rev_pos = code.len() - 4;
+
+    // Load bytes and swap
+    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::T4, rs2: Gpr::T2 }.encode());
+    code.extend(Instruction::Add { rd: Gpr::T6, rs1: Gpr::T4, rs2: Gpr::T3 }.encode());
+    code.extend(Instruction::Lbu { rd: Gpr::T4, rs1: Gpr::T5, imm: 0 }.encode()); // reuse t4
+    code.extend(Instruction::Lbu { rd: Gpr::A7, rs1: Gpr::T6, imm: 0 }.encode()); // use a7 as temp
+    code.extend(Instruction::Sb { rs1: Gpr::A7, rs2: Gpr::T5, imm: 0 }.encode());
+    code.extend(Instruction::Sb { rs1: Gpr::T4, rs2: Gpr::T6, imm: 0 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T2, imm: 1 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+    // Loop back
+    let rev_back = (rev_loop as i32) - (code.len() as i32);
+    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: rev_back }.encode());
+
+    // rev_done: Patch BGE
+    let rev_done = code.len() as i32;
+    let bge_rev_offset = rev_done - (bge_rev_pos as i32);
+    let bge_rev_patched = Instruction::Bge { rs1: Gpr::T2, rs2: Gpr::T3, offset: bge_rev_offset };
+    code[bge_rev_pos..bge_rev_pos + 4].copy_from_slice(&bge_rev_patched.encode());
+
+    // Patch J write_digits
+    let write_digits = code.len() as i32;
+    let j_write_offset = write_digits - (j_write_pos as i32);
+    let j_write_patched = Instruction::Jal { rd: Gpr::Zero, offset: j_write_offset };
+    code[j_write_pos..j_write_pos + 4].copy_from_slice(&j_write_patched.encode());
+
+    // write_digits: sys_write(1, sp+16, t0)
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 16 }.encode()); // buf
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::T0, imm: 0 }.encode()); // len
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(Instruction::Ecall.encode());
+
+    // Epilogue
+    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 56 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 48 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 64 }.encode());
+    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+
+    // ── __vuma_print_newline ──
+    // Simple: write '\n' to stdout
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 10 }.encode()); // '\n'
+    code.extend(Instruction::Sb { rs1: Gpr::T0, rs2: Gpr::Sp, imm: 0 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode()); // len
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(Instruction::Ecall.encode());
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+
+    code
 }
 
 // ===========================================================================
@@ -4768,8 +5059,93 @@ impl Backend for RiscV64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Collect all encoded bytes from every function and block.
-        let mut all_code = Vec::new();
+        // ── RISC-V 64 Linux static executable ──
+        //
+        // Layout:
+        //   _start:  JAL ra, main        ; call main (result in a0)
+        //            ADDI a0, a0, 0       ; (nop, keep result)
+        //            ADDI a7, zero, 93    ; sys_exit_group
+        //            ECALL                ; syscall
+        //   <functions...>
+        //   <runtime: print_hex, print_int using ECALL sys_write>
+
+        // ── _start stub ──
+        // JAL ra, <main>    — 4 bytes, needs offset patching
+        // ADDI a0, a0, 0    — 4 bytes (nop, keep result)
+        // ADDI a7, zero, 93 — 4 bytes (sys_exit_group = 93 on RISC-V Linux)
+        // ECALL             — 4 bytes
+
+        let start_stub_size: usize = 16; // 4 × 4-byte instructions
+
+        // ── Build runtime I/O code ──
+        let runtime_code = build_riscv64_runtime();
+
+        // ── Compute function offsets ──
+        let mut func_offsets: HashMap<String, usize> = HashMap::new();
+        let mut current_offset: usize = start_stub_size;
+
+        for func in &program.functions {
+            func_offsets.insert(func.name.clone(), current_offset);
+            let func_size: usize = func.blocks.iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            current_offset += func_size;
+        }
+
+        // ── Build _start stub ──
+        let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // JAL ra, <main> — placeholder, will be patched
+        // JAL encoding: opcode=1101111, rd=ra=1, imm20=0
+        let jal_placeholder = Instruction::Jal {
+            rd: Gpr::Ra,
+            offset: 0,
+        };
+        start_stub.extend_from_slice(&jal_placeholder.encode());
+
+        // ADDI a0, a0, 0 (nop)
+        start_stub.extend_from_slice(
+            &Instruction::Addi {
+                rd: Gpr::A0,
+                rs1: Gpr::A0,
+                imm: 0,
+            }
+            .encode(),
+        );
+
+        // ADDI a7, zero, 93 (sys_exit_group)
+        start_stub.extend_from_slice(
+            &Instruction::Addi {
+                rd: Gpr::A7,
+                rs1: Gpr::Zero,
+                imm: 93,
+            }
+            .encode(),
+        );
+
+        // ECALL
+        start_stub.extend_from_slice(&Instruction::Ecall.encode());
+
+        // ── Patch _start JAL to main ──
+        let main_key = func_offsets.keys()
+            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .cloned();
+        if let Some(ref key) = main_key {
+            let main_offset = func_offsets[key];
+            // JAL offset = target - pc, where pc = address of JAL
+            // JAL is at offset 0 within all_code
+            // target = main_offset
+            let jal_imm = main_offset as i32;
+            let patched_jal = Instruction::Jal {
+                rd: Gpr::Ra,
+                offset: jal_imm,
+            };
+            start_stub[0..4].copy_from_slice(&patched_jal.encode());
+        }
+
+        // ── Concatenate all code ──
+        let mut all_code = start_stub;
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -4778,8 +5154,52 @@ impl Backend for RiscV64Backend {
             }
         }
 
-        // Wrap in a minimal ELF64 binary for RISC-V 64-bit.
-        Ok(build_minimal_riscv64_elf(&all_code, 0x10000))
+        // Append runtime I/O code
+        all_code.extend_from_slice(&runtime_code);
+
+        // ── Patch JAL relocations for inter-function calls ──
+        // RISC-V uses JAL for direct calls within ±1MB
+        let mut func_code_offset: usize = start_stub_size;
+        for func in &program.functions {
+            for reloc in &func.relocations {
+                let abs_offset = func_code_offset + reloc.offset as usize;
+                if abs_offset + 4 > all_code.len() {
+                    continue;
+                }
+
+                if reloc.reloc_type == "R_RISCV_JAL" {
+                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                        let jal_addr = abs_offset as i32;
+                        let target_addr = target_offset as i32;
+                        let offset = target_addr - jal_addr;
+                        // Patch the JAL instruction's imm20 field
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        // Decode existing JAL to get rd, then re-encode with new offset
+                        let rd_idx = (existing >> 7) & 0x1F;
+                        let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+                        let patched = Instruction::Jal {
+                            rd: rd_reg,
+                            offset: offset,
+                        };
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.encode());
+                    }
+                }
+            }
+            let func_size: usize = func.blocks.iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            func_code_offset += func_size;
+        }
+
+        // ── Build ELF with 2 LOAD segments ──
+        Ok(build_minimal_riscv64_elf_2seg(&all_code, 0x10000))
     }
 
     fn return_stub(&self) -> Vec<u8> {

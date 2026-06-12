@@ -801,15 +801,21 @@ impl Emitter {
 
             IRInstr::Alloc { dst, size } => {
                 let rd = self.resolve_reg(dst)?;
-                self.emit_instruction(Instruction::MOV {
-                    rd,
-                    rm: Register::SP,
-                })?;
+                // IMPORTANT: Decrement SP FIRST, then save the new SP value.
+                // If we save before decrementing, the allocation pointer
+                // points to the wrong (too-high) address.
                 let aligned = (*size).div_ceil(16) * 16;
                 self.emit_instruction(Instruction::SUB {
                     rd: Register::SP,
                     rn: Register::SP,
                     rm: Operand::Imm12(aligned as u16),
+                })?;
+                // MOV rd, SP: cannot use ORR because ORR treats Rm=31 as XZR.
+                // Use ADD rd, SP, #0 instead.
+                self.emit_instruction(Instruction::ADD {
+                    rd,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(0),
                 })?;
             }
 
@@ -1758,10 +1764,13 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
 // ---------------------------------------------------------------------------
 
 /// Compute the stack frame size for a function by summing its `Alloc`
-/// instructions, adding 16 bytes for the FP/LR save pair, and rounding up
-/// to 16-byte alignment.
+/// instructions and rounding up to 16-byte alignment.
+///
+/// NOTE: This does NOT include the 16 bytes for the FP/LR save pair,
+/// because the prologue handles that separately with an explicit
+/// `SUB SP, SP, #16` before the STP.
 fn compute_frame_size(func: &IRFunction) -> u16 {
-    let mut total: u32 = 16; // FP/LR save pair
+    let mut total: u32 = 0; // Alloc sizes only; FP/LR handled separately
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {

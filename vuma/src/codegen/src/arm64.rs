@@ -2936,9 +2936,12 @@ impl InstructionSelector {
                 rn: Register::SP,
                 rm: Operand::Imm12(aligned as u16),
             });
-            self.push(Instruction::MOV {
+            // MOV rd, SP: cannot use ORR because ORR treats Rm=31 as XZR.
+            // Use ADD rd, SP, #0 instead.
+            self.push(Instruction::ADD {
                 rd,
-                rm: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Imm12(0),
             });
         }
     }
@@ -4393,11 +4396,13 @@ mod tests {
                 ..
             }
         ));
+        // After MOV SP fix: alloc now emits ADD Xd, SP, #0 instead of MOV Xd, SP
         assert!(matches!(
             instrs[1],
-            Instruction::MOV {
+            Instruction::ADD {
                 rd: Register::X0,
-                rm: Register::SP
+                rn: Register::SP,
+                rm: Operand::Imm12(0)
             }
         ));
     }

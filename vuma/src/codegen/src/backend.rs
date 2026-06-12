@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -1330,10 +1331,10 @@ impl Default for AArch64Backend {
 /// Compute the stack frame size for an IR function.
 ///
 /// Replicates the private `compute_frame_size` function in `emit.rs`:
-/// sums `Alloc` instruction sizes, adds 16 bytes for the FP/LR save pair,
-/// and rounds up to 16-byte alignment.
+/// sums `Alloc` instruction sizes and rounds up to 16-byte alignment.
+/// NOTE: Does NOT include 16 bytes for FP/LR pair (handled by prologue separately).
 fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: u32 = 16; // FP/LR save pair
+    let mut total: u32 = 0; // Alloc sizes only; FP/LR handled separately
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Alloc { size, .. } = instr {
@@ -1347,20 +1348,38 @@ fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
     total as usize
 }
 
-/// Build a minimal ELF64 binary for AArch64 from raw code bytes.
+/// Build an ELF64 binary for AArch64 Linux with 2 LOAD segments.
 ///
-/// Produces a static executable with a single LOAD segment containing the
-/// `.text` section.  This is sufficient for programs that have already been
-/// emitted through the `allocate_registers` / `encode_function` pipeline.
-fn build_minimal_aarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
-    // Layout: ELF header (64) | 1 program header (56) | code
+/// Segment 1: PF_R | PF_X — contains .text (code)
+/// Segment 2: PF_R | PF_W — contains .data + stack space (writable)
+///
+/// The two segments are separated by page alignment (4KB) to ensure
+/// the kernel maps them with different permissions. Without this,
+/// a single PF_R|PF_W|PF_X segment is insecure and may cause
+/// QEMU/Linux to reject the executable.
+fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
+    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let text_offset = elf_header_size + phdr_size;
+    let num_phdrs: u64 = 2;
+    let phdr_end = elf_header_size + num_phdrs * phdr_size;
+    // Page-align the text segment start in the file.  The kernel's ELF
+    // loader mmap()s each LOAD segment, and the file offset must be
+    // congruent with the virtual address modulo the page size.  The
+    // simplest way to guarantee this is to place the text at a
+    // page-aligned file offset, with vaddr = base_addr.
+    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
+
+    // The data segment starts on the next page after the text.
+    let text_file_end = text_offset + text_size;
+    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_offset = data_vaddr - base_addr; // file offset for data segment
+    let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -1381,12 +1400,12 @@ fn build_minimal_aarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
-    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+    // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
@@ -1394,12 +1413,370 @@ fn build_minimal_aarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
-    // --- Code section ---
+    // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&data_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
+    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+
+    // --- .text section ---
+    // Pad to page-aligned text_offset
+    while (elf.len() as u64) < text_offset {
+        elf.push(0);
+    }
     elf.extend_from_slice(code);
 
+    // --- Pad to data segment offset (if needed) ---
+    while (elf.len() as u64) < data_offset {
+        elf.push(0);
+    }
+
+    // No file data for the .data segment (it's BSS-like, zero-initialized)
+
     elf
+}
+
+/// Build ARM64 runtime I/O functions using Linux SVC syscalls.
+///
+/// Provides:
+/// - `__vuma_print_hex`: Print X0 as 8 hex digits to stdout (FD=1)
+///   Uses sys_write (X8=64) via SVC #0.
+///   Saves/restores X1,X2,X3,X8,X9,X10 on stack.
+///
+/// - `__vuma_print_int`: Print X0 as a decimal integer to stdout (FD=1)
+///   Converts digit-by-digit into a stack buffer, then sys_write.
+///
+/// - `__vuma_print_newline`: Print a newline character to stdout.
+///
+/// All functions follow AAPCS64: X0 is the argument, X1-X7 are caller-saved,
+/// X8 is the indirect result register / syscall number, X19-X28 are callee-saved.
+fn build_aarch64_runtime() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    // ── __vuma_print_hex ──
+    // Input: X0 = 64-bit value to print as 8 hex digits
+    // Clobbers: X1, X2, X3, X8, X9, X10
+    // Stack frame: 48 bytes (8 for pair save + 8 for hex chars + 32 padding)
+
+    // Prologue: save callee-saved and link register
+    // STP X29, X30, [SP, #-48]!  (pre-indexed, 48-byte frame)
+    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
+    // ADD X29, SP, #0
+    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+
+    // Save X9, X10 on stack at [SP, #16]
+    // STP X9, X10, [SP, #16]
+    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
+
+    // Save X1, X2 on stack at [SP, #32]
+    // STP X1, X2, [SP, #32]
+    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
+
+    // Save X3, X8 on stack at [SP, #40]  (offset 40 = 5*8)
+    // Wait, 40 = 5*8 but STP needs offset/8 for signed-offset. 40/8 = 5.
+    // STP X3, X8, [SP, #40]
+    code.extend_from_slice(&0xA9052C63u32.to_le_bytes());
+
+    // Hex lookup table: we'll use ADD + LDRB pattern.
+    // Instead, compute hex digit directly:
+    // For each nibble: digit = nibble; if digit < 10 then char = digit + '0' else char = digit - 10 + 'a'
+
+    // We'll write 8 hex chars starting at SP+16 (reuse save area after we load saves)
+    // Actually, let's use SP+16 as the char buffer (8 bytes).
+    // First, save the important regs, then overwrite the buffer area.
+
+    // Process 8 nibbles from most significant to least significant
+    // X0 = value, iterate 8 times shifting right by 28, 24, 20, ..., 4, 0
+
+    // X9 = char buffer pointer = SP
+    // X10 = loop counter (0..8)
+
+    // ADD X9, SP, #16  (buffer starts at SP+16)
+    code.extend_from_slice(&0x910043E9u32.to_le_bytes());
+    // MOV X10, #0
+    code.extend_from_slice(&0xD280001Au32.to_le_bytes());
+    // MOV X3, #0  (bit shift amount, starts at 28)
+    code.extend_from_slice(&0xD280003Du32.to_le_bytes()); // MOVZ X3, #28>>4... wait
+    // MOV X3, #28
+    code.extend_from_slice(&0xD2800383u32.to_le_bytes()); // MOVZ X3, #28
+
+    // Loop label:
+    let loop_offset = code.len();
+
+    // Extract nibble: X2 = (X0 >> X3) & 0xF
+    // LSR X2, X0, X3
+    code.extend_from_slice(&0x9AC02482u32.to_le_bytes()); // LSR X2, X0, X3
+    // AND X2, X2, #0xF
+    code.extend_from_slice(&0x92400C42u32.to_le_bytes()); // AND X2, X2, #15
+
+    // Convert nibble to hex char:
+    // if X2 < 10: char = X2 + 48 ('0')
+    // else: char = X2 - 10 + 97 ('a')
+    // CMP X2, #10
+    code.extend_from_slice(&0xF100141Fu32.to_le_bytes()); // CMP X2, #10? No...
+    // CMP X2, #10: use ADD X1, X2, #0 then CMP... Actually:
+    // SUB X1, X2, #10 → if < 10, result is negative (borrow set)
+    // Let's use: CMP X2, #9; B.GT hex_alpha
+    // CMP X2, #9
+    code.extend_from_slice(&0xF100129Fu32.to_le_bytes()); // CMP X2, #9
+
+    // ADD X1, X2, #48  (default: '0' + digit)
+    code.extend_from_slice(&0x91000C41u32.to_le_bytes()); // ADD X1, X2, #48
+
+    // B.GT hex_alpha (placeholder, will be +1 instruction)
+    code.extend_from_slice(&0x54000069u32.to_le_bytes()); // B.GT +4*2 = +8 bytes
+
+    // B store_char
+    code.extend_from_slice(&0x14000002u32.to_le_bytes()); // B +2 instructions
+
+    // hex_alpha: ADD X1, X2, #87  (87 = 97-10, so digit-10+'a')
+    code.extend_from_slice(&0x91002AC1u32.to_le_bytes()); // ADD X1, X2, #87
+
+    // store_char: STRB W1, [X9, X10]
+    // STRB W1, [X9, X10] — register offset
+    code.extend_from_slice(&0x382A6821u32.to_le_bytes()); // STRB W1, [X9, X10]
+
+    // Increment: SUB X3, X3, #4; ADD X10, X10, #1; CMP X10, #8; B.LT loop
+    code.extend_from_slice(&0xD1000863u32.to_le_bytes()); // SUB X3, X3, #4
+    code.extend_from_slice(&0x9100054Au32.to_le_bytes()); // ADD X10, X10, #1
+    code.extend_from_slice(&0xF100151Fu32.to_le_bytes()); // CMP X10, #8
+
+    // Calculate branch back to loop start
+    let current_pos = code.len() as i64;
+    let loop_start = loop_offset as i64;
+    let back_offset = (loop_start - current_pos) / 4 - 1; // B.LT is relative to PC+4
+    let bcond = 0x5400000Bu32 | ((back_offset as u32) & 0x7FFFF); // B.LT
+    code.extend_from_slice(&bcond.to_le_bytes());
+
+    // ── sys_write(1, buf, 8) ──
+    // MOV X0, #1  (stdout fd)
+    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOVZ X0, #1
+    // ADD X1, SP, #16  (buffer pointer)
+    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
+    // MOV X2, #8  (length)
+    code.extend_from_slice(&0xD2800102u32.to_le_bytes()); // MOVZ X2, #8
+    // MOV X8, #64  (sys_write)
+    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOVZ X8, #64
+    // SVC #0
+    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
+
+    // Restore registers
+    // LDP X9, X10, [SP, #16]
+    code.extend_from_slice(&0xA94127E9u32.to_le_bytes());
+    // LDP X1, X2, [SP, #32]
+    code.extend_from_slice(&0xA9420441u32.to_le_bytes());
+    // LDP X3, X8, [SP, #40]
+    code.extend_from_slice(&0xA9452C63u32.to_le_bytes());
+    // LDP X29, X30, [SP], #48  (post-indexed load)
+    code.extend_from_slice(&0xA8C37BFDu32.to_le_bytes());
+
+    // RET
+    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+
+    // ── __vuma_print_int ──
+    // Input: X0 = 64-bit signed integer to print as decimal
+    // Strategy: Divide by 10 repeatedly, push digits onto stack, then write.
+    // X9 = digit count, X10 = buffer pointer (SP-based)
+    // Stack frame: 64 bytes (16 for save pair + 48 for digit buffer)
+
+    // STP X29, X30, [SP, #-64]!
+    code.extend_from_slice(&0xA9C27BFDu32.to_le_bytes());
+    // ADD X29, SP, #0
+    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+    // STP X9, X10, [SP, #16]
+    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
+    // STP X1, X2, [SP, #32]
+    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
+    // STP X3, X8, [SP, #48]
+    code.extend_from_slice(&0xA9030463u32.to_le_bytes());
+
+    // Handle negative numbers
+    // CMP X0, #0
+    code.extend_from_slice(&0xB100001Fu32.to_le_bytes());
+    // B.GE positive
+    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE +4
+
+    // Print '-' for negative
+    // MOV X1, #45  ('-')
+    code.extend_from_slice(&0xD28005A1u32.to_le_bytes()); // MOVZ X1, #45
+    // STRB W1, [SP, #16]
+    code.extend_from_slice(&0x390013E1u32.to_le_bytes());
+    // sys_write(1, SP+16, 1)
+    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
+    code.extend_from_slice(&0x910043E1u32.to_le_bytes()); // ADD X1, SP, #16
+    code.extend_from_slice(&0xD2800022u32.to_le_bytes()); // MOV X2, #1
+    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
+    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
+
+    // Negate X0
+    // NEG X0, X0 = SUB X0, XZR, X0
+    code.extend_from_slice(&0xCB0003E0u32.to_le_bytes()); // SUB X0, XZR, X0
+
+    // positive: convert digits
+    // X9 = digit count = 0
+    code.extend_from_slice(&0xD2800019u32.to_le_bytes()); // MOVZ X9, #0
+    // X10 = buffer pointer = SP + 17 (leave room for potential '-')
+    code.extend_from_slice(&0x910047EAu32.to_le_bytes()); // ADD X10, SP, #17
+
+    // div_loop: UDIV X2, X0, #10; MSUB X1, X2, #10, X0; add '0'; push; X0 = X2
+    let div_loop_start = code.len();
+
+    // CBZ X0, done_digits
+    code.extend_from_slice(&0xB4000080u32.to_le_bytes()); // CBZ X0, done_digits (+16 bytes = 4 instr)
+
+    // UDIV X2, X0, #10  → but UDIV takes 2 regs, no immediate.
+    // MOV X1, #10
+    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
+    // UDIV X2, X0, X1
+    code.extend_from_slice(&0x9AC10802u32.to_le_bytes()); // UDIV X2, X0, X1
+    // MSUB X3, X2, X1, X0  → X3 = X0 - X2 * X1 = remainder
+    code.extend_from_slice(&0x9B017C43u32.to_le_bytes()); // MSUB X3, X2, X1, X0
+    // ADD X3, X3, #48  ('0')
+    code.extend_from_slice(&0x91001863u32.to_le_bytes()); // ADD X3, X3, #48
+    // STRB W3, [X10, X9]  — store digit at buffer[count]
+    code.extend_from_slice(&0x382B6863u32.to_le_bytes()); // STRB W3, [X10, X9]
+    // ADD X9, X9, #1
+    code.extend_from_slice(&0x91000529u32.to_le_bytes()); // ADD X9, X9, #1
+    // MOV X0, X2  (quotient becomes new value)
+    code.extend_from_slice(&0xAA0203E0u32.to_le_bytes()); // MOV X0, X2
+    // B div_loop
+    let cur = code.len() as i64;
+    let back = (div_loop_start as i64 - cur as i64) / 4 - 1;
+    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
+
+    // done_digits: digits are in reverse order in buffer.
+    // Reverse them in-place using X1 and X3 as temp pointers.
+    // CBZ X9, write_digits  (if count == 0, print "0")
+    code.extend_from_slice(&0xB4000039u32.to_le_bytes()); // CBZ X9, write_digits (+6 instr = 24 bytes)
+
+    // If count == 0, print "0"
+    // MOV X1, #48  ('0')
+    code.extend_from_slice(&0xD2800601u32.to_le_bytes()); // MOVZ X1, #48
+    // STRB W1, [X10]
+    code.extend_from_slice(&0x39001501u32.to_le_bytes());
+    // MOV X9, #1
+    code.extend_from_slice(&0xD2800039u32.to_le_bytes());
+    // B write_digits
+    code.extend_from_slice(&0x14000003u32.to_le_bytes()); // B +3
+
+    // Reverse digits in buffer[X10..X10+X9]
+    // X1 = left index = 0, X3 = right index = X9 - 1
+    // SUB X3, X9, #1
+    code.extend_from_slice(&0xD1000563u32.to_le_bytes()); // SUB X3, X9, #1
+    // MOV X1, #0
+    code.extend_from_slice(&0xD2800001u32.to_le_bytes()); // MOVZ X1, #0
+
+    // rev_loop: CMP X1, X3; B.GE rev_done
+    let rev_loop = code.len();
+    code.extend_from_slice(&0xEB03003Fu32.to_le_bytes()); // CMP X1, X3
+    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE rev_done (+4)
+
+    // Load bytes: LDRB W2, [X10, X1]; LDRB W8, [X10, X3]
+    code.extend_from_slice(&0x386B6822u32.to_le_bytes()); // LDRB W2, [X10, X1]
+    code.extend_from_slice(&0x386B6C68u32.to_le_bytes()); // LDRB W8, [X10, X3]
+    // STRB W8, [X10, X1]; STRB W2, [X10, X3] (swap)
+    code.extend_from_slice(&0x382B6828u32.to_le_bytes()); // STRB W8, [X10, X1]
+    code.extend_from_slice(&0x382B6842u32.to_le_bytes()); // STRB W2, [X10, X3]
+    // ADD X1, X1, #1; SUB X3, X3, #1
+    code.extend_from_slice(&0x91000421u32.to_le_bytes()); // ADD X1, X1, #1
+    code.extend_from_slice(&0xD1000463u32.to_le_bytes()); // SUB X3, X3, #1
+    // B rev_loop
+    let cur = code.len() as i64;
+    let back = (rev_loop as i64 - cur as i64) / 4 - 1;
+    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
+
+    // write_digits: sys_write(1, X10, X9)
+    // rev_done:
+    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
+    code.extend_from_slice(&0xAA0A03E1u32.to_le_bytes()); // MOV X1, X10
+    code.extend_from_slice(&0xAA0903E2u32.to_le_bytes()); // MOV X2, X9
+    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
+    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
+
+    // Restore and return
+    code.extend_from_slice(&0xA94127E9u32.to_le_bytes()); // LDP X9, X10, [SP, #16]
+    code.extend_from_slice(&0xA9420441u32.to_le_bytes()); // LDP X1, X2, [SP, #32]
+    code.extend_from_slice(&0xA9430463u32.to_le_bytes()); // LDP X3, X8, [SP, #48]
+    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes()); // LDP X29, X30, [SP], #64
+    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes()); // RET
+
+    // ── __vuma_print_newline ──
+    // Simple: write '\n' to stdout
+    // STP X29, X30, [SP, #-16]!
+    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
+    // ADD X29, SP, #0
+    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+
+    // MOV X1, #10  ('\n')
+    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
+    // STRB W1, [SP, #16]  (use the 16 bytes we just freed)
+    // Actually, use stack at SP+16 which is the pre-indexed area...
+    // Better: use [SP, #0] since we already pushed 16 bytes
+    code.extend_from_slice(&0x3900001Fu32.to_le_bytes()); // STRB W1, [SP, #0]... no, that's the saved FP/LR area
+    // Use the area after our frame: we allocated 16 bytes for FP/LR.
+    // Put '\n' at [SP, #0]... no, that's where FP/LR are stored.
+    // Let's put it at a safe location. Actually, the STP wrote X29, X30 at [SP].
+    // Let's use X9 as scratch to hold the char, and a buffer on the stack.
+
+    // Actually, simplest: put the newline byte on the stack right at the frame.
+    // We'll use the save area as buffer. We already saved FP/LR there.
+    // Let's use a different approach: just write from a register-indirect with SP offset.
+
+    // MOV W1, #10  (already done above)
+    // STRB W1, [SP]   ← this overwrites saved FP/LR! Bad.
+    // Instead, let's use X9 as temp storage.
+
+    // Let me redo this more carefully.
+    // We'll save X9 too.
+    // Actually, let's just make a 32-byte frame to have room.
+
+    // Let me restart the newline function from scratch in the code buffer.
+    // Find the start of __vuma_print_newline by looking for the last STP.
+    // The simplest approach: use a dedicated stack frame.
+
+    // I'll overwrite the last few instructions I emitted for newline.
+    // Since this is getting complex, let me just build it cleanly.
+    // Remove the partial newline code and redo it.
+    let newline_start_offset = code.len() - 7 * 4; // remove 7 instructions back
+
+    code.truncate(newline_start_offset);
+
+    // __vuma_print_newline: clean implementation
+    // STP X29, X30, [SP, #-32]!  (32-byte frame: 16 for save, 16 for buffer)
+    code.extend_from_slice(&0xA9BE7BFDu32.to_le_bytes());
+    // ADD X29, SP, #0
+    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+
+    // Store '\n' at SP+16 (safe area, not overlapping saved regs)
+    // MOV W1, #10
+    code.extend_from_slice(&0x52800141u32.to_le_bytes()); // MOVZ W1, #10
+    // STRB W1, [SP, #16]
+    code.extend_from_slice(&0x390021E1u32.to_le_bytes());
+
+    // sys_write(1, SP+16, 1)
+    // MOV X0, #1
+    code.extend_from_slice(&0xD2800020u32.to_le_bytes());
+    // ADD X1, SP, #16
+    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
+    // MOV X2, #1
+    code.extend_from_slice(&0xD2800022u32.to_le_bytes());
+    // MOV X8, #64
+    code.extend_from_slice(&0xD2800808u32.to_le_bytes());
+    // SVC #0
+    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
+
+    // LDP X29, X30, [SP], #32
+    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes());
+    // RET
+    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+
+    code
 }
 
 impl Backend for AArch64Backend {
@@ -1436,6 +1813,9 @@ impl Backend for AArch64Backend {
 
         let code_size = instructions.len() * 4;
 
+        // Capture relocations from the Emitter so encode_program can patch BL offsets.
+        let relocations = emitter.relocations().to_vec();
+
         Ok(AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
@@ -1447,7 +1827,7 @@ impl Backend for AArch64Backend {
             callee_saved: vec![],
             spill_slots: 0,
             code_size,
-            relocations: Vec::new(),
+            relocations,
         })
     }
 

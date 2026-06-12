@@ -1,0 +1,1883 @@
+     1→//! # Multi-Backend Trait Architecture
+     2→//!
+     3→//! Defines the `TargetInfo` and `Backend` traits that allow VUMA to target
+     4→//! multiple instruction set architectures. Each ISA implements these traits
+     5→//! to provide target-specific information and code generation.
+     6→
+     7→use crate::arm32::Arm32Backend;
+     8→use crate::ir::{IRFunction, IRInstr, IRType};
+     9→use crate::loongarch64::LoongArch64Backend;
+    10→use crate::mips64::Mips64Backend;
+    11→use crate::ppc64::PPC64Backend;
+    12→use crate::riscv64::RiscV64Backend;
+    13→use crate::x86_64::X86_64Backend;
+    14→use std::fmt;
+    15→
+    16→// ---------------------------------------------------------------------------
+    17→// Endianness
+    18→// ---------------------------------------------------------------------------
+    19→
+    20→/// Byte order of the target architecture.
+    21→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    22→pub enum Endianness {
+    23→    /// Least-significant byte first (AArch64, RISC-V, x86_64, LoongArch).
+    24→    Little,
+    25→    /// Most-significant byte first (MIPS64 big-endian, PPC64 big-endian).
+    26→    Big,
+    27→    /// Bi-endian — the ISA supports both but the default is big-endian (PPC64).
+    28→    Bi,
+    29→}
+    30→
+    31→// ---------------------------------------------------------------------------
+    32→// OutputFormat
+    33→// ---------------------------------------------------------------------------
+    34→
+    35→/// The output binary format produced by the backend.
+    36→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    37→pub enum OutputFormat {
+    38→    /// 64-bit ELF (AArch64, RISC-V64, x86_64, LoongArch64, MIPS64, PPC64).
+    39→    Elf64,
+    40→    /// 32-bit ELF (ARM32).
+    41→    Elf32,
+    42→    /// WebAssembly binary module (.wasm).
+    43→    WasmBinary,
+    44→    /// Raw binary blob (bare-metal, no headers).
+    45→    RawBinary,
+    46→}
+    47→
+    48→// ---------------------------------------------------------------------------
+    49→// PhysicalReg
+    50→// ---------------------------------------------------------------------------
+    51→
+    52→/// A physical register identified by class and index.
+    53→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    54→pub struct PhysicalReg {
+    55→    /// Register class.
+    56→    pub class: RegClass,
+    57→    /// Register index within its class (0-based).
+    58→    pub index: u32,
+    59→}
+    60→
+    61→impl PhysicalReg {
+    62→    /// Creates a new physical register identifier with the given class and index.
+    63→    pub fn new(class: RegClass, index: u32) -> Self {
+    64→        Self { class, index }
+    65→    }
+    66→}
+    67→
+    68→impl fmt::Display for PhysicalReg {
+    69→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    70→        write!(f, "{:?}:{}", self.class, self.index)
+    71→    }
+    72→}
+    73→
+    74→// ---------------------------------------------------------------------------
+    75→// RegClass
+    76→// ---------------------------------------------------------------------------
+    77→
+    78→/// Classification of physical registers.
+    79→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    80→pub enum RegClass {
+    81→    /// General-purpose integer registers (X0-X30 on ARM64, RAX-R15 on x86_64, etc.)
+    82→    Gpr,
+    83→    /// SIMD / floating-point registers (V0-V31 on ARM64, XMM0-XMM15 on x86_64, etc.)
+    84→    SimdFp,
+    85→    /// Condition register fields (PPC64 CR0-CR7).
+    86→    Condition,
+    87→    /// Special-purpose register (TOC pointer on PPC64, etc.)
+    88→    Special,
+    89→}
+    90→
+    91→// ---------------------------------------------------------------------------
+    92→// FrameType
+    93→// ---------------------------------------------------------------------------
+    94→
+    95→/// The kind of stack frame slot.
+    96→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    97→pub enum FrameSlotKind {
+    98→    /// Spill slot for a register that was evicted.
+    99→    Spill,
+   100→    /// Local variable storage.
+   101→    Local,
+   102→    /// Outgoing argument that doesn't fit in registers.
+   103→    OutgoingArg,
+   104→    /// Incoming stack argument from the caller.
+   105→    IncomingArg,
+   106→}
+   107→
+   108→// ---------------------------------------------------------------------------
+   109→// RelocationEntry
+   110→// ---------------------------------------------------------------------------
+   111→
+   112→/// A relocation entry for patching encoded code at link time.
+   113→///
+   114→/// Each entry records a byte offset within the function's encoded output where
+   115→/// a symbolic reference must be resolved, the name of the target symbol, and
+   116→/// the ISA-specific relocation type (e.g., `"R_X86_64_PLT32"`, `"R_X86_64_64"`).
+   117→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   118→pub struct RelocationEntry {
+   119→    /// Byte offset within the function's encoded code where the relocation applies.
+   120→    pub offset: u64,
+   121→    /// Name of the target symbol.
+   122→    pub symbol: String,
+   123→    /// Relocation type (ISA-specific, e.g., "R_X86_64_PLT32", "R_X86_64_64").
+   124→    pub reloc_type: String,
+   125→}
+   126→
+   127→// ---------------------------------------------------------------------------
+   128→// AllocatedInstruction
+   129→// ---------------------------------------------------------------------------
+   130→
+   131→/// A single instruction after register allocation, with physical registers assigned.
+   132→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   133→pub struct AllocatedInstruction {
+   134→    /// Opcode name (for debugging / disassembly).
+   135→    pub opcode: String,
+   136→    /// Physical registers read by this instruction.
+   137→    pub reads: Vec<PhysicalReg>,
+   138→    /// Physical registers written by this instruction.
+   139→    pub writes: Vec<PhysicalReg>,
+   140→    /// Encoded bytes (filled in during encoding phase).
+   141→    pub encoded: Vec<u8>,
+   142→}
+   143→
+   144→// ---------------------------------------------------------------------------
+   145→// AllocatedBlock
+   146→// ---------------------------------------------------------------------------
+   147→
+   148→/// A basic block after register allocation.
+   149→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   150→pub struct AllocatedBlock {
+   151→    /// Block label.
+   152→    pub label: String,
+   153→    /// Allocated instructions in order.
+   154→    pub instructions: Vec<AllocatedInstruction>,
+   155→    /// Byte offset of this block in the final code section.
+   156→    pub code_offset: usize,
+   157→}
+   158→
+   159→// ---------------------------------------------------------------------------
+   160→// AllocatedFunction
+   161→// ---------------------------------------------------------------------------
+   162→
+   163→/// A function after register allocation.
+   164→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   165→pub struct AllocatedFunction {
+   166→    /// Function name.
+   167→    pub name: String,
+   168→    /// Allocated blocks in layout order.
+   169→    pub blocks: Vec<AllocatedBlock>,
+   170→    /// Total frame size in bytes (including callee-saved save area).
+   171→    pub frame_size: usize,
+   172→    /// Set of callee-saved physical registers used.
+   173→    pub callee_saved: Vec<PhysicalReg>,
+   174→    /// Number of spill slots.
+   175→    pub spill_slots: usize,
+   176→    /// Byte size of the encoded function body.
+   177→    pub code_size: usize,
+   178→    /// Relocation entries for this function.
+   179→    #[serde(default)]
+   180→    pub relocations: Vec<RelocationEntry>,
+   181→}
+   182→
+   183→// ---------------------------------------------------------------------------
+   184→// AllocatedProgram
+   185→// ---------------------------------------------------------------------------
+   186→
+   187→/// A complete program after register allocation.
+   188→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   189→pub struct AllocatedProgram {
+   190→    /// Allocated functions.
+   191→    pub functions: Vec<AllocatedFunction>,
+   192→    /// Total code section size in bytes.
+   193→    pub total_code_size: usize,
+   194→    /// Total data section size in bytes.
+   195→    pub total_data_size: usize,
+   196→}
+   197→
+   198→// ---------------------------------------------------------------------------
+   199→// BackendError
+   200→// ---------------------------------------------------------------------------
+   201→
+   202→/// Error type for backend operations.
+   203→#[derive(Debug, Clone, thiserror::Error)]
+   204→pub enum BackendError {
+   205→    /// The requested feature is not supported by this ISA.
+   206→    #[error("[{isa}] unsupported feature: {feature}")]
+   207→    UnsupportedFeature {
+   208→        /// ISA identifier (e.g., "aarch64", "x86_64").
+   209→        isa: &'static str,
+   210→        /// Description of the unsupported feature.
+   211→        feature: String,
+   212→    },
+   213→
+   214→    /// Register allocation failed.
+   215→    #[error("[{isa}] register allocation failed: {reason}")]
+   216→    RegisterAllocFailed {
+   217→        /// ISA identifier.
+   218→        isa: &'static str,
+   219→        /// Reason for the allocation failure.
+   220→        reason: String,
+   221→    },
+   222→
+   223→    /// Instruction encoding failed.
+   224→    #[error("[{isa}] encoding error: {reason}")]
+   225→    EncodingError {
+   226→        /// ISA identifier.
+   227→        isa: &'static str,
+   228→        /// Reason for the encoding failure.
+   229→        reason: String,
+   230→    },
+   231→
+   232→    /// Invalid instruction for this target.
+   233→    #[error("[{isa}] invalid instruction: {details}")]
+   234→    InvalidInstruction {
+   235→        /// ISA identifier.
+   236→        isa: &'static str,
+   237→        /// Details about why the instruction is invalid.
+   238→        details: String,
+   239→    },
+   240→
+   241→    /// ELF / binary emission error.
+   242→    #[error("[{isa}] emission error: {reason}")]
+   243→    EmissionError {
+   244→        /// ISA identifier.
+   245→        isa: &'static str,
+   246→        /// Reason for the emission failure.
+   247→        reason: String,
+   248→    },
+   249→
+   250→    /// The target cannot handle this type.
+   251→    #[error("[{isa}] unsupported type: {ty}")]
+   252→    UnsupportedType {
+   253→        /// ISA identifier.
+   254→        isa: &'static str,
+   255→        /// The unsupported type name.
+   256→        ty: String,
+   257→    },
+   258→
+   259→    /// Generic backend error.
+   260→    #[error("[{isa}] {message}")]
+   261→    Other {
+   262→        /// ISA identifier.
+   263→        isa: &'static str,
+   264→        /// Error message.
+   265→        message: String,
+   266→    },
+   267→}
+   268→
+   269→// ---------------------------------------------------------------------------
+   270→// TargetInfo trait
+   271→// ---------------------------------------------------------------------------
+   272→
+   273→/// Target-specific information needed during code generation.
+   274→///
+   275→/// This trait provides a data-driven interface for query target properties.
+   276→/// It must be implementable for ALL supported ISAs, including fundamentally
+   277→/// different architectures like Wasm (stack machine, no registers) and
+   278→/// MIPS (branch delay slots).
+   279→///
+   280→/// # Object Safety
+   281→///
+   282→/// This trait is object-safe: all methods take `&self` and return only
+   283→/// owned types or references with `'static` lifetime.
+   284→pub trait TargetInfo: Send + Sync + 'static {
+   285→    // === Identity ===
+   286→
+   287→    /// ISA name in lowercase (e.g., "aarch64", "riscv64", "wasm32").
+   288→    fn isa_name(&self) -> &'static str;
+   289→
+   290→    /// LLVM-style target triple (e.g., "aarch64-unknown-linux-gnu").
+   291→    fn target_triple(&self) -> &'static str;
+   292→
+   293→    /// ELF `e_machine` value.  Returns 0 for non-ELF targets (Wasm).
+   294→    fn elf_machine_type(&self) -> u16;
+   295→
+   296→    /// Default base address for the .text section.
+   297→    fn default_base_address(&self) -> u64;
+   298→
+   299→    // === Data model ===
+   300→
+   301→    /// Pointer width in bytes (4 for 32-bit, 8 for 64-bit).
+   302→    fn pointer_width(&self) -> usize;
+   303→
+   304→    /// Size in bytes of `ty` on this target.
+   305→    fn size_of(&self, ty: &IRType) -> usize;
+   306→
+   307→    /// Natural alignment in bytes of `ty` on this target.
+   308→    fn alignment_of(&self, ty: &IRType) -> usize;
+   309→
+   310→    /// Byte order of this target.
+   311→    fn endianness(&self) -> Endianness;
+   312→
+   313→    // === Register architecture ===
+   314→
+   315→    /// Whether this target has registers at all.  `false` for Wasm (stack machine).
+   316→    fn has_registers(&self) -> bool;
+   317→
+   318→    /// Number of general-purpose registers.  0 for Wasm.
+   319→    fn num_gp_regs(&self) -> usize;
+   320→
+   321→    /// Number of SIMD/FP registers.  0 for Wasm.
+   322→    fn num_simd_fp_regs(&self) -> usize;
+   323→
+   324→    /// Whether the ISA has a hardwired-zero register (RISC-V x0, LoongArch r0).
+   325→    fn has_hardwired_zero(&self) -> bool;
+   326→
+   327→    /// Whether the ISA uses a link register (ARM, RISC-V, MIPS, PPC) rather than
+   328→    /// pushing the return address on the stack (x86_64).
+   329→    fn has_link_register(&self) -> bool;
+   330→
+   331→    /// Whether branches have delay slots (MIPS only).
+   332→    fn has_branch_delay_slots(&self) -> bool;
+   333→
+   334→    /// Whether this ISA uses a TOC (Table of Contents) pointer (PPC64 r2).
+   335→    fn has_toc_pointer(&self) -> bool;
+   336→
+   337→    /// Whether this ISA has dedicated condition register fields (PPC64 CR0-CR7).
+   338→    fn has_condition_registers(&self) -> bool;
+   339→
+   340→    // === Calling convention ===
+   341→
+   342→    /// Name of the calling convention (e.g., "aapcs64", "lp64d", "systemv").
+   343→    fn calling_convention_name(&self) -> &'static str;
+   344→
+   345→    /// Number of integer argument registers.
+   346→    fn num_int_arg_regs(&self) -> usize;
+   347→
+   348→    /// Number of FP/SIMD argument registers.
+   349→    fn num_fp_arg_regs(&self) -> usize;
+   350→
+   351→    /// Required stack alignment in bytes.
+   352→    fn stack_alignment(&self) -> usize;
+   353→
+   354→    // === Instruction encoding ===
+   355→
+   356→    /// Alignment requirement for instructions in bytes (4 for fixed-width RISCs,
+   357→    /// 1 for x86_64 and Wasm).
+   358→    fn instruction_alignment(&self) -> usize;
+   359→
+   360→    /// Minimum and maximum instruction width in bytes.
+   361→    /// - Fixed-width 32-bit ISAs: (4, 4)
+   362→    /// - x86_64: (1, 15)
+   363→    /// - RISC-V with RVC: (2, 4)
+   364→    /// - Wasm: (1, ~) but typically (1, 15)
+   365→    fn instruction_width_range(&self) -> (usize, usize);
+   366→
+   367→    // === Output format ===
+   368→
+   369→    /// Binary format produced by this backend.
+   370→    fn output_format(&self) -> OutputFormat;
+   371→}
+   372→
+   373→// ---------------------------------------------------------------------------
+   374→// Backend trait
+   375→// ---------------------------------------------------------------------------
+   376→
+   377→/// A code generation backend for a specific target architecture.
+   378→///
+   379→/// Each supported ISA implements this trait, providing register allocation,
+   380→/// instruction encoding, program emission, and disassembly.
+   381→///
+   382→/// # Object Safety
+   383→///
+   384→/// This trait is object-safe.
+   385→pub trait Backend: Send + Sync + 'static {
+   386→    /// Returns a reference to this backend's target info.
+   387→    fn target_info(&self) -> &dyn TargetInfo;
+   388→
+   389→    /// Allocate physical registers for an IR function.
+   390→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError>;
+   391→
+   392→    /// Encode a single allocated function into machine code bytes.
+   393→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError>;
+   394→
+   395→    /// Encode an entire allocated program into its final binary form
+   396→    /// (ELF, .wasm, raw binary, etc.).
+   397→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError>;
+   398→
+   399→    /// Returns the bytes for a minimal return stub (e.g., `RET` on ARM64,
+   400→    /// `mov eax, 0; ret` on x86_64, `end` on Wasm).
+   401→    fn return_stub(&self) -> Vec<u8>;
+   402→
+   403→    /// Returns a trampoline that jumps to `entry_addr`.
+   404→    fn trampoline(&self, entry_addr: u64) -> Vec<u8>;
+   405→
+   406→    /// Disassemble `bytes` starting at virtual address `addr`.
+   407→    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String>;
+   408→
+   409→    /// Human-readable name of this backend.
+   410→    fn name(&self) -> &'static str;
+   411→}
+   412→
+   413→// ---------------------------------------------------------------------------
+   414→// BackendKind
+   415→// ---------------------------------------------------------------------------
+   416→
+   417→/// Enumeration of all supported backend architectures.
+   418→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+   419→pub enum BackendKind {
+   420→    /// ARM 64-bit (AArch64).
+   421→    AArch64,
+   422→    /// RISC-V 64-bit.
+   423→    RiscV64,
+   424→    /// WebAssembly 32-bit.
+   425→    Wasm32,
+   426→    /// LoongArch 64-bit.
+   427→    LoongArch64,
+   428→    /// x86-64.
+   429→    X86_64,
+   430→    /// ARM 32-bit.
+   431→    Arm32,
+   432→    /// MIPS 64-bit.
+   433→    Mips64,
+   434→    /// PowerPC 64-bit.
+   435→    PowerPC64,
+   436→}
+   437→
+   438→impl BackendKind {
+   439→    /// Returns the ISA name string for this backend kind.
+   440→    pub fn isa_name(&self) -> &'static str {
+   441→        match self {
+   442→            BackendKind::AArch64 => "aarch64",
+   443→            BackendKind::RiscV64 => "riscv64",
+   444→            BackendKind::Wasm32 => "wasm32",
+   445→            BackendKind::LoongArch64 => "loongarch64",
+   446→            BackendKind::X86_64 => "x86_64",
+   447→            BackendKind::Arm32 => "arm32",
+   448→            BackendKind::Mips64 => "mips64",
+   449→            BackendKind::PowerPC64 => "ppc64",
+   450→        }
+   451→    }
+   452→}
+   453→
+   454→impl fmt::Display for BackendKind {
+   455→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   456→        f.write_str(self.isa_name())
+   457→    }
+   458→}
+   459→
+   460→// ---------------------------------------------------------------------------
+   461→// AArch64 TargetInfo implementation (wrapping existing ARM64 logic)
+   462→// ---------------------------------------------------------------------------
+   463→
+   464→/// AArch64 (ARM64) target information.
+   465→///
+   466→/// Provides the data model, register counts, and calling convention details
+   467→/// for the AArch64 architecture under the AAPCS64 ABI.
+   468→pub struct AArch64TargetInfo;
+   469→
+   470→impl TargetInfo for AArch64TargetInfo {
+   471→    fn isa_name(&self) -> &'static str {
+   472→        "aarch64"
+   473→    }
+   474→    fn target_triple(&self) -> &'static str {
+   475→        "aarch64-unknown-linux-gnu"
+   476→    }
+   477→    fn elf_machine_type(&self) -> u16 {
+   478→        183
+   479→    } // EM_AARCH64
+   480→    fn default_base_address(&self) -> u64 {
+   481→        0x400000
+   482→    }
+   483→    fn pointer_width(&self) -> usize {
+   484→        8
+   485→    }
+   486→
+   487→    fn size_of(&self, ty: &IRType) -> usize {
+   488→        crate::ir::size_of(ty) // Uses existing ARM64 LP64 logic
+   489→    }
+   490→
+   491→    fn alignment_of(&self, ty: &IRType) -> usize {
+   492→        crate::ir::alignment_of(ty) // Uses existing ARM64 LP64 logic
+   493→    }
+   494→
+   495→    fn endianness(&self) -> Endianness {
+   496→        Endianness::Little
+   497→    }
+   498→    fn has_registers(&self) -> bool {
+   499→        true
+   500→    }
+   501→    fn num_gp_regs(&self) -> usize {
+   502→        31
+   503→    } // X0-X30 (SP/XZR are special)
+   504→    fn num_simd_fp_regs(&self) -> usize {
+   505→        32
+   506→    } // V0-V31
+   507→    fn has_hardwired_zero(&self) -> bool {
+   508→        true
+   509→    } // XZR
+   510→    fn has_link_register(&self) -> bool {
+   511→        true
+   512→    } // X30 (LR)
+   513→    fn has_branch_delay_slots(&self) -> bool {
+   514→        false
+   515→    }
+   516→    fn has_toc_pointer(&self) -> bool {
+   517→        false
+   518→    }
+   519→    fn has_condition_registers(&self) -> bool {
+   520→        false
+   521→    }
+   522→    fn calling_convention_name(&self) -> &'static str {
+   523→        "aapcs64"
+   524→    }
+   525→    fn num_int_arg_regs(&self) -> usize {
+   526→        8
+   527→    } // X0-X7
+   528→    fn num_fp_arg_regs(&self) -> usize {
+   529→        8
+   530→    } // V0-V7
+   531→    fn stack_alignment(&self) -> usize {
+   532→        16
+   533→    }
+   534→    fn instruction_alignment(&self) -> usize {
+   535→        4
+   536→    }
+   537→    fn instruction_width_range(&self) -> (usize, usize) {
+   538→        (4, 4)
+   539→    }
+   540→    fn output_format(&self) -> OutputFormat {
+   541→        OutputFormat::Elf64
+   542→    }
+   543→}
+   544→
+   545→// ---------------------------------------------------------------------------
+   546→// RISC-V64 TargetInfo
+   547→// ---------------------------------------------------------------------------
+   548→
+   549→/// RISC-V 64-bit target information (RV64GC, LP64D ABI).
+   550→pub struct RiscV64TargetInfo;
+   551→
+   552→impl TargetInfo for RiscV64TargetInfo {
+   553→    fn isa_name(&self) -> &'static str {
+   554→        "riscv64"
+   555→    }
+   556→    fn target_triple(&self) -> &'static str {
+   557→        "riscv64-unknown-linux-gnu"
+   558→    }
+   559→    fn elf_machine_type(&self) -> u16 {
+   560→        243
+   561→    } // EM_RISCV
+   562→    fn default_base_address(&self) -> u64 {
+   563→        0x10000
+   564→    }
+   565→    fn pointer_width(&self) -> usize {
+   566→        8
+   567→    }
+   568→    fn size_of(&self, ty: &IRType) -> usize {
+   569→        crate::ir::size_of(ty)
+   570→    }
+   571→    fn alignment_of(&self, ty: &IRType) -> usize {
+   572→        crate::ir::alignment_of(ty)
+   573→    }
+   574→    fn endianness(&self) -> Endianness {
+   575→        Endianness::Little
+   576→    }
+   577→    fn has_registers(&self) -> bool {
+   578→        true
+   579→    }
+   580→    fn num_gp_regs(&self) -> usize {
+   581→        32
+   582→    } // x0-x31
+   583→    fn num_simd_fp_regs(&self) -> usize {
+   584→        32
+   585→    } // f0-f31
+   586→    fn has_hardwired_zero(&self) -> bool {
+   587→        true
+   588→    } // x0
+   589→    fn has_link_register(&self) -> bool {
+   590→        true
+   591→    } // x1 (ra)
+   592→    fn has_branch_delay_slots(&self) -> bool {
+   593→        false
+   594→    }
+   595→    fn has_toc_pointer(&self) -> bool {
+   596→        false
+   597→    }
+   598→    fn has_condition_registers(&self) -> bool {
+   599→        false
+   600→    }
+   601→    fn calling_convention_name(&self) -> &'static str {
+   602→        "lp64d"
+   603→    }
+   604→    fn num_int_arg_regs(&self) -> usize {
+   605→        8
+   606→    } // a0-a7
+   607→    fn num_fp_arg_regs(&self) -> usize {
+   608→        8
+   609→    } // fa0-fa7
+   610→    fn stack_alignment(&self) -> usize {
+   611→        16
+   612→    }
+   613→    fn instruction_alignment(&self) -> usize {
+   614→        2
+   615→    } // RVC allows 16-bit alignment
+   616→    fn instruction_width_range(&self) -> (usize, usize) {
+   617→        (2, 4)
+   618→    } // RVC + 32-bit
+   619→    fn output_format(&self) -> OutputFormat {
+   620→        OutputFormat::Elf64
+   621→    }
+   622→}
+   623→
+   624→// ---------------------------------------------------------------------------
+   625→// Wasm32 TargetInfo
+   626→// ---------------------------------------------------------------------------
+   627→
+   628→/// WebAssembly 32-bit target information (stack machine, no registers).
+   629→pub struct Wasm32TargetInfo;
+   630→
+   631→impl TargetInfo for Wasm32TargetInfo {
+   632→    fn isa_name(&self) -> &'static str {
+   633→        "wasm32"
+   634→    }
+   635→    fn target_triple(&self) -> &'static str {
+   636→        "wasm32-unknown-unknown"
+   637→    }
+   638→    fn elf_machine_type(&self) -> u16 {
+   639→        0
+   640→    } // Not ELF
+   641→    fn default_base_address(&self) -> u64 {
+   642→        0
+   643→    } // Linear memory base
+   644→    fn pointer_width(&self) -> usize {
+   645→        4
+   646→    }
+   647→    fn size_of(&self, ty: &IRType) -> usize {
+   648→        match ty {
+   649→            IRType::Ptr | IRType::Func => 4, // 32-bit pointers in wasm32
+   650→            _ => crate::ir::size_of(ty),
+   651→        }
+   652→    }
+   653→    fn alignment_of(&self, ty: &IRType) -> usize {
+   654→        match ty {
+   655→            IRType::Ptr | IRType::Func => 4,
+   656→            _ => crate::ir::alignment_of(ty),
+   657→        }
+   658→    }
+   659→    fn endianness(&self) -> Endianness {
+   660→        Endianness::Little
+   661→    }
+   662→    fn has_registers(&self) -> bool {
+   663→        false
+   664→    } // Stack machine!
+   665→    fn num_gp_regs(&self) -> usize {
+   666→        0
+   667→    }
+   668→    fn num_simd_fp_regs(&self) -> usize {
+   669→        0
+   670→    }
+   671→    fn has_hardwired_zero(&self) -> bool {
+   672→        false
+   673→    }
+   674→    fn has_link_register(&self) -> bool {
+   675→        false
+   676→    }
+   677→    fn has_branch_delay_slots(&self) -> bool {
+   678→        false
+   679→    }
+   680→    fn has_toc_pointer(&self) -> bool {
+   681→        false
+   682→    }
+   683→    fn has_condition_registers(&self) -> bool {
+   684→        false
+   685→    }
+   686→    fn calling_convention_name(&self) -> &'static str {
+   687→        "wasm-stack"
+   688→    }
+   689→    fn num_int_arg_regs(&self) -> usize {
+   690→        0
+   691→    } // Stack-based calling
+   692→    fn num_fp_arg_regs(&self) -> usize {
+   693→        0
+   694→    }
+   695→    fn stack_alignment(&self) -> usize {
+   696→        8
+   697→    } // Wasm stack alignment
+   698→    fn instruction_alignment(&self) -> usize {
+   699→        1
+   700→    }
+   701→    fn instruction_width_range(&self) -> (usize, usize) {
+   702→        (1, 15)
+   703→    }
+   704→    fn output_format(&self) -> OutputFormat {
+   705→        OutputFormat::WasmBinary
+   706→    }
+   707→}
+   708→
+   709→// ---------------------------------------------------------------------------
+   710→// LoongArch64 TargetInfo
+   711→// ---------------------------------------------------------------------------
+   712→
+   713→/// LoongArch 64-bit target information (LP64 ABI).
+   714→pub struct LoongArch64TargetInfo;
+   715→
+   716→impl TargetInfo for LoongArch64TargetInfo {
+   717→    fn isa_name(&self) -> &'static str {
+   718→        "loongarch64"
+   719→    }
+   720→    fn target_triple(&self) -> &'static str {
+   721→        "loongarch64-unknown-linux-gnu"
+   722→    }
+   723→    fn elf_machine_type(&self) -> u16 {
+   724→        258
+   725→    } // EM_LOONGARCH
+   726→    fn default_base_address(&self) -> u64 {
+   727→        0x120000000
+   728→    }
+   729→    fn pointer_width(&self) -> usize {
+   730→        8
+   731→    }
+   732→    fn size_of(&self, ty: &IRType) -> usize {
+   733→        crate::ir::size_of(ty)
+   734→    }
+   735→    fn alignment_of(&self, ty: &IRType) -> usize {
+   736→        crate::ir::alignment_of(ty)
+   737→    }
+   738→    fn endianness(&self) -> Endianness {
+   739→        Endianness::Little
+   740→    }
+   741→    fn has_registers(&self) -> bool {
+   742→        true
+   743→    }
+   744→    fn num_gp_regs(&self) -> usize {
+   745→        32
+   746→    } // r0-r31
+   747→    fn num_simd_fp_regs(&self) -> usize {
+   748→        32
+   749→    } // f0-f31
+   750→    fn has_hardwired_zero(&self) -> bool {
+   751→        true
+   752→    } // r0
+   753→    fn has_link_register(&self) -> bool {
+   754→        true
+   755→    } // r1 (ra)
+   756→    fn has_branch_delay_slots(&self) -> bool {
+   757→        false
+   758→    }
+   759→    fn has_toc_pointer(&self) -> bool {
+   760→        false
+   761→    }
+   762→    fn has_condition_registers(&self) -> bool {
+   763→        false
+   764→    }
+   765→    fn calling_convention_name(&self) -> &'static str {
+   766→        "lp64"
+   767→    }
+   768→    fn num_int_arg_regs(&self) -> usize {
+   769→        8
+   770→    } // a0-a7 (r4-r11)
+   771→    fn num_fp_arg_regs(&self) -> usize {
+   772→        8
+   773→    } // fa0-fa7
+   774→    fn stack_alignment(&self) -> usize {
+   775→        16
+   776→    }
+   777→    fn instruction_alignment(&self) -> usize {
+   778→        4
+   779→    }
+   780→    fn instruction_width_range(&self) -> (usize, usize) {
+   781→        (4, 4)
+   782→    }
+   783→    fn output_format(&self) -> OutputFormat {
+   784→        OutputFormat::Elf64
+   785→    }
+   786→}
+   787→
+   788→// ---------------------------------------------------------------------------
+   789→// x86_64 TargetInfo
+   790→// ---------------------------------------------------------------------------
+   791→
+   792→/// x86-64 target information (SystemV ABI).
+   793→pub struct X86_64TargetInfo;
+   794→
+   795→impl TargetInfo for X86_64TargetInfo {
+   796→    fn isa_name(&self) -> &'static str {
+   797→        "x86_64"
+   798→    }
+   799→    fn target_triple(&self) -> &'static str {
+   800→        "x86_64-unknown-linux-gnu"
+   801→    }
+   802→    fn elf_machine_type(&self) -> u16 {
+   803→        62
+   804→    } // EM_X86_64
+   805→    fn default_base_address(&self) -> u64 {
+   806→        0x400000
+   807→    }
+   808→    fn pointer_width(&self) -> usize {
+   809→        8
+   810→    }
+   811→    fn size_of(&self, ty: &IRType) -> usize {
+   812→        crate::ir::size_of(ty)
+   813→    }
+   814→    fn alignment_of(&self, ty: &IRType) -> usize {
+   815→        crate::ir::alignment_of(ty)
+   816→    }
+   817→    fn endianness(&self) -> Endianness {
+   818→        Endianness::Little
+   819→    }
+   820→    fn has_registers(&self) -> bool {
+   821→        true
+   822→    }
+   823→    fn num_gp_regs(&self) -> usize {
+   824→        16
+   825→    } // RAX-R15
+   826→    fn num_simd_fp_regs(&self) -> usize {
+   827→        16
+   828→    } // XMM0-XMM15
+   829→    fn has_hardwired_zero(&self) -> bool {
+   830→        false
+   831→    } // No hardwired zero reg
+   832→    fn has_link_register(&self) -> bool {
+   833→        false
+   834→    } // Return addr pushed on stack
+   835→    fn has_branch_delay_slots(&self) -> bool {
+   836→        false
+   837→    }
+   838→    fn has_toc_pointer(&self) -> bool {
+   839→        false
+   840→    }
+   841→    fn has_condition_registers(&self) -> bool {
+   842→        false
+   843→    }
+   844→    fn calling_convention_name(&self) -> &'static str {
+   845→        "systemv"
+   846→    }
+   847→    fn num_int_arg_regs(&self) -> usize {
+   848→        6
+   849→    } // RDI, RSI, RDX, RCX, R8, R9
+   850→    fn num_fp_arg_regs(&self) -> usize {
+   851→        8
+   852→    } // XMM0-XMM7
+   853→    fn stack_alignment(&self) -> usize {
+   854→        16
+   855→    }
+   856→    fn instruction_alignment(&self) -> usize {
+   857→        1
+   858→    } // Variable-length
+   859→    fn instruction_width_range(&self) -> (usize, usize) {
+   860→        (1, 15)
+   861→    }
+   862→    fn output_format(&self) -> OutputFormat {
+   863→        OutputFormat::Elf64
+   864→    }
+   865→}
+   866→
+   867→// ---------------------------------------------------------------------------
+   868→// ARM32 TargetInfo
+   869→// ---------------------------------------------------------------------------
+   870→
+   871→/// ARM 32-bit target information (AAPCS).
+   872→pub struct Arm32TargetInfo;
+   873→
+   874→impl TargetInfo for Arm32TargetInfo {
+   875→    fn isa_name(&self) -> &'static str {
+   876→        "arm32"
+   877→    }
+   878→    fn target_triple(&self) -> &'static str {
+   879→        "arm-unknown-linux-gnueabihf"
+   880→    }
+   881→    fn elf_machine_type(&self) -> u16 {
+   882→        40
+   883→    } // EM_ARM
+   884→    fn default_base_address(&self) -> u64 {
+   885→        0x10000
+   886→    }
+   887→    fn pointer_width(&self) -> usize {
+   888→        4
+   889→    }
+   890→    fn size_of(&self, ty: &IRType) -> usize {
+   891→        match ty {
+   892→            IRType::Ptr | IRType::Func => 4, // 32-bit pointers
+   893→            IRType::I64 | IRType::U64 => 8,
+   894→            _ => crate::ir::size_of(ty),
+   895→        }
+   896→    }
+   897→    fn alignment_of(&self, ty: &IRType) -> usize {
+   898→        match ty {
+   899→            IRType::Ptr | IRType::Func => 4,
+   900→            IRType::I64 | IRType::U64 => 4, // ARM32 aligns i64 to 4
+   901→            _ => crate::ir::alignment_of(ty),
+   902→        }
+   903→    }
+   904→    fn endianness(&self) -> Endianness {
+   905→        Endianness::Little
+   906→    }
+   907→    fn has_registers(&self) -> bool {
+   908→        true
+   909→    }
+   910→    fn num_gp_regs(&self) -> usize {
+   911→        16
+   912→    } // R0-R15
+   913→    fn num_simd_fp_regs(&self) -> usize {
+   914→        32
+   915→    } // D0-D31
+   916→    fn has_hardwired_zero(&self) -> bool {
+   917→        false
+   918→    }
+   919→    fn has_link_register(&self) -> bool {
+   920→        true
+   921→    } // R14 (LR)
+   922→    fn has_branch_delay_slots(&self) -> bool {
+   923→        false
+   924→    }
+   925→    fn has_toc_pointer(&self) -> bool {
+   926→        false
+   927→    }
+   928→    fn has_condition_registers(&self) -> bool {
+   929→        false
+   930→    }
+   931→    fn calling_convention_name(&self) -> &'static str {
+   932→        "aapcs"
+   933→    }
+   934→    fn num_int_arg_regs(&self) -> usize {
+   935→        4
+   936→    } // R0-R3
+   937→    fn num_fp_arg_regs(&self) -> usize {
+   938→        16
+   939→    } // D0-D15 (AAPCS VFP)
+   940→    fn stack_alignment(&self) -> usize {
+   941→        8
+   942→    }
+   943→    fn instruction_alignment(&self) -> usize {
+   944→        2
+   945→    } // Thumb allows 16-bit
+   946→    fn instruction_width_range(&self) -> (usize, usize) {
+   947→        (2, 4)
+   948→    }
+   949→    fn output_format(&self) -> OutputFormat {
+   950→        OutputFormat::Elf32
+   951→    }
+   952→}
+   953→
+   954→// ---------------------------------------------------------------------------
+   955→// MIPS64 TargetInfo
+   956→// ---------------------------------------------------------------------------
+   957→
+   958→/// MIPS 64-bit target information (N64 ABI, big-endian).
+   959→pub struct Mips64TargetInfo;
+   960→
+   961→impl TargetInfo for Mips64TargetInfo {
+   962→    fn isa_name(&self) -> &'static str {
+   963→        "mips64"
+   964→    }
+   965→    fn target_triple(&self) -> &'static str {
+   966→        "mips64-unknown-linux-gnuabi64"
+   967→    }
+   968→    fn elf_machine_type(&self) -> u16 {
+   969→        8
+   970→    } // EM_MIPS
+   971→    fn default_base_address(&self) -> u64 {
+   972→        0x120000000
+   973→    }
+   974→    fn pointer_width(&self) -> usize {
+   975→        8
+   976→    }
+   977→    fn size_of(&self, ty: &IRType) -> usize {
+   978→        crate::ir::size_of(ty)
+   979→    }
+   980→    fn alignment_of(&self, ty: &IRType) -> usize {
+   981→        crate::ir::alignment_of(ty)
+   982→    }
+   983→    fn endianness(&self) -> Endianness {
+   984→        Endianness::Big
+   985→    }
+   986→    fn has_registers(&self) -> bool {
+   987→        true
+   988→    }
+   989→    fn num_gp_regs(&self) -> usize {
+   990→        32
+   991→    } // $0-$31
+   992→    fn num_simd_fp_regs(&self) -> usize {
+   993→        32
+   994→    } // $f0-$f31
+   995→    fn has_hardwired_zero(&self) -> bool {
+   996→        true
+   997→    } // $zero ($0)
+   998→    fn has_link_register(&self) -> bool {
+   999→        true
+  1000→    } // $ra ($31)
+  1001→    fn has_branch_delay_slots(&self) -> bool {
+  1002→        true
+  1003→    } // THE defining feature
+  1004→    fn has_toc_pointer(&self) -> bool {
+  1005→        false
+  1006→    }
+  1007→    fn has_condition_registers(&self) -> bool {
+  1008→        false
+  1009→    }
+  1010→    fn calling_convention_name(&self) -> &'static str {
+  1011→        "n64"
+  1012→    }
+  1013→    fn num_int_arg_regs(&self) -> usize {
+  1014→        4
+  1015→    } // $a0-$a3 (but N64 extends to 8)
+  1016→    fn num_fp_arg_regs(&self) -> usize {
+  1017→        8
+  1018→    } // $f12-$f19 (N64 FP args)
+  1019→    fn stack_alignment(&self) -> usize {
+  1020→        16
+  1021→    }
+  1022→    fn instruction_alignment(&self) -> usize {
+  1023→        4
+  1024→    }
+  1025→    fn instruction_width_range(&self) -> (usize, usize) {
+  1026→        (4, 4)
+  1027→    }
+  1028→    fn output_format(&self) -> OutputFormat {
+  1029→        OutputFormat::Elf64
+  1030→    }
+  1031→}
+  1032→
+  1033→// ---------------------------------------------------------------------------
+  1034→// PowerPC64 TargetInfo
+  1035→// ---------------------------------------------------------------------------
+  1036→
+  1037→/// PowerPC 64-bit target information (ELFv2 ABI, big-endian by default).
+  1038→pub struct PowerPC64TargetInfo;
+  1039→
+  1040→impl TargetInfo for PowerPC64TargetInfo {
+  1041→    fn isa_name(&self) -> &'static str {
+  1042→        "ppc64"
+  1043→    }
+  1044→    fn target_triple(&self) -> &'static str {
+  1045→        "powerpc64le-unknown-linux-gnu"
+  1046→    }
+  1047→    fn elf_machine_type(&self) -> u16 {
+  1048→        21
+  1049→    } // EM_PPC64
+  1050→    fn default_base_address(&self) -> u64 {
+  1051→        0x10000000
+  1052→    }
+  1053→    fn pointer_width(&self) -> usize {
+  1054→        8
+  1055→    }
+  1056→    fn size_of(&self, ty: &IRType) -> usize {
+  1057→        crate::ir::size_of(ty)
+  1058→    }
+  1059→    fn alignment_of(&self, ty: &IRType) -> usize {
+  1060→        crate::ir::alignment_of(ty)
+  1061→    }
+  1062→    fn endianness(&self) -> Endianness {
+  1063→        Endianness::Bi
+  1064→    } // Bi-endian
+  1065→    fn has_registers(&self) -> bool {
+  1066→        true
+  1067→    }
+  1068→    fn num_gp_regs(&self) -> usize {
+  1069→        32
+  1070→    } // R0-R31
+  1071→    fn num_simd_fp_regs(&self) -> usize {
+  1072→        64
+  1073→    } // 32 FPR + 32 VMX (VSX overlaps)
+  1074→    fn has_hardwired_zero(&self) -> bool {
+  1075→        false
+  1076→    } // R0 is NOT hardwired zero (it's volatile)
+  1077→    fn has_link_register(&self) -> bool {
+  1078→        true
+  1079→    } // LR (SPR)
+  1080→    fn has_branch_delay_slots(&self) -> bool {
+  1081→        false
+  1082→    }
+  1083→    fn has_toc_pointer(&self) -> bool {
+  1084→        true
+  1085→    } // R2 = TOC
+  1086→    fn has_condition_registers(&self) -> bool {
+  1087→        true
+  1088→    } // CR0-CR7
+  1089→    fn calling_convention_name(&self) -> &'static str {
+  1090→        "elfv2"
+  1091→    }
+  1092→    fn num_int_arg_regs(&self) -> usize {
+  1093→        8
+  1094→    } // R3-R10
+  1095→    fn num_fp_arg_regs(&self) -> usize {
+  1096→        13
+  1097→    } // F1-F13
+  1098→    fn stack_alignment(&self) -> usize {
+  1099→        16
+  1100→    }
+  1101→    fn instruction_alignment(&self) -> usize {
+  1102→        4
+  1103→    }
+  1104→    fn instruction_width_range(&self) -> (usize, usize) {
+  1105→        (4, 4)
+  1106→    }
+  1107→    fn output_format(&self) -> OutputFormat {
+  1108→        OutputFormat::Elf64
+  1109→    }
+  1110→}
+  1111→
+  1112→// ---------------------------------------------------------------------------
+  1113→// AArch64 Mnemonic Decoder
+  1114→// ---------------------------------------------------------------------------
+  1115→
+  1116→/// Decode a 32-bit AArch64 instruction word into a human-readable mnemonic.
+  1117→///
+  1118→/// Covers the most common AArch64 instructions: ADD, SUB, MOV, LDR, STR, B,
+  1119→/// BL, RET, CMP, B.cond, STP, LDP, NOP, MUL, SDIV, UDIV, AND, ORR, EOR,
+  1120→/// plus several additional frequently-encountered encodings.
+  1121→fn decode_aarch64(word: u32) -> String {
+  1122→    let rd = word & 0x1F;
+  1123→    let rn = (word >> 5) & 0x1F;
+  1124→    let rt = rd; // alias for load/store destination
+  1125→    let rm = (word >> 16) & 0x1F;
+  1126→    let imm12 = (word >> 10) & 0xFFF;
+  1127→    let cond = word & 0xF;
+  1128→
+  1129→    // NOP: d503201f
+  1130→    if word == 0xD503201F {
+  1131→        return "nop".to_string();
+  1132→    }
+  1133→
+  1134→    // RET: d65f03c0
+  1135→    if word == 0xD65F03C0 {
+  1136→        return "ret".to_string();
+  1137→    }
+  1138→
+  1139→    let _top8 = word >> 24;
+  1140→    let _top10 = word >> 22;
+  1141→
+  1142→    // --- ADD/SUB (immediate): 100100xx ...
+  1143→    if (word >> 23) & 0x1FF == 0b1_0010_0010 {
+  1144→        // ADD Xd, Xn, #imm12
+  1145→        return format!("add x{}, x{}, #{}", rd, rn, imm12);
+  1146→    }
+  1147→    if (word >> 23) & 0x1FF == 0b1_1010_0010 {
+  1148→        // SUB Xd, Xn, #imm12
+  1149→        return format!("sub x{}, x{}, #{}", rd, rn, imm12);
+  1150→    }
+  1151→
+  1152→    // --- ADD (shifted register): 1_00_0101_1_xxx ...
+  1153→    if (word >> 24) & 0xFF == 0b1000_1011 {
+  1154→        // ADD Xd, Xn, Xm
+  1155→        return format!("add x{}, x{}, x{}", rd, rn, rm);
+  1156→    }
+  1157→
+  1158→    // --- SUB (shifted register): 1_00_0101_1_xxx ... with S=1 at bit30
+  1159→    if (word >> 24) & 0xFF == 0b1101_0110 {
+  1160→        // SUB Xd, Xn, Xm (bit 30 set = sub)
+  1161→        return format!("sub x{}, x{}, x{}", rd, rn, rm);
+  1162→    }
+  1163→
+  1164→    // --- AND (shifted register): 1_00_0101_0_00_xxx
+  1165→    if (word >> 24) & 0xFE == 0b1000_1010 {
+  1166→        // Check bit 21-15: opcode[31:21] = 10001010_000
+  1167→        if (word >> 21) & 0x7FF == 0b10001010000 {
+  1168→            return format!("and x{}, x{}, x{}", rd, rn, rm);
+  1169→        }
+  1170→    }
+  1171→
+  1172→    // --- ORR (shifted register): 1_01_0101_0_00_xxx
+  1173→    if (word >> 21) & 0x7FF == 0b10101010000 {
+  1174→        return format!("orr x{}, x{}, x{}", rd, rn, rm);
+  1175→    }
+  1176→
+  1177→    // --- EOR (shifted register): 1_10_0101_0_00_xxx
+  1178→    if (word >> 21) & 0x7FF == 0b11001010000 {
+  1179→        return format!("eor x{}, x{}, x{}", rd, rn, rm);
+  1180→    }
+  1181→
+  1182→    // --- MOV (register): alias for ORR Xd, XZR, Xm
+  1183→    // ORR Xd, XZR, Xm: 10101010_000_rm_000000_xzr_rd
+  1184→    // More general: ORR with Rn=XZR(31)
+  1185→    if (word >> 21) & 0x7FF == 0b10101010000 && rn == 31 {
+  1186→        return format!("mov x{}, x{}", rd, rm);
+  1187→    }
+  1188→
+  1189→    // --- MUL: MADD Xd, Xn, Xm, XZR
+  1190→    // Encoding: 1_00_1101_1_000_Rm_0_01111_Rn_Rd
+  1191→    if (word >> 21) & 0x7FF == 0b10011011000 && ((word >> 10) & 0x1F) == 0b01111 {
+  1192→        return format!("mul x{}, x{}, x{}", rd, rn, rm);
+  1193→    }
+  1194→
+  1195→    // --- SDIV: 1_00_1101_1_0100_00000_00001_Rn_Rd  (actually 1_00_1101_0100_Rm_00001_Rn_Rd)
+  1196→    if (word >> 21) & 0x7FF == 0b10011010100 && (word >> 10) & 0x1F == 0b00001 {
+  1197→        return format!("sdiv x{}, x{}, x{}", rd, rn, rm);
+  1198→    }
+  1199→
+  1200→    // --- UDIV: 1_00_1101_0000_Rm_00001_Rn_Rd
+  1201→    if (word >> 21) & 0x7FF == 0b10011010000 && (word >> 10) & 0x1F == 0b00001 {
+  1202→        return format!("udiv x{}, x{}, x{}", rd, rn, rm);
+  1203→    }
+  1204→
+  1205→    // --- CMP (immediate): SUBS XZR, Xn, #imm12
+  1206→    // 11100001_00_xxx_xxx_xxx_xxx_xxx_11111_xxx
+  1207→    if (word >> 23) & 0x1FF == 0b1_1110_0010 && rd == 31 {
+  1208→        return format!("cmp x{}, #{}", rn, imm12);
+  1209→    }
+  1210→
+  1211→    // --- CMP (register): SUBS XZR, Xn, Xm
+  1212→    if (word >> 21) & 0x7FF == 0b11101011000 && rd == 31 {
+  1213→        return format!("cmp x{}, x{}", rn, rm);
+  1214→    }
+  1215→
+  1216→    // --- B.cond: 0101010x xxxxxxxxxx xxxxxx cond
+  1217→    if (word >> 24) & 0xFF == 0x54 {
+  1218→        let cond_name = match cond {
+  1219→            0 => "eq",
+  1220→            1 => "ne",
+  1221→            2 => "cs",
+  1222→            3 => "cc",
+  1223→            4 => "mi",
+  1224→            5 => "pl",
+  1225→            6 => "vs",
+  1226→            7 => "vc",
+  1227→            8 => "hi",
+  1228→            9 => "ls",
+  1229→            10 => "ge",
+  1230→            11 => "lt",
+  1231→            12 => "gt",
+  1232→            13 => "le",
+  1233→            14 => "al",
+  1234→            _ => "??",
+  1235→        };
+  1236→        let imm19 = (word >> 5) & 0x7FFFF;
+  1237→        let offset = ((imm19 as i32) << 13) >> 11; // sign-extend and *4
+  1238→        return format!("b.{} {:+}", cond_name, offset);
+  1239→    }
+  1240→
+  1241→    // --- B (unconditional): 000101xx xxxxxxxxxxxxxxxxxxxx
+  1242→    if (word >> 26) & 0x3F == 0b000101 {
+  1243→        let imm26 = word & 0x3FFFFFF;
+  1244→        let offset = ((imm26 as i32) << 6) >> 4; // sign-extend and *4
+  1245→        return format!("b {:+}", offset);
+  1246→    }
+  1247→
+  1248→    // --- BL: 100101xx xxxxxxxxxxxxxxxxxxxx
+  1249→    if (word >> 26) & 0x3F == 0b100101 {
+  1250→        let imm26 = word & 0x3FFFFFF;
+  1251→        let offset = ((imm26 as i32) << 6) >> 4;
+  1252→        return format!("bl {:+}", offset);
+  1253→    }
+  1254→
+  1255→    // --- LDR (unsigned offset): 11111001_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+  1256→    if (word >> 22) & 0x3FF == 0b1111100101 {
+  1257→        let imm12_raw = (word >> 10) & 0xFFF;
+  1258→        let offset = imm12_raw * 8; // scale by 8 for 64-bit
+  1259→        return format!("ldr x{}, [x{}, #{}]", rt, rn, offset);
+  1260→    }
+  1261→
+  1262→    // --- STR (unsigned offset): 11111000_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+  1263→    if (word >> 22) & 0x3FF == 0b1111100001 {
+  1264→        let imm12_raw = (word >> 10) & 0xFFF;
+  1265→        let offset = imm12_raw * 8;
+  1266→        return format!("str x{}, [x{}, #{}]", rt, rn, offset);
+  1267→    }
+  1268→
+  1269→    // --- LDP (signed offset, 64-bit): 101_0100_110_xxx_xxx_xxx_xxx_xxx_xn_rt2
+  1270→    if (word >> 22) & 0x3FF == 0b1010100110 {
+  1271→        let rt2 = (word >> 10) & 0x1F;
+  1272→        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+  1273→        let offset = imm7 * 8;
+  1274→        return format!("ldp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+  1275→    }
+  1276→
+  1277→    // --- STP (signed offset, 64-bit): 101_0100_010_xxx_xxx_xxx_xxx_xxx_xn_rt2
+  1278→    if (word >> 22) & 0x3FF == 0b1010100010 {
+  1279→        let rt2 = (word >> 10) & 0x1F;
+  1280→        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+  1281→        let offset = imm7 * 8;
+  1282→        return format!("stp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+  1283→    }
+  1284→
+  1285→    // --- MOVZ: 110100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+  1286→    if (word >> 23) & 0x1FF == 0b110100101 {
+  1287→        let hw = (word >> 21) & 0x3;
+  1288→        let imm16 = (word >> 5) & 0xFFFF;
+  1289→        return format!("movz x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+  1290→    }
+  1291→
+  1292→    // --- MOVK: 111100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+  1293→    if (word >> 23) & 0x1FF == 0b111100101 {
+  1294→        let hw = (word >> 21) & 0x3;
+  1295→        let imm16 = (word >> 5) & 0xFFFF;
+  1296→        return format!("movk x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+  1297→    }
+  1298→
+  1299→    format!(".word {:08x}", word)
+  1300→}
+  1301→
+  1302→// ---------------------------------------------------------------------------
+  1303→// AArch64 Backend implementation
+  1304→// ---------------------------------------------------------------------------
+  1305→
+  1306→/// AArch64 (ARM64) code generation backend.
+  1307→///
+  1308→/// Wraps the existing ARM64 emitter, register allocator, and instruction
+  1309→/// encoding behind the `Backend` trait.
+  1310→pub struct AArch64Backend {
+  1311→    target_info: AArch64TargetInfo,
+  1312→}
+  1313→
+  1314→impl AArch64Backend {
+  1315→    /// Create a new AArch64 backend.
+  1316→    pub fn new() -> Self {
+  1317→        Self {
+  1318→            target_info: AArch64TargetInfo,
+  1319→        }
+  1320→    }
+  1321→}
+  1322→
+  1323→impl Default for AArch64Backend {
+  1324→    fn default() -> Self {
+  1325→        Self::new()
+  1326→    }
+  1327→}
+  1328→
+  1329→/// Compute the stack frame size for an IR function.
+  1330→///
+  1331→/// Replicates the private `compute_frame_size` function in `emit.rs`:
+  1332→/// sums `Alloc` instruction sizes, adds 16 bytes for the FP/LR save pair,
+  1333→/// and rounds up to 16-byte alignment.
+  1334→fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
+  1335→    let mut total: u32 = 16; // FP/LR save pair
+  1336→    for block in &func.blocks {
+  1337→        for instr in &block.instructions {
+  1338→            if let IRInstr::Alloc { size, .. } = instr {
+  1339→                let aligned = (*size).div_ceil(16) * 16;
+  1340→                total += aligned;
+  1341→            }
+  1342→        }
+  1343→    }
+  1344→    // Round up to 16-byte alignment
+  1345→    total = (total + 15) & !15;
+  1346→    total as usize
+  1347→}
+  1348→
+  1349→/// Build a minimal ELF64 binary for AArch64 from raw code bytes.
+  1350→///
+  1351→/// Produces a static executable with a single LOAD segment containing the
+  1352→/// `.text` section.  This is sufficient for programs that have already been
+  1353→/// emitted through the `allocate_registers` / `encode_function` pipeline.
+  1354→fn build_minimal_aarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1355→    // Layout: ELF header (64) | 1 program header (56) | code
+  1356→    let elf_header_size: u64 = 64;
+  1357→    let phdr_size: u64 = 56;
+  1358→    let text_offset = elf_header_size + phdr_size;
+  1359→    let text_size = code.len() as u64;
+  1360→    let entry_point = base_addr + text_offset;
+  1361→
+  1362→    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+  1363→
+  1364→    // --- e_ident ---
+  1365→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1366→    elf.push(2); // ELFCLASS64
+  1367→    elf.push(1); // ELFDATA2LSB
+  1368→    elf.push(1); // EV_CURRENT
+  1369→    elf.push(3); // ELFOSABI_LINUX
+  1370→    elf.push(0); // padding
+  1371→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1372→
+  1373→    // --- ELF header fields ---
+  1374→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1375→    elf.extend_from_slice(&183u16.to_le_bytes()); // e_machine = EM_AARCH64
+  1376→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1377→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1378→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1379→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1380→    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+  1381→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1382→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1383→    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+  1384→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1385→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1386→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1387→
+  1388→    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+  1389→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1390→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1391→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1392→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1393→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1394→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1395→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1396→    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+  1397→
+  1398→    // --- Code section ---
+  1399→    elf.extend_from_slice(code);
+  1400→
+  1401→    elf
+  1402→}
+  1403→
+  1404→impl Backend for AArch64Backend {
+  1405→    fn target_info(&self) -> &dyn TargetInfo {
+  1406→        &self.target_info
+  1407→    }
+  1408→
+  1409→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  1410→        // Use the existing Emitter to emit the function, which internally
+  1411→        // performs register allocation and instruction encoding.
+  1412→        let mut emitter = crate::emit::Emitter::new();
+  1413→        let code = emitter
+  1414→            .emit_function(func)
+  1415→            .map_err(|e| BackendError::RegisterAllocFailed {
+  1416→                isa: "aarch64",
+  1417→                reason: e.to_string(),
+  1418→            })?;
+  1419→
+  1420→        let func_name = func.name.clone();
+  1421→        let frame_size = aarch64_compute_frame_size(func);
+  1422→
+  1423→        // Convert each 32-bit ARM64 instruction word into an AllocatedInstruction
+  1424→        // with its little-endian encoded bytes.
+  1425→        let instructions: Vec<AllocatedInstruction> = code
+  1426→            .iter()
+  1427→            .enumerate()
+  1428→            .map(|(i, &word)| AllocatedInstruction {
+  1429→                opcode: format!("arm64_{}", i),
+  1430→                reads: vec![],
+  1431→                writes: vec![],
+  1432→                encoded: word.to_le_bytes().to_vec(),
+  1433→            })
+  1434→            .collect();
+  1435→
+  1436→        let code_size = instructions.len() * 4;
+  1437→
+  1438→        Ok(AllocatedFunction {
+  1439→            name: func_name,
+  1440→            blocks: vec![AllocatedBlock {
+  1441→                label: "entry".to_string(),
+  1442→                instructions,
+  1443→                code_offset: 0,
+  1444→            }],
+  1445→            frame_size,
+  1446→            callee_saved: vec![],
+  1447→            spill_slots: 0,
+  1448→            code_size,
+  1449→            relocations: Vec::new(),
+  1450→        })
+  1451→    }
+  1452→
+  1453→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+  1454→        let mut bytes = Vec::new();
+  1455→        for block in &func.blocks {
+  1456→            for instr in &block.instructions {
+  1457→                bytes.extend_from_slice(&instr.encoded);
+  1458→            }
+  1459→        }
+  1460→        Ok(bytes)
+  1461→    }
+  1462→
+  1463→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+  1464→        // Collect all encoded bytes from every function and block.
+  1465→        let mut all_code = Vec::new();
+  1466→        for func in &program.functions {
+  1467→            for block in &func.blocks {
+  1468→                for instr in &block.instructions {
+  1469→                    all_code.extend_from_slice(&instr.encoded);
+  1470→                }
+  1471→            }
+  1472→        }
+  1473→
+  1474→        // Wrap in a minimal ELF64 binary for AArch64.
+  1475→        Ok(build_minimal_aarch64_elf(&all_code, 0x400000))
+  1476→    }
+  1477→
+  1478→    fn return_stub(&self) -> Vec<u8> {
+  1479→        // ARM64 RET instruction: 0xD65F03C0
+  1480→        vec![0xC0, 0x03, 0x5F, 0xD6]
+  1481→    }
+  1482→
+  1483→    fn trampoline(&self, entry_addr: u64) -> Vec<u8> {
+  1484→        // LDR X16, [PC, #8] ; BR X16 ; <8 bytes address>
+  1485→        let mut code = Vec::with_capacity(16);
+  1486→        // LDR X16, [PC, #8] = 0x58000050
+  1487→        code.extend_from_slice(&0x58000050u32.to_le_bytes());
+  1488→        // BR X16 = 0xD61F0200
+  1489→        code.extend_from_slice(&0xD61F0200u32.to_le_bytes());
+  1490→        // 64-bit address
+  1491→        code.extend_from_slice(&entry_addr.to_le_bytes());
+  1492→        code
+  1493→    }
+  1494→
+  1495→    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
+  1496→        // Mnemonic decoder for AArch64 (4-byte fixed-width instructions).
+  1497→        let mut lines = Vec::new();
+  1498→        let mut offset = 0usize;
+  1499→        let mut pc = addr;
+  1500→        while offset + 4 <= bytes.len() {
+  1501→            let word = u32::from_le_bytes([
+  1502→                bytes[offset],
+  1503→                bytes[offset + 1],
+  1504→                bytes[offset + 2],
+  1505→                bytes[offset + 3],
+  1506→            ]);
+  1507→            let mnemonic = if let Some(instr) = crate::arm64::Instruction::decode(word) {
+  1508→                format!("{}", instr)
+  1509→            } else {
+  1510→                decode_aarch64(word)
+  1511→            };
+  1512→            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
+  1513→            offset += 4;
+  1514→            pc += 4;
+  1515→        }
+  1516→        if offset < bytes.len() {
+  1517→            let remaining = &bytes[offset..];
+  1518→            lines.push(format!("{:#010x}:  {:02x?}", pc, remaining));
+  1519→        }
+  1520→        lines
+  1521→    }
+  1522→
+  1523→    fn name(&self) -> &'static str {
+  1524→        "aarch64"
+  1525→    }
+  1526→}
+  1527→
+  1528→// ---------------------------------------------------------------------------
+  1529→// Factory function
+  1530→// ---------------------------------------------------------------------------
+  1531→
+  1532→/// Create a backend for the given architecture kind.
+  1533→///
+  1534→/// Currently only AArch64 has a full Backend implementation.
+  1535→/// Other ISAs return an error indicating they are not yet implemented.
+  1536→pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendError> {
+  1537→    match kind {
+  1538→        BackendKind::AArch64 => Ok(Box::new(AArch64Backend::new())),
+  1539→        BackendKind::RiscV64 => Ok(Box::new(RiscV64Backend::new())),
+  1540→        BackendKind::Wasm32 => Ok(Box::new(crate::wasm32::Wasm32Backend::new())),
+  1541→        BackendKind::LoongArch64 => Ok(Box::new(LoongArch64Backend::new())),
+  1542→        BackendKind::X86_64 => Ok(Box::new(X86_64Backend::new())),
+  1543→        BackendKind::Arm32 => Ok(Box::new(Arm32Backend::new())),
+  1544→        BackendKind::Mips64 => Ok(Box::new(Mips64Backend::new())),
+  1545→        BackendKind::PowerPC64 => Ok(Box::new(PPC64Backend::new())),
+  1546→    }
+  1547→}
+  1548→
+  1549→// ---------------------------------------------------------------------------
+  1550→// Tests
+  1551→// ---------------------------------------------------------------------------
+  1552→
+  1553→#[cfg(test)]
+  1554→mod tests {
+  1555→    use super::*;
+  1556→
+  1557→    /// Helper: validate that a TargetInfo impl returns internally consistent values.
+  1558→    fn validate_target_info(info: &dyn TargetInfo) {
+  1559→        // If there are no registers, register counts must be zero.
+  1560→        if !info.has_registers() {
+  1561→            assert_eq!(
+  1562→                info.num_gp_regs(),
+  1563→                0,
+  1564→                "{}: has_registers=false but num_gp_regs != 0",
+  1565→                info.isa_name()
+  1566→            );
+  1567→            assert_eq!(
+  1568→                info.num_simd_fp_regs(),
+  1569→                0,
+  1570→                "{}: has_registers=false but num_simd_fp_regs != 0",
+  1571→                info.isa_name()
+  1572→            );
+  1573→            assert_eq!(
+  1574→                info.num_int_arg_regs(),
+  1575→                0,
+  1576→                "{}: has_registers=false but num_int_arg_regs != 0",
+  1577→                info.isa_name()
+  1578→            );
+  1579→            assert_eq!(
+  1580→                info.num_fp_arg_regs(),
+  1581→                0,
+  1582→                "{}: has_registers=false but num_fp_arg_regs != 0",
+  1583→                info.isa_name()
+  1584→            );
+  1585→        }
+  1586→
+  1587→        // Pointer width must be 4 or 8.
+  1588→        assert!(
+  1589→            info.pointer_width() == 4 || info.pointer_width() == 8,
+  1590→            "{}: pointer_width must be 4 or 8, got {}",
+  1591→            info.isa_name(),
+  1592→            info.pointer_width()
+  1593→        );
+  1594→
+  1595→        // Stack alignment must be a power of 2 and at least 8.
+  1596→        let sa = info.stack_alignment();
+  1597→        assert!(
+  1598→            sa >= 8,
+  1599→            "{}: stack_alignment must be >= 8, got {}",
+  1600→            info.isa_name(),
+  1601→            sa
+  1602→        );
+  1603→        assert!(
+  1604→            sa.is_power_of_two(),
+  1605→            "{}: stack_alignment must be a power of 2, got {}",
+  1606→            info.isa_name(),
+  1607→            sa
+  1608→        );
+  1609→
+  1610→        // Instruction alignment must be 1, 2, or 4.
+  1611→        let ia = info.instruction_alignment();
+  1612→        assert!(
+  1613→            ia == 1 || ia == 2 || ia == 4,
+  1614→            "{}: instruction_alignment must be 1, 2, or 4, got {}",
+  1615→            info.isa_name(),
+  1616→            ia
+  1617→        );
+  1618→
+  1619→        // Width range must be sane.
+  1620→        let (min_w, max_w) = info.instruction_width_range();
+  1621→        assert!(
+  1622→            min_w >= 1,
+  1623→            "{}: min instruction width must be >= 1",
+  1624→            info.isa_name()
+  1625→        );
+  1626→        assert!(
+  1627→            max_w >= min_w,
+  1628→            "{}: max instruction width must be >= min",
+  1629→            info.isa_name()
+  1630→        );
+  1631→
+  1632→        // Only MIPS has branch delay slots.
+  1633→        if info.has_branch_delay_slots() {
+  1634→            assert_eq!(
+  1635→                info.isa_name(),
+  1636→                "mips64",
+  1637→                "Only MIPS64 should have branch delay slots"
+  1638→            );
+  1639→        }
+  1640→
+  1641→        // Only PPC64 has a TOC pointer.
+  1642→        if info.has_toc_pointer() {
+  1643→            assert_eq!(
+  1644→                info.isa_name(),
+  1645→                "ppc64",
+  1646→                "Only PPC64 should have a TOC pointer"
+  1647→            );
+  1648→        }
+  1649→
+  1650→        // Only PPC64 has condition registers.
+  1651→        if info.has_condition_registers() {
+  1652→            assert_eq!(
+  1653→                info.isa_name(),
+  1654→                "ppc64",
+  1655→                "Only PPC64 should have condition registers"
+  1656→            );
+  1657→        }
+  1658→
+  1659→        // size_of and alignment_of for basic types.
+  1660→        let ptr_size = info.size_of(&IRType::Ptr);
+  1661→        assert_eq!(
+  1662→            ptr_size,
+  1663→            info.pointer_width(),
+  1664→            "{}: Ptr size must match pointer_width",
+  1665→            info.isa_name()
+  1666→        );
+  1667→    }
+  1668→
+  1669→    #[test]
+  1670→    fn test_aarch64_target_info() {
+  1671→        let info = AArch64TargetInfo;
+  1672→        assert_eq!(info.isa_name(), "aarch64");
+  1673→        assert_eq!(info.elf_machine_type(), 183);
+  1674→        assert_eq!(info.pointer_width(), 8);
+  1675→        assert!(info.has_registers());
+  1676→        assert_eq!(info.num_gp_regs(), 31);
+  1677→        assert_eq!(info.num_simd_fp_regs(), 32);
+  1678→        assert!(info.has_link_register());
+  1679→        assert!(!info.has_branch_delay_slots());
+  1680→        assert_eq!(info.calling_convention_name(), "aapcs64");
+  1681→        assert_eq!(info.num_int_arg_regs(), 8);
+  1682→        assert_eq!(info.num_fp_arg_regs(), 8);
+  1683→        assert_eq!(info.stack_alignment(), 16);
+  1684→        assert_eq!(info.instruction_width_range(), (4, 4));
+  1685→        assert_eq!(info.output_format(), OutputFormat::Elf64);
+  1686→        validate_target_info(&info);
+  1687→    }
+  1688→
+  1689→    #[test]
+  1690→    fn test_riscv64_target_info() {
+  1691→        let info = RiscV64TargetInfo;
+  1692→        assert_eq!(info.isa_name(), "riscv64");
+  1693→        assert_eq!(info.elf_machine_type(), 243);
+  1694→        assert!(info.has_hardwired_zero());
+  1695→        assert!(info.has_link_register());
+  1696→        assert!(!info.has_branch_delay_slots());
+  1697→        assert_eq!(info.calling_convention_name(), "lp64d");
+  1698→        assert_eq!(info.instruction_width_range(), (2, 4));
+  1699→        validate_target_info(&info);
+  1700→    }
+  1701→
+  1702→    #[test]
+  1703→    fn test_wasm32_target_info() {
+  1704→        let info = Wasm32TargetInfo;
+  1705→        assert_eq!(info.isa_name(), "wasm32");
+  1706→        assert_eq!(info.elf_machine_type(), 0); // Not ELF
+  1707→        assert!(!info.has_registers()); // Stack machine!
+  1708→        assert_eq!(info.num_gp_regs(), 0);
+  1709→        assert_eq!(info.num_simd_fp_regs(), 0);
+  1710→        assert_eq!(info.pointer_width(), 4); // wasm32 is 32-bit
+  1711→        assert_eq!(info.output_format(), OutputFormat::WasmBinary);
+  1712→        assert_eq!(info.calling_convention_name(), "wasm-stack");
+  1713→        validate_target_info(&info);
+  1714→    }
+  1715→
+  1716→    #[test]
+  1717→    fn test_loongarch64_target_info() {
+  1718→        let info = LoongArch64TargetInfo;
+  1719→        assert_eq!(info.isa_name(), "loongarch64");
+  1720→        assert_eq!(info.elf_machine_type(), 258);
+  1721→        assert!(info.has_hardwired_zero());
+  1722→        assert!(info.has_link_register());
+  1723→        assert_eq!(info.calling_convention_name(), "lp64");
+  1724→        validate_target_info(&info);
+  1725→    }
+  1726→
+  1727→    #[test]
+  1728→    fn test_x86_64_target_info() {
+  1729→        let info = X86_64TargetInfo;
+  1730→        assert_eq!(info.isa_name(), "x86_64");
+  1731→        assert_eq!(info.elf_machine_type(), 62);
+  1732→        assert!(!info.has_link_register()); // x86_64 pushes return addr
+  1733→        assert_eq!(info.calling_convention_name(), "systemv");
+  1734→        assert_eq!(info.num_int_arg_regs(), 6);
+  1735→        assert_eq!(info.num_fp_arg_regs(), 8);
+  1736→        assert_eq!(info.instruction_width_range(), (1, 15));
+  1737→        validate_target_info(&info);
+  1738→    }
+  1739→
+  1740→    #[test]
+  1741→    fn test_arm32_target_info() {
+  1742→        let info = Arm32TargetInfo;
+  1743→        assert_eq!(info.isa_name(), "arm32");
+  1744→        assert_eq!(info.elf_machine_type(), 40);
+  1745→        assert!(info.has_link_register());
+  1746→        assert_eq!(info.pointer_width(), 4);
+  1747→        assert_eq!(info.output_format(), OutputFormat::Elf32);
+  1748→        assert_eq!(info.calling_convention_name(), "aapcs");
+  1749→        assert_eq!(info.num_int_arg_regs(), 4);
+  1750→        validate_target_info(&info);
+  1751→    }
+  1752→
+  1753→    #[test]
+  1754→    fn test_mips64_target_info() {
+  1755→        let info = Mips64TargetInfo;
+  1756→        assert_eq!(info.isa_name(), "mips64");
+  1757→        assert_eq!(info.elf_machine_type(), 8);
+  1758→        assert!(info.has_branch_delay_slots()); // THE defining feature
+  1759→        assert!(info.has_hardwired_zero());
+  1760→        assert_eq!(info.endianness(), Endianness::Big);
+  1761→        assert_eq!(info.calling_convention_name(), "n64");
+  1762→        validate_target_info(&info);
+  1763→    }
+  1764→
+  1765→    #[test]
+  1766→    fn test_ppc64_target_info() {
+  1767→        let info = PowerPC64TargetInfo;
+  1768→        assert_eq!(info.isa_name(), "ppc64");
+  1769→        assert_eq!(info.elf_machine_type(), 21);
+  1770→        assert!(info.has_toc_pointer()); // R2 = TOC
+  1771→        assert!(info.has_condition_registers()); // CR0-CR7
+  1772→        assert_eq!(info.calling_convention_name(), "elfv2");
+  1773→        assert_eq!(info.num_int_arg_regs(), 8);
+  1774→        assert_eq!(info.num_fp_arg_regs(), 13);
+  1775→        assert_eq!(info.endianness(), Endianness::Bi);
+  1776→        validate_target_info(&info);
+  1777→    }
+  1778→
+  1779→    #[test]
+  1780→    fn test_backend_kind_display() {
+  1781→        assert_eq!(BackendKind::AArch64.to_string(), "aarch64");
+  1782→        assert_eq!(BackendKind::RiscV64.to_string(), "riscv64");
+  1783→        assert_eq!(BackendKind::Wasm32.to_string(), "wasm32");
+  1784→        assert_eq!(BackendKind::LoongArch64.to_string(), "loongarch64");
+  1785→        assert_eq!(BackendKind::X86_64.to_string(), "x86_64");
+  1786→        assert_eq!(BackendKind::Arm32.to_string(), "arm32");
+  1787→        assert_eq!(BackendKind::Mips64.to_string(), "mips64");
+  1788→        assert_eq!(BackendKind::PowerPC64.to_string(), "ppc64");
+  1789→    }
+  1790→
+  1791→    #[test]
+  1792→    fn test_backend_kind_isa_name() {
+  1793→        assert_eq!(BackendKind::AArch64.isa_name(), "aarch64");
+  1794→        assert_eq!(BackendKind::X86_64.isa_name(), "x86_64");
+  1795→        assert_eq!(BackendKind::Wasm32.isa_name(), "wasm32");
+  1796→    }
+  1797→
+  1798→    #[test]
+  1799→    fn test_physical_reg_display() {
+  1800→        let gpr = PhysicalReg::new(RegClass::Gpr, 0);
+  1801→        let simd = PhysicalReg::new(RegClass::SimdFp, 15);
+  1802→        assert_eq!(gpr.to_string(), "Gpr:0");
+  1803→        assert_eq!(simd.to_string(), "SimdFp:15");
+  1804→    }
+  1805→
+  1806→    #[test]
+  1807→    fn test_wasm32_size_of_ptr() {
+  1808→        let info = Wasm32TargetInfo;
+  1809→        // wasm32 has 32-bit pointers
+  1810→        assert_eq!(info.size_of(&IRType::Ptr), 4);
+  1811→        assert_eq!(info.alignment_of(&IRType::Ptr), 4);
+  1812→    }
+  1813→
+  1814→    #[test]
+  1815→    fn test_arm32_size_of_ptr() {
+  1816→        let info = Arm32TargetInfo;
+  1817→        // ARM32 has 32-bit pointers
+  1818→        assert_eq!(info.size_of(&IRType::Ptr), 4);
+  1819→        assert_eq!(info.alignment_of(&IRType::Ptr), 4);
+  1820→    }
+  1821→
+  1822→    #[test]
+  1823→    fn test_output_format_variants() {
+  1824→        assert_ne!(OutputFormat::Elf64, OutputFormat::WasmBinary);
+  1825→    }
+  1826→
+  1827→    #[test]
+  1828→    fn test_aarch64_disassemble_nop() {
+  1829→        let backend = AArch64Backend::new();
+  1830→        // NOP = 0xD503201F
+  1831→        let bytes: Vec<u8> = 0xD503201Fu32.to_le_bytes().to_vec();
+  1832→        let lines = backend.disassemble(&bytes, 0x1000);
+  1833→        assert_eq!(lines.len(), 1);
+  1834→        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+  1835→    }
+  1836→
+  1837→    #[test]
+  1838→    fn test_aarch64_disassemble_ret() {
+  1839→        let backend = AArch64Backend::new();
+  1840→        // RET = 0xD65F03C0
+  1841→        let bytes: Vec<u8> = 0xD65F03C0u32.to_le_bytes().to_vec();
+  1842→        let lines = backend.disassemble(&bytes, 0x2000);
+  1843→        assert_eq!(lines.len(), 1);
+  1844→        assert!(lines[0].contains("ret"), "Expected ret, got: {}", lines[0]);
+  1845→    }
+  1846→
+  1847→    #[test]
+  1848→    fn test_aarch64_disassemble_add_imm() {
+  1849→        let backend = AArch64Backend::new();
+  1850→        // ADD X0, X1, #42: 0x9100A820
+  1851→        use crate::arm64::{Instruction, Operand, Register};
+  1852→        let instr = Instruction::ADD {
+  1853→            rd: Register::X0,
+  1854→            rn: Register::X1,
+  1855→            rm: Operand::Imm12(42),
+  1856→        };
+  1857→        let encoded = instr.encode().unwrap();
+  1858→        let bytes: Vec<u8> = encoded.to_le_bytes().to_vec();
+  1859→        let lines = backend.disassemble(&bytes, 0);
+  1860→        assert_eq!(lines.len(), 1);
+  1861→        assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
+  1862→    }
+  1863→
+  1864→    #[test]
+  1865→    fn test_backend_error_includes_isa_name() {
+  1866→        let err = BackendError::UnsupportedFeature {
+  1867→            isa: "aarch64",
+  1868→            feature: "branch delay slots".to_string(),
+  1869→        };
+  1870→        let msg = err.to_string();
+  1871→        assert!(
+  1872→            msg.contains("[aarch64]"),
+  1873→            "Error should include ISA name: {}",
+  1874→            msg
+  1875→        );
+  1876→        assert!(
+  1877→            msg.contains("branch delay slots"),
+  1878→            "Error should include feature: {}",
+  1879→            msg
+  1880→        );
+  1881→    }
+  1882→}
+  1883→
