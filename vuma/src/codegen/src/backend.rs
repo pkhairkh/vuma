@@ -8,6 +8,7 @@ use crate::arm32::Arm32Backend;
 use crate::ir::{IRFunction, IRInstr, IRType};
 use crate::loongarch64::LoongArch64Backend;
 use crate::mips64::Mips64Backend;
+use std::collections::HashMap;
 use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
@@ -1461,8 +1462,67 @@ impl Backend for AArch64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Collect all encoded bytes from every function and block.
-        let mut all_code = Vec::new();
+        // ARM64 Linux executable layout:
+        // [_start stub (16 bytes)] [user functions] [runtime I/O functions]
+        let start_stub_size: usize = 16; // 4 ARM64 instructions
+
+        // Compute function offsets (after _start stub)
+        let mut func_offsets: HashMap<String, usize> = HashMap::new();
+        let mut current_offset: usize = start_stub_size;
+
+        for func in &program.functions {
+            func_offsets.insert(func.name.clone(), current_offset);
+            let func_size: usize = func.blocks.iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            current_offset += func_size;
+        }
+
+        // Runtime I/O functions: __vuma_write_stdout
+        let write_stdout_offset = current_offset;
+        for name in &["print_buf", "write_stdout", "__vuma_write_stdout", "print_hex"] {
+            func_offsets.insert(name.to_string(), write_stdout_offset);
+        }
+        // ARM64 write_stdout: mov x2,x1; mov x1,x0; mov x0,#1; mov x8,#64; svc#0; ret
+        let runtime_write_stdout: Vec<u8> = vec![
+            0xE2, 0x03, 0x01, 0xAA, // mov x2, x1
+            0xE1, 0x03, 0x00, 0xAA, // mov x1, x0
+            0x20, 0x00, 0x80, 0xD2, // mov x0, #1
+            0x08, 0x08, 0x80, 0xD2, // mov x8, #64
+            0x01, 0x00, 0x00, 0xD4, // svc #0
+            0xC0, 0x03, 0x5F, 0xD6, // ret
+        ];
+        current_offset += runtime_write_stdout.len();
+
+        // print_int: stub that returns 0
+        let print_int_offset = current_offset;
+        for name in &["print_int", "print", "__vuma_print_int"] {
+            func_offsets.insert(name.to_string(), print_int_offset);
+        }
+        let runtime_print_int: Vec<u8> = vec![
+            0x00, 0x00, 0x80, 0xD2, // mov x0, #0
+            0xC0, 0x03, 0x5F, 0xD6, // ret
+        ];
+        current_offset += runtime_print_int.len();
+
+        // Build _start stub: bl main; mov x8, #93; svc #0; ret
+        let mut start_stub = vec![0u8; start_stub_size];
+        if let Some(&main_offset) = func_offsets.get("main") {
+            let bl_offset = main_offset as i64; // from offset 0
+            let imm26 = (bl_offset >> 2) as u32 & 0x03FFFFFF;
+            let bl_instr = 0x94000000u32 | imm26;
+            start_stub[0..4].copy_from_slice(&bl_instr.to_le_bytes());
+        }
+        // mov x8, #93 (sys_exit)
+        start_stub[4..8].copy_from_slice(&0xD2800BA8u32.to_le_bytes());
+        // svc #0
+        start_stub[8..12].copy_from_slice(&0xD4000001u32.to_le_bytes());
+        // ret
+        start_stub[12..16].copy_from_slice(&0xD65F03C0u32.to_le_bytes());
+
+        // Concatenate all code
+        let mut all_code = start_stub;
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -1470,8 +1530,41 @@ impl Backend for AArch64Backend {
                 }
             }
         }
+        all_code.extend_from_slice(&runtime_write_stdout);
+        all_code.extend_from_slice(&runtime_print_int);
 
-        // Wrap in a minimal ELF64 binary for AArch64.
+        // Patch relocations for user functions
+        let mut func_code_offset: usize = start_stub_size;
+        for func in &program.functions {
+            for reloc in &func.relocations {
+                let abs_offset = func_code_offset + reloc.offset as usize;
+                if abs_offset + 4 > all_code.len() {
+                    continue;
+                }
+                // ARM64 BL relocation: 26-bit signed offset in bits[25:0]
+                if reloc.reloc_type == "R_AARCH64_CALL26" {
+                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                        let current_bits = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        // BL offset = (target - source) >> 2
+                        let bl_offset = (target_offset as i64 - abs_offset as i64) >> 2;
+                        let imm26 = (bl_offset as u32) & 0x03FFFFFF;
+                        let patched = (current_bits & 0xFC000000) | imm26;
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    }
+                }
+            }
+            let func_size: usize = func.blocks.iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            func_code_offset += func_size;
+        }
+
         Ok(build_minimal_aarch64_elf(&all_code, 0x400000))
     }
 
