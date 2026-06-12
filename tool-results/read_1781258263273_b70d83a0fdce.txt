@@ -1,0 +1,986 @@
+     1→//! # Stack-Slot ISel for x86_64
+     2→//!
+     3→//! Complete replacement for the `allocate_registers` method in the x86_64 backend.
+     4→//!
+     5→//! Every virtual register gets a stack slot at `[rbp - offset]`. The ISel generates
+     6→//! code that loads source operands from their stack slots into scratch registers,
+     7→//! performs the operation, and stores the result to the destination's stack slot.
+     8→//!
+     9→//! ## Scratch Registers (never assigned to vregs)
+    10→//!
+    11→//! - RAX: primary accumulator / return value
+    12→//! - RCX: secondary operand / shift count
+    13→//! - RDX: tertiary / division (RDX:RAX pair)
+    14→//! - R10, R11: additional temporaries
+    15→//!
+    16→//! ## Callee-Saved Registers
+    17→//!
+    18→//! RBX, R12, R13, R14, R15 are pushed in the prologue (after `push rbp; mov rbp, rsp;
+    19→//! sub rsp, frame_size`) and popped in reverse order before the epilogue.
+    20→
+    21→use crate::backend::{
+    22→    AllocatedBlock, AllocatedFunction, AllocatedInstruction,
+    23→    BackendError, PhysicalReg, RegClass, RelocationEntry,
+    24→};
+    25→use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+    26→use std::collections::HashMap;
+    27→
+    28→#[allow(unused_imports)]
+    29→use super::{
+    30→    binop_cmp_to_cc, cmp_kind_to_cc, modrm, rex_prefix,
+    31→    Cc, Gpr,
+    32→    R_X86_64_64, R_X86_64_PLT32,
+    33→    encode_add_reg_imm32, encode_add_reg_reg,
+    34→    encode_and_reg_imm32, encode_and_reg_reg,
+    35→    encode_call_rel32,
+    36→    encode_cmovcc_reg_reg,
+    37→    encode_cmp_reg_imm32, encode_cmp_reg_reg,
+    38→    encode_cqo,
+    39→    encode_div_reg,
+    40→    encode_idiv_reg,
+    41→    encode_imul_reg_reg,
+    42→    encode_jcc_rel32, encode_jmp_rel32,
+    43→    encode_lea_reg_mem,
+    44→    encode_mov_mem16_reg16, encode_mov_mem32_reg32, encode_mov_mem8_reg8,
+    45→    encode_mov_mem_reg,
+    46→    encode_mov_reg32_mem,
+    47→    encode_mov_reg_imm32, encode_mov_reg_imm64, encode_mov_reg_mem, encode_mov_reg_reg,
+    48→    encode_movsx_reg8,
+    49→    encode_movsx_reg8_mem,
+    50→    encode_movzx_reg8, encode_movzx_reg16,
+    51→    encode_movzx_reg8_mem, encode_movzx_reg16_mem,
+    52→    encode_neg_reg, encode_nop, encode_not_reg,
+    53→    encode_or_reg_imm32, encode_or_reg_reg,
+    54→    encode_pop, encode_push,
+    55→    encode_ret,
+    56→    encode_rol_reg_cl, encode_ror_reg_cl,
+    57→    encode_sar_reg_cl,
+    58→    encode_setcc,
+    59→    encode_shl_reg_cl, encode_shr_reg_cl,
+    60→    encode_sub_reg_imm32, encode_sub_reg_reg,
+    61→    encode_test_reg_reg,
+    62→    encode_xor_reg_imm32, encode_xor_reg_reg,
+    63→};
+    64→
+    65→// =============================================================================
+    66→// allocate_registers — Stack-Slot Code Generation
+    67→// =============================================================================
+    68→
+    69→/// Stack-slot-only register allocation for x86_64.
+    70→///
+    71→/// Every vreg gets a stack slot at `[rbp - offset]` (8 bytes each).
+    72→/// Alloc vregs get their own larger stack regions.
+    73→/// For each IR instruction, we:
+    74→///   1. Load source operands from their stack slots into scratch registers
+    75→///   2. Perform the operation in the scratch registers
+    76→///   3. Store the result back to the destination's stack slot
+    77→///
+    78→/// Scratch registers (never assigned to vregs):
+    79→///   RAX = primary accumulator / result
+    80→///   RCX = secondary operand / shift count
+    81→///   RDX = tertiary / division
+    82→///   R10, R11 = temporary scratch
+    83→///
+    84→/// Callee-save: RBX, R12–R15 are pushed in prologue, popped in epilogue.
+    85→pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+    86→    let func_name = func.name.clone();
+    87→
+    88→    // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+    89→
+    90→    // Collect all unique vreg IDs from the function's vregs map and also
+    91→    // from instruction operands (to catch any vregs not in the map)
+    92→    let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    93→    // From the function's declared vregs
+    94→    for &id in func.vregs.keys() {
+    95→        all_vreg_ids.insert(id);
+    96→    }
+    97→    // Also from function params
+    98→    for param in &func.params {
+    99→        if let Some(id) = param.as_register() {
+   100→            all_vreg_ids.insert(id);
+   101→        }
+   102→    }
+   103→    // And from instruction operands (to catch any vregs not in the map)
+   104→    for block in &func.blocks {
+   105→        for instr in &block.instructions {
+   106→            for id in instr.defined_regs() {
+   107→                all_vreg_ids.insert(id);
+   108→            }
+   109→            for id in instr.used_regs() {
+   110→                all_vreg_ids.insert(id);
+   111→            }
+   112→        }
+   113→    }
+   114→
+   115→    // Identify Alloc vregs and compute their stack region sizes
+   116→    let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+   117→        std::collections::HashSet::new();
+   118→    let mut alloc_sizes: HashMap<u32, i32> = HashMap::new(); // vreg → aligned size
+   119→    for block in &func.blocks {
+   120→        for instr in &block.instructions {
+   121→            if let IRInstr::Alloc { dst, size } = instr {
+   122→                if let Some(id) = dst.as_register() {
+   123→                    stack_alloc_vregs.insert(id);
+   124→                    let aligned_size = ((*size as i32 + 15) & !15) as i32;
+   125→                    alloc_sizes.insert(id, aligned_size);
+   126→                }
+   127→            }
+   128→        }
+   129→    }
+   130→
+   131→    // ── Stack Layout ──
+   132→    // [high address]
+   133→    //   saved RBP           ← RBP points here
+   134→    //   Alloc data region N ← [rbp - alloc_offset_N] size aligned_alloc_N
+   135→    //   ...
+   136→    //   Alloc data region 1 ← [rbp - alloc_offset_1] size aligned_alloc_1
+   137→    //   vreg slot M         ← [rbp - vreg_offset_M]  (8 bytes each, including Alloc ptrs)
+   138→    //   ...
+   139→    //   vreg slot 1         ← [rbp - first_vreg_offset]
+   140→    // [low address]         ← RSP
+   141→
+   142→    // Assign stack offsets for Alloc regions (closest to RBP, growing downward)
+   143→    let mut alloc_offsets: HashMap<u32, i32> = HashMap::new(); // vreg → [rbp - offset] (start of data region)
+   144→    let mut current_offset: i32 = 0;
+   145→    // Process Allocs in a deterministic order
+   146→    let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
+   147→    alloc_vreg_ids.sort();
+   148→    for &id in &alloc_vreg_ids {
+   149→        let size = alloc_sizes[&id];
+   150→        current_offset += size;
+   151→        alloc_offsets.insert(id, -(current_offset));
+   152→    }
+   153→
+   154→    // Assign stack slots for ALL vregs (including Alloc vregs).
+   155→    // Alloc vregs need a separate 8-byte slot to store the pointer to their data region.
+   156→    // Non-Alloc vregs just use their 8-byte slot for the value.
+   157→    let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new(); // vreg → [rbp - offset]
+   158→    let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+   159→    all_vreg_ids_sorted.sort();
+   160→    for &id in &all_vreg_ids_sorted {
+   161→        current_offset += 8;
+   162→        vreg_stack_slots.insert(id, -(current_offset));
+   163→    }
+   164→
+   165→    // Round up to ensure proper stack alignment for calls.
+   166→    // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size; push×5 (-40)
+   167→    // On entry to this function: RSP was 8 mod 16 (SysV ABI).
+   168→    // After push rbp: RSP is 0 mod 16.
+   169→    // After sub rsp,frame_size: RSP is (-frame_size) mod 16.
+   170→    // After 5 pushes (40 bytes): RSP is (-frame_size - 40) mod 16.
+   171→    // Before any `call` from this function, RSP must be 0 mod 16 (so that
+   172→    // the callee enters with RSP at 8 mod 16 as required by SysV).
+   173→    // Therefore: (frame_size + 40) % 16 == 0, i.e., frame_size % 16 == 8.
+   174→    let aligned = ((current_offset + 15) & !15) as usize;
+   175→    let frame_size = if aligned % 16 == 8 {
+   176→        aligned.max(8)
+   177→    } else {
+   178→        (aligned + 8).max(8)  // Add 8 bytes padding to make frame_size ≡ 8 (mod 16)
+   179→    };
+   180→
+   181→    // ── Helper closures for stack slot access ──
+   182→
+   183→    // Get the [rbp - offset] for a vreg's stack slot (where its value/pointer is stored)
+   184→    let slot_offset = |id: u32| -> i32 {
+   185→        if let Some(&off) = vreg_stack_slots.get(&id) {
+   186→            off
+   187→        } else {
+   188→            // Fallback: shouldn't happen, but use a safe offset
+   189→            -(frame_size as i32)
+   190→        }
+   191→    };
+   192→
+   193→    // Load a vreg from its stack slot into a scratch register
+   194→    let load_vreg = |id: u32, scratch: Gpr| -> Vec<u8> {
+   195→        let off = slot_offset(id);
+   196→        encode_mov_reg_mem(scratch, Gpr::Rbp, off)
+   197→    };
+   198→
+   199→    // Store a scratch register into a vreg's stack slot
+   200→    let store_vreg = |id: u32, scratch: Gpr| -> Vec<u8> {
+   201→        let off = slot_offset(id);
+   202→        encode_mov_mem_reg(Gpr::Rbp, off, scratch)
+   203→    };
+   204→
+   205→    // Load an IRValue into a scratch register
+   206→    // For registers: load from stack slot
+   207→    // For immediates: mov scratch, imm
+   208→    let load_value = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+   209→        match val {
+   210→            IRValue::Register(id) => load_vreg(*id, scratch),
+   211→            IRValue::Immediate(imm) => {
+   212→                let imm = *imm;
+   213→                if (-2147483648..=2147483647).contains(&imm) {
+   214→                    encode_mov_reg_imm32(scratch, imm as i32)
+   215→                } else {
+   216→                    encode_mov_reg_imm64(scratch, imm as u64)
+   217→                }
+   218→            }
+   219→            IRValue::Address(addr) => encode_mov_reg_imm64(scratch, *addr),
+   220→            IRValue::Label(_) => encode_mov_reg_imm64(scratch, 0), // placeholder
+   221→        }
+   222→    };
+   223→
+   224→    // ── Phase 2: Generate prologue ──
+   225→
+   226→    let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
+   227→    let mut relocations: Vec<RelocationEntry> = Vec::new();
+   228→    let mut byte_offset: usize = 0;
+   229→
+   230→    // Helper to push an encoded instruction
+   231→    let mut emit = |code: Vec<u8>, opcode_name: &str| {
+   232→        if !code.is_empty() {
+   233→            byte_offset += code.len();
+   234→            encoded_instrs.push(AllocatedInstruction {
+   235→                opcode: opcode_name.to_string(),
+   236→                reads: vec![],
+   237→                writes: vec![],
+   238→                encoded: code,
+   239→            });
+   240→        }
+   241→    };
+   242→
+   243→    // push rbp
+   244→    emit(encode_push(Gpr::Rbp), "push_rbp");
+   245→
+   246→    // mov rbp, rsp
+   247→    emit(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp), "mov_rbp_rsp");
+   248→
+   249→    // sub rsp, frame_size
+   250→    if frame_size > 0 {
+   251→        emit(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32), "sub_rsp");
+   252→    }
+   253→
+   254→    // Push callee-saved registers (RBX, R12–R15) — always, to be safe
+   255→    let callee_save_regs: Vec<Gpr> = vec![Gpr::Rbx, Gpr::R12, Gpr::R13, Gpr::R14, Gpr::R15];
+   256→    for &reg in &callee_save_regs {
+   257→        emit(encode_push(reg), "push_callee_save");
+   258→    }
+   259→
+   260→    // Copy function parameters from SystemV arg registers to their stack slots
+   261→    let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+   262→    for (i, param) in func.params.iter().enumerate() {
+   263→        if let Some(id) = param.as_register() {
+   264→            if i < arg_regs.len() {
+   265→                let off = slot_offset(id);
+   266→                emit(encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[i]), "store_param");
+   267→            }
+   268→        }
+   269→    }
+   270→
+   271→    // ── Phase 3: Encode each IR instruction ──
+   272→
+   273→    // We need to resolve intra-function branch targets (block labels).
+   274→    // Strategy: first emit all code with placeholder rel32=0 for branches,
+   275→    // then patch the branch targets after we know all block offsets.
+   276→
+   277→    // Track block label → byte_offset within the function's encoded output
+   278→    let mut block_offsets: HashMap<String, usize> = HashMap::new();
+   279→    // Track branches that need patching: (rel32_field_offset, target_label)
+   280→    let mut branch_patches: Vec<(usize, String)> = Vec::new();
+   281→
+   282→    for block in &func.blocks {
+   283→        // Record this block's label offset
+   284→        block_offsets.insert(block.label.clone(), byte_offset);
+   285→
+   286→        for instr in &block.instructions {
+   287→            let encoded = match instr {
+   288→                // ── Add ──
+   289→                IRInstr::Add { dst, lhs, rhs, .. } => {
+   290→                    let mut code = Vec::new();
+   291→                    let dst_id = dst.as_register().unwrap_or(0);
+   292→                    // Load lhs into RAX
+   293→                    code.extend(load_value(lhs, Gpr::Rax));
+   294→                    // Add rhs (immediate or from stack)
+   295→                    if let IRValue::Immediate(imm) = rhs {
+   296→                        let imm = *imm;
+   297→                        if (-2147483648..=2147483647).contains(&imm) {
+   298→                            code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+   299→                        } else {
+   300→                            code.extend(load_value(rhs, Gpr::Rcx));
+   301→                            code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+   302→                        }
+   303→                    } else {
+   304→                        code.extend(load_value(rhs, Gpr::Rcx));
+   305→                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+   306→                    }
+   307→                    // Store result to dst stack slot
+   308→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   309→                    code
+   310→                }
+   311→
+   312→                // ── Sub ──
+   313→                IRInstr::Sub { dst, lhs, rhs, .. } => {
+   314→                    let mut code = Vec::new();
+   315→                    let dst_id = dst.as_register().unwrap_or(0);
+   316→                    code.extend(load_value(lhs, Gpr::Rax));
+   317→                    if let IRValue::Immediate(imm) = rhs {
+   318→                        let imm = *imm;
+   319→                        if (-2147483648..=2147483647).contains(&imm) {
+   320→                            code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+   321→                        } else {
+   322→                            code.extend(load_value(rhs, Gpr::Rcx));
+   323→                            code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+   324→                        }
+   325→                    } else {
+   326→                        code.extend(load_value(rhs, Gpr::Rcx));
+   327→                        code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+   328→                    }
+   329→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   330→                    code
+   331→                }
+   332→
+   333→                // ── Mul ──
+   334→                IRInstr::Mul { dst, lhs, rhs, .. } => {
+   335→                    let mut code = Vec::new();
+   336→                    let dst_id = dst.as_register().unwrap_or(0);
+   337→                    code.extend(load_value(lhs, Gpr::Rax));
+   338→                    code.extend(load_value(rhs, Gpr::Rcx));
+   339→                    code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
+   340→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   341→                    code
+   342→                }
+   343→
+   344→                // ── Div ──
+   345→                IRInstr::Div { dst, lhs, rhs, .. } => {
+   346→                    let mut code = Vec::new();
+   347→                    let dst_id = dst.as_register().unwrap_or(0);
+   348→                    // Load lhs into RAX
+   349→                    code.extend(load_value(lhs, Gpr::Rax));
+   350→                    // Sign-extend RAX into RDX:RAX
+   351→                    code.extend(encode_cqo());
+   352→                    // Load rhs into RCX, then IDIV RCX
+   353→                    code.extend(load_value(rhs, Gpr::Rcx));
+   354→                    code.extend(encode_idiv_reg(Gpr::Rcx));
+   355→                    // Quotient in RAX, store to dst
+   356→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   357→                    code
+   358→                }
+   359→
+   360→                // ── BinOp (generic) ──
+   361→                IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+   362→                    let mut code = Vec::new();
+   363→                    let dst_id = dst.as_register().unwrap_or(0);
+   364→
+   365→                    match op {
+   366→                        BinOpKind::Add => {
+   367→                            code.extend(load_value(lhs, Gpr::Rax));
+   368→                            if let IRValue::Immediate(imm) = rhs {
+   369→                                let imm = *imm;
+   370→                                if (-2147483648..=2147483647).contains(&imm) {
+   371→                                    code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+   372→                                } else {
+   373→                                    code.extend(load_value(rhs, Gpr::Rcx));
+   374→                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+   375→                                }
+   376→                            } else {
+   377→                                code.extend(load_value(rhs, Gpr::Rcx));
+   378→                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+   379→                            }
+   380→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   381→                        }
+   382→                        BinOpKind::Sub => {
+   383→                            code.extend(load_value(lhs, Gpr::Rax));
+   384→                            if let IRValue::Immediate(imm) = rhs {
+   385→                                let imm = *imm;
+   386→                                if (-2147483648..=2147483647).contains(&imm) {
+   387→                                    code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+   388→                                } else {
+   389→                                    code.extend(load_value(rhs, Gpr::Rcx));
+   390→                                    code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+   391→                                }
+   392→                            } else {
+   393→                                code.extend(load_value(rhs, Gpr::Rcx));
+   394→                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+   395→                            }
+   396→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   397→                        }
+   398→                        BinOpKind::Mul => {
+   399→                            code.extend(load_value(lhs, Gpr::Rax));
+   400→                            code.extend(load_value(rhs, Gpr::Rcx));
+   401→                            code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
+   402→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   403→                        }
+   404→                        BinOpKind::SDiv => {
+   405→                            code.extend(load_value(lhs, Gpr::Rax));
+   406→                            code.extend(encode_cqo());
+   407→                            code.extend(load_value(rhs, Gpr::Rcx));
+   408→                            code.extend(encode_idiv_reg(Gpr::Rcx));
+   409→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   410→                        }
+   411→                        BinOpKind::UDiv => {
+   412→                            code.extend(load_value(lhs, Gpr::Rax));
+   413→                            code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+   414→                            code.extend(load_value(rhs, Gpr::Rcx));
+   415→                            code.extend(encode_div_reg(Gpr::Rcx));
+   416→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   417→                        }
+   418→                        BinOpKind::SRem => {
+   419→                            code.extend(load_value(lhs, Gpr::Rax));
+   420→                            code.extend(encode_cqo());
+   421→                            code.extend(load_value(rhs, Gpr::Rcx));
+   422→                            code.extend(encode_idiv_reg(Gpr::Rcx));
+   423→                            // Remainder in RDX
+   424→                            code.extend(store_vreg(dst_id, Gpr::Rdx));
+   425→                        }
+   426→                        BinOpKind::URem => {
+   427→                            code.extend(load_value(lhs, Gpr::Rax));
+   428→                            code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+   429→                            code.extend(load_value(rhs, Gpr::Rcx));
+   430→                            code.extend(encode_div_reg(Gpr::Rcx));
+   431→                            code.extend(store_vreg(dst_id, Gpr::Rdx));
+   432→                        }
+   433→                        BinOpKind::And => {
+   434→                            code.extend(load_value(lhs, Gpr::Rax));
+   435→                            if let IRValue::Immediate(imm) = rhs {
+   436→                                let imm = *imm;
+   437→                                if (-2147483648..=2147483647).contains(&imm) {
+   438→                                    code.extend(encode_and_reg_imm32(Gpr::Rax, imm as i32));
+   439→                                } else {
+   440→                                    code.extend(load_value(rhs, Gpr::Rcx));
+   441→                                    code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rcx));
+   442→                                }
+   443→                            } else {
+   444→                                code.extend(load_value(rhs, Gpr::Rcx));
+   445→                                code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rcx));
+   446→                            }
+   447→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   448→                        }
+   449→                        BinOpKind::Or => {
+   450→                            code.extend(load_value(lhs, Gpr::Rax));
+   451→                            if let IRValue::Immediate(imm) = rhs {
+   452→                                let imm = *imm;
+   453→                                if (-2147483648..=2147483647).contains(&imm) {
+   454→                                    code.extend(encode_or_reg_imm32(Gpr::Rax, imm as i32));
+   455→                                } else {
+   456→                                    code.extend(load_value(rhs, Gpr::Rcx));
+   457→                                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx));
+   458→                                }
+   459→                            } else {
+   460→                                code.extend(load_value(rhs, Gpr::Rcx));
+   461→                                code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx));
+   462→                            }
+   463→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   464→                        }
+   465→                        BinOpKind::Xor => {
+   466→                            code.extend(load_value(lhs, Gpr::Rax));
+   467→                            if let IRValue::Immediate(imm) = rhs {
+   468→                                let imm = *imm;
+   469→                                if (-2147483648..=2147483647).contains(&imm) {
+   470→                                    code.extend(encode_xor_reg_imm32(Gpr::Rax, imm as i32));
+   471→                                } else {
+   472→                                    code.extend(load_value(rhs, Gpr::Rcx));
+   473→                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+   474→                                }
+   475→                            } else {
+   476→                                code.extend(load_value(rhs, Gpr::Rcx));
+   477→                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+   478→                            }
+   479→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   480→                        }
+   481→                        BinOpKind::Shl => {
+   482→                            code.extend(load_value(lhs, Gpr::Rax));
+   483→                            code.extend(load_value(rhs, Gpr::Rcx));
+   484→                            code.extend(encode_shl_reg_cl(Gpr::Rax));
+   485→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   486→                        }
+   487→                        BinOpKind::ShrL => {
+   488→                            code.extend(load_value(lhs, Gpr::Rax));
+   489→                            code.extend(load_value(rhs, Gpr::Rcx));
+   490→                            code.extend(encode_shr_reg_cl(Gpr::Rax));
+   491→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   492→                        }
+   493→                        BinOpKind::ShrA => {
+   494→                            code.extend(load_value(lhs, Gpr::Rax));
+   495→                            code.extend(load_value(rhs, Gpr::Rcx));
+   496→                            code.extend(encode_sar_reg_cl(Gpr::Rax));
+   497→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   498→                        }
+   499→                        BinOpKind::Ror => {
+   500→                            code.extend(load_value(lhs, Gpr::Rax));
+   501→                            code.extend(load_value(rhs, Gpr::Rcx));
+   502→                            code.extend(encode_ror_reg_cl(Gpr::Rax));
+   503→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   504→                        }
+   505→                        BinOpKind::Rol => {
+   506→                            code.extend(load_value(lhs, Gpr::Rax));
+   507→                            code.extend(load_value(rhs, Gpr::Rcx));
+   508→                            code.extend(encode_rol_reg_cl(Gpr::Rax));
+   509→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   510→                        }
+   511→                        // Comparison BinOps: produce 0 or 1
+   512→                        BinOpKind::SLt
+   513→                        | BinOpKind::SLe
+   514→                        | BinOpKind::SGt
+   515→                        | BinOpKind::SGe
+   516→                        | BinOpKind::ULt
+   517→                        | BinOpKind::ULe
+   518→                        | BinOpKind::UGt
+   519→                        | BinOpKind::UGe
+   520→                        | BinOpKind::Eq
+   521→                        | BinOpKind::Ne => {
+   522→                            let cc = binop_cmp_to_cc(op);
+   523→                            code.extend(load_value(lhs, Gpr::Rax));
+   524→                            code.extend(load_value(rhs, Gpr::Rcx));
+   525→                            code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+   526→                            code.extend(encode_setcc(cc, Gpr::Rax));
+   527→                            code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+   528→                            code.extend(store_vreg(dst_id, Gpr::Rax));
+   529→                        }
+   530→                    }
+   531→                    code
+   532→                }
+   533→
+   534→                // ── Unary operations ──
+   535→                IRInstr::UnaryOp { op, dst, operand, .. } => {
+   536→                    let mut code = Vec::new();
+   537→                    let dst_id = dst.as_register().unwrap_or(0);
+   538→                    code.extend(load_value(operand, Gpr::Rax));
+   539→
+   540→                    match op {
+   541→                        UnaryOpKind::Neg => {
+   542→                            code.extend(encode_neg_reg(Gpr::Rax));
+   543→                        }
+   544→                        UnaryOpKind::Not => {
+   545→                            code.extend(encode_not_reg(Gpr::Rax));
+   546→                        }
+   547→                        UnaryOpKind::Clz => {
+   548→                            // BSR RAX, RAX → result = 63 - BSR
+   549→                            let r = Gpr::Rax.needs_rex();
+   550→                            let b = Gpr::Rax.needs_rex();
+   551→                            if let Some(rex) = rex_prefix(true, r, false, b) {
+   552→                                code.push(rex);
+   553→                            } else {
+   554→                                code.push(0x48);
+   555→                            }
+   556→                            code.push(0x0F);
+   557→                            code.push(0xBD);
+   558→                            code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
+   559→                            code.extend(encode_mov_reg_imm32(Gpr::R10, 63));
+   560→                            code.extend(encode_sub_reg_reg(Gpr::R10, Gpr::Rax));
+   561→                            code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::R10));
+   562→                        }
+   563→                        UnaryOpKind::Ctz => {
+   564→                            // BSF RAX, RAX
+   565→                            let r = Gpr::Rax.needs_rex();
+   566→                            let b = Gpr::Rax.needs_rex();
+   567→                            if let Some(rex) = rex_prefix(true, r, false, b) {
+   568→                                code.push(rex);
+   569→                            } else {
+   570→                                code.push(0x48);
+   571→                            }
+   572→                            code.push(0x0F);
+   573→                            code.push(0xBC);
+   574→                            code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
+   575→                        }
+   576→                        UnaryOpKind::Popcnt => {
+   577→                            // POPCNT RAX, RAX (F3 0F B8 /r)
+   578→                            code.push(0xF3);
+   579→                            let r = Gpr::Rax.needs_rex();
+   580→                            let b = Gpr::Rax.needs_rex();
+   581→                            if let Some(rex) = rex_prefix(true, r, false, b) {
+   582→                                code.push(rex);
+   583→                            } else {
+   584→                                code.push(0x48);
+   585→                            }
+   586→                            code.push(0x0F);
+   587→                            code.push(0xB8);
+   588→                            code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
+   589→                        }
+   590→                    }
+   591→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   592→                    code
+   593→                }
+   594→
+   595→                // ── Comparison (dedicated Cmp instruction) ──
+   596→                IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+   597→                    let mut code = Vec::new();
+   598→                    let dst_id = dst.as_register().unwrap_or(0);
+   599→                    let cc = cmp_kind_to_cc(kind);
+   600→                    code.extend(load_value(lhs, Gpr::Rax));
+   601→                    if let IRValue::Immediate(imm) = rhs {
+   602→                        let imm = *imm;
+   603→                        if (-2147483648..=2147483647).contains(&imm) {
+   604→                            code.extend(encode_cmp_reg_imm32(Gpr::Rax, imm as i32));
+   605→                        } else {
+   606→                            code.extend(load_value(rhs, Gpr::Rcx));
+   607→                            code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+   608→                        }
+   609→                    } else {
+   610→                        code.extend(load_value(rhs, Gpr::Rcx));
+   611→                        code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+   612→                    }
+   613→                    code.extend(encode_setcc(cc, Gpr::Rax));
+   614→                    code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+   615→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   616→                    code
+   617→                }
+   618→
+   619→                // ── Conditional select (Cmov) ──
+   620→                IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+   621→                    let mut code = Vec::new();
+   622→                    let dst_id = dst.as_register().unwrap_or(0);
+   623→                    // Load false_val into RAX, true_val into R10, cond into R11
+   624→                    code.extend(load_value(false_val, Gpr::Rax));
+   625→                    code.extend(load_value(true_val, Gpr::R10));
+   626→                    code.extend(load_value(cond, Gpr::R11));
+   627→                    // Test cond != 0
+   628→                    code.extend(encode_test_reg_reg(Gpr::R11, Gpr::R11));
+   629→                    // CMOVNZ RAX, R10
+   630→                    code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::R10));
+   631→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   632→                    code
+   633→                }
+   634→
+   635→                // ── Memory: Load ──
+   636→                IRInstr::Load { dst, addr, offset, ty } => {
+   637→                    let mut code = Vec::new();
+   638→                    let dst_id = dst.as_register().unwrap_or(0);
+   639→                    // Load address from stack into R10
+   640→                    code.extend(load_value(addr, Gpr::R10));
+   641→                    let off = *offset;
+   642→                    match ty {
+   643→                        IRType::I8 | IRType::U8 => {
+   644→                            code.extend(encode_movzx_reg8_mem(Gpr::Rax, Gpr::R10, off));
+   645→                        }
+   646→                        IRType::I16 | IRType::U16 => {
+   647→                            code.extend(encode_movzx_reg16_mem(Gpr::Rax, Gpr::R10, off));
+   648→                        }
+   649→                        IRType::I32 | IRType::U32 => {
+   650→                            code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::R10, off));
+   651→                        }
+   652→                        _ => {
+   653→                            code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::R10, off));
+   654→                        }
+   655→                    }
+   656→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   657→                    code
+   658→                }
+   659→
+   660→                // ── Memory: Store ──
+   661→                IRInstr::Store { value, addr, offset, ty } => {
+   662→                    let mut code = Vec::new();
+   663→                    // Load value into R10, address into R11
+   664→                    code.extend(load_value(value, Gpr::R10));
+   665→                    code.extend(load_value(addr, Gpr::R11));
+   666→                    let off = *offset;
+   667→                    match ty {
+   668→                        IRType::I8 | IRType::U8 => {
+   669→                            code.extend(encode_mov_mem8_reg8(Gpr::R11, off, Gpr::R10));
+   670→                        }
+   671→                        IRType::I16 | IRType::U16 => {
+   672→                            code.extend(encode_mov_mem16_reg16(Gpr::R11, off, Gpr::R10));
+   673→                        }
+   674→                        IRType::I32 | IRType::U32 => {
+   675→                            code.extend(encode_mov_mem32_reg32(Gpr::R11, off, Gpr::R10));
+   676→                        }
+   677→                        _ => {
+   678→                            code.extend(encode_mov_mem_reg(Gpr::R11, off, Gpr::R10));
+   679→                        }
+   680→                    }
+   681→                    code
+   682→                }
+   683→
+   684→                // ── Memory: Lea (Offset) ──
+   685→                IRInstr::Offset { dst, base, offset } => {
+   686→                    let mut code = Vec::new();
+   687→                    let dst_id = dst.as_register().unwrap_or(0);
+   688→                    match offset {
+   689→                        IRValue::Immediate(imm) => {
+   690→                            let off = *imm as i32;
+   691→                            // Load base into RAX
+   692→                            code.extend(load_value(base, Gpr::Rax));
+   693→                            // LEA RAX, [RAX + off]
+   694→                            code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rax, off));
+   695→                        }
+   696→                        _ => {
+   697→                            // Load base into RAX, offset into RCX
+   698→                            code.extend(load_value(base, Gpr::Rax));
+   699→                            code.extend(load_value(offset, Gpr::Rcx));
+   700→                            code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+   701→                        }
+   702→                    }
+   703→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   704→                    code
+   705→                }
+   706→
+   707→                // ── GetAddress ──
+   708→                IRInstr::GetAddress { dst, name } => {
+   709→                    let mut code = Vec::new();
+   710→                    let dst_id = dst.as_register().unwrap_or(0);
+   711→                    // mov rax, imm64 (placeholder, patched by relocation)
+   712→                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0));
+   713→                    // Offset of the 8-byte immediate within the instruction:
+   714→                    let imm_offset = byte_offset + code.len() - 8;
+   715→                    relocations.push(RelocationEntry {
+   716→                        offset: imm_offset as u64,
+   717→                        symbol: name.clone(),
+   718→                        reloc_type: R_X86_64_64.to_string(),
+   719→                    });
+   720→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   721→                    code
+   722→                }
+   723→
+   724→                // ── Alloc ──
+   725→                IRInstr::Alloc { dst, .. } => {
+   726→                    let mut code = Vec::new();
+   727→                    let dst_id = dst.as_register().unwrap_or(0);
+   728→                    let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(-(frame_size as i32));
+   729→                    // lea rax, [rbp + alloc_off]  (alloc_off is negative)
+   730→                    code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, alloc_off));
+   731→                    // Store the pointer into dst's stack slot
+   732→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   733→                    code
+   734→                }
+   735→
+   736→                // ── Free ──
+   737→                IRInstr::Free { ptr } => {
+   738→                    let is_stack = ptr
+   739→                        .as_register()
+   740→                        .map(|id| stack_alloc_vregs.contains(&id))
+   741→                        .unwrap_or(false);
+   742→                    if is_stack {
+   743→                        // Stack allocation — no-op
+   744→                        Vec::new()
+   745→                    } else {
+   746→                        // Heap allocation — call __vuma_free(ptr)
+   747→                        let mut code = Vec::new();
+   748→                        // Load ptr from stack into RDI
+   749→                        code.extend(load_value(ptr, Gpr::Rdi));
+   750→                        // CALL rel32 — needs relocation
+   751→                        let call_offset = byte_offset + code.len() + 1;
+   752→                        code.extend(encode_call_rel32(0));
+   753→                        relocations.push(RelocationEntry {
+   754→                            offset: call_offset as u64,
+   755→                            symbol: "__vuma_free".to_string(),
+   756→                            reloc_type: R_X86_64_PLT32.to_string(),
+   757→                        });
+   758→                        code
+   759→                    }
+   760→                }
+   761→
+   762→                // ── Cast / Conversion ──
+   763→                IRInstr::Cast { kind, dst, src } => {
+   764→                    let mut code = Vec::new();
+   765→                    let dst_id = dst.as_register().unwrap_or(0);
+   766→
+   767→                    match kind {
+   768→                        CastKind::ZExt => {
+   769→                            if let IRValue::Immediate(imm) = src {
+   770→                                let imm = *imm;
+   771→                                if (-2147483648..=2147483647).contains(&imm) {
+   772→                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
+   773→                                } else {
+   774→                                    code.extend(encode_mov_reg_imm64(Gpr::Rax, imm as u64));
+   775→                                }
+   776→                            } else {
+   777→                                // Load from stack, zero-extend byte → 64 bits
+   778→                                code.extend(load_value(src, Gpr::Rax));
+   779→                                code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+   780→                            }
+   781→                        }
+   782→                        CastKind::SExt => {
+   783→                            if let IRValue::Immediate(imm) = src {
+   784→                                let imm = *imm;
+   785→                                if (-2147483648..=2147483647).contains(&imm) {
+   786→                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
+   787→                                } else {
+   788→                                    code.extend(encode_mov_reg_imm64(Gpr::Rax, imm as u64));
+   789→                                }
+   790→                            } else {
+   791→                                code.extend(load_value(src, Gpr::Rax));
+   792→                                code.extend(encode_movsx_reg8(Gpr::Rax, Gpr::Rax));
+   793→                            }
+   794→                        }
+   795→                        CastKind::Trunc | CastKind::BitCast => {
+   796→                            code.extend(load_value(src, Gpr::Rax));
+   797→                        }
+   798→                    }
+   799→                    code.extend(store_vreg(dst_id, Gpr::Rax));
+   800→                    code
+   801→                }
+   802→
+   803→                // ── Control: Ret ──
+   804→                IRInstr::Ret { values } => {
+   805→                    let mut code = Vec::new();
+   806→                    // Load return value into RAX
+   807→                    if let Some(val) = values.first() {
+   808→                        code.extend(load_value(val, Gpr::Rax));
+   809→                    }
+   810→                    // Epilogue: pop callee-saved in reverse order
+   811→                    for &reg in callee_save_regs.iter().rev() {
+   812→                        code.extend(encode_pop(reg));
+   813→                    }
+   814→                    // Restore RSP
+   815→                    if frame_size > 0 {
+   816→                        code.extend(encode_add_reg_imm32(Gpr::Rsp, frame_size as i32));
+   817→                    }
+   818→                    code.extend(encode_pop(Gpr::Rbp));
+   819→                    code.extend(encode_ret());
+   820→                    code
+   821→                }
+   822→
+   823→                // ── Control: Branch (unconditional) ──
+   824→                IRInstr::Branch { target } => {
+   825→                    let code = encode_jmp_rel32(0);
+   826→                    let rel32_offset = byte_offset + code.len() - 4;
+   827→                    branch_patches.push((rel32_offset, target.clone()));
+   828→                    code
+   829→                }
+   830→
+   831→                // ── Control: CondBranch ──
+   832→                IRInstr::CondBranch { cond, true_target, false_target } => {
+   833→                    let mut code = Vec::new();
+   834→                    // Load condition from stack into RAX
+   835→                    code.extend(load_value(cond, Gpr::Rax));
+   836→                    // test rax, rax; jnz true; jmp false
+   837→                    code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
+   838→                    // JNZ rel32
+   839→                    code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
+   840→                    let jnz_rel32_offset = byte_offset + code.len() - 4;
+   841→                    branch_patches.push((jnz_rel32_offset, true_target.clone()));
+   842→                    // JMP rel32
+   843→                    code.extend(encode_jmp_rel32(0));
+   844→                    let jmp_rel32_offset = byte_offset + code.len() - 4;
+   845→                    branch_patches.push((jmp_rel32_offset, false_target.clone()));
+   846→                    code
+   847→                }
+   848→
+   849→                // ── Call ──
+   850→                IRInstr::Call { dst, func: call_target, args } => {
+   851→                    let mut code = Vec::new();
+   852→                    // Load arguments from stack into SystemV arg registers
+   853→                    let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+   854→                    for (i, arg) in args.iter().enumerate() {
+   855→                        if i < call_arg_regs.len() {
+   856→                            code.extend(load_value(arg, call_arg_regs[i]));
+   857→                        }
+   858→                    }
+   859→                    // CALL rel32
+   860→                    code.extend(encode_call_rel32(0));
+   861→                    let call_rel32_offset = byte_offset + code.len() - 4;
+   862→                    relocations.push(RelocationEntry {
+   863→                        offset: call_rel32_offset as u64,
+   864→                        symbol: call_target.clone(),
+   865→                        reloc_type: R_X86_64_PLT32.to_string(),
+   866→                    });
+   867→                    // Store return value (RAX) to dst's stack slot
+   868→                    if let Some(d) = dst {
+   869→                        let dst_id = d.as_register().unwrap_or(0);
+   870→                        code.extend(store_vreg(dst_id, Gpr::Rax));
+   871→                    }
+   872→                    code
+   873→                }
+   874→
+   875→                // ── Phi ──
+   876→                // Phi nodes are resolved by the resolve_phis pass before codegen.
+   877→                // If any remain, they should have been replaced by copies.
+   878→                // Emit a NOP as a safety fallback.
+   879→                IRInstr::Phi { dst, incoming, .. } => {
+   880→                    // Self-referencing or trivial phi: just emit a NOP.
+   881→                    // Non-trivial phi should have been resolved by resolve_phis().
+   882→                    // As a safety measure, if the phi has exactly one non-self incoming,
+   883→                    // emit a copy from that incoming to dst.
+   884→                    let non_self: Vec<_> = incoming.iter()
+   885→                        .filter(|(val, _)| val != dst)
+   886→                        .collect();
+   887→                    if non_self.len() == 1 {
+   888→                        let (val, _) = non_self[0];
+   889→                        let mut code = Vec::new();
+   890→                        code.extend(load_value(val, Gpr::Rax));
+   891→                        let dst_id = dst.as_register().unwrap_or(0);
+   892→                        code.extend(store_vreg(dst_id, Gpr::Rax));
+   893→                        code
+   894→                    } else if non_self.is_empty() {
+   895→                        encode_nop() // trivial self-loop
+   896→                    } else {
+   897→                        // Multiple non-self incoming: should have been resolved.
+   898→                        // Just use the first one as a fallback.
+   899→                        let (val, _) = non_self[0];
+   900→                        let mut code = Vec::new();
+   901→                        code.extend(load_value(val, Gpr::Rax));
+   902→                        let dst_id = dst.as_register().unwrap_or(0);
+   903→                        code.extend(store_vreg(dst_id, Gpr::Rax));
+   904→                        code
+   905→                    }
+   906→                }
+   907→            };
+   908→
+   909→            if !encoded.is_empty() {
+   910→                byte_offset += encoded.len();
+   911→                encoded_instrs.push(AllocatedInstruction {
+   912→                    opcode: format!("{:?}", instr)
+   913→                        .split_whitespace()
+   914→                        .next()
+   915→                        .unwrap_or("unknown")
+   916→                        .to_string(),
+   917→                    reads: vec![],
+   918→                    writes: vec![],
+   919→                    encoded,
+   920→                });
+   921→            }
+   922→        }
+   923→    }
+   924→
+   925→    // ── Phase 4: Resolve intra-function branch patches ──
+   926→    //
+   927→    // For each branch patch, compute the rel32 offset from the branch instruction
+   928→    // to the target block's first instruction.
+   929→    //
+   930→    // rel32 = target_offset - (patch_offset + 4)
+   931→    // where patch_offset is the offset of the rel32 field within the function's code,
+   932→    // and target_offset is the offset of the target block.
+   933→
+   934→    // First, compute the byte offset of each encoded instruction
+   935→    let mut instr_offsets: Vec<usize> = Vec::with_capacity(encoded_instrs.len());
+   936→    let mut cur: usize = 0;
+   937→    for instr in &encoded_instrs {
+   938→        instr_offsets.push(cur);
+   939→        cur += instr.encoded.len();
+   940→    }
+   941→
+   942→    // Now patch each branch target
+   943→    for (patch_offset, target_label) in &branch_patches {
+   944→        if let Some(&target_offset) = block_offsets.get(target_label) {
+   945→            let rel32 = (target_offset as i64 - (*patch_offset as i64 + 4)) as i32;
+   946→            // Find the encoded instruction that contains this patch offset
+   947→            // and patch the rel32 field
+   948→            for (i, &start) in instr_offsets.iter().enumerate() {
+   949→                let end = start + encoded_instrs[i].encoded.len();
+   950→                if *patch_offset >= start && *patch_offset + 4 <= end {
+   951→                    let within_instr = *patch_offset - start;
+   952→                    let encoded = &mut encoded_instrs[i].encoded;
+   953→                    encoded[within_instr..within_instr + 4]
+   954→                        .copy_from_slice(&rel32.to_le_bytes());
+   955→                    break;
+   956→                }
+   957→            }
+   958→        }
+   959→        // If the target label is not found in block_offsets, it might be
+   960→        // a forward reference to a block that hasn't been defined yet.
+   961→        // This shouldn't happen if all blocks are processed in order.
+   962→    }
+   963→
+   964→    let code_size: usize = encoded_instrs.iter().map(|i| i.encoded.len()).sum();
+   965→
+   966→    // Callee-saved: always report all 5 (RBX, R12-R15) since we always push/pop them
+   967→    let callee_saved: Vec<PhysicalReg> = callee_save_regs
+   968→        .iter()
+   969→        .map(|r| PhysicalReg::new(RegClass::Gpr, r.encoding() as u32))
+   970→        .collect();
+   971→
+   972→    Ok(AllocatedFunction {
+   973→        name: func_name,
+   974→        blocks: vec![AllocatedBlock {
+   975→            label: "entry".to_string(),
+   976→            instructions: encoded_instrs,
+   977→            code_offset: 0,
+   978→        }],
+   979→        frame_size,
+   980→        callee_saved,
+   981→        spill_slots: 0,
+   982→        code_size,
+   983→        relocations,
+   984→    })
+   985→}
+   986→
