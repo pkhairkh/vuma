@@ -1,0 +1,2002 @@
+     1→//! # Intermediate Representation (IR)
+     2→//!
+     3→//! Defines the IR types used as the central representation between the SCG
+     4→//! (Semantic Computation Graph) front-end and the ARM64 code emitter.
+     5→//!
+     6→//! ## Hierarchy
+     7→//!
+     8→//! ```text
+     9→//! IRProgram
+    10→//!  ├── Vec<IRFunction>
+    11→//!  │    ├── name, params, results, param_types, result_types
+    12→//!  │    └── Vec<IRBlock>
+    13→//!  │         ├── label
+    14→//!  │         ├── Vec<IRInstr>
+    15→//!  │         └── IRTerminator
+    16→//!  └── Vec<DataSection>
+    17→//! ```
+    18→//!
+    19→//! ## Type System
+    20→//!
+    21→//! The IR includes a type system (`IRType`) that models the ARM64 LP64 data
+    22→//! model, with functions for computing sizes, alignments, AAPCS64 argument
+    23→//! classification, calling-convention layout, and stack-frame layout.
+    24→//!
+    25→//! The IR is intentionally low-level but target-independent.  It uses virtual
+    26→//! registers (`IRValue::Register(id)`) that are later mapped to physical
+    27→//! ARM64 registers by the register allocator.
+    28→
+    29→use std::collections::{HashMap, HashSet};
+    30→use std::fmt;
+    31→
+    32→// ---------------------------------------------------------------------------
+    33→// IRType
+    34→// ---------------------------------------------------------------------------
+    35→
+    36→/// A type in the IR type system.
+    37→///
+    38→/// Models the ARM64 LP64 data model where `int` is 32 bits and pointers are
+    39→/// 64 bits.  Supports primitive integer/float types, pointers, void,
+    40→/// function pointers, structs, and arrays.
+    41→#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    42→pub enum IRType {
+    43→    /// Signed 8-bit integer.
+    44→    I8,
+    45→    /// Signed 16-bit integer.
+    46→    I16,
+    47→    /// Signed 32-bit integer.
+    48→    I32,
+    49→    /// Signed 64-bit integer.
+    50→    I64,
+    51→    /// Unsigned 8-bit integer.
+    52→    U8,
+    53→    /// Unsigned 16-bit integer.
+    54→    U16,
+    55→    /// Unsigned 32-bit integer.
+    56→    U32,
+    57→    /// Unsigned 64-bit integer.
+    58→    U64,
+    59→    /// 32-bit IEEE 754 floating-point.
+    60→    F32,
+    61→    /// 64-bit IEEE 754 floating-point.
+    62→    F64,
+    63→    /// Opaque pointer (64-bit on ARM64 LP64).
+    64→    Ptr,
+    65→    /// Void type (size 0, only valid as a function return type).
+    66→    Void,
+    67→    /// Function pointer (pointer-sized).
+    68→    Func,
+    69→    /// Struct type with a name and ordered fields.
+    70→    Struct {
+    71→        /// Struct name (may be empty for anonymous structs).
+    72→        name: String,
+    73→        /// Fields in declaration order.
+    74→        fields: Vec<IRType>,
+    75→    },
+    76→    /// Array type with an element type and element count.
+    77→    Array {
+    78→        /// Element type.
+    79→        element: Box<IRType>,
+    80→        /// Number of elements.
+    81→        count: usize,
+    82→    },
+    83→}
+    84→
+    85→impl IRType {
+    86→    /// Returns `true` if this is an integer type (signed or unsigned).
+    87→    pub fn is_integer(&self) -> bool {
+    88→        matches!(
+    89→            self,
+    90→            IRType::I8
+    91→                | IRType::I16
+    92→                | IRType::I32
+    93→                | IRType::I64
+    94→                | IRType::U8
+    95→                | IRType::U16
+    96→                | IRType::U32
+    97→                | IRType::U64
+    98→        )
+    99→    }
+   100→
+   101→    /// Returns `true` if this is a floating-point type.
+   102→    pub fn is_float(&self) -> bool {
+   103→        matches!(self, IRType::F32 | IRType::F64)
+   104→    }
+   105→
+   106→    /// Returns `true` if this type is passed by value in registers under
+   107→    /// AAPCS64 (integer or FP primitive, pointer, func, or small struct/array).
+   108→    pub fn is_register_passable(&self) -> bool {
+   109→        match self {
+   110→            IRType::I8
+   111→            | IRType::I16
+   112→            | IRType::I32
+   113→            | IRType::I64
+   114→            | IRType::U8
+   115→            | IRType::U16
+   116→            | IRType::U32
+   117→            | IRType::U64
+   118→            | IRType::F32
+   119→            | IRType::F64
+   120→            | IRType::Ptr
+   121→            | IRType::Func => true,
+   122→            IRType::Void => false,
+   123→            IRType::Struct { fields, .. } => size_of(self) <= 16 && !fields.is_empty(),
+   124→            IRType::Array { .. } => size_of(self) <= 16,
+   125→        }
+   126→    }
+   127→
+   128→    /// Returns `true` if this is a Homogeneous Floating-point Aggregate (HFA)
+   129→    /// — a struct or array of 1–4 identical floating-point members.
+   130→    pub fn is_hfa(&self) -> bool {
+   131→        match self {
+   132→            IRType::Struct { fields, .. } => {
+   133→                if fields.is_empty() || fields.len() > 4 {
+   134→                    return false;
+   135→                }
+   136→                let first = &fields[0];
+   137→                if !first.is_float() {
+   138→                    return false;
+   139→                }
+   140→                fields.iter().all(|f| f == first)
+   141→            }
+   142→            IRType::Array { element, count } => {
+   143→                if *count == 0 || *count > 4 {
+   144→                    return false;
+   145→                }
+   146→                element.is_float()
+   147→            }
+   148→            _ => false,
+   149→        }
+   150→    }
+   151→
+   152→    /// If this is an HFA, returns the element type and count.
+   153→    pub fn hfa_info(&self) -> Option<(&IRType, usize)> {
+   154→        if !self.is_hfa() {
+   155→            return None;
+   156→        }
+   157→        match self {
+   158→            IRType::Struct { fields, .. } => Some((&fields[0], fields.len())),
+   159→            IRType::Array { element, count } => Some((element, *count)),
+   160→            _ => None,
+   161→        }
+   162→    }
+   163→}
+   164→
+   165→impl fmt::Display for IRType {
+   166→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   167→        match self {
+   168→            IRType::I8 => write!(f, "i8"),
+   169→            IRType::I16 => write!(f, "i16"),
+   170→            IRType::I32 => write!(f, "i32"),
+   171→            IRType::I64 => write!(f, "i64"),
+   172→            IRType::U8 => write!(f, "u8"),
+   173→            IRType::U16 => write!(f, "u16"),
+   174→            IRType::U32 => write!(f, "u32"),
+   175→            IRType::U64 => write!(f, "u64"),
+   176→            IRType::F32 => write!(f, "f32"),
+   177→            IRType::F64 => write!(f, "f64"),
+   178→            IRType::Ptr => write!(f, "ptr"),
+   179→            IRType::Void => write!(f, "void"),
+   180→            IRType::Func => write!(f, "func"),
+   181→            IRType::Struct { name, fields } => {
+   182→                let fields_str = fields
+   183→                    .iter()
+   184→                    .map(|t| format!("{}", t))
+   185→                    .collect::<Vec<_>>()
+   186→                    .join(", ");
+   187→                write!(f, "struct {} {{ {} }}", name, fields_str)
+   188→            }
+   189→            IRType::Array { element, count } => {
+   190→                write!(f, "[{}; {}]", element, count)
+   191→            }
+   192→        }
+   193→    }
+   194→}
+   195→
+   196→// ---------------------------------------------------------------------------
+   197→// size_of / alignment_of  (ARM64 LP64)
+   198→// ---------------------------------------------------------------------------
+   199→
+   200→/// Returns the byte size of `t` on ARM64 under the LP64 data model.
+   201→///
+   202→/// - Integers: their bit-width / 8
+   203→/// - Floats: 4 (f32) or 8 (f64)
+   204→/// - Pointers / function pointers: 8
+   205→/// - Void: 0
+   206→/// - Structs: sum of field sizes with inter-field padding for alignment,
+   207→///   rounded up to the struct's own alignment
+   208→/// - Arrays: `size_of(element) * count`
+   209→pub fn size_of(t: &IRType) -> usize {
+   210→    match t {
+   211→        IRType::I8 | IRType::U8 => 1,
+   212→        IRType::I16 | IRType::U16 => 2,
+   213→        IRType::I32 | IRType::U32 => 4,
+   214→        IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => 8,
+   215→        IRType::F32 => 4,
+   216→        IRType::F64 => 8,
+   217→        IRType::Void => 0,
+   218→        IRType::Struct { fields, .. } => {
+   219→            let mut offset = 0usize;
+   220→            for field in fields {
+   221→                let field_align = alignment_of(field);
+   222→                // Align the current offset to the field alignment.
+   223→                offset = (offset + field_align - 1) & !(field_align - 1);
+   224→                offset += size_of(field);
+   225→            }
+   226→            // Round up to struct alignment.
+   227→            let struct_align = alignment_of(t);
+   228→            if struct_align > 0 {
+   229→                (offset + struct_align - 1) & !(struct_align - 1)
+   230→            } else {
+   231→                0
+   232→            }
+   233→        }
+   234→        IRType::Array { element, count } => size_of(element) * count,
+   235→    }
+   236→}
+   237→
+   238→/// Returns the natural alignment of `t` on ARM64 under the LP64 data model.
+   239→///
+   240→/// - Primitives: their size
+   241→/// - Void: 1 (by convention, so that `size_of` math works for empty structs)
+   242→/// - Structs: maximum alignment of any field
+   243→/// - Arrays: alignment of the element type
+   244→pub fn alignment_of(t: &IRType) -> usize {
+   245→    match t {
+   246→        IRType::I8 | IRType::U8 => 1,
+   247→        IRType::I16 | IRType::U16 => 2,
+   248→        IRType::I32 | IRType::U32 => 4,
+   249→        IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => 8,
+   250→        IRType::F32 => 4,
+   251→        IRType::F64 => 8,
+   252→        IRType::Void => 1,
+   253→        IRType::Struct { fields, .. } => {
+   254→            if fields.is_empty() {
+   255→                return 1;
+   256→            }
+   257→            fields.iter().map(alignment_of).max().unwrap_or(1)
+   258→        }
+   259→        IRType::Array { element, .. } => alignment_of(element),
+   260→    }
+   261→}
+   262→
+   263→// ---------------------------------------------------------------------------
+   264→// AAPCS64 Argument Classification
+   265→// ---------------------------------------------------------------------------
+   266→
+   267→/// Classification of how an argument or return value is passed under AAPCS64.
+   268→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   269→pub enum ArgClass {
+   270→    /// Passed in a general-purpose (X) register.
+   271→    Integer,
+   272→    /// Passed in a SIMD/FP (V) register.
+   273→    FP,
+   274→    /// Passed on the stack.
+   275→    Stack,
+   276→    /// Passed indirectly — the caller passes a pointer to the value.
+   277→    /// For returns, the caller provides the address in X8.
+   278→    Indirect,
+   279→}
+   280→
+   281→impl fmt::Display for ArgClass {
+   282→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   283→        f.write_str(match self {
+   284→            ArgClass::Integer => "integer",
+   285→            ArgClass::FP => "fp",
+   286→            ArgClass::Stack => "stack",
+   287→            ArgClass::Indirect => "indirect",
+   288→        })
+   289→    }
+   290→}
+   291→
+   292→/// Classifies a single argument or return-value type according to AAPCS64.
+   293→///
+   294→/// ## Rules (simplified)
+   295→///
+   296→/// - Integer types, pointers, and function pointers → `Integer`
+   297→/// - Floating-point types → `FP`
+   298→/// - Void → `Integer` (only valid for return; caller should check)
+   299→/// - Homogeneous FP aggregates (1–4 same-type FP members) → `FP`
+   300→/// - Structs / arrays ≤ 16 bytes (not HFA) → `Integer`
+   301→/// - Structs / arrays > 16 bytes → `Indirect`
+   302→pub fn classify_arg(t: &IRType) -> ArgClass {
+   303→    match t {
+   304→        // Integer types → Integer class
+   305→        IRType::I8
+   306→        | IRType::I16
+   307→        | IRType::I32
+   308→        | IRType::I64
+   309→        | IRType::U8
+   310→        | IRType::U16
+   311→        | IRType::U32
+   312→        | IRType::U64
+   313→        | IRType::Ptr
+   314→        | IRType::Func => ArgClass::Integer,
+   315→
+   316→        // Floating-point → FP class
+   317→        IRType::F32 | IRType::F64 => ArgClass::FP,
+   318→
+   319→        // Void — only meaningful as a return type; classify as Integer
+   320→        // (the caller should treat a void return as "no return value").
+   321→        IRType::Void => ArgClass::Integer,
+   322→
+   323→        // Struct / Array: check HFA first, then size.
+   324→        IRType::Struct { .. } | IRType::Array { .. } => {
+   325→            if t.is_hfa() {
+   326→                ArgClass::FP
+   327→            } else {
+   328→                let sz = size_of(t);
+   329→                if sz <= 16 {
+   330→                    ArgClass::Integer
+   331→                } else {
+   332→                    ArgClass::Indirect
+   333→                }
+   334→            }
+   335→        }
+   336→    }
+   337→}
+   338→
+   339→// ---------------------------------------------------------------------------
+   340→// Calling Convention
+   341→// ---------------------------------------------------------------------------
+   342→
+   343→/// Which kind of register an argument or return value occupies.
+   344→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   345→pub enum RegisterClass {
+   346→    /// General-purpose X register (X0–X30, SP, XZR).
+   347→    X,
+   348→    /// SIMD/FP V register (V0–V31).
+   349→    V,
+   350→}
+   351→
+   352→impl fmt::Display for RegisterClass {
+   353→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   354→        f.write_str(match self {
+   355→            RegisterClass::X => "x",
+   356→            RegisterClass::V => "v",
+   357→        })
+   358→    }
+   359→}
+   360→
+   361→/// Describes where a single argument or return value is placed.
+   362→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   363→pub struct ArgLocation {
+   364→    /// Index of the argument (0-based) in the argument list.
+   365→    pub index: usize,
+   366→    /// AAPCS64 classification of this argument.
+   367→    pub class: ArgClass,
+   368→    /// Register class and index, if passed in a register.
+   369→    /// For `ArgClass::Integer` → `(RegisterClass::X, n)` where n is 0–7.
+   370→    /// For `ArgClass::FP` → `(RegisterClass::V, n)` where n is 0–7.
+   371→    /// `None` for stack or indirect arguments.
+   372→    pub register: Option<(RegisterClass, u32)>,
+   373→    /// Byte offset from SP (for stack arguments) or from the indirect
+   374→    /// pointer, if applicable.  `None` for register arguments.
+   375→    pub stack_offset: Option<i32>,
+   376→}
+   377→
+   378→/// Describes the location of the return value.
+   379→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   380→pub struct RetLocation {
+   381→    /// AAPCS64 classification of the return.
+   382→    pub class: ArgClass,
+   383→    /// Register(s) used for the return value.
+   384→    /// - Void: empty
+   385→    /// - Integer ≤ 8 bytes: `[(X, 0)]`
+   386→    /// - Integer 9–16 bytes (struct): `[(X, 0), (X, 1)]`
+   387→    /// - FP (HFA 1 member): `[(V, 0)]`, etc.
+   388→    /// - Indirect: `[(X, 8)]` — X8 holds the caller-allocated address
+   389→    pub registers: Vec<(RegisterClass, u32)>,
+   390→}
+   391→
+   392→/// Complete calling-convention information for a function signature.
+   393→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   394→pub struct CallingConvInfo {
+   395→    /// Location for each argument.
+   396→    pub arg_locations: Vec<ArgLocation>,
+   397→    /// Location for the return value.
+   398→    pub ret_location: RetLocation,
+   399→    /// Total bytes of stack argument space that the *caller* must reserve
+   400→    /// for arguments that don't fit in registers.
+   401→    pub stack_args_size: usize,
+   402→}
+   403→
+   404→/// Computes calling-convention information for a function signature.
+   405→///
+   406→/// Walks the argument types, classifies each, and assigns registers (X0–X7
+   407→/// for integer/pointer, V0–V7 for FP) or stack slots.  Also classifies the
+   408→/// return value.
+   409→///
+   410→/// ## Return-value handling
+   411→///
+   412→/// - `void` → no registers
+   413→/// - Integer/pointer ≤ 8 bytes → X0
+   414→/// - Small struct (≤16 bytes, integer-like) → X0, X1
+   415→/// - FP primitive → V0
+   416→/// - HFA with N members → V0..V(N-1)
+   417→/// - Large type (>16 bytes, not HFA) → indirect via X8
+   418→pub fn compute_calling_conv(args: &[IRType], ret: &IRType) -> CallingConvInfo {
+   419→    let mut x_reg_idx: u32 = 0;
+   420→    let mut v_reg_idx: u32 = 0;
+   421→    let mut stack_offset: i32 = 0;
+   422→    let mut arg_locations = Vec::with_capacity(args.len());
+   423→
+   424→    // If the return value is indirect, X8 is used for the return-area
+   425→    // pointer.  Per AAPCS64, this is passed as a hidden first argument in X8.
+   426→    // We model it by setting x_reg_idx = 1 so that the first explicit
+   427→    // argument starts at X0 (if not indirect) or X1 (since X8 is reserved).
+   428→    // Actually, AAPCS64 says X8 is *separate* — it does not consume an
+   429→    // argument register slot.  The integer argument registers X0–X7 are
+   430→    // independent of X8.  So we don't need to adjust x_reg_idx.
+   431→    let indirect_ret = classify_arg(ret) == ArgClass::Indirect;
+   432→
+   433→    for (i, arg_type) in args.iter().enumerate() {
+   434→        let class = classify_arg(arg_type);
+   435→        match class {
+   436→            ArgClass::Integer => {
+   437→                if x_reg_idx < 8 {
+   438→                    arg_locations.push(ArgLocation {
+   439→                        index: i,
+   440→                        class,
+   441→                        register: Some((RegisterClass::X, x_reg_idx)),
+   442→                        stack_offset: None,
+   443→                    });
+   444→                    x_reg_idx += 1;
+   445→                } else {
+   446→                    // Spill to stack — each stack arg is 8-byte aligned.
+   447→                    arg_locations.push(ArgLocation {
+   448→                        index: i,
+   449→                        class: ArgClass::Stack,
+   450→                        register: None,
+   451→                        stack_offset: Some(stack_offset),
+   452→                    });
+   453→                    stack_offset += 8;
+   454→                }
+   455→            }
+   456→            ArgClass::FP => {
+   457→                // HFA: may consume multiple V registers.
+   458→                if let Some((elem_ty, count)) = arg_type.hfa_info() {
+   459→                    let elem_size = size_of(elem_ty);
+   460→                    if v_reg_idx + count as u32 <= 8 {
+   461→                        // HFA fits in V registers — store the first register;
+   462→                        // the remaining are consecutive.
+   463→                        arg_locations.push(ArgLocation {
+   464→                            index: i,
+   465→                            class,
+   466→                            register: Some((RegisterClass::V, v_reg_idx)),
+   467→                            stack_offset: None,
+   468→                        });
+   469→                        v_reg_idx += count as u32;
+   470→                    } else {
+   471→                        // HFA spills to stack — each member is naturally aligned.
+   472→                        let mut off = stack_offset;
+   473→                        for _ in 0..count {
+   474→                            let align = alignment_of(elem_ty) as i32;
+   475→                            off = (off + align - 1) & !(align - 1);
+   476→                            off += elem_size as i32;
+   477→                        }
+   478→                        arg_locations.push(ArgLocation {
+   479→                            index: i,
+   480→                            class: ArgClass::Stack,
+   481→                            register: None,
+   482→                            stack_offset: Some(stack_offset),
+   483→                        });
+   484→                        stack_offset = off;
+   485→                    }
+   486→                } else {
+   487→                    // Single FP value.
+   488→                    if v_reg_idx < 8 {
+   489→                        arg_locations.push(ArgLocation {
+   490→                            index: i,
+   491→                            class,
+   492→                            register: Some((RegisterClass::V, v_reg_idx)),
+   493→                            stack_offset: None,
+   494→                        });
+   495→                        v_reg_idx += 1;
+   496→                    } else {
+   497→                        let align = alignment_of(arg_type) as i32;
+   498→                        stack_offset = (stack_offset + align - 1) & !(align - 1);
+   499→                        arg_locations.push(ArgLocation {
+   500→                            index: i,
+   501→                            class: ArgClass::Stack,
+   502→                            register: None,
+   503→                            stack_offset: Some(stack_offset),
+   504→                        });
+   505→                        stack_offset += size_of(arg_type) as i32;
+   506→                    }
+   507→                }
+   508→            }
+   509→            ArgClass::Indirect => {
+   510→                // Pass a pointer to the value in an X register (or on stack).
+   511→                if x_reg_idx < 8 {
+   512→                    arg_locations.push(ArgLocation {
+   513→                        index: i,
+   514→                        class,
+   515→                        register: Some((RegisterClass::X, x_reg_idx)),
+   516→                        stack_offset: None,
+   517→                    });
+   518→                    x_reg_idx += 1;
+   519→                } else {
+   520→                    arg_locations.push(ArgLocation {
+   521→                        index: i,
+   522→                        class: ArgClass::Stack,
+   523→                        register: None,
+   524→                        stack_offset: Some(stack_offset),
+   525→                    });
+   526→                    stack_offset += 8;
+   527→                }
+   528→            }
+   529→            ArgClass::Stack => {
+   530→                let align = alignment_of(arg_type) as i32;
+   531→                stack_offset = (stack_offset + align - 1) & !(align - 1);
+   532→                arg_locations.push(ArgLocation {
+   533→                    index: i,
+   534→                    class,
+   535→                    register: None,
+   536→                    stack_offset: Some(stack_offset),
+   537→                });
+   538→                stack_offset += size_of(arg_type) as i32;
+   539→            }
+   540→        }
+   541→    }
+   542→
+   543→    // Align stack args size to 16 bytes (AAPCS64 requirement).
+   544→    let stack_args_size = ((stack_offset as usize) + 15) & !15;
+   545→
+   546→    // Compute return-value location.
+   547→    let ret_class = classify_arg(ret);
+   548→    let ret_location = match ret_class {
+   549→        ArgClass::Integer => {
+   550→            if *ret == IRType::Void {
+   551→                RetLocation {
+   552→                    class: ret_class,
+   553→                    registers: vec![],
+   554→                }
+   555→            } else {
+   556→                let sz = size_of(ret);
+   557→                if sz <= 8 {
+   558→                    RetLocation {
+   559→                        class: ret_class,
+   560→                        registers: vec![(RegisterClass::X, 0)],
+   561→                    }
+   562→                } else {
+   563→                    // Struct ≤ 16 bytes returned in X0 + X1.
+   564→                    RetLocation {
+   565→                        class: ret_class,
+   566→                        registers: vec![(RegisterClass::X, 0), (RegisterClass::X, 1)],
+   567→                    }
+   568→                }
+   569→            }
+   570→        }
+   571→        ArgClass::FP => {
+   572→            if let Some((_, count)) = ret.hfa_info() {
+   573→                let regs: Vec<(RegisterClass, u32)> =
+   574→                    (0..count as u32).map(|i| (RegisterClass::V, i)).collect();
+   575→                RetLocation {
+   576→                    class: ret_class,
+   577→                    registers: regs,
+   578→                }
+   579→            } else {
+   580→                RetLocation {
+   581→                    class: ret_class,
+   582→                    registers: vec![(RegisterClass::V, 0)],
+   583→                }
+   584→            }
+   585→        }
+   586→        ArgClass::Indirect => RetLocation {
+   587→            class: ret_class,
+   588→            registers: vec![(RegisterClass::X, 8)],
+   589→        },
+   590→        ArgClass::Stack => {
+   591→            // Stack return is unusual; model as indirect for now.
+   592→            RetLocation {
+   593→                class: ArgClass::Indirect,
+   594→                registers: vec![(RegisterClass::X, 8)],
+   595→            }
+   596→        }
+   597→    };
+   598→
+   599→    let _ = indirect_ret; // X8 reservation is implicit via ret_location.
+   600→
+   601→    CallingConvInfo {
+   602→        arg_locations,
+   603→        ret_location,
+   604→        stack_args_size,
+   605→    }
+   606→}
+   607→
+   608→// ---------------------------------------------------------------------------
+   609→// Stack Layout
+   610→// ---------------------------------------------------------------------------
+   611→
+   612→/// A named slot in the stack frame.
+   613→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   614→pub struct StackSlot {
+   615→    /// Human-readable name for this slot.
+   616→    pub name: String,
+   617→    /// Offset from the frame pointer (FP / X29).  Negative values are in the
+   618→    /// callee's frame (locals, saved regs); positive values point into the
+   619→    /// caller's stack-argument area.
+   620→    pub offset: i32,
+   621→    /// Size of this slot in bytes.
+   622→    pub size: usize,
+   623→    /// Alignment of this slot in bytes.
+   624→    pub alignment: usize,
+   625→}
+   626→
+   627→/// Complete stack-frame layout for a function.
+   628→///
+   629→/// The stack frame layout follows the AAPCS64 convention:
+   630→///
+   631→/// ```text
+   632→/// Higher addresses
+   633→///   ┌─────────────────────┐
+   634→///   │ Incoming stack args  │  FP+16, FP+24, …
+   635→///   ├─────────────────────┤
+   636→///   │ Saved FP (X29)       │  FP+0
+   637→///   │ Saved LR (X30)       │  FP+8
+   638→///   ├─────────────────────┤
+   639→///   │ Callee-saved regs    │  FP-8, FP-16, …
+   640→///   │ (X19..X28)           │
+   641→///   ├─────────────────────┤
+   642→///   │ Local variables      │  from Alloc instructions
+   643→///   │ (aligned)            │
+   644→///   ├─────────────────────┤
+   645→///   │ Outgoing stack args  │  bottom of frame (for calls)
+   646→///   │ (for nested calls)   │
+   647→///   └─────────────────────┘  ← SP
+   648→/// Lower addresses
+   649→/// ```
+   650→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   651→pub struct StackLayout {
+   652→    /// Total stack frame size in bytes (always 16-byte aligned).
+   653→    pub total_size: usize,
+   654→    /// Slots for callee-saved registers.
+   655→    pub callee_save_slots: Vec<StackSlot>,
+   656→    /// Slots for local variables (from `Alloc` instructions).
+   657→    pub local_slots: Vec<StackSlot>,
+   658→    /// Slot for outgoing stack arguments to callees (single contiguous area).
+   659→    pub outgoing_args_slot: Option<StackSlot>,
+   660→    /// Slot for the saved FP (X29) — always at FP+0.
+   661→    pub fp_slot: StackSlot,
+   662→    /// Slot for the saved LR (X30) — always at FP+8.
+   663→    pub lr_slot: StackSlot,
+   664→    /// Number of callee-saved registers that are spilled.
+   665→    pub callee_saves_count: usize,
+   666→}
+   667→
+   668→/// Computes the stack-frame layout for an IR function.
+   669→///
+   670→/// This scans the function body for `Alloc` instructions (local variables) and
+   671→/// `Call` instructions (outgoing stack arguments), and lays out the frame
+   672→/// according to AAPCS64 conventions.
+   673→///
+   674→/// ## Parameters
+   675→///
+   676→/// - `func`: The IR function to compute the layout for.
+   677→/// - `callee_saves_count`: How many callee-saved registers (X19–X28) the
+   678→///   function uses.  Set by the register allocator.  Each consumes 8 bytes.
+   679→/// - `call_arg_types`: For each `Call` instruction in the function, the
+   680→///   argument types.  This is used to compute the outgoing stack-argument
+   681→///   area size.  If empty or if calls have no stack args, no outgoing area
+   682→///   is needed.
+   683→pub fn compute_stack_layout(func: &IRFunction) -> StackLayout {
+   684→    compute_stack_layout_with_info(func, 0, &[])
+   685→}
+   686→
+   687→/// Computes the stack-frame layout with additional information from the
+   688→/// register allocator and call-site type information.
+   689→///
+   690→/// See [`compute_stack_layout`] for the simplified version.
+   691→pub fn compute_stack_layout_with_info(
+   692→    func: &IRFunction,
+   693→    callee_saves_count: usize,
+   694→    call_arg_types: &[Vec<IRType>],
+   695→) -> StackLayout {
+   696→    // Fixed slots: saved FP at FP+0, saved LR at FP+8.
+   697→    let fp_slot = StackSlot {
+   698→        name: "saved_fp".to_string(),
+   699→        offset: 0,
+   700→        size: 8,
+   701→        alignment: 8,
+   702→    };
+   703→    let lr_slot = StackSlot {
+   704→        name: "saved_lr".to_string(),
+   705→        offset: 8,
+   706→        size: 8,
+   707→        alignment: 8,
+   708→    };
+   709→
+   710→    // Current negative offset from FP, growing downward.
+   711→    let mut offset: i32 = 0;
+   712→
+   713→    // --- Callee-saved registers ---
+   714→    let mut callee_save_slots = Vec::new();
+   715→    for i in 0..callee_saves_count {
+   716→        offset -= 8;
+   717→        callee_save_slots.push(StackSlot {
+   718→            name: format!("callee_save_{}", i),
+   719→            offset,
+   720→            size: 8,
+   721→            alignment: 8,
+   722→        });
+   723→    }
+   724→
+   725→    // --- Local variables (from Alloc instructions) ---
+   726→    let mut local_slots = Vec::new();
+   727→    let mut alloc_index = 0;
+   728→    for block in &func.blocks {
+   729→        for instr in &block.instructions {
+   730→            if let IRInstr::Alloc { dst, size } = instr {
+   731→                let size = *size as usize;
+   732→                let align = if size >= 8 {
+   733→                    8usize
+   734→                } else {
+   735→                    size.next_power_of_two()
+   736→                };
+   737→                // Align offset.
+   738→                offset = (offset - align as i32) & !(align as i32 - 1);
+   739→                offset -= size as i32;
+   740→                // Re-align offset to the start of the slot.
+   741→                offset &= !(align as i32 - 1);
+   742→                let name = match dst {
+   743→                    IRValue::Register(id) => format!("local_%v{}", id),
+   744→                    _ => format!("local_{}", alloc_index),
+   745→                };
+   746→                local_slots.push(StackSlot {
+   747→                    name,
+   748→                    offset,
+   749→                    size,
+   750→                    alignment: align,
+   751→                });
+   752→                alloc_index += 1;
+   753→            }
+   754→        }
+   755→    }
+   756→
+   757→    // --- Outgoing stack arguments ---
+   758→    // Compute the maximum stack-args size across all call sites.
+   759→    let mut max_outgoing_stack = 0usize;
+   760→    for arg_types in call_arg_types {
+   761→        let cc = compute_calling_conv(arg_types, &IRType::Void);
+   762→        max_outgoing_stack = max_outgoing_stack.max(cc.stack_args_size);
+   763→    }
+   764→
+   765→    let outgoing_args_slot = if max_outgoing_stack > 0 {
+   766→        // Align to 16 bytes.
+   767→        let size = (max_outgoing_stack + 15) & !15;
+   768→        offset -= size as i32;
+   769→        Some(StackSlot {
+   770→            name: "outgoing_args".to_string(),
+   771→            offset,
+   772→            size,
+   773→            alignment: 16,
+   774→        })
+   775→    } else {
+   776→        None
+   777→    };
+   778→
+   779→    // Total frame size: absolute value of the lowest offset, plus 16 for
+   780→    // FP/LR pair.  The frame pointer is at the saved-FP position; everything
+   781→    // below is at negative offsets from FP.
+   782→    let total_raw = ((-offset) as usize) + 16; // 16 = FP + LR
+   783→    let total_size = (total_raw + 15) & !15; // 16-byte align.
+   784→
+   785→    StackLayout {
+   786→        total_size,
+   787→        callee_save_slots,
+   788→        local_slots,
+   789→        outgoing_args_slot,
+   790→        fp_slot,
+   791→        lr_slot,
+   792→        callee_saves_count,
+   793→    }
+   794→}
+   795→
+   796→// ---------------------------------------------------------------------------
+   797→// IRValue
+   798→// ---------------------------------------------------------------------------
+   799→
+   800→/// A value that can appear as an operand in an IR instruction.
+   801→#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   802→pub enum IRValue {
+   803→    /// A virtual register identified by a numeric ID.
+   804→    Register(u32),
+   805→    /// An immediate constant.
+   806→    Immediate(i64),
+   807→    /// A memory address (absolute).
+   808→    Address(u64),
+   809→    /// A named label (for branch targets).
+   810→    Label(String),
+   811→}
+   812→
+   813→impl IRValue {
+   814→    /// Returns `true` if this is a virtual register.
+   815→    pub fn is_register(&self) -> bool {
+   816→        matches!(self, IRValue::Register(_))
+   817→    }
+   818→
+   819→    /// Returns `true` if this is an immediate constant.
+   820→    pub fn is_immediate(&self) -> bool {
+   821→        matches!(self, IRValue::Immediate(_))
+   822→    }
+   823→
+   824→    /// Extract the register ID, if this is a register value.
+   825→    pub fn as_register(&self) -> Option<u32> {
+   826→        match self {
+   827→            IRValue::Register(id) => Some(*id),
+   828→            _ => None,
+   829→        }
+   830→    }
+   831→
+   832→    /// Extract the immediate value, if this is an immediate.
+   833→    pub fn as_immediate(&self) -> Option<i64> {
+   834→        match self {
+   835→            IRValue::Immediate(v) => Some(*v),
+   836→            _ => None,
+   837→        }
+   838→    }
+   839→}
+   840→
+   841→impl fmt::Display for IRValue {
+   842→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   843→        match self {
+   844→            IRValue::Register(id) => write!(f, "%v{}", id),
+   845→            IRValue::Immediate(v) => write!(f, "{}", v),
+   846→            IRValue::Address(a) => write!(f, "0x{:016x}", a),
+   847→            IRValue::Label(name) => write!(f, "@{}", name),
+   848→        }
+   849→    }
+   850→}
+   851→
+   852→// ---------------------------------------------------------------------------
+   853→// Binary / Unary operators
+   854→// ---------------------------------------------------------------------------
+   855→
+   856→/// Binary operations supported by the IR.
+   857→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   858→pub enum BinOpKind {
+   859→    /// Integer addition.
+   860→    Add,
+   861→    /// Integer subtraction.
+   862→    Sub,
+   863→    /// Integer multiplication.
+   864→    Mul,
+   865→    /// Signed integer division.
+   866→    SDiv,
+   867→    /// Unsigned integer division.
+   868→    UDiv,
+   869→    /// Signed integer remainder.
+   870→    SRem,
+   871→    /// Unsigned integer remainder.
+   872→    URem,
+   873→    /// Bitwise AND.
+   874→    And,
+   875→    /// Bitwise OR.
+   876→    Or,
+   877→    /// Bitwise XOR.
+   878→    Xor,
+   879→    /// Logical left shift.
+   880→    Shl,
+   881→    /// Logical right shift.
+   882→    ShrL,
+   883→    /// Arithmetic right shift.
+   884→    ShrA,
+   885→    /// Rotate right.
+   886→    Ror,
+   887→    /// Rotate left.
+   888→    Rol,
+   889→    /// Signed less-than comparison.
+   890→    SLt,
+   891→    /// Signed less-than-or-equal comparison.
+   892→    SLe,
+   893→    /// Signed greater-than comparison.
+   894→    SGt,
+   895→    /// Signed greater-than-or-equal comparison.
+   896→    SGe,
+   897→    /// Unsigned less-than comparison.
+   898→    ULt,
+   899→    /// Unsigned less-than-or-equal comparison.
+   900→    ULe,
+   901→    /// Unsigned greater-than comparison.
+   902→    UGt,
+   903→    /// Unsigned greater-than-or-equal comparison.
+   904→    UGe,
+   905→    /// Equality comparison.
+   906→    Eq,
+   907→    /// Inequality comparison.
+   908→    Ne,
+   909→}
+   910→
+   911→impl fmt::Display for BinOpKind {
+   912→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   913→        f.write_str(match self {
+   914→            BinOpKind::Add => "add",
+   915→            BinOpKind::Sub => "sub",
+   916→            BinOpKind::Mul => "mul",
+   917→            BinOpKind::SDiv => "sdiv",
+   918→            BinOpKind::UDiv => "udiv",
+   919→            BinOpKind::SRem => "srem",
+   920→            BinOpKind::URem => "urem",
+   921→            BinOpKind::And => "and",
+   922→            BinOpKind::Or => "or",
+   923→            BinOpKind::Xor => "xor",
+   924→            BinOpKind::Shl => "shl",
+   925→            BinOpKind::ShrL => "shr.l",
+   926→            BinOpKind::ShrA => "shr.a",
+   927→            BinOpKind::Ror => "ror",
+   928→            BinOpKind::Rol => "rol",
+   929→            BinOpKind::SLt => "slt",
+   930→            BinOpKind::SLe => "sle",
+   931→            BinOpKind::SGt => "sgt",
+   932→            BinOpKind::SGe => "sge",
+   933→            BinOpKind::ULt => "ult",
+   934→            BinOpKind::ULe => "ule",
+   935→            BinOpKind::UGt => "ugt",
+   936→            BinOpKind::UGe => "uge",
+   937→            BinOpKind::Eq => "eq",
+   938→            BinOpKind::Ne => "ne",
+   939→        })
+   940→    }
+   941→}
+   942→
+   943→/// Unary operations supported by the IR.
+   944→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   945→pub enum UnaryOpKind {
+   946→    /// Arithmetic negation.
+   947→    Neg,
+   948→    /// Bitwise NOT.
+   949→    Not,
+   950→    /// Count leading zeros.
+   951→    Clz,
+   952→    /// Count trailing zeros.
+   953→    Ctz,
+   954→    /// Population count (number of set bits).
+   955→    Popcnt,
+   956→}
+   957→
+   958→impl fmt::Display for UnaryOpKind {
+   959→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   960→        f.write_str(match self {
+   961→            UnaryOpKind::Neg => "neg",
+   962→            UnaryOpKind::Not => "not",
+   963→            UnaryOpKind::Clz => "clz",
+   964→            UnaryOpKind::Ctz => "ctz",
+   965→            UnaryOpKind::Popcnt => "popcnt",
+   966→        })
+   967→    }
+   968→}
+   969→
+   970→// ---------------------------------------------------------------------------
+   971→// VirtualRegister
+   972→// ---------------------------------------------------------------------------
+   973→
+   974→/// A named virtual register in SSA form.
+   975→///
+   976→/// Each virtual register has a unique numeric ID and an optional human-readable
+   977→/// name derived from the original source variable.  The ID guarantees uniqueness
+   978→/// even when the same source name is reused in different scopes.
+   979→#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   980→pub struct VirtualRegister {
+   981→    /// Unique numeric identifier.
+   982→    pub id: u32,
+   983→    /// Optional human-readable name (e.g. `"x"`, `"loop_idx"`).
+   984→    pub name: Option<String>,
+   985→}
+   986→
+   987→impl VirtualRegister {
+   988→    /// Create a new virtual register with the given ID and optional name.
+   989→    pub fn new(id: u32, name: Option<String>) -> Self {
+   990→        Self { id, name }
+   991→    }
+   992→
+   993→    /// Create an anonymous virtual register (no name).
+   994→    pub fn anonymous(id: u32) -> Self {
+   995→        Self::new(id, None)
+   996→    }
+   997→
+   998→    /// Create a named virtual register.
+   999→    pub fn named(id: u32, name: impl Into<String>) -> Self {
+  1000→        Self::new(id, Some(name.into()))
+  1001→    }
+  1002→
+  1003→    /// Returns the register ID.
+  1004→    pub fn id(&self) -> u32 {
+  1005→        self.id
+  1006→    }
+  1007→
+  1008→    /// Returns the name, if any.
+  1009→    pub fn name(&self) -> Option<&str> {
+  1010→        self.name.as_deref()
+  1011→    }
+  1012→}
+  1013→
+  1014→impl fmt::Display for VirtualRegister {
+  1015→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1016→        match &self.name {
+  1017→            Some(n) => write!(f, "%{}#{}", n, self.id),
+  1018→            None => write!(f, "%v{}", self.id),
+  1019→        }
+  1020→    }
+  1021→}
+  1022→
+  1023→// ---------------------------------------------------------------------------
+  1024→// CmpKind
+  1025→// ---------------------------------------------------------------------------
+  1026→
+  1027→/// Comparison operations supported by the IR.
+  1028→///
+  1029→/// Each comparison produces a boolean result (1 or 0) stored in the
+  1030→/// destination register.
+  1031→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+  1032→pub enum CmpKind {
+  1033→    /// Equal.
+  1034→    Eq,
+  1035→    /// Not equal.
+  1036→    Ne,
+  1037→    /// Signed less-than.
+  1038→    SLt,
+  1039→    /// Signed less-than-or-equal.
+  1040→    SLe,
+  1041→    /// Signed greater-than.
+  1042→    SGt,
+  1043→    /// Signed greater-than-or-equal.
+  1044→    SGe,
+  1045→    /// Unsigned less-than.
+  1046→    ULt,
+  1047→    /// Unsigned less-than-or-equal.
+  1048→    ULe,
+  1049→    /// Unsigned greater-than.
+  1050→    UGt,
+  1051→    /// Unsigned greater-than-or-equal.
+  1052→    UGe,
+  1053→}
+  1054→
+  1055→impl fmt::Display for CmpKind {
+  1056→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1057→        f.write_str(match self {
+  1058→            CmpKind::Eq => "cmp.eq",
+  1059→            CmpKind::Ne => "cmp.ne",
+  1060→            CmpKind::SLt => "cmp.slt",
+  1061→            CmpKind::SLe => "cmp.sle",
+  1062→            CmpKind::SGt => "cmp.sgt",
+  1063→            CmpKind::SGe => "cmp.sge",
+  1064→            CmpKind::ULt => "cmp.ult",
+  1065→            CmpKind::ULe => "cmp.ule",
+  1066→            CmpKind::UGt => "cmp.ugt",
+  1067→            CmpKind::UGe => "cmp.uge",
+  1068→        })
+  1069→    }
+  1070→}
+  1071→
+  1072→/// Cast / reinterpretation kinds.
+  1073→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+  1074→pub enum CastKind {
+  1075→    /// Zero-extend (e.g. u8 → u64).
+  1076→    ZExt,
+  1077→    /// Sign-extend (e.g. i8 → i64).
+  1078→    SExt,
+  1079→    /// Truncate (e.g. i64 → i32).
+  1080→    Trunc,
+  1081→    /// Reinterpret bits (no data change, just type change).
+  1082→    BitCast,
+  1083→}
+  1084→
+  1085→impl fmt::Display for CastKind {
+  1086→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1087→        f.write_str(match self {
+  1088→            CastKind::ZExt => "zext",
+  1089→            CastKind::SExt => "sext",
+  1090→            CastKind::Trunc => "trunc",
+  1091→            CastKind::BitCast => "bitcast",
+  1092→        })
+  1093→    }
+  1094→}
+  1095→
+  1096→// ---------------------------------------------------------------------------
+  1097→// IR Instruction
+  1098→// ---------------------------------------------------------------------------
+  1099→
+  1100→/// A single IR instruction.
+  1101→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1102→pub enum IRInstr {
+  1103→    /// Load a value from memory: `dst = load addr + offset`
+  1104→    Load {
+  1105→        /// Destination register.
+  1106→        dst: IRValue,
+  1107→        /// Source address register (base).
+  1108→        addr: IRValue,
+  1109→        /// Byte offset from the base address.
+  1110→        offset: i32,
+  1111→        /// Type of the value being loaded (determines memory access size).
+  1112→        ty: IRType,
+  1113→    },
+  1114→
+  1115→    /// Store a value to memory: `store value, addr + offset`
+  1116→    Store {
+  1117→        /// Value to store.
+  1118→        value: IRValue,
+  1119→        /// Target address register (base).
+  1120→        addr: IRValue,
+  1121→        /// Byte offset from the base address.
+  1122→        offset: i32,
+  1123→        /// Type of the value being stored (determines memory access size).
+  1124→        ty: IRType,
+  1125→    },
+  1126→
+  1127→    /// Binary operation: `dst = lhs op rhs`
+  1128→    BinOp {
+  1129→        /// The binary operator.
+  1130→        op: BinOpKind,
+  1131→        /// Destination register.
+  1132→        dst: IRValue,
+  1133→        /// Left-hand side operand.
+  1134→        lhs: IRValue,
+  1135→        /// Right-hand side operand.
+  1136→        rhs: IRValue,
+  1137→        /// Type of the operation result (determines 32-bit vs 64-bit encoding).
+  1138→        /// `None` defaults to 64-bit (X register) behavior.
+  1139→        ty: Option<IRType>,
+  1140→    },
+  1141→
+  1142→    /// Unary operation: `dst = op operand`
+  1143→    UnaryOp {
+  1144→        /// The unary operator.
+  1145→        op: UnaryOpKind,
+  1146→        /// Destination register.
+  1147→        dst: IRValue,
+  1148→        /// Operand value.
+  1149→        operand: IRValue,
+  1150→        /// Type of the operation result (determines 32-bit vs 64-bit encoding).
+  1151→        /// `None` defaults to 64-bit (X register) behavior.
+  1152→        ty: Option<IRType>,
+  1153→    },
+  1154→
+  1155→    /// Function call: `dst = call func_name(args…)`
+  1156→    Call {
+  1157→        /// Optional destination register for the return value.
+  1158→        dst: Option<IRValue>,
+  1159→        /// Function name.
+  1160→        func: String,
+  1161→        /// Argument values.
+  1162→        args: Vec<IRValue>,
+  1163→    },
+  1164→
+  1165→    /// Stack allocation: `dst = alloc size` — reserves `size` bytes on the
+  1166→    /// stack and returns a pointer in `dst`.
+  1167→    Alloc {
+  1168→        /// Destination register (pointer to allocated space).
+  1169→        dst: IRValue,
+  1170→        /// Size in bytes to allocate.
+  1171→        size: u32,
+  1172→    },
+  1173→
+  1174→    /// Heap deallocation: `free ptr` — not directly emitted as an instruction;
+  1175→    /// lowered to a runtime call.
+  1176→    Free {
+  1177→        /// Pointer to deallocate.
+  1178→        ptr: IRValue,
+  1179→    },
+  1180→
+  1181→    /// Type cast / reinterpret: `dst = cast kind src`
+  1182→    Cast {
+  1183→        /// Cast kind.
+  1184→        kind: CastKind,
+  1185→        /// Destination register.
+  1186→        dst: IRValue,
+  1187→        /// Source value.
+  1188→        src: IRValue,
+  1189→    },
+  1190→
+  1191→    /// SSA phi node: `dst = phi [(val, block), …]`
+  1192→    Phi {
+  1193→        /// Destination register.
+  1194→        dst: IRValue,
+  1195→        /// Incoming (value, predecessor-block) pairs.
+  1196→        incoming: Vec<(IRValue, String)>,
+  1197→    },
+  1198→
+  1199→    /// Compute the address of a data symbol: `dst = getaddress name`
+  1200→    GetAddress {
+  1201→        /// Destination register.
+  1202→        dst: IRValue,
+  1203→        /// Symbol name.
+  1204→        name: String,
+  1205→    },
+  1206→
+  1207→    /// Compute `dst = base + offset` (pointer arithmetic).
+  1208→    Offset {
+  1209→        /// Destination register.
+  1210→        dst: IRValue,
+  1211→        /// Base pointer value.
+  1212→        base: IRValue,
+  1213→        /// Offset value.
+  1214→        offset: IRValue,
+  1215→    },
+  1216→
+  1217→    /// Conditional select: `dst = if cond != 0 { true_val } else { false_val }`
+  1218→    Select {
+  1219→        /// Destination register.
+  1220→        dst: IRValue,
+  1221→        /// Condition value.
+  1222→        cond: IRValue,
+  1223→        /// Value when condition is true.
+  1224→        true_val: IRValue,
+  1225→        /// Value when condition is false.
+  1226→        false_val: IRValue,
+  1227→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1228→        /// `None` defaults to 64-bit (X register) behavior.
+  1229→        ty: Option<IRType>,
+  1230→    },
+  1231→
+  1232→    // ── Dedicated arithmetic instructions ────────────────────────────
+  1233→    /// Add: `dst = lhs + rhs`
+  1234→    Add {
+  1235→        /// Destination register.
+  1236→        dst: IRValue,
+  1237→        /// Left-hand side operand.
+  1238→        lhs: IRValue,
+  1239→        /// Right-hand side operand.
+  1240→        rhs: IRValue,
+  1241→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1242→        /// `None` defaults to 64-bit (X register) behavior.
+  1243→        ty: Option<IRType>,
+  1244→    },
+  1245→    /// Subtract: `dst = lhs - rhs`
+  1246→    Sub {
+  1247→        /// Destination register.
+  1248→        dst: IRValue,
+  1249→        /// Left-hand side operand.
+  1250→        lhs: IRValue,
+  1251→        /// Right-hand side operand.
+  1252→        rhs: IRValue,
+  1253→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1254→        /// `None` defaults to 64-bit (X register) behavior.
+  1255→        ty: Option<IRType>,
+  1256→    },
+  1257→    /// Multiply: `dst = lhs * rhs`
+  1258→    Mul {
+  1259→        /// Destination register.
+  1260→        dst: IRValue,
+  1261→        /// Left-hand side operand.
+  1262→        lhs: IRValue,
+  1263→        /// Right-hand side operand.
+  1264→        rhs: IRValue,
+  1265→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1266→        /// `None` defaults to 64-bit (X register) behavior.
+  1267→        ty: Option<IRType>,
+  1268→    },
+  1269→    /// Divide: `dst = lhs / rhs`
+  1270→    Div {
+  1271→        /// Destination register.
+  1272→        dst: IRValue,
+  1273→        /// Left-hand side operand.
+  1274→        lhs: IRValue,
+  1275→        /// Right-hand side operand.
+  1276→        rhs: IRValue,
+  1277→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1278→        /// `None` defaults to 64-bit (X register) behavior.
+  1279→        ty: Option<IRType>,
+  1280→    },
+  1281→
+  1282→    // ── Comparison ──────────────────────────────────────────────────
+  1283→    /// Comparison: `dst = cmp kind lhs rhs` — produces 1 or 0.
+  1284→    Cmp {
+  1285→        /// Comparison kind.
+  1286→        kind: CmpKind,
+  1287→        /// Destination register (boolean result).
+  1288→        dst: IRValue,
+  1289→        /// Left-hand side operand.
+  1290→        lhs: IRValue,
+  1291→        /// Right-hand side operand.
+  1292→        rhs: IRValue,
+  1293→        /// Type of the operands (determines 32-bit vs 64-bit comparison).
+  1294→        /// `None` defaults to 64-bit (X register) behavior.
+  1295→        ty: Option<IRType>,
+  1296→    },
+  1297→
+  1298→    // ── Instruction-level control flow ───────────────────────────────
+  1299→    /// Return from the current function with optional values.
+  1300→    Ret {
+  1301→        /// Return value registers.
+  1302→        values: Vec<IRValue>,
+  1303→    },
+  1304→    /// Unconditional branch to a label.
+  1305→    Branch {
+  1306→        /// Target label.
+  1307→        target: String,
+  1308→    },
+  1309→    /// Conditional branch: if `cond` is non-zero, go to `true_target`;
+  1310→    /// otherwise go to `false_target`.
+  1311→    CondBranch {
+  1312→        /// Condition value.
+  1313→        cond: IRValue,
+  1314→        /// Label to branch to when condition is true.
+  1315→        true_target: String,
+  1316→        /// Label to branch to when condition is false.
+  1317→        false_target: String,
+  1318→    },
+  1319→}
+  1320→
+  1321→impl IRInstr {
+  1322→    /// Returns the set of virtual-register IDs that this instruction defines
+  1323→    /// (writes to).
+  1324→    pub fn defined_regs(&self) -> Vec<u32> {
+  1325→        match self {
+  1326→            IRInstr::Load { dst, .. }
+  1327→            | IRInstr::BinOp { dst, .. }
+  1328→            | IRInstr::UnaryOp { dst, .. }
+  1329→            | IRInstr::Alloc { dst, .. }
+  1330→            | IRInstr::Cast { dst, .. }
+  1331→            | IRInstr::Phi { dst, .. }
+  1332→            | IRInstr::GetAddress { dst, .. }
+  1333→            | IRInstr::Offset { dst, .. }
+  1334→            | IRInstr::Select { dst, .. } => dst.as_register().into_iter().collect(),
+  1335→            IRInstr::Call { dst, .. } => dst
+  1336→                .as_ref()
+  1337→                .and_then(|v| v.as_register())
+  1338→                .into_iter()
+  1339→                .collect(),
+  1340→            IRInstr::Add { dst, .. }
+  1341→            | IRInstr::Sub { dst, .. }
+  1342→            | IRInstr::Mul { dst, .. }
+  1343→            | IRInstr::Div { dst, .. }
+  1344→            | IRInstr::Cmp { dst, .. } => dst.as_register().into_iter().collect(),
+  1345→            IRInstr::Store { .. }
+  1346→            | IRInstr::Free { .. }
+  1347→            | IRInstr::Ret { .. }
+  1348→            | IRInstr::Branch { .. }
+  1349→            | IRInstr::CondBranch { .. } => vec![],
+  1350→        }
+  1351→    }
+  1352→
+  1353→    /// Returns the set of virtual-register IDs that this instruction uses
+  1354→    /// (reads from).
+  1355→    pub fn used_regs(&self) -> Vec<u32> {
+  1356→        match self {
+  1357→            IRInstr::Load { addr, .. } => addr.as_register().into_iter().collect(),
+  1358→            IRInstr::Store { value, addr, .. } => {
+  1359→                let mut r = value.as_register().into_iter().collect::<Vec<_>>();
+  1360→                r.extend(addr.as_register());
+  1361→                r
+  1362→            }
+  1363→            IRInstr::BinOp { lhs, rhs, .. }
+  1364→            | IRInstr::Add { lhs, rhs, .. }
+  1365→            | IRInstr::Sub { lhs, rhs, .. }
+  1366→            | IRInstr::Mul { lhs, rhs, .. }
+  1367→            | IRInstr::Div { lhs, rhs, .. }
+  1368→            | IRInstr::Cmp { lhs, rhs, .. } => {
+  1369→                let mut r = lhs.as_register().into_iter().collect::<Vec<_>>();
+  1370→                r.extend(rhs.as_register());
+  1371→                r
+  1372→            }
+  1373→            IRInstr::UnaryOp { operand, .. } => operand.as_register().into_iter().collect(),
+  1374→            IRInstr::Call { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
+  1375→            IRInstr::Alloc { .. } | IRInstr::GetAddress { .. } => vec![],
+  1376→            IRInstr::Free { ptr } => ptr.as_register().into_iter().collect(),
+  1377→            IRInstr::Cast { src, .. } => src.as_register().into_iter().collect(),
+  1378→            IRInstr::Phi { incoming, .. } => incoming
+  1379→                .iter()
+  1380→                .filter_map(|(v, _)| v.as_register())
+  1381→                .collect(),
+  1382→            IRInstr::Offset { base, offset, .. } => {
+  1383→                let mut r = base.as_register().into_iter().collect::<Vec<_>>();
+  1384→                r.extend(offset.as_register());
+  1385→                r
+  1386→            }
+  1387→            IRInstr::Select {
+  1388→                cond,
+  1389→                true_val,
+  1390→                false_val, ty: _,
+  1391→                ..
+  1392→            } => {
+  1393→                let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
+  1394→                r.extend(true_val.as_register());
+  1395→                r.extend(false_val.as_register());
+  1396→                r
+  1397→            }
+  1398→            IRInstr::Ret { values } => values.iter().filter_map(|v| v.as_register()).collect(),
+  1399→            IRInstr::Branch { .. } => vec![],
+  1400→            IRInstr::CondBranch { cond, .. } => cond.as_register().into_iter().collect(),
+  1401→        }
+  1402→    }
+  1403→}
+  1404→
+  1405→impl fmt::Display for IRInstr {
+  1406→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1407→        match self {
+  1408→            IRInstr::Load { dst, addr, offset, ty } => {
+  1409→                if *offset != 0 {
+  1410→                    write!(f, "{} = load [{} + {}] ({})", dst, addr, offset, ty)
+  1411→                } else {
+  1412→                    write!(f, "{} = load {} ({})", dst, addr, ty)
+  1413→                }
+  1414→            }
+  1415→            IRInstr::Store { value, addr, offset, ty } => {
+  1416→                if *offset != 0 {
+  1417→                    write!(f, "store {}, [{} + {}] ({})", value, addr, offset, ty)
+  1418→                } else {
+  1419→                    write!(f, "store {}, {} ({})", value, addr, ty)
+  1420→                }
+  1421→            }
+  1422→            IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+  1423→                write!(f, "{} = {} {}, {}", dst, op, lhs, rhs)
+  1424→            }
+  1425→            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
+  1426→                write!(f, "{} = {} {}", dst, op, operand)
+  1427→            }
+  1428→            IRInstr::Call { dst, func, args } => {
+  1429→                let args_str = args
+  1430→                    .iter()
+  1431→                    .map(|a| format!("{}", a))
+  1432→                    .collect::<Vec<_>>()
+  1433→                    .join(", ");
+  1434→                match dst {
+  1435→                    Some(d) => write!(f, "{} = call @{}({})", d, func, args_str),
+  1436→                    None => write!(f, "call @{}({})", func, args_str),
+  1437→                }
+  1438→            }
+  1439→            IRInstr::Alloc { dst, size } => write!(f, "{} = alloc {}", dst, size),
+  1440→            IRInstr::Free { ptr } => write!(f, "free {}", ptr),
+  1441→            IRInstr::Cast { kind, dst, src } => {
+  1442→                write!(f, "{} = {} {}", dst, kind, src)
+  1443→            }
+  1444→            IRInstr::Phi { dst, incoming } => {
+  1445→                let pairs = incoming
+  1446→                    .iter()
+  1447→                    .map(|(v, b)| format!("[{}, @{}]", v, b))
+  1448→                    .collect::<Vec<_>>()
+  1449→                    .join(", ");
+  1450→                write!(f, "{} = phi {}", dst, pairs)
+  1451→            }
+  1452→            IRInstr::GetAddress { dst, name } => {
+  1453→                write!(f, "{} = getaddress @{}", dst, name)
+  1454→            }
+  1455→            IRInstr::Offset { dst, base, offset } => {
+  1456→                write!(f, "{} = offset {}, {}", dst, base, offset)
+  1457→            }
+  1458→            IRInstr::Select {
+  1459→                dst,
+  1460→                cond,
+  1461→                true_val,
+  1462→                false_val, ty: _,
+  1463→            } => {
+  1464→                write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
+  1465→            }
+  1466→            IRInstr::Add { dst, lhs, rhs, ty: _ } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
+  1467→            IRInstr::Sub { dst, lhs, rhs, ty: _ } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
+  1468→            IRInstr::Mul { dst, lhs, rhs, ty: _ } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
+  1469→            IRInstr::Div { dst, lhs, rhs, ty: _ } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
+  1470→            IRInstr::Cmp {
+  1471→                kind,
+  1472→                dst,
+  1473→                lhs,
+  1474→                rhs, ty: _,
+  1475→            } => {
+  1476→                write!(f, "{} = {} {}, {}", dst, kind, lhs, rhs)
+  1477→            }
+  1478→            IRInstr::Ret { values } => {
+  1479→                let vals_str = values
+  1480→                    .iter()
+  1481→                    .map(|v| format!("{}", v))
+  1482→                    .collect::<Vec<_>>()
+  1483→                    .join(", ");
+  1484→                write!(f, "ret {}", vals_str)
+  1485→            }
+  1486→            IRInstr::Branch { target } => write!(f, "br @{}", target),
+  1487→            IRInstr::CondBranch {
+  1488→                cond,
+  1489→                true_target,
+  1490→                false_target,
+  1491→            } => {
+  1492→                write!(f, "br {}, @{}, @{}", cond, true_target, false_target)
+  1493→            }
+  1494→        }
+  1495→    }
+  1496→}
+  1497→
+  1498→// ---------------------------------------------------------------------------
+  1499→// IR Terminator
+  1500→// ---------------------------------------------------------------------------
+  1501→
+  1502→/// A block terminator — the last "instruction" in an `IRBlock` that transfers
+  1503→/// control flow.
+  1504→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1505→pub enum IRTerminator {
+  1506→    /// Unconditional jump to a label.
+  1507→    Jump(String),
+  1508→    /// Conditional branch: if `cond` is non-zero, go to `true_block`;
+  1509→    /// otherwise go to `false_block`.
+  1510→    Branch {
+  1511→        /// Condition value; branches to `true_block` if non-zero.
+  1512→        cond: IRValue,
+  1513→        /// Target block label when the condition is true.
+  1514→        true_block: String,
+  1515→        /// Target block label when the condition is false.
+  1516→        false_block: String,
+  1517→    },
+  1518→    /// Return from the current function with optional values.
+  1519→    Return(Vec<IRValue>),
+  1520→    /// Unreachable code marker (e.g. after a diverging call).
+  1521→    Unreachable,
+  1522→    /// Switch dispatch: branch to one of several targets based on the
+  1523→    /// discriminator value, or fall through to `default`.
+  1524→    Switch {
+  1525→        /// Discriminator value.
+  1526→        discr: IRValue,
+  1527→        /// (value, target_label) pairs.
+  1528→        targets: Vec<(i64, String)>,
+  1529→        /// Default target if no value matches.
+  1530→        default: String,
+  1531→    },
+  1532→    /// Invoke: call a function that may throw, with separate normal and
+  1533→    /// unwind continuations.
+  1534→    Invoke {
+  1535→        /// Destination register for the return value.
+  1536→        dst: Option<IRValue>,
+  1537→        /// Function name.
+  1538→        func: String,
+  1539→        /// Arguments.
+  1540→        args: Vec<IRValue>,
+  1541→        /// Normal continuation label.
+  1542→        normal: String,
+  1543→        /// Unwind (exception) continuation label.
+  1544→        unwind: String,
+  1545→    },
+  1546→    /// Tail call: jump to the callee, reusing the current stack frame.
+  1547→    TailCall {
+  1548→        /// Function name.
+  1549→        func: String,
+  1550→        /// Arguments.
+  1551→        args: Vec<IRValue>,
+  1552→    },
+  1553→    /// Resume unwinding with the given exception value.
+  1554→    Resume {
+  1555→        /// Exception value to resume with.
+  1556→        value: IRValue,
+  1557→    },
+  1558→}
+  1559→
+  1560→impl IRTerminator {
+  1561→    /// Returns the labels of all successor blocks referenced by this terminator.
+  1562→    pub fn successor_labels(&self) -> Vec<&str> {
+  1563→        match self {
+  1564→            IRTerminator::Jump(target) => vec![target],
+  1565→            IRTerminator::Branch {
+  1566→                true_block,
+  1567→                false_block,
+  1568→                ..
+  1569→            } => vec![true_block, false_block],
+  1570→            IRTerminator::Return(_) | IRTerminator::Unreachable => vec![],
+  1571→            IRTerminator::Switch {
+  1572→                targets, default, ..
+  1573→            } => {
+  1574→                let mut labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
+  1575→                labels.push(default);
+  1576→                labels
+  1577→            }
+  1578→            IRTerminator::Invoke { normal, unwind, .. } => vec![normal, unwind],
+  1579→            IRTerminator::TailCall { .. } | IRTerminator::Resume { .. } => vec![],
+  1580→        }
+  1581→    }
+  1582→}
+  1583→
+  1584→impl fmt::Display for IRTerminator {
+  1585→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1586→        match self {
+  1587→            IRTerminator::Jump(target) => write!(f, "jump @{}", target),
+  1588→            IRTerminator::Branch {
+  1589→                cond,
+  1590→                true_block,
+  1591→                false_block,
+  1592→            } => {
+  1593→                write!(f, "br {}, @{}, @{}", cond, true_block, false_block)
+  1594→            }
+  1595→            IRTerminator::Return(vals) => {
+  1596→                let vals_str = vals
+  1597→                    .iter()
+  1598→                    .map(|v| format!("{}", v))
+  1599→                    .collect::<Vec<_>>()
+  1600→                    .join(", ");
+  1601→                write!(f, "ret {}", vals_str)
+  1602→            }
+  1603→            IRTerminator::Unreachable => write!(f, "unreachable"),
+  1604→            IRTerminator::Switch {
+  1605→                discr,
+  1606→                targets,
+  1607→                default,
+  1608→            } => {
+  1609→                let pairs = targets
+  1610→                    .iter()
+  1611→                    .map(|(v, l)| format!("{}: @{}", v, l))
+  1612→                    .collect::<Vec<_>>()
+  1613→                    .join(", ");
+  1614→                write!(f, "switch {}, [{}] default @{}", discr, pairs, default)
+  1615→            }
+  1616→            IRTerminator::Invoke {
+  1617→                dst,
+  1618→                func,
+  1619→                args,
+  1620→                normal,
+  1621→                unwind,
+  1622→            } => {
+  1623→                let args_str = args
+  1624→                    .iter()
+  1625→                    .map(|a| format!("{}", a))
+  1626→                    .collect::<Vec<_>>()
+  1627→                    .join(", ");
+  1628→                match dst {
+  1629→                    Some(d) => write!(
+  1630→                        f,
+  1631→                        "invoke {} = @{}({}) normal @{} unwind @{}",
+  1632→                        d, func, args_str, normal, unwind
+  1633→                    ),
+  1634→                    None => write!(
+  1635→                        f,
+  1636→                        "invoke @{}({}) normal @{} unwind @{}",
+  1637→                        func, args_str, normal, unwind
+  1638→                    ),
+  1639→                }
+  1640→            }
+  1641→            IRTerminator::TailCall { func, args } => {
+  1642→                let args_str = args
+  1643→                    .iter()
+  1644→                    .map(|a| format!("{}", a))
+  1645→                    .collect::<Vec<_>>()
+  1646→                    .join(", ");
+  1647→                write!(f, "tailcall @{}({})", func, args_str)
+  1648→            }
+  1649→            IRTerminator::Resume { value } => write!(f, "resume {}", value),
+  1650→        }
+  1651→    }
+  1652→}
+  1653→
+  1654→// ---------------------------------------------------------------------------
+  1655→// IRBlock
+  1656→// ---------------------------------------------------------------------------
+  1657→
+  1658→/// A basic block within an IR function.
+  1659→///
+  1660→/// Execution enters at the top and falls through each instruction.  The block
+  1661→/// always ends with exactly one terminator.
+  1662→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1663→pub struct IRBlock {
+  1664→    /// Block label (used as a branch target).
+  1665→    pub label: String,
+  1666→    /// Ordered instructions in this block.
+  1667→    pub instructions: Vec<IRInstr>,
+  1668→    /// The terminating control-flow instruction.
+  1669→    pub terminator: IRTerminator,
+  1670→    /// Labels of predecessor blocks (populated after CFG construction).
+  1671→    pub predecessors: HashSet<String>,
+  1672→    /// Labels of successor blocks (populated after CFG construction).
+  1673→    pub successors: HashSet<String>,
+  1674→}
+  1675→
+  1676→impl IRBlock {
+  1677→    /// Create a new empty block with the given label and an `Unreachable`
+  1678→    /// terminator placeholder (callers should replace it).
+  1679→    pub fn new(label: impl Into<String>) -> Self {
+  1680→        Self {
+  1681→            label: label.into(),
+  1682→            instructions: Vec::new(),
+  1683→            terminator: IRTerminator::Unreachable,
+  1684→            predecessors: HashSet::new(),
+  1685→            successors: HashSet::new(),
+  1686→        }
+  1687→    }
+  1688→
+  1689→    /// Append an instruction to this block.
+  1690→    pub fn push(&mut self, instr: IRInstr) {
+  1691→        self.instructions.push(instr);
+  1692→    }
+  1693→
+  1694→    /// Returns the number of instructions in this block.
+  1695→    pub fn len(&self) -> usize {
+  1696→        self.instructions.len()
+  1697→    }
+  1698→
+  1699→    /// Returns `true` if this block has no instructions.
+  1700→    pub fn is_empty(&self) -> bool {
+  1701→        self.instructions.is_empty()
+  1702→    }
+  1703→
+  1704→    /// Update the successor set from the current terminator.
+  1705→    pub fn update_successors_from_terminator(&mut self) {
+  1706→        self.successors.clear();
+  1707→        for label in self.terminator.successor_labels() {
+  1708→            self.successors.insert(label.to_string());
+  1709→        }
+  1710→    }
+  1711→}
+  1712→
+  1713→/// Backward-compatible alias.
+  1714→pub type BasicBlock = IRBlock;
+  1715→
+  1716→impl fmt::Display for IRBlock {
+  1717→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1718→        writeln!(f, "@{}:", self.label)?;
+  1719→        for instr in &self.instructions {
+  1720→            writeln!(f, "  {}", instr)?;
+  1721→        }
+  1722→        writeln!(f, "  {}", self.terminator)?;
+  1723→        Ok(())
+  1724→    }
+  1725→}
+  1726→
+  1727→// ---------------------------------------------------------------------------
+  1728→// IRFunction
+  1729→// ---------------------------------------------------------------------------
+  1730→
+  1731→/// A function in the IR.
+  1732→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1733→pub struct IRFunction {
+  1734→    /// Function name (used as a symbol in the emitted binary).
+  1735→    pub name: String,
+  1736→    /// Parameter virtual registers.
+  1737→    pub params: Vec<IRValue>,
+  1738→    /// Return-value virtual registers.
+  1739→    pub results: Vec<IRValue>,
+  1740→    /// Type of each parameter (parallel to `params`).
+  1741→    pub param_types: Vec<IRType>,
+  1742→    /// Type of each return value (parallel to `results`).
+  1743→    pub result_types: Vec<IRType>,
+  1744→    /// Named virtual registers used in this function.
+  1745→    pub vregs: HashMap<u32, VirtualRegister>,
+  1746→    /// Basic blocks, in layout order.  The first block is the entry block.
+  1747→    pub blocks: Vec<IRBlock>,
+  1748→}
+  1749→
+  1750→impl IRFunction {
+  1751→    /// Create a new function with the given name and an empty entry block.
+  1752→    pub fn new(name: impl Into<String>) -> Self {
+  1753→        let entry_label = "entry".to_string();
+  1754→        Self {
+  1755→            name: name.into(),
+  1756→            params: Vec::new(),
+  1757→            results: Vec::new(),
+  1758→            param_types: Vec::new(),
+  1759→            result_types: Vec::new(),
+  1760→            vregs: HashMap::new(),
+  1761→            blocks: vec![IRBlock::new(entry_label)],
+  1762→        }
+  1763→    }
+  1764→
+  1765→    /// Returns a mutable reference to the current (last) block.
+  1766→    pub fn current_block(&mut self) -> &mut IRBlock {
+  1767→        self.blocks
+  1768→            .last_mut()
+  1769→            .expect("IRFunction must have at least one block")
+  1770→    }
+  1771→
+  1772→    /// Append a new block and return its index.
+  1773→    pub fn append_block(&mut self, label: impl Into<String>) -> usize {
+  1774→        let idx = self.blocks.len();
+  1775→        self.blocks.push(IRBlock::new(label));
+  1776→        idx
+  1777→    }
+  1778→
+  1779→    /// Register a named virtual register.
+  1780→    pub fn register_vreg(&mut self, vreg: VirtualRegister) {
+  1781→        self.vregs.insert(vreg.id, vreg);
+  1782→    }
+  1783→
+  1784→    /// Look up a virtual register by ID.
+  1785→    pub fn get_vreg(&self, id: u32) -> Option<&VirtualRegister> {
+  1786→        self.vregs.get(&id)
+  1787→    }
+  1788→
+  1789→    /// Rebuild predecessor/successor sets for all blocks from terminators.
+  1790→    pub fn rebuild_cfg(&mut self) {
+  1791→        let label_to_idx: HashMap<String, usize> = self
+  1792→            .blocks
+  1793→            .iter()
+  1794→            .enumerate()
+  1795→            .map(|(i, b)| (b.label.clone(), i))
+  1796→            .collect();
+  1797→
+  1798→        for block in &mut self.blocks {
+  1799→            block.predecessors.clear();
+  1800→            block.successors.clear();
+  1801→        }
+  1802→
+  1803→        // Collect edge data first to avoid borrow conflicts.
+  1804→        let mut edges: Vec<(usize, usize)> = Vec::new();
+  1805→        for i in 0..self.blocks.len() {
+  1806→            self.blocks[i].update_successors_from_terminator();
+  1807→            let succ_labels: Vec<String> = self.blocks[i].successors.iter().cloned().collect();
+  1808→            for succ_label in succ_labels {
+  1809→                if let Some(&succ_idx) = label_to_idx.get(&succ_label) {
+  1810→                    edges.push((i, succ_idx));
+  1811→                }
+  1812→            }
+  1813→        }
+  1814→
+  1815→        // Now apply predecessor edges.
+  1816→        let src_labels: Vec<(usize, String)> = self
+  1817→            .blocks
+  1818→            .iter()
+  1819→            .enumerate()
+  1820→            .map(|(i, b)| (i, b.label.clone()))
+  1821→            .collect();
+  1822→        for (src_idx, tgt_idx) in edges {
+  1823→            self.blocks[tgt_idx]
+  1824→                .predecessors
+  1825→                .insert(src_labels[src_idx].1.clone());
+  1826→        }
+  1827→    }
+  1828→
+  1829→    /// Find a block by label, returning its index.
+  1830→    pub fn find_block_by_label(&self, label: &str) -> Option<usize> {
+  1831→        self.blocks.iter().position(|b| b.label == label)
+  1832→    }
+  1833→
+  1834→    /// Returns the total number of blocks.
+  1835→    pub fn block_count(&self) -> usize {
+  1836→        self.blocks.len()
+  1837→    }
+  1838→
+  1839→    /// Returns the total number of instructions across all blocks.
+  1840→    pub fn instruction_count(&self) -> usize {
+  1841→        self.blocks.iter().map(|b| b.instructions.len()).sum()
+  1842→    }
+  1843→}
+  1844→
+  1845→impl fmt::Display for IRFunction {
+  1846→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1847→        let params = self
+  1848→            .params
+  1849→            .iter()
+  1850→            .zip(self.param_types.iter())
+  1851→            .map(|(p, t)| format!("{}: {}", p, t))
+  1852→            .collect::<Vec<_>>()
+  1853→            .join(", ");
+  1854→        let results = self
+  1855→            .results
+  1856→            .iter()
+  1857→            .zip(self.result_types.iter())
+  1858→            .map(|(r, t)| format!("{}: {}", r, t))
+  1859→            .collect::<Vec<_>>()
+  1860→            .join(", ");
+  1861→        if results.is_empty() {
+  1862→            writeln!(f, "fn @{}({}) {{", self.name, params)?;
+  1863→        } else {
+  1864→            writeln!(f, "fn @{}({}) -> {} {{", self.name, params, results)?;
+  1865→        }
+  1866→        for block in &self.blocks {
+  1867→            write!(f, "{}", block)?;
+  1868→        }
+  1869→        writeln!(f, "}}")
+  1870→    }
+  1871→}
+  1872→
+  1873→// ---------------------------------------------------------------------------
+  1874→// DataSection
+  1875→// ---------------------------------------------------------------------------
+  1876→
+  1877→/// A data section embedded in the emitted binary.
+  1878→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1879→pub struct DataSection {
+  1880→    /// Section name (e.g. `"rodata"`, `"data"`, `"bss"`).
+  1881→    pub name: String,
+  1882→    /// Section kind determines placement and alignment.
+  1883→    pub kind: DataSectionKind,
+  1884→    /// Alignment in bytes (power of two).
+  1885→    pub align: u32,
+  1886→    /// Raw data bytes (empty for BSS sections).
+  1887→    pub data: Vec<u8>,
+  1888→}
+  1889→
+  1890→/// Classification of a data section.
+  1891→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+  1892→pub enum DataSectionKind {
+  1893→    /// Read-only data (`.rodata`).
+  1894→    ReadOnly,
+  1895→    /// Read-write initialized data (`.data`).
+  1896→    Data,
+  1897→    /// Zero-initialized data (`.bss`).
+  1898→    Bss,
+  1899→}
+  1900→
+  1901→// ---------------------------------------------------------------------------
+  1902→// IRProgram
+  1903→// ---------------------------------------------------------------------------
+  1904→
+  1905→/// A complete IR program — the top-level container.
+  1906→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1907→pub struct IRProgram {
+  1908→    /// Functions in the program.
+  1909→    pub functions: Vec<IRFunction>,
+  1910→    /// Data sections.
+  1911→    pub data_sections: Vec<DataSection>,
+  1912→}
+  1913→
+  1914→impl IRProgram {
+  1915→    /// Create an empty program.
+  1916→    pub fn new() -> Self {
+  1917→        Self {
+  1918→            functions: Vec::new(),
+  1919→            data_sections: Vec::new(),
+  1920→        }
+  1921→    }
+  1922→}
+  1923→
+  1924→impl Default for IRProgram {
+  1925→    fn default() -> Self {
+  1926→        Self::new()
+  1927→    }
+  1928→}
+  1929→
+  1930→impl fmt::Display for IRProgram {
+  1931→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1932→        for func in &self.functions {
+  1933→            write!(f, "{}", func)?;
+  1934→        }
+  1935→        for section in &self.data_sections {
+  1936→            writeln!(
+  1937→                f,
+  1938→                "section {} ({:?}), align {}",
+  1939→                section.name, section.kind, section.align
+  1940→            )?;
+  1941→            writeln!(f, "  {} bytes", section.data.len())?;
+  1942→        }
+  1943→        Ok(())
+  1944→    }
+  1945→}
+  1946→
+  1947→// ---------------------------------------------------------------------------
+  1948→// Tests
+  1949→// ---------------------------------------------------------------------------
+  1950→
+  1951→#[cfg(test)]
+  1952→mod tests {
+  1953→    use super::*;
+  1954→
+  1955→    // --- Original tests (preserved) ---
+  1956→
+  1957→    #[test]
+  1958→    fn ir_value_display() {
+  1959→        assert_eq!(format!("{}", IRValue::Register(0)), "%v0");
+  1960→        assert_eq!(format!("{}", IRValue::Immediate(42)), "42");
+  1961→        assert_eq!(format!("{}", IRValue::Label("entry".into())), "@entry");
+  1962→    }
+  1963→
+  1964→    #[test]
+  1965→    fn ir_function_build() {
+  1966→        let mut func = IRFunction::new("main");
+  1967→        func.params.push(IRValue::Register(0));
+  1968→        func.param_types.push(IRType::I64);
+  1969→        func.results.push(IRValue::Register(1));
+  1970→        func.result_types.push(IRType::I64);
+  1971→
+  1972→        let block = func.current_block();
+  1973→        block.push(IRInstr::BinOp {
+  1974→            op: BinOpKind::Add,
+  1975→            dst: IRValue::Register(1),
+  1976→            lhs: IRValue::Register(0),
+  1977→            rhs: IRValue::Immediate(1),
+  1978→        });
+  1979→        block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1980→
+  1981→        let text = format!("{}", func);
+  1982→        assert!(text.contains("fn @main"));
+  1983→        assert!(text.contains("add"));
+  1984→        assert!(text.contains("ret"));
+  1985→        assert!(text.contains("i64"));
+  1986→    }
+  1987→
+  1988→    #[test]
+  1989→    fn ir_instr_def_use() {
+  1990→        let instr = IRInstr::BinOp {
+  1991→            op: BinOpKind::Add,
+  1992→            dst: IRValue::Register(2),
+  1993→            lhs: IRValue::Register(0),
+  1994→            rhs: IRValue::Register(1),
+  1995→        };
+  1996→        assert_eq!(instr.defined_regs(), vec![2]);
+  1997→        assert_eq!(instr.used_regs(), vec![0, 1]);
+  1998→    }
+  1999→
+  2000→    // --- Type system tests ---
+
+[showing lines 1-2000 of 2284; use offset=2001 with limit to continue reading]
