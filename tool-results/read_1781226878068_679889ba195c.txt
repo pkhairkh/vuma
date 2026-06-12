@@ -1,0 +1,1170 @@
+     1→//! SCG Graph Structure
+     2→//!
+     3→//! This module defines the core `SCG` graph type, which wraps a
+     4→//! `petgraph::DiGraph` and provides high-level operations for
+     5→//! constructing, querying, and manipulating the Semantic Computation Graph.
+     6→
+     7→use hashbrown::HashMap;
+     8→use indexmap::IndexSet;
+     9→use petgraph::algo::{has_path_connecting, toposort};
+    10→use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
+    11→use petgraph::visit::EdgeRef;
+    12→use petgraph::Direction;
+    13→
+    14→use crate::edge::{EdgeData, EdgeId, EdgeKind};
+    15→use crate::node::{NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
+    16→use crate::region::{RegionId, SCGRegion};
+    17→
+    18→/// Errors that can occur during SCG operations.
+    19→#[derive(Debug, Clone, PartialEq)]
+    20→pub enum SCGError {
+    21→    /// A node with the given `NodeId` was not found in the graph.
+    22→    NodeNotFound(NodeId),
+    23→    /// An edge with the given `EdgeId` was not found in the graph.
+    24→    EdgeNotFound(EdgeId),
+    25→    /// A node with the given `NodeId` already exists in the graph.
+    26→    DuplicateNode(NodeId),
+    27→    /// An edge with the given `EdgeId` already exists in the graph.
+    28→    DuplicateEdge(EdgeId),
+    29→    /// The graph contains a cycle, preventing topological sort.
+    30→    CycleDetected,
+    31→    /// A well-formedness validation check failed.
+    32→    ValidationFailed(String),
+    33→    /// A region with the given `RegionId` was not found.
+    34→    RegionNotFound(RegionId),
+    35→    /// The specified source or target node for an edge does not exist.
+    36→    InvalidEdgeEndpoints {
+    37→        /// The source node of the invalid edge.
+    38→        source: NodeId,
+    39→        /// The target node of the invalid edge.
+    40→        target: NodeId,
+    41→    },
+    42→}
+    43→
+    44→impl std::fmt::Display for SCGError {
+    45→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    46→        match self {
+    47→            SCGError::NodeNotFound(id) => write!(f, "node not found: {id}"),
+    48→            SCGError::EdgeNotFound(id) => write!(f, "edge not found: {id}"),
+    49→            SCGError::DuplicateNode(id) => write!(f, "duplicate node: {id}"),
+    50→            SCGError::DuplicateEdge(id) => write!(f, "duplicate edge: {id}"),
+    51→            SCGError::CycleDetected => write!(f, "cycle detected in graph"),
+    52→            SCGError::ValidationFailed(msg) => write!(f, "validation failed: {msg}"),
+    53→            SCGError::RegionNotFound(id) => write!(f, "region not found: {id}"),
+    54→            SCGError::InvalidEdgeEndpoints { source, target } => {
+    55→                write!(
+    56→                    f,
+    57→                    "invalid edge endpoints: source={source}, target={target}"
+    58→                )
+    59→            }
+    60→        }
+    61→    }
+    62→}
+    63→
+    64→impl std::error::Error for SCGError {}
+    65→
+    66→/// Result of validating an SCG's well-formedness.
+    67→#[derive(Debug, Clone, PartialEq)]
+    68→pub struct ValidationResult {
+    69→    /// Whether the SCG passed all validation checks.
+    70→    pub is_valid: bool,
+    71→    /// A list of warnings or informational messages (non-fatal issues).
+    72→    pub warnings: Vec<String>,
+    73→    /// A list of error messages (fatal issues that invalidate the graph).
+    74→    pub errors: Vec<String>,
+    75→}
+    76→
+    77→impl ValidationResult {
+    78→    /// Creates a successful validation result with no errors.
+    79→    pub fn ok() -> Self {
+    80→        Self {
+    81→            is_valid: true,
+    82→            warnings: Vec::new(),
+    83→            errors: Vec::new(),
+    84→        }
+    85→    }
+    86→
+    87→    /// Creates a failed validation result with the given error message.
+    88→    pub fn fail(error: impl Into<String>) -> Self {
+    89→        Self {
+    90→            is_valid: false,
+    91→            warnings: Vec::new(),
+    92→            errors: vec![error.into()],
+    93→        }
+    94→    }
+    95→
+    96→    /// Adds a warning to the validation result.
+    97→    pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
+    98→        self.warnings.push(warning.into());
+    99→        self
+   100→    }
+   101→
+   102→    /// Adds an error to the validation result and marks it as invalid.
+   103→    pub fn with_error(mut self, error: impl Into<String>) -> Self {
+   104→        self.is_valid = false;
+   105→        self.errors.push(error.into());
+   106→        self
+   107→    }
+   108→}
+   109→
+   110→/// The Semantic Computation Graph.
+   111→///
+   112→/// `SCG` is the central data structure of the SCG module. It wraps a
+   113→/// `petgraph::DiGraph` and maintains bidirectional mappings between
+   114→/// external `NodeId`/`EdgeId` identifiers and petgraph's internal indices.
+   115→///
+   116→/// # Type Parameters
+   117→/// The graph stores `NodeData` as node weights and `EdgeData` as edge weights.
+   118→///
+   119→/// # Invariants
+   120→/// - Every `NodeId` maps to exactly one petgraph `NodeIndex`, and vice versa.
+   121→/// - Every `EdgeId` maps to exactly one petgraph `EdgeIndex`, and vice versa.
+   122→/// - All edges connect nodes that exist in the graph.
+   123→#[derive(Debug, Clone)]
+   124→pub struct SCG {
+   125→    /// The underlying directed graph.
+   126→    graph: DiGraph<NodeData, EdgeData>,
+   127→    /// Mapping from external `NodeId` to petgraph `NodeIndex`.
+   128→    node_id_to_index: HashMap<NodeId, NodeIndex>,
+   129→    /// Mapping from petgraph `NodeIndex` to external `NodeId`.
+   130→    node_index_to_id: HashMap<NodeIndex, NodeId>,
+   131→    /// Mapping from external `EdgeId` to petgraph `EdgeIndex`.
+   132→    edge_id_to_index: HashMap<EdgeId, EdgeIndex>,
+   133→    /// Mapping from petgraph `EdgeIndex` to external `EdgeId`.
+   134→    edge_index_to_id: HashMap<EdgeIndex, EdgeId>,
+   135→    /// Regions defined within this SCG.
+   136→    regions: HashMap<RegionId, SCGRegion>,
+   137→    /// Counter for generating the next `NodeId`.
+   138→    next_node_id: u64,
+   139→    /// Counter for generating the next `EdgeId`.
+   140→    next_edge_id: u64,
+   141→}
+   142→
+   143→impl SCG {
+   144→    /// Creates a new, empty SCG.
+   145→    pub fn new() -> Self {
+   146→        Self {
+   147→            graph: DiGraph::new(),
+   148→            node_id_to_index: HashMap::new(),
+   149→            node_index_to_id: HashMap::new(),
+   150→            edge_id_to_index: HashMap::new(),
+   151→            edge_index_to_id: HashMap::new(),
+   152→            regions: HashMap::new(),
+   153→            next_node_id: 0,
+   154→            next_edge_id: 0,
+   155→        }
+   156→    }
+   157→
+   158→    /// Allocates and returns the next unique `NodeId`.
+   159→    fn alloc_node_id(&mut self) -> NodeId {
+   160→        let id = NodeId::new(self.next_node_id);
+   161→        self.next_node_id += 1;
+   162→        id
+   163→    }
+   164→
+   165→    /// Allocates and returns the next unique `EdgeId`.
+   166→    fn alloc_edge_id(&mut self) -> EdgeId {
+   167→        let id = EdgeId::new(self.next_edge_id);
+   168→        self.next_edge_id += 1;
+   169→        id
+   170→    }
+   171→
+   172→    // ── Node Operations ────────────────────────────────────────────
+   173→
+   174→    /// Adds a node to the graph with the given type, payload, and program point.
+   175→    ///
+   176→    /// A unique `NodeId` is automatically assigned. Returns the assigned `NodeId`.
+   177→    pub fn add_node(
+   178→        &mut self,
+   179→        node_type: NodeType,
+   180→        payload: NodePayload,
+   181→        program_point: ProgramPoint,
+   182→    ) -> NodeId {
+   183→        let id = self.alloc_node_id();
+   184→        let data = NodeData {
+   185→            id,
+   186→            node_type,
+   187→            annotation: None,
+   188→            program_point,
+   189→            payload,
+   190→        };
+   191→        let idx = self.graph.add_node(data);
+   192→        self.node_id_to_index.insert(id, idx);
+   193→        self.node_index_to_id.insert(idx, id);
+   194→        id
+   195→    }
+   196→
+   197→    /// Adds a node with a pre-assigned `NodeId`.
+   198→    ///
+   199→    /// Returns an error if a node with the same `NodeId` already exists.
+   200→    pub fn add_node_with_id(
+   201→        &mut self,
+   202→        id: NodeId,
+   203→        node_type: NodeType,
+   204→        payload: NodePayload,
+   205→        program_point: ProgramPoint,
+   206→    ) -> Result<NodeId, SCGError> {
+   207→        if self.node_id_to_index.contains_key(&id) {
+   208→            return Err(SCGError::DuplicateNode(id));
+   209→        }
+   210→        let data = NodeData {
+   211→            id,
+   212→            node_type,
+   213→            annotation: None,
+   214→            program_point,
+   215→            payload,
+   216→        };
+   217→        let idx = self.graph.add_node(data);
+   218→        self.node_id_to_index.insert(id, idx);
+   219→        self.node_index_to_id.insert(idx, id);
+   220→        // Update next_node_id if necessary to avoid future collisions
+   221→        if id.as_u64() >= self.next_node_id {
+   222→            self.next_node_id = id.as_u64() + 1;
+   223→        }
+   224→        Ok(id)
+   225→    }
+   226→
+   227→    /// Removes a node from the graph by its `NodeId`.
+   228→    ///
+   229→    /// All edges connected to this node are also removed.
+   230→    /// Returns the removed `NodeData`, or an error if the node was not found.
+   231→    pub fn remove_node(&mut self, id: NodeId) -> Result<NodeData, SCGError> {
+   232→        let idx = self
+   233→            .node_id_to_index
+   234→            .remove(&id)
+   235→            .ok_or(SCGError::NodeNotFound(id))?;
+   236→
+   237→        // Remove all edge mappings for edges connected to this node
+   238→        let edges_to_remove: Vec<EdgeIndex> = self
+   239→            .graph
+   240→            .edges_directed(idx, Direction::Outgoing)
+   241→            .chain(self.graph.edges_directed(idx, Direction::Incoming))
+   242→            .map(|e| e.id())
+   243→            .collect();
+   244→
+   245→        for eidx in edges_to_remove {
+   246→            if let Some(eid) = self.edge_index_to_id.remove(&eidx) {
+   247→                self.edge_id_to_index.remove(&eid);
+   248→            }
+   249→        }
+   250→
+   251→        self.node_index_to_id.remove(&idx);
+   252→        let data = self.graph.remove_node(idx).expect("node index was valid");
+   253→
+   254→        // Rebuild index mappings since petgraph shifts indices on removal
+   255→        self.rebuild_index_mappings();
+   256→
+   257→        Ok(data)
+   258→    }
+   259→
+   260→    /// Retrieves a reference to the `NodeData` for the given `NodeId`.
+   261→    pub fn get_node(&self, id: NodeId) -> Option<&NodeData> {
+   262→        self.node_id_to_index
+   263→            .get(&id)
+   264→            .and_then(|&idx| self.graph.node_weight(idx))
+   265→    }
+   266→
+   267→    /// Retrieves a mutable reference to the `NodeData` for the given `NodeId`.
+   268→    pub fn get_node_mut(&mut self, id: NodeId) -> Option<&mut NodeData> {
+   269→        let idx = *self.node_id_to_index.get(&id)?;
+   270→        self.graph.node_weight_mut(idx)
+   271→    }
+   272→
+   273→    /// Returns the total number of nodes in the graph.
+   274→    pub fn node_count(&self) -> usize {
+   275→        self.graph.node_count()
+   276→    }
+   277→
+   278→    /// Returns an iterator over all node IDs in the graph.
+   279→    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+   280→        self.node_id_to_index.keys().copied()
+   281→    }
+   282→
+   283→    /// Returns an iterator over all node data in the graph.
+   284→    pub fn nodes(&self) -> impl Iterator<Item = &NodeData> {
+   285→        self.graph.node_weights()
+   286→    }
+   287→
+   288→    // ── Edge Operations ────────────────────────────────────────────
+   289→
+   290→    /// Adds an edge between two existing nodes.
+   291→    ///
+   292→    /// A unique `EdgeId` is automatically assigned.
+   293→    /// Returns an error if either endpoint node does not exist.
+   294→    pub fn add_edge(
+   295→        &mut self,
+   296→        source: NodeId,
+   297→        target: NodeId,
+   298→        kind: EdgeKind,
+   299→    ) -> Result<EdgeId, SCGError> {
+   300→        let source_idx = *self
+   301→            .node_id_to_index
+   302→            .get(&source)
+   303→            .ok_or(SCGError::InvalidEdgeEndpoints { source, target })?;
+   304→        let target_idx = *self
+   305→            .node_id_to_index
+   306→            .get(&target)
+   307→            .ok_or(SCGError::InvalidEdgeEndpoints { source, target })?;
+   308→
+   309→        let id = self.alloc_edge_id();
+   310→        let data = EdgeData {
+   311→            id,
+   312→            source,
+   313→            target,
+   314→            kind,
+   315→            label: None,
+   316→        };
+   317→        let eidx = self.graph.add_edge(source_idx, target_idx, data);
+   318→        self.edge_id_to_index.insert(id, eidx);
+   319→        self.edge_index_to_id.insert(eidx, id);
+   320→        Ok(id)
+   321→    }
+   322→
+   323→    /// Adds an edge with a pre-assigned `EdgeId`.
+   324→    ///
+   325→    /// Returns an error if the edge ID already exists or either endpoint
+   326→    /// node does not exist.
+   327→    pub fn add_edge_with_id(
+   328→        &mut self,
+   329→        id: EdgeId,
+   330→        source: NodeId,
+   331→        target: NodeId,
+   332→        kind: EdgeKind,
+   333→    ) -> Result<EdgeId, SCGError> {
+   334→        if self.edge_id_to_index.contains_key(&id) {
+   335→            return Err(SCGError::DuplicateEdge(id));
+   336→        }
+   337→        let source_idx = *self
+   338→            .node_id_to_index
+   339→            .get(&source)
+   340→            .ok_or(SCGError::InvalidEdgeEndpoints { source, target })?;
+   341→        let target_idx = *self
+   342→            .node_id_to_index
+   343→            .get(&target)
+   344→            .ok_or(SCGError::InvalidEdgeEndpoints { source, target })?;
+   345→
+   346→        let data = EdgeData {
+   347→            id,
+   348→            source,
+   349→            target,
+   350→            kind,
+   351→            label: None,
+   352→        };
+   353→        let eidx = self.graph.add_edge(source_idx, target_idx, data);
+   354→        self.edge_id_to_index.insert(id, eidx);
+   355→        self.edge_index_to_id.insert(eidx, id);
+   356→        if id.as_u64() >= self.next_edge_id {
+   357→            self.next_edge_id = id.as_u64() + 1;
+   358→        }
+   359→        Ok(id)
+   360→    }
+   361→
+   362→    /// Removes an edge from the graph by its `EdgeId`.
+   363→    ///
+   364→    /// Returns the removed `EdgeData`, or an error if the edge was not found.
+   365→    pub fn remove_edge(&mut self, id: EdgeId) -> Result<EdgeData, SCGError> {
+   366→        let eidx = self
+   367→            .edge_id_to_index
+   368→            .remove(&id)
+   369→            .ok_or(SCGError::EdgeNotFound(id))?;
+   370→
+   371→        self.edge_index_to_id.remove(&eidx);
+   372→        let data = self.graph.remove_edge(eidx).expect("edge index was valid");
+   373→
+   374→        // Note: edge removal in petgraph does not shift node indices,
+   375→        // but it does shift edge indices. We need to rebuild edge mappings.
+   376→        self.rebuild_edge_mappings();
+   377→
+   378→        Ok(data)
+   379→    }
+   380→
+   381→    /// Retrieves a reference to the `EdgeData` for the given `EdgeId`.
+   382→    pub fn get_edge(&self, id: EdgeId) -> Option<&EdgeData> {
+   383→        self.edge_id_to_index
+   384→            .get(&id)
+   385→            .and_then(|&eidx| self.graph.edge_weight(eidx))
+   386→    }
+   387→
+   388→    /// Retrieves a mutable reference to the `EdgeData` for the given `EdgeId`.
+   389→    pub fn get_edge_mut(&mut self, id: EdgeId) -> Option<&mut EdgeData> {
+   390→        let eidx = *self.edge_id_to_index.get(&id)?;
+   391→        self.graph.edge_weight_mut(eidx)
+   392→    }
+   393→
+   394→    /// Returns the total number of edges in the graph.
+   395→    pub fn edge_count(&self) -> usize {
+   396→        self.graph.edge_count()
+   397→    }
+   398→
+   399→    /// Returns an iterator over all edge IDs in the graph.
+   400→    pub fn edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+   401→        self.edge_id_to_index.keys().copied()
+   402→    }
+   403→
+   404→    /// Returns an iterator over all edge data in the graph.
+   405→    pub fn edges(&self) -> impl Iterator<Item = &EdgeData> {
+   406→        self.graph.edge_weights()
+   407→    }
+   408→
+   409→    // ── Interprocedural Edge Helpers ──────────────────────────────
+   410→
+   411→    /// Adds a Call edge from a caller node to a callee's FunctionEntry node.
+   412→    ///
+   413→    /// This creates an interprocedural call edge in the SCG, representing
+   414→    /// a function call from the caller (at `from_node`) to the callee
+   415→    /// (whose entry is `to_node`). The `caller_region` identifies the
+   416→    /// region in which the caller is executing.
+   417→    pub fn add_call_edge(
+   418→        &mut self,
+   419→        from_node: NodeId,
+   420→        to_node: NodeId,
+   421→        caller_region: RegionId,
+   422→    ) -> Result<EdgeId, SCGError> {
+   423→        self.add_edge(
+   424→            from_node,
+   425→            to_node,
+   426→            EdgeKind::Call {
+   427→                from_node,
+   428→                to_node,
+   429→                caller_region,
+   430→            },
+   431→        )
+   432→    }
+   433→
+   434→    /// Adds a Return edge from a callee's FunctionReturn node back to the caller.
+   435→    ///
+   436→    /// This creates an interprocedural return edge in the SCG, representing
+   437→    /// a function return from the callee (at `from_node`) back to the caller
+   438→    /// (at `to_node`). The `return_values` lists the node IDs of the
+   439→    /// values being returned.
+   440→    pub fn add_return_edge(
+   441→        &mut self,
+   442→        from_node: NodeId,
+   443→        to_node: NodeId,
+   444→        return_values: Vec<NodeId>,
+   445→    ) -> Result<EdgeId, SCGError> {
+   446→        self.add_edge(
+   447→            from_node,
+   448→            to_node,
+   449→            EdgeKind::Return {
+   450→                from_node,
+   451→                to_node,
+   452→                return_values,
+   453→            },
+   454→        )
+   455→    }
+   456→
+   457→    /// Returns all edges of the specified kind.
+   458→    pub fn edges_of_kind(&self, kind: &EdgeKind) -> Vec<&EdgeData> {
+   459→        self.edges().filter(|e| &e.kind == kind).collect()
+   460→    }
+   461→
+   462→    /// Returns all Call edges in the graph.
+   463→    pub fn call_edges(&self) -> Vec<&EdgeData> {
+   464→        self.edges()
+   465→            .filter(|e| matches!(e.kind, EdgeKind::Call { .. }))
+   466→            .collect()
+   467→    }
+   468→
+   469→    /// Returns all Return edges in the graph.
+   470→    pub fn return_edges(&self) -> Vec<&EdgeData> {
+   471→        self.edges()
+   472→            .filter(|e| matches!(e.kind, EdgeKind::Return { .. }))
+   473→            .collect()
+   474→    }
+   475→
+   476→    /// Finds all FunctionEntry and FunctionReturn nodes in the graph.
+   477→    ///
+   478→    /// Returns a tuple of (entry_nodes, return_nodes).
+   479→    pub fn function_boundary_nodes(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+   480→        let mut entries = Vec::new();
+   481→        let mut returns = Vec::new();
+   482→        for node in self.nodes() {
+   483→            if node.node_type == NodeType::Control {
+   484→                if let NodePayload::Control(ctrl) = &node.payload {
+   485→                    match ctrl.kind {
+   486→                        crate::node::ControlKind::FunctionEntry => entries.push(node.id),
+   487→                        crate::node::ControlKind::FunctionReturn => returns.push(node.id),
+   488→                        _ => {}
+   489→                    }
+   490→                }
+   491→            }
+   492→        }
+   493→        (entries, returns)
+   494→    }
+   495→
+   496→    /// Given a FunctionEntry node, finds the corresponding FunctionReturn node
+   497→    /// by looking for the FunctionReturn node reachable via ControlFlow edges
+   498→    /// from the entry.
+   499→    pub fn find_function_return(&self, entry: NodeId) -> Option<NodeId> {
+   500→        let &entry_idx = self.node_id_to_index.get(&entry)?;
+   501→        // BFS through ControlFlow edges to find a FunctionReturn node
+   502→        let mut visited = std::collections::HashSet::new();
+   503→        let mut queue = std::collections::VecDeque::new();
+   504→        queue.push_back(entry_idx);
+   505→        visited.insert(entry_idx);
+   506→
+   507→        while let Some(current_idx) = queue.pop_front() {
+   508→            for edge_ref in self.graph.edges_directed(current_idx, Direction::Outgoing) {
+   509→                let target_idx = edge_ref.target();
+   510→                if visited.insert(target_idx) {
+   511→                    if let Some(target_id) = self.node_index_to_id.get(&target_idx) {
+   512→                        if let Some(node) = self.get_node(*target_id) {
+   513→                            if let NodePayload::Control(ctrl) = &node.payload {
+   514→                                if ctrl.kind == crate::node::ControlKind::FunctionReturn {
+   515→                                    return Some(*target_id);
+   516→                                }
+   517→                            }
+   518→                        }
+   519→                    }
+   520→                    queue.push_back(target_idx);
+   521→                }
+   522→            }
+   523→        }
+   524→        None
+   525→    }
+   526→
+   527→    // ── Traversal Operations ───────────────────────────────────────
+   528→
+   529→    /// Returns the `NodeId`s of all direct successors of the given node.
+   530→    ///
+   531→    /// Successors are nodes reachable via outgoing edges from the specified node.
+   532→    pub fn successors(&self, id: NodeId) -> Option<Vec<NodeId>> {
+   533→        let &idx = self.node_id_to_index.get(&id)?;
+   534→        let succs: Vec<NodeId> = self
+   535→            .graph
+   536→            .neighbors_directed(idx, Direction::Outgoing)
+   537→            .filter_map(|nidx| self.node_index_to_id.get(&nidx).copied())
+   538→            .collect();
+   539→        Some(succs)
+   540→    }
+   541→
+   542→    /// Returns the `NodeId`s of all direct predecessors of the given node.
+   543→    ///
+   544→    /// Predecessors are nodes that have outgoing edges to the specified node.
+   545→    pub fn predecessors(&self, id: NodeId) -> Option<Vec<NodeId>> {
+   546→        let &idx = self.node_id_to_index.get(&id)?;
+   547→        let preds: Vec<NodeId> = self
+   548→            .graph
+   549→            .neighbors_directed(idx, Direction::Incoming)
+   550→            .filter_map(|nidx| self.node_index_to_id.get(&nidx).copied())
+   551→            .collect();
+   552→        Some(preds)
+   553→    }
+   554→
+   555→    /// Checks whether a path exists from `source` to `target`.
+   556→    ///
+   557→    /// Returns `None` if either node does not exist.
+   558→    /// Returns `Some(true)` if a path exists, `Some(false)` otherwise.
+   559→    pub fn find_path(&self, source: NodeId, target: NodeId) -> Option<bool> {
+   560→        let &source_idx = self.node_id_to_index.get(&source)?;
+   561→        let &target_idx = self.node_id_to_index.get(&target)?;
+   562→        Some(has_path_connecting(
+   563→            &self.graph,
+   564→            source_idx,
+   565→            target_idx,
+   566→            None,
+   567→        ))
+   568→    }
+   569→
+   570→    /// Returns a topological ordering of the nodes in the graph.
+   571→    ///
+   572→    /// Returns an error if the graph contains a cycle.
+   573→    pub fn topological_sort(&self) -> Result<Vec<NodeId>, SCGError> {
+   574→        let sorted: Vec<NodeIndex> =
+   575→            toposort(&self.graph, None).map_err(|_| SCGError::CycleDetected)?;
+   576→        let result: Vec<NodeId> = sorted
+   577→            .into_iter()
+   578→            .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
+   579→            .collect();
+   580→        Ok(result)
+   581→    }
+   582→
+   583→    // ── Region Operations ──────────────────────────────────────────
+   584→
+   585→    /// Adds a region to the SCG.
+   586→    pub fn add_region(&mut self, region: SCGRegion) {
+   587→        self.regions.insert(region.id, region);
+   588→    }
+   589→
+   590→    /// Retrieves a reference to a region by its `RegionId`.
+   591→    pub fn get_region(&self, id: RegionId) -> Option<&SCGRegion> {
+   592→        self.regions.get(&id)
+   593→    }
+   594→
+   595→    /// Retrieves a mutable reference to a region by its `RegionId`.
+   596→    pub fn get_region_mut(&mut self, id: RegionId) -> Option<&mut SCGRegion> {
+   597→        self.regions.get_mut(&id)
+   598→    }
+   599→
+   600→    /// Removes a region from the SCG.
+   601→    ///
+   602→    /// Returns the removed region, or `None` if not found.
+   603→    pub fn remove_region(&mut self, id: RegionId) -> Option<SCGRegion> {
+   604→        self.regions.remove(&id)
+   605→    }
+   606→
+   607→    /// Returns an iterator over all regions in the SCG.
+   608→    pub fn regions(&self) -> impl Iterator<Item = &SCGRegion> {
+   609→        self.regions.values()
+   610→    }
+   611→
+   612→    /// Returns the number of regions in the SCG.
+   613→    pub fn region_count(&self) -> usize {
+   614→        self.regions.len()
+   615→    }
+   616→
+   617→    // ── Validation ─────────────────────────────────────────────────
+   618→
+   619→    /// Validates the well-formedness of this SCG.
+   620→    ///
+   621→    /// Checks the following conditions:
+   622→    /// - Every edge's source and target nodes exist in the graph.
+   623→    /// - Every allocation has a corresponding deallocation (warning if not).
+   624→    /// - No orphan nodes (nodes with no edges) that are not phantom nodes (warning).
+   625→    /// - Security boundary regions do not have direct data flow across them.
+   626→    /// - Deallocation nodes reference valid allocation nodes.
+   627→    pub fn validate(&self) -> ValidationResult {
+   628→        let mut result = ValidationResult::ok();
+   629→
+   630→        // Check that all edges reference existing nodes
+   631→        for edge_data in self.edges() {
+   632→            if self.get_node(edge_data.source).is_none() {
+   633→                result = result.with_error(format!(
+   634→                    "edge {} references non-existent source node {}",
+   635→                    edge_data.id, edge_data.source
+   636→                ));
+   637→            }
+   638→            if self.get_node(edge_data.target).is_none() {
+   639→                result = result.with_error(format!(
+   640→                    "edge {} references non-existent target node {}",
+   641→                    edge_data.id, edge_data.target
+   642→                ));
+   643→            }
+   644→        }
+   645→
+   646→        // Check for allocation/deallocation pairing
+   647→        let allocations: IndexSet<NodeId> = self
+   648→            .nodes()
+   649→            .filter(|n| matches!(n.node_type, NodeType::Allocation))
+   650→            .map(|n| n.id)
+   651→            .collect();
+   652→
+   653→        let deallocations_referenced: IndexSet<NodeId> = self
+   654→            .nodes()
+   655→            .filter_map(|n| match &n.payload {
+   656→                NodePayload::Deallocation(d) => Some(d.allocation_node),
+   657→                _ => None,
+   658→            })
+   659→            .collect();
+   660→
+   661→        for alloc_id in &allocations {
+   662→            if !deallocations_referenced.contains(alloc_id) {
+   663→                result = result.with_warning(format!(
+   664→                    "allocation node {alloc_id} has no corresponding deallocation"
+   665→                ));
+   666→            }
+   667→        }
+   668→
+   669→        // Check deallocation nodes reference valid allocations
+   670→        for node_data in self.nodes() {
+   671→            if let NodePayload::Deallocation(dealloc) = &node_data.payload {
+   672→                if !allocations.contains(&dealloc.allocation_node) {
+   673→                    result = result.with_error(format!(
+   674→                        "deallocation node {} references non-existent allocation node {}",
+   675→                        node_data.id, dealloc.allocation_node
+   676→                    ));
+   677→                }
+   678→            }
+   679→        }
+   680→
+   681→        // Check for orphan nodes (warning only, not error)
+   682→        for node_data in self.nodes() {
+   683→            if !matches!(node_data.node_type, NodeType::Phantom) {
+   684→                let succs = self.successors(node_data.id).unwrap_or_default();
+   685→                let preds = self.predecessors(node_data.id).unwrap_or_default();
+   686→                if succs.is_empty() && preds.is_empty() && self.node_count() > 1 {
+   687→                    result =
+   688→                        result.with_warning(format!("orphan node {} (no edges)", node_data.id));
+   689→                }
+   690→            }
+   691→        }
+   692→
+   693→        // Check security boundary: no direct data flow across security boundaries
+   694→        for edge_data in self.edges() {
+   695→            if matches!(edge_data.kind, EdgeKind::DataFlow) {
+   696→                if let (Some(src_region), Some(tgt_region)) = (
+   697→                    self.find_region_for_node(&edge_data.source),
+   698→                    self.find_region_for_node(&edge_data.target),
+   699→                ) {
+   700→                    if src_region != tgt_region {
+   701→                        let src = self.regions.get(&src_region);
+   702→                        let tgt = self.regions.get(&tgt_region);
+   703→                        if src.is_some_and(|r| r.security_boundary)
+   704→                            || tgt.is_some_and(|r| r.security_boundary)
+   705→                        {
+   706→                            result = result.with_error(format!(
+   707→                                "data flow edge {} crosses security boundary between regions {} and {}",
+   708→                                edge_data.id, src_region, tgt_region
+   709→                            ));
+   710→                        }
+   711→                    }
+   712→                }
+   713→            }
+   714→        }
+   715→
+   716→        result
+   717→    }
+   718→
+   719→    /// Finds the `RegionId` containing the given node, if any.
+   720→    fn find_region_for_node(&self, node_id: &NodeId) -> Option<RegionId> {
+   721→        for region in self.regions.values() {
+   722→            if region.contains_node(node_id) {
+   723→                return Some(region.id);
+   724→            }
+   725→        }
+   726→        None
+   727→    }
+   728→
+   729→    // ── Merge ──────────────────────────────────────────────────────
+   730→
+   731→    /// Merges another SCG into this one.
+   732→    ///
+   733→    /// All nodes, edges, and regions from `other` are incorporated into `self`.
+   734→    /// Node and edge IDs from `other` are remapped to avoid collisions with
+   735→    /// existing IDs in `self`.
+   736→    ///
+   737→    /// Returns a mapping from old `NodeId`s (in `other`) to new `NodeId`s
+   738→    /// (in the merged graph).
+   739→    pub fn merge(&mut self, other: SCG) -> HashMap<NodeId, NodeId> {
+   740→        let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
+   741→        let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
+   742→
+   743→        // Add all nodes from other, creating new IDs
+   744→        for node_data in other.nodes() {
+   745→            let old_id = node_data.id;
+   746→            let new_id = self.add_node(
+   747→                node_data.node_type.clone(),
+   748→                node_data.payload.clone(),
+   749→                node_data.program_point.clone(),
+   750→            );
+   751→            // Copy annotation
+   752→            if let Some(ref ann) = node_data.annotation {
+   753→                if let Some(new_data) = self.get_node_mut(new_id) {
+   754→                    new_data.annotation = Some(ann.clone());
+   755→                }
+   756→            }
+   757→            node_map.insert(old_id, new_id);
+   758→        }
+   759→
+   760→        // Add all edges from other, remapping node IDs
+   761→        for edge_data in other.edges() {
+   762→            let new_source = node_map
+   763→                .get(&edge_data.source)
+   764→                .copied()
+   765→                .unwrap_or(edge_data.source);
+   766→            let new_target = node_map
+   767→                .get(&edge_data.target)
+   768→                .copied()
+   769→                .unwrap_or(edge_data.target);
+   770→
+   771→            if let Ok(new_eid) = self.add_edge(new_source, new_target, edge_data.kind.clone()) {
+   772→                // Copy label
+   773→                if let Some(ref label) = edge_data.label {
+   774→                    if let Some(new_edge) = self.get_edge_mut(new_eid) {
+   775→                        new_edge.label = Some(label.clone());
+   776→                    }
+   777→                }
+   778→                edge_map.insert(edge_data.id, new_eid);
+   779→            }
+   780→        }
+   781→
+   782→        // Add all regions from other, remapping node IDs
+   783→        for region in other.regions() {
+   784→            let new_region_id = RegionId::new(self.next_region_id());
+   785→            let mut new_region = SCGRegion::new(new_region_id, region.deployment_target.clone());
+   786→            new_region.scope_level = region.scope_level;
+   787→            new_region.security_boundary = region.security_boundary;
+   788→            for old_node_id in region.iter_nodes() {
+   789→                if let Some(&new_node_id) = node_map.get(old_node_id) {
+   790→                    new_region.add_node(new_node_id);
+   791→                }
+   792→            }
+   793→            self.add_region(new_region);
+   794→        }
+   795→
+   796→        node_map
+   797→    }
+   798→
+   799→    /// Returns the next available region ID.
+   800→    fn next_region_id(&self) -> u64 {
+   801→        let max_id = self.regions.keys().map(|r| r.as_u64()).max().unwrap_or(0);
+   802→        max_id + 1
+   803→    }
+   804→
+   805→    // ── Internal Helpers ───────────────────────────────────────────
+   806→
+   807→    /// Rebuilds both node and edge index mappings after a node removal.
+   808→    ///
+   809→    /// When petgraph removes a node, it may swap the last node into the
+   810→    /// removed slot, invalidating existing `NodeIndex` mappings.
+   811→    fn rebuild_index_mappings(&mut self) {
+   812→        self.node_id_to_index.clear();
+   813→        self.node_index_to_id.clear();
+   814→        self.edge_id_to_index.clear();
+   815→        self.edge_index_to_id.clear();
+   816→
+   817→        for idx in self.graph.node_indices() {
+   818→            if let Some(data) = self.graph.node_weight(idx) {
+   819→                self.node_id_to_index.insert(data.id, idx);
+   820→                self.node_index_to_id.insert(idx, data.id);
+   821→            }
+   822→        }
+   823→
+   824→        for eidx in self.graph.edge_indices() {
+   825→            if let Some(data) = self.graph.edge_weight(eidx) {
+   826→                self.edge_id_to_index.insert(data.id, eidx);
+   827→                self.edge_index_to_id.insert(eidx, data.id);
+   828→            }
+   829→        }
+   830→    }
+   831→
+   832→    /// Rebuilds only edge index mappings after an edge removal.
+   833→    fn rebuild_edge_mappings(&mut self) {
+   834→        self.edge_id_to_index.clear();
+   835→        self.edge_index_to_id.clear();
+   836→
+   837→        for eidx in self.graph.edge_indices() {
+   838→            if let Some(data) = self.graph.edge_weight(eidx) {
+   839→                self.edge_id_to_index.insert(data.id, eidx);
+   840→                self.edge_index_to_id.insert(eidx, data.id);
+   841→            }
+   842→        }
+   843→    }
+   844→}
+   845→
+   846→impl Default for SCG {
+   847→    fn default() -> Self {
+   848→        Self::new()
+   849→    }
+   850→}
+   851→
+   852→#[cfg(test)]
+   853→mod tests {
+   854→    use super::*;
+   855→    use crate::node::{AllocationNode, ComputationNode, DeallocationNode, PhantomNode};
+   856→    use crate::region::DeploymentTarget;
+   857→
+   858→    fn make_program_point() -> ProgramPoint {
+   859→        ProgramPoint {
+   860→            file: Some("test.vu".to_string()),
+   861→            line: Some(1),
+   862→            column: Some(1),
+   863→            offset: None,
+   864→        }
+   865→    }
+   866→
+   867→    #[test]
+   868→    fn test_add_and_get_node() {
+   869→        let mut scg = SCG::new();
+   870→        let id = scg.add_node(
+   871→            NodeType::Computation,
+   872→            NodePayload::Computation(ComputationNode {
+   873→                operation: "add".to_string(),
+   874→                result_type: Some("i32".to_string()),
+   875→                tail_call: false,
+   876→            }),
+   877→            make_program_point(),
+   878→        );
+   879→        let node = scg.get_node(id).unwrap();
+   880→        assert_eq!(node.id, id);
+   881→        assert_eq!(node.node_type, NodeType::Computation);
+   882→    }
+   883→
+   884→    #[test]
+   885→    fn test_remove_node() {
+   886→        let mut scg = SCG::new();
+   887→        let id = scg.add_node(
+   888→            NodeType::Phantom,
+   889→            NodePayload::Phantom(PhantomNode {
+   890→                purpose: "test".to_string(),
+   891→            }),
+   892→            make_program_point(),
+   893→        );
+   894→        let removed = scg.remove_node(id).unwrap();
+   895→        assert_eq!(removed.id, id);
+   896→        assert!(scg.get_node(id).is_none());
+   897→    }
+   898→
+   899→    #[test]
+   900→    fn test_remove_nonexistent_node() {
+   901→        let mut scg = SCG::new();
+   902→        let result = scg.remove_node(NodeId::new(999));
+   903→        assert!(matches!(result, Err(SCGError::NodeNotFound(_))));
+   904→    }
+   905→
+   906→    #[test]
+   907→    fn test_add_and_get_edge() {
+   908→        let mut scg = SCG::new();
+   909→        let n1 = scg.add_node(
+   910→            NodeType::Computation,
+   911→            NodePayload::Computation(ComputationNode {
+   912→                operation: "f".to_string(),
+   913→                result_type: None,
+   914→                tail_call: false,
+   915→            }),
+   916→            make_program_point(),
+   917→        );
+   918→        let n2 = scg.add_node(
+   919→            NodeType::Computation,
+   920→            NodePayload::Computation(ComputationNode {
+   921→                operation: "g".to_string(),
+   922→                result_type: None,
+   923→                tail_call: false,
+   924→            }),
+   925→            make_program_point(),
+   926→        );
+   927→        let eid = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+   928→        let edge = scg.get_edge(eid).unwrap();
+   929→        assert_eq!(edge.source, n1);
+   930→        assert_eq!(edge.target, n2);
+   931→    }
+   932→
+   933→    #[test]
+   934→    fn test_add_edge_invalid_endpoints() {
+   935→        let mut scg = SCG::new();
+   936→        let result = scg.add_edge(NodeId::new(99), NodeId::new(100), EdgeKind::DataFlow);
+   937→        assert!(matches!(result, Err(SCGError::InvalidEdgeEndpoints { .. })));
+   938→    }
+   939→
+   940→    #[test]
+   941→    fn test_successors_and_predecessors() {
+   942→        let mut scg = SCG::new();
+   943→        let n1 = scg.add_node(
+   944→            NodeType::Computation,
+   945→            NodePayload::Computation(ComputationNode {
+   946→                operation: "a".to_string(),
+   947→                result_type: None,
+   948→                tail_call: false,
+   949→            }),
+   950→            make_program_point(),
+   951→        );
+   952→        let n2 = scg.add_node(
+   953→            NodeType::Computation,
+   954→            NodePayload::Computation(ComputationNode {
+   955→                operation: "b".to_string(),
+   956→                result_type: None,
+   957→                tail_call: false,
+   958→            }),
+   959→            make_program_point(),
+   960→        );
+   961→        let n3 = scg.add_node(
+   962→            NodeType::Computation,
+   963→            NodePayload::Computation(ComputationNode {
+   964→                operation: "c".to_string(),
+   965→                result_type: None,
+   966→                tail_call: false,
+   967→            }),
+   968→            make_program_point(),
+   969→        );
+   970→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+   971→        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+   972→
+   973→        let succs = scg.successors(n1).unwrap();
+   974→        assert_eq!(succs.len(), 2);
+   975→        assert!(succs.contains(&n2));
+   976→        assert!(succs.contains(&n3));
+   977→
+   978→        let preds_n2 = scg.predecessors(n2).unwrap();
+   979→        assert_eq!(preds_n2.len(), 1);
+   980→        assert!(preds_n2.contains(&n1));
+   981→    }
+   982→
+   983→    #[test]
+   984→    fn test_find_path() {
+   985→        let mut scg = SCG::new();
+   986→        let n1 = scg.add_node(
+   987→            NodeType::Computation,
+   988→            NodePayload::Computation(ComputationNode {
+   989→                operation: "x".to_string(),
+   990→                result_type: None,
+   991→                tail_call: false,
+   992→            }),
+   993→            make_program_point(),
+   994→        );
+   995→        let n2 = scg.add_node(
+   996→            NodeType::Computation,
+   997→            NodePayload::Computation(ComputationNode {
+   998→                operation: "y".to_string(),
+   999→                result_type: None,
+  1000→                tail_call: false,
+  1001→            }),
+  1002→            make_program_point(),
+  1003→        );
+  1004→        let n3 = scg.add_node(
+  1005→            NodeType::Computation,
+  1006→            NodePayload::Computation(ComputationNode {
+  1007→                operation: "z".to_string(),
+  1008→                result_type: None,
+  1009→                tail_call: false,
+  1010→            }),
+  1011→            make_program_point(),
+  1012→        );
+  1013→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1014→        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+  1015→
+  1016→        assert_eq!(scg.find_path(n1, n3), Some(true));
+  1017→        assert_eq!(scg.find_path(n3, n1), Some(false));
+  1018→    }
+  1019→
+  1020→    #[test]
+  1021→    fn test_topological_sort() {
+  1022→        let mut scg = SCG::new();
+  1023→        let n1 = scg.add_node(
+  1024→            NodeType::Computation,
+  1025→            NodePayload::Computation(ComputationNode {
+  1026→                operation: "first".to_string(),
+  1027→                result_type: None,
+  1028→                tail_call: false,
+  1029→            }),
+  1030→            make_program_point(),
+  1031→        );
+  1032→        let n2 = scg.add_node(
+  1033→            NodeType::Computation,
+  1034→            NodePayload::Computation(ComputationNode {
+  1035→                operation: "second".to_string(),
+  1036→                result_type: None,
+  1037→                tail_call: false,
+  1038→            }),
+  1039→            make_program_point(),
+  1040→        );
+  1041→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1042→
+  1043→        let sorted = scg.topological_sort().unwrap();
+  1044→        assert_eq!(sorted.len(), 2);
+  1045→        // n1 must come before n2
+  1046→        let pos1 = sorted.iter().position(|&id| id == n1).unwrap();
+  1047→        let pos2 = sorted.iter().position(|&id| id == n2).unwrap();
+  1048→        assert!(pos1 < pos2);
+  1049→    }
+  1050→
+  1051→    #[test]
+  1052→    fn test_topological_sort_cycle() {
+  1053→        let mut scg = SCG::new();
+  1054→        let n1 = scg.add_node(
+  1055→            NodeType::Computation,
+  1056→            NodePayload::Computation(ComputationNode {
+  1057→                operation: "a".to_string(),
+  1058→                result_type: None,
+  1059→                tail_call: false,
+  1060→            }),
+  1061→            make_program_point(),
+  1062→        );
+  1063→        let n2 = scg.add_node(
+  1064→            NodeType::Computation,
+  1065→            NodePayload::Computation(ComputationNode {
+  1066→                operation: "b".to_string(),
+  1067→                result_type: None,
+  1068→                tail_call: false,
+  1069→            }),
+  1070→            make_program_point(),
+  1071→        );
+  1072→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1073→        scg.add_edge(n2, n1, EdgeKind::DataFlow).unwrap();
+  1074→
+  1075→        let result = scg.topological_sort();
+  1076→        assert!(matches!(result, Err(SCGError::CycleDetected)));
+  1077→    }
+  1078→
+  1079→    #[test]
+  1080→    fn test_validate_clean_graph() {
+  1081→        let mut scg = SCG::new();
+  1082→        let region = RegionId::new(1);
+  1083→        let n1 = scg.add_node(
+  1084→            NodeType::Allocation,
+  1085→            NodePayload::Allocation(AllocationNode {
+  1086→                size: 64,
+  1087→                align: 8,
+  1088→                region_id: region,
+  1089→                type_name: None,
+  1090→            }),
+  1091→            make_program_point(),
+  1092→        );
+  1093→        let n2 = scg.add_node(
+  1094→            NodeType::Deallocation,
+  1095→            NodePayload::Deallocation(DeallocationNode {
+  1096→                allocation_node: n1,
+  1097→                region_id: region,
+  1098→            }),
+  1099→            make_program_point(),
+  1100→        );
+  1101→        scg.add_edge(n1, n2, EdgeKind::Derivation).unwrap();
+  1102→
+  1103→        let result = scg.validate();
+  1104→        assert!(result.is_valid, "Validation errors: {:?}", result.errors);
+  1105→    }
+  1106→
+  1107→    #[test]
+  1108→    fn test_validate_missing_deallocation() {
+  1109→        let mut scg = SCG::new();
+  1110→        scg.add_node(
+  1111→            NodeType::Allocation,
+  1112→            NodePayload::Allocation(AllocationNode {
+  1113→                size: 64,
+  1114→                align: 8,
+  1115→                region_id: RegionId::new(1),
+  1116→                type_name: None,
+  1117→            }),
+  1118→            make_program_point(),
+  1119→        );
+  1120→        let result = scg.validate();
+  1121→        // Should have warnings but still be valid (warnings don't invalidate)
+  1122→        assert!(result
+  1123→            .warnings
+  1124→            .iter()
+  1125→            .any(|w| w.contains("no corresponding deallocation")));
+  1126→    }
+  1127→
+  1128→    #[test]
+  1129→    fn test_merge_two_scgs() {
+  1130→        let mut scg1 = SCG::new();
+  1131→        let n1 = scg1.add_node(
+  1132→            NodeType::Computation,
+  1133→            NodePayload::Computation(ComputationNode {
+  1134→                operation: "a".to_string(),
+  1135→                result_type: None,
+  1136→                tail_call: false,
+  1137→            }),
+  1138→            make_program_point(),
+  1139→        );
+  1140→
+  1141→        let mut scg2 = SCG::new();
+  1142→        let n2_old = scg2.add_node(
+  1143→            NodeType::Computation,
+  1144→            NodePayload::Computation(ComputationNode {
+  1145→                operation: "b".to_string(),
+  1146→                result_type: None,
+  1147→                tail_call: false,
+  1148→            }),
+  1149→            make_program_point(),
+  1150→        );
+  1151→
+  1152→        let node_map = scg1.merge(scg2);
+  1153→        assert_eq!(scg1.node_count(), 2);
+  1154→        assert!(node_map.contains_key(&n2_old));
+  1155→        let n2_new = node_map[&n2_old];
+  1156→        assert_ne!(n1, n2_new);
+  1157→        assert!(scg1.get_node(n1).is_some());
+  1158→        assert!(scg1.get_node(n2_new).is_some());
+  1159→    }
+  1160→
+  1161→    #[test]
+  1162→    fn test_regions() {
+  1163→        let mut scg = SCG::new();
+  1164→        let region = SCGRegion::new(RegionId::new(1), DeploymentTarget::Heap);
+  1165→        scg.add_region(region);
+  1166→        assert_eq!(scg.region_count(), 1);
+  1167→        assert!(scg.get_region(RegionId::new(1)).is_some());
+  1168→    }
+  1169→}
+  1170→

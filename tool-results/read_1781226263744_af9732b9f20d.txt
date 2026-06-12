@@ -1,0 +1,1347 @@
+     1→//! SCG → MSG Conversion Pipeline
+     2→//!
+     3→//! This module implements the conversion from a Semantic Computation Graph (SCG)
+     4→//! to a Memory State Graph (MSG). The SCG is a front-end IR that captures
+     5→//! computation, allocation, access, and control flow. The MSG is the core
+     6→//! analysis IR that tracks memory regions, pointer derivations, access events,
+     7→//! and synchronisation edges.
+     8→//!
+     9→//! # Conversion Strategy
+    10→//!
+    11→//! 1. **Topological walk** — SCG nodes are processed in topological order so
+    12→//!    that all predecessors of a node are converted before the node itself.
+    13→//! 2. **AllocationNode → Region** — each `Allocation` node becomes an MSG
+    14→//!    `Region` with a monotonically assigned base address (starting from
+    15→//!    `0x1_0000`).
+    16→//! 3. **Derivation edges → Derivations** — `Derivation` edges in the SCG carry
+    17→//!    pointer provenance and are mapped to MSG `Derivation` nodes with proper
+    18→//!    source chains and provenance ranges.
+    19→//! 4. **Access nodes → Accesses** — each `Access` node in the SCG is converted
+    20→//!    to an MSG `Access` targeting the appropriate derivation.
+    21→//! 5. **Cast nodes → Derivations** — `Cast` nodes produce `DerivationKind::Cast`
+    22→//!    derivations from their parent derivation.
+    23→//! 6. **Control-flow edges → SyncEdges** — `ControlFlow` edges between two
+    24→//!    `Access` nodes become `SyncEdge`s with `HappensBefore` ordering.
+    25→//! 7. **DeallocationNode → Region status Freed** — `Deallocation` nodes mark
+    26→//!    their corresponding region as `Freed`.
+    27→//! 8. **Verification** — after conversion, all derivation chains are verified
+    28→//!    to be well-formed (each chain terminates at a region).
+    29→
+    30→use std::fmt;
+    31→
+    32→use hashbrown::HashMap;
+    33→
+    34→use crate::access::{Access, AccessId, AccessKind};
+    35→use crate::address::Address;
+    36→use crate::derivation::{Derivation, DerivationId, DerivationKind, DerivationSource, RepD};
+    37→use crate::msg::MSG;
+    38→use crate::program_point::ProgramPoint as MsgProgramPoint;
+    39→use crate::region::{Region, RegionId, RegionStatus};
+    40→use crate::sync::{Ordering, SyncEdge, SyncEdgeId};
+    41→
+    42→use vuma_scg::edge::EdgeKind;
+    43→use vuma_scg::graph::SCG;
+    44→use vuma_scg::node::{
+    45→    AccessMode, NodeData, NodeId as ScgNodeId, NodePayload, NodeType,
+    46→    ProgramPoint as ScgProgramPoint,
+    47→};
+    48→use vuma_scg::region::RegionId as ScgRegionId;
+    49→
+    50→// ---------------------------------------------------------------------------
+    51→// Constants
+    52→// ---------------------------------------------------------------------------
+    53→
+    54→/// The starting base address for monotonic region allocation.
+    55→const BASE_ADDRESS: u64 = 0x1_0000;
+    56→
+    57→/// Default alignment used when no alignment is specified (16 bytes).
+    58→const DEFAULT_ALIGN: u64 = 16;
+    59→
+    60→// ---------------------------------------------------------------------------
+    61→// Error type
+    62→// ---------------------------------------------------------------------------
+    63→
+    64→/// Errors that can occur during SCG → MSG conversion.
+    65→#[derive(Debug, Clone, PartialEq)]
+    66→pub enum ConversionError {
+    67→    /// The SCG contains a cycle and cannot be topologically sorted.
+    68→    CycleDetected,
+    69→    /// An allocation node references a region that was not found in the SCG.
+    70→    UnknownRegion(ScgRegionId),
+    71→    /// A deallocation node references an allocation that was not converted.
+    72→    UnknownAllocation(ScgNodeId),
+    73→    /// A derivation edge references a source node that has no associated derivation.
+    74→    MissingDerivation(ScgNodeId),
+    75→    /// An access node references a region that was not found.
+    76→    AccessRegionNotFound(ScgRegionId),
+    77→    /// A cast node has no incoming derivation to chain from.
+    78→    CastWithoutParent(ScgNodeId),
+    79→    /// Verification failed: a derivation chain does not terminate at a region.
+    80→    BrokenDerivationChain(DerivationId),
+    81→    /// Verification failed: a derivation has an invalid provenance range.
+    82→    InvalidProvenanceRange(DerivationId),
+    83→}
+    84→
+    85→impl fmt::Display for ConversionError {
+    86→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    87→        match self {
+    88→            ConversionError::CycleDetected => write!(f, "SCG contains a cycle, cannot convert"),
+    89→            ConversionError::UnknownRegion(rid) => {
+    90→                write!(f, "allocation references unknown region {}", rid)
+    91→            }
+    92→            ConversionError::UnknownAllocation(nid) => {
+    93→                write!(f, "deallocation references unknown allocation {}", nid)
+    94→            }
+    95→            ConversionError::MissingDerivation(nid) => {
+    96→                write!(
+    97→                    f,
+    98→                    "derivation edge source node {} has no associated derivation",
+    99→                    nid
+   100→                )
+   101→            }
+   102→            ConversionError::AccessRegionNotFound(rid) => {
+   103→                write!(f, "access references unknown region {}", rid)
+   104→            }
+   105→            ConversionError::CastWithoutParent(nid) => {
+   106→                write!(
+   107→                    f,
+   108→                    "cast node {} has no incoming derivation to chain from",
+   109→                    nid
+   110→                )
+   111→            }
+   112→            ConversionError::BrokenDerivationChain(did) => {
+   113→                write!(f, "derivation {} chain does not terminate at a region", did)
+   114→            }
+   115→            ConversionError::InvalidProvenanceRange(did) => {
+   116→                write!(f, "derivation {} has invalid provenance range", did)
+   117→            }
+   118→        }
+   119→    }
+   120→}
+   121→
+   122→impl std::error::Error for ConversionError {}
+   123→
+   124→// ---------------------------------------------------------------------------
+   125→// Conversion context
+   126→// ---------------------------------------------------------------------------
+   127→
+   128→/// Internal context that tracks the mapping between SCG and MSG entities
+   129→/// during the conversion process.
+   130→struct ConversionContext {
+   131→    /// The MSG being built.
+   132→    msg: MSG,
+   133→
+   134→    /// Next available address for monotonic allocation.
+   135→    next_address: u64,
+   136→
+   137→    /// Maps SCG Allocation NodeId → MSG RegionId.
+   138→    alloc_node_to_region: HashMap<ScgNodeId, RegionId>,
+   139→
+   140→    /// Maps SCG Allocation NodeId → DerivationId (the Direct derivation from the region).
+   141→    alloc_node_to_derivation: HashMap<ScgNodeId, DerivationId>,
+   142→
+   143→    /// Maps SCG node (Access, Cast, Computation) → DerivationId.
+   144→    node_to_derivation: HashMap<ScgNodeId, DerivationId>,
+   145→
+   146→    /// Maps SCG Access NodeId → AccessId.
+   147→    node_to_access: HashMap<ScgNodeId, AccessId>,
+   148→
+   149→    /// Maps SCG region ID (raw u64) → MSG region ID.
+   150→    scg_region_to_msg_region: HashMap<u64, RegionId>,
+   151→
+   152→    /// Maps MSG RegionId → (base_address, size) for provenance range computation.
+   153→    region_bounds: HashMap<RegionId, (Address, u64)>,
+   154→
+   155→    /// Counter for DerivationId assignment.
+   156→    next_derivation_id: u64,
+   157→
+   158→    /// Counter for AccessId assignment.
+   159→    next_access_id: u64,
+   160→
+   161→    /// Counter for SyncEdgeId assignment.
+   162→    next_sync_edge_id: u64,
+   163→}
+   164→
+   165→impl ConversionContext {
+   166→    fn new() -> Self {
+   167→        Self {
+   168→            msg: MSG::new(),
+   169→            next_address: BASE_ADDRESS,
+   170→            alloc_node_to_region: HashMap::new(),
+   171→            alloc_node_to_derivation: HashMap::new(),
+   172→            node_to_derivation: HashMap::new(),
+   173→            node_to_access: HashMap::new(),
+   174→            scg_region_to_msg_region: HashMap::new(),
+   175→            region_bounds: HashMap::new(),
+   176→            next_derivation_id: 0,
+   177→            next_access_id: 0,
+   178→            next_sync_edge_id: 0,
+   179→        }
+   180→    }
+   181→
+   182→    /// Allocate a contiguous address range of `size` bytes with `align` alignment.
+   183→    /// Returns the base address of the allocated range. Addresses are assigned
+   184→    /// monotonically — each new region is placed after the previous one.
+   185→    fn allocate_address(&mut self, size: u64, align: u64) -> Address {
+   186→        let align = if align == 0 { DEFAULT_ALIGN } else { align };
+   187→        let base = Address::from(self.next_address).align_to(align);
+   188→        self.next_address = base.as_u64() + size;
+   189→        base
+   190→    }
+   191→
+   192→    fn alloc_derivation_id(&mut self) -> DerivationId {
+   193→        let id = DerivationId(self.next_derivation_id);
+   194→        self.next_derivation_id += 1;
+   195→        id
+   196→    }
+   197→
+   198→    fn alloc_access_id(&mut self) -> AccessId {
+   199→        let id = AccessId(self.next_access_id);
+   200→        self.next_access_id += 1;
+   201→        id
+   202→    }
+   203→
+   204→    fn alloc_sync_edge_id(&mut self) -> SyncEdgeId {
+   205→        let id = SyncEdgeId(self.next_sync_edge_id);
+   206→        self.next_sync_edge_id += 1;
+   207→        id
+   208→    }
+   209→
+   210→    /// Look up the derivation associated with an SCG node, checking both
+   211→    /// allocation derivation maps and the general node-to-derivation map.
+   212→    fn get_derivation_for_node(&self, node_id: ScgNodeId) -> Option<DerivationId> {
+   213→        self.alloc_node_to_derivation
+   214→            .get(&node_id)
+   215→            .copied()
+   216→            .or_else(|| self.node_to_derivation.get(&node_id).copied())
+   217→    }
+   218→}
+   219→
+   220→// ---------------------------------------------------------------------------
+   221→// Program point conversion
+   222→// ---------------------------------------------------------------------------
+   223→
+   224→/// Convert an SCG ProgramPoint to an MSG ProgramPoint.
+   225→fn convert_program_point(scg_pp: &ScgProgramPoint) -> MsgProgramPoint {
+   226→    MsgProgramPoint::new(
+   227→        scg_pp
+   228→            .file
+   229→            .clone()
+   230→            .unwrap_or_else(|| "<unknown>".to_string()),
+   231→        scg_pp.line.map(|l| l as u32).unwrap_or(0),
+   232→        scg_pp.column.map(|c| c as u32).unwrap_or(0),
+   233→    )
+   234→}
+   235→
+   236→// ---------------------------------------------------------------------------
+   237→// Node conversion helpers
+   238→// ---------------------------------------------------------------------------
+   239→
+   240→/// Determine the MSG `RegionStatus` from a deployment target name and whether
+   241→/// the region has been freed.
+   242→fn region_status_from_deployment(deployment: &str, freed: bool) -> RegionStatus {
+   243→    if freed {
+   244→        return RegionStatus::Freed;
+   245→    }
+   246→    match deployment {
+   247→        "Stack" => RegionStatus::Stack,
+   248→        "Gpu" => RegionStatus::Device,
+   249→        "Persisted" => RegionStatus::Mapped,
+   250→        _ => RegionStatus::Allocated,
+   251→    }
+   252→}
+   253→
+   254→/// Map SCG `AccessMode` to MSG `AccessKind`.
+   255→fn access_kind_from_mode(mode: AccessMode) -> AccessKind {
+   256→    match mode {
+   257→        AccessMode::Read => AccessKind::Read,
+   258→        AccessMode::Write => AccessKind::Write,
+   259→        AccessMode::ReadWrite => AccessKind::Write, // conservative: treat ReadWrite as Write
+   260→    }
+   261→}
+   262→
+   263→// ---------------------------------------------------------------------------
+   264→// Main conversion function
+   265→// ---------------------------------------------------------------------------
+   266→
+   267→/// Convert an entire SCG to an MSG.
+   268→///
+   269→/// This is the primary entry point for the conversion pipeline. It walks the
+   270→/// SCG in topological order, mapping each node to the appropriate MSG
+   271→/// construct, and then processes edges to build derivation chains and
+   272→/// synchronisation edges.
+   273→///
+   274→/// # Errors
+   275→///
+   276→/// Returns a [`ConversionError`] if:
+   277→/// - The SCG contains a cycle (topological sort fails).
+   278→/// - A node references a region or allocation that doesn't exist.
+   279→/// - Post-conversion verification finds broken derivation chains.
+   280→pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
+   281→    let mut ctx = ConversionContext::new();
+   282→
+   283→    // Step 1: Topological sort the SCG.
+   284→    let sorted_nodes = scg
+   285→        .topological_sort()
+   286→        .map_err(|_| ConversionError::CycleDetected)?;
+   287→
+   288→    // Step 2: Pre-scan — identify which allocation nodes exist and which regions
+   289→    // are freed, so we can assign correct region status upfront.
+   290→    let mut freed_allocations: hashbrown::HashSet<ScgNodeId> = hashbrown::HashSet::new();
+   291→    for node_data in scg.nodes() {
+   292→        if let NodePayload::Deallocation(dealloc) = &node_data.payload {
+   293→            freed_allocations.insert(dealloc.allocation_node);
+   294→        }
+   295→    }
+   296→
+   297→    // Step 3: Process nodes in topological order.
+   298→    for node_id in &sorted_nodes {
+   299→        let node_data = scg.get_node(*node_id).expect("node must exist in SCG");
+   300→        process_node(scg, &mut ctx, node_data, &freed_allocations)?;
+   301→    }
+   302→
+   303→    // Step 4: Process edges — build sync edges from ControlFlow edges.
+   304→    process_edges(scg, &mut ctx)?;
+   305→
+   306→    // Step 5: Verify derivation chains.
+   307→    verify_derivation_chains(&ctx)?;
+   308→
+   309→    Ok(ctx.msg)
+   310→}
+   311→
+   312→// ---------------------------------------------------------------------------
+   313→// Node processing
+   314→// ---------------------------------------------------------------------------
+   315→
+   316→/// Process a single SCG node and add the corresponding MSG constructs.
+   317→fn process_node(
+   318→    scg: &SCG,
+   319→    ctx: &mut ConversionContext,
+   320→    node: &NodeData,
+   321→    freed_allocations: &hashbrown::HashSet<ScgNodeId>,
+   322→) -> Result<(), ConversionError> {
+   323→    match node.node_type {
+   324→        NodeType::Allocation => {
+   325→            process_allocation(scg, ctx, node, freed_allocations)?;
+   326→        }
+   327→        NodeType::Access => {
+   328→            process_access(scg, ctx, node)?;
+   329→        }
+   330→        NodeType::Cast => {
+   331→            process_cast(scg, ctx, node)?;
+   332→        }
+   333→        NodeType::Deallocation => {
+   334→            process_deallocation(ctx, node)?;
+   335→        }
+   336→        NodeType::Computation
+   337→        | NodeType::Effect
+   338→        | NodeType::Control
+   339→        | NodeType::Phantom
+   340→        | NodeType::VTable
+   341→        | NodeType::ClosureEnv => {
+   342→            // These node types do not directly produce MSG constructs.
+   343→            // However, if they participate in derivation chains via Derivation
+   344→            // edges, we create a passthrough derivation.
+   345→            process_passthrough(scg, ctx, node)?;
+   346→        }
+   347→    }
+   348→    Ok(())
+   349→}
+   350→
+   351→/// Process an AllocationNode: create an MSG Region and a Direct derivation.
+   352→///
+   353→/// The allocation is assigned a base address from the monotonic allocator.
+   354→/// A `DerivationKind::Direct` derivation is also created, linking the
+   355→/// region base to the pointer produced by this allocation.
+   356→fn process_allocation(
+   357→    scg: &SCG,
+   358→    ctx: &mut ConversionContext,
+   359→    node: &NodeData,
+   360→    freed_allocations: &hashbrown::HashSet<ScgNodeId>,
+   361→) -> Result<(), ConversionError> {
+   362→    let alloc_payload = match &node.payload {
+   363→        NodePayload::Allocation(a) => a,
+   364→        _ => unreachable!("Allocation node must have Allocation payload"),
+   365→    };
+   366→
+   367→    // Look up the SCG region to get the deployment target.
+   368→    let scg_region = scg.get_region(alloc_payload.region_id);
+   369→    let deployment_name = scg_region
+   370→        .map(|r| format!("{}", r.deployment_target))
+   371→        .unwrap_or_else(|| "Heap".to_string());
+   372→
+   373→    let is_freed = freed_allocations.contains(&node.id);
+   374→
+   375→    // Assign address with monotonic allocator.
+   376→    let base = ctx.allocate_address(alloc_payload.size, alloc_payload.align);
+   377→
+   378→    // Determine MSG RegionId — use the SCG region's raw value.
+   379→    let msg_region_id = RegionId(alloc_payload.region_id.as_u64());
+   380→    ctx.scg_region_to_msg_region
+   381→        .insert(alloc_payload.region_id.as_u64(), msg_region_id);
+   382→
+   383→    let status = region_status_from_deployment(&deployment_name, is_freed);
+   384→
+   385→    let region = Region {
+   386→        id: msg_region_id,
+   387→        base,
+   388→        size: alloc_payload.size,
+   389→        status,
+   390→        alloc_point: convert_program_point(&node.program_point),
+   391→        free_point: None, // will be set when deallocation is processed
+   392→        owner_context: None,
+   393→    };
+   394→
+   395→    ctx.region_bounds
+   396→        .insert(msg_region_id, (base, alloc_payload.size));
+   397→    ctx.alloc_node_to_region.insert(node.id, msg_region_id);
+   398→    ctx.msg.add_region(region);
+   399→
+   400→    // Create a Direct derivation from this region.
+   401→    let deriv_id = ctx.alloc_derivation_id();
+   402→    let derivation = Derivation {
+   403→        id: deriv_id,
+   404→        source: DerivationSource::Region(msg_region_id),
+   405→        kind: DerivationKind::Direct,
+   406→        proven_range: (base, base + alloc_payload.size),
+   407→    };
+   408→    ctx.msg.add_derivation(derivation);
+   409→    ctx.alloc_node_to_derivation.insert(node.id, deriv_id);
+   410→
+   411→    Ok(())
+   412→}
+   413→
+   414→/// Process an Access node: create an MSG Derivation and Access.
+   415→///
+   416→/// The derivation captures pointer provenance (how the accessed pointer
+   417→/// was derived from a region). The access records the kind (Read/Write)
+   418→/// and size of the memory operation.
+   419→fn process_access(
+   420→    scg: &SCG,
+   421→    ctx: &mut ConversionContext,
+   422→    node: &NodeData,
+   423→) -> Result<(), ConversionError> {
+   424→    let access_payload = match &node.payload {
+   425→        NodePayload::Access(a) => a,
+   426→        _ => unreachable!("Access node must have Access payload"),
+   427→    };
+   428→
+   429→    // Find the derivation source by looking at incoming Derivation edges.
+   430→    let (source, kind, proven_range) = compute_derivation_for_node(scg, ctx, node)?;
+   431→
+   432→    let deriv_id = ctx.alloc_derivation_id();
+   433→    let derivation = Derivation {
+   434→        id: deriv_id,
+   435→        source,
+   436→        kind,
+   437→        proven_range,
+   438→    };
+   439→    ctx.msg.add_derivation(derivation);
+   440→    ctx.node_to_derivation.insert(node.id, deriv_id);
+   441→
+   442→    // Create the access event.
+   443→    let access_kind = access_kind_from_mode(access_payload.mode);
+   444→    let access_size = access_payload.access_size.unwrap_or(1);
+   445→    let access_id = ctx.alloc_access_id();
+   446→
+   447→    let access = Access::new(
+   448→        access_id,
+   449→        deriv_id,
+   450→        access_kind,
+   451→        access_size,
+   452→        convert_program_point(&node.program_point),
+   453→    );
+   454→    ctx.msg.add_access(access);
+   455→    ctx.node_to_access.insert(node.id, access_id);
+   456→
+   457→    Ok(())
+   458→}
+   459→
+   460→/// Process a Cast node: create an MSG Derivation with DerivationKind::Cast.
+   461→///
+   462→/// Cast nodes represent type-level pointer casts (e.g. `*mut u8` → `*mut u32`).
+   463→/// The derivation inherits the provenance range from its parent.
+   464→fn process_cast(
+   465→    scg: &SCG,
+   466→    ctx: &mut ConversionContext,
+   467→    node: &NodeData,
+   468→) -> Result<(), ConversionError> {
+   469→    let cast_payload = match &node.payload {
+   470→        NodePayload::Cast(c) => c,
+   471→        _ => unreachable!("Cast node must have Cast payload"),
+   472→    };
+   473→
+   474→    // Find the parent derivation via incoming Derivation edges.
+   475→    let parent_deriv_id = find_parent_derivation(scg, ctx, node.id)
+   476→        .ok_or(ConversionError::CastWithoutParent(node.id))?;
+   477→
+   478→    let parent_deriv = ctx
+   479→        .msg
+   480→        .derivation(parent_deriv_id)
+   481→        .expect("derivation must exist")
+   482→        .clone();
+   483→    let proven_range = parent_deriv.proven_range;
+   484→
+   485→    let deriv_id = ctx.alloc_derivation_id();
+   486→    let derivation = Derivation {
+   487→        id: deriv_id,
+   488→        source: DerivationSource::AnotherDerivation(parent_deriv_id),
+   489→        kind: DerivationKind::Cast {
+   490→            from: RepD {
+   491→                name: cast_payload.from_type.clone(),
+   492→                size: 0, // unknown at this level
+   493→            },
+   494→            to: RepD {
+   495→                name: cast_payload.to_type.clone(),
+   496→                size: 0,
+   497→            },
+   498→        },
+   499→        proven_range,
+   500→    };
+   501→    ctx.msg.add_derivation(derivation);
+   502→    ctx.node_to_derivation.insert(node.id, deriv_id);
+   503→
+   504→    Ok(())
+   505→}
+   506→
+   507→/// Process a DeallocationNode: mark the corresponding region as Freed.
+   508→///
+   509→/// The deallocation node references its allocation node; the MSG Region
+   510→/// associated with that allocation is updated to `RegionStatus::Freed`
+   511→/// and the `free_point` is set.
+   512→fn process_deallocation(
+   513→    ctx: &mut ConversionContext,
+   514→    node: &NodeData,
+   515→) -> Result<(), ConversionError> {
+   516→    let dealloc_payload = match &node.payload {
+   517→        NodePayload::Deallocation(d) => d,
+   518→        _ => unreachable!("Deallocation node must have Deallocation payload"),
+   519→    };
+   520→
+   521→    // Find the region associated with the allocation being freed.
+   522→    let msg_region_id = ctx
+   523→        .alloc_node_to_region
+   524→        .get(&dealloc_payload.allocation_node)
+   525→        .copied()
+   526→        .ok_or(ConversionError::UnknownAllocation(
+   527→            dealloc_payload.allocation_node,
+   528→        ))?;
+   529→
+   530→    // Update the region status and set the free point.
+   531→    if let Some(region) = ctx.msg.region(msg_region_id).cloned() {
+   532→        let updated_region = Region {
+   533→            status: RegionStatus::Freed,
+   534→            free_point: Some(convert_program_point(&node.program_point)),
+   535→            ..region
+   536→        };
+   537→        ctx.msg.add_region(updated_region); // add_region replaces existing
+   538→    }
+   539→
+   540→    Ok(())
+   541→}
+   542→
+   543→/// Process passthrough nodes (Computation, Effect, Control, Phantom) that may
+   544→/// participate in derivation chains. If the node has an incoming Derivation
+   545→/// or DataFlow edge, we create a passthrough derivation that forwards the
+   546→/// provenance from its parent.
+   547→fn process_passthrough(
+   548→    scg: &SCG,
+   549→    ctx: &mut ConversionContext,
+   550→    node: &NodeData,
+   551→) -> Result<(), ConversionError> {
+   552→    // Check if this node has incoming Derivation edges.
+   553→    if let Some(parent_deriv_id) = find_parent_derivation(scg, ctx, node.id) {
+   554→        let parent_deriv = ctx
+   555→            .msg
+   556→            .derivation(parent_deriv_id)
+   557→            .expect("derivation must exist")
+   558→            .clone();
+   559→        let proven_range = parent_deriv.proven_range;
+   560→
+   561→        let deriv_id = ctx.alloc_derivation_id();
+   562→        let derivation = Derivation {
+   563→            id: deriv_id,
+   564→            source: DerivationSource::AnotherDerivation(parent_deriv_id),
+   565→            kind: DerivationKind::Direct, // passthrough — no transformation
+   566→            proven_range,
+   567→        };
+   568→        ctx.msg.add_derivation(derivation);
+   569→        ctx.node_to_derivation.insert(node.id, deriv_id);
+   570→    }
+   571→    Ok(())
+   572→}
+   573→
+   574→// ---------------------------------------------------------------------------
+   575→// Edge processing
+   576→// ---------------------------------------------------------------------------
+   577→
+   578→/// Process SCG edges to create MSG sync edges from ControlFlow edges.
+   579→///
+   580→/// A `ControlFlow` edge between two `Access` nodes becomes a
+   581→/// `SyncEdge` with `Ordering::HappensBefore`, establishing a
+   582→/// happens-before relation for data-race analysis.
+   583→fn process_edges(scg: &SCG, ctx: &mut ConversionContext) -> Result<(), ConversionError> {
+   584→    for edge_data in scg.edges() {
+   585→        if edge_data.kind == EdgeKind::ControlFlow {
+   586→            // Only create sync edges between Access nodes.
+   587→            let source_access = ctx.node_to_access.get(&edge_data.source).copied();
+   588→            let target_access = ctx.node_to_access.get(&edge_data.target).copied();
+   589→
+   590→            if let (Some(a1), Some(a2)) = (source_access, target_access) {
+   591→                let sync_id = ctx.alloc_sync_edge_id();
+   592→                let sync_edge = SyncEdge::new(sync_id, a1, a2, Ordering::HappensBefore);
+   593→                ctx.msg.add_sync_edge(sync_edge);
+   594→            }
+   595→        }
+   596→    }
+   597→    Ok(())
+   598→}
+   599→
+   600→// ---------------------------------------------------------------------------
+   601→// Derivation helpers
+   602→// ---------------------------------------------------------------------------
+   603→
+   604→/// Compute the derivation source, kind, and provenance range for an Access
+   605→/// node based on its incoming edges and the access payload.
+   606→///
+   607→/// If the access has a parent derivation (via Derivation/DataFlow edges),
+   608→/// the new derivation is chained from it with an optional offset.
+   609→/// Otherwise, the derivation originates directly from the region.
+   610→fn compute_derivation_for_node(
+   611→    scg: &SCG,
+   612→    ctx: &ConversionContext,
+   613→    node: &NodeData,
+   614→) -> Result<(DerivationSource, DerivationKind, (Address, Address)), ConversionError> {
+   615→    let access_payload = match &node.payload {
+   616→        NodePayload::Access(a) => a,
+   617→        _ => unreachable!("expected Access payload"),
+   618→    };
+   619→
+   620→    // Try to find a parent derivation via incoming edges.
+   621→    if let Some(parent_deriv_id) = find_parent_derivation(scg, ctx, node.id) {
+   622→        let parent_deriv = ctx
+   623→            .msg
+   624→            .derivation(parent_deriv_id)
+   625→            .expect("derivation must exist")
+   626→            .clone();
+   627→        let offset = access_payload.offset.unwrap_or(0);
+   628→        let base = parent_deriv.proven_range.0;
+   629→        let parent_end = parent_deriv.proven_range.1;
+   630→
+   631→        if offset == 0 {
+   632→            Ok((
+   633→                DerivationSource::AnotherDerivation(parent_deriv_id),
+   634→                DerivationKind::Direct,
+   635→                parent_deriv.proven_range,
+   636→            ))
+   637→        } else {
+   638→            let offset_addr = base + offset;
+   639→            let end = if offset_addr < parent_end {
+   640→                parent_end // proven range extends to end of parent
+   641→            } else {
+   642→                offset_addr // degenerate: offset at end or beyond
+   643→            };
+   644→            Ok((
+   645→                DerivationSource::AnotherDerivation(parent_deriv_id),
+   646→                DerivationKind::Offset { by: offset as i64 },
+   647→                (offset_addr, end),
+   648→            ))
+   649→        }
+   650→    } else {
+   651→        // No parent derivation found — derive directly from the region.
+   652→        let msg_region_id = ctx
+   653→            .scg_region_to_msg_region
+   654→            .get(&access_payload.region_id.as_u64())
+   655→            .copied()
+   656→            .ok_or(ConversionError::AccessRegionNotFound(
+   657→                access_payload.region_id,
+   658→            ))?;
+   659→
+   660→        let &(base, size) =
+   661→            ctx.region_bounds
+   662→                .get(&msg_region_id)
+   663→                .ok_or(ConversionError::AccessRegionNotFound(
+   664→                    access_payload.region_id,
+   665→                ))?;
+   666→
+   667→        let offset = access_payload.offset.unwrap_or(0);
+   668→        if offset == 0 {
+   669→            Ok((
+   670→                DerivationSource::Region(msg_region_id),
+   671→                DerivationKind::Direct,
+   672→                (base, base + size),
+   673→            ))
+   674→        } else {
+   675→            let offset_addr = base + offset;
+   676→            Ok((
+   677→                DerivationSource::Region(msg_region_id),
+   678→                DerivationKind::Offset { by: offset as i64 },
+   679→                (offset_addr, base + size),
+   680→            ))
+   681→        }
+   682→    }
+   683→}
+   684→
+   685→/// Find the parent derivation for a node by looking at incoming Derivation
+   686→/// and DataFlow edges. Derivation edges are preferred; DataFlow edges are
+   687→/// used as a fallback.
+   688→fn find_parent_derivation(
+   689→    scg: &SCG,
+   690→    ctx: &ConversionContext,
+   691→    node_id: ScgNodeId,
+   692→) -> Option<DerivationId> {
+   693→    // Look at predecessors connected by Derivation edges.
+   694→    if let Some(preds) = scg.predecessors(node_id) {
+   695→        // First pass: check Derivation edges.
+   696→        for pred_id in &preds {
+   697→            for edge in scg.edges() {
+   698→                if edge.source == *pred_id
+   699→                    && edge.target == node_id
+   700→                    && edge.kind == EdgeKind::Derivation
+   701→                {
+   702→                    if let Some(deriv_id) = ctx.get_derivation_for_node(*pred_id) {
+   703→                        return Some(deriv_id);
+   704→                    }
+   705→                }
+   706→            }
+   707→        }
+   708→        // Second pass: check DataFlow edges as a fallback.
+   709→        for pred_id in &preds {
+   710→            for edge in scg.edges() {
+   711→                if edge.source == *pred_id
+   712→                    && edge.target == node_id
+   713→                    && edge.kind == EdgeKind::DataFlow
+   714→                {
+   715→                    if let Some(deriv_id) = ctx.get_derivation_for_node(*pred_id) {
+   716→                        return Some(deriv_id);
+   717→                    }
+   718→                }
+   719→            }
+   720→        }
+   721→    }
+   722→    None
+   723→}
+   724→
+   725→// ---------------------------------------------------------------------------
+   726→// Verification
+   727→// ---------------------------------------------------------------------------
+   728→
+   729→/// Verify that all derivation chains in the MSG are well-formed.
+   730→///
+   731→/// A chain is well-formed if:
+   732→/// 1. Every derivation chain terminates at a `DerivationSource::Region`.
+   733→/// 2. Every derivation has a valid provenance range (lo < hi).
+   734→fn verify_derivation_chains(ctx: &ConversionContext) -> Result<(), ConversionError> {
+   735→    // We check derivations that we created (IDs 0..next_derivation_id).
+   736→    for i in 0..ctx.next_derivation_id {
+   737→        let did = DerivationId(i);
+   738→        if let Some(derivation) = ctx.msg.derivation(did) {
+   739→            // Check provenance range.
+   740→            if !derivation.is_within_bounds() {
+   741→                return Err(ConversionError::InvalidProvenanceRange(did));
+   742→            }
+   743→
+   744→            // Check that the chain terminates at a region.
+   745→            if derivation
+   746→                .base_region(|id| ctx.msg.derivation(id).cloned())
+   747→                .is_none()
+   748→            {
+   749→                return Err(ConversionError::BrokenDerivationChain(did));
+   750→            }
+   751→        }
+   752→    }
+   753→    Ok(())
+   754→}
+   755→
+   756→// ---------------------------------------------------------------------------
+   757→// Tests
+   758→// ---------------------------------------------------------------------------
+   759→
+   760→#[cfg(test)]
+   761→mod tests {
+   762→    use super::*;
+   763→    use vuma_scg::edge::EdgeKind;
+   764→    use vuma_scg::graph::SCG;
+   765→    use vuma_scg::node::{
+   766→        AccessMode, AccessNode, AllocationNode, CastNode, ComputationNode, DeallocationNode,
+   767→        NodePayload, NodeType, ProgramPoint as ScgPP,
+   768→    };
+   769→    use vuma_scg::region::{DeploymentTarget, RegionId as ScgRegionId, SCGRegion};
+   770→
+   771→    /// Helper: create an SCG ProgramPoint.
+   772→    fn scg_pp(line: u64) -> ScgPP {
+   773→        ScgPP {
+   774→            file: Some("test.vu".to_string()),
+   775→            line: Some(line),
+   776→            column: Some(1),
+   777→            offset: None,
+   778→        }
+   779→    }
+   780→
+   781→    /// Helper: build a simple SCG with one allocation + one read access.
+   782→    fn build_simple_scg() -> SCG {
+   783→        let mut scg = SCG::new();
+   784→        let region_id = ScgRegionId::new(1);
+   785→
+   786→        // Add region.
+   787→        let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+   788→
+   789→        // Allocation node.
+   790→        let alloc_id = scg.add_node(
+   791→            NodeType::Allocation,
+   792→            NodePayload::Allocation(AllocationNode {
+   793→                size: 256,
+   794→                align: 16,
+   795→                region_id,
+   796→                type_name: Some("Buffer".to_string()),
+   797→            }),
+   798→            scg_pp(10),
+   799→        );
+   800→        region.add_node(alloc_id);
+   801→
+   802→        // Access node (read).
+   803→        let access_id = scg.add_node(
+   804→            NodeType::Access,
+   805→            NodePayload::Access(AccessNode {
+   806→                mode: AccessMode::Read,
+   807→                region_id,
+   808→                offset: None,
+   809→                access_size: Some(4),
+   810→            }),
+   811→            scg_pp(11),
+   812→        );
+   813→        region.add_node(access_id);
+   814→
+   815→        // Derivation edge: allocation → access.
+   816→        scg.add_edge(alloc_id, access_id, EdgeKind::Derivation)
+   817→            .unwrap();
+   818→
+   819→        scg.add_region(region);
+   820→        scg
+   821→    }
+   822→
+   823→    // -----------------------------------------------------------------------
+   824→    // Test 1: Allocation → Region
+   825→    // -----------------------------------------------------------------------
+   826→
+   827→    #[test]
+   828→    fn test_allocation_creates_region_with_monotonic_address() {
+   829→        let scg = build_simple_scg();
+   830→        let msg = scg_to_msg(&scg).unwrap();
+   831→
+   832→        assert_eq!(msg.region_count(), 1);
+   833→        let region = msg.region(RegionId(1)).unwrap();
+   834→        assert_eq!(region.size, 256);
+   835→        assert!(region.base.as_u64() >= BASE_ADDRESS);
+   836→        assert!(region.is_live());
+   837→    }
+   838→
+   839→    // -----------------------------------------------------------------------
+   840→    // Test 2: Allocation → Direct Derivation
+   841→    // -----------------------------------------------------------------------
+   842→
+   843→    #[test]
+   844→    fn test_allocation_creates_direct_derivation() {
+   845→        let scg = build_simple_scg();
+   846→        let msg = scg_to_msg(&scg).unwrap();
+   847→
+   848→        // Should have at least 1 derivation from the allocation.
+   849→        assert!(msg.derivation_count() >= 1);
+   850→
+   851→        // The first derivation (from allocation) should be Direct.
+   852→        let direct_deriv = msg.derivation(DerivationId(0)).unwrap();
+   853→        assert!(matches!(direct_deriv.kind, DerivationKind::Direct));
+   854→        assert!(matches!(direct_deriv.source, DerivationSource::Region(_)));
+   855→        assert!(direct_deriv.is_within_bounds());
+   856→    }
+   857→
+   858→    // -----------------------------------------------------------------------
+   859→    // Test 3: Access → Derivation + Access event
+   860→    // -----------------------------------------------------------------------
+   861→
+   862→    #[test]
+   863→    fn test_access_creates_derivation_and_access_event() {
+   864→        let scg = build_simple_scg();
+   865→        let msg = scg_to_msg(&scg).unwrap();
+   866→
+   867→        assert_eq!(msg.access_count(), 1);
+   868→        assert!(msg.derivation_count() >= 2);
+   869→
+   870→        // The access should target a derivation.
+   871→        let access = msg.access(AccessId(0)).unwrap();
+   872→        assert_eq!(access.kind, AccessKind::Read);
+   873→        assert_eq!(access.size, 4);
+   874→
+   875→        // The derivation chain from the access should terminate at a region.
+   876→        let chain = msg.derivation_chain(access.target);
+   877→        assert!(!chain.is_empty());
+   878→        assert!(matches!(chain[0].source, DerivationSource::Region(_)));
+   879→    }
+   880→
+   881→    // -----------------------------------------------------------------------
+   882→    // Test 4: DeallocationNode → Region status Freed
+   883→    // -----------------------------------------------------------------------
+   884→
+   885→    #[test]
+   886→    fn test_deallocation_marks_region_freed() {
+   887→        let mut scg = SCG::new();
+   888→        let region_id = ScgRegionId::new(1);
+   889→
+   890→        let alloc_id = scg.add_node(
+   891→            NodeType::Allocation,
+   892→            NodePayload::Allocation(AllocationNode {
+   893→                size: 128,
+   894→                align: 8,
+   895→                region_id,
+   896→                type_name: None,
+   897→            }),
+   898→            scg_pp(1),
+   899→        );
+   900→
+   901→        let dealloc_id = scg.add_node(
+   902→            NodeType::Deallocation,
+   903→            NodePayload::Deallocation(DeallocationNode {
+   904→                allocation_node: alloc_id,
+   905→                region_id,
+   906→            }),
+   907→            scg_pp(5),
+   908→        );
+   909→
+   910→        scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation)
+   911→            .unwrap();
+   912→
+   913→        let msg = scg_to_msg(&scg).unwrap();
+   914→        let region = msg.region(RegionId(1)).unwrap();
+   915→        assert_eq!(region.status, RegionStatus::Freed);
+   916→        assert!(region.free_point.is_some());
+   917→    }
+   918→
+   919→    // -----------------------------------------------------------------------
+   920→    // Test 5: Cast → DerivationKind::Cast
+   921→    // -----------------------------------------------------------------------
+   922→
+   923→    #[test]
+   924→    fn test_cast_creates_cast_derivation() {
+   925→        let mut scg = SCG::new();
+   926→        let region_id = ScgRegionId::new(1);
+   927→
+   928→        let alloc_id = scg.add_node(
+   929→            NodeType::Allocation,
+   930→            NodePayload::Allocation(AllocationNode {
+   931→                size: 64,
+   932→                align: 8,
+   933→                region_id,
+   934→                type_name: Some("u8".to_string()),
+   935→            }),
+   936→            scg_pp(1),
+   937→        );
+   938→
+   939→        let cast_id = scg.add_node(
+   940→            NodeType::Cast,
+   941→            NodePayload::Cast(CastNode {
+   942→                from_type: "*mut u8".to_string(),
+   943→                to_type: "*mut u32".to_string(),
+   944→                is_lossless: true,
+   945→            }),
+   946→            scg_pp(2),
+   947→        );
+   948→
+   949→        scg.add_edge(alloc_id, cast_id, EdgeKind::Derivation)
+   950→            .unwrap();
+   951→
+   952→        let msg = scg_to_msg(&scg).unwrap();
+   953→
+   954→        // Should have 2 derivations: Direct (from alloc) + Cast
+   955→        assert_eq!(msg.derivation_count(), 2);
+   956→
+   957→        let cast_deriv = msg.derivation(DerivationId(1)).unwrap();
+   958→        assert!(matches!(cast_deriv.kind, DerivationKind::Cast { .. }));
+   959→        assert!(matches!(
+   960→            cast_deriv.source,
+   961→            DerivationSource::AnotherDerivation(DerivationId(0))
+   962→        ));
+   963→
+   964→        // The cast derivation chain should lead back to the region.
+   965→        let chain = msg.derivation_chain(DerivationId(1));
+   966→        assert_eq!(chain.len(), 2);
+   967→        assert!(matches!(chain[0].source, DerivationSource::Region(_)));
+   968→    }
+   969→
+   970→    // -----------------------------------------------------------------------
+   971→    // Test 6: ControlFlow edge → SyncEdge with HappensBefore
+   972→    // -----------------------------------------------------------------------
+   973→
+   974→    #[test]
+   975→    fn test_control_flow_creates_sync_edge() {
+   976→        let mut scg = SCG::new();
+   977→        let region_id = ScgRegionId::new(1);
+   978→
+   979→        let alloc_id = scg.add_node(
+   980→            NodeType::Allocation,
+   981→            NodePayload::Allocation(AllocationNode {
+   982→                size: 128,
+   983→                align: 8,
+   984→                region_id,
+   985→                type_name: None,
+   986→            }),
+   987→            scg_pp(1),
+   988→        );
+   989→
+   990→        let write_id = scg.add_node(
+   991→            NodeType::Access,
+   992→            NodePayload::Access(AccessNode {
+   993→                mode: AccessMode::Write,
+   994→                region_id,
+   995→                offset: None,
+   996→                access_size: Some(8),
+   997→            }),
+   998→            scg_pp(2),
+   999→        );
+  1000→
+  1001→        let read_id = scg.add_node(
+  1002→            NodeType::Access,
+  1003→            NodePayload::Access(AccessNode {
+  1004→                mode: AccessMode::Read,
+  1005→                region_id,
+  1006→                offset: None,
+  1007→                access_size: Some(8),
+  1008→            }),
+  1009→            scg_pp(3),
+  1010→        );
+  1011→
+  1012→        // Derivation edges: alloc → write, alloc → read.
+  1013→        scg.add_edge(alloc_id, write_id, EdgeKind::Derivation)
+  1014→            .unwrap();
+  1015→        scg.add_edge(alloc_id, read_id, EdgeKind::Derivation)
+  1016→            .unwrap();
+  1017→
+  1018→        // Control flow: write → read (happens-before).
+  1019→        scg.add_edge(write_id, read_id, EdgeKind::ControlFlow)
+  1020→            .unwrap();
+  1021→
+  1022→        let msg = scg_to_msg(&scg).unwrap();
+  1023→
+  1024→        assert_eq!(msg.access_count(), 2);
+  1025→        assert_eq!(msg.sync_edge_count(), 1);
+  1026→
+  1027→        // The sync edge should order the write before the read.
+  1028→        let sync = msg.sync_edge(SyncEdgeId(0)).unwrap();
+  1029→        assert_eq!(sync.access1, AccessId(0)); // write
+  1030→        assert_eq!(sync.access2, AccessId(1)); // read
+  1031→        assert!(matches!(sync.ordering, Ordering::HappensBefore));
+  1032→    }
+  1033→
+  1034→    // -----------------------------------------------------------------------
+  1035→    // Test 7: Monotonic address assignment
+  1036→    // -----------------------------------------------------------------------
+  1037→
+  1038→    #[test]
+  1039→    fn test_monotonic_address_assignment() {
+  1040→        let mut scg = SCG::new();
+  1041→
+  1042→        // Two allocations in separate regions.
+  1043→        let r1 = ScgRegionId::new(1);
+  1044→        let r2 = ScgRegionId::new(2);
+  1045→
+  1046→        let a1 = scg.add_node(
+  1047→            NodeType::Allocation,
+  1048→            NodePayload::Allocation(AllocationNode {
+  1049→                size: 256,
+  1050→                align: 16,
+  1051→                region_id: r1,
+  1052→                type_name: None,
+  1053→            }),
+  1054→            scg_pp(1),
+  1055→        );
+  1056→
+  1057→        let a2 = scg.add_node(
+  1058→            NodeType::Allocation,
+  1059→            NodePayload::Allocation(AllocationNode {
+  1060→                size: 128,
+  1061→                align: 8,
+  1062→                region_id: r2,
+  1063→                type_name: None,
+  1064→            }),
+  1065→            scg_pp(2),
+  1066→        );
+  1067→
+  1068→        // Derivation edge to establish order.
+  1069→        scg.add_edge(a1, a2, EdgeKind::ControlFlow).unwrap();
+  1070→
+  1071→        let msg = scg_to_msg(&scg).unwrap();
+  1072→
+  1073→        let region1 = msg.region(RegionId(1)).unwrap();
+  1074→        let region2 = msg.region(RegionId(2)).unwrap();
+  1075→
+  1076→        // Region 1 should start at BASE_ADDRESS (aligned to 16).
+  1077→        assert_eq!(region1.base, Address::from(BASE_ADDRESS));
+  1078→
+  1079→        // Region 2 should start after region 1 (aligned to 8).
+  1080→        let expected_r2_base = Address::from(BASE_ADDRESS + 256).align_to(8);
+  1081→        assert_eq!(region2.base, expected_r2_base);
+  1082→
+  1083→        // Regions should not overlap.
+  1084→        assert!(!region1.overlaps(region2));
+  1085→    }
+  1086→
+  1087→    // -----------------------------------------------------------------------
+  1088→    // Test 8: Pointer offset → DerivationKind::Offset with provenance range
+  1089→    // -----------------------------------------------------------------------
+  1090→
+  1091→    #[test]
+  1092→    fn test_access_with_offset_creates_offset_derivation() {
+  1093→        let mut scg = SCG::new();
+  1094→        let region_id = ScgRegionId::new(1);
+  1095→
+  1096→        let alloc_id = scg.add_node(
+  1097→            NodeType::Allocation,
+  1098→            NodePayload::Allocation(AllocationNode {
+  1099→                size: 1024,
+  1100→                align: 16,
+  1101→                region_id,
+  1102→                type_name: None,
+  1103→            }),
+  1104→            scg_pp(1),
+  1105→        );
+  1106→
+  1107→        let access_id = scg.add_node(
+  1108→            NodeType::Access,
+  1109→            NodePayload::Access(AccessNode {
+  1110→                mode: AccessMode::Write,
+  1111→                region_id,
+  1112→                offset: Some(64),
+  1113→                access_size: Some(4),
+  1114→            }),
+  1115→            scg_pp(2),
+  1116→        );
+  1117→
+  1118→        scg.add_edge(alloc_id, access_id, EdgeKind::Derivation)
+  1119→            .unwrap();
+  1120→
+  1121→        let msg = scg_to_msg(&scg).unwrap();
+  1122→
+  1123→        // The access derivation should be an Offset derivation.
+  1124→        let access = msg.access(AccessId(0)).unwrap();
+  1125→        let deriv = msg.derivation(access.target).unwrap();
+  1126→
+  1127→        assert!(matches!(deriv.kind, DerivationKind::Offset { by: 64 }));
+  1128→
+  1129→        // The provenance range should start at base + 64.
+  1130→        let region = msg.region(RegionId(1)).unwrap();
+  1131→        let expected_start = region.base + 64;
+  1132→        assert_eq!(deriv.proven_range.0, expected_start);
+  1133→        assert!(deriv.is_within_bounds());
+  1134→    }
+  1135→
+  1136→    // -----------------------------------------------------------------------
+  1137→    // Test 9: Empty SCG → Empty MSG
+  1138→    // -----------------------------------------------------------------------
+  1139→
+  1140→    #[test]
+  1141→    fn test_empty_scg_produces_empty_msg() {
+  1142→        let scg = SCG::new();
+  1143→        let msg = scg_to_msg(&scg).unwrap();
+  1144→
+  1145→        assert_eq!(msg.region_count(), 0);
+  1146→        assert_eq!(msg.derivation_count(), 0);
+  1147→        assert_eq!(msg.access_count(), 0);
+  1148→        assert_eq!(msg.sync_edge_count(), 0);
+  1149→    }
+  1150→
+  1151→    // -----------------------------------------------------------------------
+  1152→    // Test 10: Derivation chain verification
+  1153→    // -----------------------------------------------------------------------
+  1154→
+  1155→    #[test]
+  1156→    fn test_all_derivation_chains_are_well_formed() {
+  1157→        let scg = build_simple_scg();
+  1158→        let msg = scg_to_msg(&scg).unwrap();
+  1159→
+  1160→        // All derivations should have well-formed chains.
+  1161→        for i in 0..msg.derivation_count() {
+  1162→            let did = DerivationId(i as u64);
+  1163→            if let Some(deriv) = msg.derivation(did) {
+  1164→                assert!(deriv.is_within_bounds());
+  1165→                let base_region = deriv.base_region(|id| msg.derivation(id).cloned());
+  1166→                assert!(
+  1167→                    base_region.is_some(),
+  1168→                    "Derivation {} has no base region",
+  1169→                    did.0
+  1170→                );
+  1171→            }
+  1172→        }
+  1173→    }
+  1174→
+  1175→    // -----------------------------------------------------------------------
+  1176→    // Test 11: Concurrent accesses (no sync edge)
+  1177→    // -----------------------------------------------------------------------
+  1178→
+  1179→    #[test]
+  1180→    fn test_concurrent_accesses_detected() {
+  1181→        let mut scg = SCG::new();
+  1182→        let region_id = ScgRegionId::new(1);
+  1183→
+  1184→        let alloc_id = scg.add_node(
+  1185→            NodeType::Allocation,
+  1186→            NodePayload::Allocation(AllocationNode {
+  1187→                size: 256,
+  1188→                align: 16,
+  1189→                region_id,
+  1190→                type_name: None,
+  1191→            }),
+  1192→            scg_pp(1),
+  1193→        );
+  1194→
+  1195→        let w1 = scg.add_node(
+  1196→            NodeType::Access,
+  1197→            NodePayload::Access(AccessNode {
+  1198→                mode: AccessMode::Write,
+  1199→                region_id,
+  1200→                offset: None,
+  1201→                access_size: Some(8),
+  1202→            }),
+  1203→            scg_pp(2),
+  1204→        );
+  1205→
+  1206→        let w2 = scg.add_node(
+  1207→            NodeType::Access,
+  1208→            NodePayload::Access(AccessNode {
+  1209→                mode: AccessMode::Write,
+  1210→                region_id,
+  1211→                offset: None,
+  1212→                access_size: Some(8),
+  1213→            }),
+  1214→            scg_pp(3),
+  1215→        );
+  1216→
+  1217→        // Both accesses derived from the same allocation, no control flow between them.
+  1218→        scg.add_edge(alloc_id, w1, EdgeKind::Derivation).unwrap();
+  1219→        scg.add_edge(alloc_id, w2, EdgeKind::Derivation).unwrap();
+  1220→
+  1221→        let msg = scg_to_msg(&scg).unwrap();
+  1222→
+  1223→        // No sync edges — accesses should be concurrent.
+  1224→        assert_eq!(msg.sync_edge_count(), 0);
+  1225→
+  1226→        let concurrent = msg.concurrent_accesses(AccessId(0));
+  1227→        assert!(concurrent.contains(&AccessId(1)));
+  1228→    }
+  1229→
+  1230→    // -----------------------------------------------------------------------
+  1231→    // Test 12: Deployment target → RegionStatus mapping
+  1232→    // -----------------------------------------------------------------------
+  1233→
+  1234→    #[test]
+  1235→    fn test_stack_deployment_produces_stack_region() {
+  1236→        let mut scg = SCG::new();
+  1237→        let region_id = ScgRegionId::new(1);
+  1238→        let mut region = SCGRegion::new(region_id, DeploymentTarget::Stack);
+  1239→
+  1240→        let alloc_id = scg.add_node(
+  1241→            NodeType::Allocation,
+  1242→            NodePayload::Allocation(AllocationNode {
+  1243→                size: 64,
+  1244→                align: 8,
+  1245→                region_id,
+  1246→                type_name: None,
+  1247→            }),
+  1248→            scg_pp(1),
+  1249→        );
+  1250→        region.add_node(alloc_id);
+  1251→        scg.add_region(region);
+  1252→
+  1253→        let msg = scg_to_msg(&scg).unwrap();
+  1254→        let msg_region = msg.region(RegionId(1)).unwrap();
+  1255→        assert_eq!(msg_region.status, RegionStatus::Stack);
+  1256→    }
+  1257→
+  1258→    // -----------------------------------------------------------------------
+  1259→    // Test 13: Computation node passthrough derivation
+  1260→    // -----------------------------------------------------------------------
+  1261→
+  1262→    #[test]
+  1263→    fn test_computation_node_passthrough_derivation() {
+  1264→        let mut scg = SCG::new();
+  1265→        let region_id = ScgRegionId::new(1);
+  1266→
+  1267→        let alloc_id = scg.add_node(
+  1268→            NodeType::Allocation,
+  1269→            NodePayload::Allocation(AllocationNode {
+  1270→                size: 128,
+  1271→                align: 8,
+  1272→                region_id,
+  1273→                type_name: None,
+  1274→            }),
+  1275→            scg_pp(1),
+  1276→        );
+  1277→
+  1278→        // Computation node in the derivation chain.
+  1279→        let comp_id = scg.add_node(
+  1280→            NodeType::Computation,
+  1281→            NodePayload::Computation(ComputationNode {
+  1282→                operation: "offset_compute".to_string(),
+  1283→                result_type: Some("*mut u8".to_string()),
+  1284→                tail_call: false,
+  1285→            }),
+  1286→            scg_pp(2),
+  1287→        );
+  1288→
+  1289→        let access_id = scg.add_node(
+  1290→            NodeType::Access,
+  1291→            NodePayload::Access(AccessNode {
+  1292→                mode: AccessMode::Read,
+  1293→                region_id,
+  1294→                offset: None,
+  1295→                access_size: Some(4),
+  1296→            }),
+  1297→            scg_pp(3),
+  1298→        );
+  1299→
+  1300→        // Chain: alloc → computation → access
+  1301→        scg.add_edge(alloc_id, comp_id, EdgeKind::Derivation)
+  1302→            .unwrap();
+  1303→        scg.add_edge(comp_id, access_id, EdgeKind::Derivation)
+  1304→            .unwrap();
+  1305→
+  1306→        let msg = scg_to_msg(&scg).unwrap();
+  1307→
+  1308→        // Should have 3 derivations: alloc (Direct), computation (Direct passthrough), access (Direct)
+  1309→        assert!(msg.derivation_count() >= 3);
+  1310→
+  1311→        // The access derivation chain should lead back to the region through
+  1312→        // the computation passthrough.
+  1313→        let access = msg.access(AccessId(0)).unwrap();
+  1314→        let chain = msg.derivation_chain(access.target);
+  1315→        assert!(chain.len() >= 2);
+  1316→        assert!(matches!(chain[0].source, DerivationSource::Region(_)));
+  1317→    }
+  1318→
+  1319→    // -----------------------------------------------------------------------
+  1320→    // Test 14: GPU deployment → Device region status
+  1321→    // -----------------------------------------------------------------------
+  1322→
+  1323→    #[test]
+  1324→    fn test_gpu_deployment_produces_device_region() {
+  1325→        let mut scg = SCG::new();
+  1326→        let region_id = ScgRegionId::new(1);
+  1327→        let mut region = SCGRegion::new(region_id, DeploymentTarget::Gpu);
+  1328→
+  1329→        let alloc_id = scg.add_node(
+  1330→            NodeType::Allocation,
+  1331→            NodePayload::Allocation(AllocationNode {
+  1332→                size: 512,
+  1333→                align: 256,
+  1334→                region_id,
+  1335→                type_name: None,
+  1336→            }),
+  1337→            scg_pp(1),
+  1338→        );
+  1339→        region.add_node(alloc_id);
+  1340→        scg.add_region(region);
+  1341→
+  1342→        let msg = scg_to_msg(&scg).unwrap();
+  1343→        let msg_region = msg.region(RegionId(1)).unwrap();
+  1344→        assert_eq!(msg_region.status, RegionStatus::Device);
+  1345→    }
+  1346→}
+  1347→

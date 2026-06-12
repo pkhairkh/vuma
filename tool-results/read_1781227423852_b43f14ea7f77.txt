@@ -1,0 +1,2002 @@
+     1→     1→//! # x86_64 Backend
+     2→     2→//!
+     3→     3→//! Implements the `Backend` trait for the x86_64 target (SystemV ABI).
+     4→     4→//! This module provides:
+     5→     5→//!
+     6→     6→//! - `Gpr` — General-purpose register enum (RAX–R15)
+     7→     7→//! - `Xmm` — SSE/SIMD register enum (XMM0–XMM15)
+     8→     8→//! - REX prefix generation
+     9→     9→//! - ModR/M + SIB byte encoding
+    10→    10→//! - Instruction encoding for all key x86_64 instructions
+    11→    11→//! - `X86_64Backend` — `Backend` implementation that lowers IR to x86_64 machine code
+    12→    12→//!
+    13→    13→//! ## x86_64 Register Convention (SystemV ABI)
+    14→    14→//!
+    15→    15→//! | Register | Role                    | Callee-saved |
+    16→    16→//! |----------|-------------------------|-------------|
+    17→    17→//! | RAX      | Return value / scratch  | No          |
+    18→    18→//! | RCX      | 4th int arg / scratch   | No          |
+    19→    19→//! | RDX      | 3rd int arg / scratch   | No          |
+    20→    20→//! | RBX      | Callee-saved            | Yes         |
+    21→    21→//! | RSP      | Stack pointer           | (special)   |
+    22→    22→//! | RBP      | Frame pointer           | Yes         |
+    23→    23→//! | RSI      | 2nd int arg / scratch   | No          |
+    24→    24→//! | RDI      | 1st int arg / scratch   | No          |
+    25→    25→//! | R8–R9    | 5th/6th int arg         | No          |
+    26→    26→//! | R10–R11  | Scratch                 | No          |
+    27→    27→//! | R12–R15  | Callee-saved            | Yes         |
+    28→    28→//!
+    29→    29→//! ## References
+    30→    30→//!
+    31→    31→//! - Intel 64 and IA-32 Architectures Software Developer's Manual, Volumes 2A/2B
+    32→    32→//! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
+    33→    33→
+    34→    34→use crate::backend::{
+    35→    35→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    36→    36→    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
+    37→    37→};
+    38→    38→use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+    39→    39→use std::collections::HashMap;
+    40→    40→use std::fmt;
+    41→    41→
+    42→    42→// ===========================================================================
+    43→    43→// General-Purpose Registers
+    44→    44→// ===========================================================================
+    45→    45→
+    46→    46→/// x86_64 general-purpose registers (RAX–R15).
+    47→    47→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    48→    48→pub enum Gpr {
+    49→    49→    Rax = 0,
+    50→    50→    Rcx = 1,
+    51→    51→    Rdx = 2,
+    52→    52→    Rbx = 3,
+    53→    53→    Rsp = 4,
+    54→    54→    Rbp = 5,
+    55→    55→    Rsi = 6,
+    56→    56→    Rdi = 7,
+    57→    57→    R8 = 8,
+    58→    58→    R9 = 9,
+    59→    59→    R10 = 10,
+    60→    60→    R11 = 11,
+    61→    61→    R12 = 12,
+    62→    62→    R13 = 13,
+    63→    63→    R14 = 14,
+    64→    64→    R15 = 15,
+    65→    65→}
+    66→    66→
+    67→    67→impl Gpr {
+    68→    68→    /// Returns the 4-bit encoding index for this register.
+    69→    69→    pub fn encoding(&self) -> u8 {
+    70→    70→        *self as u8
+    71→    71→    }
+    72→    72→
+    73→    73→    /// Returns `true` if this register requires a REX prefix bit (R8–R15).
+    74→    74→    pub fn needs_rex(&self) -> bool {
+    75→    75→        *self as u8 >= 8
+    76→    76→    }
+    77→    77→
+    78→    78→    /// Returns `true` if this register is callee-saved under SystemV ABI.
+    79→    79→    pub fn is_callee_saved(&self) -> bool {
+    80→    80→        matches!(
+    81→    81→            self,
+    82→    82→            Gpr::Rbx | Gpr::R12 | Gpr::R13 | Gpr::R14 | Gpr::R15 | Gpr::Rbp
+    83→    83→        )
+    84→    84→    }
+    85→    85→
+    86→    86→    /// Returns `true` if this register is an integer argument register under SystemV ABI.
+    87→    87→    pub fn is_arg_reg(&self) -> bool {
+    88→    88→        matches!(
+    89→    89→            self,
+    90→    90→            Gpr::Rdi | Gpr::Rsi | Gpr::Rdx | Gpr::Rcx | Gpr::R8 | Gpr::R9
+    91→    91→        )
+    92→    92→    }
+    93→    93→
+    94→    94→    /// Returns `true` if this register is available for register allocation.
+    95→    95→    pub fn is_allocatable(&self) -> bool {
+    96→    96→        !matches!(self, Gpr::Rsp)
+    97→    97→    }
+    98→    98→
+    99→    99→    /// Returns the standard assembly name for this register.
+   100→   100→    pub fn asm_name(&self) -> &'static str {
+   101→   101→        match self {
+   102→   102→            Gpr::Rax => "rax",
+   103→   103→            Gpr::Rcx => "rcx",
+   104→   104→            Gpr::Rdx => "rdx",
+   105→   105→            Gpr::Rbx => "rbx",
+   106→   106→            Gpr::Rsp => "rsp",
+   107→   107→            Gpr::Rbp => "rbp",
+   108→   108→            Gpr::Rsi => "rsi",
+   109→   109→            Gpr::Rdi => "rdi",
+   110→   110→            Gpr::R8 => "r8",
+   111→   111→            Gpr::R9 => "r9",
+   112→   112→            Gpr::R10 => "r10",
+   113→   113→            Gpr::R11 => "r11",
+   114→   114→            Gpr::R12 => "r12",
+   115→   115→            Gpr::R13 => "r13",
+   116→   116→            Gpr::R14 => "r14",
+   117→   117→            Gpr::R15 => "r15",
+   118→   118→        }
+   119→   119→    }
+   120→   120→
+   121→   121→    /// Returns the Gpr for a given SystemV integer argument index (0–5).
+   122→   122→    pub fn arg_register(index: usize) -> Option<Gpr> {
+   123→   123→        match index {
+   124→   124→            0 => Some(Gpr::Rdi),
+   125→   125→            1 => Some(Gpr::Rsi),
+   126→   126→            2 => Some(Gpr::Rdx),
+   127→   127→            3 => Some(Gpr::Rcx),
+   128→   128→            4 => Some(Gpr::R8),
+   129→   129→            5 => Some(Gpr::R9),
+   130→   130→            _ => None,
+   131→   131→        }
+   132→   132→    }
+   133→   133→}
+   134→   134→
+   135→   135→impl fmt::Display for Gpr {
+   136→   136→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   137→   137→        f.write_str(self.asm_name())
+   138→   138→    }
+   139→   139→}
+   140→   140→
+   141→   141→// ===========================================================================
+   142→   142→// XMM (SSE) Registers
+   143→   143→// ===========================================================================
+   144→   144→
+   145→   145→/// x86_64 SSE/SIMD registers (XMM0–XMM15).
+   146→   146→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   147→   147→pub enum Xmm {
+   148→   148→    Xmm0 = 0,
+   149→   149→    Xmm1 = 1,
+   150→   150→    Xmm2 = 2,
+   151→   151→    Xmm3 = 3,
+   152→   152→    Xmm4 = 4,
+   153→   153→    Xmm5 = 5,
+   154→   154→    Xmm6 = 6,
+   155→   155→    Xmm7 = 7,
+   156→   156→    Xmm8 = 8,
+   157→   157→    Xmm9 = 9,
+   158→   158→    Xmm10 = 10,
+   159→   159→    Xmm11 = 11,
+   160→   160→    Xmm12 = 12,
+   161→   161→    Xmm13 = 13,
+   162→   162→    Xmm14 = 14,
+   163→   163→    Xmm15 = 15,
+   164→   164→}
+   165→   165→
+   166→   166→impl Xmm {
+   167→   167→    /// Returns the 4-bit encoding index for this register.
+   168→   168→    pub fn encoding(&self) -> u8 {
+   169→   169→        *self as u8
+   170→   170→    }
+   171→   171→
+   172→   172→    /// Returns `true` if this register requires a REX prefix bit (XMM8–XMM15).
+   173→   173→    pub fn needs_rex(&self) -> bool {
+   174→   174→        *self as u8 >= 8
+   175→   175→    }
+   176→   176→
+   177→   177→    /// Returns the standard assembly name for this register.
+   178→   178→    pub fn asm_name(&self) -> &'static str {
+   179→   179→        match self {
+   180→   180→            Xmm::Xmm0 => "xmm0",
+   181→   181→            Xmm::Xmm1 => "xmm1",
+   182→   182→            Xmm::Xmm2 => "xmm2",
+   183→   183→            Xmm::Xmm3 => "xmm3",
+   184→   184→            Xmm::Xmm4 => "xmm4",
+   185→   185→            Xmm::Xmm5 => "xmm5",
+   186→   186→            Xmm::Xmm6 => "xmm6",
+   187→   187→            Xmm::Xmm7 => "xmm7",
+   188→   188→            Xmm::Xmm8 => "xmm8",
+   189→   189→            Xmm::Xmm9 => "xmm9",
+   190→   190→            Xmm::Xmm10 => "xmm10",
+   191→   191→            Xmm::Xmm11 => "xmm11",
+   192→   192→            Xmm::Xmm12 => "xmm12",
+   193→   193→            Xmm::Xmm13 => "xmm13",
+   194→   194→            Xmm::Xmm14 => "xmm14",
+   195→   195→            Xmm::Xmm15 => "xmm15",
+   196→   196→        }
+   197→   197→    }
+   198→   198→}
+   199→   199→
+   200→   200→impl fmt::Display for Xmm {
+   201→   201→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   202→   202→        f.write_str(self.asm_name())
+   203→   203→    }
+   204→   204→}
+   205→   205→
+   206→   206→// ===========================================================================
+   207→   207→// Condition Codes
+   208→   208→// ===========================================================================
+   209→   209→
+   210→   210→/// x86_64 condition codes for SETcc, Jcc, and CMOVcc instructions.
+   211→   211→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   212→   212→pub enum Cc {
+   213→   213→    Overflow = 0x0,
+   214→   214→    NoOverflow = 0x1,
+   215→   215→    Below = 0x2,
+   216→   216→    AboveEqual = 0x3,
+   217→   217→    Equal = 0x4,
+   218→   218→    NotEqual = 0x5,
+   219→   219→    BelowEqual = 0x6,
+   220→   220→    Above = 0x7,
+   221→   221→    Sign = 0x8,
+   222→   222→    NotSign = 0x9,
+   223→   223→    Parity = 0xA,
+   224→   224→    NotParity = 0xB,
+   225→   225→    Less = 0xC,
+   226→   226→    GreaterEqual = 0xD,
+   227→   227→    LessEqual = 0xE,
+   228→   228→    Greater = 0xF,
+   229→   229→}
+   230→   230→
+   231→   231→impl Cc {
+   232→   232→    /// Returns the 4-bit condition code encoding.
+   233→   233→    pub fn encoding(&self) -> u8 {
+   234→   234→        *self as u8
+   235→   235→    }
+   236→   236→}
+   237→   237→
+   238→   238→// ===========================================================================
+   239→   239→// REX Prefix
+   240→   240→// ===========================================================================
+   241→   241→
+   242→   242→/// Generate a REX prefix byte.
+   243→   243→///
+   244→   244→/// - `w`: REX.W — 64-bit operand size
+   245→   245→/// - `r`: Extension of the ModR/M `reg` field (for R8–R15 / XMM8–XMM15)
+   246→   246→/// - `x`: Extension of the SIB `index` field
+   247→   247→/// - `b`: Extension of the ModR/M `rm` field or SIB `base` field
+   248→   248→///
+   249→   249→/// Returns `None` if no REX byte is needed (all bits are 0).
+   250→   250→fn rex_prefix(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
+   251→   251→    let byte = 0x40 | (w as u8) << 3 | (r as u8) << 2 | (x as u8) << 1 | b as u8;
+   252→   252→    if byte > 0x40 {
+   253→   253→        Some(byte)
+   254→   254→    } else {
+   255→   255→        None
+   256→   256→    }
+   257→   257→}
+   258→   258→
+   259→   259→// ===========================================================================
+   260→   260→// ModR/M + SIB Encoding
+   261→   261→// ===========================================================================
+   262→   262→
+   263→   263→/// Encode a ModR/M byte.
+   264→   264→///
+   265→   265→/// - `mod_bits`: 2-bit mod field (0=mem, 1=mem+disp8, 2=mem+disp32, 3=reg)
+   266→   266→/// - `reg`: 3-bit reg field (register or opcode extension)
+   267→   267→/// - `rm`: 3-bit r/m field (register or memory operand)
+   268→   268→fn modrm(mod_bits: u8, reg: u8, rm: u8) -> u8 {
+   269→   269→    (mod_bits & 3) << 6 | (reg & 7) << 3 | (rm & 7)
+   270→   270→}
+   271→   271→
+   272→   272→/// Encode a SIB byte.
+   273→   273→///
+   274→   274→/// - `scale`: 2-bit scale factor (0=1, 1=2, 2=4, 3=8)
+   275→   275→/// - `index`: 3-bit index register
+   276→   276→/// - `base`: 3-bit base register
+   277→   277→fn sib(scale: u8, index: u8, base: u8) -> u8 {
+   278→   278→    (scale & 3) << 6 | (index & 7) << 3 | (base & 7)
+   279→   279→}
+   280→   280→
+   281→   281→// ===========================================================================
+   282→   282→// Instruction Encoding Functions
+   283→   283→// ===========================================================================
+   284→   284→
+   285→   285→/// Emit a REX.W prefix plus opcode, then a ModR/M byte for reg-reg operations.
+   286→   286→///
+   287→   287→/// This is the common pattern for 64-bit ALU instructions: REX.W + opcode + ModR/M(mod=3, reg, rm).
+   288→   288→fn emit_rexw_reg_reg(code: &mut Vec<u8>, opcode: u8, reg: Gpr, rm: Gpr) {
+   289→   289→    let r = reg.needs_rex();
+   290→   290→    let b = rm.needs_rex();
+   291→   291→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   292→   292→        code.push(rex);
+   293→   293→    } else {
+   294→   294→        // REX.W is still needed for 64-bit operations even if r and b are 0
+   295→   295→        code.push(0x48);
+   296→   296→    }
+   297→   297→    code.push(opcode);
+   298→   298→    code.push(modrm(3, reg.encoding() & 7, rm.encoding() & 7));
+   299→   299→}
+   300→   300→
+   301→   301→/// Emit a REX.W prefix (always), then opcode, then ModR/M for reg-reg with
+   302→   302→/// specific reg field (opcode extension) and rm register.
+   303→   303→fn emit_rexw_opext_reg(code: &mut Vec<u8>, opcode: u8, opext: u8, rm: Gpr) {
+   304→   304→    let b = rm.needs_rex();
+   305→   305→    // Always emit REX.W for 64-bit
+   306→   306→    let rex = 0x48 | (b as u8);
+   307→   307→    code.push(rex);
+   308→   308→    code.push(opcode);
+   309→   309→    code.push(modrm(3, opext & 7, rm.encoding() & 7));
+   310→   310→}
+   311→   311→
+   312→   312→/// Encode MOV r64, r64 (REX.W + 89 /r)
+   313→   313→pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   314→   314→    let mut code = Vec::with_capacity(3);
+   315→   315→    emit_rexw_reg_reg(&mut code, 0x89, src, dst);
+   316→   316→    code
+   317→   317→}
+   318→   318→
+   319→   319→/// Encode MOV r64, imm64 (REX.W + B8+rd + 8-byte imm)
+   320→   320→pub fn encode_mov_reg_imm64(dst: Gpr, imm: u64) -> Vec<u8> {
+   321→   321→    let mut code = Vec::with_capacity(10);
+   322→   322→    let b = dst.needs_rex();
+   323→   323→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   324→   324→        code.push(rex);
+   325→   325→    } else {
+   326→   326→        code.push(0x48);
+   327→   327→    }
+   328→   328→    code.push(0xB8 + (dst.encoding() & 7));
+   329→   329→    code.extend_from_slice(&imm.to_le_bytes());
+   330→   330→    code
+   331→   331→}
+   332→   332→
+   333→   333→/// Encode MOV r64, imm32 (REX.W + C7 /0 + 4-byte imm, sign-extended)
+   334→   334→pub fn encode_mov_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   335→   335→    let mut code = Vec::with_capacity(7);
+   336→   336→    let b = dst.needs_rex();
+   337→   337→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   338→   338→        code.push(rex);
+   339→   339→    } else {
+   340→   340→        code.push(0x48);
+   341→   341→    }
+   342→   342→    code.push(0xC7);
+   343→   343→    code.push(modrm(3, 0, dst.encoding() & 7));
+   344→   344→    code.extend_from_slice(&imm.to_le_bytes());
+   345→   345→    code
+   346→   346→}
+   347→   347→
+   348→   348→/// Encode MOV r64, [r64+offset] (REX.W + 8B /r + displacement)
+   349→   349→///
+   350→   350→/// Handles special cases:
+   351→   351→/// - RSP/R12 as base: SIB byte required
+   352→   352→/// - RBP/R13 as base: mod=1 with disp8=0 even for zero offset
+   353→   353→/// - Offset fits in i8: disp8; otherwise: disp32
+   354→   354→pub fn encode_mov_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+   355→   355→    let mut code = Vec::with_capacity(8);
+   356→   356→    let r = dst.needs_rex();
+   357→   357→    let b = base.needs_rex();
+   358→   358→
+   359→   359→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   360→   360→        code.push(rex);
+   361→   361→    } else {
+   362→   362→        code.push(0x48);
+   363→   363→    }
+   364→   364→    code.push(0x8B);
+   365→   365→
+   366→   366→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   367→   367→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   368→   368→
+   369→   369→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   370→   370→        // mod=00, no displacement
+   371→   371→        code.push(modrm(0, dst.encoding() & 7, base.encoding() & 7));
+   372→   372→    } else if needs_sib {
+   373→   373→        // SIB byte required: base = RSP(4), index = RSP(4) means "no index"
+   374→   374→        if offset == 0 {
+   375→   375→            code.push(modrm(0, dst.encoding() & 7, 4));
+   376→   376→            code.push(sib(0, 4, base.encoding() & 7));
+   377→   377→        } else if (-128..=127).contains(&offset) {
+   378→   378→            code.push(modrm(1, dst.encoding() & 7, 4));
+   379→   379→            code.push(sib(0, 4, base.encoding() & 7));
+   380→   380→            code.push(offset as u8);
+   381→   381→        } else {
+   382→   382→            code.push(modrm(2, dst.encoding() & 7, 4));
+   383→   383→            code.push(sib(0, 4, base.encoding() & 7));
+   384→   384→            code.extend_from_slice(&offset.to_le_bytes());
+   385→   385→        }
+   386→   386→    } else if (-128..=127).contains(&offset) {
+   387→   387→        // mod=01, disp8
+   388→   388→        code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
+   389→   389→        code.push(offset as u8);
+   390→   390→    } else {
+   391→   391→        // mod=10, disp32
+   392→   392→        code.push(modrm(2, dst.encoding() & 7, base.encoding() & 7));
+   393→   393→        code.extend_from_slice(&offset.to_le_bytes());
+   394→   394→    }
+   395→   395→
+   396→   396→    code
+   397→   397→}
+   398→   398→
+   399→   399→/// Encode MOV [r64+offset], r64 (REX.W + 89 /r + displacement)
+   400→   400→pub fn encode_mov_mem_reg(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
+   401→   401→    let mut code = Vec::with_capacity(8);
+   402→   402→    let r = src.needs_rex();
+   403→   403→    let b = base.needs_rex();
+   404→   404→
+   405→   405→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   406→   406→        code.push(rex);
+   407→   407→    } else {
+   408→   408→        code.push(0x48);
+   409→   409→    }
+   410→   410→    code.push(0x89);
+   411→   411→
+   412→   412→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   413→   413→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   414→   414→
+   415→   415→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   416→   416→        code.push(modrm(0, src.encoding() & 7, base.encoding() & 7));
+   417→   417→    } else if needs_sib {
+   418→   418→        if offset == 0 {
+   419→   419→            code.push(modrm(0, src.encoding() & 7, 4));
+   420→   420→            code.push(sib(0, 4, base.encoding() & 7));
+   421→   421→        } else if (-128..=127).contains(&offset) {
+   422→   422→            code.push(modrm(1, src.encoding() & 7, 4));
+   423→   423→            code.push(sib(0, 4, base.encoding() & 7));
+   424→   424→            code.push(offset as u8);
+   425→   425→        } else {
+   426→   426→            code.push(modrm(2, src.encoding() & 7, 4));
+   427→   427→            code.push(sib(0, 4, base.encoding() & 7));
+   428→   428→            code.extend_from_slice(&offset.to_le_bytes());
+   429→   429→        }
+   430→   430→    } else if (-128..=127).contains(&offset) {
+   431→   431→        code.push(modrm(1, src.encoding() & 7, base.encoding() & 7));
+   432→   432→        code.push(offset as u8);
+   433→   433→    } else {
+   434→   434→        code.push(modrm(2, src.encoding() & 7, base.encoding() & 7));
+   435→   435→        code.extend_from_slice(&offset.to_le_bytes());
+   436→   436→    }
+   437→   437→
+   438→   438→    code
+   439→   439→}
+   440→   440→
+   441→   441→/// Encode ADD r64, r64 (REX.W + 01 /r)
+   442→   442→pub fn encode_add_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   443→   443→    let mut code = Vec::with_capacity(3);
+   444→   444→    emit_rexw_reg_reg(&mut code, 0x01, src, dst);
+   445→   445→    code
+   446→   446→}
+   447→   447→
+   448→   448→/// Encode SUB r64, r64 (REX.W + 29 /r)
+   449→   449→pub fn encode_sub_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   450→   450→    let mut code = Vec::with_capacity(3);
+   451→   451→    emit_rexw_reg_reg(&mut code, 0x29, src, dst);
+   452→   452→    code
+   453→   453→}
+   454→   454→
+   455→   455→/// Encode IMUL r64, r64 (REX.W + 0F AF /r)
+   456→   456→pub fn encode_imul_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   457→   457→    let mut code = Vec::with_capacity(4);
+   458→   458→    let r = dst.needs_rex();
+   459→   459→    let b = src.needs_rex();
+   460→   460→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   461→   461→        code.push(rex);
+   462→   462→    } else {
+   463→   463→        code.push(0x48);
+   464→   464→    }
+   465→   465→    code.push(0x0F);
+   466→   466→    code.push(0xAF);
+   467→   467→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   468→   468→    code
+   469→   469→}
+   470→   470→
+   471→   471→/// Encode IDIV r64 (REX.W + F7 /7)
+   472→   472→pub fn encode_idiv_reg(src: Gpr) -> Vec<u8> {
+   473→   473→    let mut code = Vec::with_capacity(3);
+   474→   474→    emit_rexw_opext_reg(&mut code, 0xF7, 7, src);
+   475→   475→    code
+   476→   476→}
+   477→   477→
+   478→   478→/// Encode CMP r64, r64 (REX.W + 39 /r)
+   479→   479→pub fn encode_cmp_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   480→   480→    let mut code = Vec::with_capacity(3);
+   481→   481→    emit_rexw_reg_reg(&mut code, 0x39, src, dst);
+   482→   482→    code
+   483→   483→}
+   484→   484→
+   485→   485→/// Encode CMP r64, imm32 (REX.W + 81 /7 + imm)
+   486→   486→pub fn encode_cmp_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   487→   487→    let mut code = Vec::with_capacity(7);
+   488→   488→    let b = dst.needs_rex();
+   489→   489→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   490→   490→        code.push(rex);
+   491→   491→    } else {
+   492→   492→        code.push(0x48);
+   493→   493→    }
+   494→   494→    code.push(0x81);
+   495→   495→    code.push(modrm(3, 7, dst.encoding() & 7));
+   496→   496→    code.extend_from_slice(&imm.to_le_bytes());
+   497→   497→    code
+   498→   498→}
+   499→   499→
+   500→   500→/// Encode TEST r64, r64 (REX.W + 85 /r)
+   501→   501→pub fn encode_test_reg_reg(a: Gpr, b: Gpr) -> Vec<u8> {
+   502→   502→    let mut code = Vec::with_capacity(3);
+   503→   503→    emit_rexw_reg_reg(&mut code, 0x85, a, b);
+   504→   504→    code
+   505→   505→}
+   506→   506→
+   507→   507→/// Encode AND r64, r64 (REX.W + 21 /r)
+   508→   508→pub fn encode_and_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   509→   509→    let mut code = Vec::with_capacity(3);
+   510→   510→    emit_rexw_reg_reg(&mut code, 0x21, src, dst);
+   511→   511→    code
+   512→   512→}
+   513→   513→
+   514→   514→/// Encode OR r64, r64 (REX.W + 09 /r)
+   515→   515→pub fn encode_or_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   516→   516→    let mut code = Vec::with_capacity(3);
+   517→   517→    emit_rexw_reg_reg(&mut code, 0x09, src, dst);
+   518→   518→    code
+   519→   519→}
+   520→   520→
+   521→   521→/// Encode XOR r64, r64 (REX.W + 31 /r)
+   522→   522→pub fn encode_xor_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   523→   523→    let mut code = Vec::with_capacity(3);
+   524→   524→    emit_rexw_reg_reg(&mut code, 0x31, src, dst);
+   525→   525→    code
+   526→   526→}
+   527→   527→
+   528→   528→/// Encode SHL r64, CL (REX.W + D3 /4)
+   529→   529→pub fn encode_shl_reg_cl(dst: Gpr) -> Vec<u8> {
+   530→   530→    let mut code = Vec::with_capacity(3);
+   531→   531→    emit_rexw_opext_reg(&mut code, 0xD3, 4, dst);
+   532→   532→    code
+   533→   533→}
+   534→   534→
+   535→   535→/// Encode SHR r64, CL (REX.W + D3 /5)
+   536→   536→pub fn encode_shr_reg_cl(dst: Gpr) -> Vec<u8> {
+   537→   537→    let mut code = Vec::with_capacity(3);
+   538→   538→    emit_rexw_opext_reg(&mut code, 0xD3, 5, dst);
+   539→   539→    code
+   540→   540→}
+   541→   541→
+   542→   542→/// Encode SAR r64, CL (REX.W + D3 /7)
+   543→   543→pub fn encode_sar_reg_cl(dst: Gpr) -> Vec<u8> {
+   544→   544→    let mut code = Vec::with_capacity(3);
+   545→   545→    emit_rexw_opext_reg(&mut code, 0xD3, 7, dst);
+   546→   546→    code
+   547→   547→}
+   548→   548→
+   549→   549→/// Encode JMP rel32 (E9 + 4-byte offset)
+   550→   550→pub fn encode_jmp_rel32(offset: i32) -> Vec<u8> {
+   551→   551→    let mut code = Vec::with_capacity(5);
+   552→   552→    code.push(0xE9);
+   553→   553→    code.extend_from_slice(&offset.to_le_bytes());
+   554→   554→    code
+   555→   555→}
+   556→   556→
+   557→   557→/// Encode CALL rel32 (E8 + 4-byte offset)
+   558→   558→pub fn encode_call_rel32(offset: i32) -> Vec<u8> {
+   559→   559→    let mut code = Vec::with_capacity(5);
+   560→   560→    code.push(0xE8);
+   561→   561→    code.extend_from_slice(&offset.to_le_bytes());
+   562→   562→    code
+   563→   563→}
+   564→   564→
+   565→   565→/// Encode RET (C3)
+   566→   566→pub fn encode_ret() -> Vec<u8> {
+   567→   567→    vec![0xC3]
+   568→   568→}
+   569→   569→
+   570→   570→/// Encode NOP (90)
+   571→   571→pub fn encode_nop() -> Vec<u8> {
+   572→   572→    vec![0x90]
+   573→   573→}
+   574→   574→
+   575→   575→/// Encode PUSH r64 (50+rd or REX.B+50+rd for R8–R15)
+   576→   576→pub fn encode_push(src: Gpr) -> Vec<u8> {
+   577→   577→    let mut code = Vec::with_capacity(2);
+   578→   578→    if src.needs_rex() {
+   579→   579→        code.push(0x41); // REX.B
+   580→   580→    }
+   581→   581→    code.push(0x50 + (src.encoding() & 7));
+   582→   582→    code
+   583→   583→}
+   584→   584→
+   585→   585→/// Encode POP r64 (58+rd or REX.B+58+rd for R8–R15)
+   586→   586→pub fn encode_pop(dst: Gpr) -> Vec<u8> {
+   587→   587→    let mut code = Vec::with_capacity(2);
+   588→   588→    if dst.needs_rex() {
+   589→   589→        code.push(0x41); // REX.B
+   590→   590→    }
+   591→   591→    code.push(0x58 + (dst.encoding() & 7));
+   592→   592→    code
+   593→   593→}
+   594→   594→
+   595→   595→/// Encode SETcc r/m8 (0F 9x /r)
+   596→   596→pub fn encode_setcc(cc: Cc, dst: Gpr) -> Vec<u8> {
+   597→   597→    let mut code = Vec::with_capacity(3);
+   598→   598→    // SETcc always uses a byte register. For registers < 8, no REX needed
+   599→   599→    // (unless we need to force REX to access SPL, BPL, SIL, DIL for RSP/RBP/RSI/RDI).
+   600→   600→    // For R8B-R15B, we need REX.B.
+   601→   601→    if dst.needs_rex() {
+   602→   602→        code.push(0x41); // REX.B for R8B-R15B
+   603→   603→    } else if matches!(dst, Gpr::Rsp | Gpr::Rbp | Gpr::Rsi | Gpr::Rdi) {
+   604→   604→        // Accessing SPL, BPL, SIL, DIL requires a REX prefix
+   605→   605→        code.push(0x40); // Bare REX
+   606→   606→    }
+   607→   607→    code.push(0x0F);
+   608→   608→    code.push(0x90 + cc.encoding());
+   609→   609→    code.push(modrm(3, 0, dst.encoding() & 7));
+   610→   610→    code
+   611→   611→}
+   612→   612→
+   613→   613→/// Encode Jcc rel32 (0F 8x + 4-byte offset)
+   614→   614→pub fn encode_jcc_rel32(cc: Cc, offset: i32) -> Vec<u8> {
+   615→   615→    let mut code = Vec::with_capacity(6);
+   616→   616→    code.push(0x0F);
+   617→   617→    code.push(0x80 + cc.encoding());
+   618→   618→    code.extend_from_slice(&offset.to_le_bytes());
+   619→   619→    code
+   620→   620→}
+   621→   621→
+   622→   622→/// Encode CMOVcc r64, r64 (REX.W + 0F 4x /r)
+   623→   623→pub fn encode_cmovcc_reg_reg(cc: Cc, dst: Gpr, src: Gpr) -> Vec<u8> {
+   624→   624→    let mut code = Vec::with_capacity(4);
+   625→   625→    let r = dst.needs_rex();
+   626→   626→    let b = src.needs_rex();
+   627→   627→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   628→   628→        code.push(rex);
+   629→   629→    } else {
+   630→   630→        code.push(0x48);
+   631→   631→    }
+   632→   632→    code.push(0x0F);
+   633→   633→    code.push(0x40 + cc.encoding());
+   634→   634→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   635→   635→    code
+   636→   636→}
+   637→   637→
+   638→   638→/// Encode LEA r64, [r64+offset] (REX.W + 8D /r)
+   639→   639→pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+   640→   640→    let mut code = Vec::with_capacity(8);
+   641→   641→    let r = dst.needs_rex();
+   642→   642→    let b = base.needs_rex();
+   643→   643→
+   644→   644→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   645→   645→        code.push(rex);
+   646→   646→    } else {
+   647→   647→        code.push(0x48);
+   648→   648→    }
+   649→   649→    code.push(0x8D);
+   650→   650→
+   651→   651→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   652→   652→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   653→   653→
+   654→   654→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   655→   655→        code.push(modrm(0, dst.encoding() & 7, base.encoding() & 7));
+   656→   656→    } else if needs_sib {
+   657→   657→        if offset == 0 {
+   658→   658→            code.push(modrm(0, dst.encoding() & 7, 4));
+   659→   659→            code.push(sib(0, 4, base.encoding() & 7));
+   660→   660→        } else if (-128..=127).contains(&offset) {
+   661→   661→            code.push(modrm(1, dst.encoding() & 7, 4));
+   662→   662→            code.push(sib(0, 4, base.encoding() & 7));
+   663→   663→            code.push(offset as u8);
+   664→   664→        } else {
+   665→   665→            code.push(modrm(2, dst.encoding() & 7, 4));
+   666→   666→            code.push(sib(0, 4, base.encoding() & 7));
+   667→   667→            code.extend_from_slice(&offset.to_le_bytes());
+   668→   668→        }
+   669→   669→    } else if (-128..=127).contains(&offset) {
+   670→   670→        code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
+   671→   671→        code.push(offset as u8);
+   672→   672→    } else {
+   673→   673→        code.push(modrm(2, dst.encoding() & 7, base.encoding() & 7));
+   674→   674→        code.extend_from_slice(&offset.to_le_bytes());
+   675→   675→    }
+   676→   676→
+   677→   677→    code
+   678→   678→}
+   679→   679→
+   680→   680→/// Encode MOVZX r64, r8 (REX.W + 0F B6 /r) — zero-extend byte to 64 bits
+   681→   681→pub fn encode_movzx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
+   682→   682→    let mut code = Vec::with_capacity(4);
+   683→   683→    let r = dst.needs_rex();
+   684→   684→    let b = src.needs_rex();
+   685→   685→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   686→   686→        code.push(rex);
+   687→   687→    } else {
+   688→   688→        code.push(0x48);
+   689→   689→    }
+   690→   690→    code.push(0x0F);
+   691→   691→    code.push(0xB6);
+   692→   692→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   693→   693→    code
+   694→   694→}
+   695→   695→
+   696→   696→/// Encode MOVZX r64, r16 (REX.W + 0F B7 /r) — zero-extend word to 64 bits
+   697→   697→pub fn encode_movzx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
+   698→   698→    let mut code = Vec::with_capacity(4);
+   699→   699→    let r = dst.needs_rex();
+   700→   700→    let b = src.needs_rex();
+   701→   701→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   702→   702→        code.push(rex);
+   703→   703→    } else {
+   704→   704→        code.push(0x48);
+   705→   705→    }
+   706→   706→    code.push(0x0F);
+   707→   707→    code.push(0xB7);
+   708→   708→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   709→   709→    code
+   710→   710→}
+   711→   711→
+   712→   712→/// Encode MOVSX r64, r8 (REX.W + 0F BE /r) — sign-extend byte to 64 bits
+   713→   713→pub fn encode_movsx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
+   714→   714→    let mut code = Vec::with_capacity(4);
+   715→   715→    let r = dst.needs_rex();
+   716→   716→    let b = src.needs_rex();
+   717→   717→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   718→   718→        code.push(rex);
+   719→   719→    } else {
+   720→   720→        code.push(0x48);
+   721→   721→    }
+   722→   722→    code.push(0x0F);
+   723→   723→    code.push(0xBE);
+   724→   724→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   725→   725→    code
+   726→   726→}
+   727→   727→
+   728→   728→/// Encode MOVSX r64, r16 (REX.W + 0F BF /r) — sign-extend word to 64 bits
+   729→   729→pub fn encode_movsx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
+   730→   730→    let mut code = Vec::with_capacity(4);
+   731→   731→    let r = dst.needs_rex();
+   732→   732→    let b = src.needs_rex();
+   733→   733→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   734→   734→        code.push(rex);
+   735→   735→    } else {
+   736→   736→        code.push(0x48);
+   737→   737→    }
+   738→   738→    code.push(0x0F);
+   739→   739→    code.push(0xBF);
+   740→   740→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   741→   741→    code
+   742→   742→}
+   743→   743→
+   744→   744→/// Encode MOVSX r64, r32 (REX.W + 63 /r) — sign-extend dword to 64 bits
+   745→   745→pub fn encode_movsxd(dst: Gpr, src: Gpr) -> Vec<u8> {
+   746→   746→    let mut code = Vec::with_capacity(3);
+   747→   747→    let r = dst.needs_rex();
+   748→   748→    let b = src.needs_rex();
+   749→   749→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   750→   750→        code.push(rex);
+   751→   751→    } else {
+   752→   752→        code.push(0x48);
+   753→   753→    }
+   754→   754→    code.push(0x63);
+   755→   755→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   756→   756→    code
+   757→   757→}
+   758→   758→
+   759→   759→/// Encode XCHG rax, r64 (REX.W + 90+rd)
+   760→   760→pub fn encode_xchg_rax_reg(src: Gpr) -> Vec<u8> {
+   761→   761→    let mut code = Vec::with_capacity(2);
+   762→   762→    let b = src.needs_rex();
+   763→   763→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   764→   764→        code.push(rex);
+   765→   765→    } else {
+   766→   766→        code.push(0x48);
+   767→   767→    }
+   768→   768→    code.push(0x90 + (src.encoding() & 7));
+   769→   769→    code
+   770→   770→}
+   771→   771→
+   772→   772→/// Encode SYSCALL (0F 05)
+   773→   773→pub fn encode_syscall() -> Vec<u8> {
+   774→   774→    vec![0x0F, 0x05]
+   775→   775→}
+   776→   776→
+   777→   777→/// Encode INT3 (CC)
+   778→   778→pub fn encode_int3() -> Vec<u8> {
+   779→   779→    vec![0xCC]
+   780→   780→}
+   781→   781→
+   782→   782→/// Encode NEG r64 (REX.W + F7 /3)
+   783→   783→pub fn encode_neg_reg(dst: Gpr) -> Vec<u8> {
+   784→   784→    let mut code = Vec::with_capacity(3);
+   785→   785→    emit_rexw_opext_reg(&mut code, 0xF7, 3, dst);
+   786→   786→    code
+   787→   787→}
+   788→   788→
+   789→   789→/// Encode NOT r64 (REX.W + F7 /2)
+   790→   790→pub fn encode_not_reg(dst: Gpr) -> Vec<u8> {
+   791→   791→    let mut code = Vec::with_capacity(3);
+   792→   792→    emit_rexw_opext_reg(&mut code, 0xF7, 2, dst);
+   793→   793→    code
+   794→   794→}
+   795→   795→
+   796→   796→/// Encode MUL r64 (REX.W + F7 /4) — unsigned multiply, result in RDX:RAX
+   797→   797→pub fn encode_mul_reg(src: Gpr) -> Vec<u8> {
+   798→   798→    let mut code = Vec::with_capacity(3);
+   799→   799→    emit_rexw_opext_reg(&mut code, 0xF7, 4, src);
+   800→   800→    code
+   801→   801→}
+   802→   802→
+   803→   803→/// Encode DIV r64 (REX.W + F7 /6) — unsigned divide
+   804→   804→pub fn encode_div_reg(src: Gpr) -> Vec<u8> {
+   805→   805→    let mut code = Vec::with_capacity(3);
+   806→   806→    emit_rexw_opext_reg(&mut code, 0xF7, 6, src);
+   807→   807→    code
+   808→   808→}
+   809→   809→
+   810→   810→/// Encode CQO (REX.W + 99) — sign-extend RAX into RDX:RAX
+   811→   811→pub fn encode_cqo() -> Vec<u8> {
+   812→   812→    vec![0x48, 0x99]
+   813→   813→}
+   814→   814→
+   815→   815→/// Encode SUB r64, imm32 (REX.W + 81 /5 + imm)
+   816→   816→pub fn encode_sub_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   817→   817→    let mut code = Vec::with_capacity(7);
+   818→   818→    let b = dst.needs_rex();
+   819→   819→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   820→   820→        code.push(rex);
+   821→   821→    } else {
+   822→   822→        code.push(0x48);
+   823→   823→    }
+   824→   824→    code.push(0x81);
+   825→   825→    code.push(modrm(3, 5, dst.encoding() & 7));
+   826→   826→    code.extend_from_slice(&imm.to_le_bytes());
+   827→   827→    code
+   828→   828→}
+   829→   829→
+   830→   830→/// Encode ADD r64, imm32 (REX.W + 81 /0 + imm)
+   831→   831→pub fn encode_add_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   832→   832→    let mut code = Vec::with_capacity(7);
+   833→   833→    let b = dst.needs_rex();
+   834→   834→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   835→   835→        code.push(rex);
+   836→   836→    } else {
+   837→   837→        code.push(0x48);
+   838→   838→    }
+   839→   839→    code.push(0x81);
+   840→   840→    code.push(modrm(3, 0, dst.encoding() & 7));
+   841→   841→    code.extend_from_slice(&imm.to_le_bytes());
+   842→   842→    code
+   843→   843→}
+   844→   844→
+   845→   845→// ===========================================================================
+   846→   846→// x86_64 Mnemonic Disassembler
+   847→   847→// ===========================================================================
+   848→   848→
+   849→   849→/// Decode x86_64 bytes into mnemonic strings with (offset, mnemonic) pairs.
+   850→   850→///
+   851→   851→/// Handles the top 20+ most common x86_64 instructions including mov, add, sub,
+   852→   852→/// push, pop, call, ret, jmp, cmp, test, lea, xor, and, or, shl, shr, nop,
+   853→   853→/// mul, div, imul.
+   854→   854→fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
+   855→   855→    let mut lines = Vec::new();
+   856→   856→    let mut offset = 0usize;
+   857→   857→    let mut pc = addr;
+   858→   858→
+   859→   859→    while offset < bytes.len() {
+   860→   860→        let start = offset;
+   861→   861→        let start_pc = pc;
+   862→   862→        let mut pos = offset;
+   863→   863→
+   864→   864→        // Skip legacy prefixes
+   865→   865→        while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
+   866→   866→            pos += 1;
+   867→   867→        }
+   868→   868→
+   869→   869→        // REX prefix
+   870→   870→        let mut rex = 0u8;
+   871→   871→        let mut _rex_w = false;
+   872→   872→        let mut rex_r = false;
+   873→   873→        let mut rex_b = false;
+   874→   874→        if pos < bytes.len() && bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
+   875→   875→            rex = bytes[pos];
+   876→   876→            _rex_w = (rex & 0x08) != 0;
+   877→   877→            rex_r = (rex & 0x04) != 0;
+   878→   878→            rex_b = (rex & 0x01) != 0;
+   879→   879→            pos += 1;
+   880→   880→        }
+   881→   881→
+   882→   882→        if pos >= bytes.len() {
+   883→   883→            let end = pos.min(bytes.len());
+   884→   884→            let hex_bytes: Vec<String> = bytes[start..end]
+   885→   885→                .iter()
+   886→   886→                .map(|b| format!("{:02x}", b))
+   887→   887→                .collect();
+   888→   888→            lines.push(format!("{:#010x}:  {}", start_pc, hex_bytes.join(" ")));
+   889→   889→            offset = end;
+   890→   890→            pc = start_pc + (end - start) as u64;
+   891→   891→            continue;
+   892→   892→        }
+   893→   893→
+   894→   894→        let opcode = bytes[pos];
+   895→   895→        pos += 1;
+   896→   896→
+   897→   897→        let mnemonic = match opcode {
+   898→   898→            // NOP
+   899→   899→            0x90 => "nop".to_string(),
+   900→   900→
+   901→   901→            // RET
+   902→   902→            0xC3 => "ret".to_string(),
+   903→   903→
+   904→   904→            // INT3
+   905→   905→            0xCC => "int3".to_string(),
+   906→   906→
+   907→   907→            // PUSH r64
+   908→   908→            0x50..=0x57 => {
+   909→   909→                let reg_idx = (opcode - 0x50) | (if rex_b { 8 } else { 0 });
+   910→   910→                format!("push {}", gpr_name_64(reg_idx))
+   911→   911→            }
+   912→   912→
+   913→   913→            // POP r64
+   914→   914→            0x58..=0x5F => {
+   915→   915→                let reg_idx = (opcode - 0x58) | (if rex_b { 8 } else { 0 });
+   916→   916→                format!("pop {}", gpr_name_64(reg_idx))
+   917→   917→            }
+   918→   918→
+   919→   919→            // MOV r64, imm64 (B8+rd)
+   920→   920→            0xB8..=0xBF => {
+   921→   921→                let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
+   922→   922→                if pos + 8 <= bytes.len() {
+   923→   923→                    let imm = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
+   924→   924→                    pos += 8;
+   925→   925→                    format!("mov {}, {:#x}", gpr_name_64(reg_idx), imm)
+   926→   926→                } else {
+   927→   927→                    pos = bytes.len();
+   928→   928→                    format!("mov {}, ???", gpr_name_64(reg_idx))
+   929→   929→                }
+   930→   930→            }
+   931→   931→
+   932→   932→            // JMP rel32
+   933→   933→            0xE9 => {
+   934→   934→                if pos + 4 <= bytes.len() {
+   935→   935→                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   936→   936→                    pos += 4;
+   937→   937→                    format!(
+   938→   938→                        "jmp {:#x}",
+   939→   939→                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+   940→   940→                    )
+   941→   941→                } else {
+   942→   942→                    pos = bytes.len();
+   943→   943→                    "jmp ???".to_string()
+   944→   944→                }
+   945→   945→            }
+   946→   946→
+   947→   947→            // CALL rel32
+   948→   948→            0xE8 => {
+   949→   949→                if pos + 4 <= bytes.len() {
+   950→   950→                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   951→   951→                    pos += 4;
+   952→   952→                    format!(
+   953→   953→                        "call {:#x}",
+   954→   954→                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+   955→   955→                    )
+   956→   956→                } else {
+   957→   957→                    pos = bytes.len();
+   958→   958→                    "call ???".to_string()
+   959→   959→                }
+   960→   960→            }
+   961→   961→
+   962→   962→            // Two-byte opcode (0F xx)
+   963→   963→            0x0F => {
+   964→   964→                if pos >= bytes.len() {
+   965→   965→                    "0f ???".to_string()
+   966→   966→                } else {
+   967→   967→                    let op2 = bytes[pos];
+   968→   968→                    pos += 1;
+   969→   969→                    match op2 {
+   970→   970→                        // SYSCALL
+   971→   971→                        0x05 => "syscall".to_string(),
+   972→   972→                        // IMUL r64, r64
+   973→   973→                        0xAF => {
+   974→   974→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   975→   975→                            pos = new_pos;
+   976→   976→                            format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   977→   977→                        }
+   978→   978→                        // Jcc rel32
+   979→   979→                        0x80..=0x8F => {
+   980→   980→                            let cc_name = match op2 & 0xF {
+   981→   981→                                0 => "jo",
+   982→   982→                                1 => "jno",
+   983→   983→                                2 => "jb",
+   984→   984→                                3 => "jae",
+   985→   985→                                4 => "je",
+   986→   986→                                5 => "jne",
+   987→   987→                                6 => "jbe",
+   988→   988→                                7 => "ja",
+   989→   989→                                8 => "js",
+   990→   990→                                9 => "jns",
+   991→   991→                                0xA => "jp",
+   992→   992→                                0xB => "jnp",
+   993→   993→                                0xC => "jl",
+   994→   994→                                0xD => "jge",
+   995→   995→                                0xE => "jle",
+   996→   996→                                0xF => "jg",
+   997→   997→                                _ => "j??",
+   998→   998→                            };
+   999→   999→                            if pos + 4 <= bytes.len() {
+  1000→  1000→                                let rel = i32::from_le_bytes(
+  1001→  1001→                                    bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
+  1002→  1002→                                );
+  1003→  1003→                                pos += 4;
+  1004→  1004→                                format!(
+  1005→  1005→                                    "{} {:#x}",
+  1006→  1006→                                    cc_name,
+  1007→  1007→                                    (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+  1008→  1008→                                )
+  1009→  1009→                            } else {
+  1010→  1010→                                pos = bytes.len();
+  1011→  1011→                                format!("{} ???", cc_name)
+  1012→  1012→                            }
+  1013→  1013→                        }
+  1014→  1014→                        // MOVZX r64, r8
+  1015→  1015→                        0xB6 => {
+  1016→  1016→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1017→  1017→                            pos = new_pos;
+  1018→  1018→                            format!("movzx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+  1019→  1019→                        }
+  1020→  1020→                        // MOVZX r64, r16
+  1021→  1021→                        0xB7 => {
+  1022→  1022→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1023→  1023→                            pos = new_pos;
+  1024→  1024→                            format!("movzx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+  1025→  1025→                        }
+  1026→  1026→                        // MOVSX r64, r8
+  1027→  1027→                        0xBE => {
+  1028→  1028→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1029→  1029→                            pos = new_pos;
+  1030→  1030→                            format!("movsx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+  1031→  1031→                        }
+  1032→  1032→                        // MOVSX r64, r16
+  1033→  1033→                        0xBF => {
+  1034→  1034→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1035→  1035→                            pos = new_pos;
+  1036→  1036→                            format!("movsx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+  1037→  1037→                        }
+  1038→  1038→                        // SETcc r/m8
+  1039→  1039→                        0x90..=0x9F => {
+  1040→  1040→                            let (_, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
+  1041→  1041→                            pos = new_pos;
+  1042→  1042→                            let cc_name = match op2 & 0xF {
+  1043→  1043→                                0 => "seto",
+  1044→  1044→                                1 => "setno",
+  1045→  1045→                                2 => "setb",
+  1046→  1046→                                3 => "setae",
+  1047→  1047→                                4 => "sete",
+  1048→  1048→                                5 => "setne",
+  1049→  1049→                                6 => "setbe",
+  1050→  1050→                                7 => "seta",
+  1051→  1051→                                8 => "sets",
+  1052→  1052→                                9 => "setns",
+  1053→  1053→                                0xA => "setp",
+  1054→  1054→                                0xB => "setnp",
+  1055→  1055→                                0xC => "setl",
+  1056→  1056→                                0xD => "setge",
+  1057→  1057→                                0xE => "setle",
+  1058→  1058→                                0xF => "setg",
+  1059→  1059→                                _ => "set??",
+  1060→  1060→                            };
+  1061→  1061→                            format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
+  1062→  1062→                        }
+  1063→  1063→                        // CMOVcc r64, r64
+  1064→  1064→                        0x40..=0x4F => {
+  1065→  1065→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1066→  1066→                            pos = new_pos;
+  1067→  1067→                            let cc_name = match op2 & 0xF {
+  1068→  1068→                                0 => "cmovo",
+  1069→  1069→                                1 => "cmovno",
+  1070→  1070→                                2 => "cmovb",
+  1071→  1071→                                3 => "cmovae",
+  1072→  1072→                                4 => "cmove",
+  1073→  1073→                                5 => "cmovne",
+  1074→  1074→                                6 => "cmovbe",
+  1075→  1075→                                7 => "cmova",
+  1076→  1076→                                8 => "cmovs",
+  1077→  1077→                                9 => "cmovns",
+  1078→  1078→                                0xA => "cmovp",
+  1079→  1079→                                0xB => "cmovnp",
+  1080→  1080→                                0xC => "cmovl",
+  1081→  1081→                                0xD => "cmovge",
+  1082→  1082→                                0xE => "cmovle",
+  1083→  1083→                                0xF => "cmovg",
+  1084→  1084→                                _ => "cmov??",
+  1085→  1085→                            };
+  1086→  1086→                            format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
+  1087→  1087→                        }
+  1088→  1088→                        _ => format!("0f {:02x}", op2),
+  1089→  1089→                    }
+  1090→  1090→                }
+  1091→  1091→            }
+  1092→  1092→
+  1093→  1093→            // ALU reg-reg opcodes (with ModR/M byte)
+  1094→  1094→            0x01 => {
+  1095→  1095→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1096→  1096→                pos = np;
+  1097→  1097→                format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1098→  1098→            }
+  1099→  1099→            0x03 => {
+  1100→  1100→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1101→  1101→                pos = np;
+  1102→  1102→                format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1103→  1103→            }
+  1104→  1104→            0x09 => {
+  1105→  1105→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1106→  1106→                pos = np;
+  1107→  1107→                format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1108→  1108→            }
+  1109→  1109→            0x0B => {
+  1110→  1110→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1111→  1111→                pos = np;
+  1112→  1112→                format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1113→  1113→            }
+  1114→  1114→            0x21 => {
+  1115→  1115→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1116→  1116→                pos = np;
+  1117→  1117→                format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1118→  1118→            }
+  1119→  1119→            0x23 => {
+  1120→  1120→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1121→  1121→                pos = np;
+  1122→  1122→                format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1123→  1123→            }
+  1124→  1124→            0x29 => {
+  1125→  1125→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1126→  1126→                pos = np;
+  1127→  1127→                format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1128→  1128→            }
+  1129→  1129→            0x2B => {
+  1130→  1130→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1131→  1131→                pos = np;
+  1132→  1132→                format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1133→  1133→            }
+  1134→  1134→            0x31 => {
+  1135→  1135→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1136→  1136→                pos = np;
+  1137→  1137→                format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1138→  1138→            }
+  1139→  1139→            0x33 => {
+  1140→  1140→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1141→  1141→                pos = np;
+  1142→  1142→                format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1143→  1143→            }
+  1144→  1144→            0x39 => {
+  1145→  1145→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1146→  1146→                pos = np;
+  1147→  1147→                format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1148→  1148→            }
+  1149→  1149→            0x3B => {
+  1150→  1150→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1151→  1151→                pos = np;
+  1152→  1152→                format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1153→  1153→            }
+  1154→  1154→            0x85 => {
+  1155→  1155→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1156→  1156→                pos = np;
+  1157→  1157→                format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1158→  1158→            }
+  1159→  1159→            0x87 => {
+  1160→  1160→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1161→  1161→                pos = np;
+  1162→  1162→                format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1163→  1163→            }
+  1164→  1164→            0x89 => {
+  1165→  1165→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1166→  1166→                pos = np;
+  1167→  1167→                format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1168→  1168→            }
+  1169→  1169→            0x8B => {
+  1170→  1170→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1171→  1171→                pos = np;
+  1172→  1172→                format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1173→  1173→            }
+  1174→  1174→            0x8D => {
+  1175→  1175→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1176→  1176→                pos = np;
+  1177→  1177→                format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm))
+  1178→  1178→            }
+  1179→  1179→            0x63 => {
+  1180→  1180→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1181→  1181→                pos = np;
+  1182→  1182→                format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1183→  1183→            }
+  1184→  1184→
+  1185→  1185→            // F7 /x (NEG, NOT, MUL, DIV, IDIV)
+  1186→  1186→            0xF7 => {
+  1187→  1187→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1188→  1188→                pos = np;
+  1189→  1189→                match r {
+  1190→  1190→                    2 => format!("not {}", gpr_name_64(rm)),
+  1191→  1191→                    3 => format!("neg {}", gpr_name_64(rm)),
+  1192→  1192→                    4 => format!("mul {}", gpr_name_64(rm)),
+  1193→  1193→                    6 => format!("div {}", gpr_name_64(rm)),
+  1194→  1194→                    7 => format!("idiv {}", gpr_name_64(rm)),
+  1195→  1195→                    _ => format!("f7 /{}, {}", r, gpr_name_64(rm)),
+  1196→  1196→                }
+  1197→  1197→            }
+  1198→  1198→
+  1199→  1199→            // D3 /x (shift by CL)
+  1200→  1200→            0xD3 => {
+  1201→  1201→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1202→  1202→                pos = np;
+  1203→  1203→                match r {
+  1204→  1204→                    4 => format!("shl {}, cl", gpr_name_64(rm)),
+  1205→  1205→                    5 => format!("shr {}, cl", gpr_name_64(rm)),
+  1206→  1206→                    7 => format!("sar {}, cl", gpr_name_64(rm)),
+  1207→  1207→                    _ => format!("d3 /{}, {}", r, gpr_name_64(rm)),
+  1208→  1208→                }
+  1209→  1209→            }
+  1210→  1210→
+  1211→  1211→            // C7 /0 + imm32 (MOV r/m64, imm32)
+  1212→  1212→            0xC7 => {
+  1213→  1213→                let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1214→  1214→                pos = np;
+  1215→  1215→                if pos + 4 <= bytes.len() {
+  1216→  1216→                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1217→  1217→                    pos += 4;
+  1218→  1218→                    format!("mov {}, {}", gpr_name_64(rm), imm)
+  1219→  1219→                } else {
+  1220→  1220→                    pos = bytes.len();
+  1221→  1221→                    format!("mov {}, ???", gpr_name_64(rm))
+  1222→  1222→                }
+  1223→  1223→            }
+  1224→  1224→
+  1225→  1225→            // 81 /x + imm32 (ADD/SUB/etc r/m64, imm32)
+  1226→  1226→            0x81 => {
+  1227→  1227→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1228→  1228→                pos = np;
+  1229→  1229→                if pos + 4 <= bytes.len() {
+  1230→  1230→                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1231→  1231→                    pos += 4;
+  1232→  1232→                    let op_name = match r {
+  1233→  1233→                        0 => "add",
+  1234→  1234→                        1 => "or",
+  1235→  1235→                        2 => "adc",
+  1236→  1236→                        3 => "sbb",
+  1237→  1237→                        4 => "and",
+  1238→  1238→                        5 => "sub",
+  1239→  1239→                        6 => "xor",
+  1240→  1240→                        7 => "cmp",
+  1241→  1241→                        _ => "???",
+  1242→  1242→                    };
+  1243→  1243→                    format!("{} {}, {}", op_name, gpr_name_64(rm), imm)
+  1244→  1244→                } else {
+  1245→  1245→                    pos = bytes.len();
+  1246→  1246→                    format!("81 /{}, {}", r, gpr_name_64(rm))
+  1247→  1247→                }
+  1248→  1248→            }
+  1249→  1249→
+  1250→  1250→            // 99 (CQO)
+  1251→  1251→            0x99 => "cqo".to_string(),
+  1252→  1252→
+  1253→  1253→            // XCHG rax, r64
+  1254→  1254→            0x91..=0x97 => {
+  1255→  1255→                let reg_idx = (opcode - 0x90) | (if rex_b { 8 } else { 0 });
+  1256→  1256→                format!("xchg rax, {}", gpr_name_64(reg_idx))
+  1257→  1257→            }
+  1258→  1258→
+  1259→  1259→            _ => {
+  1260→  1260→                // Unknown opcode — just show hex
+  1261→  1261→                format!(".byte {:02x}", opcode)
+  1262→  1262→            }
+  1263→  1263→        };
+  1264→  1264→
+  1265→  1265→        let end = pos.min(bytes.len());
+  1266→  1266→        let hex_bytes: Vec<String> = bytes[start..end]
+  1267→  1267→            .iter()
+  1268→  1268→            .map(|b| format!("{:02x}", b))
+  1269→  1269→            .collect();
+  1270→  1270→        lines.push(format!(
+  1271→  1271→            "{:#010x}:  {:20} {}",
+  1272→  1272→            start_pc,
+  1273→  1273→            hex_bytes.join(" "),
+  1274→  1274→            mnemonic
+  1275→  1275→        ));
+  1276→  1276→
+  1277→  1277→        offset = end;
+  1278→  1278→        pc = start_pc + (end - start) as u64;
+  1279→  1279→    }
+  1280→  1280→
+  1281→  1281→    lines
+  1282→  1282→}
+  1283→  1283→
+  1284→  1284→/// Helper: get 64-bit GPR name from index (0-15).
+  1285→  1285→fn gpr_name_64(idx: u8) -> &'static str {
+  1286→  1286→    match idx & 0xF {
+  1287→  1287→        0 => "rax",
+  1288→  1288→        1 => "rcx",
+  1289→  1289→        2 => "rdx",
+  1290→  1290→        3 => "rbx",
+  1291→  1291→        4 => "rsp",
+  1292→  1292→        5 => "rbp",
+  1293→  1293→        6 => "rsi",
+  1294→  1294→        7 => "rdi",
+  1295→  1295→        8 => "r8",
+  1296→  1296→        9 => "r9",
+  1297→  1297→        10 => "r10",
+  1298→  1298→        11 => "r11",
+  1299→  1299→        12 => "r12",
+  1300→  1300→        13 => "r13",
+  1301→  1301→        14 => "r14",
+  1302→  1302→        15 => "r15",
+  1303→  1303→        _ => "r??",
+  1304→  1304→    }
+  1305→  1305→}
+  1306→  1306→
+  1307→  1307→/// Helper: get 8-bit GPR name from index (0-15).
+  1308→  1308→fn gpr_name_8(idx: u8, has_rex: bool) -> &'static str {
+  1309→  1309→    match idx & 0xF {
+  1310→  1310→        0 => {
+  1311→  1311→            if has_rex {
+  1312→  1312→                "r8b"
+  1313→  1313→            } else {
+  1314→  1314→                "al"
+  1315→  1315→            }
+  1316→  1316→        }
+  1317→  1317→        1 => {
+  1318→  1318→            if has_rex {
+  1319→  1319→                "r9b"
+  1320→  1320→            } else {
+  1321→  1321→                "cl"
+  1322→  1322→            }
+  1323→  1323→        }
+  1324→  1324→        2 => {
+  1325→  1325→            if has_rex {
+  1326→  1326→                "r10b"
+  1327→  1327→            } else {
+  1328→  1328→                "dl"
+  1329→  1329→            }
+  1330→  1330→        }
+  1331→  1331→        3 => {
+  1332→  1332→            if has_rex {
+  1333→  1333→                "r11b"
+  1334→  1334→            } else {
+  1335→  1335→                "bl"
+  1336→  1336→            }
+  1337→  1337→        }
+  1338→  1338→        4 => {
+  1339→  1339→            if has_rex {
+  1340→  1340→                "r12b"
+  1341→  1341→            } else {
+  1342→  1342→                "spl"
+  1343→  1343→            }
+  1344→  1344→        } // REX required for spl
+  1345→  1345→        5 => {
+  1346→  1346→            if has_rex {
+  1347→  1347→                "r13b"
+  1348→  1348→            } else {
+  1349→  1349→                "bpl"
+  1350→  1350→            }
+  1351→  1351→        }
+  1352→  1352→        6 => {
+  1353→  1353→            if has_rex {
+  1354→  1354→                "r14b"
+  1355→  1355→            } else {
+  1356→  1356→                "sil"
+  1357→  1357→            }
+  1358→  1358→        }
+  1359→  1359→        7 => {
+  1360→  1360→            if has_rex {
+  1361→  1361→                "r15b"
+  1362→  1362→            } else {
+  1363→  1363→                "dil"
+  1364→  1364→            }
+  1365→  1365→        }
+  1366→  1366→        8 => "r8b",
+  1367→  1367→        9 => "r9b",
+  1368→  1368→        10 => "r10b",
+  1369→  1369→        11 => "r11b",
+  1370→  1370→        12 => "r12b",
+  1371→  1371→        13 => "r13b",
+  1372→  1372→        14 => "r14b",
+  1373→  1373→        15 => "r15b",
+  1374→  1374→        _ => "??b",
+  1375→  1375→    }
+  1376→  1376→}
+  1377→  1377→
+  1378→  1378→/// Decode a ModR/M byte, returning (reg, rm, new_pos).
+  1379→  1379→/// Handles register-register (mod=3) only for simplicity.
+  1380→  1380→fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
+  1381→  1381→    if pos >= bytes.len() {
+  1382→  1382→        return (0, 0, pos);
+  1383→  1383→    }
+  1384→  1384→    let modrm = bytes[pos];
+  1385→  1385→    let new_pos = pos + 1;
+  1386→  1386→    let mod_bits = (modrm >> 6) & 3;
+  1387→  1387→    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+  1388→  1388→    let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
+  1389→  1389→
+  1390→  1390→    if mod_bits == 3 {
+  1391→  1391→        // Register-register
+  1392→  1392→        (reg, rm, new_pos)
+  1393→  1393→    } else {
+  1394→  1394→        // For memory operands, just return the rm as-is (simplified)
+  1395→  1395→        (reg, rm, new_pos)
+  1396→  1396→    }
+  1397→  1397→}
+  1398→  1398→
+  1399→  1399→// ===========================================================================
+  1400→  1400→// ELF64 Emission
+  1401→  1401→// ===========================================================================
+  1402→  1402→
+  1403→  1403→/// Build a minimal ELF64 binary for x86_64 from raw code bytes.
+  1404→  1404→///
+  1405→  1405→/// Produces a static executable with a single LOAD segment containing the
+  1406→  1406→/// `.text` section. Entry point is at `base_addr` + header offset.
+  1407→  1407→fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1408→  1408→    let elf_header_size: u64 = 64;
+  1409→  1409→    let phdr_size: u64 = 56;
+  1410→  1410→    let text_offset = elf_header_size + phdr_size;
+  1411→  1411→    let text_size = code.len() as u64;
+  1412→  1412→    let entry_point = base_addr + text_offset;
+  1413→  1413→
+  1414→  1414→    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+  1415→  1415→
+  1416→  1416→    // --- e_ident ---
+  1417→  1417→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1418→  1418→    elf.push(2); // ELFCLASS64
+  1419→  1419→    elf.push(1); // ELFDATA2LSB
+  1420→  1420→    elf.push(1); // EV_CURRENT
+  1421→  1421→    elf.push(3); // ELFOSABI_LINUX
+  1422→  1422→    elf.push(0); // padding
+  1423→  1423→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1424→  1424→
+  1425→  1425→    // --- ELF header fields ---
+  1426→  1426→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1427→  1427→    elf.extend_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
+  1428→  1428→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1429→  1429→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1430→  1430→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1431→  1431→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1432→  1432→    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+  1433→  1433→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1434→  1434→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1435→  1435→    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+  1436→  1436→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1437→  1437→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1438→  1438→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1439→  1439→
+  1440→  1440→    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+  1441→  1441→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1442→  1442→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1443→  1443→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1444→  1444→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1445→  1445→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1446→  1446→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1447→  1447→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1448→  1448→    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+  1449→  1449→
+  1450→  1450→    // --- Code section ---
+  1451→  1451→    elf.extend_from_slice(code);
+  1452→  1452→
+  1453→  1453→    elf
+  1454→  1454→}
+  1455→  1455→
+  1456→  1456→// ===========================================================================
+  1457→  1457→// X86_64Backend
+  1458→  1458→// ===========================================================================
+  1459→  1459→
+  1460→  1460→/// x86_64 code generation backend (SystemV ABI).
+  1461→  1461→pub struct X86_64Backend {
+  1462→  1462→    target_info: X86_64TargetInfo,
+  1463→  1463→}
+  1464→  1464→
+  1465→  1465→impl X86_64Backend {
+  1466→  1466→    /// Create a new x86_64 backend.
+  1467→  1467→    pub fn new() -> Self {
+  1468→  1468→        Self {
+  1469→  1469→            target_info: X86_64TargetInfo,
+  1470→  1470→        }
+  1471→  1471→    }
+  1472→  1472→}
+  1473→  1473→
+  1474→  1474→impl Default for X86_64Backend {
+  1475→  1475→    fn default() -> Self {
+  1476→  1476→        Self::new()
+  1477→  1477→    }
+  1478→  1478→}
+  1479→  1479→
+  1480→  1480→/// Compute the stack frame size for an IR function on x86_64.
+  1481→  1481→///
+  1482→  1482→/// Sums `Alloc` instruction sizes, adds 8 bytes for the RBP save,
+  1483→  1483→/// and rounds up to 16-byte alignment.
+  1484→  1484→fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
+  1485→  1485→    let mut total: usize = 8; // Saved RBP
+  1486→  1486→    for block in &func.blocks {
+  1487→  1487→        for instr in &block.instructions {
+  1488→  1488→            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
+  1489→  1489→                let aligned = (*size as usize).div_ceil(16) * 16;
+  1490→  1490→                total += aligned;
+  1491→  1491→            }
+  1492→  1492→        }
+  1493→  1493→    }
+  1494→  1494→    // Round up to 16-byte alignment
+  1495→  1495→    (total + 15) & !15
+  1496→  1496→}
+  1497→  1497→
+  1498→  1498→// ── x86_64 ELF Relocation Types ─────────────────────────────────────────
+  1499→  1499→
+  1500→  1500→/// R_X86_64_64 — S + A, 64-bit absolute relocation.
+  1501→  1501→const R_X86_64_64: &str = "R_X86_64_64";
+  1502→  1502→/// R_X86_64_PLT32 — L + A - P, 32-bit PC-relative PLT relocation for calls/jumps.
+  1503→  1503→const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
+  1504→  1504→
+  1505→  1505→// ── ISel helpers ─────────────────────────────────────────────────────────
+  1506→  1506→
+  1507→  1507→/// Resolve an IRValue to a physical GPR.
+  1508→  1508→/// For registers, looks up in the reg_map. For immediates, loads the value
+  1509→  1509→/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
+  1510→  1510→fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+  1511→  1511→    match val {
+  1512→  1512→        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
+  1513→  1513→        IRValue::Immediate(imm) => {
+  1514→  1514→            let imm = *imm;
+  1515→  1515→            let code = if (-2147483648..=2147483647).contains(&imm) {
+  1516→  1516→                encode_mov_reg_imm32(scratch, imm as i32)
+  1517→  1517→            } else {
+  1518→  1518→                encode_mov_reg_imm64(scratch, imm as u64)
+  1519→  1519→            };
+  1520→  1520→            (scratch, code)
+  1521→  1521→        }
+  1522→  1522→        IRValue::Address(addr) => {
+  1523→  1523→            let code = encode_mov_reg_imm64(scratch, *addr);
+  1524→  1524→            (scratch, code)
+  1525→  1525→        }
+  1526→  1526→        IRValue::Label(_) => {
+  1527→  1527→            // Labels need relocation; emit a placeholder mov for now
+  1528→  1528→            let code = encode_mov_reg_imm64(scratch, 0);
+  1529→  1529→            (scratch, code)
+  1530→  1530→        }
+  1531→  1531→    }
+  1532→  1532→}
+  1533→  1533→
+  1534→  1534→/// Map an IR CmpKind to an x86_64 condition code.
+  1535→  1535→fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
+  1536→  1536→    match kind {
+  1537→  1537→        CmpKind::Eq => Cc::Equal,
+  1538→  1538→        CmpKind::Ne => Cc::NotEqual,
+  1539→  1539→        CmpKind::SLt => Cc::Less,
+  1540→  1540→        CmpKind::SLe => Cc::LessEqual,
+  1541→  1541→        CmpKind::SGt => Cc::Greater,
+  1542→  1542→        CmpKind::SGe => Cc::GreaterEqual,
+  1543→  1543→        CmpKind::ULt => Cc::Below,
+  1544→  1544→        CmpKind::ULe => Cc::BelowEqual,
+  1545→  1545→        CmpKind::UGt => Cc::Above,
+  1546→  1546→        CmpKind::UGe => Cc::AboveEqual,
+  1547→  1547→    }
+  1548→  1548→}
+  1549→  1549→
+  1550→  1550→/// Map an IR BinOpKind comparison to an x86_64 condition code.
+  1551→  1551→fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
+  1552→  1552→    match op {
+  1553→  1553→        BinOpKind::Eq => Cc::Equal,
+  1554→  1554→        BinOpKind::Ne => Cc::NotEqual,
+  1555→  1555→        BinOpKind::SLt => Cc::Less,
+  1556→  1556→        BinOpKind::SLe => Cc::LessEqual,
+  1557→  1557→        BinOpKind::SGt => Cc::Greater,
+  1558→  1558→        BinOpKind::SGe => Cc::GreaterEqual,
+  1559→  1559→        BinOpKind::ULt => Cc::Below,
+  1560→  1560→        BinOpKind::ULe => Cc::BelowEqual,
+  1561→  1561→        BinOpKind::UGt => Cc::Above,
+  1562→  1562→        BinOpKind::UGe => Cc::AboveEqual,
+  1563→  1563→        _ => Cc::Equal, // fallback, shouldn't be reached
+  1564→  1564→    }
+  1565→  1565→}
+  1566→  1566→
+  1567→  1567→/// Emit a CMP + SETcc + zero-extend sequence for a comparison that produces
+  1568→  1568→/// a boolean (0 or 1) in the destination register.
+  1569→  1569→fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+  1570→  1570→    let mut code = Vec::new();
+  1571→  1571→    code.extend(encode_cmp_reg_reg(lhs, rhs));
+  1572→  1572→    code.extend(encode_setcc(cc, dst));
+  1573→  1573→    // Zero-extend the byte result to 64 bits to clear upper bits
+  1574→  1574→    code.extend(encode_movzx_reg8(dst, dst));
+  1575→  1575→    code
+  1576→  1576→}
+  1577→  1577→
+  1578→  1578→impl Backend for X86_64Backend {
+  1579→  1579→    fn target_info(&self) -> &dyn TargetInfo {
+  1580→  1580→        &self.target_info
+  1581→  1581→    }
+  1582→  1582→
+  1583→  1583→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  1584→  1584→        // Simple register allocation: map virtual registers to physical registers
+  1585→  1585→        // in a round-robin fashion over allocatable GPRs.
+  1586→  1586→        let allocatable: Vec<Gpr> = [
+  1587→  1587→            Gpr::Rax,
+  1588→  1588→            Gpr::Rcx,
+  1589→  1589→            Gpr::Rdx,
+  1590→  1590→            Gpr::Rsi,
+  1591→  1591→            Gpr::Rdi,
+  1592→  1592→            Gpr::R8,
+  1593→  1593→            Gpr::R9,
+  1594→  1594→            Gpr::R10,
+  1595→  1595→            Gpr::R11,
+  1596→  1596→            Gpr::R12,
+  1597→  1597→            Gpr::R13,
+  1598→  1598→            Gpr::R14,
+  1599→  1599→            Gpr::R15,
+  1600→  1600→            Gpr::Rbx,
+  1601→  1601→            Gpr::Rbp,
+  1602→  1602→        ]
+  1603→  1603→        .to_vec();
+  1604→  1604→
+  1605→  1605→        let func_name = func.name.clone();
+  1606→  1606→        let frame_size = x86_64_compute_frame_size(func);
+  1607→  1607→
+  1608→  1608→        // Collect all virtual register IDs and track which ones are defined
+  1609→  1609→        // by Alloc instructions (stack allocations, so Free on them is a no-op).
+  1610→  1610→        let mut vreg_ids: Vec<u32> = Vec::new();
+  1611→  1611→        let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+  1612→  1612→            std::collections::HashSet::new();
+  1613→  1613→        for block in &func.blocks {
+  1614→  1614→            for instr in &block.instructions {
+  1615→  1615→                for id in instr.defined_regs() {
+  1616→  1616→                    if !vreg_ids.contains(&id) {
+  1617→  1617→                        vreg_ids.push(id);
+  1618→  1618→                    }
+  1619→  1619→                }
+  1620→  1620→                if let IRInstr::Alloc { dst, .. } = instr {
+  1621→  1621→                    if let Some(id) = dst.as_register() {
+  1622→  1622→                        stack_alloc_vregs.insert(id);
+  1623→  1623→                    }
+  1624→  1624→                }
+  1625→  1625→            }
+  1626→  1626→        }
+  1627→  1627→
+  1628→  1628→        // Map virtual registers to physical registers
+  1629→  1629→        let mut reg_map: HashMap<u32, Gpr> = HashMap::new();
+  1630→  1630→        for (i, &id) in vreg_ids.iter().enumerate() {
+  1631→  1631→            reg_map.insert(id, allocatable[i % allocatable.len()]);
+  1632→  1632→        }
+  1633→  1633→
+  1634→  1634→        // Determine callee-saved registers used
+  1635→  1635→        let callee_saved: Vec<PhysicalReg> = reg_map
+  1636→  1636→            .values()
+  1637→  1637→            .filter(|r| r.is_callee_saved())
+  1638→  1638→            .map(|r| PhysicalReg::new(RegClass::Gpr, r.encoding() as u32))
+  1639→  1639→            .collect();
+  1640→  1640→
+  1641→  1641→        // Generate prologue
+  1642→  1642→        let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
+  1643→  1643→        let mut relocations: Vec<RelocationEntry> = Vec::new();
+  1644→  1644→        // Running byte offset within the function's encoded output, used to
+  1645→  1645→        // compute relocation offsets.
+  1646→  1646→        let mut byte_offset: usize = 0;
+  1647→  1647→
+  1648→  1648→        // push rbp
+  1649→  1649→        let push_rbp = encode_push(Gpr::Rbp);
+  1650→  1650→        byte_offset += push_rbp.len();
+  1651→  1651→        encoded_instrs.push(AllocatedInstruction {
+  1652→  1652→            opcode: "push".to_string(),
+  1653→  1653→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rbp.encoding() as u32)],
+  1654→  1654→            writes: vec![],
+  1655→  1655→            encoded: push_rbp,
+  1656→  1656→        });
+  1657→  1657→
+  1658→  1658→        // mov rbp, rsp
+  1659→  1659→        let mov_rbp_rsp = encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp);
+  1660→  1660→        byte_offset += mov_rbp_rsp.len();
+  1661→  1661→        encoded_instrs.push(AllocatedInstruction {
+  1662→  1662→            opcode: "mov".to_string(),
+  1663→  1663→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
+  1664→  1664→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rbp.encoding() as u32)],
+  1665→  1665→            encoded: mov_rbp_rsp,
+  1666→  1666→        });
+  1667→  1667→
+  1668→  1668→        // sub rsp, frame_size
+  1669→  1669→        if frame_size > 0 {
+  1670→  1670→            let sub_rsp = encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32);
+  1671→  1671→            byte_offset += sub_rsp.len();
+  1672→  1672→            encoded_instrs.push(AllocatedInstruction {
+  1673→  1673→                opcode: "sub".to_string(),
+  1674→  1674→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
+  1675→  1675→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Rsp.encoding() as u32)],
+  1676→  1676→                encoded: sub_rsp,
+  1677→  1677→            });
+  1678→  1678→        }
+  1679→  1679→
+  1680→  1680→        // Encode each IR instruction
+  1681→  1681→        for block in &func.blocks {
+  1682→  1682→            for instr in &block.instructions {
+  1683→  1683→                let encoded = match instr {
+  1684→  1684→                    // ── Dedicated Add/Sub/Mul (with immediate-form optimisations) ──
+  1685→  1685→                    IRInstr::Add { dst, lhs, rhs, .. } => {
+  1686→  1686→                        let d = reg_map
+  1687→  1687→                            .get(&dst.as_register().unwrap_or(0))
+  1688→  1688→                            .copied()
+  1689→  1689→                            .unwrap_or(Gpr::Rax);
+  1690→  1690→                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+  1691→  1691→                        if l != d {
+  1692→  1692→                            code.extend(encode_mov_reg_reg(d, l));
+  1693→  1693→                        }
+  1694→  1694→                        if let IRValue::Immediate(imm) = rhs {
+  1695→  1695→                            if (-2147483648..=2147483647).contains(imm) {
+  1696→  1696→                                code.extend(encode_add_reg_imm32(d, *imm as i32));
+  1697→  1697→                            } else {
+  1698→  1698→                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1699→  1699→                                code.extend(pre);
+  1700→  1700→                                code.extend(encode_add_reg_reg(d, r));
+  1701→  1701→                            }
+  1702→  1702→                        } else {
+  1703→  1703→                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1704→  1704→                            code.extend(pre);
+  1705→  1705→                            code.extend(encode_add_reg_reg(d, r));
+  1706→  1706→                        }
+  1707→  1707→                        code
+  1708→  1708→                    }
+  1709→  1709→                    IRInstr::Sub { dst, lhs, rhs, .. } => {
+  1710→  1710→                        let d = reg_map
+  1711→  1711→                            .get(&dst.as_register().unwrap_or(0))
+  1712→  1712→                            .copied()
+  1713→  1713→                            .unwrap_or(Gpr::Rax);
+  1714→  1714→                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+  1715→  1715→                        if l != d {
+  1716→  1716→                            code.extend(encode_mov_reg_reg(d, l));
+  1717→  1717→                        }
+  1718→  1718→                        if let IRValue::Immediate(imm) = rhs {
+  1719→  1719→                            if (-2147483648..=2147483647).contains(imm) {
+  1720→  1720→                                code.extend(encode_sub_reg_imm32(d, *imm as i32));
+  1721→  1721→                            } else {
+  1722→  1722→                                let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1723→  1723→                                code.extend(pre);
+  1724→  1724→                                code.extend(encode_sub_reg_reg(d, r));
+  1725→  1725→                            }
+  1726→  1726→                        } else {
+  1727→  1727→                            let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1728→  1728→                            code.extend(pre);
+  1729→  1729→                            code.extend(encode_sub_reg_reg(d, r));
+  1730→  1730→                        }
+  1731→  1731→                        code
+  1732→  1732→                    }
+  1733→  1733→                    IRInstr::Mul { dst, lhs, rhs, .. } => {
+  1734→  1734→                        let d = reg_map
+  1735→  1735→                            .get(&dst.as_register().unwrap_or(0))
+  1736→  1736→                            .copied()
+  1737→  1737→                            .unwrap_or(Gpr::Rax);
+  1738→  1738→                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+  1739→  1739→                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1740→  1740→                        code.extend(pre);
+  1741→  1741→                        if l != d {
+  1742→  1742→                            code.extend(encode_mov_reg_reg(d, l));
+  1743→  1743→                        }
+  1744→  1744→                        code.extend(encode_imul_reg_reg(d, r));
+  1745→  1745→                        code
+  1746→  1746→                    }
+  1747→  1747→
+  1748→  1748→                    // ── Division: uses RAX/RDX implicitly ───────────────
+  1749→  1749→                    IRInstr::Div { dst, lhs, rhs, .. } => {
+  1750→  1750→                        let d = reg_map
+  1751→  1751→                            .get(&dst.as_register().unwrap_or(0))
+  1752→  1752→                            .copied()
+  1753→  1753→                            .unwrap_or(Gpr::Rax);
+  1754→  1754→                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+  1755→  1755→                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1756→  1756→                        code.extend(pre);
+  1757→  1757→                        // Move lhs into RAX
+  1758→  1758→                        if l != Gpr::Rax {
+  1759→  1759→                            code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+  1760→  1760→                        }
+  1761→  1761→                        // Sign-extend RAX into RDX:RAX
+  1762→  1762→                        code.extend(encode_cqo());
+  1763→  1763→                        // IDIV r
+  1764→  1764→                        code.extend(encode_idiv_reg(r));
+  1765→  1765→                        // Quotient is in RAX, move to dst if different
+  1766→  1766→                        if d != Gpr::Rax {
+  1767→  1767→                            code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+  1768→  1768→                        }
+  1769→  1769→                        code
+  1770→  1770→                    }
+  1771→  1771→
+  1772→  1772→                    // ── BinOp (generic) ──────────────────────────────────
+  1773→  1773→                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+  1774→  1774→                        let d = reg_map
+  1775→  1775→                            .get(&dst.as_register().unwrap_or(0))
+  1776→  1776→                            .copied()
+  1777→  1777→                            .unwrap_or(Gpr::Rax);
+  1778→  1778→                        let (l, mut code) = resolve_gpr(lhs, &reg_map, Gpr::R10);
+  1779→  1779→                        let (r, pre) = resolve_gpr(rhs, &reg_map, Gpr::R11);
+  1780→  1780→                        code.extend(pre);
+  1781→  1781→
+  1782→  1782→                        match op {
+  1783→  1783→                            BinOpKind::Add => {
+  1784→  1784→                                if l != d {
+  1785→  1785→                                    code.extend(encode_mov_reg_reg(d, l));
+  1786→  1786→                                }
+  1787→  1787→                                if let IRValue::Immediate(imm) = rhs {
+  1788→  1788→                                    if (-2147483648..=2147483647).contains(imm) {
+  1789→  1789→                                        code.extend(encode_add_reg_imm32(d, *imm as i32));
+  1790→  1790→                                    } else {
+  1791→  1791→                                        code.extend(encode_add_reg_reg(d, r));
+  1792→  1792→                                    }
+  1793→  1793→                                } else {
+  1794→  1794→                                    code.extend(encode_add_reg_reg(d, r));
+  1795→  1795→                                }
+  1796→  1796→                            }
+  1797→  1797→                            BinOpKind::Sub => {
+  1798→  1798→                                if l != d {
+  1799→  1799→                                    code.extend(encode_mov_reg_reg(d, l));
+  1800→  1800→                                }
+  1801→  1801→                                if let IRValue::Immediate(imm) = rhs {
+  1802→  1802→                                    if (-2147483648..=2147483647).contains(imm) {
+  1803→  1803→                                        code.extend(encode_sub_reg_imm32(d, *imm as i32));
+  1804→  1804→                                    } else {
+  1805→  1805→                                        code.extend(encode_sub_reg_reg(d, r));
+  1806→  1806→                                    }
+  1807→  1807→                                } else {
+  1808→  1808→                                    code.extend(encode_sub_reg_reg(d, r));
+  1809→  1809→                                }
+  1810→  1810→                            }
+  1811→  1811→                            BinOpKind::Mul => {
+  1812→  1812→                                if l != d {
+  1813→  1813→                                    code.extend(encode_mov_reg_reg(d, l));
+  1814→  1814→                                }
+  1815→  1815→                                code.extend(encode_imul_reg_reg(d, r));
+  1816→  1816→                            }
+  1817→  1817→                            BinOpKind::SDiv => {
+  1818→  1818→                                if l != Gpr::Rax {
+  1819→  1819→                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+  1820→  1820→                                }
+  1821→  1821→                                code.extend(encode_cqo());
+  1822→  1822→                                code.extend(encode_idiv_reg(r));
+  1823→  1823→                                if d != Gpr::Rax {
+  1824→  1824→                                    code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+  1825→  1825→                                }
+  1826→  1826→                            }
+  1827→  1827→                            BinOpKind::UDiv => {
+  1828→  1828→                                if l != Gpr::Rax {
+  1829→  1829→                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+  1830→  1830→                                }
+  1831→  1831→                                // Zero-extend RAX into RDX for unsigned divide
+  1832→  1832→                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+  1833→  1833→                                code.extend(encode_div_reg(r));
+  1834→  1834→                                if d != Gpr::Rax {
+  1835→  1835→                                    code.extend(encode_mov_reg_reg(d, Gpr::Rax));
+  1836→  1836→                                }
+  1837→  1837→                            }
+  1838→  1838→                            BinOpKind::SRem => {
+  1839→  1839→                                if l != Gpr::Rax {
+  1840→  1840→                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+  1841→  1841→                                }
+  1842→  1842→                                code.extend(encode_cqo());
+  1843→  1843→                                code.extend(encode_idiv_reg(r));
+  1844→  1844→                                // Remainder in RDX
+  1845→  1845→                                if d != Gpr::Rdx {
+  1846→  1846→                                    code.extend(encode_mov_reg_reg(d, Gpr::Rdx));
+  1847→  1847→                                }
+  1848→  1848→                            }
+  1849→  1849→                            BinOpKind::URem => {
+  1850→  1850→                                if l != Gpr::Rax {
+  1851→  1851→                                    code.extend(encode_mov_reg_reg(Gpr::Rax, l));
+  1852→  1852→                                }
+  1853→  1853→                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+  1854→  1854→                                code.extend(encode_div_reg(r));
+  1855→  1855→                                // Remainder in RDX
+  1856→  1856→                                if d != Gpr::Rdx {
+  1857→  1857→                                    code.extend(encode_mov_reg_reg(d, Gpr::Rdx));
+  1858→  1858→                                }
+  1859→  1859→                            }
+  1860→  1860→                            BinOpKind::And => {
+  1861→  1861→                                if l != d {
+  1862→  1862→                                    code.extend(encode_mov_reg_reg(d, l));
+  1863→  1863→                                }
+  1864→  1864→                                code.extend(encode_and_reg_reg(d, r));
+  1865→  1865→                            }
+  1866→  1866→                            BinOpKind::Or => {
+  1867→  1867→                                if l != d {
+  1868→  1868→                                    code.extend(encode_mov_reg_reg(d, l));
+  1869→  1869→                                }
+  1870→  1870→                                code.extend(encode_or_reg_reg(d, r));
+  1871→  1871→                            }
+  1872→  1872→                            BinOpKind::Xor => {
+  1873→  1873→                                if l != d {
+  1874→  1874→                                    code.extend(encode_mov_reg_reg(d, l));
+  1875→  1875→                                }
+  1876→  1876→                                code.extend(encode_xor_reg_reg(d, r));
+  1877→  1877→                            }
+  1878→  1878→                            BinOpKind::Shl => {
+  1879→  1879→                                if l != d {
+  1880→  1880→                                    code.extend(encode_mov_reg_reg(d, l));
+  1881→  1881→                                }
+  1882→  1882→                                // Shift amount must be in CL (RCX)
+  1883→  1883→                                if r != Gpr::Rcx {
+  1884→  1884→                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+  1885→  1885→                                }
+  1886→  1886→                                code.extend(encode_shl_reg_cl(d));
+  1887→  1887→                            }
+  1888→  1888→                            BinOpKind::ShrL => {
+  1889→  1889→                                if l != d {
+  1890→  1890→                                    code.extend(encode_mov_reg_reg(d, l));
+  1891→  1891→                                }
+  1892→  1892→                                if r != Gpr::Rcx {
+  1893→  1893→                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+  1894→  1894→                                }
+  1895→  1895→                                code.extend(encode_shr_reg_cl(d));
+  1896→  1896→                            }
+  1897→  1897→                            BinOpKind::ShrA => {
+  1898→  1898→                                if l != d {
+  1899→  1899→                                    code.extend(encode_mov_reg_reg(d, l));
+  1900→  1900→                                }
+  1901→  1901→                                if r != Gpr::Rcx {
+  1902→  1902→                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, r));
+  1903→  1903→                                }
+  1904→  1904→                                code.extend(encode_sar_reg_cl(d));
+  1905→  1905→                            }
+  1906→  1906→                            // Comparison BinOps: produce 0 or 1
+  1907→  1907→                            BinOpKind::SLt
+  1908→  1908→                            | BinOpKind::SLe
+  1909→  1909→                            | BinOpKind::SGt
+  1910→  1910→                            | BinOpKind::SGe
+  1911→  1911→                            | BinOpKind::ULt
+  1912→  1912→                            | BinOpKind::ULe
+  1913→  1913→                            | BinOpKind::UGt
+  1914→  1914→                            | BinOpKind::UGe
+  1915→  1915→                            | BinOpKind::Eq
+  1916→  1916→                            | BinOpKind::Ne => {
+  1917→  1917→                                let cc = binop_cmp_to_cc(op);
+  1918→  1918→                                if l != d {
+  1919→  1919→                                    code.extend(encode_mov_reg_reg(d, l));
+  1920→  1920→                                }
+  1921→  1921→                                code.extend(emit_cmp_setcc(d, d, r, cc));
+  1922→  1922→                            }
+  1923→  1923→                        }
+  1924→  1924→                        code
+  1925→  1925→                    }
+  1926→  1926→
+  1927→  1927→                    // ── Unary operations ─────────────────────────────────
+  1928→  1928→                    IRInstr::UnaryOp { op, dst, operand, .. } => {
+  1929→  1929→                        let d = reg_map
+  1930→  1930→                            .get(&dst.as_register().unwrap_or(0))
+  1931→  1931→                            .copied()
+  1932→  1932→                            .unwrap_or(Gpr::Rax);
+  1933→  1933→                        let (s, mut code) = resolve_gpr(operand, &reg_map, Gpr::R10);
+  1934→  1934→
+  1935→  1935→                        match op {
+  1936→  1936→                            UnaryOpKind::Neg => {
+  1937→  1937→                                if s != d {
+  1938→  1938→                                    code.extend(encode_mov_reg_reg(d, s));
+  1939→  1939→                                }
+  1940→  1940→                                code.extend(encode_neg_reg(d));
+  1941→  1941→                            }
+  1942→  1942→                            UnaryOpKind::Not => {
+  1943→  1943→                                if s != d {
+  1944→  1944→                                    code.extend(encode_mov_reg_reg(d, s));
+  1945→  1945→                                }
+  1946→  1946→                                code.extend(encode_not_reg(d));
+  1947→  1947→                            }
+  1948→  1948→                            UnaryOpKind::Clz => {
+  1949→  1949→                                // BSR finds highest set bit; result = 63 - BSR
+  1950→  1950→                                // BSR sets ZF if operand is 0
+  1951→  1951→                                if s != d {
+  1952→  1952→                                    code.extend(encode_mov_reg_reg(d, s));
+  1953→  1953→                                }
+  1954→  1954→                                // BSR dst, dst  (0F BD /r)
+  1955→  1955→                                // We emit this manually since there's no helper
+  1956→  1956→                                let r = d.needs_rex();
+  1957→  1957→                                let b = d.needs_rex();
+  1958→  1958→                                if let Some(rex) = rex_prefix(true, r, false, b) {
+  1959→  1959→                                    code.push(rex);
+  1960→  1960→                                } else {
+  1961→  1961→                                    code.push(0x48);
+  1962→  1962→                                }
+  1963→  1963→                                code.push(0x0F);
+  1964→  1964→                                code.push(0xBD);
+  1965→  1965→                                code.push(modrm(3, d.encoding() & 7, d.encoding() & 7));
+  1966→  1966→                                // XOR temp, temp; then if ZF, result = 64
+  1967→  1967→                                // Simplified: result = 63 - BSR_result for non-zero
+  1968→  1968→                                code.extend(encode_mov_reg_imm32(Gpr::R11, 63));
+  1969→  1969→                                code.extend(encode_sub_reg_reg(Gpr::R11, d));
+  1970→  1970→                                code.extend(encode_mov_reg_reg(d, Gpr::R11));
+  1971→  1971→                            }
+  1972→  1972→                            UnaryOpKind::Ctz => {
+  1973→  1973→                                // BSF finds lowest set bit; result = BSF
+  1974→  1974→                                if s != d {
+  1975→  1975→                                    code.extend(encode_mov_reg_reg(d, s));
+  1976→  1976→                                }
+  1977→  1977→                                // BSF dst, dst  (0F BC /r)
+  1978→  1978→                                let r = d.needs_rex();
+  1979→  1979→                                let b = d.needs_rex();
+  1980→  1980→                                if let Some(rex) = rex_prefix(true, r, false, b) {
+  1981→  1981→                                    code.push(rex);
+  1982→  1982→                                } else {
+  1983→  1983→                                    code.push(0x48);
+  1984→  1984→                                }
+  1985→  1985→                                code.push(0x0F);
+  1986→  1986→                                code.push(0xBC);
+  1987→  1987→                                code.push(modrm(3, d.encoding() & 7, d.encoding() & 7));
+  1988→  1988→                                // BSF result is already the count of trailing zeros
+  1989→  1989→                            }
+  1990→  1990→                            UnaryOpKind::Popcnt => {
+  1991→  1991→                                if s != d {
+  1992→  1992→                                    code.extend(encode_mov_reg_reg(d, s));
+  1993→  1993→                                }
+  1994→  1994→                                // POPCNT dst, dst  (F3 0F B8 /r)
+  1995→  1995→                                // We need the F3 prefix
+  1996→  1996→                                code.push(0xF3);
+  1997→  1997→                                let r = d.needs_rex();
+  1998→  1998→                                let b = d.needs_rex();
+  1999→  1999→                                if let Some(rex) = rex_prefix(true, r, false, b) {
+  2000→  2000→                                    code.push(rex);
+
+[showing lines 1-2000 of 2002; use offset=2001 with limit to continue reading]

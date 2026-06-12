@@ -1,0 +1,2002 @@
+     1→//! AST → SCG (Structured Computation Graph) conversion.
+     2→//!
+     3→//! This module bridges the parser's output ([`Program`]) to the VUMA
+     4→//! intermediate representation: the **Structured Computation Graph** (SCG).
+     5→//!
+     6→//! The SCG is a directed graph where:
+     7→//! - **Nodes** represent computational operations (allocation, access,
+     8→//!   deallocation, computation, control flow, cast, effect, phantom).
+     9→//! - **Edges** represent data-flow, control-flow, derivation, and
+    10→//!   annotation dependencies.
+    11→//! - **Regions** group nodes into memory scopes with security boundaries.
+    12→//!
+    13→//! # Mapping overview
+    14→//!
+    15→//! | VUMA construct          | SCG node / edge                                  |
+    16→//! |-------------------------|--------------------------------------------------|
+    17→//! | `fn f(…) { … }`        | Region + FunctionEntry/FunctionReturn nodes      |
+    18→//! | `let x = …`            | Computation node + DataFlow edges                |
+    19→//! | `allocate(size)`        | Allocation node (size, align from type)          |
+    20→//! | `free(ptr)`            | Deallocation node (references allocation)        |
+    21→//! | `ptr + offset`          | Derivation edge from allocation to computation   |
+    22→//! | `derive(ptr, region)`   | Derivation edge                                  |
+    23→//! | `expr as Type`          | Cast node (from_type, to_type, BD reference)     |
+    24→//! | `*ptr` / `ptr.field`    | Access node (Read/Write, size)                   |
+    25→//! | `if/else`              | Control Branch node + ControlFlow edges           |
+    26→//! | `while/for/loop`        | LoopHeader/LoopExit nodes + back edges           |
+    27→//! | `match`                | Branch + Join nodes                               |
+    28→//! | `f(args)`              | FunctionEntry + FunctionReturn nodes             |
+    29→//! | `async { … }`          | Parallel region (security-boundary region)       |
+    30→//! | `spawn expr`           | Effect node (parallel fork)                      |
+    31→//! | `sync { … }`           | Synchronization edges (Annotation)               |
+    32→//! | `region r = alloc(…)`  | Region + Allocation node + Derivation edge       |
+    33→//! | `sizeof(T)` / `alignof(T)` | Computation nodes                            |
+    34→//!
+    35→//! # Enhancement notes (Task 4-3)
+    36→//!
+    37→//! Each mapping is enhanced with deeper semantic fidelity:
+    38→//!
+    39→//! 1. **Fn → entry/exit**: return type stored on entry label; body nodes
+    40→//!    verified as intermediaries between entry/return via ControlFlow edges.
+    41→//! 2. **let/assign**: type annotations propagate `result_type`; allocations
+    42→//!    inside let get correct size/align from the annotated type.
+    43→//! 3. **alloc**: when a type annotation is present, size is computed from
+    44→//!    `sizeof(T)` and alignment from `alignof(T)`.
+    45→//! 4. **free**: deallocation node receives the allocation's region_id so that
+    46→//!    alloc/free region consistency can be validated.
+    47→//! 5. **ptr derive/offset**: for constant offsets the Derivation edge gets a
+    48→//!    label recording the byte offset, enabling offset-aware analysis.
+    49→//! 6. **ptr cast**: narrowing vs widening classification; signedness change
+    50→//!    detection for integer casts.
+    51→//! 7. **read/write**: field accesses produce Access nodes with computed
+    52→//!    offset (best-effort); ReadWrite mode for compound assignments.
+    53→//! 8. **if/else**: branch edges labelled "then"/"else" for precise CFG
+    54→//!    reconstruction.
+    55→//! 9. **while/for**: condition data-flow re-entering the LoopHeader is
+    56→//!    explicitly tracked; for-loop iterator variable has DataFlow edge.
+    57→//! 10. **Function calls**: per-argument DataFlow edges from caller variables
+    58→//!     to FunctionEntry; return value DataFlow edge from FunctionReturn.
+    59→//! 11. **async/spawn**: spawn Effect node connects to async region's fork
+    60→//!     via Derivation edge; parallel fork/join boundaries explicit.
+    61→//! 12. **sync**: sync_enter / sync_exit effect nodes bound the body;
+    62→//!     Annotation edges from body nodes to sync_exit enforce ordering.
+    63→
+    64→use crate::ast::*;
+    65→use crate::error::{ParseError, Span};
+    66→use std::collections::HashMap;
+    67→use vuma_scg::{
+    68→    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
+    69→    ControlNode, DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
+    70→    NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, VTableNode, SCG,
+    71→};
+    72→
+    73→// ---------------------------------------------------------------------------
+    74→// Converter
+    75→// ---------------------------------------------------------------------------
+    76→
+    77→/// Converts a VUMA [`Program`] into a [`vuma_scg::SCG`].
+    78→///
+    79→/// The converter walks the AST in order, emitting nodes and edges into the
+    80→/// SCG. It tracks variable definitions to automatically insert DataFlow
+    81→/// edges from the producer of a value to its consumers.
+    82→///
+    83→/// # Region strategy
+    84→///
+    85→/// Each function definition gets its own [`SCGRegion`] (Heap-deployed).
+    86→/// `async` blocks get a `Shared`-deployed security-boundary region.
+    87→/// Top-level statements go into a default region.
+    88→pub struct AstToScg {
+    89→    /// Variable scopes: maps variable name → the [`NodeId`] that last defined it.
+    90→    scopes: Vec<HashMap<String, NodeId>>,
+    91→    /// Maps allocation variable names to the NodeId of their Allocation node
+    92→    /// (so that `free(ptr)` can reference the correct allocation).
+    93→    alloc_defs: Vec<HashMap<String, NodeId>>,
+    94→    /// Counter for generating region IDs.
+    95→    next_region_id: u64,
+    96→    /// The default (top-level) region ID.
+    97→    default_region: RegionId,
+    98→}
+    99→
+   100→impl AstToScg {
+   101→    /// Create a new converter.
+   102→    pub fn new() -> Self {
+   103→        let default_region = RegionId::new(0);
+   104→        Self {
+   105→            scopes: vec![HashMap::new()],
+   106→            alloc_defs: vec![HashMap::new()],
+   107→            next_region_id: 1,
+   108→            default_region,
+   109→        }
+   110→    }
+   111→
+   112→    /// Allocate a fresh region ID.
+   113→    fn alloc_region_id(&mut self) -> RegionId {
+   114→        let id = RegionId::new(self.next_region_id);
+   115→        self.next_region_id += 1;
+   116→        id
+   117→    }
+   118→
+   119→    /// Convert a parsed program into an SCG.
+   120→    pub fn convert(&mut self, program: &Program) -> Result<SCG, ParseError> {
+   121→        let mut scg = SCG::new();
+   122→
+   123→        // Create the default top-level region.
+   124→        let mut default_region = SCGRegion::new(self.default_region, DeploymentTarget::Heap);
+   125→        default_region.scope_level = 0;
+   126→
+   127→        let mut prev_node: Option<NodeId> = None;
+   128→
+   129→        for item in &program.items {
+   130→            let node_id = self.convert_item(item, &mut scg, &mut default_region)?;
+   131→
+   132→            // Link sequential control flow.
+   133→            if let Some(prev) = prev_node {
+   134→                let _ = scg.add_edge(prev, node_id, EdgeKind::ControlFlow);
+   135→            }
+   136→            prev_node = Some(node_id);
+   137→        }
+   138→
+   139→        scg.add_region(default_region);
+   140→
+   141→        Ok(scg)
+   142→    }
+   143→
+   144→    // -- helpers: span → ProgramPoint ---------------------------------------
+   145→
+   146→    fn span_to_pp(&self, span: &Span) -> ProgramPoint {
+   147→        ProgramPoint {
+   148→            file: None,
+   149→            line: None,
+   150→            column: None,
+   151→            offset: Some(span.start as u64),
+   152→        }
+   153→    }
+   154→
+   155→    // -- item conversion -----------------------------------------------------
+   156→
+   157→    fn convert_item(
+   158→        &mut self,
+   159→        item: &Item,
+   160→        scg: &mut SCG,
+   161→        default_region: &mut SCGRegion,
+   162→    ) -> Result<NodeId, ParseError> {
+   163→        match item {
+   164→            Item::FnDef(f) => self.convert_fn_def(f, scg),
+   165→            Item::RegionDef(r) => self.convert_region_def(r, scg, default_region),
+   166→            Item::Import(i) => {
+   167→                let id = scg.add_node(
+   168→                    NodeType::Computation,
+   169→                    NodePayload::Computation(ComputationNode {
+   170→                        operation: format!("import \"{}\"", i.path),
+   171→                        result_type: None,
+   172→                        tail_call: false,
+   173→                    }),
+   174→                    self.span_to_pp(&i.span),
+   175→                );
+   176→                default_region.add_node(id);
+   177→                Ok(id)
+   178→            }
+   179→            Item::Export(e) => {
+   180→                let id = scg.add_node(
+   181→                    NodeType::Computation,
+   182→                    NodePayload::Computation(ComputationNode {
+   183→                        operation: format!("export {}", e.name),
+   184→                        result_type: None,
+   185→                        tail_call: false,
+   186→                    }),
+   187→                    self.span_to_pp(&e.span),
+   188→                );
+   189→                default_region.add_node(id);
+   190→                Ok(id)
+   191→            }
+   192→            Item::Const(c) => {
+   193→                let desc = format!("const {} = {}", c.name, self.expr_to_string(&c.value));
+   194→                let id = scg.add_node(
+   195→                    NodeType::Computation,
+   196→                    NodePayload::Computation(ComputationNode {
+   197→                        operation: desc,
+   198→                        result_type: c.ty.as_ref().map(|t| t.to_string()),
+   199→                        tail_call: false,
+   200→                    }),
+   201→                    self.span_to_pp(&c.span),
+   202→                );
+   203→                default_region.add_node(id);
+   204→                self.define_var(&c.name, id);
+   205→                self.add_data_flow_edges(&c.value, id, scg);
+   206→                Ok(id)
+   207→            }
+   208→            Item::StructDef(s) => {
+   209→                let fields_str: Vec<String> = s
+   210→                    .fields
+   211→                    .iter()
+   212→                    .map(|f| format!("{}: {}", f.name, f.ty))
+   213→                    .collect();
+   214→                let id = scg.add_node(
+   215→                    NodeType::Computation,
+   216→                    NodePayload::Computation(ComputationNode {
+   217→                        operation: format!("struct {} {{ {} }}", s.name, fields_str.join(", ")),
+   218→                        result_type: None,
+   219→                        tail_call: false,
+   220→                    }),
+   221→                    self.span_to_pp(&s.span),
+   222→                );
+   223→                default_region.add_node(id);
+   224→                Ok(id)
+   225→            }
+   226→            Item::EnumDef(e) => {
+   227→                let variants_str: Vec<String> = e.variants.iter().map(|v| v.name.clone()).collect();
+   228→                let id = scg.add_node(
+   229→                    NodeType::Computation,
+   230→                    NodePayload::Computation(ComputationNode {
+   231→                        operation: format!("enum {} {{ {} }}", e.name, variants_str.join(", ")),
+   232→                        result_type: None,
+   233→                        tail_call: false,
+   234→                    }),
+   235→                    self.span_to_pp(&e.span),
+   236→                );
+   237→                default_region.add_node(id);
+   238→                Ok(id)
+   239→            }
+   240→            Item::ModuleDef(m) => {
+   241→                let id = scg.add_node(
+   242→                    NodeType::Computation,
+   243→                    NodePayload::Computation(ComputationNode {
+   244→                        operation: format!("module {}", m.name),
+   245→                        result_type: None,
+   246→                        tail_call: false,
+   247→                    }),
+   248→                    self.span_to_pp(&m.span),
+   249→                );
+   250→                default_region.add_node(id);
+   251→                Ok(id)
+   252→            }
+   253→            Item::Stmt(s) => self.convert_stmt(s, scg, default_region),
+   254→            Item::Static(s) => {
+   255→                let desc = format!("static {} = {}", s.name, self.expr_to_string(&s.value));
+   256→                let id = scg.add_node(
+   257→                    NodeType::Computation,
+   258→                    NodePayload::Computation(ComputationNode {
+   259→                        operation: desc,
+   260→                        result_type: s.ty.as_ref().map(|t| t.to_string()),
+   261→                        tail_call: false,
+   262→                    }),
+   263→                    self.span_to_pp(&s.span),
+   264→                );
+   265→                default_region.add_node(id);
+   266→                self.define_var(&s.name, id);
+   267→                self.add_data_flow_edges(&s.value, id, scg);
+   268→                Ok(id)
+   269→            }
+   270→            Item::TraitDef(t) => {
+   271→                let methods_str: Vec<String> = t
+   272→                    .required_methods
+   273→                    .iter()
+   274→                    .chain(t.provided_methods.iter())
+   275→                    .map(|m| m.name.clone())
+   276→                    .collect();
+   277→                let id = scg.add_node(
+   278→                    NodeType::Computation,
+   279→                    NodePayload::Computation(ComputationNode {
+   280→                        operation: format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
+   281→                        result_type: None,
+   282→                        tail_call: false,
+   283→                    }),
+   284→                    self.span_to_pp(&t.span),
+   285→                );
+   286→                default_region.add_node(id);
+   287→                Ok(id)
+   288→            }
+   289→            Item::ImplBlock(i) => {
+   290→                let target_str = i.target_type.to_string();
+   291→                let trait_str = i.trait_name.as_deref().unwrap_or("");
+   292→                let methods_str: Vec<String> = i.methods.iter().map(|m| m.name.clone()).collect();
+   293→                let id = scg.add_node(
+   294→                    NodeType::Computation,
+   295→                    NodePayload::Computation(ComputationNode {
+   296→                        operation: format!(
+   297→                            "impl {}{} for {} {{ {} }}",
+   298→                            trait_str,
+   299→                            if trait_str.is_empty() { "" } else { " " },
+   300→                            target_str,
+   301→                            methods_str.join(", ")
+   302→                        ),
+   303→                        result_type: None,
+   304→                        tail_call: false,
+   305→                    }),
+   306→                    self.span_to_pp(&i.span),
+   307→                );
+   308→                default_region.add_node(id);
+   309→                Ok(id)
+   310→            }
+   311→        }
+   312→    }
+   313→
+   314→    // -- 1. Function definition → region with entry/exit nodes ---------------
+   315→
+   316→    fn convert_fn_def(&mut self, f: &FnDef, scg: &mut SCG) -> Result<NodeId, ParseError> {
+   317→        let region_id = self.alloc_region_id();
+   318→        let mut fn_region = SCGRegion::with_scope_level(region_id, DeploymentTarget::Heap, 1);
+   319→
+   320→        self.push_scope();
+   321→        self.push_alloc_scope();
+   322→
+   323→        // Enhanced: include return type in entry label for traceability.
+   324→        let ret_type_str = f
+   325→            .return_type
+   326→            .as_ref()
+   327→            .map(|t| t.to_string())
+   328→            .unwrap_or_else(|| "void".to_string());
+   329→        let entry_label = format!("fn_{}_entry({})", f.name, ret_type_str);
+   330→
+   331→        // FunctionEntry node.
+   332→        let entry_id = scg.add_node(
+   333→            NodeType::Control,
+   334→            NodePayload::Control(ControlNode {
+   335→                kind: ControlKind::FunctionEntry,
+   336→                label: Some(entry_label),
+   337→            }),
+   338→            self.span_to_pp(&f.span),
+   339→        );
+   340→        fn_region.add_node(entry_id);
+   341→
+   342→        // Parameter nodes — each receives type annotation as result_type.
+   343→        let mut param_ids = Vec::new();
+   344→        for p in &f.params {
+   345→            let param_id = scg.add_node(
+   346→                NodeType::Computation,
+   347→                NodePayload::Computation(ComputationNode {
+   348→                    operation: format!("param {}", p.name),
+   349→                    result_type: p.ty.as_ref().map(|t| t.to_string()),
+   350→                    tail_call: false,
+   351→                }),
+   352→                self.span_to_pp(&p.span),
+   353→            );
+   354→            fn_region.add_node(param_id);
+   355→            self.define_var(&p.name, param_id);
+   356→            // Enhanced: DataFlow edge from entry to each param (represents
+   357→            // the value flowing from the caller into the parameter).
+   358→            let _ = scg.add_edge(entry_id, param_id, EdgeKind::DataFlow);
+   359→            param_ids.push(param_id);
+   360→        }
+   361→
+   362→        // Link entry → params.
+   363→        let mut prev_node: Option<NodeId> = Some(entry_id);
+   364→        for &pid in &param_ids {
+   365→            if let Some(prev) = prev_node {
+   366→                let _ = scg.add_edge(prev, pid, EdgeKind::ControlFlow);
+   367→            }
+   368→            prev_node = Some(pid);
+   369→        }
+   370→
+   371→        // Body statements — these become intermediate nodes between entry/exit.
+   372→        for stmt in &f.body.statements {
+   373→            let stmt_id = self.convert_stmt_in_region(stmt, scg, &mut fn_region)?;
+   374→            if let Some(prev) = prev_node {
+   375→                let _ = scg.add_edge(prev, stmt_id, EdgeKind::ControlFlow);
+   376→            }
+   377→            prev_node = Some(stmt_id);
+   378→        }
+   379→
+   380→        // FunctionReturn node — enhanced with return type label.
+   381→        let ret_label = format!("fn_{}_return({})", f.name, ret_type_str);
+   382→        let ret_id = scg.add_node(
+   383→            NodeType::Control,
+   384→            NodePayload::Control(ControlNode {
+   385→                kind: ControlKind::FunctionReturn,
+   386→                label: Some(ret_label),
+   387→            }),
+   388→            self.span_to_pp(&f.span),
+   389→        );
+   390→        fn_region.add_node(ret_id);
+   391→
+   392→        // Link last body node to return.
+   393→        if let Some(prev) = prev_node {
+   394→            let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+   395→        }
+   396→
+   397→        self.pop_alloc_scope();
+   398→        self.pop_scope();
+   399→
+   400→        scg.add_region(fn_region);
+   401→
+   402→        Ok(entry_id)
+   403→    }
+   404→
+   405→    // -- region definition ---------------------------------------------------
+   406→
+   407→    fn convert_region_def(
+   408→        &mut self,
+   409→        r: &RegionDef,
+   410→        scg: &mut SCG,
+   411→        default_region: &mut SCGRegion,
+   412→    ) -> Result<NodeId, ParseError> {
+   413→        let region_id = self.alloc_region_id();
+   414→        let mut mem_region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+   415→
+   416→        let size_val = self.eval_const_int(&r.size_expr).unwrap_or(0);
+   417→        let align = self.type_alignment(None);
+   418→
+   419→        // Allocation node within the region.
+   420→        let alloc_id = scg.add_node(
+   421→            NodeType::Allocation,
+   422→            NodePayload::Allocation(AllocationNode {
+   423→                size: size_val,
+   424→                align,
+   425→                region_id,
+   426→                type_name: Some(r.name.clone()),
+   427→            }),
+   428→            self.span_to_pp(&r.span),
+   429→        );
+   430→        mem_region.add_node(alloc_id);
+   431→        default_region.add_node(alloc_id);
+   432→
+   433→        // Region phantom node (structural marker).
+   434→        let region_node_id = scg.add_node(
+   435→            NodeType::Phantom,
+   436→            NodePayload::Phantom(PhantomNode {
+   437→                purpose: format!("region {}", r.name),
+   438→            }),
+   439→            self.span_to_pp(&r.span),
+   440→        );
+   441→        mem_region.add_node(region_node_id);
+   442→        default_region.add_node(region_node_id);
+   443→
+   444→        // Derivation edge: region node → allocation.
+   445→        let _ = scg.add_edge(region_node_id, alloc_id, EdgeKind::Derivation);
+   446→
+   447→        // Record that this variable is an allocation.
+   448→        self.define_var(&r.name, alloc_id);
+   449→        self.define_alloc(&r.name, alloc_id);
+   450→
+   451→        self.add_data_flow_edges(&r.size_expr, alloc_id, scg);
+   452→
+   453→        scg.add_region(mem_region);
+   454→
+   455→        Ok(alloc_id)
+   456→    }
+   457→
+   458→    // -- statement conversion ------------------------------------------------
+   459→
+   460→    fn convert_stmt(
+   461→        &mut self,
+   462→        stmt: &Stmt,
+   463→        scg: &mut SCG,
+   464→        default_region: &mut SCGRegion,
+   465→    ) -> Result<NodeId, ParseError> {
+   466→        let id = self.convert_stmt_in_region(stmt, scg, default_region)?;
+   467→        default_region.add_node(id);
+   468→        Ok(id)
+   469→    }
+   470→
+   471→    fn convert_stmt_in_region(
+   472→        &mut self,
+   473→        stmt: &Stmt,
+   474→        scg: &mut SCG,
+   475→        region: &mut SCGRegion,
+   476→    ) -> Result<NodeId, ParseError> {
+   477→        match stmt {
+   478→            // 2. Let bindings → Computation nodes (enhanced: type propagation)
+   479→            Stmt::Let(l) => {
+   480→                // Enhanced: if type annotation is present, propagate size/align.
+   481→                let result_type = l.ty.as_ref().map(|t| t.to_string());
+   482→                let desc = if matches!(&l.value, Expr::Uninitialized { .. }) {
+   483→                    format!("let {}", l.name)
+   484→                } else {
+   485→                    format!("let {} = {}", l.name, self.expr_to_string(&l.value))
+   486→                };
+   487→                let id = scg.add_node(
+   488→                    NodeType::Computation,
+   489→                    NodePayload::Computation(ComputationNode {
+   490→                        operation: desc,
+   491→                        result_type: result_type.clone(),
+   492→                        tail_call: false,
+   493→                    }),
+   494→                    self.span_to_pp(&l.span),
+   495→                );
+   496→                region.add_node(id);
+   497→                self.define_var(&l.name, id);
+   498→                self.add_data_flow_edges(&l.value, id, scg);
+   499→
+   500→                // If the RHS is uninitialized → emit a computation node
+   501→                // representing the uninitialized state.
+   502→                if let Expr::Uninitialized { span } = &l.value {
+   503→                    let uninit_id = scg.add_node(
+   504→                        NodeType::Computation,
+   505→                        NodePayload::Computation(ComputationNode {
+   506→                            operation: "uninitialized".to_string(),
+   507→                            result_type: result_type.clone(),
+   508→                            tail_call: false,
+   509→                        }),
+   510→                        self.span_to_pp(span),
+   511→                    );
+   512→                    region.add_node(uninit_id);
+   513→                    let _ = scg.add_edge(uninit_id, id, EdgeKind::DataFlow);
+   514→                }
+   515→
+   516→                // If the RHS is a function call — emit FunctionEntry/Return.
+   517→                if let Expr::Call { callee, args, .. } = &l.value {
+   518→                    self.emit_call_nodes(callee, args, id, scg, region)?;
+   519→                }
+   520→
+   521→                // If the RHS is an async expression → parallel region.
+   522→                if let Expr::Async { body, .. } = &l.value {
+   523→                    self.emit_async_region(body, id, scg, region, &l.span)?;
+   524→                }
+   525→
+   526→                // If the RHS is a spawn expression → effect node.
+   527→                if let Expr::Spawn { expr, .. } = &l.value {
+   528→                    self.emit_spawn_node(expr, id, scg, region, &l.span)?;
+   529→                }
+   530→
+   531→                // If the RHS is an allocate expression → allocation node
+   532→                // with enhanced size/align from type annotation.
+   533→                if let Expr::Allocate { size, .. } = &l.value {
+   534→                    self.emit_alloc_from_expr(
+   535→                        size,
+   536→                        &l.name,
+   537→                        l.ty.as_ref(),
+   538→                        id,
+   539→                        scg,
+   540→                        region,
+   541→                        &l.span,
+   542→                    )?;
+   543→                }
+   544→
+   545→                // If the RHS is a cast expression → Cast node.
+   546→                if let Expr::Cast {
+   547→                    expr: inner,
+   548→                    target_type,
+   549→                    ..
+   550→                } = &l.value
+   551→                {
+   552→                    let source_type = self.infer_expr_type(inner);
+   553→                    let target_type_str = target_type.to_string();
+   554→                    let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+   555→                    let cast_id = scg.add_node(
+   556→                        NodeType::Cast,
+   557→                        NodePayload::Cast(CastNode {
+   558→                            from_type: source_type,
+   559→                            to_type: target_type_str,
+   560→                            is_lossless,
+   561→                        }),
+   562→                        self.span_to_pp(&l.span),
+   563→                    );
+   564→                    region.add_node(cast_id);
+   565→                    let _ = scg.add_edge(id, cast_id, EdgeKind::Derivation);
+   566→                    self.add_data_flow_edges(inner, cast_id, scg);
+   567→                    for var_name in &self.expr_uses(inner) {
+   568→                        if let Some(source) = self.lookup_var(var_name) {
+   569→                            let _ = scg.add_edge(source, cast_id, EdgeKind::Derivation);
+   570→                        }
+   571→                    }
+   572→                }
+   573→
+   574→                Ok(id)
+   575→            }
+   576→
+   577→            // 2b. Assignment → Computation + optional Write access
+   578→            Stmt::Assign(a) => {
+   579→                let target_name = self.assign_target_name(&a.target);
+   580→                let desc = format!("{} = {}", target_name, self.expr_to_string(&a.value));
+   581→                let id = scg.add_node(
+   582→                    NodeType::Computation,
+   583→                    NodePayload::Computation(ComputationNode {
+   584→                        operation: desc,
+   585→                        result_type: None,
+   586→                        tail_call: false,
+   587→                    }),
+   588→                    self.span_to_pp(&a.span),
+   589→                );
+   590→                region.add_node(id);
+   591→
+   592→                // Enhanced: if assigning through a dereference or index,
+   593→                // this is also a Write (or ReadWrite if the target is read
+   594→                // before being written, e.g., +=).
+   595→                if matches!(
+   596→                    a.target,
+   597→                    AssignTarget::Deref { .. }
+   598→                        | AssignTarget::DerefField { .. }
+   599→                        | AssignTarget::Index { .. }
+   600→                ) {
+   601→                    let access_size = self.infer_assign_access_size(&a.target);
+   602→                    let access_id = scg.add_node(
+   603→                        NodeType::Access,
+   604→                        NodePayload::Access(AccessNode {
+   605→                            mode: AccessMode::Write,
+   606→                            region_id: region.id,
+   607→                            offset: self.infer_assign_offset(&a.target),
+   608→                            access_size,
+   609→                        }),
+   610→                        self.span_to_pp(&a.span),
+   611→                    );
+   612→                    region.add_node(access_id);
+   613→                    let _ = scg.add_edge(id, access_id, EdgeKind::Derivation);
+   614→
+   615→                    // Enhanced: Derivation from the pointer variable to the access.
+   616→                    for var_name in &self.assign_target_uses(&a.target) {
+   617→                        if let Some(source) = self.lookup_var(var_name) {
+   618→                            let _ = scg.add_edge(source, access_id, EdgeKind::Derivation);
+   619→                        }
+   620→                    }
+   621→                }
+   622→
+   623→                // Update variable definition for simple assignments.
+   624→                if let AssignTarget::Var { name, .. } = &a.target {
+   625→                    self.define_var(name, id);
+   626→                }
+   627→
+   628→                self.add_data_flow_edges(&a.value, id, scg);
+   629→
+   630→                // Check if the RHS is a function call.
+   631→                if let Expr::Call { callee, args, .. } = &a.value {
+   632→                    self.emit_call_nodes(callee, args, id, scg, region)?;
+   633→                }
+   634→
+   635→                // Pointer offset via assignment: `ptr = base + offset`
+   636→                // Create Derivation edge with offset label.
+   637→                if let Expr::BinOp {
+   638→                    op: BinOp::Add,
+   639→                    lhs,
+   640→                    rhs,
+   641→                    ..
+   642→                } = &a.value
+   643→                {
+   644→                    for var_name in &self.expr_uses(lhs) {
+   645→                        if let Some(source) = self.lookup_var(var_name) {
+   646→                            let eid = scg.add_edge(source, id, EdgeKind::Derivation);
+   647→                            if let Ok(eid_val) = eid {
+   648→                                if let Some(offset_val) = self.eval_const_int(rhs) {
+   649→                                    if let Some(edge) = scg.get_edge_mut(eid_val) {
+   650→                                        edge.label = Some(format!("offset={}", offset_val));
+   651→                                    }
+   652→                                }
+   653→                            }
+   654→                        }
+   655→                    }
+   656→                    for var_name in &self.expr_uses(rhs) {
+   657→                        if let Some(source) = self.lookup_var(var_name) {
+   658→                            let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+   659→                        }
+   660→                    }
+   661→                }
+   662→
+   663→                // Also handle Cast in assignment value
+   664→                if let Expr::Cast {
+   665→                    expr: inner,
+   666→                    target_type,
+   667→                    ..
+   668→                } = &a.value
+   669→                {
+   670→                    let source_type = self.infer_expr_type(inner);
+   671→                    let target_type_str = target_type.to_string();
+   672→                    let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+   673→                    let cast_id = scg.add_node(
+   674→                        NodeType::Cast,
+   675→                        NodePayload::Cast(CastNode {
+   676→                            from_type: source_type,
+   677→                            to_type: target_type_str,
+   678→                            is_lossless,
+   679→                        }),
+   680→                        self.span_to_pp(&a.span),
+   681→                    );
+   682→                    region.add_node(cast_id);
+   683→                    let _ = scg.add_edge(id, cast_id, EdgeKind::Derivation);
+   684→                    self.add_data_flow_edges(inner, cast_id, scg);
+   685→                }
+   686→
+   687→                // Handle Allocate in assignment value: `ptr = allocate(size)`
+   688→                // Must register in alloc_defs so that `free(ptr)` can find it.
+   689→                if let Expr::Allocate { size, .. } = &a.value {
+   690→                    if let AssignTarget::Var { name, .. } = &a.target {
+   691→                        self.emit_alloc_from_expr(
+   692→                            size,
+   693→                            name,
+   694→                            None, // no type annotation on Assign
+   695→                            id,
+   696→                            scg,
+   697→                            region,
+   698→                            &a.span,
+   699→                        )?;
+   700→                    }
+   701→                }
+   702→
+   703→                Ok(id)
+   704→            }
+   705→
+   706→            // 3. Alloc expressions → Allocation nodes (enhanced: type-based size/align)
+   707→            Stmt::Allocate(alloc) => {
+   708→                let size_val = self.eval_const_int(&alloc.size).unwrap_or(0);
+   709→                let align = self.type_alignment(None);
+   710→                let id = scg.add_node(
+   711→                    NodeType::Allocation,
+   712→                    NodePayload::Allocation(AllocationNode {
+   713→                        size: size_val,
+   714→                        align,
+   715→                        region_id: region.id,
+   716→                        type_name: None,
+   717→                    }),
+   718→                    self.span_to_pp(&alloc.span),
+   719→                );
+   720→                region.add_node(id);
+   721→                // Register with a synthetic name based on NodeId so that
+   722→                // free() can potentially find this allocation.  The preferred
+   723→                // path is `let/var = allocate(size)` which goes through
+   724→                // Stmt::Let/Assign and properly registers via emit_alloc_from_expr.
+   725→                let synthetic_name = format!("_alloc_node_{}", id.as_u64());
+   726→                self.define_alloc(&synthetic_name, id);
+   727→                self.add_data_flow_edges(&alloc.size, id, scg);
+   728→                Ok(id)
+   729→            }
+   730→
+   731→            // 4. Free expressions → Deallocation nodes (enhanced: region consistency)
+   732→            Stmt::Free(fr) => {
+   733→                let target_str = self.expr_to_string(&fr.ptr);
+   734→
+   735→                // Strategy 1: Look up by the expression string (works for `let x = allocate(...)`)
+   736→                let mut alloc_node_id = self.lookup_alloc(&target_str);
+   737→
+   738→                // Strategy 2: If the pointer is a simple variable, look up the
+   739→                // variable's defining NodeId and search for a connected Allocation
+   740→                // node via Derivation edges (works for `x = allocate(...)` via Assign).
+   741→                if alloc_node_id.is_none() {
+   742→                    if let Expr::Var { name, .. } = &fr.ptr {
+   743→                        // First try looking up the variable name directly in alloc_defs
+   744→                        alloc_node_id = self.lookup_alloc(name);
+   745→                        // Then try looking up the var's NodeId and trace back
+   746→                        if alloc_node_id.is_none() {
+   747→                            if let Some(var_nid) = self.lookup_var(name) {
+   748→                                if let Some(alloc_nid) =
+   749→                                    Self::find_alloc_for_var(scg, var_nid)
+   750→                                {
+   751→                                    alloc_node_id = Some(alloc_nid);
+   752→                                    // Cache for future lookups
+   753→                                    self.define_alloc(name, alloc_nid);
+   754→                                }
+   755→                            }
+   756→                        }
+   757→                    }
+   758→                }
+   759→
+   760→                // Enhanced: derive region_id from the allocation if found,
+   761→                // ensuring alloc/free region consistency.
+   762→                let dealloc_region_id = if let Some(alloc_nid) = alloc_node_id {
+   763→                    if let Some(alloc_data) = scg.get_node(alloc_nid) {
+   764→                        if let NodePayload::Allocation(a) = &alloc_data.payload {
+   765→                            a.region_id
+   766→                        } else {
+   767→                            region.id
+   768→                        }
+   769→                    } else {
+   770→                        region.id
+   771→                    }
+   772→                } else {
+   773→                    region.id
+   774→                };
+   775→
+   776→                // When no matching allocation is found, emit a Computation node
+   777→                // instead of a DeallocationNode with an invalid sentinel.  This
+   778→                // avoids the SCG validation error while still preserving the
+   779→                // free() semantics in the IR.
+   780→                if let Some(alloc_nid) = alloc_node_id {
+   781→                    let id = scg.add_node(
+   782→                        NodeType::Deallocation,
+   783→                        NodePayload::Deallocation(DeallocationNode {
+   784→                            allocation_node: alloc_nid,
+   785→                            region_id: dealloc_region_id,
+   786→                        }),
+   787→                        self.span_to_pp(&fr.span),
+   788→                    );
+   789→                    region.add_node(id);
+   790→                    let _ = scg.add_edge(alloc_nid, id, EdgeKind::Derivation);
+   791→                    self.add_data_flow_edges(&fr.ptr, id, scg);
+   792→                    Ok(id)
+   793→                } else {
+   794→                    // Fallback: emit as a Computation node (avoids NodeId::MAX sentinel)
+   795→                    let desc = format!("free({})", target_str);
+   796→                    let id = scg.add_node(
+   797→                        NodeType::Computation,
+   798→                        NodePayload::Computation(ComputationNode {
+   799→                            operation: desc,
+   800→                            result_type: None,
+   801→                            tail_call: false,
+   802→                        }),
+   803→                        self.span_to_pp(&fr.span),
+   804→                    );
+   805→                    region.add_node(id);
+   806→                    self.add_data_flow_edges(&fr.ptr, id, scg);
+   807→                    Ok(id)
+   808→                }
+   809→            }
+   810→
+   811→            // 7. Read/Write → Access nodes (enhanced: field offset, access_size)
+   812→            Stmt::Access(acc) => {
+   813→                let (_target, field) = self.extract_access(&acc.expr);
+   814→                let access_size = self.infer_access_size(&acc.expr);
+   815→                // Enhanced: compute field offset for struct field access.
+   816→                let offset = field
+   817→                    .as_deref()
+   818→                    .and_then(|_| self.infer_field_offset(&acc.expr));
+   819→                let id = scg.add_node(
+   820→                    NodeType::Access,
+   821→                    NodePayload::Access(AccessNode {
+   822→                        mode: AccessMode::Read,
+   823→                        region_id: region.id,
+   824→                        offset,
+   825→                        access_size,
+   826→                    }),
+   827→                    self.span_to_pp(&acc.span),
+   828→                );
+   829→                region.add_node(id);
+   830→
+   831→                // Derivation from the variable being accessed.
+   832→                let uses = self.expr_uses(&acc.expr);
+   833→                for var_name in &uses {
+   834→                    if let Some(source) = self.lookup_var(var_name) {
+   835→                        let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+   836→                    }
+   837→                }
+   838→
+   839→                Ok(id)
+   840→            }
+   841→
+   842→            // 6. Pointer cast → Cast node (enhanced: narrowing/widening, signedness)
+   843→            Stmt::Cast(c) => {
+   844→                let source_type = self.infer_expr_type(&c.expr);
+   845→                let target_type_str = c.target_type.to_string();
+   846→                let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+   847→
+   848→                let id = scg.add_node(
+   849→                    NodeType::Cast,
+   850→                    NodePayload::Cast(CastNode {
+   851→                        from_type: source_type.clone(),
+   852→                        to_type: target_type_str.clone(),
+   853→                        is_lossless,
+   854→                    }),
+   855→                    self.span_to_pp(&c.span),
+   856→                );
+   857→                region.add_node(id);
+   858→                self.add_data_flow_edges(&c.expr, id, scg);
+   859→
+   860→                let uses = self.expr_uses(&c.expr);
+   861→                for var_name in &uses {
+   862→                    if let Some(source) = self.lookup_var(var_name) {
+   863→                        let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+   864→                    }
+   865→                }
+   866→
+   867→                Ok(id)
+   868→            }
+   869→
+   870→            // 8. If/else → Control flow with branching (enhanced: labelled edges)
+   871→            Stmt::If(if_s) => {
+   872→                let cond_str = self.expr_to_string(&if_s.condition);
+   873→
+   874→                let branch_id = scg.add_node(
+   875→                    NodeType::Control,
+   876→                    NodePayload::Control(ControlNode {
+   877→                        kind: ControlKind::Branch,
+   878→                        label: Some(format!("if {}", cond_str)),
+   879→                    }),
+   880→                    self.span_to_pp(&if_s.span),
+   881→                );
+   882→                region.add_node(branch_id);
+   883→                self.add_data_flow_edges(&if_s.condition, branch_id, scg);
+   884→
+   885→                // Then branch — enhanced: label the edge "then".
+   886→                self.push_scope();
+   887→                let then_ids = self.convert_block_ids(&if_s.then_block, scg, region)?;
+   888→                self.pop_scope();
+   889→
+   890→                if let Some(&first_then) = then_ids.first() {
+   891→                    let eid = scg.add_edge(branch_id, first_then, EdgeKind::ControlFlow);
+   892→                    // Enhanced: label the branch edge.
+   893→                    if let Ok(id) = eid {
+   894→                        if let Some(edge) = scg.get_edge_mut(id) {
+   895→                            edge.label = Some("then".to_string());
+   896→                        }
+   897→                    }
+   898→                }
+   899→
+   900→                // Else branch — enhanced: label the edge "else".
+   901→                let else_ids = if let Some(eb) = &if_s.else_block {
+   902→                    self.push_scope();
+   903→                    let ids = self.convert_block_ids(eb, scg, region)?;
+   904→                    self.pop_scope();
+   905→                    if let Some(&first_else) = ids.first() {
+   906→                        let eid = scg.add_edge(branch_id, first_else, EdgeKind::ControlFlow);
+   907→                        if let Ok(id) = eid {
+   908→                            if let Some(edge) = scg.get_edge_mut(id) {
+   909→                                edge.label = Some("else".to_string());
+   910→                            }
+   911→                        }
+   912→                    }
+   913→                    ids
+   914→                } else {
+   915→                    Vec::new()
+   916→                };
+   917→
+   918→                // Join node.
+   919→                let join_id = scg.add_node(
+   920→                    NodeType::Control,
+   921→                    NodePayload::Control(ControlNode {
+   922→                        kind: ControlKind::Join,
+   923→                        label: Some("if_join".to_string()),
+   924→                    }),
+   925→                    self.span_to_pp(&if_s.span),
+   926→                );
+   927→                region.add_node(join_id);
+   928→
+   929→                if let Some(&last_then) = then_ids.last() {
+   930→                    let _ = scg.add_edge(last_then, join_id, EdgeKind::ControlFlow);
+   931→                } else {
+   932→                    let _ = scg.add_edge(branch_id, join_id, EdgeKind::ControlFlow);
+   933→                }
+   934→                if let Some(&last_else) = else_ids.last() {
+   935→                    let _ = scg.add_edge(last_else, join_id, EdgeKind::ControlFlow);
+   936→                } else if else_ids.is_empty() {
+   937→                    // No else block: branch falls through directly to join.
+   938→                    let eid = scg.add_edge(branch_id, join_id, EdgeKind::ControlFlow);
+   939→                    if let Ok(id) = eid {
+   940→                        if let Some(edge) = scg.get_edge_mut(id) {
+   941→                            edge.label = Some("else_fallthrough".to_string());
+   942→                        }
+   943→                    }
+   944→                }
+   945→
+   946→                Ok(branch_id)
+   947→            }
+   948→
+   949→            // 9. While loop → LoopHeader/LoopExit with back edges
+   950→            //    Enhanced: condition re-evaluation tracked via DataFlow.
+   951→            Stmt::While(wh) => {
+   952→                let cond_str = self.expr_to_string(&wh.condition);
+   953→
+   954→                let header_id = scg.add_node(
+   955→                    NodeType::Control,
+   956→                    NodePayload::Control(ControlNode {
+   957→                        kind: ControlKind::LoopHeader,
+   958→                        label: Some(format!("while {}", cond_str)),
+   959→                    }),
+   960→                    self.span_to_pp(&wh.span),
+   961→                );
+   962→                region.add_node(header_id);
+   963→                self.add_data_flow_edges(&wh.condition, header_id, scg);
+   964→
+   965→                self.push_scope();
+   966→                let body_ids = self.convert_block_ids(&wh.body, scg, region)?;
+   967→                self.pop_scope();
+   968→
+   969→                if let Some(&first_body) = body_ids.first() {
+   970→                    let _ = scg.add_edge(header_id, first_body, EdgeKind::ControlFlow);
+   971→                }
+   972→
+   973→                let exit_id = scg.add_node(
+   974→                    NodeType::Control,
+   975→                    NodePayload::Control(ControlNode {
+   976→                        kind: ControlKind::LoopExit,
+   977→                        label: Some("while_exit".to_string()),
+   978→                    }),
+   979→                    self.span_to_pp(&wh.span),
+   980→                );
+   981→                region.add_node(exit_id);
+   982→
+   983→                // Back edge: last body → header (enhanced: also re-add
+   984→                // condition data-flow for loop iterations).
+   985→                if let Some(&last_body) = body_ids.last() {
+   986→                    let _ = scg.add_edge(last_body, header_id, EdgeKind::ControlFlow);
+   987→                    // Enhanced: data-flow from last body to header for
+   988→                    // condition re-evaluation in loops.
+   989→                    let _ = scg.add_edge(last_body, header_id, EdgeKind::DataFlow);
+   990→                }
+   991→                // Header → exit (when condition is false).
+   992→                let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
+   993→
+   994→                Ok(header_id)
+   995→            }
+   996→
+   997→            // 9b. For loop → LoopHeader/LoopExit with back edges
+   998→            //     Enhanced: iterator variable has DataFlow from header.
+   999→            Stmt::For(fr) => {
+  1000→                let iter_desc = self.expr_to_string(&fr.iter);
+  1001→
+  1002→                let header_id = scg.add_node(
+  1003→                    NodeType::Control,
+  1004→                    NodePayload::Control(ControlNode {
+  1005→                        kind: ControlKind::LoopHeader,
+  1006→                        label: Some(format!("for {} in {}", fr.name, iter_desc)),
+  1007→                    }),
+  1008→                    self.span_to_pp(&fr.span),
+  1009→                );
+  1010→                region.add_node(header_id);
+  1011→                self.add_data_flow_edges(&fr.iter, header_id, scg);
+  1012→
+  1013→                self.push_scope();
+  1014→                self.define_var(&fr.name, header_id);
+  1015→                let body_ids = self.convert_block_ids(&fr.body, scg, region)?;
+  1016→                self.pop_scope();
+  1017→
+  1018→                if let Some(&first_body) = body_ids.first() {
+  1019→                    let _ = scg.add_edge(header_id, first_body, EdgeKind::ControlFlow);
+  1020→                }
+  1021→
+  1022→                let exit_id = scg.add_node(
+  1023→                    NodeType::Control,
+  1024→                    NodePayload::Control(ControlNode {
+  1025→                        kind: ControlKind::LoopExit,
+  1026→                        label: Some("for_exit".to_string()),
+  1027→                    }),
+  1028→                    self.span_to_pp(&fr.span),
+  1029→                );
+  1030→                region.add_node(exit_id);
+  1031→
+  1032→                if let Some(&last_body) = body_ids.last() {
+  1033→                    let _ = scg.add_edge(last_body, header_id, EdgeKind::ControlFlow);
+  1034→                    // Enhanced: data-flow for loop-carried dependency.
+  1035→                    let _ = scg.add_edge(last_body, header_id, EdgeKind::DataFlow);
+  1036→                }
+  1037→                let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
+  1038→
+  1039→                Ok(header_id)
+  1040→            }
+  1041→
+  1042→            // 9c. Infinite loop → LoopHeader/LoopExit
+  1043→            Stmt::Loop(lo) => {
+  1044→                let header_id = scg.add_node(
+  1045→                    NodeType::Control,
+  1046→                    NodePayload::Control(ControlNode {
+  1047→                        kind: ControlKind::LoopHeader,
+  1048→                        label: Some("loop".to_string()),
+  1049→                    }),
+  1050→                    self.span_to_pp(&lo.span),
+  1051→                );
+  1052→                region.add_node(header_id);
+  1053→
+  1054→                self.push_scope();
+  1055→                let body_ids = self.convert_block_ids(&lo.body, scg, region)?;
+  1056→                self.pop_scope();
+  1057→
+  1058→                if let Some(&first_body) = body_ids.first() {
+  1059→                    let _ = scg.add_edge(header_id, first_body, EdgeKind::ControlFlow);
+  1060→                }
+  1061→
+  1062→                let exit_id = scg.add_node(
+  1063→                    NodeType::Control,
+  1064→                    NodePayload::Control(ControlNode {
+  1065→                        kind: ControlKind::LoopExit,
+  1066→                        label: Some("loop_exit".to_string()),
+  1067→                    }),
+  1068→                    self.span_to_pp(&lo.span),
+  1069→                );
+  1070→                region.add_node(exit_id);
+  1071→
+  1072→                if let Some(&last_body) = body_ids.last() {
+  1073→                    let _ = scg.add_edge(last_body, header_id, EdgeKind::ControlFlow);
+  1074→                }
+  1075→                let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
+  1076→
+  1077→                Ok(header_id)
+  1078→            }
+  1079→
+  1080→            // Unsafe block → Effect node marking unsafe verification + inner body
+  1081→            Stmt::UnsafeBlock { body, span } => {
+  1082→                // Emit an Effect node marking this as an unsafe region
+  1083→                let unsafe_id = scg.add_node(
+  1084→                    NodeType::Effect,
+  1085→                    NodePayload::Effect(EffectNode {
+  1086→                        effect_kind: "unsafe_enter".to_string(),
+  1087→                        is_observable: false,
+  1088→                    }),
+  1089→                    self.span_to_pp(span),
+  1090→                );
+  1091→                region.add_node(unsafe_id);
+  1092→
+  1093→                // Convert the inner body statements
+  1094→                self.push_scope();
+  1095→                let body_ids = self.convert_block_ids(body, scg, region)?;
+  1096→                self.pop_scope();
+  1097→
+  1098→                // Link unsafe_enter to first body node
+  1099→                if let Some(&first_body) = body_ids.first() {
+  1100→                    let _ = scg.add_edge(unsafe_id, first_body, EdgeKind::ControlFlow);
+  1101→                }
+  1102→
+  1103→                // Emit unsafe_exit effect node
+  1104→                let exit_id = scg.add_node(
+  1105→                    NodeType::Effect,
+  1106→                    NodePayload::Effect(EffectNode {
+  1107→                        effect_kind: "unsafe_exit".to_string(),
+  1108→                        is_observable: false,
+  1109→                    }),
+  1110→                    self.span_to_pp(span),
+  1111→                );
+  1112→                region.add_node(exit_id);
+  1113→
+  1114→                // Link last body node to unsafe_exit
+  1115→                if let Some(&last_body) = body_ids.last() {
+  1116→                    let _ = scg.add_edge(last_body, exit_id, EdgeKind::ControlFlow);
+  1117→                }
+  1118→
+  1119→                // Annotation edges from body nodes to unsafe_exit — marks them
+  1120→                // as requiring unsafe verification.
+  1121→                for &bid in &body_ids {
+  1122→                    let _ = scg.add_edge(bid, exit_id, EdgeKind::Annotation);
+  1123→                }
+  1124→
+  1125→                Ok(unsafe_id)
+  1126→            }
+  1127→
+  1128→            // Match statement → Switch/Branch + Join decision tree
+  1129→            Stmt::Match(m) => {
+  1130→                let subject_str = self.expr_to_string(&m.subject);
+  1131→
+  1132→                // Create the top-level Switch decision node.
+  1133→                let switch_id = scg.add_node(
+  1134→                    NodeType::Control,
+  1135→                    NodePayload::Control(ControlNode {
+  1136→                        kind: ControlKind::Switch,
+  1137→                        label: Some(format!("match {}", subject_str)),
+  1138→                    }),
+  1139→                    self.span_to_pp(&m.span),
+  1140→                );
+  1141→                region.add_node(switch_id);
+  1142→                self.add_data_flow_edges(&m.subject, switch_id, scg);
+  1143→
+  1144→                // Join node where all arms converge.
+  1145→                let join_id = scg.add_node(
+  1146→                    NodeType::Control,
+  1147→                    NodePayload::Control(ControlNode {
+  1148→                        kind: ControlKind::Join,
+  1149→                        label: Some("match_join".to_string()),
+  1150→                    }),
+  1151→                    self.span_to_pp(&m.span),
+  1152→                );
+  1153→                region.add_node(join_id);
+  1154→
+  1155→                // For each arm, create a decision-tree subgraph.
+  1156→                for (arm_idx, arm) in m.arms.iter().enumerate() {
+  1157→                    let pattern_desc = self.pattern_to_string(&arm.pattern);
+  1158→                    let arm_body_desc = self.expr_to_string(&arm.body);
+  1159→
+  1160→                    // Create a SwitchCase node for this arm's pattern test.
+  1161→                    let case_id = scg.add_node(
+  1162→                        NodeType::Control,
+  1163→                        NodePayload::Control(ControlNode {
+  1164→                            kind: ControlKind::SwitchCase,
+  1165→                            label: Some(format!("case {}: {}", arm_idx, pattern_desc)),
+  1166→                        }),
+  1167→                        self.span_to_pp(&arm.span),
+  1168→                    );
+  1169→                    region.add_node(case_id);
+  1170→
+  1171→                    // Dispatch edge from switch to case.
+  1172→                    let eid = scg.add_edge(switch_id, case_id, EdgeKind::Dispatch);
+  1173→                    if let Ok(id) = eid {
+  1174→                        if let Some(edge) = scg.get_edge_mut(id) {
+  1175→                            edge.label = Some(pattern_desc.clone());
+  1176→                        }
+  1177→                    }
+  1178→
+  1179→                    // If this arm has a guard, create a Branch node for it.
+  1180→                    let arm_entry = if let Some(guard) = &arm.guard {
+  1181→                        let guard_str = self.expr_to_string(guard);
+  1182→                        let guard_branch_id = scg.add_node(
+  1183→                            NodeType::Control,
+  1184→                            NodePayload::Control(ControlNode {
+  1185→                                kind: ControlKind::Branch,
+  1186→                                label: Some(format!("guard {}", guard_str)),
+  1187→                            }),
+  1188→                            self.span_to_pp(&arm.span),
+  1189→                        );
+  1190→                        region.add_node(guard_branch_id);
+  1191→                        let _ = scg.add_edge(case_id, guard_branch_id, EdgeKind::ControlFlow);
+  1192→                        self.add_data_flow_edges(guard, guard_branch_id, scg);
+  1193→                        guard_branch_id
+  1194→                    } else {
+  1195→                        case_id
+  1196→                    };
+  1197→
+  1198→                    // Computation node for the arm body.
+  1199→                    let body_id = scg.add_node(
+  1200→                        NodeType::Computation,
+  1201→                        NodePayload::Computation(ComputationNode {
+  1202→                            operation: format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
+  1203→                            result_type: None,
+  1204→                            tail_call: false,
+  1205→                        }),
+  1206→                        self.span_to_pp(&arm.span),
+  1207→                    );
+  1208→                    region.add_node(body_id);
+  1209→                    let _ = scg.add_edge(arm_entry, body_id, EdgeKind::ControlFlow);
+  1210→
+  1211→                    // Struct destructuring: create Access nodes for each field.
+  1212→                    if let MatchPattern::Struct { name, fields, .. } = &arm.pattern {
+  1213→                        for field in fields {
+  1214→                            let field_access_id = scg.add_node(
+  1215→                                NodeType::Access,
+  1216→                                NodePayload::Access(AccessNode {
+  1217→                                    mode: AccessMode::Read,
+  1218→                                    region_id: region.id,
+  1219→                                    offset: None,
+  1220→                                    access_size: None,
+  1221→                                }),
+  1222→                                self.span_to_pp(&arm.span),
+  1223→                            );
+  1224→                            region.add_node(field_access_id);
+  1225→                            let _ = scg.add_edge(body_id, field_access_id, EdgeKind::Derivation);
+  1226→                            let field_comp_id = scg.add_node(
+  1227→                                NodeType::Computation,
+  1228→                                NodePayload::Computation(ComputationNode {
+  1229→                                    operation: format!("destructure {}.{}", name, field),
+  1230→                                    result_type: None,
+  1231→                                    tail_call: false,
+  1232→                                }),
+  1233→                                self.span_to_pp(&arm.span),
+  1234→                            );
+  1235→                            region.add_node(field_comp_id);
+  1236→                            let _ =
+  1237→                                scg.add_edge(field_access_id, field_comp_id, EdgeKind::DataFlow);
+  1238→                        }
+  1239→                    }
+  1240→
+  1241→                    // Enum variant binding: create a Computation node for the binding.
+  1242→                    if let MatchPattern::Enum {
+  1243→                        name,
+  1244→                        binding: Some(b),
+  1245→                        ..
+  1246→                    } = &arm.pattern
+  1247→                    {
+  1248→                        let bind_id = scg.add_node(
+  1249→                            NodeType::Computation,
+  1250→                            NodePayload::Computation(ComputationNode {
+  1251→                                operation: format!("enum_bind {}({})", name, b),
+  1252→                                result_type: None,
+  1253→                                tail_call: false,
+  1254→                            }),
+  1255→                            self.span_to_pp(&arm.span),
+  1256→                        );
+  1257→                        region.add_node(bind_id);
+  1258→                        let _ = scg.add_edge(body_id, bind_id, EdgeKind::DataFlow);
+  1259→                        self.define_var(b, bind_id);
+  1260→                    }
+  1261→
+  1262→                    // Range pattern: create a range-check computation.
+  1263→                    if let MatchPattern::Range { start, end, .. } = &arm.pattern {
+  1264→                        let range_check_id = scg.add_node(
+  1265→                            NodeType::Computation,
+  1266→                            NodePayload::Computation(ComputationNode {
+  1267→                                operation: format!(
+  1268→                                    "range_check {}..={}",
+  1269→                                    self.lit_to_string(start),
+  1270→                                    self.lit_to_string(end)
+  1271→                                ),
+  1272→                                result_type: Some("bool".to_string()),
+  1273→                                tail_call: false,
+  1274→                            }),
+  1275→                            self.span_to_pp(&arm.span),
+  1276→                        );
+  1277→                        region.add_node(range_check_id);
+  1278→                        let _ = scg.add_edge(case_id, range_check_id, EdgeKind::DataFlow);
+  1279→                    }
+  1280→
+  1281→                    // Or-pattern: create a Branch for each alternative.
+  1282→                    if let MatchPattern::Or { patterns, .. } = &arm.pattern {
+  1283→                        for (p_idx, sub_pat) in patterns.iter().enumerate() {
+  1284→                            let sub_desc = self.pattern_to_string(sub_pat);
+  1285→                            let or_branch_id = scg.add_node(
+  1286→                                NodeType::Control,
+  1287→                                NodePayload::Control(ControlNode {
+  1288→                                    kind: ControlKind::SwitchCase,
+  1289→                                    label: Some(format!("or_alt[{}]: {}", p_idx, sub_desc)),
+  1290→                                }),
+  1291→                                self.span_to_pp(&arm.span),
+  1292→                            );
+  1293→                            region.add_node(or_branch_id);
+  1294→                            let _ = scg.add_edge(case_id, or_branch_id, EdgeKind::Dispatch);
+  1295→                            let _ = scg.add_edge(or_branch_id, body_id, EdgeKind::ControlFlow);
+  1296→                        }
+  1297→                    }
+  1298→
+  1299→                    // Arm body → join.
+  1300→                    let _ = scg.add_edge(body_id, join_id, EdgeKind::ControlFlow);
+  1301→                }
+  1302→
+  1303→                Ok(switch_id)
+  1304→            }
+  1305→
+  1306→            // 12. Sync block → Synchronization edges
+  1307→            //     Enhanced: sync_enter / sync_exit effect nodes bound the body.
+  1308→            Stmt::Sync(sy) => {
+  1309→                let sync_enter_id = scg.add_node(
+  1310→                    NodeType::Effect,
+  1311→                    NodePayload::Effect(EffectNode {
+  1312→                        effect_kind: "sync_enter".to_string(),
+  1313→                        is_observable: false,
+  1314→                    }),
+  1315→                    self.span_to_pp(&sy.span),
+  1316→                );
+  1317→                region.add_node(sync_enter_id);
+  1318→
+  1319→                self.push_scope();
+  1320→                let body_ids = self.convert_block_ids(&sy.body, scg, region)?;
+  1321→                self.pop_scope();
+  1322→
+  1323→                // Link sync_enter → first body.
+  1324→                if let Some(&first_body) = body_ids.first() {
+  1325→                    let _ = scg.add_edge(sync_enter_id, first_body, EdgeKind::Annotation);
+  1326→                }
+  1327→
+  1328→                let sync_exit_id = scg.add_node(
+  1329→                    NodeType::Effect,
+  1330→                    NodePayload::Effect(EffectNode {
+  1331→                        effect_kind: "sync_exit".to_string(),
+  1332→                        is_observable: false,
+  1333→                    }),
+  1334→                    self.span_to_pp(&sy.span),
+  1335→                );
+  1336→                region.add_node(sync_exit_id);
+  1337→
+  1338→                // Link last body → sync_exit.
+  1339→                if let Some(&last_body) = body_ids.last() {
+  1340→                    let _ = scg.add_edge(last_body, sync_exit_id, EdgeKind::Annotation);
+  1341→                }
+  1342→
+  1343→                // Enhanced: all body nodes get Annotation edges to sync_exit
+  1344→                // to enforce ordering constraint.
+  1345→                for &bid in &body_ids {
+  1346→                    let _ = scg.add_edge(bid, sync_exit_id, EdgeKind::Annotation);
+  1347→                }
+  1348→
+  1349→                Ok(sync_enter_id)
+  1350→            }
+  1351→
+  1352→            Stmt::Return(r) => {
+  1353→                let id = scg.add_node(
+  1354→                    NodeType::Control,
+  1355→                    NodePayload::Control(ControlNode {
+  1356→                        kind: ControlKind::FunctionReturn,
+  1357→                        label: Some("return".to_string()),
+  1358→                    }),
+  1359→                    self.span_to_pp(&r.span),
+  1360→                );
+  1361→                region.add_node(id);
+  1362→
+  1363→                if let Some(v) = &r.value {
+  1364→                    self.add_data_flow_edges(v, id, scg);
+  1365→                }
+  1366→
+  1367→                Ok(id)
+  1368→            }
+  1369→
+  1370→            Stmt::Expr(e) => {
+  1371→                let desc = self.expr_to_string(&e.expr);
+  1372→                let id = scg.add_node(
+  1373→                    NodeType::Computation,
+  1374→                    NodePayload::Computation(ComputationNode {
+  1375→                        operation: desc,
+  1376→                        result_type: None,
+  1377→                        tail_call: false,
+  1378→                    }),
+  1379→                    self.span_to_pp(&e.span),
+  1380→                );
+  1381→                region.add_node(id);
+  1382→                self.add_data_flow_edges(&e.expr, id, scg);
+  1383→
+  1384→                // 10. Function calls → FunctionEntry/FunctionReturn nodes
+  1385→                if let Expr::Call { callee, args, .. } = &e.expr {
+  1386→                    self.emit_call_nodes(callee, args, id, scg, region)?;
+  1387→                }
+  1388→
+  1389→                // 5. Pointer derive/offset → Derivation edges
+  1390→                //    Enhanced: label derivation edge with offset value if constant.
+  1391→                if let Expr::Offset { base, offset, .. } = &e.expr {
+  1392→                    for var_name in &self.expr_uses(base) {
+  1393→                        if let Some(source) = self.lookup_var(var_name) {
+  1394→                            let eid = scg.add_edge(source, id, EdgeKind::Derivation);
+  1395→                            // Enhanced: label with offset value if constant.
+  1396→                            if let Ok(eid_val) = eid {
+  1397→                                if let Some(offset_val) = self.eval_const_int(offset) {
+  1398→                                    if let Some(edge) = scg.get_edge_mut(eid_val) {
+  1399→                                        edge.label = Some(format!("offset={}", offset_val));
+  1400→                                    }
+  1401→                                }
+  1402→                            }
+  1403→                        }
+  1404→                    }
+  1405→                    for var_name in &self.expr_uses(offset) {
+  1406→                        if let Some(source) = self.lookup_var(var_name) {
+  1407→                            let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+  1408→                        }
+  1409→                    }
+  1410→                }
+  1411→
+  1412→                // Derive expression → Derivation edges
+  1413→                if let Expr::Derive {
+  1414→                    ptr,
+  1415→                    region: derive_region,
+  1416→                    ..
+  1417→                } = &e.expr
+  1418→                {
+  1419→                    for var_name in &self.expr_uses(ptr) {
+  1420→                        if let Some(source) = self.lookup_var(var_name) {
+  1421→                            let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+  1422→                        }
+  1423→                    }
+  1424→                    for var_name in &self.expr_uses(derive_region) {
+  1425→                        if let Some(source) = self.lookup_var(var_name) {
+  1426→                            let _ = scg.add_edge(source, id, EdgeKind::Derivation);
+  1427→                        }
+  1428→                    }
+  1429→                }
+  1430→
+  1431→                // If the expression is a dereference, add an Access node (Read).
+  1432→                if let Expr::Deref { .. } = &e.expr {
+  1433→                    let access_size = self.infer_access_size(&e.expr);
+  1434→                    let access_id = scg.add_node(
+  1435→                        NodeType::Access,
+  1436→                        NodePayload::Access(AccessNode {
+  1437→                            mode: AccessMode::Read,
+  1438→                            region_id: region.id,
+  1439→                            offset: None,
+  1440→                            access_size,
+  1441→                        }),
+  1442→                        self.span_to_pp(&e.span),
+  1443→                    );
+  1444→                    region.add_node(access_id);
+  1445→                    let _ = scg.add_edge(id, access_id, EdgeKind::Derivation);
+  1446→                }
+  1447→
+  1448→                // If the expression is a cast, add a Cast node.
+  1449→                if let Expr::Cast {
+  1450→                    expr: inner,
+  1451→                    target_type,
+  1452→                    ..
+  1453→                } = &e.expr
+  1454→                {
+  1455→                    let source_type = self.infer_expr_type(inner);
+  1456→                    let target_type_str = target_type.to_string();
+  1457→                    let is_lossless = self.is_lossless_cast(&source_type, &target_type_str);
+  1458→                    let cast_id = scg.add_node(
+  1459→                        NodeType::Cast,
+  1460→                        NodePayload::Cast(CastNode {
+  1461→                            from_type: source_type,
+  1462→                            to_type: target_type_str,
+  1463→                            is_lossless,
+  1464→                        }),
+  1465→                        self.span_to_pp(&e.span),
+  1466→                    );
+  1467→                    region.add_node(cast_id);
+  1468→                    let _ = scg.add_edge(id, cast_id, EdgeKind::Derivation);
+  1469→                }
+  1470→
+  1471→                // 11. Async block → Parallel region
+  1472→                if let Expr::Async { body, .. } = &e.expr {
+  1473→                    self.emit_async_region(body, id, scg, region, &e.span)?;
+  1474→                }
+  1475→
+  1476→                // 11b. Spawn → Effect node
+  1477→                if let Expr::Spawn { expr: inner, .. } = &e.expr {
+  1478→                    self.emit_spawn_node(inner, id, scg, region, &e.span)?;
+  1479→                }
+  1480→
+  1481→                // Allocate expression → Allocation node
+  1482→                if let Expr::Allocate { size, .. } = &e.expr {
+  1483→                    let size_val = self.eval_const_int(size).unwrap_or(0);
+  1484→                    let align = self.type_alignment(None);
+  1485→                    let alloc_id = scg.add_node(
+  1486→                        NodeType::Allocation,
+  1487→                        NodePayload::Allocation(AllocationNode {
+  1488→                            size: size_val,
+  1489→                            align,
+  1490→                            region_id: region.id,
+  1491→                            type_name: None,
+  1492→                        }),
+  1493→                        self.span_to_pp(&e.span),
+  1494→                    );
+  1495→                    region.add_node(alloc_id);
+  1496→                    let _ = scg.add_edge(id, alloc_id, EdgeKind::Derivation);
+  1497→                }
+  1498→
+  1499→                // sizeof/alignof → Computation nodes
+  1500→                if let Expr::Sizeof { ty, .. } = &e.expr {
+  1501→                    let size_id = scg.add_node(
+  1502→                        NodeType::Computation,
+  1503→                        NodePayload::Computation(ComputationNode {
+  1504→                            operation: format!("sizeof({})", ty),
+  1505→                            result_type: Some("usize".to_string()),
+  1506→                            tail_call: false,
+  1507→                        }),
+  1508→                        self.span_to_pp(&e.span),
+  1509→                    );
+  1510→                    region.add_node(size_id);
+  1511→                    let _ = scg.add_edge(id, size_id, EdgeKind::Derivation);
+  1512→                }
+  1513→
+  1514→                if let Expr::Alignof { ty, .. } = &e.expr {
+  1515→                    let align_id = scg.add_node(
+  1516→                        NodeType::Computation,
+  1517→                        NodePayload::Computation(ComputationNode {
+  1518→                            operation: format!("alignof({})", ty),
+  1519→                            result_type: Some("usize".to_string()),
+  1520→                            tail_call: false,
+  1521→                        }),
+  1522→                        self.span_to_pp(&e.span),
+  1523→                    );
+  1524→                    region.add_node(align_id);
+  1525→                    let _ = scg.add_edge(id, align_id, EdgeKind::Derivation);
+  1526→                }
+  1527→
+  1528→                Ok(id)
+  1529→            }
+  1530→
+  1531→            // Compound assignment: target op= value
+  1532→            Stmt::CompoundAssign(ca) => {
+  1533→                let target_name = self.assign_target_name(&ca.target);
+  1534→                let op_str = match ca.op {
+  1535→                    CompoundOp::Add => "+=",
+  1536→                    CompoundOp::Sub => "-=",
+  1537→                    CompoundOp::Mul => "*=",
+  1538→                    CompoundOp::Div => "/=",
+  1539→                    CompoundOp::Mod => "%=",
+  1540→                    CompoundOp::BitAnd => "&=",
+  1541→                    CompoundOp::BitOr => "|=",
+  1542→                    CompoundOp::BitXor => "^=",
+  1543→                    CompoundOp::Shl => "<<=",
+  1544→                    CompoundOp::Shr => ">>=",
+  1545→                };
+  1546→                let desc = format!(
+  1547→                    "{} {} {}",
+  1548→                    target_name,
+  1549→                    op_str,
+  1550→                    self.expr_to_string(&ca.value)
+  1551→                );
+  1552→                let id = scg.add_node(
+  1553→                    NodeType::Computation,
+  1554→                    NodePayload::Computation(ComputationNode {
+  1555→                        operation: desc,
+  1556→                        result_type: None,
+  1557→                        tail_call: false,
+  1558→                    }),
+  1559→                    self.span_to_pp(&ca.span),
+  1560→                );
+  1561→                region.add_node(id);
+  1562→                self.add_data_flow_edges(&ca.value, id, scg);
+  1563→                Ok(id)
+  1564→            }
+  1565→
+  1566→            // Break
+  1567→            Stmt::Break(br) => {
+  1568→                let id = scg.add_node(
+  1569→                    NodeType::Control,
+  1570→                    NodePayload::Control(ControlNode {
+  1571→                        kind: ControlKind::Jump,
+  1572→                        label: Some("break".to_string()),
+  1573→                    }),
+  1574→                    self.span_to_pp(&br.span),
+  1575→                );
+  1576→                region.add_node(id);
+  1577→                if let Some(v) = &br.value {
+  1578→                    self.add_data_flow_edges(v, id, scg);
+  1579→                }
+  1580→                Ok(id)
+  1581→            }
+  1582→
+  1583→            // Continue
+  1584→            Stmt::Continue(ct) => {
+  1585→                let id = scg.add_node(
+  1586→                    NodeType::Control,
+  1587→                    NodePayload::Control(ControlNode {
+  1588→                        kind: ControlKind::Jump,
+  1589→                        label: Some("continue".to_string()),
+  1590→                    }),
+  1591→                    self.span_to_pp(&ct.span),
+  1592→                );
+  1593→                region.add_node(id);
+  1594→                Ok(id)
+  1595→            }
+  1596→
+  1597→            // BD directive → Effect node
+  1598→            Stmt::BdDirective(bd) => {
+  1599→                let kind_str = match bd.kind {
+  1600→                    BdDirectiveKind::Bd => "bd",
+  1601→                    BdDirectiveKind::Repd => "repd",
+  1602→                    BdDirectiveKind::Capd => "capd",
+  1603→                    BdDirectiveKind::Reld => "reld",
+  1604→                };
+  1605→                let desc = if let Some(expr) = &bd.expr {
+  1606→                    format!("{}({}, {})", kind_str, bd.name, self.expr_to_string(expr))
+  1607→                } else {
+  1608→                    format!("{}({})", kind_str, bd.name)
+  1609→                };
+  1610→                let id = scg.add_node(
+  1611→                    NodeType::Effect,
+  1612→                    NodePayload::Effect(EffectNode {
+  1613→                        effect_kind: desc,
+  1614→                        is_observable: false,
+  1615→                    }),
+  1616→                    self.span_to_pp(&bd.span),
+  1617→                );
+  1618→                region.add_node(id);
+  1619→                if let Some(expr) = &bd.expr {
+  1620→                    self.add_data_flow_edges(expr, id, scg);
+  1621→                }
+  1622→                Ok(id)
+  1623→            }
+  1624→        }
+  1625→    }
+  1626→
+  1627→    // -- 10. Function calls → FunctionEntry/FunctionReturn nodes -------------
+  1628→    //    Enhanced: per-argument DataFlow edges; return value DataFlow.
+  1629→
+  1630→    fn emit_call_nodes(
+  1631→        &self,
+  1632→        callee: &Expr,
+  1633→        args: &[Expr],
+  1634→        caller_node: NodeId,
+  1635→        scg: &mut SCG,
+  1636→        region: &mut SCGRegion,
+  1637→    ) -> Result<(), ParseError> {
+  1638→        let callee_name = self.expr_to_string(callee);
+  1639→
+  1640→        let entry_id = scg.add_node(
+  1641→            NodeType::Control,
+  1642→            NodePayload::Control(ControlNode {
+  1643→                kind: ControlKind::FunctionEntry,
+  1644→                label: Some(format!("call_{}", callee_name)),
+  1645→            }),
+  1646→            ProgramPoint {
+  1647→                file: None,
+  1648→                line: None,
+  1649→                column: None,
+  1650→                offset: None,
+  1651→            },
+  1652→        );
+  1653→        region.add_node(entry_id);
+  1654→
+  1655→        let _ = scg.add_edge(caller_node, entry_id, EdgeKind::ControlFlow);
+  1656→
+  1657→        // Enhanced: per-argument DataFlow edges from caller variables
+  1658→        // to the FunctionEntry node.
+  1659→        for (i, arg) in args.iter().enumerate() {
+  1660→            let uses = self.expr_uses(arg);
+  1661→            for var_name in &uses {
+  1662→                if let Some(source) = self.lookup_var(var_name) {
+  1663→                    let eid = scg.add_edge(source, entry_id, EdgeKind::DataFlow);
+  1664→                    // Enhanced: label with argument position.
+  1665→                    if let Ok(id) = eid {
+  1666→                        if let Some(edge) = scg.get_edge_mut(id) {
+  1667→                            edge.label = Some(format!("arg{}", i));
+  1668→                        }
+  1669→                    }
+  1670→                }
+  1671→            }
+  1672→        }
+  1673→
+  1674→        let ret_id = scg.add_node(
+  1675→            NodeType::Control,
+  1676→            NodePayload::Control(ControlNode {
+  1677→                kind: ControlKind::FunctionReturn,
+  1678→                label: Some(format!("return_{}", callee_name)),
+  1679→            }),
+  1680→            ProgramPoint {
+  1681→                file: None,
+  1682→                line: None,
+  1683→                column: None,
+  1684→                offset: None,
+  1685→            },
+  1686→        );
+  1687→        region.add_node(ret_id);
+  1688→
+  1689→        let _ = scg.add_edge(entry_id, ret_id, EdgeKind::ControlFlow);
+  1690→
+  1691→        // Enhanced: DataFlow edge from return to the caller node,
+  1692→        // representing the return value flowing back.
+  1693→        let _ = scg.add_edge(ret_id, caller_node, EdgeKind::DataFlow);
+  1694→
+  1695→        Ok(())
+  1696→    }
+  1697→
+  1698→    // -- Closure lowering (2b) ------------------------------------------------
+  1699→
+  1700→    #[allow(dead_code, clippy::too_many_arguments)]
+  1701→    fn emit_closure_lowering(
+  1702→        &mut self,
+  1703→        params: &[Param],
+  1704→        body: &ClosureBody,
+  1705→        capture_kind: &CaptureKind,
+  1706→        parent_id: NodeId,
+  1707→        scg: &mut SCG,
+  1708→        region: &mut SCGRegion,
+  1709→        span: &Span,
+  1710→    ) -> Result<NodeId, ParseError> {
+  1711→        // Capture analysis: find which enclosing variables are used in the closure body.
+  1712→        let body_uses = match body {
+  1713→            ClosureBody::Expr(e) => self.expr_uses(e),
+  1714→            ClosureBody::Block(b) => {
+  1715→                let mut uses = Vec::new();
+  1716→                for stmt in &b.statements {
+  1717→                    self.collect_stmt_uses(stmt, &mut uses);
+  1718→                }
+  1719→                uses.sort();
+  1720→                uses.dedup();
+  1721→                uses
+  1722→            }
+  1723→        };
+  1724→
+  1725→        // Filter to only those that exist in the enclosing scope.
+  1726→        let captured_vars: Vec<(String, NodeId)> = body_uses
+  1727→            .iter()
+  1728→            .filter_map(|name| self.lookup_var(name).map(|id| (name.clone(), id)))
+  1729→            .collect();
+  1730→
+  1731→        // Determine capture mode for each variable.
+  1732→        let _is_move = matches!(capture_kind, CaptureKind::Move);
+  1733→        let capture_modes: Vec<bool> = captured_vars
+  1734→            .iter()
+  1735→            .map(|(name, _)| {
+  1736→                match capture_kind {
+  1737→                    CaptureKind::Move => true,
+  1738→                    CaptureKind::Ref => false,
+  1739→                    CaptureKind::Auto => {
+  1740→                        // Simple heuristic: if the variable is an allocation, capture by borrow;
+  1741→                        // otherwise capture by move.
+  1742→                        self.lookup_alloc(name).is_none()
+  1743→                    }
+  1744→                }
+  1745→            })
+  1746→            .collect();
+  1747→
+  1748→        // Create a ClosureEnv node.
+  1749→        let env_id = scg.add_node(
+  1750→            NodeType::ClosureEnv,
+  1751→            NodePayload::ClosureEnv(ClosureEnvNode {
+  1752→                captured_vars: captured_vars.iter().map(|(n, _)| n.clone()).collect(),
+  1753→                capture_modes: capture_modes.clone(),
+  1754→                closure_entry: None,
+  1755→            }),
+  1756→            self.span_to_pp(span),
+  1757→        );
+  1758→        region.add_node(env_id);
+  1759→        let _ = scg.add_edge(parent_id, env_id, EdgeKind::Derivation);
+  1760→
+  1761→        // DataFlow / Derivation from each captured variable to the env.
+  1762→        for (idx, (_, source_id)) in captured_vars.iter().enumerate() {
+  1763→            if capture_modes[idx] {
+  1764→                // Move capture: create Copy node and DataFlow edge.
+  1765→                let copy_id = scg.add_node(
+  1766→                    NodeType::Computation,
+  1767→                    NodePayload::Computation(ComputationNode {
+  1768→                        operation: format!("copy_capture[{}]", idx),
+  1769→                        result_type: None,
+  1770→                        tail_call: false,
+  1771→                    }),
+  1772→                    self.span_to_pp(span),
+  1773→                );
+  1774→                region.add_node(copy_id);
+  1775→                let _ = scg.add_edge(*source_id, copy_id, EdgeKind::DataFlow);
+  1776→                let _ = scg.add_edge(copy_id, env_id, EdgeKind::DataFlow);
+  1777→            } else {
+  1778→                // Borrow capture: Derivation edge.
+  1779→                let _ = scg.add_edge(*source_id, env_id, EdgeKind::Derivation);
+  1780→            }
+  1781→        }
+  1782→
+  1783→        // Create ClosureEntry node.
+  1784→        let entry_id = scg.add_node(
+  1785→            NodeType::Control,
+  1786→            NodePayload::Control(ControlNode {
+  1787→                kind: ControlKind::ClosureEntry,
+  1788→                label: Some("closure_entry".to_string()),
+  1789→            }),
+  1790→            self.span_to_pp(span),
+  1791→        );
+  1792→        region.add_node(entry_id);
+  1793→        let _ = scg.add_edge(env_id, entry_id, EdgeKind::ControlFlow);
+  1794→        let _ = scg.add_edge(parent_id, entry_id, EdgeKind::ControlFlow);
+  1795→
+  1796→        // Update env to reference closure entry.
+  1797→        if let Some(env_node) = scg.get_node_mut(env_id) {
+  1798→            if let NodePayload::ClosureEnv(ref mut ce) = env_node.payload {
+  1799→                ce.closure_entry = Some(entry_id);
+  1800→            }
+  1801→        }
+  1802→
+  1803→        // Define closure params in a new scope.
+  1804→        self.push_scope();
+  1805→        let mut prev_node: Option<NodeId> = Some(entry_id);
+  1806→        for p in params {
+  1807→            let param_id = scg.add_node(
+  1808→                NodeType::Computation,
+  1809→                NodePayload::Computation(ComputationNode {
+  1810→                    operation: format!("closure_param {}", p.name),
+  1811→                    result_type: p.ty.as_ref().map(|t| t.to_string()),
+  1812→                    tail_call: false,
+  1813→                }),
+  1814→                self.span_to_pp(&p.span),
+  1815→            );
+  1816→            region.add_node(param_id);
+  1817→            self.define_var(&p.name, param_id);
+  1818→            let _ = scg.add_edge(entry_id, param_id, EdgeKind::DataFlow);
+  1819→            if let Some(prev) = prev_node {
+  1820→                let _ = scg.add_edge(prev, param_id, EdgeKind::ControlFlow);
+  1821→            }
+  1822→            prev_node = Some(param_id);
+  1823→        }
+  1824→
+  1825→        // Convert the closure body.
+  1826→        match body {
+  1827→            ClosureBody::Expr(e) => {
+  1828→                let body_id = scg.add_node(
+  1829→                    NodeType::Computation,
+  1830→                    NodePayload::Computation(ComputationNode {
+  1831→                        operation: self.expr_to_string(e),
+  1832→                        result_type: None,
+  1833→                        tail_call: false,
+  1834→                    }),
+  1835→                    self.span_to_pp(span),
+  1836→                );
+  1837→                region.add_node(body_id);
+  1838→                self.add_data_flow_edges(e, body_id, scg);
+  1839→                if let Some(prev) = prev_node {
+  1840→                    let _ = scg.add_edge(prev, body_id, EdgeKind::ControlFlow);
+  1841→                }
+  1842→                prev_node = Some(body_id);
+  1843→            }
+  1844→            ClosureBody::Block(b) => {
+  1845→                for stmt in &b.statements {
+  1846→                    let stmt_id = self.convert_stmt_in_region(stmt, scg, region)?;
+  1847→                    if let Some(prev) = prev_node {
+  1848→                        let _ = scg.add_edge(prev, stmt_id, EdgeKind::ControlFlow);
+  1849→                    }
+  1850→                    prev_node = Some(stmt_id);
+  1851→                }
+  1852→            }
+  1853→        }
+  1854→
+  1855→        // Create ClosureReturn node.
+  1856→        let ret_id = scg.add_node(
+  1857→            NodeType::Control,
+  1858→            NodePayload::Control(ControlNode {
+  1859→                kind: ControlKind::ClosureReturn,
+  1860→                label: Some("closure_return".to_string()),
+  1861→            }),
+  1862→            self.span_to_pp(span),
+  1863→        );
+  1864→        region.add_node(ret_id);
+  1865→        if let Some(prev) = prev_node {
+  1866→            let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+  1867→        }
+  1868→
+  1869→        self.pop_scope();
+  1870→
+  1871→        Ok(entry_id)
+  1872→    }
+  1873→
+  1874→    // -- Async/await lowering (2c) -------------------------------------------
+  1875→
+  1876→    #[allow(dead_code)]
+  1877→    fn emit_async_await_lowering(
+  1878→        &mut self,
+  1879→        expr: &Expr,
+  1880→        parent_id: NodeId,
+  1881→        scg: &mut SCG,
+  1882→        region: &mut SCGRegion,
+  1883→        span: &Span,
+  1884→    ) -> Result<NodeId, ParseError> {
+  1885→        // Create a FuturePoll node for this await point.
+  1886→        let poll_id = scg.add_node(
+  1887→            NodeType::Control,
+  1888→            NodePayload::Control(ControlNode {
+  1889→                kind: ControlKind::FuturePoll,
+  1890→                label: Some("future_poll".to_string()),
+  1891→            }),
+  1892→            self.span_to_pp(span),
+  1893→        );
+  1894→        region.add_node(poll_id);
+  1895→        let _ = scg.add_edge(parent_id, poll_id, EdgeKind::ControlFlow);
+  1896→        self.add_data_flow_edges(expr, poll_id, scg);
+  1897→
+  1898→        // Create a WakerRegistration node.
+  1899→        let waker_id = scg.add_node(
+  1900→            NodeType::Control,
+  1901→            NodePayload::Control(ControlNode {
+  1902→                kind: ControlKind::WakerRegistration,
+  1903→                label: Some("waker_register".to_string()),
+  1904→            }),
+  1905→            self.span_to_pp(span),
+  1906→        );
+  1907→        region.add_node(waker_id);
+  1908→        let _ = scg.add_edge(poll_id, waker_id, EdgeKind::ControlFlow);
+  1909→
+  1910→        // Create a StateTransition node (the await is a split point in the state machine).
+  1911→        let state_id = scg.add_node(
+  1912→            NodeType::Control,
+  1913→            NodePayload::Control(ControlNode {
+  1914→                kind: ControlKind::StateTransition,
+  1915→                label: Some("await_suspend".to_string()),
+  1916→            }),
+  1917→            self.span_to_pp(span),
+  1918→        );
+  1919→        region.add_node(state_id);
+  1920→        let _ = scg.add_edge(waker_id, state_id, EdgeKind::ControlFlow);
+  1921→
+  1922→        // DataFlow edge from the awaited expression.
+  1923→        self.add_data_flow_edges(expr, state_id, scg);
+  1924→
+  1925→        // The resume point after the await.
+  1926→        let resume_id = scg.add_node(
+  1927→            NodeType::Control,
+  1928→            NodePayload::Control(ControlNode {
+  1929→                kind: ControlKind::FuturePoll,
+  1930→                label: Some("future_resume".to_string()),
+  1931→            }),
+  1932→            self.span_to_pp(span),
+  1933→        );
+  1934→        region.add_node(resume_id);
+  1935→        let _ = scg.add_edge(state_id, resume_id, EdgeKind::ControlFlow);
+  1936→
+  1937→        Ok(poll_id)
+  1938→    }
+  1939→
+  1940→    // -- Trait dispatch lowering (2d) ----------------------------------------
+  1941→
+  1942→    #[allow(dead_code, clippy::too_many_arguments)]
+  1943→    fn emit_static_dispatch(
+  1944→        &mut self,
+  1945→        _callee: &Expr,
+  1946→        args: &[Expr],
+  1947→        target_type: &str,
+  1948→        method_name: &str,
+  1949→        caller_node: NodeId,
+  1950→        scg: &mut SCG,
+  1951→        region: &mut SCGRegion,
+  1952→        span: &Span,
+  1953→    ) -> Result<NodeId, ParseError> {
+  1954→        // Inline the concrete impl's SCG subgraph.
+  1955→        let impl_entry_id = scg.add_node(
+  1956→            NodeType::Control,
+  1957→            NodePayload::Control(ControlNode {
+  1958→                kind: ControlKind::FunctionEntry,
+  1959→                label: Some(format!("static_dispatch {}::{}", target_type, method_name)),
+  1960→            }),
+  1961→            self.span_to_pp(span),
+  1962→        );
+  1963→        region.add_node(impl_entry_id);
+  1964→        let _ = scg.add_edge(caller_node, impl_entry_id, EdgeKind::ControlFlow);
+  1965→
+  1966→        // Per-argument DataFlow edges.
+  1967→        for (i, arg) in args.iter().enumerate() {
+  1968→            for var_name in &self.expr_uses(arg) {
+  1969→                if let Some(source) = self.lookup_var(var_name) {
+  1970→                    let eid = scg.add_edge(source, impl_entry_id, EdgeKind::DataFlow);
+  1971→                    if let Ok(id) = eid {
+  1972→                        if let Some(edge) = scg.get_edge_mut(id) {
+  1973→                            edge.label = Some(format!("arg{}", i));
+  1974→                        }
+  1975→                    }
+  1976→                }
+  1977→            }
+  1978→        }
+  1979→
+  1980→        let impl_ret_id = scg.add_node(
+  1981→            NodeType::Control,
+  1982→            NodePayload::Control(ControlNode {
+  1983→                kind: ControlKind::FunctionReturn,
+  1984→                label: Some(format!(
+  1985→                    "static_dispatch_return {}::{}",
+  1986→                    target_type, method_name
+  1987→                )),
+  1988→            }),
+  1989→            self.span_to_pp(span),
+  1990→        );
+  1991→        region.add_node(impl_ret_id);
+  1992→        let _ = scg.add_edge(impl_entry_id, impl_ret_id, EdgeKind::ControlFlow);
+  1993→        let _ = scg.add_edge(impl_ret_id, caller_node, EdgeKind::DataFlow);
+  1994→
+  1995→        Ok(impl_entry_id)
+  1996→    }
+  1997→
+  1998→    #[allow(dead_code, clippy::too_many_arguments)]
+  1999→    fn emit_dynamic_dispatch(
+  2000→        &mut self,
+
+[showing lines 1-2000 of 3764; use offset=2001 with limit to continue reading]
