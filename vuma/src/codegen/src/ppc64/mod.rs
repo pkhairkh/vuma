@@ -1,7 +1,7 @@
 //! # PowerPC64 Backend
 //!
 //! Implements the `Backend` trait for the PowerPC 64-bit target (ELFv2 ABI,
-//! big-endian). This module provides:
+//! little-endian default). This module provides:
 //!
 //! - `Gpr` — General-purpose register enum (R0–R31)
 //! - `Fpr` — Floating-point register enum (F0–F31)
@@ -30,7 +30,7 @@
 //! ## Instruction Encoding
 //!
 //! All instructions are 32 bits, fixed-width. PPC64 is bi-endian; the default
-//! for ppc64 is big-endian byte order for both data and instructions.
+//! for ppc64le is little-endian byte order for both data and instructions.
 //! The primary opcode occupies bits \[0:5\] (MSB-first bit numbering).
 //!
 //! ## References
@@ -419,9 +419,9 @@ impl fmt::Display for CrField {
 // Instruction Encoding Helpers
 // ===========================================================================
 
-/// Encode a PPC64 32-bit instruction word and return as big-endian bytes.
+/// Encode a PPC64 32-bit instruction word and return as little-endian bytes.
 fn encode_word(word: u32) -> [u8; 4] {
-    word.to_be_bytes()
+    word.to_le_bytes()
 }
 
 /// Build a D-form instruction: opcode[0:5] | rT[6:10] | rA[11:15] | d[16:31]
@@ -432,16 +432,11 @@ fn encode_d_form(opcode: u32, rt: u32, ra: u32, d: i32) -> [u8; 4] {
 }
 
 /// Build a DS-form instruction: opcode[0:5] | rT[6:10] | rA[11:15] | ds[16:29] | xo[30:31]
-///
-/// The `ds` parameter is the byte displacement; the DS-form field is `ds >> 2`
-/// (the low 2 bits must be zero).  The field is placed at bits [16:29] of the
-/// instruction word, so it is shifted left by 2 in the encoded word.
 fn encode_ds_form(opcode: u32, rt: u32, ra: u32, ds: i32, xo: u32) -> [u8; 4] {
-    let ds_field = (ds >> 2) as u32; // Convert byte displacement to 14-bit ds field
-    let word = ((opcode & 0x3f) << 26)
-        | ((rt & 0x1f) << 21)
-        | ((ra & 0x1f) << 16)
-        | ((ds_field & 0x3fff) << 2)
+    let word = ((opcode & 0x3F) << 26)
+        | ((rt & 0x1F) << 21)
+        | ((ra & 0x1F) << 16)
+        | (((ds as u32) & 0x3FFC) << 2)
         | (xo & 0x3);
     encode_word(word)
 }
@@ -519,7 +514,7 @@ fn encode_xl_form(opcode: u32, bo: u32, bi: u32, bh: u32, xo: u32, lk: u32) -> [
 /// Covers key arithmetic, logical, shift/rotate, load/store, compare, branch,
 /// move, and system instructions. Each variant captures the operands needed for
 /// encoding and disassembly. The `encode()` method produces a 4-byte
-/// big-endian machine code word.
+/// little-endian machine code word.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Instruction {
     // ── Arithmetic ──────────────────────────────────────────────────
@@ -710,7 +705,7 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    /// Encode this instruction into a 4-byte big-endian machine code word.
+    /// Encode this instruction into a 4-byte little-endian machine code word.
     ///
     /// Encoding follows the Power ISA Version 3.1.
     pub fn encode(&self) -> [u8; 4] {
@@ -1206,7 +1201,7 @@ impl fmt::Display for Instruction {
 /// Build a minimal ELF64 binary for PPC64 from raw code bytes.
 ///
 /// Produces a static executable with a single LOAD segment containing the
-/// `.text` section. Uses big-endian byte order for ppc64.
+/// `.text` section. Uses little-endian byte order for ppc64le.
 fn build_minimal_ppc64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
@@ -1219,36 +1214,36 @@ fn build_minimal_ppc64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
     elf.push(2); // ELFCLASS64
-    elf.push(2); // ELFDATA2MSB (ppc64 big-endian)
+    elf.push(1); // ELFDATA2LSB (ppc64le)
     elf.push(1); // EV_CURRENT
     elf.push(3); // ELFOSABI_LINUX
     elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
     // --- ELF header fields ---
-    elf.extend_from_slice(&2u16.to_be_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&21u16.to_be_bytes()); // e_machine = EM_PPC64
-    elf.extend_from_slice(&1u32.to_be_bytes()); // e_version
-    elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
-    elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
-    elf.extend_from_slice(&2u32.to_be_bytes()); // e_flags = EF_PPC64_ABI_V2
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
-    elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_be_bytes()); // e_phnum
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&21u16.to_le_bytes()); // e_machine = EM_PPC64
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header (single LOAD segment: PF_R | PF_X) ---
-    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&text_offset.to_be_bytes()); // p_offset
-    elf.extend_from_slice(&(base_addr + text_offset).to_be_bytes()); // p_vaddr
-    elf.extend_from_slice(&(base_addr + text_offset).to_be_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_be_bytes()); // p_filesz
-    elf.extend_from_slice(&text_size.to_be_bytes()); // p_memsz
-    elf.extend_from_slice(&16u64.to_be_bytes()); // p_align
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
 
     // --- Code section ---
     elf.extend_from_slice(code);
@@ -1260,7 +1255,7 @@ fn build_minimal_ppc64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
 // PPC64Backend
 // ===========================================================================
 
-/// PowerPC64 code generation backend (ELFv2 ABI, ppc64 big-endian).
+/// PowerPC64 code generation backend (ELFv2 ABI, ppc64le).
 pub struct PPC64Backend {
     target_info: PowerPC64TargetInfo,
 }
@@ -1726,7 +1721,6 @@ fn lower_cmp_ppc64(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<Allocate
 fn lower_ir_instr_ppc64(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
-    alloc_offset: &mut i32,
 ) -> Vec<AllocatedInstruction> {
     let mut result = Vec::new();
 
@@ -1917,6 +1911,21 @@ fn lower_ir_instr_ppc64(
                     ));
                 }
                 BinOpKind::ShrA => {
+                    result.push(emit_alloc_instr(
+                        Instruction::Srad {
+                            ra: d,
+                            rs: l,
+                            rb: r,
+                        },
+                        vec![
+                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                        ],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::Ror | BinOpKind::Rol => {
+                    // PPC64 rotation placeholder - use Srad
                     result.push(emit_alloc_instr(
                         Instruction::Srad {
                             ra: d,
@@ -2183,21 +2192,26 @@ fn lower_ir_instr_ppc64(
 
         IRInstr::Alloc { dst, size } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // The prologue already decremented r1 by frame_size (which includes
-            // all Alloc sizes), so we must NOT decrement r1 again.  Instead,
-            // compute the address from r1 using a positive offset.
-            let aligned_size = ((*size as i32 + 15) / 16) * 16;
-            // addi d, r1, alloc_offset  (compute address from SP)
+            // stdu r1, -size(r1) — store back chain and allocate stack space
+            let neg_size = -(*size as i32);
+            let stdu = Instruction::Stdu {
+                rs: Gpr::R1,
+                ra: Gpr::R1,
+                ds: neg_size,
+            };
             result.push(emit_alloc_instr(
-                Instruction::Addi {
-                    rt: d,
-                    ra: Gpr::R1,
-                    simm: *alloc_offset,
-                },
+                stdu,
                 vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
             ));
-            *alloc_offset += aligned_size;
+            // Copy updated sp to dst: mr d, r1
+            if d != Gpr::R1 {
+                result.push(emit_alloc_instr(
+                    Instruction::Mr { ra: d, rs: Gpr::R1 },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Ret { values } => {
@@ -2211,7 +2225,15 @@ fn lower_ir_instr_ppc64(
                     ));
                 }
             }
-            // The epilogue (in allocate_registers) handles frame restore and return.
+            result.push(emit_alloc_instr(
+                Instruction::Bclr {
+                    bo: 20,
+                    bi: 0,
+                    bh: 0,
+                },
+                vec![],
+                vec![],
+            ));
         }
 
         IRInstr::Call { dst, func: _, args } => {
@@ -2528,15 +2550,9 @@ impl Backend for PPC64Backend {
 
         // Body: real instruction selection — translate each IR instruction
         // into one or more PPC64 machine-code instructions.
-        //
-        // Track the cumulative allocation offset from r1.  The prologue
-        // already decremented r1 by frame_size (which includes all Alloc
-        // sizes), so Alloc must NOT decrement r1 again.  Instead, each
-        // Alloc computes its address as r1 + alloc_offset.
-        let mut alloc_offset: i32 = 32; // skip 32-byte save area (back chain + CR + LR + TOC)
         for block in &func.blocks {
             for instr in &block.instructions {
-                instructions.extend(lower_ir_instr_ppc64(instr, &mut vreg_map, &mut alloc_offset));
+                instructions.extend(lower_ir_instr_ppc64(instr, &mut vreg_map));
             }
         }
 
@@ -2648,63 +2664,6 @@ impl Backend for PPC64Backend {
                 }
             }
         }
-
-        // ── Phase 3: Replace blr in the entry function with exit syscall ──
-        // The first function is the ELF entry point, which is jumped to by the
-        // kernel — there is no return address in LR, so `blr` would jump to
-        // garbage.  Replace it with:
-        //   li r0, 1          ; __NR_exit = 1 on PPC64 Linux
-        //   sc                ; system call
-        // The return value is already in R3 (set by the Ret handler).
-        if !program.functions.is_empty() {
-            let first_func = &program.functions[0];
-            if let Some(last_block) = first_func.blocks.last() {
-                if let Some(last_instr) = last_block.instructions.last() {
-                    // Find the byte offset of the last instruction of the first function.
-                    let mut instr_offset = 0usize;
-                    let mut found_offset: Option<usize> = None;
-                    for block in &first_func.blocks {
-                        for instr in &block.instructions {
-                            if std::ptr::eq(instr as *const _, last_instr as *const _) {
-                                found_offset = Some(instr_offset);
-                                break;
-                            }
-                            instr_offset += instr.encoded.len();
-                        }
-                        if found_offset.is_some() {
-                            break;
-                        }
-                    }
-                    if let Some(offset) = found_offset {
-                        let expected_blr = Instruction::Bclr {
-                            bo: 20,
-                            bi: 0,
-                            bh: 0,
-                        }
-                        .encode();
-                        if last_instr.encoded.len() == 4
-                            && last_instr.encoded[..] == expected_blr[..]
-                        {
-                            let exit_li = Instruction::Li {
-                                rt: Gpr::R0,
-                                simm: 1,
-                            }
-                            .encode();
-                            let exit_sc = Instruction::Sc.encode();
-                            // The blr is 4 bytes; the exit syscall is 8 bytes.
-                            let mut new_code =
-                                Vec::with_capacity(all_code.len() + 4);
-                            new_code.extend_from_slice(&all_code[..offset]);
-                            new_code.extend_from_slice(&exit_li);
-                            new_code.extend_from_slice(&exit_sc);
-                            new_code.extend_from_slice(&all_code[offset + 4..]);
-                            all_code = new_code;
-                        }
-                    }
-                }
-            }
-        }
-
         Ok(build_minimal_ppc64_elf(&all_code, 0x10000000))
     }
 
@@ -2800,7 +2759,7 @@ impl Backend for PPC64Backend {
         let mut offset = 0usize;
         let mut pc = addr;
         while offset + 4 <= bytes.len() {
-            let word = u32::from_be_bytes([
+            let word = u32::from_le_bytes([
                 bytes[offset],
                 bytes[offset + 1],
                 bytes[offset + 2],
@@ -2926,14 +2885,14 @@ mod tests {
     fn test_nop_encoding() {
         // NOP = ORI r0, r0, 0 = 0x60000000
         let encoded = Instruction::Nop.encode();
-        assert_eq!(u32::from_be_bytes(encoded), 0x60000000);
+        assert_eq!(u32::from_le_bytes(encoded), 0x60000000);
     }
 
     #[test]
     fn test_trap_encoding() {
         // TRAP = TW 31, r0, r0 = 0x7FE00008
         let encoded = Instruction::Trap.encode();
-        assert_eq!(u32::from_be_bytes(encoded), 0x7FE00008);
+        assert_eq!(u32::from_le_bytes(encoded), 0x7FE00008);
     }
 
     #[test]
@@ -2945,7 +2904,7 @@ mod tests {
             rb: Gpr::R5,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31); // primary opcode
         assert_eq!((word >> 21) & 0x1F, 3); // rT
         assert_eq!((word >> 16) & 0x1F, 4); // rA
@@ -2963,7 +2922,7 @@ mod tests {
             simm: 100,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 14);
         assert_eq!((word >> 21) & 0x1F, 3);
         assert_eq!((word >> 16) & 0x1F, 4);
@@ -2979,7 +2938,7 @@ mod tests {
             rb: Gpr::R5,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
         assert_eq!((word >> 1) & 0x1FF, 40);
     }
@@ -2993,7 +2952,7 @@ mod tests {
             rb: Gpr::R3,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
         assert_eq!((word >> 1) & 0x1FF, 444);
     }
@@ -3041,7 +3000,7 @@ mod tests {
             ds: 0,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 58);
         assert_eq!((word >> 21) & 0x1F, 3);
         assert_eq!((word >> 16) & 0x1F, 4);
@@ -3056,7 +3015,7 @@ mod tests {
             ds: 8,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 62);
         assert_eq!((word >> 21) & 0x1F, 3);
         assert_eq!((word >> 16) & 0x1F, 4);
@@ -3072,7 +3031,7 @@ mod tests {
             rb: Gpr::R4,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
         assert_eq!((word >> 23) & 0x7, 0); // bf = CR0
         assert_eq!((word >> 21) & 0x1, 1); // l = 1 (64-bit)
@@ -3087,7 +3046,7 @@ mod tests {
             bh: 0,
         }
         .encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 19);
         assert_eq!((word >> 21) & 0x1F, 20); // BO
         assert_eq!((word >> 1) & 0x3FF, 16); // xo
@@ -3096,7 +3055,7 @@ mod tests {
     #[test]
     fn test_sc_encoding() {
         let encoded = Instruction::Sc.encode();
-        assert_eq!(u32::from_be_bytes(encoded), 0x44000002);
+        assert_eq!(u32::from_le_bytes(encoded), 0x44000002);
     }
 
     #[test]
@@ -3108,7 +3067,7 @@ mod tests {
             d: 0,
         }
         .encode();
-        assert_eq!((u32::from_be_bytes(lfd) >> 26) & 0x3F, 50);
+        assert_eq!((u32::from_le_bytes(lfd) >> 26) & 0x3F, 50);
 
         // STFD f1, 0(r3): primary=54
         let stfd = Instruction::Stfd {
@@ -3117,7 +3076,7 @@ mod tests {
             d: 0,
         }
         .encode();
-        assert_eq!((u32::from_be_bytes(stfd) >> 26) & 0x3F, 54);
+        assert_eq!((u32::from_le_bytes(stfd) >> 26) & 0x3F, 54);
     }
 
     // ── Backend Tests ──────────────────────────────────────────────
@@ -3142,7 +3101,7 @@ mod tests {
         let stub = backend.return_stub();
         assert_eq!(stub.len(), 4);
         // BLR: bclr 20, 0, 0
-        let word = u32::from_be_bytes([stub[0], stub[1], stub[2], stub[3]]);
+        let word = u32::from_le_bytes([stub[0], stub[1], stub[2], stub[3]]);
         assert_eq!((word >> 26) & 0x3F, 19); // XL-form
         assert_eq!((word >> 21) & 0x1F, 20); // BO=20 (always)
     }
@@ -3175,7 +3134,7 @@ mod tests {
             rb: Gpr::R5,
         };
         let encoded = mulld.encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31, "primary opcode should be 31");
         assert_eq!((word >> 21) & 0x1F, 3, "rT should be r3");
         assert_eq!((word >> 16) & 0x1F, 4, "rA should be r4");
@@ -3207,7 +3166,7 @@ mod tests {
         );
         // The stdu encoded bytes should not be a NOP (0x60000000)
         let stdu_encoded = &stdu_instrs[0].encoded;
-        let word = u32::from_be_bytes([
+        let word = u32::from_le_bytes([
             stdu_encoded[0],
             stdu_encoded[1],
             stdu_encoded[2],
@@ -3224,7 +3183,7 @@ mod tests {
             ra: Gpr::R4,
         };
         let encoded = neg.encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31, "primary opcode should be 31");
         assert_eq!((word >> 21) & 0x1F, 3, "rT should be r3");
         assert_eq!((word >> 16) & 0x1F, 4, "rA should be r4");
@@ -3240,7 +3199,7 @@ mod tests {
         load_immediate_ppc64(Gpr::R11, 42, &mut out);
         assert_eq!(out.len(), 1, "small immediate should emit 1 instruction");
         assert_eq!(out[0].opcode, "li");
-        let word = u32::from_be_bytes(out[0].encoded.clone().try_into().unwrap());
+        let word = u32::from_le_bytes(out[0].encoded.clone().try_into().unwrap());
         assert_eq!((word >> 26) & 0x3F, 14, "li should use ADDI primary=14");
         assert_eq!((word >> 21) & 0x1F, 11, "rT should be r11");
         assert_eq!((word & 0xFFFF) as i16, 42i16, "simm should be 42");
@@ -3258,7 +3217,7 @@ mod tests {
         assert_eq!(out[0].opcode, "lis");
         assert_eq!(out[1].opcode, "ori");
         // Verify the lis loads the upper 16 bits
-        let lis_word = u32::from_be_bytes(out[0].encoded.clone().try_into().unwrap());
+        let lis_word = u32::from_le_bytes(out[0].encoded.clone().try_into().unwrap());
         assert_eq!((lis_word >> 21) & 0x1F, 11, "rT should be r11");
     }
 
@@ -3336,7 +3295,7 @@ mod tests {
         );
         // Verify the trap encoding is NOT a NOP (0x60000000)
         let trap_encoded = &trap_instrs[0].encoded;
-        let word = u32::from_be_bytes([
+        let word = u32::from_le_bytes([
             trap_encoded[0],
             trap_encoded[1],
             trap_encoded[2],
@@ -3373,7 +3332,7 @@ mod tests {
         load_immediate_ppc64(Gpr::R11, -1, &mut out);
         assert_eq!(out.len(), 1, "small negative should emit 1 instruction");
         assert_eq!(out[0].opcode, "li");
-        let word = u32::from_be_bytes(out[0].encoded.clone().try_into().unwrap());
+        let word = u32::from_le_bytes(out[0].encoded.clone().try_into().unwrap());
         assert_eq!((word & 0xFFFF) as i16, -1i16, "simm should be -1");
     }
 
@@ -3387,7 +3346,6 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(42),
-            ty: None,
         });
         func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
         let allocated = backend.allocate_registers(&func).unwrap();

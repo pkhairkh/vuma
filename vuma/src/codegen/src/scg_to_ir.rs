@@ -495,6 +495,9 @@ impl IRBuilder {
         // Translate the body statements.
         self.lower_statements(&func.body, &mut ir_func, &mut name_to_vreg)?;
 
+        // Resolve phi nodes into explicit copy instructions.
+        self.resolve_phis(&mut ir_func)?;
+
         // Rebuild the CFG (predecessor/successor sets).
         ir_func.rebuild_cfg();
 
@@ -807,29 +810,55 @@ impl IRBuilder {
             exit_label: loop_exit.clone(),
         });
 
-        // Jump from current block to loop header.
+        // ── Step 1: Snapshot names BEFORE the loop ──
+        // We need to know which variables exist and their current vregs
+        // so we can create proper phi nodes in the loop header.
+        let names_before = names.clone();
+
+        // ── Step 2: Jump from current block to loop header ──
         ir_func.current_block().push(IRInstruction::Branch {
             target: loop_header.clone(),
         });
         ir_func.current_block().terminator = IRTerminator::Jump(loop_header.clone());
+        let pre_header_label = ir_func.blocks[ir_func.blocks.len() - 1].label.clone();
 
-        // Loop header — place a phi node placeholder for any loop-carried
-        // values.  We insert a trivial phi for a "loop iteration counter"
-        // to demonstrate the pattern.  Real compilers would analyze which
-        // variables are modified in the loop body.
+        // ── Step 3: Create loop header block with phi nodes ──
         ir_func.append_block(&loop_header);
 
-        // Insert a phi node for a synthetic loop counter (demonstrates phi).
-        let counter_vreg = self.alloc_vreg();
-        ir_func.register_vreg(VirtualRegister::named(counter_vreg, "loop_counter"));
-        let pre_header_label = ir_func.blocks[ir_func.blocks.len() - 2].label.clone();
-        ir_func.current_block().push(IRInstruction::Phi {
-            dst: IRValue::Register(counter_vreg),
-            incoming: vec![
-                (IRValue::Immediate(0), pre_header_label),
-                (IRValue::Register(counter_vreg), loop_body_label.clone()),
-            ],
-        });
+        // For every variable that exists before the loop, create a phi node
+        // in the loop header. The phi merges the pre-loop value with the
+        // value from the back-edge (which we'll fill in after lowering the body).
+        // The phi result becomes the variable's value inside the loop body.
+        let mut phi_info: Vec<(String, u32, u32)> = Vec::new(); // (name, pre_loop_vreg, phi_vreg)
+        let mut phi_instructions: Vec<IRInstruction> = Vec::new();
+
+        let mut sorted_names: Vec<String> = names_before.keys().cloned().collect();
+        sorted_names.sort(); // deterministic order
+
+        for name in &sorted_names {
+            let &pre_loop_vreg = names_before.get(name).unwrap();
+            let phi_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(phi_vreg, name.as_str()));
+            phi_info.push((name.clone(), pre_loop_vreg, phi_vreg));
+
+            // Create phi with placeholder incoming from back-edge.
+            // We'll patch the back-edge incoming value after lowering the body.
+            phi_instructions.push(IRInstruction::Phi {
+                dst: IRValue::Register(phi_vreg),
+                incoming: vec![
+                    (IRValue::Register(pre_loop_vreg), pre_header_label.clone()),
+                    (IRValue::Register(pre_loop_vreg), loop_body_label.clone()), // placeholder
+                ],
+            });
+
+            // Update names so the loop body uses the phi result
+            names.insert(name.clone(), phi_vreg);
+        }
+
+        // Insert phi instructions at the beginning of the loop header
+        for phi in phi_instructions {
+            ir_func.current_block().instructions.push(phi);
+        }
 
         // Unconditional jump from header to body.
         ir_func.current_block().push(IRInstruction::Branch {
@@ -837,11 +866,12 @@ impl IRBuilder {
         });
         ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
 
-        // Loop body.
+        // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
         self.lower_statements(body, ir_func, names)?;
 
         // Back-edge to header if the block doesn't have a terminator.
+        let back_edge_label;
         if matches!(
             ir_func.current_block().terminator,
             IRTerminator::Unreachable
@@ -851,12 +881,137 @@ impl IRBuilder {
             });
             ir_func.current_block().terminator = IRTerminator::Jump(loop_header.clone());
         }
+        back_edge_label = ir_func.current_block().label.clone();
 
-        // Loop exit.
+        // ── Step 5: Patch phi nodes with correct back-edge values ──
+        // For each variable that was modified in the loop body, update the
+        // phi's back-edge incoming to use the new vreg from the end of the loop body.
+        {
+            let header_block = ir_func.blocks.iter_mut()
+                .find(|b| b.label == loop_header)
+                .expect("loop header block must exist");
+
+            for instr in &mut header_block.instructions {
+                if let IRInstruction::Phi { dst, incoming } = instr {
+                    // Find the phi's variable name from its dst vreg
+                    if let Some(phi_vreg_id) = dst.as_register() {
+                        // Find the name that maps to this phi_vreg
+                        for (name, _, phi_vreg) in &phi_info {
+                            if *phi_vreg == phi_vreg_id {
+                                // Get the current vreg for this name (after loop body)
+                                if let Some(&current_vreg) = names.get(name) {
+                                    // Update the back-edge incoming
+                                    for entry in incoming.iter_mut() {
+                                        if entry.1 == loop_body_label || entry.1 == back_edge_label {
+                                            entry.0 = IRValue::Register(current_vreg);
+                                            entry.1 = back_edge_label.clone();
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Step 6: Update names for variables after the loop ──
+        // After the loop, variables that were modified in the loop should
+        // use the phi result (which merges both paths). For break exits,
+        // we'd need to track the value at the break point, but for simplicity
+        // we use the phi result (which is correct for the last iteration's value
+        // when the loop exits normally).
+        for (name, _, phi_vreg) in &phi_info {
+            // After the loop, the variable's value is the phi result
+            // (which is correct for normal loop exit)
+            names.insert(name.clone(), *phi_vreg);
+        }
+
+        // ── Step 7: Loop exit block ──
         ir_func.append_block(&loop_exit);
 
         // Pop loop context.
         self.loop_stack.pop();
+
+        Ok(())
+    }
+
+    /// Lower a `break` to a jump to the enclosing loop's exit label.
+    // =======================================================================
+    // Phi resolution — convert phi nodes to explicit copy instructions
+    // =======================================================================
+
+    /// Resolve all phi nodes in the function into explicit copy instructions.
+    ///
+    /// For each phi `dst = phi(val1 from block_A, val2 from block_B)`, we insert
+    /// a copy `dst = val1` at the end of block_A (before its terminator) and
+    /// `dst = val2` at the end of block_B (before its terminator). Then we
+    /// remove the phi node.
+    ///
+    /// This is a standard SSA destruction step. The copies ensure that when
+    /// control transfers from a predecessor to the phi's block, the correct
+    /// value is already in the destination vreg's stack slot.
+    fn resolve_phis(&self, ir_func: &mut IRFunction) -> Result<()> {
+        // Build a label → block-index map
+        let label_to_idx: HashMap<String, usize> = ir_func.blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.label.clone(), i))
+            .collect();
+
+        // Collect all phi information first (to avoid borrow issues)
+        // Each entry: (block_idx, phi_dst, vec of (value, predecessor_label))
+        let mut all_phis: Vec<(usize, IRValue, Vec<(IRValue, String)>)> = Vec::new();
+
+        for (block_idx, block) in ir_func.blocks.iter().enumerate() {
+            for instr in &block.instructions {
+                if let IRInstruction::Phi { dst, incoming } = instr {
+                    all_phis.push((block_idx, dst.clone(), incoming.clone()));
+                }
+            }
+        }
+
+        // For each phi, insert copies at the end of predecessor blocks,
+        // BEFORE any Branch instruction (so the copies execute before the jump).
+        for (_phi_block_idx, dst, incoming) in &all_phis {
+            for (value, pred_label) in incoming {
+                // Skip self-referencing entries (where the value == dst)
+                if value == dst {
+                    continue;
+                }
+
+                if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+                    // Insert a copy instruction before the terminator
+                    // The copy is: dst = value, which is BinOp::Add(value, 0)
+                    // (We use Add with 0 as a move, matching the existing pattern)
+                    let copy_instr = IRInstruction::Add {
+                        dst: dst.clone(),
+                        lhs: value.clone(),
+                        rhs: IRValue::Immediate(0),
+                        ty: None,
+                    };
+
+                    // Insert BEFORE the last instruction if it's a Branch.
+                    // This ensures the copy executes before the jump.
+                    let block = &mut ir_func.blocks[pred_idx];
+                    if let Some(IRInstruction::Branch { .. }) = block.instructions.last() {
+                        // Insert before the Branch
+                        block.instructions.insert(block.instructions.len() - 1, copy_instr);
+                    } else {
+                        // No Branch at end — just append
+                        block.instructions.push(copy_instr);
+                    }
+                }
+            }
+        }
+
+        // Remove all phi instructions from all blocks
+        for block in &mut ir_func.blocks {
+            block.instructions.retain(|instr| {
+                !matches!(instr, IRInstruction::Phi { .. })
+            });
+        }
 
         Ok(())
     }
@@ -1150,11 +1305,14 @@ impl IRBuilder {
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
                 names.insert(dst.clone(), dst_vreg);
+                // Default to U8 for pointer dereference loads — VUMA's *ptr loads
+                // a single byte and zero-extends. The caller is responsible for
+                // any widening (e.g., assigning to a u32 variable).
                 ir_func.current_block().push(IRInstruction::Load {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
@@ -1178,11 +1336,13 @@ impl IRBuilder {
                     }
                     None => (ptr_val, 0),
                 };
+                // Default to U8 for pointer dereference stores — VUMA's *ptr = val
+                // stores a single byte. The value is truncated to 8 bits.
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
         }

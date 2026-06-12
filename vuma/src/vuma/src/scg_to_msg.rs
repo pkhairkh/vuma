@@ -294,10 +294,25 @@ pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
         }
     }
 
-    // Step 3: Process nodes in topological order.
+    // Step 3a: Process Allocation nodes FIRST.  This ensures that every
+    // region is registered in `scg_region_to_msg_region` before any Access
+    // node tries to look it up.  The topological sort may place an Access
+    // node before its corresponding Allocation node when there is no direct
+    // SCG edge between them (e.g. the allocation is a sibling of the
+    // pointer-producing Computation, not a parent of the Access).
     for node_id in &sorted_nodes {
         let node_data = scg.get_node(*node_id).expect("node must exist in SCG");
-        process_node(scg, &mut ctx, node_data, &freed_allocations)?;
+        if node_data.node_type == NodeType::Allocation {
+            process_allocation(scg, &mut ctx, node_data, &freed_allocations)?;
+        }
+    }
+
+    // Step 3b: Process all remaining nodes in topological order.
+    for node_id in &sorted_nodes {
+        let node_data = scg.get_node(*node_id).expect("node must exist in SCG");
+        if node_data.node_type != NodeType::Allocation {
+            process_node(scg, &mut ctx, node_data, &freed_allocations)?;
+        }
     }
 
     // Step 4: Process edges — build sync edges from ControlFlow edges.

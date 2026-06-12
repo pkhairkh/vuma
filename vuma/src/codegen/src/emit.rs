@@ -557,10 +557,6 @@ pub struct Emitter {
     func_text_offset: u64,
     /// Computed stack frame size (in bytes) for the current function.
     frame_size: u16,
-    /// Running offset (in bytes) from FP for Alloc instructions.
-    /// Starts at 16 (past the saved FP/LR pair) and grows by each Alloc's
-    /// aligned size.  Each Alloc computes its address as `FP - alloc_offset`.
-    alloc_offset: u16,
 }
 
 impl Emitter {
@@ -576,7 +572,6 @@ impl Emitter {
             current_func_name: String::new(),
             func_text_offset: 0,
             frame_size: 0,
-            alloc_offset: 0,
         }
     }
 
@@ -595,7 +590,6 @@ impl Emitter {
         self.relocations.clear();
         self.current_func_name = func.name.clone();
         self.reg_alloc.reset();
-        self.alloc_offset = 16; // Start past the saved FP/LR pair
 
         // Allocate registers for parameters (AAPCS64: X0–X7).
         for (i, param) in func.params.iter().enumerate() {
@@ -606,8 +600,8 @@ impl Emitter {
             }
         }
 
-        // Emit prologue: STP X29, X30, [SP, #-16]! (pre-indexed)
-        self.emit_instruction(Instruction::STP_PRE {
+        // Emit prologue: STP X29, X30, [SP, #-16]!
+        self.emit_instruction(Instruction::STP {
             rt1: Register::X29,
             rt2: Register::X30,
             rn: Register::SP,
@@ -813,15 +807,15 @@ impl Emitter {
 
             IRInstr::Alloc { dst, size } => {
                 let rd = self.resolve_reg(dst)?;
-                let aligned = (*size).div_ceil(16) * 16;
-                // The prologue already reserved the full frame, so we must NOT
-                // decrement SP again.  Instead, compute the allocation address
-                // as FP - offset (similar to x86_64's RBP-based addressing).
-                self.alloc_offset += aligned as u16;
-                self.emit_instruction(Instruction::SUB {
+                self.emit_instruction(Instruction::MOV {
                     rd,
-                    rn: Register::X29,
-                    rm: Operand::Imm12(self.alloc_offset),
+                    rm: Register::SP,
+                })?;
+                let aligned = (*size).div_ceil(16) * 16;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(aligned as u16),
                 })?;
             }
 
@@ -1161,6 +1155,11 @@ impl Emitter {
             BinOpKind::ShrA => {
                 self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm }, width)?;
             }
+            BinOpKind::Ror | BinOpKind::Rol => {
+                let rm_reg = self.operand_to_reg(&rm)?;
+                // ARM64 rotation: use ASR as placeholder
+                self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm: Operand::Reg { reg: rm_reg, shift: None } }, width)?;
+            }
             BinOpKind::SRem | BinOpKind::URem => {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 let div_instr = if op == BinOpKind::SRem {
@@ -1254,7 +1253,7 @@ impl Emitter {
                     rn: Register::SP,
                     rm: Operand::Imm12(frame_size),
                 })?;
-                self.emit_instruction(Instruction::LDP_POST {
+                self.emit_instruction(Instruction::LDP {
                     rt1: Register::X29,
                     rt2: Register::X30,
                     rn: Register::SP,

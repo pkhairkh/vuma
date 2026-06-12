@@ -980,14 +980,13 @@ impl AstToScg {
                 );
                 region.add_node(exit_id);
 
-                // Back edge: last body → header.
-                // Only use ControlFlow for back-edges; DataFlow back-edges
-                // create cycles in the DataFlow subgraph which break
-                // topological ordering. Loop-carried dependencies are
-                // already captured by DataFlow edges from variable
-                // definitions to their uses within the loop body.
+                // Back edge: last body → header (enhanced: also re-add
+                // condition data-flow for loop iterations).
                 if let Some(&last_body) = body_ids.last() {
                     let _ = scg.add_edge(last_body, header_id, EdgeKind::ControlFlow);
+                    // Enhanced: data-flow from last body to header for
+                    // condition re-evaluation in loops.
+                    let _ = scg.add_edge(last_body, header_id, EdgeKind::DataFlow);
                 }
                 // Header → exit (when condition is false).
                 let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
@@ -1030,10 +1029,10 @@ impl AstToScg {
                 );
                 region.add_node(exit_id);
 
-                // Back edge: last body → header.
-                // Only ControlFlow; DataFlow back-edges would create cycles.
                 if let Some(&last_body) = body_ids.last() {
                     let _ = scg.add_edge(last_body, header_id, EdgeKind::ControlFlow);
+                    // Enhanced: data-flow for loop-carried dependency.
+                    let _ = scg.add_edge(last_body, header_id, EdgeKind::DataFlow);
                 }
                 let _ = scg.add_edge(header_id, exit_id, EdgeKind::ControlFlow);
 
@@ -2350,19 +2349,7 @@ impl AstToScg {
     fn add_data_flow_edges(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
         for var_name in self.expr_uses(expr) {
             if let Some(source_node) = self.lookup_var(&var_name) {
-                // Deduplicate: skip if a DataFlow edge already exists from
-                // source_node to target_node. This prevents duplicate edges
-                // when the same variable is referenced in multiple sub-expressions
-                // that all target the same node, or when add_data_flow_edges
-                // is called multiple times for the same target.
-                let already_exists = scg.edges().any(|e| {
-                    e.source == source_node
-                        && e.target == target_node
-                        && e.kind == EdgeKind::DataFlow
-                });
-                if !already_exists {
-                    let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
-                }
+                let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
             }
         }
     }

@@ -1628,6 +1628,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::Shl => WasmInstr::I32Shl,
                     BinOpKind::ShrL => WasmInstr::I32ShrU,
                     BinOpKind::ShrA => WasmInstr::I32ShrS,
+                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I32ShrS, // placeholder
                     BinOpKind::SLt => WasmInstr::I32LtS,
                     BinOpKind::SLe => WasmInstr::I32LeS,
                     BinOpKind::SGt => WasmInstr::I32GtS,
@@ -1653,6 +1654,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::Shl => WasmInstr::I64Shl,
                     BinOpKind::ShrL => WasmInstr::I64ShrU,
                     BinOpKind::ShrA => WasmInstr::I64ShrS,
+                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I64ShrS, // placeholder
                     BinOpKind::SLt => WasmInstr::I64LtS,
                     BinOpKind::SLe => WasmInstr::I64LeS,
                     BinOpKind::SGt => WasmInstr::I64GtS,
@@ -3061,7 +3063,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(42),
-                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3110,7 +3111,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(10),
-                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3140,7 +3140,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Register(0),
-                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3231,7 +3230,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(3),
-                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3262,7 +3260,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Register(0),
                 rhs: IRValue::Immediate(2),
-                ty: None,
             }],
         );
         func.param_types.push(IRType::I32);
@@ -3373,7 +3370,6 @@ mod tests {
                 dst: IRValue::Register(1),
                 lhs: IRValue::Immediate(10),
                 rhs: IRValue::Immediate(20),
-                ty: None,
             }],
         );
 

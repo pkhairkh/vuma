@@ -99,9 +99,9 @@ impl Gpr {
 
     /// Returns `true` if this register is available for register allocation.
     ///
-    /// R0 (zero), Ra, Tp, Sp, and Fp are reserved.
+    /// R0 (zero), Ra, Tp, and Sp are reserved.
     pub fn is_allocatable(&self) -> bool {
-        !matches!(self, Gpr::R0 | Gpr::Ra | Gpr::Tp | Gpr::Sp | Gpr::Fp)
+        !matches!(self, Gpr::R0 | Gpr::Ra | Gpr::Tp | Gpr::Sp)
     }
 
     /// Returns `true` if this register is callee-saved (fp, s0–s8).
@@ -1271,12 +1271,12 @@ impl Instruction {
                 )
             }
             Instruction::Syscall => {
-                // SYSCALL 0 = 0x002B0000
-                0x002B0000u32.to_le_bytes()
+                // SYSCALL = 0x0000002B (opcode bits [31:15] = 0x0000, bits [14:0] = 0x002B)
+                0x0000002Bu32.to_le_bytes()
             }
             Instruction::Break => {
-                // BREAK 0 = 0x002A0000
-                0x002A0000u32.to_le_bytes()
+                // BREAK = 0x0000002A (opcode bits [31:15] = 0x0000, bits [14:0] = 0x002A)
+                0x0000002Au32.to_le_bytes()
             }
         }
     }
@@ -1725,6 +1725,8 @@ const ALLOCATABLE_GPRS: &[Gpr] = &[
     Gpr::S6,
     Gpr::S7,
     Gpr::S8,
+    // Frame pointer is last — we prefer not to use it for general allocation
+    Gpr::Fp,
 ];
 
 /// Map from virtual register ID to a physical GPR using a simple linear scan.
@@ -2565,6 +2567,22 @@ fn lower_binop_la64(
                 ));
             }
         }
+        BinOpKind::Ror | BinOpKind::Rol => {
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
+            result.push(emit_alloc_instr(
+                Instruction::RotrD {
+                    rd: dst_reg,
+                    rj: l,
+                    rk: r,
+                },
+                vec![
+                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                ],
+                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+            ));
+        }
         // Comparison BinOps
         BinOpKind::SLt
         | BinOpKind::SLe
@@ -2588,7 +2606,6 @@ fn lower_binop_la64(
 fn lower_ir_instr_la64(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
-    alloc_offset: &mut i32,
 ) -> Vec<AllocatedInstruction> {
     let mut result = Vec::new();
 
@@ -2850,21 +2867,29 @@ fn lower_ir_instr_la64(
 
         IRInstr::Alloc { dst, size } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            // The prologue already decremented SP by frame_size (which includes
-            // all Alloc sizes), so we must NOT decrement SP again.  Instead,
-            // compute the address from $fp using a positive offset.
-            let aligned_size = ((*size as i32 + 15) / 16) * 16;
-            // addi.d d, $fp, alloc_offset  (compute address from FP)
+            let neg_size = -(*size as i32);
+            // addi.d $sp, $sp, -size (decrement stack pointer)
             result.push(emit_alloc_instr(
                 Instruction::AddiD {
-                    rd: d,
-                    rj: Gpr::Fp,
-                    imm12: *alloc_offset,
+                    rd: Gpr::Sp,
+                    rj: Gpr::Sp,
+                    imm12: neg_size,
                 },
-                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Fp.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
             ));
-            *alloc_offset += aligned_size;
+            // add.d d, $sp, $r0 (copy new SP to destination)
+            if d != Gpr::Sp {
+                result.push(emit_alloc_instr(
+                    Instruction::AddD {
+                        rd: d,
+                        rj: Gpr::Sp,
+                        rk: Gpr::R0,
+                    },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                ));
+            }
         }
 
         IRInstr::Ret { values } => {
@@ -2884,7 +2909,16 @@ fn lower_ir_instr_la64(
                     ));
                 }
             }
-            // The epilogue (in allocate_registers) handles frame restore and return.
+            // jirl $r0, $ra, 0 (return)
+            result.push(emit_alloc_instr(
+                Instruction::Jirl {
+                    rd: Gpr::R0,
+                    rj: Gpr::Ra,
+                    offs16: 0,
+                },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding())],
+                vec![],
+            ));
         }
 
         IRInstr::Call { dst, func: _, args } => {
@@ -3186,15 +3220,9 @@ impl Backend for LoongArch64Backend {
 
         // Body: real instruction selection — translate each IR instruction
         // into one or more LoongArch64 machine-code instructions.
-        //
-        // Track the cumulative allocation offset from FP.  The prologue
-        // already decremented SP by frame_size (which includes all Alloc
-        // sizes), so Alloc must NOT decrement SP again.  Instead, each
-        // Alloc computes its address as FP + alloc_offset.
-        let mut alloc_offset: i32 = 0;
         for block in &func.blocks {
             for instr in &block.instructions {
-                instructions.extend(lower_ir_instr_la64(instr, &mut vreg_map, &mut alloc_offset));
+                instructions.extend(lower_ir_instr_la64(instr, &mut vreg_map));
             }
         }
 
@@ -3285,63 +3313,6 @@ impl Backend for LoongArch64Backend {
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
-                }
-            }
-        }
-
-        // ── Phase 3: Replace jirl $r0, $ra, 0 in the entry function with exit syscall ──
-        // The first function is the ELF entry point, which is jumped to by the
-        // kernel — there is no return address, so `jirl $r0, $ra, 0` would
-        // SIGSEGV.  Replace it with:
-        //   addi.d $a7, $r0, 93    ; sys_exit = 93
-        //   syscall 0               ; invoke kernel
-        // The return value is already in $a0 (set by the Ret handler).
-        if !program.functions.is_empty() {
-            let first_func = &program.functions[0];
-            if let Some(last_block) = first_func.blocks.last() {
-                if let Some(last_instr) = last_block.instructions.last() {
-                    // Find the byte offset of the last instruction of the first function.
-                    let mut instr_offset = 0usize;
-                    let mut found_offset: Option<usize> = None;
-                    for block in &first_func.blocks {
-                        for instr in &block.instructions {
-                            if std::ptr::eq(instr as *const _, last_instr as *const _) {
-                                found_offset = Some(instr_offset);
-                                break;
-                            }
-                            instr_offset += instr.encoded.len();
-                        }
-                        if found_offset.is_some() {
-                            break;
-                        }
-                    }
-                    if let Some(offset) = found_offset {
-                        let expected_jirl = Instruction::Jirl {
-                            rd: Gpr::R0,
-                            rj: Gpr::Ra,
-                            offs16: 0,
-                        }
-                        .encode();
-                        if last_instr.encoded.len() == 4
-                            && last_instr.encoded[..] == expected_jirl[..]
-                        {
-                            let exit_addi = Instruction::AddiD {
-                                rd: Gpr::A7,
-                                rj: Gpr::R0,
-                                imm12: 93,
-                            }
-                            .encode();
-                            let exit_syscall = Instruction::Syscall.encode();
-                            // The jirl is 4 bytes; the exit syscall is 8 bytes.
-                            let mut new_code =
-                                Vec::with_capacity(all_code.len() + 4);
-                            new_code.extend_from_slice(&all_code[..offset]);
-                            new_code.extend_from_slice(&exit_addi);
-                            new_code.extend_from_slice(&exit_syscall);
-                            new_code.extend_from_slice(&all_code[offset + 4..]);
-                            all_code = new_code;
-                        }
-                    }
                 }
             }
         }
@@ -3485,7 +3456,7 @@ mod tests {
         assert!(Gpr::A0.is_allocatable());
         assert!(Gpr::T0.is_allocatable());
         assert!(Gpr::S0.is_allocatable());
-        assert!(!Gpr::Fp.is_allocatable());
+        assert!(Gpr::Fp.is_allocatable());
     }
 
     #[test]
@@ -3884,7 +3855,6 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(10),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -3914,7 +3884,6 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(5),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -3943,7 +3912,6 @@ mod tests {
                 op: UnaryOpKind::Neg,
                 dst: IRValue::Register(0),
                 operand: IRValue::Register(1),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -3972,7 +3940,6 @@ mod tests {
                 op: UnaryOpKind::Not,
                 dst: IRValue::Register(0),
                 operand: IRValue::Register(1),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4002,7 +3969,6 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4031,7 +3997,6 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(100000),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4061,7 +4026,6 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(3),
-                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();

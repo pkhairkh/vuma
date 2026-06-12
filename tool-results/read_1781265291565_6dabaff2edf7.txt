@@ -1,0 +1,962 @@
+     1→//! VUMA CLI — Command-line interface for the VUMA compiler.
+     2→//!
+     3→//! Subcommands:
+     4→//! - `vuma build <file>` — Parse + compile to ARM64 ELF (default), save to output file
+     5→//! - `vuma run <file>`   — Build + execute (via QEMU aarch64 or native)
+     6→//! - `vuma check <file>` — Parse + SCG + BD inference + IVE verification only
+     7→//! - `vuma emit <isa> <file>` — Compile to specific ISA
+     8→//! - `vuma disasm <file>` — Read binary and disassemble
+     9→//! - `vuma verify <file>` — Run IVE 5-invariant verification
+    10→//! - `vuma repl` — Interactive REPL (parse expr, print AST)
+    11→
+    12→use std::fs;
+    13→use std::io::{self, Write as IoWrite};
+    14→use std::path::{Path, PathBuf};
+    15→use std::process::Command;
+    16→
+    17→use clap::{Parser, Subcommand, ValueEnum};
+    18→
+    19→use vuma::pipeline::{
+    20→    compile, compile_for_isa, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+    21→    VumaError,
+    22→};
+    23→use vuma_codegen::backend::{create_backend, BackendKind};
+    24→
+    25→// ═══════════════════════════════════════════════════════════════════════════
+    26→// CLI definition (clap derive)
+    27→// ═══════════════════════════════════════════════════════════════════════════
+    28→
+    29→/// VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language
+    30→#[derive(Parser, Debug)]
+    31→#[command(name = "vuma", version, about = "VUMA compiler and toolchain")]
+    32→struct Cli {
+    33→    /// Optimization level (overrides subcommand default)
+    34→    #[arg(long, global = true, value_enum, default_value = "O2")]
+    35→    opt_level: OptLevelArg,
+    36→
+    37→    /// Verification level (overrides subcommand default)
+    38→    #[arg(long, global = true, value_enum, default_value = "normal")]
+    39→    verification: VerificationArg,
+    40→
+    41→    /// Include debug info in output
+    42→    #[arg(long, global = true)]
+    43→    debug: bool,
+    44→
+    45→    #[command(subcommand)]
+    46→    command: Commands,
+    47→}
+    48→
+    49→/// Optimization level CLI argument.
+    50→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    51→enum OptLevelArg {
+    52→    #[value(name = "O0")]
+    53→    O0,
+    54→    #[value(name = "O1")]
+    55→    O1,
+    56→    #[value(name = "O2")]
+    57→    O2,
+    58→    #[value(name = "O3")]
+    59→    O3,
+    60→}
+    61→
+    62→impl From<OptLevelArg> for OptLevel {
+    63→    fn from(val: OptLevelArg) -> Self {
+    64→        match val {
+    65→            OptLevelArg::O0 => OptLevel::O0,
+    66→            OptLevelArg::O1 => OptLevel::O1,
+    67→            OptLevelArg::O2 => OptLevel::O2,
+    68→            OptLevelArg::O3 => OptLevel::O3,
+    69→        }
+    70→    }
+    71→}
+    72→
+    73→/// Verification level CLI argument.
+    74→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    75→enum VerificationArg {
+    76→    #[value(name = "none")]
+    77→    None,
+    78→    #[value(name = "quick")]
+    79→    Quick,
+    80→    #[value(name = "normal")]
+    81→    Normal,
+    82→    #[value(name = "exhaustive")]
+    83→    Exhaustive,
+    84→}
+    85→
+    86→impl From<VerificationArg> for VerificationLevel {
+    87→    fn from(val: VerificationArg) -> Self {
+    88→        match val {
+    89→            VerificationArg::None => VerificationLevel::None,
+    90→            VerificationArg::Quick => VerificationLevel::Quick,
+    91→            VerificationArg::Normal => VerificationLevel::Normal,
+    92→            VerificationArg::Exhaustive => VerificationLevel::Exhaustive,
+    93→        }
+    94→    }
+    95→}
+    96→
+    97→/// Target ISA for the `emit` subcommand.
+    98→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    99→enum IsaArg {
+   100→    #[value(name = "aarch64")]
+   101→    Aarch64,
+   102→    #[value(name = "x86_64")]
+   103→    X86_64,
+   104→    #[value(name = "riscv64")]
+   105→    Riscv64,
+   106→    #[value(name = "wasm32")]
+   107→    Wasm32,
+   108→    #[value(name = "loongarch64")]
+   109→    Loongarch64,
+   110→    #[value(name = "arm32")]
+   111→    Arm32,
+   112→    #[value(name = "mips64")]
+   113→    Mips64,
+   114→    #[value(name = "ppc64")]
+   115→    Ppc64,
+   116→}
+   117→
+   118→impl From<IsaArg> for BackendKind {
+   119→    fn from(val: IsaArg) -> Self {
+   120→        match val {
+   121→            IsaArg::Aarch64 => BackendKind::AArch64,
+   122→            IsaArg::X86_64 => BackendKind::X86_64,
+   123→            IsaArg::Riscv64 => BackendKind::RiscV64,
+   124→            IsaArg::Wasm32 => BackendKind::Wasm32,
+   125→            IsaArg::Loongarch64 => BackendKind::LoongArch64,
+   126→            IsaArg::Arm32 => BackendKind::Arm32,
+   127→            IsaArg::Mips64 => BackendKind::Mips64,
+   128→            IsaArg::Ppc64 => BackendKind::PowerPC64,
+   129→        }
+   130→    }
+   131→}
+   132→
+   133→#[derive(Subcommand, Debug)]
+   134→enum Commands {
+   135→    /// Parse + compile to ARM64 ELF (default), save to output file
+   136→    Build {
+   137→        /// Input VUMA source file
+   138→        file: PathBuf,
+   139→
+   140→        /// Output file path (default: <input>.o)
+   141→        #[arg(short, long)]
+   142→        output: Option<PathBuf>,
+   143→
+   144→        /// Target platform
+   145→        #[arg(long, value_enum, default_value = "pi5-linux")]
+   146→        target: TargetArg,
+   147→    },
+   148→
+   149→    /// Build + execute (via QEMU aarch64 or native)
+   150→    Run {
+   151→        /// Input VUMA source file
+   152→        file: PathBuf,
+   153→
+   154→        /// Arguments to pass to the executed program
+   155→        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+   156→        args: Vec<String>,
+   157→    },
+   158→
+   159→    /// Parse + SCG + BD inference + IVE verification only (no codegen)
+   160→    Check {
+   161→        /// Input VUMA source file
+   162→        file: PathBuf,
+   163→    },
+   164→
+   165→    /// Compile to a specific ISA target
+   166→    Emit {
+   167→        /// Target ISA
+   168→        isa: IsaArg,
+   169→
+   170→        /// Input VUMA source file
+   171→        file: PathBuf,
+   172→
+   173→        /// Output file path (default: <input>.o)
+   174→        #[arg(short, long)]
+   175→        output: Option<PathBuf>,
+   176→    },
+   177→
+   178→    /// Read a binary file and disassemble it
+   179→    Disasm {
+   180→        /// Binary file to disassemble
+   181→        file: PathBuf,
+   182→
+   183→        /// ISA to use for disassembly (default: aarch64)
+   184→        #[arg(long, value_enum, default_value = "aarch64")]
+   185→        isa: IsaArg,
+   186→
+   187→        /// Starting virtual address (default: 0x400000)
+   188→        #[arg(long, default_value = "0x400000")]
+   189→        base_addr: String,
+   190→    },
+   191→
+   192→    /// Run IVE 5-invariant verification
+   193→    Verify {
+   194→        /// Input VUMA source file
+   195→        file: PathBuf,
+   196→    },
+   197→
+   198→    /// Interactive REPL: parse expressions and print AST
+   199→    Repl,
+   200→}
+   201→
+   202→/// Target platform CLI argument for the `build` subcommand.
+   203→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   204→enum TargetArg {
+   205→    #[value(name = "pi5-bare")]
+   206→    Pi5Bare,
+   207→    #[value(name = "pi5-linux")]
+   208→    Pi5Linux,
+   209→    #[value(name = "linux")]
+   210→    Linux,
+   211→}
+   212→
+   213→impl From<TargetArg> for CompileTarget {
+   214→    fn from(val: TargetArg) -> Self {
+   215→        match val {
+   216→            TargetArg::Pi5Bare => CompileTarget::Pi5Bare,
+   217→            TargetArg::Pi5Linux => CompileTarget::Pi5Linux,
+   218→            TargetArg::Linux => CompileTarget::Linux,
+   219→        }
+   220→    }
+   221→}
+   222→
+   223→// ═══════════════════════════════════════════════════════════════════════════
+   224→// Helper functions
+   225→// ═══════════════════════════════════════════════════════════════════════════
+   226→
+   227→/// Read source file content with a human-readable error on failure.
+   228→fn read_source(path: &PathBuf) -> Result<String, String> {
+   229→    fs::read_to_string(path)
+   230→        .map_err(|e| format!("error: cannot read source file '{}': {}", path.display(), e))
+   231→}
+   232→
+   233→/// Build a `CompileConfig` from the global CLI flags.
+   234→fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
+   235→    CompileConfig {
+   236→        target,
+   237→        opt_level: OptLevel::from(cli.opt_level),
+   238→        verification_level: VerificationLevel::from(cli.verification),
+   239→        debug_info: cli.debug,
+   240→        ..CompileConfig::default()
+   241→    }
+   242→}
+   243→
+   244→/// Print compilation errors to stderr in a human-readable format.
+   245→fn print_errors(errors: &[VumaError]) {
+   246→    for err in errors {
+   247→        eprintln!("error[{}]: {}", err.stage(), err);
+   248→    }
+   249→}
+   250→
+   251→/// Determine the default output path for a given input file.
+   252→fn default_output_path(input: &Path) -> PathBuf {
+   253→    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+   254→    let dir = input.parent().unwrap_or(std::path::Path::new("."));
+   255→    dir.join(format!("{}.o", stem))
+   256→}
+   257→
+   258→// ═══════════════════════════════════════════════════════════════════════════
+   259→// Subcommand handlers
+   260→// ═══════════════════════════════════════════════════════════════════════════
+   261→
+   262→/// `vuma build <file>` — Parse + compile to ELF, save to output file.
+   263→fn cmd_build(
+   264→    cli: &Cli,
+   265→    file: &PathBuf,
+   266→    output: &Option<PathBuf>,
+   267→    target: TargetArg,
+   268→) -> Result<(), String> {
+   269→    let source = read_source(file)?;
+   270→    let config = make_config(cli, CompileTarget::from(target));
+   271→    let result = compile(&source, &config).map_err(|errors| {
+   272→        print_errors(&errors);
+   273→        format!("compilation failed with {} error(s)", errors.len())
+   274→    })?;
+   275→
+   276→    let out_path = output
+   277→        .as_ref()
+   278→        .cloned()
+   279→        .unwrap_or_else(|| default_output_path(file));
+   280→    fs::write(&out_path, &result.binary).map_err(|e| {
+   281→        format!(
+   282→            "error: cannot write output file '{}': {}",
+   283→            out_path.display(),
+   284→            e
+   285→        )
+   286→    })?;
+   287→
+   288→    println!(
+   289→        "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
+   290→        file.display(),
+   291→        out_path.display(),
+   292→        result.binary.len(),
+   293→        result.scg.node_count(),
+   294→        result.ir_instruction_count,
+   295→    );
+   296→
+   297→    // Print stage timings.
+   298→    for (stage, ms) in &result.stage_timings {
+   299→        println!("  {:20} {}ms", stage, ms);
+   300→    }
+   301→
+   302→    Ok(())
+   303→}
+   304→
+   305→/// `vuma run <file>` — Build + execute.
+   306→fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
+   307→    let source = read_source(file)?;
+   308→    let config = make_config(cli, CompileTarget::Pi5Linux);
+   309→    let result = compile(&source, &config).map_err(|errors| {
+   310→        print_errors(&errors);
+   311→        format!("compilation failed with {} error(s)", errors.len())
+   312→    })?;
+   313→
+   314→    // Write binary to a temp file.
+   315→    let tmp_dir = std::env::temp_dir();
+   316→    let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
+   317→    fs::write(&exe_path, &result.binary).map_err(|e| {
+   318→        format!(
+   319→            "error: cannot write temporary executable '{}': {}",
+   320→            exe_path.display(),
+   321→            e
+   322→        )
+   323→    })?;
+   324→
+   325→    // Make the file executable on Unix.
+   326→    #[cfg(unix)]
+   327→    {
+   328→        use std::os::unix::fs::PermissionsExt;
+   329→        let mut perms = fs::metadata(&exe_path)
+   330→            .map_err(|e| format!("error: cannot stat '{}': {}", exe_path.display(), e))?
+   331→            .permissions();
+   332→        perms.set_mode(0o755);
+   333→        fs::set_permissions(&exe_path, perms)
+   334→            .map_err(|e| format!("error: cannot chmod '{}': {}", exe_path.display(), e))?;
+   335→    }
+   336→
+   337→    // Try to execute: first natively (if on aarch64), then via qemu-aarch64.
+   338→    let native_output = Command::new(&exe_path).args(args).output();
+   339→
+   340→    let output = match native_output {
+   341→        Ok(out) => out,
+   342→        Err(_) => {
+   343→            // Native execution failed; try qemu-aarch64.
+   344→            let qemu_output = Command::new("qemu-aarch64")
+   345→                .arg(&exe_path)
+   346→                .args(args)
+   347→                .output()
+   348→                .map_err(|e| {
+   349→                    format!(
+   350→                        "error: failed to execute binary (neither native nor qemu-aarch64): {}",
+   351→                        e
+   352→                    )
+   353→                })?;
+   354→            qemu_output
+   355→        }
+   356→    };
+   357→
+   358→    io::stdout()
+   359→        .write_all(&output.stdout)
+   360→        .map_err(|e| format!("error: failed to write program output: {}", e))?;
+   361→    io::stderr()
+   362→        .write_all(&output.stderr)
+   363→        .map_err(|e| format!("error: failed to write program stderr: {}", e))?;
+   364→
+   365→    // Clean up temp file.
+   366→    let _ = fs::remove_file(&exe_path);
+   367→
+   368→    let code = output.status.code().unwrap_or(1);
+   369→    if code != 0 {
+   370→        return Err(format!("program exited with code {}", code));
+   371→    }
+   372→
+   373→    Ok(())
+   374→}
+   375→
+   376→/// `vuma check <file>` — Parse + SCG + BD inference + IVE verification only.
+   377→fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+   378→    let source = read_source(file)?;
+   379→    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+   380→    // check mode: always run verification, don't skip
+   381→    if config.verification_level == VerificationLevel::None {
+   382→        config.verification_level = VerificationLevel::Normal;
+   383→    }
+   384→
+   385→    // Run the full compile — the check command doesn't save the binary,
+   386→    // it just verifies the program compiles and passes verification.
+   387→    let result = compile(&source, &config).map_err(|errors| {
+   388→        print_errors(&errors);
+   389→        format!("check failed with {} error(s)", errors.len())
+   390→    })?;
+   391→
+   392→    println!("Check passed for {}", file.display());
+   393→    println!("  SCG nodes:      {}", result.scg.node_count());
+   394→    println!("  IR functions:   {}", result.ir_function_count);
+   395→    println!("  IR instructions: {}", result.ir_instruction_count);
+   396→
+   397→    if let Some(ref verification) = result.verification {
+   398→        println!("  Verification:   {}", verification.overall);
+   399→    }
+   400→
+   401→    // Print stage timings.
+   402→    for (stage, ms) in &result.stage_timings {
+   403→        println!("  {:20} {}ms", stage, ms);
+   404→    }
+   405→
+   406→    Ok(())
+   407→}
+   408→
+   409→/// `vuma emit <isa> <file>` — Compile to a specific ISA target.
+   410→fn cmd_emit(
+   411→    cli: &Cli,
+   412→    isa: IsaArg,
+   413→    file: &PathBuf,
+   414→    output: &Option<PathBuf>,
+   415→) -> Result<(), String> {
+   416→    let source = read_source(file)?;
+   417→    let backend_kind = BackendKind::from(isa);
+   418→    let config = make_config(cli, CompileTarget::Pi5Linux);
+   419→
+   420→    // Create the target backend
+   421→    let backend = create_backend(backend_kind).map_err(|e| {
+   422→        format!(
+   423→            "error: cannot create {} backend: {}",
+   424→            backend_kind.isa_name(),
+   425→            e
+   426→        )
+   427→    })?;
+   428→
+   429→    // Use compile_for_isa which drives the pipeline end-to-end
+   430→    // with the target backend for register allocation and encoding.
+   431→    let result = compile_for_isa(&source, &config, backend.as_ref()).map_err(|errors| {
+   432→        print_errors(&errors);
+   433→        format!("compilation failed with {} error(s)", errors.len())
+   434→    })?;
+   435→
+   436→    let out_path = output
+   437→        .as_ref()
+   438→        .cloned()
+   439→        .unwrap_or_else(|| default_output_path(file));
+   440→
+   441→    fs::write(&out_path, &result.binary).map_err(|e| {
+   442→        format!(
+   443→            "error: cannot write output file '{}': {}",
+   444→            out_path.display(),
+   445→            e
+   446→        )
+   447→    })?;
+   448→    println!(
+   449→        "Emitted {} -> {} ({} bytes, ISA: {})",
+   450→        file.display(),
+   451→        out_path.display(),
+   452→        result.binary.len(),
+   453→        backend.name(),
+   454→    );
+   455→
+   456→    // Print stage timings.
+   457→    for (stage, ms) in &result.stage_timings {
+   458→        println!("  {:20} {}ms", stage, ms);
+   459→    }
+   460→
+   461→    Ok(())
+   462→}
+   463→
+   464→/// `vuma disasm <file>` — Read binary and disassemble.
+   465→fn cmd_disasm(file: &PathBuf, isa: IsaArg, base_addr_str: &str) -> Result<(), String> {
+   466→    let bytes = fs::read(file)
+   467→        .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;
+   468→
+   469→    let base_addr = u64::from_str_radix(base_addr_str.trim_start_matches("0x"), 16)
+   470→        .map_err(|e| format!("error: invalid base address '{}': {}", base_addr_str, e))?;
+   471→
+   472→    let backend_kind = BackendKind::from(isa);
+   473→    let backend = create_backend(backend_kind).map_err(|e| {
+   474→        format!(
+   475→            "error: cannot create {} backend: {}",
+   476→            backend_kind.isa_name(),
+   477→            e
+   478→        )
+   479→    })?;
+   480→
+   481→    let instructions = backend.disassemble(&bytes, base_addr);
+   482→
+   483→    println!(
+   484→        "Disassembly of {} ({} bytes, ISA: {}):",
+   485→        file.display(),
+   486→        bytes.len(),
+   487→        backend.name()
+   488→    );
+   489→    for line in &instructions {
+   490→        println!("{}", line);
+   491→    }
+   492→
+   493→    Ok(())
+   494→}
+   495→
+   496→/// `vuma verify <file>` — Run IVE 5-invariant verification.
+   497→fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+   498→    let source = read_source(file)?;
+   499→    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+   500→    // Force exhaustive verification for the verify subcommand.
+   501→    config.verification_level = VerificationLevel::Exhaustive;
+   502→
+   503→    let result = compile(&source, &config).map_err(|errors| {
+   504→        print_errors(&errors);
+   505→        format!(
+   506→            "compilation/verification failed with {} error(s)",
+   507→            errors.len()
+   508→        )
+   509→    })?;
+   510→
+   511→    match result.verification {
+   512→        Some(ref verification) => {
+   513→            println!("IVE Verification Results for {}", file.display());
+   514→            println!("  Overall verdict: {}", verification.overall);
+   515→            println!(
+   516→                "  Summary: {} invariant(s) checked",
+   517→                verification.summary.total_checked
+   518→            );
+   519→            println!("           {} passed", verification.summary.passed);
+   520→            println!("           {} failed", verification.summary.failed);
+   521→            println!("           {} unverified", verification.summary.unverified);
+   522→
+   523→            // Print individual invariant results.
+   524→            for per_inv in &verification.per_invariant {
+   525→                let status_str = match &per_inv.result.status {
+   526→                    vuma_ive::VerificationStatus::Proven => "PROVEN",
+   527→                    vuma_ive::VerificationStatus::ProbablySafe { .. } => "PROBABLY_SAFE",
+   528→                    vuma_ive::VerificationStatus::Unverified { .. } => "UNVERIFIED",
+   529→                    vuma_ive::VerificationStatus::Violated { .. } => "VIOLATED",
+   530→                };
+   531→                println!(
+   532→                    "  [{}] {:?} — {}",
+   533→                    status_str, per_inv.kind, per_inv.result.message,
+   534→                );
+   535→                if let Some(ref evidence) = per_inv.result.evidence {
+   536→                    println!("    evidence: {}", evidence);
+   537→                }
+   538→            }
+   539→        }
+   540→        None => {
+   541→            println!("Verification was skipped (verification level set to None).");
+   542→        }
+   543→    }
+   544→
+   545→    Ok(())
+   546→}
+   547→
+   548→/// `vuma repl` — Interactive REPL: parse expressions and print AST.
+   549→fn cmd_repl() -> Result<(), String> {
+   550→    println!("VUMA REPL v0.1.0");
+   551→    println!("Type VUMA expressions or statements. Enter ':quit' to exit, ':help' for help.");
+   552→
+   553→    let stdin = io::stdin();
+   554→    let mut input = String::new();
+   555→
+   556→    loop {
+   557→        print!("vuma> ");
+   558→        io::stdout()
+   559→            .flush()
+   560→            .map_err(|e| format!("flush error: {}", e))?;
+   561→
+   562→        input.clear();
+   563→        match stdin.read_line(&mut input) {
+   564→            Ok(0) => break, // EOF
+   565→            Ok(_) => {}
+   566→            Err(e) => return Err(format!("error reading input: {}", e)),
+   567→        }
+   568→
+   569→        let trimmed = input.trim();
+   570→        if trimmed.is_empty() {
+   571→            continue;
+   572→        }
+   573→        if trimmed == ":quit" || trimmed == ":q" {
+   574→            break;
+   575→        }
+   576→        if trimmed == ":help" || trimmed == ":h" {
+   577→            println!("  :quit, :q   — Exit the REPL");
+   578→            println!("  :help, :h   — Show this help");
+   579→            println!("  <expr>      — Parse and display the AST");
+   580→            println!("  <stmt>      — Parse and display the AST");
+   581→            println!("  <program>   — Parse and display the full program AST");
+   582→            continue;
+   583→        }
+   584→
+   585→        // Try to parse as a full program first.
+   586→        let mut parser = vuma_parser::Parser::new(trimmed);
+   587→        let result = parser.parse_program();
+   588→        if !result.has_errors() {
+   589→            // Successfully parsed; display the AST.
+   590→            let program = result.unwrap();
+   591→            println!("{:#?}", program);
+   592→            continue;
+   593→        }
+   594→        // Program parse had errors; try to parse as an expression via
+   595→        // wrapping it in a dummy program context.
+   596→        let program_errors = result.errors.clone();
+   597→        // Since parse_expr is private, we re-parse as a minimal program.
+   598→        let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
+   599→        let mut expr_parser = vuma_parser::Parser::new(&wrapped);
+   600→        let expr_result = expr_parser.parse_program();
+   601→        if !expr_result.has_errors() {
+   602→            // Print the function body AST.
+   603→            let program = expr_result.unwrap();
+   604→            if let Some(item) = program.items.first() {
+   605→                println!("{:#?}", item);
+   606→            } else {
+   607→                println!("{:#?}", program);
+   608→            }
+   609→        } else {
+   610→            // Show the original parse errors.
+   611→            for err in &program_errors {
+   612→                eprintln!("parse error: {}", err);
+   613→            }
+   614→        }
+   615→    }
+   616→
+   617→    Ok(())
+   618→}
+   619→
+   620→// ═══════════════════════════════════════════════════════════════════════════
+   621→// Main entry point
+   622→// ═══════════════════════════════════════════════════════════════════════════
+   623→
+   624→fn main() {
+   625→    // Initialize logger.
+   626→    env_logger::init();
+   627→
+   628→    let cli = Cli::parse();
+   629→
+   630→    let result = match cli.command {
+   631→        Commands::Build {
+   632→            ref file,
+   633→            ref output,
+   634→            target,
+   635→        } => cmd_build(&cli, file, output, target),
+   636→        Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
+   637→        Commands::Check { ref file } => cmd_check(&cli, file),
+   638→        Commands::Emit {
+   639→            isa,
+   640→            ref file,
+   641→            ref output,
+   642→        } => cmd_emit(&cli, isa, file, output),
+   643→        Commands::Disasm {
+   644→            ref file,
+   645→            isa,
+   646→            ref base_addr,
+   647→        } => cmd_disasm(file, isa, base_addr),
+   648→        Commands::Verify { ref file } => cmd_verify(&cli, file),
+   649→        Commands::Repl => cmd_repl(),
+   650→    };
+   651→
+   652→    if let Err(err) = result {
+   653→        eprintln!("{}", err);
+   654→        std::process::exit(1);
+   655→    }
+   656→}
+   657→
+   658→// ═══════════════════════════════════════════════════════════════════════════
+   659→// Tests for CLI argument parsing
+   660→// ═══════════════════════════════════════════════════════════════════════════
+   661→
+   662→#[cfg(test)]
+   663→mod tests {
+   664→    use super::*;
+   665→    use clap::Parser;
+   666→
+   667→    /// Test 1: `vuma build hello.vuma` parses correctly.
+   668→    #[test]
+   669→    fn test_build_basic() {
+   670→        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+   671→        match cli.command {
+   672→            Commands::Build {
+   673→                ref file,
+   674→                ref output,
+   675→                ref target,
+   676→            } => {
+   677→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   678→                assert!(output.is_none());
+   679→                assert_eq!(target, &TargetArg::Pi5Linux);
+   680→            }
+   681→            _ => panic!("expected Build command"),
+   682→        }
+   683→    }
+   684→
+   685→    /// Test 2: `vuma build hello.vuma -o out.o --target pi5-bare` parses correctly.
+   686→    #[test]
+   687→    fn test_build_with_options() {
+   688→        let cli = Cli::try_parse_from([
+   689→            "vuma",
+   690→            "build",
+   691→            "hello.vuma",
+   692→            "-o",
+   693→            "out.o",
+   694→            "--target",
+   695→            "pi5-bare",
+   696→        ])
+   697→        .unwrap();
+   698→        match cli.command {
+   699→            Commands::Build {
+   700→                ref file,
+   701→                ref output,
+   702→                ref target,
+   703→            } => {
+   704→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   705→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+   706→                assert_eq!(target, &TargetArg::Pi5Bare);
+   707→            }
+   708→            _ => panic!("expected Build command"),
+   709→        }
+   710→    }
+   711→
+   712→    /// Test 3: `vuma run hello.vuma` parses correctly.
+   713→    #[test]
+   714→    fn test_run_basic() {
+   715→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
+   716→        match cli.command {
+   717→            Commands::Run { ref file, ref args } => {
+   718→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   719→                assert!(args.is_empty());
+   720→            }
+   721→            _ => panic!("expected Run command"),
+   722→        }
+   723→    }
+   724→
+   725→    /// Test 4: `vuma run hello.vuma arg1 arg2` passes trailing args.
+   726→    #[test]
+   727→    fn test_run_with_args() {
+   728→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
+   729→        match cli.command {
+   730→            Commands::Run { ref file, ref args } => {
+   731→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   732→                assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
+   733→            }
+   734→            _ => panic!("expected Run command"),
+   735→        }
+   736→    }
+   737→
+   738→    /// Test 5: `vuma check hello.vuma` parses correctly.
+   739→    #[test]
+   740→    fn test_check() {
+   741→        let cli = Cli::try_parse_from(["vuma", "check", "hello.vuma"]).unwrap();
+   742→        match cli.command {
+   743→            Commands::Check { ref file } => {
+   744→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   745→            }
+   746→            _ => panic!("expected Check command"),
+   747→        }
+   748→    }
+   749→
+   750→    /// Test 6: `vuma emit aarch64 hello.vuma` parses correctly.
+   751→    #[test]
+   752→    fn test_emit_aarch64() {
+   753→        let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
+   754→        match cli.command {
+   755→            Commands::Emit {
+   756→                isa,
+   757→                ref file,
+   758→                ref output,
+   759→            } => {
+   760→                assert_eq!(isa, IsaArg::Aarch64);
+   761→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   762→                assert!(output.is_none());
+   763→            }
+   764→            _ => panic!("expected Emit command"),
+   765→        }
+   766→    }
+   767→
+   768→    /// Test 7: `vuma emit x86-64 hello.vuma -o out.o` parses correctly.
+   769→    #[test]
+   770→    fn test_emit_x86_64_with_output() {
+   771→        let cli =
+   772→            Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+   773→        match cli.command {
+   774→            Commands::Emit {
+   775→                isa,
+   776→                ref file,
+   777→                ref output,
+   778→            } => {
+   779→                assert_eq!(isa, IsaArg::X86_64);
+   780→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   781→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+   782→            }
+   783→            _ => panic!("expected Emit command"),
+   784→        }
+   785→    }
+   786→
+   787→    /// Test 8: `vuma disasm hello.o --isa riscv64 --base-addr 0x1000` parses correctly.
+   788→    #[test]
+   789→    fn test_disasm() {
+   790→        let cli = Cli::try_parse_from([
+   791→            "vuma",
+   792→            "disasm",
+   793→            "hello.o",
+   794→            "--isa",
+   795→            "riscv64",
+   796→            "--base-addr",
+   797→            "0x1000",
+   798→        ])
+   799→        .unwrap();
+   800→        match cli.command {
+   801→            Commands::Disasm {
+   802→                ref file,
+   803→                isa,
+   804→                ref base_addr,
+   805→            } => {
+   806→                assert_eq!(file, &PathBuf::from("hello.o"));
+   807→                assert_eq!(isa, IsaArg::Riscv64);
+   808→                assert_eq!(base_addr, "0x1000");
+   809→            }
+   810→            _ => panic!("expected Disasm command"),
+   811→        }
+   812→    }
+   813→
+   814→    /// Test 9: `vuma verify hello.vuma` parses correctly.
+   815→    #[test]
+   816→    fn test_verify() {
+   817→        let cli = Cli::try_parse_from(["vuma", "verify", "hello.vuma"]).unwrap();
+   818→        match cli.command {
+   819→            Commands::Verify { ref file } => {
+   820→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+   821→            }
+   822→            _ => panic!("expected Verify command"),
+   823→        }
+   824→    }
+   825→
+   826→    /// Test 10: `vuma repl` parses correctly.
+   827→    #[test]
+   828→    fn test_repl() {
+   829→        let cli = Cli::try_parse_from(["vuma", "repl"]).unwrap();
+   830→        match cli.command {
+   831→            Commands::Repl => {}
+   832→            _ => panic!("expected Repl command"),
+   833→        }
+   834→    }
+   835→
+   836→    /// Test 11: Global --opt-level flag works.
+   837→    #[test]
+   838→    fn test_global_opt_level() {
+   839→        let cli =
+   840→            Cli::try_parse_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
+   841→        assert_eq!(cli.opt_level, OptLevelArg::O0);
+   842→    }
+   843→
+   844→    /// Test 12: Global --verification flag works.
+   845→    #[test]
+   846→    fn test_global_verification_level() {
+   847→        let cli = Cli::try_parse_from([
+   848→            "vuma",
+   849→            "--verification",
+   850→            "exhaustive",
+   851→            "build",
+   852→            "hello.vuma",
+   853→        ])
+   854→        .unwrap();
+   855→        assert_eq!(cli.verification, VerificationArg::Exhaustive);
+   856→    }
+   857→
+   858→    /// Test 13: Global --debug flag works.
+   859→    #[test]
+   860→    fn test_global_debug_flag() {
+   861→        let cli = Cli::try_parse_from(["vuma", "--debug", "build", "hello.vuma"]).unwrap();
+   862→        assert!(cli.debug);
+   863→    }
+   864→
+   865→    /// Test 14: Default values are correct.
+   866→    #[test]
+   867→    fn test_defaults() {
+   868→        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+   869→        assert_eq!(cli.opt_level, OptLevelArg::O2);
+   870→        assert_eq!(cli.verification, VerificationArg::Normal);
+   871→        assert!(!cli.debug);
+   872→    }
+   873→
+   874→    /// Test 15: All ISA values are parseable.
+   875→    #[test]
+   876→    fn test_all_isa_values() {
+   877→        let isa_names = [
+   878→            "aarch64",
+   879→            "x86_64",
+   880→            "riscv64",
+   881→            "wasm32",
+   882→            "loongarch64",
+   883→            "arm32",
+   884→            "mips64",
+   885→            "ppc64",
+   886→        ];
+   887→        for name in isa_names {
+   888→            let cli = Cli::try_parse_from(["vuma", "emit", name, "test.vuma"]).unwrap();
+   889→            match cli.command {
+   890→                Commands::Emit { isa, .. } => {
+   891→                    // Verify it parsed without error.
+   892→                    let _backend_kind = BackendKind::from(isa);
+   893→                }
+   894→                _ => panic!("expected Emit command for ISA {}", name),
+   895→            }
+   896→        }
+   897→    }
+   898→
+   899→    /// Test 16: OptLevelArg conversion to pipeline OptLevel.
+   900→    #[test]
+   901→    fn test_opt_level_conversion() {
+   902→        assert_eq!(OptLevel::from(OptLevelArg::O0), OptLevel::O0);
+   903→        assert_eq!(OptLevel::from(OptLevelArg::O1), OptLevel::O1);
+   904→        assert_eq!(OptLevel::from(OptLevelArg::O2), OptLevel::O2);
+   905→        assert_eq!(OptLevel::from(OptLevelArg::O3), OptLevel::O3);
+   906→    }
+   907→
+   908→    /// Test 17: VerificationArg conversion to pipeline VerificationLevel.
+   909→    #[test]
+   910→    fn test_verification_conversion() {
+   911→        assert_eq!(
+   912→            VerificationLevel::from(VerificationArg::None),
+   913→            VerificationLevel::None
+   914→        );
+   915→        assert_eq!(
+   916→            VerificationLevel::from(VerificationArg::Quick),
+   917→            VerificationLevel::Quick
+   918→        );
+   919→        assert_eq!(
+   920→            VerificationLevel::from(VerificationArg::Normal),
+   921→            VerificationLevel::Normal
+   922→        );
+   923→        assert_eq!(
+   924→            VerificationLevel::from(VerificationArg::Exhaustive),
+   925→            VerificationLevel::Exhaustive
+   926→        );
+   927→    }
+   928→
+   929→    /// Test 18: TargetArg conversion to pipeline CompileTarget.
+   930→    #[test]
+   931→    fn test_target_conversion() {
+   932→        assert_eq!(
+   933→            CompileTarget::from(TargetArg::Pi5Bare),
+   934→            CompileTarget::Pi5Bare
+   935→        );
+   936→        assert_eq!(
+   937→            CompileTarget::from(TargetArg::Pi5Linux),
+   938→            CompileTarget::Pi5Linux
+   939→        );
+   940→        assert_eq!(CompileTarget::from(TargetArg::Linux), CompileTarget::Linux);
+   941→    }
+   942→
+   943→    /// Test 19: default_output_path produces correct path.
+   944→    #[test]
+   945→    fn test_default_output_path() {
+   946→        let input = PathBuf::from("hello.vuma");
+   947→        let output = default_output_path(&input);
+   948→        assert_eq!(output, PathBuf::from("hello.o"));
+   949→
+   950→        let input2 = PathBuf::from("/tmp/test.vuma");
+   951→        let output2 = default_output_path(&input2);
+   952→        assert_eq!(output2, PathBuf::from("/tmp/test.o"));
+   953→    }
+   954→
+   955→    /// Test 20: Invalid subcommand is rejected.
+   956→    #[test]
+   957→    fn test_invalid_subcommand() {
+   958→        let result = Cli::try_parse_from(["vuma", "invalid"]);
+   959→        assert!(result.is_err());
+   960→    }
+   961→}
+   962→

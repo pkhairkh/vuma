@@ -956,22 +956,8 @@ pub enum Instruction {
         rn: Register,
         offset: i32,
     },
-    /// Store pair (signed offset): `STP Rt1, Rt2, [Rn, #offset]`
+    /// Store pair: `STP Rt1, Rt2, [Rn, #offset]`
     STP {
-        rt1: Register,
-        rt2: Register,
-        rn: Register,
-        offset: i32,
-    },
-    /// Store pair (pre-indexed): `STP Rt1, Rt2, [Rn, #offset]!`
-    STP_PRE {
-        rt1: Register,
-        rt2: Register,
-        rn: Register,
-        offset: i32,
-    },
-    /// Load pair (post-indexed): `LDP Rt1, Rt2, [Rn], #offset`
-    LDP_POST {
         rt1: Register,
         rt2: Register,
         rn: Register,
@@ -1487,7 +1473,7 @@ impl Instruction {
                 }
             }
 
-            // ---- LDP (signed offset, 64-bit) ----
+            // ---- LDP (signed offset) ----
             Instruction::LDP {
                 rt1,
                 rt2,
@@ -1495,17 +1481,14 @@ impl Instruction {
                 offset,
             } => {
                 let imm7 = *offset / 8;
-                // LDP <Rt1>, <Rt2>, [<Rn>, #<imm>]
-                // Encoding: x010 1001 01 imm7 Rt2 Rn Rt1
-                // Rt2 at bits[14:10], Rn at bits[9:5], Rt1 at bits[4:0]
-                Ok(0xA9400000u32
+                Ok(0b101_0100_1100_0000_0000_0000_0000_0000
                     | (((imm7 as u32) & 0x7F) << 15)
-                    | (rt2.encoding() << 10)
-                    | (rn.encoding() << 5)
-                    | rt1.encoding())
+                    | (rn.encoding() << 10)
+                    | (rt1.encoding() << 5)
+                    | rt2.encoding())
             }
 
-            // ---- STP (signed offset, 64-bit) ----
+            // ---- STP (signed offset) ----
             Instruction::STP {
                 rt1,
                 rt2,
@@ -1513,50 +1496,11 @@ impl Instruction {
                 offset,
             } => {
                 let imm7 = *offset / 8;
-                // STP <Rt1>, <Rt2>, [<Rn>, #<imm>]
-                // Encoding: x010 1001 00 imm7 Rt2 Rn Rt1
-                // Rt2 at bits[14:10], Rn at bits[9:5], Rt1 at bits[4:0]
-                Ok(0xA9000000u32
+                Ok(0b101_0100_0100_0000_0000_0000_0000_0000
                     | (((imm7 as u32) & 0x7F) << 15)
-                    | (rt2.encoding() << 10)
-                    | (rn.encoding() << 5)
-                    | rt1.encoding())
-            }
-
-            // ---- STP (pre-indexed, 64-bit) ----
-            Instruction::STP_PRE {
-                rt1,
-                rt2,
-                rn,
-                offset,
-            } => {
-                let imm7 = *offset / 8;
-                // STP <Rt1>, <Rt2>, [<Rn>, #<imm>]!
-                // Encoding: x010 1001 11 imm7 Rt2 Rn Rt1
-                // Rt2 at bits[14:10], Rn at bits[9:5], Rt1 at bits[4:0]
-                Ok(0xA9800000u32
-                    | (((imm7 as u32) & 0x7F) << 15)
-                    | (rt2.encoding() << 10)
-                    | (rn.encoding() << 5)
-                    | rt1.encoding())
-            }
-
-            // ---- LDP (post-indexed, 64-bit) ----
-            Instruction::LDP_POST {
-                rt1,
-                rt2,
-                rn,
-                offset,
-            } => {
-                let imm7 = *offset / 8;
-                // LDP <Rt1>, <Rt2>, [<Rn>], #<imm>
-                // Encoding: x010 1001 11 imm7 Rt2 Rn Rt1 (with L=1)
-                // bits[23:22] = 11 (post-indexed + load)
-                Ok(0xA8C00000u32
-                    | (((imm7 as u32) & 0x7F) << 15)
-                    | (rt2.encoding() << 10)
-                    | (rn.encoding() << 5)
-                    | rt1.encoding())
+                    | (rn.encoding() << 10)
+                    | (rt1.encoding() << 5)
+                    | rt2.encoding())
             }
 
             // ---- LDXR ----
@@ -1721,17 +1665,17 @@ impl Instruction {
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- UBFM (unsigned bitfield move, 64-bit) ----
-            // UBFM: 1 10 100110 1 immr imms Rn Rd
-            Instruction::UBFM { rd, rn, immr, imms } => Ok(0xD3400000u32
+            // ---- UBFM (unsigned bitfield move) ----
+            // UBFM: 1 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+            Instruction::UBFM { rd, rn, immr, imms } => Ok(0x53000000u32
                 | ((*immr & 0x3F) << 16)
                 | ((*imms & 0x3F) << 10)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SBFM (signed bitfield move, 64-bit) ----
-            // SBFM: 1 00 100110 1 immr imms Rn Rd
-            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x93400000u32
+            // ---- SBFM (signed bitfield move) ----
+            // SBFM: 0 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x13000000u32
                 | ((*immr & 0x3F) << 16)
                 | ((*imms & 0x3F) << 10)
                 | (rn.encoding() << 5)
@@ -1787,21 +1731,9 @@ impl Instruction {
             Instruction::ISB => Ok(0b1101_0101_0000_1011_1011_1011_0000_1110),
 
             // ---- MOV (alias for ORR Xd, XZR, Xm) ----
-            // ---- MOV (alias for ORR Xd, XZR, Xm or ADD Xd, SP, #0) ----
-            Instruction::MOV { rd, rm } => {
-                // When the source is SP, ORR cannot be used because register 31
-                // in the Rm position of ORR is XZR, not SP.  Use ADD Xd, SP, #0
-                // instead, which correctly reads SP (register 31 in Rn of ADD is SP).
-                if matches!(rm, Register::SP) {
-                    // ADD Rd, SP, #0  →  1 0 0 1 0001 00 imm12 Rn Rd
-                    // imm12 = 0, Rn = SP (31)
-                    Ok(0x91000000u32 | (31u32 << 5) | rd.encoding())
-                } else {
-                    Ok(0xAA0003E0u32
-                        | (rm.encoding() << 16)
-                        | rd.encoding())
-                }
-            }
+            Instruction::MOV { rd, rm } => Ok(0b101_0101_0000_0000_0000_0011_1110_0000
+                | (rm.encoding() << 16)
+                | rd.encoding()),
 
             // ---- MOVZ ----
             Instruction::MOVZ { rd, imm16, shift } => {
@@ -2163,25 +2095,11 @@ impl Instruction {
                     | rd.encoding())
             }
 
-            // ---- MOV (alias for ORR Xd/Wd, XZR/WZR, Xm/Wm or ADD Xd, SP, #0) ----
-            Instruction::MOV { rd, rm } => {
-                // When the source is SP, ORR cannot be used because register 31
-                // in the Rm position of ORR is XZR, not SP.  Use ADD Rd, SP, #0
-                // instead, which correctly reads SP (register 31 in Rn of ADD is SP).
-                if matches!(rm, Register::SP) {
-                    // ADD Rd, SP, #0  →  sf 0 0 1 0001 00 imm12 Rn Rd
-                    // imm12 = 0, Rn = SP (31)
-                    Ok((sf << 31)
-                        | 0b0001_0001_0000_0000_0000_0000_0000_0000
-                        | (31u32 << 5)
-                        | rd.encoding())
-                } else {
-                    Ok((sf << 31)
-                        | 0b01_0101_0000_0000_0000_0011_1110_0000
-                        | (rm.encoding() << 16)
-                        | rd.encoding())
-                }
-            }
+            // ---- MOV (alias for ORR Xd/Wd, XZR/WZR, Xm/Wm) ----
+            Instruction::MOV { rd, rm } => Ok((sf << 31)
+                | 0b01_0101_0000_0000_0000_0011_1110_0000
+                | (rm.encoding() << 16)
+                | rd.encoding()),
 
             // ---- MOVZ ----
             Instruction::MOVZ { rd, imm16, shift } => {
@@ -2573,8 +2491,8 @@ impl Instruction {
             });
         }
 
-        // ---- LDP (signed offset, 64-bit): 101_0100_101_imm7_Rt2_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1010100101 {
+        // ---- LDP (signed offset, 64-bit): 101_0100_110_imm7_Rt2_Rn_Rt ----
+        if (word >> 22) & 0x3FF == 0b1010100110 {
             let rt1_reg = Register::from_encoding(rd)?;
             let rt2 = (word >> 10) & 0x1F;
             let rt2_reg = Register::from_encoding(rt2)?;
@@ -2589,8 +2507,8 @@ impl Instruction {
             });
         }
 
-        // ---- STP (signed offset, 64-bit): 101_0100_100_imm7_Rt2_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1010100100 {
+        // ---- STP (signed offset, 64-bit): 101_0100_010_imm7_Rt2_Rn_Rt ----
+        if (word >> 22) & 0x3FF == 0b1010100010 {
             let rt1_reg = Register::from_encoding(rd)?;
             let rt2 = (word >> 10) & 0x1F;
             let rt2_reg = Register::from_encoding(rt2)?;
@@ -2598,38 +2516,6 @@ impl Instruction {
             let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
             let offset = imm7 * 8;
             return Some(Instruction::STP {
-                rt1: rt1_reg,
-                rt2: rt2_reg,
-                rn: rn_reg,
-                offset,
-            });
-        }
-
-        // ---- STP (pre-indexed, 64-bit): 101_0100_110_imm7_Rt2_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1010100110 {
-            let rt1_reg = Register::from_encoding(rd)?;
-            let rt2 = (word >> 10) & 0x1F;
-            let rt2_reg = Register::from_encoding(rt2)?;
-            let rn_reg = Register::from_encoding(rn)?;
-            let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
-            let offset = imm7 * 8;
-            return Some(Instruction::STP_PRE {
-                rt1: rt1_reg,
-                rt2: rt2_reg,
-                rn: rn_reg,
-                offset,
-            });
-        }
-
-        // ---- LDP (post-indexed, 64-bit): 101_0100_011_imm7_Rt2_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1010100011 {
-            let rt1_reg = Register::from_encoding(rd)?;
-            let rt2 = (word >> 10) & 0x1F;
-            let rt2_reg = Register::from_encoding(rt2)?;
-            let rn_reg = Register::from_encoding(rn)?;
-            let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
-            let offset = imm7 * 8;
-            return Some(Instruction::LDP_POST {
                 rt1: rt1_reg,
                 rt2: rt2_reg,
                 rn: rn_reg,
@@ -2715,22 +2601,6 @@ impl std::fmt::Display for Instruction {
                 offset,
             } => {
                 write!(f, "stp {}, {}, [{}, #{}]", rt1, rt2, rn, offset)
-            }
-            Instruction::STP_PRE {
-                rt1,
-                rt2,
-                rn,
-                offset,
-            } => {
-                write!(f, "stp {}, {}, [{}, #{}]!", rt1, rt2, rn, offset)
-            }
-            Instruction::LDP_POST {
-                rt1,
-                rt2,
-                rn,
-                offset,
-            } => {
-                write!(f, "ldp {}, {}, [{}], #{}", rt1, rt2, rn, offset)
             }
             Instruction::LDXR { rt, rn } => write!(f, "ldxr {}, [{}]", rt, rn),
             Instruction::STXR { rs, rt, rn } => write!(f, "stxr {}, {}, [{}]", rs, rt, rn),
@@ -3040,6 +2910,7 @@ impl InstructionSelector {
             BinOpKind::Shl => Instruction::LSL { rd, rn, rm },
             BinOpKind::ShrL => Instruction::LSR { rd, rn, rm },
             BinOpKind::ShrA => Instruction::ASR { rd, rn, rm },
+            BinOpKind::Ror | BinOpKind::Rol => Instruction::ASR { rd, rn, rm }, // placeholder
             _ => {
                 return Err(CodegenError::InvalidInstruction(format!(
                     "not a bitwise/shift op: {:?}",
@@ -3609,7 +3480,9 @@ impl InstructionSelector {
                     | BinOpKind::Xor
                     | BinOpKind::Shl
                     | BinOpKind::ShrL
-                    | BinOpKind::ShrA => {
+                    | BinOpKind::ShrA
+                    | BinOpKind::Ror
+                    | BinOpKind::Rol => {
                         self.select_computation_bitwise(*op, rd, rn, rm)?;
                     }
                     BinOpKind::SRem | BinOpKind::URem => {
@@ -4268,8 +4141,6 @@ impl BarrierInserter {
                 | Instruction::STRH { .. }
                 | Instruction::LDP { .. }
                 | Instruction::STP { .. }
-                | Instruction::STP_PRE { .. }
-                | Instruction::LDP_POST { .. }
                 | Instruction::LDXR { .. }
                 | Instruction::STXR { .. }
                 | Instruction::LDAXR { .. }

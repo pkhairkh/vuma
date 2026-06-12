@@ -45,6 +45,11 @@ pub struct Parser<'src> {
     expr_depth: u32,
     /// Maximum allowed recursion depth for expression parsing.
     max_depth: u32,
+    /// When true, struct literal parsing is suppressed in `parse_postfix()`.
+    /// Used when parsing the end expression of a range (`..`) so that `{`
+    /// is not consumed as part of a struct literal and remains available
+    /// for the enclosing construct (e.g. a for-loop body).
+    no_struct_literal: bool,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -114,6 +119,7 @@ impl<'src> Parser<'src> {
             pushback: std::collections::VecDeque::new(),
             expr_depth: 0,
             max_depth: MAX_EXPR_DEPTH,
+            no_struct_literal: false,
         }
     }
 
@@ -1491,7 +1497,12 @@ impl<'src> Parser<'src> {
             if self.current.kind == TokenKind::DotDot && min_prec == 0 {
                 let start = left.span().start;
                 self.advance(); // consume '..'
+                // Suppress struct literal parsing for the range end so that
+                // `0..n { … }` does not interpret `n {` as a struct literal.
+                let prev = self.no_struct_literal;
+                self.no_struct_literal = true;
                 let end_expr = self.parse_expr_with_precedence(1)?;
+                self.no_struct_literal = prev;
                 let end = end_expr.span().end;
                 left = Expr::Range {
                     start: Box::new(left),
@@ -1683,6 +1694,13 @@ impl<'src> Parser<'src> {
                     // Struct literal (only if `expr` is an identifier-like name
                     // and the brace is followed by `ident :` — otherwise the `{`
                     // belongs to a block statement like `if cond { … }`).
+                    //
+                    // When `no_struct_literal` is set (e.g. parsing the end of a
+                    // range expression like `0..n`), skip this branch entirely so
+                    // that the `{` remains for the enclosing construct.
+                    if self.no_struct_literal {
+                        break;
+                    }
                     let start = expr.span().start;
                     if let Expr::Var { name, .. } = &expr {
                         let name = name.clone();
@@ -4504,6 +4522,29 @@ fn process(buf: *Buffer) -> u32 {
         let program = parser
             .parse_program()
             .expect("for loop over range should parse");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.body.statements.len(), 1);
+                assert!(matches!(&f.body.statements[0], Stmt::For(_)));
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // ---- Reg Test 12b: For loop over range with variable end ----
+    #[test]
+    fn reg_for_loop_over_range_var_end() {
+        let source = r#"
+            fn test(n: u32) {
+                for i in 0..n {
+                    val: u32 = 0;
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser
+            .parse_program()
+            .expect("for loop over range with variable end should parse");
         match &program.items[0] {
             Item::FnDef(f) => {
                 assert_eq!(f.body.statements.len(), 1);

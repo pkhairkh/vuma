@@ -17,10 +17,13 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use vuma::pipeline::{
-    compile, compile_for_isa, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
-    VumaError,
+    compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
 };
 use vuma_codegen::backend::{create_backend, BackendKind};
+use vuma_codegen::ScgToIr;
+use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
+    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode};
+use vuma_codegen::ir::BinOpKind;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLI definition (clap derive)
@@ -407,6 +410,10 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 }
 
 /// `vuma emit <isa> <file>` — Compile to a specific ISA target.
+///
+/// Uses the direct AST → codegen SCG → IR path for better code quality
+/// than the main pipeline (which goes through the semantic SCG and loses
+/// most program semantics in the SCG→IR bridge).
 fn cmd_emit(
     cli: &Cli,
     isa: IsaArg,
@@ -415,53 +422,735 @@ fn cmd_emit(
 ) -> Result<(), String> {
     let source = read_source(file)?;
     let backend_kind = BackendKind::from(isa);
-    let config = make_config(cli, CompileTarget::Pi5Linux);
 
-    // Create the target backend
+    // Step 1: Parse source → AST.
+    let mut parser = vuma_parser::Parser::new(&source);
+    let parse_result = parser.parse_program();
+    if parse_result.is_err() {
+        return Err(format!("parse error: {:?}", parse_result.errors));
+    }
+    if !parse_result.errors.is_empty() {
+        eprintln!("[emit] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
+        for err in &parse_result.errors {
+            eprintln!("[emit]   {:?}", err);
+        }
+    }
+    let program = parse_result.value.unwrap();
+
+    // Step 2: Bridge parser AST → codegen SCG.
+    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+    // Step 3: Lower codegen SCG → IR.
+    let mut ir_builder = ScgToIr::new();
+    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+        format!("IR conversion error: {}", e)
+    })?;
+
+    eprintln!("[emit] IR program has {} functions", ir_program.functions.len());
+    for func in &ir_program.functions {
+        eprintln!("[emit] Function: {} ({} params, {} vregs)", func.name, func.params.len(), func.vregs.len());
+        for block in &func.blocks {
+            eprintln!("[emit]   Block: {}", block.label);
+            for instr in &block.instructions {
+                eprintln!("[emit]     {:?}", instr);
+            }
+        }
+    }
+
+    // Step 4: Create backend and allocate registers.
     let backend = create_backend(backend_kind).map_err(|e| {
-        format!(
-            "error: cannot create {} backend: {}",
-            backend_kind.isa_name(),
-            e
-        )
+        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
     })?;
 
-    // Use compile_for_isa which drives the pipeline end-to-end
-    // with the target backend for register allocation and encoding.
-    let result = compile_for_isa(&source, &config, backend.as_ref()).map_err(|errors| {
-        print_errors(&errors);
-        format!("compilation failed with {} error(s)", errors.len())
-    })?;
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => allocated_functions.push(allocated),
+            Err(e) => {
+                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+            }
+        }
+    }
 
     let out_path = output
         .as_ref()
         .cloned()
         .unwrap_or_else(|| default_output_path(file));
 
-    fs::write(&out_path, &result.binary).map_err(|e| {
-        format!(
-            "error: cannot write output file '{}': {}",
-            out_path.display(),
-            e
-        )
-    })?;
-    println!(
-        "Emitted {} -> {} ({} bytes, ISA: {})",
-        file.display(),
-        out_path.display(),
-        result.binary.len(),
-        backend.name(),
-    );
-
-    // Print stage timings.
-    for (stage, ms) in &result.stage_timings {
-        println!("  {:20} {}ms", stage, ms);
+    // Step 5: Encode and write output.
+    if !allocated_functions.is_empty() {
+        let allocated_program = vuma_codegen::backend::AllocatedProgram {
+            functions: allocated_functions,
+            total_code_size: 0,
+            total_data_size: 0,
+        };
+        match backend.encode_program(&allocated_program) {
+            Ok(bytes) => {
+                fs::write(&out_path, &bytes).map_err(|e| {
+                    format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                })?;
+                println!(
+                    "Emitted {} -> {} ({} bytes, ISA: {})",
+                    file.display(),
+                    out_path.display(),
+                    bytes.len(),
+                    backend.name(),
+                );
+            }
+            Err(e) => {
+                return Err(format!("{} encoding failed: {}", backend.name(), e));
+            }
+        }
+    } else {
+        return Err("no functions were successfully allocated".to_string());
     }
 
     Ok(())
 }
 
-/// `vuma disasm <file>` — Read binary and disassemble.
+/// Bridge parser AST → codegen SCG.
+///
+/// This converts the parser's AST into the codegen's SCG representation,
+/// which can then be lowered to IR. This bypasses the main pipeline's
+/// semantic SCG which loses most program semantics.
+///
+/// Key design: expressions are flattened into three-address code (TAC) by
+/// introducing temporary variables for sub-expressions. This preserves the
+/// full semantics of nested binary operations, function calls, dereferences,
+/// and casts.
+fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
+    use vuma_parser::ast::Item;
+
+    let mut nodes: Vec<ScgNode> = Vec::new();
+
+    for item in &program.items {
+        if let Item::FnDef(fn_def) = item {
+            let params: Vec<ScgParam> = fn_def
+                .params
+                .iter()
+                .map(|p| ScgParam {
+                    name: p.name.clone(),
+                    ty: bridge_type_to_codegen_scg(&p.ty),
+                })
+                .collect();
+
+            let results = if let Some(ref ret_ty) = fn_def.return_type {
+                vec![bridge_type_to_codegen_scg(&Some(ret_ty.clone()))]
+            } else {
+                vec![]
+            };
+
+            let mut ctx = BridgeCtx::new();
+            let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
+
+            // Ensure every function ends with a Return statement.
+            // If the body doesn't end with a Return, add an implicit one.
+            let has_return = body.last().map_or(false, |s| matches!(s, ScgStatement::Return(_)));
+            if !has_return {
+                body.push(ScgStatement::Return(vec![]));
+            }
+
+            nodes.push(ScgNode::Function(ScgFunction {
+                name: fn_def.name.clone(),
+                params,
+                results,
+                body,
+            }));
+        }
+    }
+
+    Scg { nodes }
+}
+
+/// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter.
+struct BridgeCtx {
+    temp_counter: u32,
+}
+
+impl BridgeCtx {
+    fn new() -> Self {
+        Self { temp_counter: 0 }
+    }
+
+    /// Allocate a unique temporary variable name.
+    fn alloc_temp(&mut self) -> String {
+        let name = format!("__t{}", self.temp_counter);
+        self.temp_counter += 1;
+        name
+    }
+}
+
+/// Convert a parser type annotation to a codegen SCG type.
+fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgType {
+    match ty {
+        Some(vuma_parser::ast::Type::BDBase(name)) => match name.as_str() {
+            "i8" => ScgType::I8,
+            "i16" => ScgType::I16,
+            "i32" => ScgType::I32,
+            "i64" => ScgType::I64,
+            "u8" => ScgType::U8,
+            "u16" => ScgType::U16,
+            "u32" => ScgType::U32,
+            "u64" => ScgType::U64,
+            _ => ScgType::I64,
+        },
+        Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
+        Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
+        _ => ScgType::Void,
+    }
+}
+
+
+/// Convert a parser block into codegen SCG statements, flattening expressions
+/// into three-address code with temporaries.
+fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+    block
+        .statements
+        .iter()
+        .flat_map(|s| bridge_stmt_to_scg(s, ctx))
+        .collect()
+}
+
+/// Flatten an expression into three-address code. Returns the ScgExpr that
+/// holds the result, and appends any intermediate computation statements
+/// to `stmts`.
+///
+/// This is the core of the bridge: it recursively decomposes nested
+/// expressions into a sequence of simple computation nodes, each operating
+/// on at most two operands and producing one result. This preserves the
+/// full semantics of the original expression tree.
+fn flatten_expr(
+    expr: &vuma_parser::ast::Expr,
+    stmts: &mut Vec<ScgStatement>,
+    ctx: &mut BridgeCtx,
+) -> ScgExpr {
+    use vuma_parser::ast::{Expr, Lit, UnOp};
+
+    match expr {
+        // ── Leaf expressions: return directly, no flattening needed ──
+        Expr::Var { name, .. } => ScgExpr::Var(name.clone()),
+        Expr::Lit { value, .. } => match value {
+            Lit::Int(n) => ScgExpr::Int(*n),
+            Lit::Float(f) => ScgExpr::Float(*f),
+            Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
+            Lit::Address(a) => ScgExpr::Int(*a as i64),
+            Lit::String(_) => ScgExpr::Int(0),
+        },
+
+        // ── Binary operations: flatten lhs and rhs, then emit one Computation ──
+        Expr::BinOp { op, lhs, rhs, .. } => {
+            let lhs_expr = flatten_expr(lhs, stmts, ctx);
+            let rhs_expr = flatten_expr(rhs, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            let binop_kind = map_ast_binop(op);
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: dst.clone(),
+                op: binop_kind,
+                lhs: lhs_expr,
+                rhs: rhs_expr,
+                tail_call: false,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Unary operations: flatten operand, then emit one Computation ──
+        Expr::UnOp { op, expr: operand, .. } => {
+            let operand_expr = flatten_expr(operand, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            match op {
+                UnOp::BitNot => {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: dst.clone(),
+                        op: BinOpKind::Xor,
+                        lhs: operand_expr,
+                        rhs: ScgExpr::Int(-1),
+                        tail_call: false,
+                    }));
+                }
+                UnOp::Neg => {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: dst.clone(),
+                        op: BinOpKind::Sub,
+                        lhs: ScgExpr::Int(0),
+                        rhs: operand_expr,
+                        tail_call: false,
+                    }));
+                }
+                UnOp::Not => {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: dst.clone(),
+                        op: BinOpKind::Eq,
+                        lhs: operand_expr,
+                        rhs: ScgExpr::Int(0),
+                        tail_call: false,
+                    }));
+                }
+                UnOp::Deref => {
+                    stmts.push(ScgStatement::Access(AccessNode::Load {
+                        dst: dst.clone(),
+                        ptr: operand_expr,
+                        offset: None,
+                    }));
+                }
+            }
+            ScgExpr::Var(dst)
+        }
+
+        // ── Function call: flatten args, emit CallNode ──
+        Expr::Call { callee, args, .. } => {
+            let func_name = match callee.as_ref() {
+                Expr::Var { name, .. } => name.clone(),
+                _ => "_unknown".into(),
+            };
+            let flat_args: Vec<ScgExpr> = args.iter()
+                .map(|a| flatten_expr(a, stmts, ctx))
+                .collect();
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: func_name,
+                args: flat_args,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Dereference: flatten the address, emit Load ──
+        Expr::Deref { expr, .. } => {
+            let addr = flatten_expr(expr, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: dst.clone(),
+                ptr: addr,
+                offset: None,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Offset (pointer arithmetic): flatten base and offset, emit Add ──
+        Expr::Offset { base, offset, .. } => {
+            let base_expr = flatten_expr(base, stmts, ctx);
+            let off_expr = flatten_expr(offset, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: dst.clone(),
+                op: BinOpKind::Add,
+                lhs: base_expr,
+                rhs: off_expr,
+                tail_call: false,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Cast: flatten operand, pass through ──
+        Expr::Cast { expr, .. } => flatten_expr(expr, stmts, ctx),
+
+        // ── TypeAscription: flatten inner expression ──
+        Expr::TypeAscription { expr, .. } => flatten_expr(expr, stmts, ctx),
+
+        // ── Index: flatten base and index, compute addr, emit Load ──
+        Expr::Index { expr, index, .. } => {
+            let base_expr = flatten_expr(expr, stmts, ctx);
+            let idx_expr = flatten_expr(index, stmts, ctx);
+            let addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: addr.clone(),
+                op: BinOpKind::Add,
+                lhs: base_expr,
+                rhs: idx_expr,
+                tail_call: false,
+            }));
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: dst.clone(),
+                ptr: ScgExpr::Var(addr),
+                offset: None,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Range: just flatten start (range is handled by For) ──
+        Expr::Range { start, .. } => flatten_expr(start, stmts, ctx),
+
+        // ── Allocate: emit as a heap allocation call ──
+        Expr::Allocate { size, .. } => {
+            let size_expr = flatten_expr(size, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: "__vuma_alloc".to_string(),
+                args: vec![size_expr],
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Null → 0 ──
+        Expr::Null { .. } => ScgExpr::Int(0),
+
+        // ── Uninitialized → 0 ──
+        Expr::Uninitialized { .. } => ScgExpr::Int(0),
+
+        // ── Fallback for unsupported expression types ──
+        _ => ScgExpr::Int(0),
+    }
+}
+
+/// Map a VUMA AST BinOp to a codegen BinOpKind.
+fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
+    use vuma_parser::ast::BinOp;
+    match op {
+        BinOp::Add => BinOpKind::Add,
+        BinOp::Sub => BinOpKind::Sub,
+        BinOp::Mul => BinOpKind::Mul,
+        BinOp::Div => BinOpKind::SDiv,
+        BinOp::Mod => BinOpKind::SRem,
+        BinOp::And => BinOpKind::And,
+        BinOp::Or => BinOpKind::Or,
+        BinOp::BitAnd => BinOpKind::And,
+        BinOp::BitOr => BinOpKind::Or,
+        BinOp::BitXor => BinOpKind::Xor,
+        BinOp::Shl => BinOpKind::Shl,
+        BinOp::Shr => BinOpKind::ShrL,
+        BinOp::Eq => BinOpKind::Eq,
+        BinOp::Ne => BinOpKind::Ne,
+        BinOp::Lt => BinOpKind::SLt,
+        BinOp::Le => BinOpKind::SLe,
+        BinOp::Gt => BinOpKind::SGt,
+        BinOp::Ge => BinOpKind::SGe,
+    }
+}
+
+/// Convert a single parser statement into zero or more codegen SCG statements.
+/// Uses `flatten_expr` to decompose nested expressions into three-address code.
+fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+    use vuma_parser::ast::Stmt as PStmt;
+
+    match stmt {
+        // ── let x [: T] = expr ──
+        PStmt::Let(let_stmt) => {
+            let mut stmts = Vec::new();
+
+            // Check if the RHS is an allocate() call → AllocationNode::Stack
+            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
+                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+                    if name == "allocate" {
+                        let size: u32 = args.first()
+                            .and_then(|a| {
+                                if let vuma_parser::ast::Expr::Lit { value, .. } = a {
+                                    if let vuma_parser::ast::Lit::Int(n) = value {
+                                        return Some(*n as u32);
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or(8);
+                        return vec![ScgStatement::Allocation(AllocationNode::Stack {
+                            name: let_stmt.name.clone(),
+                            size,
+                            ty: ScgType::Ptr,
+                        })];
+                    }
+                    // Other function calls → CallNode (flatten args)
+                    let flat_args: Vec<ScgExpr> = args.iter()
+                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+                        .collect();
+                    stmts.push(ScgStatement::Call(CallNode {
+                        dst: Some(let_stmt.name.clone()),
+                        func: name.clone(),
+                        args: flat_args,
+                    }));
+                    return stmts;
+                }
+            }
+
+            // Check if the RHS is an Allocate expression → AllocationNode::Stack
+            if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
+                let size_val: u32 = match size.as_ref() {
+                    vuma_parser::ast::Expr::Lit { value, .. } => {
+                        if let vuma_parser::ast::Lit::Int(n) = value {
+                            *n as u32
+                        } else {
+                            8
+                        }
+                    }
+                    _ => 8,
+                };
+                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+                    name: let_stmt.name.clone(),
+                    size: size_val,
+                    ty: ScgType::Ptr,
+                })];
+            }
+
+            // General case: flatten the expression and assign to dst
+            let result = flatten_expr(&let_stmt.value, &mut stmts, ctx);
+            match &result {
+                ScgExpr::Var(name) if name == &let_stmt.name => {}
+                _ => {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: let_stmt.name.clone(),
+                        op: BinOpKind::Add,
+                        lhs: result,
+                        rhs: ScgExpr::Int(0),
+                        tail_call: false,
+                    }));
+                }
+            }
+            stmts
+        }
+
+        // ── target = value ──
+        PStmt::Assign(assign_stmt) => {
+            let mut stmts = Vec::new();
+
+            // Detect dereference writes: `*expr = val` → Access::Store
+            if let vuma_parser::ast::AssignTarget::Deref { expr, .. } = &assign_stmt.target {
+                let ptr = flatten_expr(expr, &mut stmts, ctx);
+                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+                stmts.push(ScgStatement::Access(AccessNode::Store {
+                    ptr,
+                    offset: None,
+                    value,
+                }));
+                return stmts;
+            }
+
+            // Handle Index target: ptr[index] = value
+            if let vuma_parser::ast::AssignTarget::Index { expr, index, .. } = &assign_stmt.target {
+                let base = flatten_expr(expr, &mut stmts, ctx);
+                let idx = flatten_expr(index, &mut stmts, ctx);
+                let addr = ctx.alloc_temp();
+                stmts.push(ScgStatement::Computation(ComputationNode {
+                    dst: addr.clone(),
+                    op: BinOpKind::Add,
+                    lhs: base,
+                    rhs: idx,
+                    tail_call: false,
+                }));
+                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+                stmts.push(ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var(addr),
+                    offset: None,
+                    value,
+                }));
+                return stmts;
+            }
+
+            let dst = match &assign_stmt.target {
+                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+                vuma_parser::ast::AssignTarget::Deref { .. } => "_deref".into(),
+                vuma_parser::ast::AssignTarget::Index { .. } => "_index".into(),
+            };
+
+            // Detect allocate() expression → AllocationNode::Stack
+            if let vuma_parser::ast::Expr::Allocate { size, .. } = &assign_stmt.value {
+                let size_val: u32 = match size.as_ref() {
+                    vuma_parser::ast::Expr::Lit { value, .. } => {
+                        if let vuma_parser::ast::Lit::Int(n) = value {
+                            *n as u32
+                        } else {
+                            8
+                        }
+                    }
+                    _ => 8,
+                };
+                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+                    name: dst,
+                    size: size_val,
+                    ty: ScgType::Ptr,
+                })];
+            }
+
+            // Detect function calls in assign: `x = foo(args)` → CallNode (flatten args)
+            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &assign_stmt.value {
+                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+                    let flat_args: Vec<ScgExpr> = args.iter()
+                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+                        .collect();
+                    stmts.push(ScgStatement::Call(CallNode {
+                        dst: Some(dst),
+                        func: name.clone(),
+                        args: flat_args,
+                    }));
+                    return stmts;
+                }
+            }
+
+            // General case: flatten the value expression and assign to dst
+            let result = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+            match &result {
+                ScgExpr::Var(name) if name == &dst => {}
+                _ => {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst,
+                        op: BinOpKind::Add,
+                        lhs: result,
+                        rhs: ScgExpr::Int(0),
+                        tail_call: false,
+                    }));
+                }
+            }
+            stmts
+        }
+
+        // ── target op= value ──
+        PStmt::CompoundAssign(ca_stmt) => {
+            let mut stmts = Vec::new();
+            let dst = match &ca_stmt.target {
+                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+                _ => "_".into(),
+            };
+            let binop = match ca_stmt.op {
+                vuma_parser::ast::CompoundOp::Add => BinOpKind::Add,
+                vuma_parser::ast::CompoundOp::Sub => BinOpKind::Sub,
+                vuma_parser::ast::CompoundOp::Mul => BinOpKind::Mul,
+                vuma_parser::ast::CompoundOp::Div => BinOpKind::SDiv,
+                vuma_parser::ast::CompoundOp::Mod => BinOpKind::SRem,
+                vuma_parser::ast::CompoundOp::BitAnd => BinOpKind::And,
+                vuma_parser::ast::CompoundOp::BitOr => BinOpKind::Or,
+                vuma_parser::ast::CompoundOp::BitXor => BinOpKind::Xor,
+                vuma_parser::ast::CompoundOp::Shl => BinOpKind::Shl,
+                vuma_parser::ast::CompoundOp::Shr => BinOpKind::ShrL,
+            };
+            let rhs = flatten_expr(&ca_stmt.value, &mut stmts, ctx);
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: dst.clone(),
+                op: binop,
+                lhs: ScgExpr::Var(dst),
+                rhs,
+                tail_call: false,
+            }));
+            stmts
+        }
+
+        PStmt::Allocate(_) => vec![],
+        PStmt::Free(_) => vec![],
+
+        PStmt::Cast(cast_stmt) => {
+            let mut stmts = Vec::new();
+            let _ = flatten_expr(&cast_stmt.expr, &mut stmts, ctx);
+            stmts
+        }
+
+        PStmt::Return(ret_stmt) => {
+            let mut stmts = Vec::new();
+            let values = match &ret_stmt.value {
+                Some(expr) => vec![flatten_expr(expr, &mut stmts, ctx)],
+                None => vec![],
+            };
+            stmts.push(ScgStatement::Return(values));
+            stmts
+        }
+
+        PStmt::Expr(expr_stmt) => {
+            let mut stmts = Vec::new();
+            let _ = flatten_expr(&expr_stmt.expr, &mut stmts, ctx);
+            stmts
+        }
+
+        PStmt::If(if_stmt) => {
+            let mut pre_stmts = Vec::new();
+            let cond = flatten_expr(&if_stmt.condition, &mut pre_stmts, ctx);
+            let then_body = bridge_block_to_scg_stmts(&if_stmt.then_block, ctx);
+            let else_body = if_stmt
+                .else_block
+                .as_ref()
+                .map(|b| bridge_block_to_scg_stmts(b, ctx));
+            let mut result = pre_stmts;
+            result.push(ScgStatement::Control(ControlNode::If {
+                cond,
+                then_body,
+                else_body,
+            }));
+            result
+        }
+
+        // while condition { body }
+        // Lowered as: Loop { <compute cond>; if cond { body } else { break } }
+        PStmt::While(while_stmt) => {
+            let then_body = bridge_block_to_scg_stmts(&while_stmt.body, ctx);
+            let mut loop_body = Vec::new();
+            let cond = flatten_expr(&while_stmt.condition, &mut loop_body, ctx);
+            loop_body.push(ScgStatement::Control(ControlNode::If {
+                cond,
+                then_body,
+                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+            }));
+            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body })]
+        }
+
+        // for name in start..end { body }
+        // Lowered as:
+        //   name = start
+        //   loop { _cond = name < end; if _cond { body; name = name + 1 } else { break } }
+        PStmt::For(for_stmt) => {
+            let mut pre_stmts = Vec::new();
+            let (start_expr, end_expr) = match &for_stmt.iter {
+                vuma_parser::ast::Expr::Range { start, end, .. } => {
+                    let s = flatten_expr(start, &mut pre_stmts, ctx);
+                    let e = flatten_expr(end, &mut pre_stmts, ctx);
+                    (s, e)
+                }
+                other => {
+                    (ScgExpr::Int(0), ScgExpr::Int(0))
+                }
+            };
+
+            let init_stmt = ScgStatement::Computation(ComputationNode {
+                dst: for_stmt.name.clone(),
+                op: BinOpKind::Add,
+                lhs: start_expr,
+                rhs: ScgExpr::Int(0),
+                tail_call: false,
+            });
+
+            let mut loop_body = Vec::new();
+            let cond_temp = format!("{}_cond", for_stmt.name);
+            loop_body.push(ScgStatement::Computation(ComputationNode {
+                dst: cond_temp.clone(),
+                op: BinOpKind::SLt,
+                lhs: ScgExpr::Var(for_stmt.name.clone()),
+                rhs: end_expr.clone(),
+                tail_call: false,
+            }));
+
+            let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
+            let mut full_then = inner_body;
+            full_then.push(ScgStatement::Computation(ComputationNode {
+                dst: for_stmt.name.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(for_stmt.name.clone()),
+                rhs: ScgExpr::Int(1),
+                tail_call: false,
+            }));
+
+            loop_body.push(ScgStatement::Control(ControlNode::If {
+                cond: ScgExpr::Var(cond_temp),
+                then_body: full_then,
+                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+            }));
+
+            let mut result = pre_stmts;
+            result.push(init_stmt);
+            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body }));
+            result
+        }
+
+        PStmt::Loop(loop_stmt) => {
+            let body = bridge_block_to_scg_stmts(&loop_stmt.body, ctx);
+            vec![ScgStatement::Control(ControlNode::Loop { body })]
+        }
+
+        PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],
+        PStmt::Continue(_) => vec![ScgStatement::Control(ControlNode::Continue)],
+        PStmt::BdDirective(_)
+        | PStmt::Sync(_)
+        | PStmt::UnsafeBlock { .. }
+        | PStmt::Match(_)
+        | PStmt::Access(_) => vec![],
+    }
+}
 fn cmd_disasm(file: &PathBuf, isa: IsaArg, base_addr_str: &str) -> Result<(), String> {
     let bytes = fs::read(file)
         .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;

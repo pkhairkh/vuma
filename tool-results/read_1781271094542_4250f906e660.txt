@@ -1,0 +1,2002 @@
+     1→//! # RISC-V 64-bit Backend
+     2→//!
+     3→//! Implements the `Backend` trait for the RISC-V 64-bit target (RV64GC,
+     4→//! LP64D ABI).  This module provides:
+     5→//!
+     6→//! - `Gpr` — General-purpose register enum (x0–x31)
+     7→//! - `Fpr` — Floating-point register enum (f0–f31)
+     8→//! - `Instruction` — RV64I + M + F/D instruction enum with correct encoding
+     9→//! - Encoding helpers for R/I/S/B/U/J-type instruction formats
+    10→//! - `RiscV64Backend` — `Backend` implementation that lowers IR to RISC-V machine code
+    11→//!
+    12→//! ## RISC-V Register Convention (LP64D ABI)
+    13→//!
+    14→//! | Register(s) | ABI Name | Role                              |
+    15→//! |-------------|----------|-----------------------------------|
+    16→//! | x0          | zero     | Hardwired zero                    |
+    17→//! | x1          | ra       | Return address                    |
+    18→//! | x2          | sp       | Stack pointer                     |
+    19→//! | x3          | gp       | Global pointer                    |
+    20→//! | x4          | tp       | Thread pointer                    |
+    21→//! | x5–x7       | t0–t2    | Caller-saved temporaries          |
+    22→//! | x8          | s0/fp    | Callee-saved / frame pointer      |
+    23→//! | x9          | s1       | Callee-saved                      |
+    24→//! | x10–x17     | a0–a7    | Argument / return registers       |
+    25→//! | x18–x27     | s2–s11   | Callee-saved                      |
+    26→//! | x28–x31     | t3–t6    | Caller-saved temporaries          |
+    27→//!
+    28→//! ## References
+    29→//!
+    30→//! - RISC-V Instruction Set Manual, Volume I: User-Level ISA, Document 20191213
+    31→//! - <https://riscv.org/specifications/>
+    32→
+    33→use crate::backend::{
+    34→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    35→    BackendError, PhysicalReg, RegClass, RiscV64TargetInfo,
+    36→};
+    37→use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+    38→
+    39→// ===========================================================================
+    40→// Opcodes
+    41→// ===========================================================================
+    42→
+    43→/// RISC-V base opcodes (bits [6:0]).
+    44→const OP_LUI: u32 = 0b0110111;
+    45→const OP_AUIPC: u32 = 0b0010111;
+    46→const OP_JAL: u32 = 0b1101111;
+    47→const OP_JALR: u32 = 0b1100111;
+    48→const OP_BRANCH: u32 = 0b1100011;
+    49→const OP_LOAD: u32 = 0b0000011;
+    50→const OP_STORE: u32 = 0b0100011;
+    51→const OP_IMM: u32 = 0b0010011;
+    52→const OP_REG: u32 = 0b0110011;
+    53→const OP_IMM32: u32 = 0b0011011;
+    54→const OP_REG32: u32 = 0b0111011;
+    55→#[allow(dead_code)]
+    56→const OP_SYSTEM: u32 = 0b1110011;
+    57→const OP_MISC_MEM: u32 = 0b0001111;
+    58→const OP_FP: u32 = 0b1010011;
+    59→
+    60→// ===========================================================================
+    61→// General-Purpose Registers
+    62→// ===========================================================================
+    63→
+    64→/// RISC-V 64-bit general-purpose registers (x0–x31).
+    65→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    66→pub enum Gpr {
+    67→    Zero = 0,
+    68→    Ra = 1,
+    69→    Sp = 2,
+    70→    Gp = 3,
+    71→    Tp = 4,
+    72→    T0 = 5,
+    73→    T1 = 6,
+    74→    T2 = 7,
+    75→    S0 = 8,
+    76→    S1 = 9,
+    77→    A0 = 10,
+    78→    A1 = 11,
+    79→    A2 = 12,
+    80→    A3 = 13,
+    81→    A4 = 14,
+    82→    A5 = 15,
+    83→    A6 = 16,
+    84→    A7 = 17,
+    85→    S2 = 18,
+    86→    S3 = 19,
+    87→    S4 = 20,
+    88→    S5 = 21,
+    89→    S6 = 22,
+    90→    S7 = 23,
+    91→    S8 = 24,
+    92→    S9 = 25,
+    93→    S10 = 26,
+    94→    S11 = 27,
+    95→    T3 = 28,
+    96→    T4 = 29,
+    97→    T5 = 30,
+    98→    T6 = 31,
+    99→}
+   100→
+   101→impl Gpr {
+   102→    /// Returns the 5-bit encoding index for this register.
+   103→    pub fn encoding(&self) -> u32 {
+   104→        *self as u32
+   105→    }
+   106→
+   107→    /// Returns the Gpr for a 5-bit encoding index.
+   108→    pub fn from_encoding(idx: u32) -> Option<Gpr> {
+   109→        match idx {
+   110→            0 => Some(Gpr::Zero),
+   111→            1 => Some(Gpr::Ra),
+   112→            2 => Some(Gpr::Sp),
+   113→            3 => Some(Gpr::Gp),
+   114→            4 => Some(Gpr::Tp),
+   115→            5 => Some(Gpr::T0),
+   116→            6 => Some(Gpr::T1),
+   117→            7 => Some(Gpr::T2),
+   118→            8 => Some(Gpr::S0),
+   119→            9 => Some(Gpr::S1),
+   120→            10 => Some(Gpr::A0),
+   121→            11 => Some(Gpr::A1),
+   122→            12 => Some(Gpr::A2),
+   123→            13 => Some(Gpr::A3),
+   124→            14 => Some(Gpr::A4),
+   125→            15 => Some(Gpr::A5),
+   126→            16 => Some(Gpr::A6),
+   127→            17 => Some(Gpr::A7),
+   128→            18 => Some(Gpr::S2),
+   129→            19 => Some(Gpr::S3),
+   130→            20 => Some(Gpr::S4),
+   131→            21 => Some(Gpr::S5),
+   132→            22 => Some(Gpr::S6),
+   133→            23 => Some(Gpr::S7),
+   134→            24 => Some(Gpr::S8),
+   135→            25 => Some(Gpr::S9),
+   136→            26 => Some(Gpr::S10),
+   137→            27 => Some(Gpr::S11),
+   138→            28 => Some(Gpr::T3),
+   139→            29 => Some(Gpr::T4),
+   140→            30 => Some(Gpr::T5),
+   141→            31 => Some(Gpr::T6),
+   142→            _ => None,
+   143→        }
+   144→    }
+   145→
+   146→    /// Returns `true` if this register is available for register allocation.
+   147→    ///
+   148→    /// Zero (x0), Sp (x2), Gp (x3), and Tp (x4) are reserved.
+   149→    pub fn is_allocatable(&self) -> bool {
+   150→        !matches!(self, Gpr::Zero | Gpr::Sp | Gpr::Gp | Gpr::Tp)
+   151→    }
+   152→
+   153→    /// Returns `true` if this register is callee-saved (s0–s11).
+   154→    pub fn is_callee_saved(&self) -> bool {
+   155→        matches!(
+   156→            self,
+   157→            Gpr::S0
+   158→                | Gpr::S1
+   159→                | Gpr::S2
+   160→                | Gpr::S3
+   161→                | Gpr::S4
+   162→                | Gpr::S5
+   163→                | Gpr::S6
+   164→                | Gpr::S7
+   165→                | Gpr::S8
+   166→                | Gpr::S9
+   167→                | Gpr::S10
+   168→                | Gpr::S11
+   169→        )
+   170→    }
+   171→
+   172→    /// Returns `true` if this register is an argument register (a0–a7).
+   173→    pub fn is_arg_reg(&self) -> bool {
+   174→        matches!(
+   175→            self,
+   176→            Gpr::A0 | Gpr::A1 | Gpr::A2 | Gpr::A3 | Gpr::A4 | Gpr::A5 | Gpr::A6 | Gpr::A7
+   177→        )
+   178→    }
+   179→
+   180→    /// Returns the standard assembly name for this register.
+   181→    pub fn asm_name(&self) -> &'static str {
+   182→        match self {
+   183→            Gpr::Zero => "zero",
+   184→            Gpr::Ra => "ra",
+   185→            Gpr::Sp => "sp",
+   186→            Gpr::Gp => "gp",
+   187→            Gpr::Tp => "tp",
+   188→            Gpr::T0 => "t0",
+   189→            Gpr::T1 => "t1",
+   190→            Gpr::T2 => "t2",
+   191→            Gpr::S0 => "s0",
+   192→            Gpr::S1 => "s1",
+   193→            Gpr::A0 => "a0",
+   194→            Gpr::A1 => "a1",
+   195→            Gpr::A2 => "a2",
+   196→            Gpr::A3 => "a3",
+   197→            Gpr::A4 => "a4",
+   198→            Gpr::A5 => "a5",
+   199→            Gpr::A6 => "a6",
+   200→            Gpr::A7 => "a7",
+   201→            Gpr::S2 => "s2",
+   202→            Gpr::S3 => "s3",
+   203→            Gpr::S4 => "s4",
+   204→            Gpr::S5 => "s5",
+   205→            Gpr::S6 => "s6",
+   206→            Gpr::S7 => "s7",
+   207→            Gpr::S8 => "s8",
+   208→            Gpr::S9 => "s9",
+   209→            Gpr::S10 => "s10",
+   210→            Gpr::S11 => "s11",
+   211→            Gpr::T3 => "t3",
+   212→            Gpr::T4 => "t4",
+   213→            Gpr::T5 => "t5",
+   214→            Gpr::T6 => "t6",
+   215→        }
+   216→    }
+   217→
+   218→    /// Returns the Gpr for a given argument index (0–7). Returns `None` for
+   219→    /// indices >= 8.
+   220→    pub fn arg_register(index: usize) -> Option<Gpr> {
+   221→        match index {
+   222→            0 => Some(Gpr::A0),
+   223→            1 => Some(Gpr::A1),
+   224→            2 => Some(Gpr::A2),
+   225→            3 => Some(Gpr::A3),
+   226→            4 => Some(Gpr::A4),
+   227→            5 => Some(Gpr::A5),
+   228→            6 => Some(Gpr::A6),
+   229→            7 => Some(Gpr::A7),
+   230→            _ => None,
+   231→        }
+   232→    }
+   233→}
+   234→
+   235→impl std::fmt::Display for Gpr {
+   236→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   237→        f.write_str(self.asm_name())
+   238→    }
+   239→}
+   240→
+   241→// ===========================================================================
+   242→// Floating-Point Registers
+   243→// ===========================================================================
+   244→
+   245→/// RISC-V 64-bit floating-point registers (f0–f31).
+   246→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   247→pub enum Fpr {
+   248→    F0 = 0,
+   249→    F1 = 1,
+   250→    F2 = 2,
+   251→    F3 = 3,
+   252→    F4 = 4,
+   253→    F5 = 5,
+   254→    F6 = 6,
+   255→    F7 = 7,
+   256→    F8 = 8,
+   257→    F9 = 9,
+   258→    F10 = 10,
+   259→    F11 = 11,
+   260→    F12 = 12,
+   261→    F13 = 13,
+   262→    F14 = 14,
+   263→    F15 = 15,
+   264→    F16 = 16,
+   265→    F17 = 17,
+   266→    F18 = 18,
+   267→    F19 = 19,
+   268→    F20 = 20,
+   269→    F21 = 21,
+   270→    F22 = 22,
+   271→    F23 = 23,
+   272→    F24 = 24,
+   273→    F25 = 25,
+   274→    F26 = 26,
+   275→    F27 = 27,
+   276→    F28 = 28,
+   277→    F29 = 29,
+   278→    F30 = 30,
+   279→    F31 = 31,
+   280→}
+   281→
+   282→impl Fpr {
+   283→    /// Returns the 5-bit encoding index for this register.
+   284→    pub fn encoding(&self) -> u32 {
+   285→        *self as u32
+   286→    }
+   287→
+   288→    /// Returns the Fpr for a 5-bit encoding index.
+   289→    pub fn from_encoding(idx: u32) -> Option<Fpr> {
+   290→        match idx {
+   291→            0 => Some(Fpr::F0),
+   292→            1 => Some(Fpr::F1),
+   293→            2 => Some(Fpr::F2),
+   294→            3 => Some(Fpr::F3),
+   295→            4 => Some(Fpr::F4),
+   296→            5 => Some(Fpr::F5),
+   297→            6 => Some(Fpr::F6),
+   298→            7 => Some(Fpr::F7),
+   299→            8 => Some(Fpr::F8),
+   300→            9 => Some(Fpr::F9),
+   301→            10 => Some(Fpr::F10),
+   302→            11 => Some(Fpr::F11),
+   303→            12 => Some(Fpr::F12),
+   304→            13 => Some(Fpr::F13),
+   305→            14 => Some(Fpr::F14),
+   306→            15 => Some(Fpr::F15),
+   307→            16 => Some(Fpr::F16),
+   308→            17 => Some(Fpr::F17),
+   309→            18 => Some(Fpr::F18),
+   310→            19 => Some(Fpr::F19),
+   311→            20 => Some(Fpr::F20),
+   312→            21 => Some(Fpr::F21),
+   313→            22 => Some(Fpr::F22),
+   314→            23 => Some(Fpr::F23),
+   315→            24 => Some(Fpr::F24),
+   316→            25 => Some(Fpr::F25),
+   317→            26 => Some(Fpr::F26),
+   318→            27 => Some(Fpr::F27),
+   319→            28 => Some(Fpr::F28),
+   320→            29 => Some(Fpr::F29),
+   321→            30 => Some(Fpr::F30),
+   322→            31 => Some(Fpr::F31),
+   323→            _ => None,
+   324→        }
+   325→    }
+   326→
+   327→    /// Returns `true` if this register is callee-saved (f8–f9, f18–f27).
+   328→    pub fn is_callee_saved(&self) -> bool {
+   329→        matches!(
+   330→            self,
+   331→            Fpr::F8
+   332→                | Fpr::F9
+   333→                | Fpr::F18
+   334→                | Fpr::F19
+   335→                | Fpr::F20
+   336→                | Fpr::F21
+   337→                | Fpr::F22
+   338→                | Fpr::F23
+   339→                | Fpr::F24
+   340→                | Fpr::F25
+   341→                | Fpr::F26
+   342→                | Fpr::F27
+   343→        )
+   344→    }
+   345→
+   346→    /// Returns `true` if this register is an FP argument register (f10–f17, aka fa0–fa7).
+   347→    pub fn is_arg_reg(&self) -> bool {
+   348→        matches!(
+   349→            self,
+   350→            Fpr::F10 | Fpr::F11 | Fpr::F12 | Fpr::F13 | Fpr::F14 | Fpr::F15 | Fpr::F16 | Fpr::F17
+   351→        )
+   352→    }
+   353→
+   354→    /// Returns the standard assembly name for this register.
+   355→    pub fn asm_name(&self) -> &'static str {
+   356→        match self {
+   357→            Fpr::F0 => "f0",
+   358→            Fpr::F1 => "f1",
+   359→            Fpr::F2 => "f2",
+   360→            Fpr::F3 => "f3",
+   361→            Fpr::F4 => "f4",
+   362→            Fpr::F5 => "f5",
+   363→            Fpr::F6 => "f6",
+   364→            Fpr::F7 => "f7",
+   365→            Fpr::F8 => "f8",
+   366→            Fpr::F9 => "f9",
+   367→            Fpr::F10 => "f10",
+   368→            Fpr::F11 => "f11",
+   369→            Fpr::F12 => "f12",
+   370→            Fpr::F13 => "f13",
+   371→            Fpr::F14 => "f14",
+   372→            Fpr::F15 => "f15",
+   373→            Fpr::F16 => "f16",
+   374→            Fpr::F17 => "f17",
+   375→            Fpr::F18 => "f18",
+   376→            Fpr::F19 => "f19",
+   377→            Fpr::F20 => "f20",
+   378→            Fpr::F21 => "f21",
+   379→            Fpr::F22 => "f22",
+   380→            Fpr::F23 => "f23",
+   381→            Fpr::F24 => "f24",
+   382→            Fpr::F25 => "f25",
+   383→            Fpr::F26 => "f26",
+   384→            Fpr::F27 => "f27",
+   385→            Fpr::F28 => "f28",
+   386→            Fpr::F29 => "f29",
+   387→            Fpr::F30 => "f30",
+   388→            Fpr::F31 => "f31",
+   389→        }
+   390→    }
+   391→}
+   392→
+   393→impl std::fmt::Display for Fpr {
+   394→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   395→        f.write_str(self.asm_name())
+   396→    }
+   397→}
+   398→
+   399→// ===========================================================================
+   400→// Instruction Encoding Helpers
+   401→// ===========================================================================
+   402→
+   403→/// Encode an R-type instruction.
+   404→///
+   405→/// Format: `funct7[31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]`
+   406→fn encode_r_type(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> [u8; 4] {
+   407→    let word = ((funct7 & 0x7F) << 25)
+   408→        | ((rs2 & 0x1F) << 20)
+   409→        | ((rs1 & 0x1F) << 15)
+   410→        | ((funct3 & 0x7) << 12)
+   411→        | ((rd & 0x1F) << 7)
+   412→        | (opcode & 0x7F);
+   413→    word.to_le_bytes()
+   414→}
+   415→
+   416→/// Encode an I-type instruction.
+   417→///
+   418→/// Format: `imm[31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]`
+   419→fn encode_i_type(imm: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> [u8; 4] {
+   420→    let word = ((imm & 0xFFF) << 20)
+   421→        | ((rs1 & 0x1F) << 15)
+   422→        | ((funct3 & 0x7) << 12)
+   423→        | ((rd & 0x1F) << 7)
+   424→        | (opcode & 0x7F);
+   425→    word.to_le_bytes()
+   426→}
+   427→
+   428→/// Encode an S-type instruction.
+   429→///
+   430→/// Format: `imm[11:5][31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | imm[4:0][11:7] | opcode[6:0]`
+   431→fn encode_s_type(imm: u32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> [u8; 4] {
+   432→    let imm_lo = imm & 0x1F;
+   433→    let imm_hi = (imm >> 5) & 0x7F;
+   434→    let word = (imm_hi << 25)
+   435→        | ((rs2 & 0x1F) << 20)
+   436→        | ((rs1 & 0x1F) << 15)
+   437→        | ((funct3 & 0x7) << 12)
+   438→        | (imm_lo << 7)
+   439→        | (opcode & 0x7F);
+   440→    word.to_le_bytes()
+   441→}
+   442→
+   443→/// Encode a B-type instruction.
+   444→///
+   445→/// Format: `imm[12|10:5][31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | imm[4:1|11][11:7] | opcode[6:0]`
+   446→///
+   447→/// The immediate is a signed 13-bit byte offset (bit 0 is always 0).
+   448→fn encode_b_type(imm: i32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> [u8; 4] {
+   449→    // B-type immediate bit layout:
+   450→    // bit 31:   imm[12]
+   451→    // bits 30:25: imm[10:5]
+   452→    // bits 11:8:  imm[4:1]
+   453→    // bit 7:    imm[11]
+   454→    let imm_u = imm as u32;
+   455→    let word = (((imm_u >> 12) & 0x1) << 31)
+   456→        | (((imm_u >> 5) & 0x3F) << 25)
+   457→        | ((rs2 & 0x1F) << 20)
+   458→        | ((rs1 & 0x1F) << 15)
+   459→        | ((funct3 & 0x7) << 12)
+   460→        | (((imm_u >> 1) & 0xF) << 8)
+   461→        | (((imm_u >> 11) & 0x1) << 7)
+   462→        | (opcode & 0x7F);
+   463→    word.to_le_bytes()
+   464→}
+   465→
+   466→/// Encode a U-type instruction.
+   467→///
+   468→/// Format: `imm[31:12] | rd[11:7] | opcode[6:0]`
+   469→///
+   470→/// The immediate is the upper 20 bits; the lower 12 bits are zero.
+   471→fn encode_u_type(imm: u32, rd: u32, opcode: u32) -> [u8; 4] {
+   472→    let word = (imm & 0xFFFFF000) | ((rd & 0x1F) << 7) | (opcode & 0x7F);
+   473→    word.to_le_bytes()
+   474→}
+   475→
+   476→/// Encode a J-type instruction.
+   477→///
+   478→/// Format: `imm[20|10:1|11|19:12][31:12] | rd[11:7] | opcode[6:0]`
+   479→///
+   480→/// The immediate is a signed 21-bit byte offset (bit 0 is always 0).
+   481→fn encode_j_type(imm: i32, rd: u32, opcode: u32) -> [u8; 4] {
+   482→    // J-type immediate bit layout:
+   483→    // bit 31:    imm[20]
+   484→    // bits 30:21: imm[10:1]
+   485→    // bit 20:    imm[11]
+   486→    // bits 19:12: imm[19:12]
+   487→    let imm_u = imm as u32;
+   488→    let word = (((imm_u >> 20) & 0x1) << 31)
+   489→        | (((imm_u >> 1) & 0x3FF) << 21)
+   490→        | (((imm_u >> 11) & 0x1) << 20)
+   491→        | (((imm_u >> 12) & 0xFF) << 12)
+   492→        | ((rd & 0x1F) << 7)
+   493→        | (opcode & 0x7F);
+   494→    word.to_le_bytes()
+   495→}
+   496→
+   497→// ===========================================================================
+   498→// Instruction Enum
+   499→// ===========================================================================
+   500→
+   501→/// RISC-V 64-bit instruction representations for code generation.
+   502→///
+   503→/// Covers RV64I base, M extension, and key F/D extension instructions.
+   504→/// Each variant captures the operands needed for encoding and disassembly.
+   505→/// The `encode()` method produces a 4-byte little-endian machine code word.
+   506→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   507→pub enum Instruction {
+   508→    // ── RV64I: Upper Immediate ────────────────────────────────────────
+   509→    /// Load Upper Immediate: `lui rd, imm`
+   510→    Lui { rd: Gpr, imm: u32 },
+   511→    /// Add Upper Immediate to PC: `auipc rd, imm`
+   512→    Auipc { rd: Gpr, imm: u32 },
+   513→
+   514→    // ── RV64I: Jumps ─────────────────────────────────────────────────
+   515→    /// Jump and Link: `jal rd, offset`
+   516→    Jal { rd: Gpr, offset: i32 },
+   517→    /// Jump and Link Register: `jalr rd, rs1, imm`
+   518→    Jalr { rd: Gpr, rs1: Gpr, imm: i32 },
+   519→
+   520→    // ── RV64I: Branches ──────────────────────────────────────────────
+   521→    /// Branch if Equal: `beq rs1, rs2, offset`
+   522→    Beq { rs1: Gpr, rs2: Gpr, offset: i32 },
+   523→    /// Branch if Not Equal: `bne rs1, rs2, offset`
+   524→    Bne { rs1: Gpr, rs2: Gpr, offset: i32 },
+   525→    /// Branch if Less Than (signed): `blt rs1, rs2, offset`
+   526→    Blt { rs1: Gpr, rs2: Gpr, offset: i32 },
+   527→    /// Branch if Greater or Equal (signed): `bge rs1, rs2, offset`
+   528→    Bge { rs1: Gpr, rs2: Gpr, offset: i32 },
+   529→    /// Branch if Less Than (unsigned): `bltu rs1, rs2, offset`
+   530→    Bltu { rs1: Gpr, rs2: Gpr, offset: i32 },
+   531→    /// Branch if Greater or Equal (unsigned): `bgeu rs1, rs2, offset`
+   532→    Bgeu { rs1: Gpr, rs2: Gpr, offset: i32 },
+   533→
+   534→    // ── RV64I: Loads ─────────────────────────────────────────────────
+   535→    /// Load Byte (sign-extended): `lb rd, offset(rs1)`
+   536→    Lb { rd: Gpr, rs1: Gpr, imm: i32 },
+   537→    /// Load Halfword (sign-extended): `lh rd, offset(rs1)`
+   538→    Lh { rd: Gpr, rs1: Gpr, imm: i32 },
+   539→    /// Load Word (sign-extended): `lw rd, offset(rs1)`
+   540→    Lw { rd: Gpr, rs1: Gpr, imm: i32 },
+   541→    /// Load Doubleword: `ld rd, offset(rs1)`
+   542→    Ld { rd: Gpr, rs1: Gpr, imm: i32 },
+   543→    /// Load Byte (zero-extended): `lbu rd, offset(rs1)`
+   544→    Lbu { rd: Gpr, rs1: Gpr, imm: i32 },
+   545→    /// Load Halfword (zero-extended): `lhu rd, offset(rs1)`
+   546→    Lhu { rd: Gpr, rs1: Gpr, imm: i32 },
+   547→    /// Load Word (zero-extended, RV64): `lwu rd, offset(rs1)`
+   548→    Lwu { rd: Gpr, rs1: Gpr, imm: i32 },
+   549→
+   550→    // ── RV64I: Stores ────────────────────────────────────────────────
+   551→    /// Store Byte: `sb rs2, offset(rs1)`
+   552→    Sb { rs1: Gpr, rs2: Gpr, imm: i32 },
+   553→    /// Store Halfword: `sh rs2, offset(rs1)`
+   554→    Sh { rs1: Gpr, rs2: Gpr, imm: i32 },
+   555→    /// Store Word: `sw rs2, offset(rs1)`
+   556→    Sw { rs1: Gpr, rs2: Gpr, imm: i32 },
+   557→    /// Store Doubleword: `sd rs2, offset(rs1)`
+   558→    Sd { rs1: Gpr, rs2: Gpr, imm: i32 },
+   559→
+   560→    // ── RV64I: Immediate Arithmetic ──────────────────────────────────
+   561→    /// Add Immediate: `addi rd, rs1, imm`
+   562→    Addi { rd: Gpr, rs1: Gpr, imm: i32 },
+   563→    /// Set Less Than Immediate (signed): `slti rd, rs1, imm`
+   564→    Slti { rd: Gpr, rs1: Gpr, imm: i32 },
+   565→    /// Set Less Than Immediate (unsigned): `sltiu rd, rs1, imm`
+   566→    Sltiu { rd: Gpr, rs1: Gpr, imm: i32 },
+   567→    /// XOR Immediate: `xori rd, rs1, imm`
+   568→    Xori { rd: Gpr, rs1: Gpr, imm: i32 },
+   569→    /// OR Immediate: `ori rd, rs1, imm`
+   570→    Ori { rd: Gpr, rs1: Gpr, imm: i32 },
+   571→    /// AND Immediate: `andi rd, rs1, imm`
+   572→    Andi { rd: Gpr, rs1: Gpr, imm: i32 },
+   573→    /// Shift Left Logical by Immediate: `slli rd, rs1, shamt`
+   574→    Slli { rd: Gpr, rs1: Gpr, shamt: u32 },
+   575→    /// Shift Right Logical by Immediate: `srli rd, rs1, shamt`
+   576→    Srli { rd: Gpr, rs1: Gpr, shamt: u32 },
+   577→    /// Shift Right Arithmetic by Immediate: `srai rd, rs1, shamt`
+   578→    Srai { rd: Gpr, rs1: Gpr, shamt: u32 },
+   579→
+   580→    // ── RV64I: Register Arithmetic ───────────────────────────────────
+   581→    /// Add: `add rd, rs1, rs2`
+   582→    Add { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   583→    /// Subtract: `sub rd, rs1, rs2`
+   584→    Sub { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   585→    /// Shift Left Logical: `sll rd, rs1, rs2`
+   586→    Sll { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   587→    /// Set Less Than (signed): `slt rd, rs1, rs2`
+   588→    Slt { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   589→    /// Set Less Than (unsigned): `sltu rd, rs1, rs2`
+   590→    Sltu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   591→    /// XOR: `xor rd, rs1, rs2`
+   592→    Xor { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   593→    /// Shift Right Logical: `srl rd, rs1, rs2`
+   594→    Srl { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   595→    /// Shift Right Arithmetic: `sra rd, rs1, rs2`
+   596→    Sra { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   597→    /// OR: `or rd, rs1, rs2`
+   598→    Or { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   599→    /// AND: `and rd, rs1, rs2`
+   600→    And { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   601→
+   602→    // ── RV64I: Word-level Arithmetic (RV64 only) ─────────────────────
+   603→    /// Add Word: `addw rd, rs1, rs2`
+   604→    Addw { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   605→    /// Subtract Word: `subw rd, rs1, rs2`
+   606→    Subw { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   607→    /// Shift Left Logical Word: `sllw rd, rs1, rs2`
+   608→    Sllw { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   609→    /// Shift Right Logical Word: `srlw rd, rs1, rs2`
+   610→    Srlw { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   611→    /// Shift Right Arithmetic Word: `sraw rd, rs1, rs2`
+   612→    Sraw { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   613→    /// Add Immediate Word: `addiw rd, rs1, imm`
+   614→    Addiw { rd: Gpr, rs1: Gpr, imm: i32 },
+   615→    /// Shift Left Logical by Immediate Word: `slliw rd, rs1, shamt`
+   616→    Slliw { rd: Gpr, rs1: Gpr, shamt: u32 },
+   617→    /// Shift Right Logical by Immediate Word: `srliw rd, rs1, shamt`
+   618→    Srliw { rd: Gpr, rs1: Gpr, shamt: u32 },
+   619→    /// Shift Right Arithmetic by Immediate Word: `sraiw rd, rs1, shamt`
+   620→    Sraiw { rd: Gpr, rs1: Gpr, shamt: u32 },
+   621→
+   622→    // ── M Extension: Multiply/Divide ─────────────────────────────────
+   623→    /// Multiply: `mul rd, rs1, rs2`
+   624→    Mul { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   625→    /// Multiply High (signed): `mulh rd, rs1, rs2`
+   626→    Mulh { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   627→    /// Multiply High (signed × unsigned): `mulhsu rd, rs1, rs2`
+   628→    Mulhsu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   629→    /// Multiply High (unsigned): `mulhu rd, rs1, rs2`
+   630→    Mulhu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   631→    /// Divide (signed): `div rd, rs1, rs2`
+   632→    Div { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   633→    /// Divide (unsigned): `divu rd, rs1, rs2`
+   634→    Divu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   635→    /// Remainder (signed): `rem rd, rs1, rs2`
+   636→    Rem { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   637→    /// Remainder (unsigned): `remu rd, rs1, rs2`
+   638→    Remu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+   639→
+   640→    // ── F/D Extension: FP Load/Store ─────────────────────────────────
+   641→    /// Load Float (32-bit): `flw fd, offset(rs1)`
+   642→    Flw { rd: Fpr, rs1: Gpr, imm: i32 },
+   643→    /// Load Double (64-bit): `fld fd, offset(rs1)`
+   644→    Fld { rd: Fpr, rs1: Gpr, imm: i32 },
+   645→    /// Store Float (32-bit): `fsw fs2, offset(rs1)`
+   646→    Fsw { rs1: Gpr, rs2: Fpr, imm: i32 },
+   647→    /// Store Double (64-bit): `fsd fs2, offset(rs1)`
+   648→    Fsd { rs1: Gpr, rs2: Fpr, imm: i32 },
+   649→
+   650→    // ── F/D Extension: FP Arithmetic ─────────────────────────────────
+   651→    /// FP Add Double: `fadd.d fd, fs1, fs2`
+   652→    FaddD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+   653→    /// FP Subtract Double: `fsub.d fd, fs1, fs2`
+   654→    FsubD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+   655→    /// FP Multiply Double: `fmul.d fd, fs1, fs2`
+   656→    FmulD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+   657→    /// FP Divide Double: `fdiv.d fd, fs1, fs2`
+   658→    FdivD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+   659→    /// FP Move Double: `fmv.d fd, fs1` (pseudo: fsgnj.d)
+   660→    FmvD { rd: Fpr, rs1: Fpr },
+   661→
+   662→    // ── Zicsr Extension: Control and Status Register ────────────────
+   663→    /// CSR Read/Write: `csrrw rd, csr, rs1`
+   664→    Csrrw { rd: Gpr, csr: u32, rs1: Gpr },
+   665→    /// CSR Read and Set: `csrrs rd, csr, rs1`
+   666→    Csrrs { rd: Gpr, csr: u32, rs1: Gpr },
+   667→    /// CSR Read and Clear: `csrrc rd, csr, rs1`
+   668→    Csrrc { rd: Gpr, csr: u32, rs1: Gpr },
+   669→    /// CSR Read/Write Immediate: `csrrwi rd, csr, uimm`
+   670→    Csrrwi { rd: Gpr, csr: u32, uimm: u32 },
+   671→    /// CSR Read and Set Immediate: `csrrsi rd, csr, uimm`
+   672→    Csrrsi { rd: Gpr, csr: u32, uimm: u32 },
+   673→    /// CSR Read and Clear Immediate: `csrrci rd, csr, uimm`
+   674→    Csrrci { rd: Gpr, csr: u32, uimm: u32 },
+   675→
+   676→    // ── Zifencei Extension ──────────────────────────────────────────
+   677→    /// Fence.I: `fence.i` — instruction stream synchronization
+   678→    FenceI,
+   679→
+   680→    // ── System / Misc ────────────────────────────────────────────────
+   681→    /// Environment Call: `ecall`
+   682→    Ecall,
+   683→    /// Environment Break: `ebreak`
+   684→    Ebreak,
+   685→    /// Fence: `fence pred, succ`
+   686→    Fence { pred: u32, succ: u32 },
+   687→    /// No-operation (pseudo: `addi x0, x0, 0`)
+   688→    Nop,
+   689→}
+   690→
+   691→impl Instruction {
+   692→    /// Encode this instruction into a 4-byte little-endian machine code word.
+   693→    ///
+   694→    /// Encoding follows the RISC-V ISA Specification.
+   695→    pub fn encode(&self) -> [u8; 4] {
+   696→        match self {
+   697→            // ── Upper Immediate ──────────────────────────────────────
+   698→            Instruction::Lui { rd, imm } => encode_u_type(*imm, rd.encoding(), OP_LUI),
+   699→            Instruction::Auipc { rd, imm } => encode_u_type(*imm, rd.encoding(), OP_AUIPC),
+   700→
+   701→            // ── Jumps ───────────────────────────────────────────────
+   702→            Instruction::Jal { rd, offset } => encode_j_type(*offset, rd.encoding(), OP_JAL),
+   703→            Instruction::Jalr { rd, rs1, imm } => encode_i_type(
+   704→                (*imm as u32) & 0xFFF,
+   705→                rs1.encoding(),
+   706→                0b000,
+   707→                rd.encoding(),
+   708→                OP_JALR,
+   709→            ),
+   710→
+   711→            // ── Branches ────────────────────────────────────────────
+   712→            Instruction::Beq { rs1, rs2, offset } => {
+   713→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b000, OP_BRANCH)
+   714→            }
+   715→            Instruction::Bne { rs1, rs2, offset } => {
+   716→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b001, OP_BRANCH)
+   717→            }
+   718→            Instruction::Blt { rs1, rs2, offset } => {
+   719→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b100, OP_BRANCH)
+   720→            }
+   721→            Instruction::Bge { rs1, rs2, offset } => {
+   722→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b101, OP_BRANCH)
+   723→            }
+   724→            Instruction::Bltu { rs1, rs2, offset } => {
+   725→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b110, OP_BRANCH)
+   726→            }
+   727→            Instruction::Bgeu { rs1, rs2, offset } => {
+   728→                encode_b_type(*offset, rs2.encoding(), rs1.encoding(), 0b111, OP_BRANCH)
+   729→            }
+   730→
+   731→            // ── Loads ───────────────────────────────────────────────
+   732→            Instruction::Lb { rd, rs1, imm } => encode_i_type(
+   733→                (*imm as u32) & 0xFFF,
+   734→                rs1.encoding(),
+   735→                0b000,
+   736→                rd.encoding(),
+   737→                OP_LOAD,
+   738→            ),
+   739→            Instruction::Lh { rd, rs1, imm } => encode_i_type(
+   740→                (*imm as u32) & 0xFFF,
+   741→                rs1.encoding(),
+   742→                0b001,
+   743→                rd.encoding(),
+   744→                OP_LOAD,
+   745→            ),
+   746→            Instruction::Lw { rd, rs1, imm } => encode_i_type(
+   747→                (*imm as u32) & 0xFFF,
+   748→                rs1.encoding(),
+   749→                0b010,
+   750→                rd.encoding(),
+   751→                OP_LOAD,
+   752→            ),
+   753→            Instruction::Ld { rd, rs1, imm } => encode_i_type(
+   754→                (*imm as u32) & 0xFFF,
+   755→                rs1.encoding(),
+   756→                0b011,
+   757→                rd.encoding(),
+   758→                OP_LOAD,
+   759→            ),
+   760→            Instruction::Lbu { rd, rs1, imm } => encode_i_type(
+   761→                (*imm as u32) & 0xFFF,
+   762→                rs1.encoding(),
+   763→                0b100,
+   764→                rd.encoding(),
+   765→                OP_LOAD,
+   766→            ),
+   767→            Instruction::Lhu { rd, rs1, imm } => encode_i_type(
+   768→                (*imm as u32) & 0xFFF,
+   769→                rs1.encoding(),
+   770→                0b101,
+   771→                rd.encoding(),
+   772→                OP_LOAD,
+   773→            ),
+   774→            Instruction::Lwu { rd, rs1, imm } => encode_i_type(
+   775→                (*imm as u32) & 0xFFF,
+   776→                rs1.encoding(),
+   777→                0b110,
+   778→                rd.encoding(),
+   779→                OP_LOAD,
+   780→            ),
+   781→
+   782→            // ── Stores ──────────────────────────────────────────────
+   783→            Instruction::Sb { rs1, rs2, imm } => encode_s_type(
+   784→                (*imm as u32) & 0xFFF,
+   785→                rs2.encoding(),
+   786→                rs1.encoding(),
+   787→                0b000,
+   788→                OP_STORE,
+   789→            ),
+   790→            Instruction::Sh { rs1, rs2, imm } => encode_s_type(
+   791→                (*imm as u32) & 0xFFF,
+   792→                rs2.encoding(),
+   793→                rs1.encoding(),
+   794→                0b001,
+   795→                OP_STORE,
+   796→            ),
+   797→            Instruction::Sw { rs1, rs2, imm } => encode_s_type(
+   798→                (*imm as u32) & 0xFFF,
+   799→                rs2.encoding(),
+   800→                rs1.encoding(),
+   801→                0b010,
+   802→                OP_STORE,
+   803→            ),
+   804→            Instruction::Sd { rs1, rs2, imm } => encode_s_type(
+   805→                (*imm as u32) & 0xFFF,
+   806→                rs2.encoding(),
+   807→                rs1.encoding(),
+   808→                0b011,
+   809→                OP_STORE,
+   810→            ),
+   811→
+   812→            // ── Immediate Arithmetic ────────────────────────────────
+   813→            Instruction::Addi { rd, rs1, imm } => encode_i_type(
+   814→                (*imm as u32) & 0xFFF,
+   815→                rs1.encoding(),
+   816→                0b000,
+   817→                rd.encoding(),
+   818→                OP_IMM,
+   819→            ),
+   820→            Instruction::Slti { rd, rs1, imm } => encode_i_type(
+   821→                (*imm as u32) & 0xFFF,
+   822→                rs1.encoding(),
+   823→                0b010,
+   824→                rd.encoding(),
+   825→                OP_IMM,
+   826→            ),
+   827→            Instruction::Sltiu { rd, rs1, imm } => encode_i_type(
+   828→                (*imm as u32) & 0xFFF,
+   829→                rs1.encoding(),
+   830→                0b011,
+   831→                rd.encoding(),
+   832→                OP_IMM,
+   833→            ),
+   834→            Instruction::Xori { rd, rs1, imm } => encode_i_type(
+   835→                (*imm as u32) & 0xFFF,
+   836→                rs1.encoding(),
+   837→                0b100,
+   838→                rd.encoding(),
+   839→                OP_IMM,
+   840→            ),
+   841→            Instruction::Ori { rd, rs1, imm } => encode_i_type(
+   842→                (*imm as u32) & 0xFFF,
+   843→                rs1.encoding(),
+   844→                0b110,
+   845→                rd.encoding(),
+   846→                OP_IMM,
+   847→            ),
+   848→            Instruction::Andi { rd, rs1, imm } => encode_i_type(
+   849→                (*imm as u32) & 0xFFF,
+   850→                rs1.encoding(),
+   851→                0b111,
+   852→                rd.encoding(),
+   853→                OP_IMM,
+   854→            ),
+   855→            Instruction::Slli { rd, rs1, shamt } => {
+   856→                // funct7 = 0b0000000, funct3 = 0b001
+   857→                // For RV64I, shamt is 6 bits (bits [25:20])
+   858→                let funct7_and_shamt = (*shamt & 0x3F) << 20;
+   859→                let word = funct7_and_shamt
+   860→                    | (rs1.encoding() << 15)
+   861→                    | (0b001 << 12)
+   862→                    | (rd.encoding() << 7)
+   863→                    | OP_IMM;
+   864→                word.to_le_bytes()
+   865→            }
+   866→            Instruction::Srli { rd, rs1, shamt } => {
+   867→                // funct7 = 0b0000000, funct3 = 0b101
+   868→                let funct7_and_shamt = (*shamt & 0x3F) << 20;
+   869→                let word = funct7_and_shamt
+   870→                    | (rs1.encoding() << 15)
+   871→                    | (0b101 << 12)
+   872→                    | (rd.encoding() << 7)
+   873→                    | OP_IMM;
+   874→                word.to_le_bytes()
+   875→            }
+   876→            Instruction::Srai { rd, rs1, shamt } => {
+   877→                // funct7 = 0b0100000, funct3 = 0b101
+   878→                let funct7_and_shamt = (0b0100000u32 << 25) | ((*shamt & 0x3F) << 20);
+   879→                let word = funct7_and_shamt
+   880→                    | (rs1.encoding() << 15)
+   881→                    | (0b101 << 12)
+   882→                    | (rd.encoding() << 7)
+   883→                    | OP_IMM;
+   884→                word.to_le_bytes()
+   885→            }
+   886→
+   887→            // ── Register Arithmetic ─────────────────────────────────
+   888→            Instruction::Add { rd, rs1, rs2 } => encode_r_type(
+   889→                0b0000000,
+   890→                rs2.encoding(),
+   891→                rs1.encoding(),
+   892→                0b000,
+   893→                rd.encoding(),
+   894→                OP_REG,
+   895→            ),
+   896→            Instruction::Sub { rd, rs1, rs2 } => encode_r_type(
+   897→                0b0100000,
+   898→                rs2.encoding(),
+   899→                rs1.encoding(),
+   900→                0b000,
+   901→                rd.encoding(),
+   902→                OP_REG,
+   903→            ),
+   904→            Instruction::Sll { rd, rs1, rs2 } => encode_r_type(
+   905→                0b0000000,
+   906→                rs2.encoding(),
+   907→                rs1.encoding(),
+   908→                0b001,
+   909→                rd.encoding(),
+   910→                OP_REG,
+   911→            ),
+   912→            Instruction::Slt { rd, rs1, rs2 } => encode_r_type(
+   913→                0b0000000,
+   914→                rs2.encoding(),
+   915→                rs1.encoding(),
+   916→                0b010,
+   917→                rd.encoding(),
+   918→                OP_REG,
+   919→            ),
+   920→            Instruction::Sltu { rd, rs1, rs2 } => encode_r_type(
+   921→                0b0000000,
+   922→                rs2.encoding(),
+   923→                rs1.encoding(),
+   924→                0b011,
+   925→                rd.encoding(),
+   926→                OP_REG,
+   927→            ),
+   928→            Instruction::Xor { rd, rs1, rs2 } => encode_r_type(
+   929→                0b0000000,
+   930→                rs2.encoding(),
+   931→                rs1.encoding(),
+   932→                0b100,
+   933→                rd.encoding(),
+   934→                OP_REG,
+   935→            ),
+   936→            Instruction::Srl { rd, rs1, rs2 } => encode_r_type(
+   937→                0b0000000,
+   938→                rs2.encoding(),
+   939→                rs1.encoding(),
+   940→                0b101,
+   941→                rd.encoding(),
+   942→                OP_REG,
+   943→            ),
+   944→            Instruction::Sra { rd, rs1, rs2 } => encode_r_type(
+   945→                0b0100000,
+   946→                rs2.encoding(),
+   947→                rs1.encoding(),
+   948→                0b101,
+   949→                rd.encoding(),
+   950→                OP_REG,
+   951→            ),
+   952→            Instruction::Or { rd, rs1, rs2 } => encode_r_type(
+   953→                0b0000000,
+   954→                rs2.encoding(),
+   955→                rs1.encoding(),
+   956→                0b110,
+   957→                rd.encoding(),
+   958→                OP_REG,
+   959→            ),
+   960→            Instruction::And { rd, rs1, rs2 } => encode_r_type(
+   961→                0b0000000,
+   962→                rs2.encoding(),
+   963→                rs1.encoding(),
+   964→                0b111,
+   965→                rd.encoding(),
+   966→                OP_REG,
+   967→            ),
+   968→
+   969→            // ── Word-level Arithmetic (RV64) ────────────────────────
+   970→            Instruction::Addw { rd, rs1, rs2 } => encode_r_type(
+   971→                0b0000000,
+   972→                rs2.encoding(),
+   973→                rs1.encoding(),
+   974→                0b000,
+   975→                rd.encoding(),
+   976→                OP_REG32,
+   977→            ),
+   978→            Instruction::Subw { rd, rs1, rs2 } => encode_r_type(
+   979→                0b0100000,
+   980→                rs2.encoding(),
+   981→                rs1.encoding(),
+   982→                0b000,
+   983→                rd.encoding(),
+   984→                OP_REG32,
+   985→            ),
+   986→            Instruction::Sllw { rd, rs1, rs2 } => encode_r_type(
+   987→                0b0000000,
+   988→                rs2.encoding(),
+   989→                rs1.encoding(),
+   990→                0b001,
+   991→                rd.encoding(),
+   992→                OP_REG32,
+   993→            ),
+   994→            Instruction::Srlw { rd, rs1, rs2 } => encode_r_type(
+   995→                0b0000000,
+   996→                rs2.encoding(),
+   997→                rs1.encoding(),
+   998→                0b101,
+   999→                rd.encoding(),
+  1000→                OP_REG32,
+  1001→            ),
+  1002→            Instruction::Sraw { rd, rs1, rs2 } => encode_r_type(
+  1003→                0b0100000,
+  1004→                rs2.encoding(),
+  1005→                rs1.encoding(),
+  1006→                0b101,
+  1007→                rd.encoding(),
+  1008→                OP_REG32,
+  1009→            ),
+  1010→            Instruction::Addiw { rd, rs1, imm } => encode_i_type(
+  1011→                (*imm as u32) & 0xFFF,
+  1012→                rs1.encoding(),
+  1013→                0b000,
+  1014→                rd.encoding(),
+  1015→                OP_IMM32,
+  1016→            ),
+  1017→            Instruction::Slliw { rd, rs1, shamt } => {
+  1018→                // funct7 = 0b0000000, funct3 = 0b001, shamt is 5 bits
+  1019→                let funct7_and_shamt = (*shamt & 0x1F) << 20;
+  1020→                let word = funct7_and_shamt
+  1021→                    | (rs1.encoding() << 15)
+  1022→                    | (0b001 << 12)
+  1023→                    | (rd.encoding() << 7)
+  1024→                    | OP_IMM32;
+  1025→                word.to_le_bytes()
+  1026→            }
+  1027→            Instruction::Srliw { rd, rs1, shamt } => {
+  1028→                let funct7_and_shamt = (*shamt & 0x1F) << 20;
+  1029→                let word = funct7_and_shamt
+  1030→                    | (rs1.encoding() << 15)
+  1031→                    | (0b101 << 12)
+  1032→                    | (rd.encoding() << 7)
+  1033→                    | OP_IMM32;
+  1034→                word.to_le_bytes()
+  1035→            }
+  1036→            Instruction::Sraiw { rd, rs1, shamt } => {
+  1037→                let funct7_and_shamt = (0b0100000u32 << 25) | ((*shamt & 0x1F) << 20);
+  1038→                let word = funct7_and_shamt
+  1039→                    | (rs1.encoding() << 15)
+  1040→                    | (0b101 << 12)
+  1041→                    | (rd.encoding() << 7)
+  1042→                    | OP_IMM32;
+  1043→                word.to_le_bytes()
+  1044→            }
+  1045→
+  1046→            // ── M Extension ─────────────────────────────────────────
+  1047→            Instruction::Mul { rd, rs1, rs2 } => encode_r_type(
+  1048→                0b0000001,
+  1049→                rs2.encoding(),
+  1050→                rs1.encoding(),
+  1051→                0b000,
+  1052→                rd.encoding(),
+  1053→                OP_REG,
+  1054→            ),
+  1055→            Instruction::Mulh { rd, rs1, rs2 } => encode_r_type(
+  1056→                0b0000001,
+  1057→                rs2.encoding(),
+  1058→                rs1.encoding(),
+  1059→                0b001,
+  1060→                rd.encoding(),
+  1061→                OP_REG,
+  1062→            ),
+  1063→            Instruction::Mulhsu { rd, rs1, rs2 } => encode_r_type(
+  1064→                0b0000001,
+  1065→                rs2.encoding(),
+  1066→                rs1.encoding(),
+  1067→                0b010,
+  1068→                rd.encoding(),
+  1069→                OP_REG,
+  1070→            ),
+  1071→            Instruction::Mulhu { rd, rs1, rs2 } => encode_r_type(
+  1072→                0b0000001,
+  1073→                rs2.encoding(),
+  1074→                rs1.encoding(),
+  1075→                0b011,
+  1076→                rd.encoding(),
+  1077→                OP_REG,
+  1078→            ),
+  1079→            Instruction::Div { rd, rs1, rs2 } => encode_r_type(
+  1080→                0b0000001,
+  1081→                rs2.encoding(),
+  1082→                rs1.encoding(),
+  1083→                0b100,
+  1084→                rd.encoding(),
+  1085→                OP_REG,
+  1086→            ),
+  1087→            Instruction::Divu { rd, rs1, rs2 } => encode_r_type(
+  1088→                0b0000001,
+  1089→                rs2.encoding(),
+  1090→                rs1.encoding(),
+  1091→                0b101,
+  1092→                rd.encoding(),
+  1093→                OP_REG,
+  1094→            ),
+  1095→            Instruction::Rem { rd, rs1, rs2 } => encode_r_type(
+  1096→                0b0000001,
+  1097→                rs2.encoding(),
+  1098→                rs1.encoding(),
+  1099→                0b110,
+  1100→                rd.encoding(),
+  1101→                OP_REG,
+  1102→            ),
+  1103→            Instruction::Remu { rd, rs1, rs2 } => encode_r_type(
+  1104→                0b0000001,
+  1105→                rs2.encoding(),
+  1106→                rs1.encoding(),
+  1107→                0b111,
+  1108→                rd.encoding(),
+  1109→                OP_REG,
+  1110→            ),
+  1111→
+  1112→            // ── F/D Extension: Load/Store ───────────────────────────
+  1113→            Instruction::Flw { rd, rs1, imm } => encode_i_type(
+  1114→                (*imm as u32) & 0xFFF,
+  1115→                rs1.encoding(),
+  1116→                0b010,
+  1117→                rd.encoding(),
+  1118→                OP_LOAD,
+  1119→            ),
+  1120→            Instruction::Fld { rd, rs1, imm } => encode_i_type(
+  1121→                (*imm as u32) & 0xFFF,
+  1122→                rs1.encoding(),
+  1123→                0b011,
+  1124→                rd.encoding(),
+  1125→                OP_LOAD,
+  1126→            ),
+  1127→            Instruction::Fsw { rs1, rs2, imm } => encode_s_type(
+  1128→                (*imm as u32) & 0xFFF,
+  1129→                rs2.encoding(),
+  1130→                rs1.encoding(),
+  1131→                0b010,
+  1132→                OP_STORE,
+  1133→            ),
+  1134→            Instruction::Fsd { rs1, rs2, imm } => encode_s_type(
+  1135→                (*imm as u32) & 0xFFF,
+  1136→                rs2.encoding(),
+  1137→                rs1.encoding(),
+  1138→                0b011,
+  1139→                OP_STORE,
+  1140→            ),
+  1141→
+  1142→            // ── F/D Extension: Arithmetic ───────────────────────────
+  1143→            Instruction::FaddD { rd, rs1, rs2 } => {
+  1144→                // FADD.D: funct7=0b0000001, rm=0b111 (dynamic), opcode=OP_FP
+  1145→                // Actually: funct7[6:0] = 0000001, rs2, rs1, rm=111, rd, opcode
+  1146→                encode_r_type(
+  1147→                    0b0000001,
+  1148→                    rs2.encoding(),
+  1149→                    rs1.encoding(),
+  1150→                    0b111,
+  1151→                    rd.encoding(),
+  1152→                    OP_FP,
+  1153→                )
+  1154→            }
+  1155→            Instruction::FsubD { rd, rs1, rs2 } => encode_r_type(
+  1156→                0b0000101,
+  1157→                rs2.encoding(),
+  1158→                rs1.encoding(),
+  1159→                0b111,
+  1160→                rd.encoding(),
+  1161→                OP_FP,
+  1162→            ),
+  1163→            Instruction::FmulD { rd, rs1, rs2 } => encode_r_type(
+  1164→                0b0001001,
+  1165→                rs2.encoding(),
+  1166→                rs1.encoding(),
+  1167→                0b111,
+  1168→                rd.encoding(),
+  1169→                OP_FP,
+  1170→            ),
+  1171→            Instruction::FdivD { rd, rs1, rs2 } => encode_r_type(
+  1172→                0b0001101,
+  1173→                rs2.encoding(),
+  1174→                rs1.encoding(),
+  1175→                0b111,
+  1176→                rd.encoding(),
+  1177→                OP_FP,
+  1178→            ),
+  1179→            Instruction::FmvD { rd, rs1 } => {
+  1180→                // FMV.D = FSGNJ.D rd, fs1, fs1 (funct7=0b0010001, funct3=0b000)
+  1181→                encode_r_type(
+  1182→                    0b0010001,
+  1183→                    rs1.encoding(),
+  1184→                    rs1.encoding(),
+  1185→                    0b000,
+  1186→                    rd.encoding(),
+  1187→                    OP_FP,
+  1188→                )
+  1189→            }
+  1190→
+  1191→            // ── Zicsr Extension ──────────────────────────────────────
+  1192→            Instruction::Csrrw { rd, csr, rs1 } => {
+  1193→                // CSRRW: I-type, funct3=0b001, opcode=SYSTEM
+  1194→                encode_i_type(*csr, rs1.encoding(), 0b001, rd.encoding(), OP_SYSTEM)
+  1195→            }
+  1196→            Instruction::Csrrs { rd, csr, rs1 } => {
+  1197→                // CSRRS: I-type, funct3=0b010, opcode=SYSTEM
+  1198→                encode_i_type(*csr, rs1.encoding(), 0b010, rd.encoding(), OP_SYSTEM)
+  1199→            }
+  1200→            Instruction::Csrrc { rd, csr, rs1 } => {
+  1201→                // CSRRC: I-type, funct3=0b011, opcode=SYSTEM
+  1202→                encode_i_type(*csr, rs1.encoding(), 0b011, rd.encoding(), OP_SYSTEM)
+  1203→            }
+  1204→            Instruction::Csrrwi { rd, csr, uimm } => {
+  1205→                // CSRRWI: I-type, funct3=0b101, opcode=SYSTEM
+  1206→                encode_i_type(*csr, *uimm & 0x1F, 0b101, rd.encoding(), OP_SYSTEM)
+  1207→            }
+  1208→            Instruction::Csrrsi { rd, csr, uimm } => {
+  1209→                // CSRRSI: I-type, funct3=0b110, opcode=SYSTEM
+  1210→                encode_i_type(*csr, *uimm & 0x1F, 0b110, rd.encoding(), OP_SYSTEM)
+  1211→            }
+  1212→            Instruction::Csrrci { rd, csr, uimm } => {
+  1213→                // CSRRCI: I-type, funct3=0b111, opcode=SYSTEM
+  1214→                encode_i_type(*csr, *uimm & 0x1F, 0b111, rd.encoding(), OP_SYSTEM)
+  1215→            }
+  1216→
+  1217→            // ── Zifencei Extension ──────────────────────────────────
+  1218→            Instruction::FenceI => {
+  1219→                // FENCE.I: opcode=MISC-MEM, funct3=0b001, rd=0, rs1=0, imm=0
+  1220→                encode_i_type(0, 0, 0b001, 0, OP_MISC_MEM)
+  1221→            }
+  1222→
+  1223→            // ── System / Misc ───────────────────────────────────────
+  1224→            Instruction::Ecall => {
+  1225→                // ECALL = 0x00000073
+  1226→                0x00000073u32.to_le_bytes()
+  1227→            }
+  1228→            Instruction::Ebreak => {
+  1229→                // EBREAK = 0x00100073
+  1230→                0x00100073u32.to_le_bytes()
+  1231→            }
+  1232→            Instruction::Fence { pred, succ } => {
+  1233→                // FENCE: opcode=MISC-MEM, funct3=0b000, rd=0, rs1=0
+  1234→                let imm = ((*pred & 0xF) << 4) | (*succ & 0xF);
+  1235→                encode_i_type(imm, 0, 0b000, 0, OP_MISC_MEM)
+  1236→            }
+  1237→            Instruction::Nop => {
+  1238→                // NOP = ADDI x0, x0, 0 = 0x00000013
+  1239→                encode_i_type(0, 0, 0b000, 0, OP_IMM)
+  1240→            }
+  1241→        }
+  1242→    }
+  1243→
+  1244→    /// Returns the mnemonic name of this instruction.
+  1245→    pub fn mnemonic(&self) -> &'static str {
+  1246→        match self {
+  1247→            Instruction::Lui { .. } => "lui",
+  1248→            Instruction::Auipc { .. } => "auipc",
+  1249→            Instruction::Jal { .. } => "jal",
+  1250→            Instruction::Jalr { .. } => "jalr",
+  1251→            Instruction::Beq { .. } => "beq",
+  1252→            Instruction::Bne { .. } => "bne",
+  1253→            Instruction::Blt { .. } => "blt",
+  1254→            Instruction::Bge { .. } => "bge",
+  1255→            Instruction::Bltu { .. } => "bltu",
+  1256→            Instruction::Bgeu { .. } => "bgeu",
+  1257→            Instruction::Lb { .. } => "lb",
+  1258→            Instruction::Lh { .. } => "lh",
+  1259→            Instruction::Lw { .. } => "lw",
+  1260→            Instruction::Ld { .. } => "ld",
+  1261→            Instruction::Lbu { .. } => "lbu",
+  1262→            Instruction::Lhu { .. } => "lhu",
+  1263→            Instruction::Lwu { .. } => "lwu",
+  1264→            Instruction::Sb { .. } => "sb",
+  1265→            Instruction::Sh { .. } => "sh",
+  1266→            Instruction::Sw { .. } => "sw",
+  1267→            Instruction::Sd { .. } => "sd",
+  1268→            Instruction::Addi { .. } => "addi",
+  1269→            Instruction::Slti { .. } => "slti",
+  1270→            Instruction::Sltiu { .. } => "sltiu",
+  1271→            Instruction::Xori { .. } => "xori",
+  1272→            Instruction::Ori { .. } => "ori",
+  1273→            Instruction::Andi { .. } => "andi",
+  1274→            Instruction::Slli { .. } => "slli",
+  1275→            Instruction::Srli { .. } => "srli",
+  1276→            Instruction::Srai { .. } => "srai",
+  1277→            Instruction::Add { .. } => "add",
+  1278→            Instruction::Sub { .. } => "sub",
+  1279→            Instruction::Sll { .. } => "sll",
+  1280→            Instruction::Slt { .. } => "slt",
+  1281→            Instruction::Sltu { .. } => "sltu",
+  1282→            Instruction::Xor { .. } => "xor",
+  1283→            Instruction::Srl { .. } => "srl",
+  1284→            Instruction::Sra { .. } => "sra",
+  1285→            Instruction::Or { .. } => "or",
+  1286→            Instruction::And { .. } => "and",
+  1287→            Instruction::Addw { .. } => "addw",
+  1288→            Instruction::Subw { .. } => "subw",
+  1289→            Instruction::Sllw { .. } => "sllw",
+  1290→            Instruction::Srlw { .. } => "srlw",
+  1291→            Instruction::Sraw { .. } => "sraw",
+  1292→            Instruction::Addiw { .. } => "addiw",
+  1293→            Instruction::Slliw { .. } => "slliw",
+  1294→            Instruction::Srliw { .. } => "srliw",
+  1295→            Instruction::Sraiw { .. } => "sraiw",
+  1296→            Instruction::Mul { .. } => "mul",
+  1297→            Instruction::Mulh { .. } => "mulh",
+  1298→            Instruction::Mulhsu { .. } => "mulhsu",
+  1299→            Instruction::Mulhu { .. } => "mulhu",
+  1300→            Instruction::Div { .. } => "div",
+  1301→            Instruction::Divu { .. } => "divu",
+  1302→            Instruction::Rem { .. } => "rem",
+  1303→            Instruction::Remu { .. } => "remu",
+  1304→            Instruction::Flw { .. } => "flw",
+  1305→            Instruction::Fld { .. } => "fld",
+  1306→            Instruction::Fsw { .. } => "fsw",
+  1307→            Instruction::Fsd { .. } => "fsd",
+  1308→            Instruction::FaddD { .. } => "fadd.d",
+  1309→            Instruction::FsubD { .. } => "fsub.d",
+  1310→            Instruction::FmulD { .. } => "fmul.d",
+  1311→            Instruction::FdivD { .. } => "fdiv.d",
+  1312→            Instruction::FmvD { .. } => "fmv.d",
+  1313→            Instruction::Csrrw { .. } => "csrrw",
+  1314→            Instruction::Csrrs { .. } => "csrrs",
+  1315→            Instruction::Csrrc { .. } => "csrrc",
+  1316→            Instruction::Csrrwi { .. } => "csrrwi",
+  1317→            Instruction::Csrrsi { .. } => "csrrsi",
+  1318→            Instruction::Csrrci { .. } => "csrrci",
+  1319→            Instruction::FenceI => "fence.i",
+  1320→            Instruction::Ecall => "ecall",
+  1321→            Instruction::Ebreak => "ebreak",
+  1322→            Instruction::Fence { .. } => "fence",
+  1323→            Instruction::Nop => "nop",
+  1324→        }
+  1325→    }
+  1326→
+  1327→    /// Decode a 32-bit RISC-V machine-code word into an `Instruction`.
+  1328→    ///
+  1329→    /// Returns `None` for encodings not yet covered by the decoder.
+  1330→    /// Covers all instruction classes defined in this backend.
+  1331→    pub fn decode(word: u32) -> Option<Instruction> {
+  1332→        let opcode = word & 0x7F;
+  1333→        let rd = (word >> 7) & 0x1F;
+  1334→        let funct3 = (word >> 12) & 0x7;
+  1335→        let rs1 = (word >> 15) & 0x1F;
+  1336→        let rs2 = (word >> 20) & 0x1F;
+  1337→        let funct7 = (word >> 25) & 0x7F;
+  1338→
+  1339→        match opcode {
+  1340→            // ── LUI ────────────────────────────────────────────────
+  1341→            0b0110111 => {
+  1342→                let rd_reg = Gpr::from_encoding(rd)?;
+  1343→                let imm = word & 0xFFFFF000;
+  1344→                Some(Instruction::Lui { rd: rd_reg, imm })
+  1345→            }
+  1346→
+  1347→            // ── AUIPC ──────────────────────────────────────────────
+  1348→            0b0010111 => {
+  1349→                let rd_reg = Gpr::from_encoding(rd)?;
+  1350→                let imm = word & 0xFFFFF000;
+  1351→                Some(Instruction::Auipc { rd: rd_reg, imm })
+  1352→            }
+  1353→
+  1354→            // ── JAL ────────────────────────────────────────────────
+  1355→            0b1101111 => {
+  1356→                let rd_reg = Gpr::from_encoding(rd)?;
+  1357→                let imm20 = ((word >> 31) & 1) << 20
+  1358→                    | ((word >> 12) & 0xFF) << 12
+  1359→                    | ((word >> 20) & 1) << 11
+  1360→                    | ((word >> 21) & 0x3FF) << 1;
+  1361→                let offset = ((imm20 << 11) as i32) >> 11;
+  1362→                Some(Instruction::Jal { rd: rd_reg, offset })
+  1363→            }
+  1364→
+  1365→            // ── JALR ───────────────────────────────────────────────
+  1366→            0b1100111 => {
+  1367→                let rd_reg = Gpr::from_encoding(rd)?;
+  1368→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1369→                let imm = (((word >> 20) as i32) << 20) >> 20;
+  1370→                Some(Instruction::Jalr {
+  1371→                    rd: rd_reg,
+  1372→                    rs1: rs1_reg,
+  1373→                    imm,
+  1374→                })
+  1375→            }
+  1376→
+  1377→            // ── BRANCH ─────────────────────────────────────────────
+  1378→            0b1100011 => {
+  1379→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1380→                let rs2_reg = Gpr::from_encoding(rs2)?;
+  1381→                let imm12 = ((word >> 31) & 1) << 12
+  1382→                    | ((word >> 7) & 1) << 11
+  1383→                    | ((word >> 25) & 0x3F) << 5
+  1384→                    | ((word >> 8) & 0xF) << 1;
+  1385→                let offset = ((imm12 << 19) as i32) >> 19;
+  1386→                match funct3 {
+  1387→                    0b000 => Some(Instruction::Beq {
+  1388→                        rs1: rs1_reg,
+  1389→                        rs2: rs2_reg,
+  1390→                        offset,
+  1391→                    }),
+  1392→                    0b001 => Some(Instruction::Bne {
+  1393→                        rs1: rs1_reg,
+  1394→                        rs2: rs2_reg,
+  1395→                        offset,
+  1396→                    }),
+  1397→                    0b100 => Some(Instruction::Blt {
+  1398→                        rs1: rs1_reg,
+  1399→                        rs2: rs2_reg,
+  1400→                        offset,
+  1401→                    }),
+  1402→                    0b101 => Some(Instruction::Bge {
+  1403→                        rs1: rs1_reg,
+  1404→                        rs2: rs2_reg,
+  1405→                        offset,
+  1406→                    }),
+  1407→                    0b110 => Some(Instruction::Bltu {
+  1408→                        rs1: rs1_reg,
+  1409→                        rs2: rs2_reg,
+  1410→                        offset,
+  1411→                    }),
+  1412→                    0b111 => Some(Instruction::Bgeu {
+  1413→                        rs1: rs1_reg,
+  1414→                        rs2: rs2_reg,
+  1415→                        offset,
+  1416→                    }),
+  1417→                    _ => None,
+  1418→                }
+  1419→            }
+  1420→
+  1421→            // ── LOAD ───────────────────────────────────────────────
+  1422→            0b0000011 => {
+  1423→                let rd_reg = Gpr::from_encoding(rd)?;
+  1424→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1425→                let imm = (((word >> 20) as i32) << 20) >> 20;
+  1426→                match funct3 {
+  1427→                    0b000 => Some(Instruction::Lb {
+  1428→                        rd: rd_reg,
+  1429→                        rs1: rs1_reg,
+  1430→                        imm,
+  1431→                    }),
+  1432→                    0b001 => Some(Instruction::Lh {
+  1433→                        rd: rd_reg,
+  1434→                        rs1: rs1_reg,
+  1435→                        imm,
+  1436→                    }),
+  1437→                    0b010 => Some(Instruction::Lw {
+  1438→                        rd: rd_reg,
+  1439→                        rs1: rs1_reg,
+  1440→                        imm,
+  1441→                    }),
+  1442→                    0b011 => Some(Instruction::Ld {
+  1443→                        rd: rd_reg,
+  1444→                        rs1: rs1_reg,
+  1445→                        imm,
+  1446→                    }),
+  1447→                    0b100 => Some(Instruction::Lbu {
+  1448→                        rd: rd_reg,
+  1449→                        rs1: rs1_reg,
+  1450→                        imm,
+  1451→                    }),
+  1452→                    0b101 => Some(Instruction::Lhu {
+  1453→                        rd: rd_reg,
+  1454→                        rs1: rs1_reg,
+  1455→                        imm,
+  1456→                    }),
+  1457→                    0b110 => Some(Instruction::Lwu {
+  1458→                        rd: rd_reg,
+  1459→                        rs1: rs1_reg,
+  1460→                        imm,
+  1461→                    }),
+  1462→                    _ => None,
+  1463→                }
+  1464→            }
+  1465→
+  1466→            // ── STORE ──────────────────────────────────────────────
+  1467→            0b0100011 => {
+  1468→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1469→                let rs2_reg = Gpr::from_encoding(rs2)?;
+  1470→                let imm_lo = (word >> 7) & 0x1F;
+  1471→                let imm_hi = (word >> 25) & 0x7F;
+  1472→                let imm_raw = (imm_hi << 5) | imm_lo;
+  1473→                let imm = ((imm_raw as i32) << 20) >> 20;
+  1474→                match funct3 {
+  1475→                    0b000 => Some(Instruction::Sb {
+  1476→                        rs1: rs1_reg,
+  1477→                        rs2: rs2_reg,
+  1478→                        imm,
+  1479→                    }),
+  1480→                    0b001 => Some(Instruction::Sh {
+  1481→                        rs1: rs1_reg,
+  1482→                        rs2: rs2_reg,
+  1483→                        imm,
+  1484→                    }),
+  1485→                    0b010 => Some(Instruction::Sw {
+  1486→                        rs1: rs1_reg,
+  1487→                        rs2: rs2_reg,
+  1488→                        imm,
+  1489→                    }),
+  1490→                    0b011 => Some(Instruction::Sd {
+  1491→                        rs1: rs1_reg,
+  1492→                        rs2: rs2_reg,
+  1493→                        imm,
+  1494→                    }),
+  1495→                    _ => None,
+  1496→                }
+  1497→            }
+  1498→
+  1499→            // ── OP-IMM (RV64I) ─────────────────────────────────────
+  1500→            0b0010011 => {
+  1501→                let rd_reg = Gpr::from_encoding(rd)?;
+  1502→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1503→                let imm = (((word >> 20) as i32) << 20) >> 20;
+  1504→                let shamt = (word >> 20) & 0x3F;
+  1505→                match funct3 {
+  1506→                    0b000 => Some(Instruction::Addi {
+  1507→                        rd: rd_reg,
+  1508→                        rs1: rs1_reg,
+  1509→                        imm,
+  1510→                    }),
+  1511→                    0b010 => Some(Instruction::Slti {
+  1512→                        rd: rd_reg,
+  1513→                        rs1: rs1_reg,
+  1514→                        imm,
+  1515→                    }),
+  1516→                    0b011 => Some(Instruction::Sltiu {
+  1517→                        rd: rd_reg,
+  1518→                        rs1: rs1_reg,
+  1519→                        imm,
+  1520→                    }),
+  1521→                    0b100 => Some(Instruction::Xori {
+  1522→                        rd: rd_reg,
+  1523→                        rs1: rs1_reg,
+  1524→                        imm,
+  1525→                    }),
+  1526→                    0b110 => Some(Instruction::Ori {
+  1527→                        rd: rd_reg,
+  1528→                        rs1: rs1_reg,
+  1529→                        imm,
+  1530→                    }),
+  1531→                    0b111 => Some(Instruction::Andi {
+  1532→                        rd: rd_reg,
+  1533→                        rs1: rs1_reg,
+  1534→                        imm,
+  1535→                    }),
+  1536→                    0b001 => Some(Instruction::Slli {
+  1537→                        rd: rd_reg,
+  1538→                        rs1: rs1_reg,
+  1539→                        shamt,
+  1540→                    }),
+  1541→                    0b101 => {
+  1542→                        if funct7 == 0b0100000 {
+  1543→                            Some(Instruction::Srai {
+  1544→                                rd: rd_reg,
+  1545→                                rs1: rs1_reg,
+  1546→                                shamt,
+  1547→                            })
+  1548→                        } else {
+  1549→                            Some(Instruction::Srli {
+  1550→                                rd: rd_reg,
+  1551→                                rs1: rs1_reg,
+  1552→                                shamt,
+  1553→                            })
+  1554→                        }
+  1555→                    }
+  1556→                    _ => None,
+  1557→                }
+  1558→            }
+  1559→
+  1560→            // ── OP (RV64I register-register) ────────────────────────
+  1561→            0b0110011 => {
+  1562→                let rd_reg = Gpr::from_encoding(rd)?;
+  1563→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1564→                let rs2_reg = Gpr::from_encoding(rs2)?;
+  1565→                match (funct7, funct3) {
+  1566→                    (0b0000000, 0b000) => Some(Instruction::Add {
+  1567→                        rd: rd_reg,
+  1568→                        rs1: rs1_reg,
+  1569→                        rs2: rs2_reg,
+  1570→                    }),
+  1571→                    (0b0100000, 0b000) => Some(Instruction::Sub {
+  1572→                        rd: rd_reg,
+  1573→                        rs1: rs1_reg,
+  1574→                        rs2: rs2_reg,
+  1575→                    }),
+  1576→                    (0b0000000, 0b001) => Some(Instruction::Sll {
+  1577→                        rd: rd_reg,
+  1578→                        rs1: rs1_reg,
+  1579→                        rs2: rs2_reg,
+  1580→                    }),
+  1581→                    (0b0000000, 0b010) => Some(Instruction::Slt {
+  1582→                        rd: rd_reg,
+  1583→                        rs1: rs1_reg,
+  1584→                        rs2: rs2_reg,
+  1585→                    }),
+  1586→                    (0b0000000, 0b011) => Some(Instruction::Sltu {
+  1587→                        rd: rd_reg,
+  1588→                        rs1: rs1_reg,
+  1589→                        rs2: rs2_reg,
+  1590→                    }),
+  1591→                    (0b0000000, 0b100) => Some(Instruction::Xor {
+  1592→                        rd: rd_reg,
+  1593→                        rs1: rs1_reg,
+  1594→                        rs2: rs2_reg,
+  1595→                    }),
+  1596→                    (0b0000000, 0b101) => Some(Instruction::Srl {
+  1597→                        rd: rd_reg,
+  1598→                        rs1: rs1_reg,
+  1599→                        rs2: rs2_reg,
+  1600→                    }),
+  1601→                    (0b0100000, 0b101) => Some(Instruction::Sra {
+  1602→                        rd: rd_reg,
+  1603→                        rs1: rs1_reg,
+  1604→                        rs2: rs2_reg,
+  1605→                    }),
+  1606→                    (0b0000000, 0b110) => Some(Instruction::Or {
+  1607→                        rd: rd_reg,
+  1608→                        rs1: rs1_reg,
+  1609→                        rs2: rs2_reg,
+  1610→                    }),
+  1611→                    (0b0000000, 0b111) => Some(Instruction::And {
+  1612→                        rd: rd_reg,
+  1613→                        rs1: rs1_reg,
+  1614→                        rs2: rs2_reg,
+  1615→                    }),
+  1616→                    // M extension
+  1617→                    (0b0000001, 0b000) => Some(Instruction::Mul {
+  1618→                        rd: rd_reg,
+  1619→                        rs1: rs1_reg,
+  1620→                        rs2: rs2_reg,
+  1621→                    }),
+  1622→                    (0b0000001, 0b001) => Some(Instruction::Mulh {
+  1623→                        rd: rd_reg,
+  1624→                        rs1: rs1_reg,
+  1625→                        rs2: rs2_reg,
+  1626→                    }),
+  1627→                    (0b0000001, 0b010) => Some(Instruction::Mulhsu {
+  1628→                        rd: rd_reg,
+  1629→                        rs1: rs1_reg,
+  1630→                        rs2: rs2_reg,
+  1631→                    }),
+  1632→                    (0b0000001, 0b011) => Some(Instruction::Mulhu {
+  1633→                        rd: rd_reg,
+  1634→                        rs1: rs1_reg,
+  1635→                        rs2: rs2_reg,
+  1636→                    }),
+  1637→                    (0b0000001, 0b100) => Some(Instruction::Div {
+  1638→                        rd: rd_reg,
+  1639→                        rs1: rs1_reg,
+  1640→                        rs2: rs2_reg,
+  1641→                    }),
+  1642→                    (0b0000001, 0b101) => Some(Instruction::Divu {
+  1643→                        rd: rd_reg,
+  1644→                        rs1: rs1_reg,
+  1645→                        rs2: rs2_reg,
+  1646→                    }),
+  1647→                    (0b0000001, 0b110) => Some(Instruction::Rem {
+  1648→                        rd: rd_reg,
+  1649→                        rs1: rs1_reg,
+  1650→                        rs2: rs2_reg,
+  1651→                    }),
+  1652→                    (0b0000001, 0b111) => Some(Instruction::Remu {
+  1653→                        rd: rd_reg,
+  1654→                        rs1: rs1_reg,
+  1655→                        rs2: rs2_reg,
+  1656→                    }),
+  1657→                    _ => None,
+  1658→                }
+  1659→            }
+  1660→
+  1661→            // ── OP-IMM-32 (RV64) ───────────────────────────────────
+  1662→            0b0011011 => {
+  1663→                let rd_reg = Gpr::from_encoding(rd)?;
+  1664→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1665→                let imm = (((word >> 20) as i32) << 20) >> 20;
+  1666→                let shamt = (word >> 20) & 0x1F;
+  1667→                match funct3 {
+  1668→                    0b000 => Some(Instruction::Addiw {
+  1669→                        rd: rd_reg,
+  1670→                        rs1: rs1_reg,
+  1671→                        imm,
+  1672→                    }),
+  1673→                    0b001 => Some(Instruction::Slliw {
+  1674→                        rd: rd_reg,
+  1675→                        rs1: rs1_reg,
+  1676→                        shamt,
+  1677→                    }),
+  1678→                    0b101 => {
+  1679→                        if funct7 == 0b0100000 {
+  1680→                            Some(Instruction::Sraiw {
+  1681→                                rd: rd_reg,
+  1682→                                rs1: rs1_reg,
+  1683→                                shamt,
+  1684→                            })
+  1685→                        } else {
+  1686→                            Some(Instruction::Srliw {
+  1687→                                rd: rd_reg,
+  1688→                                rs1: rs1_reg,
+  1689→                                shamt,
+  1690→                            })
+  1691→                        }
+  1692→                    }
+  1693→                    _ => None,
+  1694→                }
+  1695→            }
+  1696→
+  1697→            // ── OP-32 (RV64) ───────────────────────────────────────
+  1698→            0b0111011 => {
+  1699→                let rd_reg = Gpr::from_encoding(rd)?;
+  1700→                let rs1_reg = Gpr::from_encoding(rs1)?;
+  1701→                let rs2_reg = Gpr::from_encoding(rs2)?;
+  1702→                match (funct7, funct3) {
+  1703→                    (0b0000000, 0b000) => Some(Instruction::Addw {
+  1704→                        rd: rd_reg,
+  1705→                        rs1: rs1_reg,
+  1706→                        rs2: rs2_reg,
+  1707→                    }),
+  1708→                    (0b0100000, 0b000) => Some(Instruction::Subw {
+  1709→                        rd: rd_reg,
+  1710→                        rs1: rs1_reg,
+  1711→                        rs2: rs2_reg,
+  1712→                    }),
+  1713→                    (0b0000000, 0b001) => Some(Instruction::Sllw {
+  1714→                        rd: rd_reg,
+  1715→                        rs1: rs1_reg,
+  1716→                        rs2: rs2_reg,
+  1717→                    }),
+  1718→                    (0b0000000, 0b101) => Some(Instruction::Srlw {
+  1719→                        rd: rd_reg,
+  1720→                        rs1: rs1_reg,
+  1721→                        rs2: rs2_reg,
+  1722→                    }),
+  1723→                    (0b0100000, 0b101) => Some(Instruction::Sraw {
+  1724→                        rd: rd_reg,
+  1725→                        rs1: rs1_reg,
+  1726→                        rs2: rs2_reg,
+  1727→                    }),
+  1728→                    _ => None,
+  1729→                }
+  1730→            }
+  1731→
+  1732→            // ── SYSTEM ─────────────────────────────────────────────
+  1733→            0b1110011 => {
+  1734→                if word == 0x00000073 {
+  1735→                    Some(Instruction::Ecall)
+  1736→                } else if word == 0x00100073 {
+  1737→                    Some(Instruction::Ebreak)
+  1738→                } else {
+  1739→                    let csr = (word >> 20) & 0xFFF;
+  1740→                    let rd_reg = Gpr::from_encoding(rd)?;
+  1741→                    let rs1_reg = Gpr::from_encoding(rs1)?;
+  1742→                    match funct3 {
+  1743→                        0b001 => Some(Instruction::Csrrw {
+  1744→                            rd: rd_reg,
+  1745→                            csr,
+  1746→                            rs1: rs1_reg,
+  1747→                        }),
+  1748→                        0b010 => Some(Instruction::Csrrs {
+  1749→                            rd: rd_reg,
+  1750→                            csr,
+  1751→                            rs1: rs1_reg,
+  1752→                        }),
+  1753→                        0b011 => Some(Instruction::Csrrc {
+  1754→                            rd: rd_reg,
+  1755→                            csr,
+  1756→                            rs1: rs1_reg,
+  1757→                        }),
+  1758→                        0b101 => Some(Instruction::Csrrwi {
+  1759→                            rd: rd_reg,
+  1760→                            csr,
+  1761→                            uimm: rs1,
+  1762→                        }),
+  1763→                        0b110 => Some(Instruction::Csrrsi {
+  1764→                            rd: rd_reg,
+  1765→                            csr,
+  1766→                            uimm: rs1,
+  1767→                        }),
+  1768→                        0b111 => Some(Instruction::Csrrci {
+  1769→                            rd: rd_reg,
+  1770→                            csr,
+  1771→                            uimm: rs1,
+  1772→                        }),
+  1773→                        _ => None,
+  1774→                    }
+  1775→                }
+  1776→            }
+  1777→
+  1778→            // ── MISC-MEM (FENCE / FENCE.I) ─────────────────────────
+  1779→            0b0001111 => {
+  1780→                if funct3 == 0b001 {
+  1781→                    Some(Instruction::FenceI)
+  1782→                } else {
+  1783→                    let imm = (word >> 20) & 0xFF;
+  1784→                    let pred = (imm >> 4) & 0xF;
+  1785→                    let succ = imm & 0xF;
+  1786→                    Some(Instruction::Fence { pred, succ })
+  1787→                }
+  1788→            }
+  1789→
+  1790→            // ── FP (opcode=0x53) ───────────────────────────────────
+  1791→            0b1010011 => {
+  1792→                let rd_fpr = Fpr::from_encoding(rd)?;
+  1793→                let rs1_fpr = Fpr::from_encoding(rs1)?;
+  1794→                let rs2_fpr = Fpr::from_encoding(rs2)?;
+  1795→                match (funct7, funct3) {
+  1796→                    (0b0000001, 0b111) => Some(Instruction::FaddD {
+  1797→                        rd: rd_fpr,
+  1798→                        rs1: rs1_fpr,
+  1799→                        rs2: rs2_fpr,
+  1800→                    }),
+  1801→                    (0b0000101, 0b111) => Some(Instruction::FsubD {
+  1802→                        rd: rd_fpr,
+  1803→                        rs1: rs1_fpr,
+  1804→                        rs2: rs2_fpr,
+  1805→                    }),
+  1806→                    (0b0001001, 0b111) => Some(Instruction::FmulD {
+  1807→                        rd: rd_fpr,
+  1808→                        rs1: rs1_fpr,
+  1809→                        rs2: rs2_fpr,
+  1810→                    }),
+  1811→                    (0b0001101, 0b111) => Some(Instruction::FdivD {
+  1812→                        rd: rd_fpr,
+  1813→                        rs1: rs1_fpr,
+  1814→                        rs2: rs2_fpr,
+  1815→                    }),
+  1816→                    (0b0010001, 0b000) if rs1 == rs2 => Some(Instruction::FmvD {
+  1817→                        rd: rd_fpr,
+  1818→                        rs1: rs1_fpr,
+  1819→                    }),
+  1820→                    _ => None,
+  1821→                }
+  1822→            }
+  1823→
+  1824→            _ => None,
+  1825→        }
+  1826→    }
+  1827→}
+  1828→
+  1829→impl std::fmt::Display for Instruction {
+  1830→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  1831→        match self {
+  1832→            Instruction::Lui { rd, imm } => write!(f, "lui {}, 0x{:08x}", rd, imm),
+  1833→            Instruction::Auipc { rd, imm } => write!(f, "auipc {}, 0x{:08x}", rd, imm),
+  1834→            Instruction::Jal { rd, offset } => write!(f, "jal {}, {:+}", rd, offset),
+  1835→            Instruction::Jalr { rd, rs1, imm } => write!(f, "jalr {}, {}({})", rd, imm, rs1),
+  1836→            Instruction::Beq { rs1, rs2, offset } => {
+  1837→                write!(f, "beq {}, {}, {:+}", rs1, rs2, offset)
+  1838→            }
+  1839→            Instruction::Bne { rs1, rs2, offset } => {
+  1840→                write!(f, "bne {}, {}, {:+}", rs1, rs2, offset)
+  1841→            }
+  1842→            Instruction::Blt { rs1, rs2, offset } => {
+  1843→                write!(f, "blt {}, {}, {:+}", rs1, rs2, offset)
+  1844→            }
+  1845→            Instruction::Bge { rs1, rs2, offset } => {
+  1846→                write!(f, "bge {}, {}, {:+}", rs1, rs2, offset)
+  1847→            }
+  1848→            Instruction::Bltu { rs1, rs2, offset } => {
+  1849→                write!(f, "bltu {}, {}, {:+}", rs1, rs2, offset)
+  1850→            }
+  1851→            Instruction::Bgeu { rs1, rs2, offset } => {
+  1852→                write!(f, "bgeu {}, {}, {:+}", rs1, rs2, offset)
+  1853→            }
+  1854→            Instruction::Lb { rd, rs1, imm } => write!(f, "lb {}, {}({})", rd, imm, rs1),
+  1855→            Instruction::Lh { rd, rs1, imm } => write!(f, "lh {}, {}({})", rd, imm, rs1),
+  1856→            Instruction::Lw { rd, rs1, imm } => write!(f, "lw {}, {}({})", rd, imm, rs1),
+  1857→            Instruction::Ld { rd, rs1, imm } => write!(f, "ld {}, {}({})", rd, imm, rs1),
+  1858→            Instruction::Lbu { rd, rs1, imm } => write!(f, "lbu {}, {}({})", rd, imm, rs1),
+  1859→            Instruction::Lhu { rd, rs1, imm } => write!(f, "lhu {}, {}({})", rd, imm, rs1),
+  1860→            Instruction::Lwu { rd, rs1, imm } => write!(f, "lwu {}, {}({})", rd, imm, rs1),
+  1861→            Instruction::Sb { rs1, rs2, imm } => write!(f, "sb {}, {}({})", rs2, imm, rs1),
+  1862→            Instruction::Sh { rs1, rs2, imm } => write!(f, "sh {}, {}({})", rs2, imm, rs1),
+  1863→            Instruction::Sw { rs1, rs2, imm } => write!(f, "sw {}, {}({})", rs2, imm, rs1),
+  1864→            Instruction::Sd { rs1, rs2, imm } => write!(f, "sd {}, {}({})", rs2, imm, rs1),
+  1865→            Instruction::Addi { rd, rs1, imm } => write!(f, "addi {}, {}, {}", rd, rs1, imm),
+  1866→            Instruction::Slti { rd, rs1, imm } => write!(f, "slti {}, {}, {}", rd, rs1, imm),
+  1867→            Instruction::Sltiu { rd, rs1, imm } => write!(f, "sltiu {}, {}, {}", rd, rs1, imm),
+  1868→            Instruction::Xori { rd, rs1, imm } => write!(f, "xori {}, {}, {}", rd, rs1, imm),
+  1869→            Instruction::Ori { rd, rs1, imm } => write!(f, "ori {}, {}, {}", rd, rs1, imm),
+  1870→            Instruction::Andi { rd, rs1, imm } => write!(f, "andi {}, {}, {}", rd, rs1, imm),
+  1871→            Instruction::Slli { rd, rs1, shamt } => write!(f, "slli {}, {}, {}", rd, rs1, shamt),
+  1872→            Instruction::Srli { rd, rs1, shamt } => write!(f, "srli {}, {}, {}", rd, rs1, shamt),
+  1873→            Instruction::Srai { rd, rs1, shamt } => write!(f, "srai {}, {}, {}", rd, rs1, shamt),
+  1874→            Instruction::Add { rd, rs1, rs2 } => write!(f, "add {}, {}, {}", rd, rs1, rs2),
+  1875→            Instruction::Sub { rd, rs1, rs2 } => write!(f, "sub {}, {}, {}", rd, rs1, rs2),
+  1876→            Instruction::Sll { rd, rs1, rs2 } => write!(f, "sll {}, {}, {}", rd, rs1, rs2),
+  1877→            Instruction::Slt { rd, rs1, rs2 } => write!(f, "slt {}, {}, {}", rd, rs1, rs2),
+  1878→            Instruction::Sltu { rd, rs1, rs2 } => write!(f, "sltu {}, {}, {}", rd, rs1, rs2),
+  1879→            Instruction::Xor { rd, rs1, rs2 } => write!(f, "xor {}, {}, {}", rd, rs1, rs2),
+  1880→            Instruction::Srl { rd, rs1, rs2 } => write!(f, "srl {}, {}, {}", rd, rs1, rs2),
+  1881→            Instruction::Sra { rd, rs1, rs2 } => write!(f, "sra {}, {}, {}", rd, rs1, rs2),
+  1882→            Instruction::Or { rd, rs1, rs2 } => write!(f, "or {}, {}, {}", rd, rs1, rs2),
+  1883→            Instruction::And { rd, rs1, rs2 } => write!(f, "and {}, {}, {}", rd, rs1, rs2),
+  1884→            Instruction::Addw { rd, rs1, rs2 } => write!(f, "addw {}, {}, {}", rd, rs1, rs2),
+  1885→            Instruction::Subw { rd, rs1, rs2 } => write!(f, "subw {}, {}, {}", rd, rs1, rs2),
+  1886→            Instruction::Sllw { rd, rs1, rs2 } => write!(f, "sllw {}, {}, {}", rd, rs1, rs2),
+  1887→            Instruction::Srlw { rd, rs1, rs2 } => write!(f, "srlw {}, {}, {}", rd, rs1, rs2),
+  1888→            Instruction::Sraw { rd, rs1, rs2 } => write!(f, "sraw {}, {}, {}", rd, rs1, rs2),
+  1889→            Instruction::Addiw { rd, rs1, imm } => write!(f, "addiw {}, {}, {}", rd, rs1, imm),
+  1890→            Instruction::Slliw { rd, rs1, shamt } => write!(f, "slliw {}, {}, {}", rd, rs1, shamt),
+  1891→            Instruction::Srliw { rd, rs1, shamt } => write!(f, "srliw {}, {}, {}", rd, rs1, shamt),
+  1892→            Instruction::Sraiw { rd, rs1, shamt } => write!(f, "sraiw {}, {}, {}", rd, rs1, shamt),
+  1893→            Instruction::Mul { rd, rs1, rs2 } => write!(f, "mul {}, {}, {}", rd, rs1, rs2),
+  1894→            Instruction::Mulh { rd, rs1, rs2 } => write!(f, "mulh {}, {}, {}", rd, rs1, rs2),
+  1895→            Instruction::Mulhsu { rd, rs1, rs2 } => write!(f, "mulhsu {}, {}, {}", rd, rs1, rs2),
+  1896→            Instruction::Mulhu { rd, rs1, rs2 } => write!(f, "mulhu {}, {}, {}", rd, rs1, rs2),
+  1897→            Instruction::Div { rd, rs1, rs2 } => write!(f, "div {}, {}, {}", rd, rs1, rs2),
+  1898→            Instruction::Divu { rd, rs1, rs2 } => write!(f, "divu {}, {}, {}", rd, rs1, rs2),
+  1899→            Instruction::Rem { rd, rs1, rs2 } => write!(f, "rem {}, {}, {}", rd, rs1, rs2),
+  1900→            Instruction::Remu { rd, rs1, rs2 } => write!(f, "remu {}, {}, {}", rd, rs1, rs2),
+  1901→            Instruction::Flw { rd, rs1, imm } => write!(f, "flw {}, {}({})", rd, imm, rs1),
+  1902→            Instruction::Fld { rd, rs1, imm } => write!(f, "fld {}, {}({})", rd, imm, rs1),
+  1903→            Instruction::Fsw { rs1, rs2, imm } => write!(f, "fsw {}, {}({})", rs2, imm, rs1),
+  1904→            Instruction::Fsd { rs1, rs2, imm } => write!(f, "fsd {}, {}({})", rs2, imm, rs1),
+  1905→            Instruction::FaddD { rd, rs1, rs2 } => write!(f, "fadd.d {}, {}, {}", rd, rs1, rs2),
+  1906→            Instruction::FsubD { rd, rs1, rs2 } => write!(f, "fsub.d {}, {}, {}", rd, rs1, rs2),
+  1907→            Instruction::FmulD { rd, rs1, rs2 } => write!(f, "fmul.d {}, {}, {}", rd, rs1, rs2),
+  1908→            Instruction::FdivD { rd, rs1, rs2 } => write!(f, "fdiv.d {}, {}, {}", rd, rs1, rs2),
+  1909→            Instruction::FmvD { rd, rs1 } => write!(f, "fmv.d {}, {}", rd, rs1),
+  1910→            Instruction::Csrrw { rd, csr, rs1 } => {
+  1911→                write!(f, "csrrw {}, 0x{:03x}, {}", rd, csr, rs1)
+  1912→            }
+  1913→            Instruction::Csrrs { rd, csr, rs1 } => {
+  1914→                write!(f, "csrrs {}, 0x{:03x}, {}", rd, csr, rs1)
+  1915→            }
+  1916→            Instruction::Csrrc { rd, csr, rs1 } => {
+  1917→                write!(f, "csrrc {}, 0x{:03x}, {}", rd, csr, rs1)
+  1918→            }
+  1919→            Instruction::Csrrwi { rd, csr, uimm } => {
+  1920→                write!(f, "csrrwi {}, 0x{:03x}, {}", rd, csr, uimm)
+  1921→            }
+  1922→            Instruction::Csrrsi { rd, csr, uimm } => {
+  1923→                write!(f, "csrrsi {}, 0x{:03x}, {}", rd, csr, uimm)
+  1924→            }
+  1925→            Instruction::Csrrci { rd, csr, uimm } => {
+  1926→                write!(f, "csrrci {}, 0x{:03x}, {}", rd, csr, uimm)
+  1927→            }
+  1928→            Instruction::FenceI => write!(f, "fence.i"),
+  1929→            Instruction::Ecall => write!(f, "ecall"),
+  1930→            Instruction::Ebreak => write!(f, "ebreak"),
+  1931→            Instruction::Fence { pred, succ } => write!(f, "fence {:#x}, {:#x}", pred, succ),
+  1932→            Instruction::Nop => write!(f, "nop"),
+  1933→        }
+  1934→    }
+  1935→}
+  1936→
+  1937→// ===========================================================================
+  1938→// ELF64 Builder for RISC-V
+  1939→// ===========================================================================
+  1940→
+  1941→/// Build a minimal ELF64 binary for RISC-V 64-bit from raw code bytes.
+  1942→///
+  1943→/// Produces a static executable with a single LOAD segment containing the
+  1944→/// `.text` section.  Uses EM_RISCV (243) as the machine type.
+  1945→fn build_minimal_riscv64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1946→    // Layout: ELF header (64) | 1 program header (56) | code
+  1947→    let elf_header_size: u64 = 64;
+  1948→    let phdr_size: u64 = 56;
+  1949→    let text_offset = elf_header_size + phdr_size;
+  1950→    let text_size = code.len() as u64;
+  1951→    let entry_point = base_addr + text_offset;
+  1952→
+  1953→    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+  1954→
+  1955→    // --- e_ident ---
+  1956→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1957→    elf.push(2); // ELFCLASS64
+  1958→    elf.push(1); // ELFDATA2LSB
+  1959→    elf.push(1); // EV_CURRENT
+  1960→    elf.push(3); // ELFOSABI_LINUX
+  1961→    elf.push(0); // padding
+  1962→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1963→
+  1964→    // --- ELF header fields ---
+  1965→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1966→    elf.extend_from_slice(&243u16.to_le_bytes()); // e_machine = EM_RISCV
+  1967→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1968→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1969→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1970→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1971→                                                // e_flags: RISC-V-specific flags. Float ABI = double (0x5), RVC = 0.
+  1972→                                                // EF_RISCV_FLOAT_ABI_DOUBLE = 0x5 << 5 = 0xA0
+  1973→                                                // EF_RISCV_RVC = 0x0001 (we don't set it for now)
+  1974→    elf.extend_from_slice(&0xA0u32.to_le_bytes()); // e_flags (LP64D ABI)
+  1975→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1976→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1977→    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+  1978→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1979→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1980→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1981→
+  1982→    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+  1983→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1984→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1985→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1986→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1987→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1988→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1989→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1990→    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+  1991→
+  1992→    // --- Code section ---
+  1993→    elf.extend_from_slice(code);
+  1994→
+  1995→    elf
+  1996→}
+  1997→
+  1998→// ===========================================================================
+  1999→// RiscV64Backend
+  2000→// ===========================================================================
+
+[showing lines 1-2000 of 6390; use offset=2001 with limit to continue reading]

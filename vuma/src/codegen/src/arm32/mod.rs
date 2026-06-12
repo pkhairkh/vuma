@@ -81,9 +81,9 @@ impl Gpr {
 
     /// Returns `true` if this register is available for register allocation.
     ///
-    /// R11 (FP), R13 (SP), R14 (LR), and R15 (PC) are reserved.
+    /// R13 (SP), R14 (LR), and R15 (PC) are reserved.
     pub fn is_allocatable(&self) -> bool {
-        !matches!(self, Gpr::R11 | Gpr::R13 | Gpr::R14 | Gpr::R15)
+        !matches!(self, Gpr::R13 | Gpr::R14 | Gpr::R15)
     }
 
     /// Returns `true` if this register is callee-saved (R4–R11).
@@ -2448,7 +2448,6 @@ impl Backend for Arm32Backend {
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Simple round-robin register allocation over allocatable GPRs.
-        // R11 (FP) is reserved — it is the frame pointer in the prologue/epilogue.
         let allocatable: Vec<Gpr> = [
             Gpr::R0,
             Gpr::R1,
@@ -2461,6 +2460,7 @@ impl Backend for Arm32Backend {
             Gpr::R8,
             Gpr::R9,
             Gpr::R10,
+            Gpr::R11,
             Gpr::R12,
         ]
         .to_vec();
@@ -2548,12 +2548,6 @@ impl Backend for Arm32Backend {
                 encoded: sub_bytes.to_vec(),
             });
         }
-
-        // Running offset from R11 (FP) for stack allocations.
-        // The prologue already reserved frame_size bytes below R11, so each
-        // Alloc just computes an address within that space instead of
-        // decrementing SP again (which would double-allocate).
-        let mut alloc_offset: i32 = 0;
 
         // Encode each IR instruction
         for block in &func.blocks {
@@ -2929,6 +2923,31 @@ impl Backend for Arm32Backend {
                                     l.encoding(),
                                 ));
                             }
+                            BinOpKind::Ror | BinOpKind::Rol => {
+                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+                                code.extend_from_slice(&pre);
+                                if l != d {
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al,
+                                        DP_MOV,
+                                        false,
+                                        0,
+                                        d.encoding(),
+                                        l.encoding(),
+                                    ));
+                                }
+                                // ROR shift_type=3, by register
+                                code.extend_from_slice(&encode_dp_shift_reg(
+                                    Condition::Al,
+                                    DP_MOV,
+                                    false,
+                                    0,
+                                    d.encoding(),
+                                    3,
+                                    r.encoding(),
+                                    l.encoding(),
+                                ));
+                            }
                             BinOpKind::Add | BinOpKind::Sub => {
                                 let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
                                 code.extend_from_slice(&pre);
@@ -3211,34 +3230,41 @@ impl Backend for Arm32Backend {
                             .copied()
                             .unwrap_or(Gpr::R0);
                         let mut code = Vec::new();
-                        // The prologue already reserved frame_size bytes below R11 (FP),
-                        // so we compute the allocation address from FP instead of
-                        // decrementing SP again (which would double-allocate).
-                        let alloc_size = (*size as i32).max(4);
-                        let aligned_size = ((alloc_size + 7) / 8) * 8; // align to 8 bytes
-                        alloc_offset += aligned_size;
-                        // SUB d, R11, #alloc_offset  (d = R11 - alloc_offset)
-                        if let Some((rotate, imm8)) = try_encode_arm_imm(alloc_offset as u32) {
+                        // SUB SP, SP, #size (decrement stack pointer)
+                        let size_val = *size;
+                        if let Some((rotate, imm8)) = try_encode_arm_imm(size_val) {
                             code.extend_from_slice(&encode_dp_imm(
                                 Condition::Al,
                                 DP_SUB,
                                 false,
-                                Gpr::R11.encoding(),
-                                d.encoding(),
+                                Gpr::R13.encoding(),
+                                Gpr::R13.encoding(),
                                 rotate,
                                 imm8,
                             ));
                         } else {
-                            // For offsets that don't fit in ARM rotated-immediate, use a
+                            // For sizes that don't fit in ARM rotated-immediate, use a
                             // scratch register to hold the value.
-                            code.extend_from_slice(&load_immediate_arm32(Gpr::R12, alloc_offset as u32));
+                            code.extend_from_slice(&load_immediate_arm32(Gpr::R12, size_val));
                             code.extend_from_slice(&encode_dp_reg(
                                 Condition::Al,
                                 DP_SUB,
                                 false,
-                                Gpr::R11.encoding(),
-                                d.encoding(),
+                                Gpr::R13.encoding(),
+                                Gpr::R13.encoding(),
                                 Gpr::R12.encoding(),
+                            ));
+                        }
+                        // ADD d, SP, #0 (copy new SP to destination)
+                        if d != Gpr::R13 {
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al,
+                                DP_ADD,
+                                false,
+                                Gpr::R13.encoding(),
+                                d.encoding(),
+                                0,
+                                0,
                             ));
                         }
                         code
@@ -3554,55 +3580,12 @@ impl Backend for Arm32Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // ── Phase 1: Concatenate all function code ──
-        let mut all_code: Vec<u8> = Vec::new();
+        // Collect all encoded bytes from every function and block.
+        let mut all_code = Vec::new();
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
-                }
-            }
-        }
-
-        // ── Phase 3: Replace ret in the entry function with exit syscall ──
-        // The first function is the ELF entry point, which is jumped to by the
-        // kernel — there is no return address on the stack, so `POP {R11, PC}`
-        // (or `BX LR`) would jump to garbage and crash.  Replace the epilogue
-        // (MOV SP, R11 + POP {R11, PC}) with the Linux exit syscall:
-        //   MOV R7, #1      ; sys_exit
-        //   SWI 0x0          ; syscall
-        // The return value in R0 becomes the exit code.
-        if !program.functions.is_empty() {
-            let first_func = &program.functions[0];
-            // Find the last instruction of the first function's last block
-            if let Some(last_block) = first_func.blocks.last() {
-                if let Some(last_instr) = last_block.instructions.last() {
-                    let encoded = &last_instr.encoded;
-                    // The epilogue is the last 8 bytes: MOV SP, R11 + POP {R11, PC}
-                    // (MOV SP, R11 = 0xE1A0D00B, POP {R11, PC} = 0xE8BD8800)
-                    if encoded.len() >= 8 {
-                        // Walk all instructions of the first function to find
-                        // the byte offset of the target instruction in all_code
-                        let mut instr_offset: usize = 0;
-                        for block in &first_func.blocks {
-                            for instr in &block.instructions {
-                                if std::ptr::eq(instr as *const _, last_instr as *const _) {
-                                    let epilogue_start = instr_offset + encoded.len() - 8;
-                                    // ARM32 Linux exit syscall:
-                                    //   MOV R7, #1   → 0xE3A07001 (LE: 01 70 A0 E3)
-                                    //   SWI 0x0      → 0xEF000000 (LE: 00 00 00 EF)
-                                    let exit_syscall: [u8; 8] = [
-                                        0x01, 0x70, 0xA0, 0xE3, // MOV R7, #1
-                                        0x00, 0x00, 0x00, 0xEF, // SWI 0x0
-                                    ];
-                                    all_code[epilogue_start..epilogue_start + 8]
-                                        .copy_from_slice(&exit_syscall);
-                                    break;
-                                }
-                                instr_offset += instr.encoded.len();
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -3697,7 +3680,6 @@ mod tests {
         assert!(Gpr::R0.is_allocatable());
         assert!(Gpr::R4.is_allocatable());
         assert!(Gpr::R12.is_allocatable());
-        assert!(!Gpr::R11.is_allocatable()); // FP
         assert!(!Gpr::R13.is_allocatable()); // SP
         assert!(!Gpr::R14.is_allocatable()); // LR
         assert!(!Gpr::R15.is_allocatable()); // PC
@@ -4027,7 +4009,6 @@ mod tests {
                         dst: crate::ir::IRValue::Register(0),
                         lhs: crate::ir::IRValue::Register(1),
                         rhs: crate::ir::IRValue::Immediate(42),
-                        ty: None,
                     },
                     crate::ir::IRInstr::Ret {
                         values: vec![crate::ir::IRValue::Register(0)],
@@ -4163,7 +4144,6 @@ mod tests {
                         dst: crate::ir::IRValue::Register(0),
                         lhs: crate::ir::IRValue::Register(1),
                         rhs: crate::ir::IRValue::Immediate(10),
-                        ty: None,
                     },
                     crate::ir::IRInstr::Ret {
                         values: vec![crate::ir::IRValue::Register(0)],

@@ -2495,7 +2495,6 @@ mod tests {
             IRInstr::Cmp {
                 kind: CmpKind::Eq,
                 rhs: IRValue::Immediate(1),
-                ty: None,
                 ..
             }
         ));
@@ -2532,7 +2531,6 @@ mod tests {
             first_instr,
             IRInstr::Cmp {
                 kind: CmpKind::SLt,
-                ty: None,
                 ..
             }
         ));

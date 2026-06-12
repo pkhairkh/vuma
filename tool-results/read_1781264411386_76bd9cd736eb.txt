@@ -1,0 +1,2002 @@
+     1→//! SCG Transformation Passes
+     2→//!
+     3→//! This module defines the transformation framework for the Semantic Computation
+     4→//! Graph. It provides a common [`SCGPass`] trait interface, several concrete
+     5→//! optimization and lowering passes, a verification pass, and a [`PassManager`]
+     6→//! that sequences and orchestrates pass execution.
+     7→//!
+     8→//! # Passes
+     9→//!
+    10→//! - [`DeadCodeElimination`] — removes nodes whose results are never consumed
+    11→//! - [`ConstantFolding`] — evaluates constant expressions at compile time
+    12→//! - [`CommonSubexpressionElimination`] — merges identical computation nodes
+    13→//! - [`InliningPass`] — inlines function-call regions by merging SCG subgraphs
+    14→//! - [`VerificationPass`] — verifies SCG well-formedness after transformation
+    15→//!
+    16→//! # Pass Manager
+    17→//!
+    18→//! The [`PassManager`] sequences passes, optionally running verification between
+    19→//! each one, and accumulates aggregate statistics across all runs.
+    20→
+    21→use hashbrown::{HashMap, HashSet};
+    22→
+    23→use crate::edge::EdgeKind;
+    24→use crate::graph::{ValidationResult, SCG};
+    25→use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
+    26→
+    27→// ── Pass Result ───────────────────────────────────────────────────────
+    28→
+    29→/// Statistics and diagnostics returned by a single pass execution.
+    30→#[derive(Debug, Clone)]
+    31→pub struct PassResult {
+    32→    /// Name of the pass that produced this result.
+    33→    pub pass_name: String,
+    34→    /// Whether the pass made any changes to the graph.
+    35→    pub changed: bool,
+    36→    /// Number of nodes removed during this pass.
+    37→    pub nodes_removed: usize,
+    38→    /// Number of nodes added during this pass.
+    39→    pub nodes_added: usize,
+    40→    /// Number of edges removed during this pass.
+    41→    pub edges_removed: usize,
+    42→    /// Number of edges added during this pass.
+    43→    pub edges_added: usize,
+    44→    /// Any error messages produced by the pass.
+    45→    pub errors: Vec<String>,
+    46→}
+    47→
+    48→impl PassResult {
+    49→    /// Creates an empty (unchanged) result for the given pass name.
+    50→    pub fn new(pass_name: impl Into<String>) -> Self {
+    51→        Self {
+    52→            pass_name: pass_name.into(),
+    53→            changed: false,
+    54→            nodes_removed: 0,
+    55→            nodes_added: 0,
+    56→            edges_removed: 0,
+    57→            edges_added: 0,
+    58→            errors: Vec::new(),
+    59→        }
+    60→    }
+    61→
+    62→    /// Returns `true` if the pass encountered any errors.
+    63→    pub fn has_errors(&self) -> bool {
+    64→        !self.errors.is_empty()
+    65→    }
+    66→
+    67→    /// Merges another `PassResult` into this one, summing statistics.
+    68→    pub fn merge(&mut self, other: &PassResult) {
+    69→        if other.changed {
+    70→            self.changed = true;
+    71→        }
+    72→        self.nodes_removed += other.nodes_removed;
+    73→        self.nodes_added += other.nodes_added;
+    74→        self.edges_removed += other.edges_removed;
+    75→        self.edges_added += other.edges_added;
+    76→        self.errors.extend_from_slice(&other.errors);
+    77→    }
+    78→}
+    79→
+    80→impl std::fmt::Display for PassResult {
+    81→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    82→        write!(
+    83→            f,
+    84→            "PassResult({}: changed={}, -{} nodes, +{} nodes, -{} edges, +{} edges",
+    85→            self.pass_name,
+    86→            self.changed,
+    87→            self.nodes_removed,
+    88→            self.nodes_added,
+    89→            self.edges_removed,
+    90→            self.edges_added
+    91→        )?;
+    92→        if !self.errors.is_empty() {
+    93→            write!(f, ", {} errors", self.errors.len())?;
+    94→        }
+    95→        write!(f, ")")
+    96→    }
+    97→}
+    98→
+    99→// ── SCGPass Trait ─────────────────────────────────────────────────────
+   100→
+   101→/// Common interface for all SCG transformation passes.
+   102→///
+   103→/// Every pass must provide a human-readable name and a `run` method that
+   104→/// mutates the graph in place and returns a `PassResult` describing what
+   105→/// changed.
+   106→pub trait SCGPass {
+   107→    /// Returns the human-readable name of this pass.
+   108→    fn name(&self) -> &str;
+   109→
+   110→    /// Executes the pass on the given SCG, returning a `PassResult`.
+   111→    ///
+   112→    /// The graph is mutated in place. The returned result describes whether
+   113→    /// changes were made and what statistics were observed.
+   114→    fn run(&self, scg: &mut SCG) -> PassResult;
+   115→}
+   116→
+   117→// ── Dead Code Elimination ─────────────────────────────────────────────
+   118→
+   119→/// Removes nodes whose results are never consumed by another node.
+   120→///
+   121→/// A node is considered "dead" if:
+   122→/// - It has no outgoing **data-flow** edges (its result is unused), **and**
+   123→/// - It has no side effects that must be preserved.
+   124→///
+   125→/// Nodes that are never dead (always preserved):
+   126→/// - [`NodeType::Effect`] — observable side effects must be kept.
+   127→/// - [`NodeType::Control`] — control flow structure must be preserved.
+   128→/// - [`NodeType::Allocation`] / [`NodeType::Deallocation`] — memory lifecycle
+   129→///   nodes are always considered live.
+   130→/// - [`NodeType::Phantom`] — structural markers are preserved.
+   131→///
+   132→/// The pass iterates to a fixpoint: removing one node may make its
+   133→/// predecessors dead as well.
+   134→pub struct DeadCodeElimination;
+   135→
+   136→impl DeadCodeElimination {
+   137→    /// Creates a new `DeadCodeElimination` pass.
+   138→    pub fn new() -> Self {
+   139→        Self
+   140→    }
+   141→
+   142→    /// Returns `true` if the given node type is never eligible for removal.
+   143→    fn is_always_live(node_type: &NodeType) -> bool {
+   144→        matches!(
+   145→            node_type,
+   146→            NodeType::Effect
+   147→                | NodeType::Control
+   148→                | NodeType::Allocation
+   149→                | NodeType::Deallocation
+   150→                | NodeType::Phantom
+   151→        )
+   152→    }
+   153→
+   154→    /// Returns `true` if a node has no outgoing data-flow edges, meaning
+   155→    /// its result is never consumed.
+   156→    fn has_no_dataflow_successors(scg: &SCG, id: NodeId) -> bool {
+   157→        if let Some(succs) = scg.successors(id) {
+   158→            for succ in succs {
+   159→                // Check if any edge from id -> succ is a DataFlow edge
+   160→                for edge in scg.edges() {
+   161→                    if edge.source == id && edge.target == succ && edge.kind == EdgeKind::DataFlow {
+   162→                        return false;
+   163→                    }
+   164→                }
+   165→            }
+   166→        }
+   167→        true
+   168→    }
+   169→}
+   170→
+   171→impl Default for DeadCodeElimination {
+   172→    fn default() -> Self {
+   173→        Self::new()
+   174→    }
+   175→}
+   176→
+   177→impl SCGPass for DeadCodeElimination {
+   178→    fn name(&self) -> &str {
+   179→        "DeadCodeElimination"
+   180→    }
+   181→
+   182→    fn run(&self, scg: &mut SCG) -> PassResult {
+   183→        let mut result = PassResult::new(self.name());
+   184→        let mut iteration_changed = true;
+   185→
+   186→        while iteration_changed {
+   187→            iteration_changed = false;
+   188→            let node_ids: Vec<NodeId> = scg.node_ids().collect();
+   189→
+   190→            for id in node_ids {
+   191→                // Fetch node type; skip if node was already removed
+   192→                let node_type = match scg.get_node(id) {
+   193→                    Some(n) => n.node_type.clone(),
+   194→                    None => continue,
+   195→                };
+   196→
+   197→                if Self::is_always_live(&node_type) {
+   198→                    continue;
+   199→                }
+   200→
+   201→                if Self::has_no_dataflow_successors(scg, id) {
+   202→                    // Count edges that will be removed with this node
+   203→                    let outgoing = scg.successors(id).map_or(0, |s| s.len());
+   204→                    let incoming = scg.predecessors(id).map_or(0, |p| p.len());
+   205→
+   206→                    if scg.remove_node(id).is_ok() {
+   207→                        result.nodes_removed += 1;
+   208→                        result.edges_removed += outgoing + incoming;
+   209→                        result.changed = true;
+   210→                        iteration_changed = true;
+   211→                    }
+   212→                }
+   213→            }
+   214→        }
+   215→
+   216→        result
+   217→    }
+   218→}
+   219→
+   220→// ── Constant Folding ──────────────────────────────────────────────────
+   221→
+   222→/// Evaluates constant expressions at compile time.
+   223→///
+   224→/// This pass recognizes computation nodes whose operation string follows
+   225→/// the convention `"const.<type>:<value>"` (e.g., `"const.i32:42"`) as
+   226→/// compile-time constants. It also folds simple binary arithmetic on
+   227→/// constants where both predecessors are constant literals.
+   228→///
+   229→/// When a computation can be folded, the original node is replaced with
+   230→/// a new computation node whose operation is the constant result, and
+   231→/// the now-unnecessary input edges are removed.
+   232→///
+   233→/// # Foldable operations
+   234→///
+   235→/// - `"add"`, `"sub"`, `"mul"` — on two constant predecessors
+   236→/// - `"const.<type>:<value>"` — treated as a literal constant (no folding needed)
+   237→pub struct ConstantFolding;
+   238→
+   239→impl ConstantFolding {
+   240→    /// Creates a new `ConstantFolding` pass.
+   241→    pub fn new() -> Self {
+   242→        Self
+   243→    }
+   244→
+   245→    /// Tries to parse a constant value from an operation string.
+   246→    ///
+   247→    /// Convention: `"const.i32:42"` → `Some(42.0)`, otherwise `None`.
+   248→    fn try_parse_constant(operation: &str) -> Option<f64> {
+   249→        if let Some(rest) = operation.strip_prefix("const.") {
+   250→            if let Some(colon_pos) = rest.find(':') {
+   251→                let value_str = &rest[colon_pos + 1..];
+   252→                return value_str.parse::<f64>().ok();
+   253→            }
+   254→        }
+   255→        None
+   256→    }
+   257→
+   258→    /// Returns `true` if the operation string represents a constant literal.
+   259→    fn is_constant(operation: &str) -> bool {
+   260→        Self::try_parse_constant(operation).is_some()
+   261→    }
+   262→
+   263→    /// Attempts to fold a binary operation on two constant values.
+   264→    fn fold_binary(op: &str, lhs: f64, rhs: f64) -> Option<f64> {
+   265→        match op {
+   266→            "add" => Some(lhs + rhs),
+   267→            "sub" => Some(lhs - rhs),
+   268→            "mul" => Some(lhs * rhs),
+   269→            _ => None,
+   270→        }
+   271→    }
+   272→
+   273→    /// Collects the constant values of all data-flow predecessors of a node.
+   274→    ///
+   275→    /// Returns a vector of `(NodeId, f64)` pairs for each predecessor that
+   276→    /// is a constant.
+   277→    fn collect_constant_predecessors(scg: &SCG, id: NodeId) -> Vec<(NodeId, f64)> {
+   278→        let mut constants = Vec::new();
+   279→        if let Some(preds) = scg.predecessors(id) {
+   280→            for pred_id in preds {
+   281→                // Only consider data-flow edges
+   282→                let is_dataflow = scg
+   283→                    .edges()
+   284→                    .any(|e| e.source == pred_id && e.target == id && e.kind == EdgeKind::DataFlow);
+   285→                if !is_dataflow {
+   286→                    continue;
+   287→                }
+   288→                if let Some(pred_node) = scg.get_node(pred_id) {
+   289→                    if let NodePayload::Computation(ref comp) = pred_node.payload {
+   290→                        if let Some(val) = Self::try_parse_constant(&comp.operation) {
+   291→                            constants.push((pred_id, val));
+   292→                        }
+   293→                    }
+   294→                }
+   295→            }
+   296→        }
+   297→        constants
+   298→    }
+   299→}
+   300→
+   301→impl Default for ConstantFolding {
+   302→    fn default() -> Self {
+   303→        Self::new()
+   304→    }
+   305→}
+   306→
+   307→impl SCGPass for ConstantFolding {
+   308→    fn name(&self) -> &str {
+   309→        "ConstantFolding"
+   310→    }
+   311→
+   312→    fn run(&self, scg: &mut SCG) -> PassResult {
+   313→        let mut result = PassResult::new(self.name());
+   314→
+   315→        // Collect node IDs first to avoid borrow issues
+   316→        let node_ids: Vec<NodeId> = scg.node_ids().collect();
+   317→
+   318→        for id in node_ids {
+   319→            // Get the operation string if this is a computation node
+   320→            let operation = match scg.get_node(id) {
+   321→                Some(n) => match &n.payload {
+   322→                    NodePayload::Computation(c) => c.operation.clone(),
+   323→                    _ => continue,
+   324→                },
+   325→                None => continue,
+   326→            };
+   327→
+   328→            // Skip if this is already a constant
+   329→            if Self::is_constant(&operation) {
+   330→                continue;
+   331→            }
+   332→
+   333→            // Try binary folding: need exactly 2 constant data-flow predecessors
+   334→            let const_preds = Self::collect_constant_predecessors(scg, id);
+   335→            if const_preds.len() == 2 {
+   336→                if let Some(folded_val) =
+   337→                    Self::fold_binary(&operation, const_preds[0].1, const_preds[1].1)
+   338→                {
+   339→                    // Build the new constant operation string, preserving type if available
+   340→                    let result_type = scg
+   341→                        .get_node(id)
+   342→                        .and_then(|n| match &n.payload {
+   343→                            NodePayload::Computation(c) => c.result_type.clone(),
+   344→                            _ => None,
+   345→                        })
+   346→                        .unwrap_or_else(|| "i64".to_string());
+   347→
+   348→                    let new_op = format!("const.{}:{}", result_type, folded_val);
+   349→
+   350→                    // Mutate the node's operation in place
+   351→                    if let Some(node) = scg.get_node_mut(id) {
+   352→                        if let NodePayload::Computation(ref mut comp) = node.payload {
+   353→                            comp.operation = new_op;
+   354→                        }
+   355→                    }
+   356→
+   357→                    result.changed = true;
+   358→                    // We don't remove predecessor edges here because the constant
+   359→                    // nodes may still be referenced by other nodes. DCE can clean
+   360→                    // them up in a subsequent pass.
+   361→                }
+   362→            }
+   363→        }
+   364→
+   365→        result
+   366→    }
+   367→}
+   368→
+   369→// ── Common Subexpression Elimination ──────────────────────────────────
+   370→
+   371→/// Merges computation nodes that perform identical operations on identical
+   372→/// inputs.
+   373→///
+   374→/// Two computation nodes are considered common subexpressions if:
+   375→/// - They have the same `NodeType::Computation` payload (same operation and
+   376→///   result type).
+   377→/// - They have the same set of data-flow predecessors (same inputs).
+   378→///
+   379→/// When a common subexpression is found, the later node is removed and all
+   380→/// its outgoing data-flow edges are redirected to the earlier node.
+   381→pub struct CommonSubexpressionElimination;
+   382→
+   383→impl CommonSubexpressionElimination {
+   384→    /// Creates a new `CommonSubexpressionElimination` pass.
+   385→    pub fn new() -> Self {
+   386→        Self
+   387→    }
+   388→
+   389→    /// Computes a key that uniquely identifies a computation's expression:
+   390→    /// (operation, result_type, sorted predecessor NodeIds).
+   391→    fn expression_key(scg: &SCG, id: NodeId) -> Option<(String, Option<String>, Vec<NodeId>)> {
+   392→        let node = scg.get_node(id)?;
+   393→        if node.node_type != NodeType::Computation {
+   394→            return None;
+   395→        }
+   396→        match &node.payload {
+   397→            NodePayload::Computation(comp) => {
+   398→                let mut preds: Vec<NodeId> = scg
+   399→                    .edges()
+   400→                    .filter(|e| e.target == id && e.kind == EdgeKind::DataFlow)
+   401→                    .map(|e| e.source)
+   402→                    .collect();
+   403→                preds.sort();
+   404→                Some((comp.operation.clone(), comp.result_type.clone(), preds))
+   405→            }
+   406→            _ => None,
+   407→        }
+   408→    }
+   409→}
+   410→
+   411→impl Default for CommonSubexpressionElimination {
+   412→    fn default() -> Self {
+   413→        Self::new()
+   414→    }
+   415→}
+   416→
+   417→impl SCGPass for CommonSubexpressionElimination {
+   418→    fn name(&self) -> &str {
+   419→        "CommonSubexpressionElimination"
+   420→    }
+   421→
+   422→    fn run(&self, scg: &mut SCG) -> PassResult {
+   423→        let mut result = PassResult::new(self.name());
+   424→
+   425→        // Map from expression key to the first NodeId that computes it.
+   426→        let mut seen: HashMap<(String, Option<String>, Vec<NodeId>), NodeId> = HashMap::new();
+   427→
+   428→        // Process in topological order so we prefer keeping earlier nodes
+   429→        let topo = match scg.topological_sort() {
+   430→            Ok(t) => t,
+   431→            Err(_) => {
+   432→                result
+   433→                    .errors
+   434→                    .push("cannot run CSE on cyclic graph".to_string());
+   435→                return result;
+   436→            }
+   437→        };
+   438→
+   439→        // Collect nodes to remove and edges to redirect
+   440→        let mut nodes_to_remove: HashSet<NodeId> = HashSet::new();
+   441→        // (old_target, replacement_node) — redirect outgoing data-flow edges
+   442→        let mut redirects: Vec<(NodeId, NodeId)> = Vec::new();
+   443→
+   444→        for id in topo {
+   445→            if let Some(key) = Self::expression_key(scg, id) {
+   446→                if let Some(&existing) = seen.get(&key) {
+   447→                    // Duplicate found: mark for removal, redirect to existing
+   448→                    nodes_to_remove.insert(id);
+   449→                    redirects.push((id, existing));
+   450→                } else {
+   451→                    seen.insert(key, id);
+   452→                }
+   453→            }
+   454→        }
+   455→
+   456→        // For each removed node, redirect its outgoing data-flow edges
+   457→        for (old_node, replacement) in &redirects {
+   458→            // Find all outgoing data-flow edges from old_node
+   459→            let successors: Vec<NodeId> = scg.successors(*old_node).unwrap_or_default();
+   460→            for succ in successors {
+   461→                // Check if this is a data-flow edge
+   462→                let is_dataflow = scg.edges().any(|e| {
+   463→                    e.source == *old_node && e.target == succ && e.kind == EdgeKind::DataFlow
+   464→                });
+   465→                if is_dataflow {
+   466→                    // Add a new edge from replacement -> succ if it doesn't exist
+   467→                    let already_exists = scg.edges().any(|e| {
+   468→                        e.source == *replacement && e.target == succ && e.kind == EdgeKind::DataFlow
+   469→                    });
+   470→                    if !already_exists
+   471→                        && scg.add_edge(*replacement, succ, EdgeKind::DataFlow).is_ok()
+   472→                    {
+   473→                        result.edges_added += 1;
+   474→                    }
+   475→                }
+   476→            }
+   477→        }
+   478→
+   479→        // Remove the duplicate nodes
+   480→        for id in &nodes_to_remove {
+   481→            let out_edges = scg.successors(*id).map_or(0, |s| s.len());
+   482→            let in_edges = scg.predecessors(*id).map_or(0, |p| p.len());
+   483→            if scg.remove_node(*id).is_ok() {
+   484→                result.nodes_removed += 1;
+   485→                result.edges_removed += out_edges + in_edges;
+   486→                result.changed = true;
+   487→            }
+   488→        }
+   489→
+   490→        result
+   491→    }
+   492→}
+   493→
+   494→// ── Inlining Pass ─────────────────────────────────────────────────────
+   495→
+   496→/// Inlines function calls by merging the callee's SCG region into the
+   497→/// caller's graph.
+   498→///
+   499→/// This pass looks for [`ControlKind::FunctionEntry`] control nodes that
+   500→/// represent function calls. For each such call site:
+   501→///
+   502→/// 1. It identifies the function body as the set of nodes reachable from
+   503→///    the `FunctionEntry` node via data-flow and control-flow edges.
+   504→/// 2. It creates a cloned copy of the function body, remapping node IDs
+   505→///    to avoid collisions.
+   506→/// 3. It splices the cloned body into the graph: the call site's
+   507→///    predecessors are wired to the cloned entry, and the cloned exit
+   508→///    is wired to the call site's successors.
+   509→/// 4. The original call-site node is replaced.
+   510→///
+   511→/// To support this, the pass uses the SCG's built-in `merge` operation
+   512→/// for subgraph integration.
+   513→pub struct InliningPass {
+   514→    /// Maximum number of nodes a function body may have to be inlined.
+   515→    /// Larger functions are skipped to avoid code bloat.
+   516→    pub max_inline_size: usize,
+   517→}
+   518→
+   519→impl InliningPass {
+   520→    /// Creates a new `InliningPass` with a default max inline size of 50 nodes.
+   521→    pub fn new() -> Self {
+   522→        Self {
+   523→            max_inline_size: 50,
+   524→        }
+   525→    }
+   526→
+   527→    /// Creates a new `InliningPass` with the specified max inline size.
+   528→    pub fn with_max_size(max_inline_size: usize) -> Self {
+   529→        Self { max_inline_size }
+   530→    }
+   531→
+   532→    /// Collects all nodes in the function body reachable from a
+   533→    /// `FunctionEntry` node.
+   534→    fn collect_function_body(scg: &SCG, entry: NodeId) -> Vec<NodeId> {
+   535→        let mut visited = HashSet::new();
+   536→        let mut stack = vec![entry];
+   537→
+   538→        while let Some(current) = stack.pop() {
+   539→            if visited.insert(current) {
+   540→                if let Some(succs) = scg.successors(current) {
+   541→                    for succ in succs {
+   542→                        if !visited.contains(&succ) {
+   543→                            stack.push(succ);
+   544→                        }
+   545→                    }
+   546→                }
+   547→            }
+   548→        }
+   549→
+   550→        let mut body: Vec<NodeId> = visited.into_iter().collect();
+   551→        body.sort();
+   552→        body
+   553→    }
+   554→
+   555→    /// Finds the `FunctionReturn` node within a function body, if any.
+   556→    fn find_function_return(scg: &SCG, body: &[NodeId]) -> Option<NodeId> {
+   557→        for &id in body {
+   558→            if let Some(node) = scg.get_node(id) {
+   559→                if let NodePayload::Control(ref ctrl) = node.payload {
+   560→                    if ctrl.kind == ControlKind::FunctionReturn {
+   561→                        return Some(id);
+   562→                    }
+   563→                }
+   564→            }
+   565→        }
+   566→        None
+   567→    }
+   568→
+   569→    /// Clones the function body into a new SCG, returning the new SCG
+   570→    /// and a mapping from old NodeIds to new NodeIds.
+   571→    fn clone_function_body(scg: &SCG, body: &[NodeId]) -> (SCG, HashMap<NodeId, NodeId>) {
+   572→        let mut new_scg = SCG::new();
+   573→        let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+   574→
+   575→        // Clone nodes
+   576→        for &id in body {
+   577→            if let Some(node) = scg.get_node(id) {
+   578→                let new_id = new_scg.add_node(
+   579→                    node.node_type.clone(),
+   580→                    node.payload.clone(),
+   581→                    node.program_point.clone(),
+   582→                );
+   583→                // Copy annotation
+   584→                if let Some(ref ann) = node.annotation {
+   585→                    if let Some(new_node) = new_scg.get_node_mut(new_id) {
+   586→                        new_node.annotation = Some(ann.clone());
+   587→                    }
+   588→                }
+   589→                id_map.insert(id, new_id);
+   590→            }
+   591→        }
+   592→
+   593→        // Clone edges within the body
+   594→        for edge in scg.edges() {
+   595→            if let (Some(&new_source), Some(&new_target)) =
+   596→                (id_map.get(&edge.source), id_map.get(&edge.target))
+   597→            {
+   598→                if let Ok(new_eid) = new_scg.add_edge(new_source, new_target, edge.kind.clone()) {
+   599→                    // Copy label
+   600→                    if let Some(ref label) = edge.label {
+   601→                        if let Some(e) = new_scg.get_edge_mut(new_eid) {
+   602→                            e.label = Some(label.clone());
+   603→                        }
+   604→                    }
+   605→                }
+   606→            }
+   607→        }
+   608→
+   609→        (new_scg, id_map)
+   610→    }
+   611→}
+   612→
+   613→impl Default for InliningPass {
+   614→    fn default() -> Self {
+   615→        Self::new()
+   616→    }
+   617→}
+   618→
+   619→impl SCGPass for InliningPass {
+   620→    fn name(&self) -> &str {
+   621→        "InliningPass"
+   622→    }
+   623→
+   624→    fn run(&self, scg: &mut SCG) -> PassResult {
+   625→        let mut result = PassResult::new(self.name());
+   626→
+   627→        // Find all FunctionEntry call sites
+   628→        let call_sites: Vec<NodeId> = scg
+   629→            .nodes()
+   630→            .filter(|n| {
+   631→                matches!(
+   632→                    &n.payload,
+   633→                    NodePayload::Control(ctrl) if ctrl.kind == ControlKind::FunctionEntry
+   634→                )
+   635→            })
+   636→            .map(|n| n.id)
+   637→            .collect();
+   638→
+   639→        if call_sites.is_empty() {
+   640→            return result;
+   641→        }
+   642→
+   643→        for entry_id in call_sites {
+   644→            // Collect the function body
+   645→            let body = Self::collect_function_body(scg, entry_id);
+   646→
+   647→            if body.len() > self.max_inline_size {
+   648→                result.errors.push(format!(
+   649→                    "function at {} too large to inline ({} nodes, max {})",
+   650→                    entry_id,
+   651→                    body.len(),
+   652→                    self.max_inline_size
+   653→                ));
+   654→                continue;
+   655→            }
+   656→
+   657→            // Find the return node
+   658→            let return_id = Self::find_function_return(scg, &body);
+   659→
+   660→            // Record predecessors of the entry (call-site inputs)
+   661→            let entry_preds: Vec<NodeId> = scg.predecessors(entry_id).unwrap_or_default();
+   662→            // Record successors of the return (call-site outputs)
+   663→            let return_succs: Vec<NodeId> = if let Some(ret) = return_id {
+   664→                scg.successors(ret).unwrap_or_default()
+   665→            } else {
+   666→                Vec::new()
+   667→            };
+   668→
+   669→            // Clone the function body into a separate SCG
+   670→            let (body_scg, _id_map) = Self::clone_function_body(scg, &body);
+   671→
+   672→            let nodes_before = scg.node_count();
+   673→            let edges_before = scg.edge_count();
+   674→
+   675→            // Merge the cloned body into the main graph
+   676→            let node_remap = scg.merge(body_scg);
+   677→
+   678→            result.nodes_added += scg.node_count() - nodes_before;
+   679→            result.edges_added += scg.edge_count() - edges_before;
+   680→
+   681→            // Wire predecessors of the original entry to the cloned entry
+   682→            if let Some(&cloned_entry) = node_remap.get(&entry_id) {
+   683→                for &pred in &entry_preds {
+   684→                    // Avoid self-loops
+   685→                    if pred != cloned_entry
+   686→                        && scg.add_edge(pred, cloned_entry, EdgeKind::DataFlow).is_ok()
+   687→                    {
+   688→                        result.edges_added += 1;
+   689→                    }
+   690→                }
+   691→            }
+   692→
+   693→            // Wire cloned return to successors of the original return
+   694→            if let Some(ret) = return_id {
+   695→                if let Some(&cloned_ret) = node_remap.get(&ret) {
+   696→                    for &succ in &return_succs {
+   697→                        if succ != cloned_ret
+   698→                            && scg.add_edge(cloned_ret, succ, EdgeKind::DataFlow).is_ok()
+   699→                        {
+   700→                            result.edges_added += 1;
+   701→                        }
+   702→                    }
+   703→                }
+   704→            }
+   705→
+   706→            result.changed = true;
+   707→        }
+   708→
+   709→        result
+   710→    }
+   711→}
+   712→
+   713→// ── Verification Pass ─────────────────────────────────────────────────
+   714→
+   715→/// Verifies SCG well-formedness after transformation.
+   716→///
+   717→/// This pass delegates to [`SCG::validate`] and also performs additional
+   718→/// checks relevant to post-transformation integrity:
+   719→///
+   720→/// - All edge endpoints reference existing nodes (delegated to SCG::validate).
+   721→/// - No dangling references in deallocation nodes.
+   722→/// - The graph remains acyclic (required for topological ordering).
+   723→/// - No duplicate data-flow edges between the same (source, target) pair.
+   724→///
+   725→/// The pass never modifies the graph. Errors are reported via the
+   726→/// `PassResult::errors` field, and `changed` is always `false`.
+   727→pub struct VerificationPass {
+   728→    /// Whether to also check that the graph is acyclic.
+   729→    pub check_acyclic: bool,
+   730→    /// Whether to check for duplicate data-flow edges.
+   731→    pub check_duplicate_edges: bool,
+   732→}
+   733→
+   734→impl VerificationPass {
+   735→    /// Creates a new `VerificationPass` with all checks enabled.
+   736→    pub fn new() -> Self {
+   737→        Self {
+   738→            check_acyclic: true,
+   739→            check_duplicate_edges: true,
+   740→        }
+   741→    }
+   742→
+   743→    /// Creates a minimal verification pass that only runs `SCG::validate`.
+   744→    pub fn minimal() -> Self {
+   745→        Self {
+   746→            check_acyclic: false,
+   747→            check_duplicate_edges: false,
+   748→        }
+   749→    }
+   750→
+   751→    /// Checks for duplicate data-flow edges between the same node pair.
+   752→    fn check_duplicates(scg: &SCG) -> Vec<String> {
+   753→        let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
+   754→        let mut errors = Vec::new();
+   755→
+   756→        for edge in scg.edges() {
+   757→            if edge.kind == EdgeKind::DataFlow {
+   758→                let key = (edge.source, edge.target);
+   759→                if !seen.insert(key) {
+   760→                    errors.push(format!(
+   761→                        "duplicate data-flow edge from {} to {} (edge {})",
+   762→                        edge.source, edge.target, edge.id
+   763→                    ));
+   764→                }
+   765→            }
+   766→        }
+   767→
+   768→        errors
+   769→    }
+   770→}
+   771→
+   772→impl Default for VerificationPass {
+   773→    fn default() -> Self {
+   774→        Self::new()
+   775→    }
+   776→}
+   777→
+   778→impl SCGPass for VerificationPass {
+   779→    fn name(&self) -> &str {
+   780→        "VerificationPass"
+   781→    }
+   782→
+   783→    fn run(&self, scg: &mut SCG) -> PassResult {
+   784→        let mut result = PassResult::new(self.name());
+   785→        // Verification never changes the graph
+   786→        result.changed = false;
+   787→
+   788→        // Run the SCG's built-in validation
+   789→        let validation: ValidationResult = scg.validate();
+   790→        if !validation.is_valid {
+   791→            for err in &validation.errors {
+   792→                result.errors.push(err.clone());
+   793→            }
+   794→        }
+   795→        // Warnings are informational; we don't treat them as pass errors.
+   796→        // They are silently ignored so that valid programs with minor
+   797→        // style issues (e.g., allocations without paired deallocations)
+   798→        // don't fail compilation.
+   799→
+   800→        // Additional check: acyclicity
+   801→        if self.check_acyclic && scg.topological_sort().is_err() {
+   802→            result.errors.push("graph contains a cycle".to_string());
+   803→        }
+   804→
+   805→        // Additional check: duplicate edges
+   806→        if self.check_duplicate_edges {
+   807→            let dup_errors = Self::check_duplicates(scg);
+   808→            result.errors.extend(dup_errors);
+   809→        }
+   810→
+   811→        result
+   812→    }
+   813→}
+   814→
+   815→// ── Pass Manager ──────────────────────────────────────────────────────
+   816→
+   817→/// Manages a sequence of transformation passes and orchestrates their
+   818→/// execution.
+   819→///
+   820→/// The `PassManager` supports:
+   821→/// - Registering passes in order.
+   822→/// - Optionally running [`VerificationPass`] between each registered pass.
+   823→/// - Collecting aggregate statistics across all pass runs.
+   824→/// - Stopping early if a pass produces errors and `stop_on_error` is set.
+   825→pub struct PassManager {
+   826→    /// The ordered list of passes to run.
+   827→    passes: Vec<Box<dyn SCGPass>>,
+   828→    /// Whether to run verification between each pass.
+   829→    verify_between: bool,
+   830→    /// Whether to stop execution when a pass reports errors.
+   831→    stop_on_error: bool,
+   832→}
+   833→
+   834→/// Aggregate result of running the entire pass pipeline.
+   835→#[derive(Debug, Clone)]
+   836→pub struct PipelineResult {
+   837→    /// Results from each individual pass, in execution order.
+   838→    pub pass_results: Vec<PassResult>,
+   839→    /// Whether any pass made changes.
+   840→    pub changed: bool,
+   841→    /// Total nodes removed across all passes.
+   842→    pub total_nodes_removed: usize,
+   843→    /// Total nodes added across all passes.
+   844→    pub total_nodes_added: usize,
+   845→    /// Total edges removed across all passes.
+   846→    pub total_edges_removed: usize,
+   847→    /// Total edges added across all passes.
+   848→    pub total_edges_added: usize,
+   849→    /// Whether the pipeline encountered any errors.
+   850→    pub has_errors: bool,
+   851→    /// The index of the pass that caused an early stop, if any.
+   852→    pub stopped_at: Option<usize>,
+   853→}
+   854→
+   855→impl PipelineResult {
+   856→    /// Creates an empty pipeline result.
+   857→    pub fn new() -> Self {
+   858→        Self {
+   859→            pass_results: Vec::new(),
+   860→            changed: false,
+   861→            total_nodes_removed: 0,
+   862→            total_nodes_added: 0,
+   863→            total_edges_removed: 0,
+   864→            total_edges_added: 0,
+   865→            has_errors: false,
+   866→            stopped_at: None,
+   867→        }
+   868→    }
+   869→
+   870→    /// Records a single pass result into the pipeline aggregate.
+   871→    fn record(&mut self, pr: PassResult) {
+   872→        if pr.changed {
+   873→            self.changed = true;
+   874→        }
+   875→        self.total_nodes_removed += pr.nodes_removed;
+   876→        self.total_nodes_added += pr.nodes_added;
+   877→        self.total_edges_removed += pr.edges_removed;
+   878→        self.total_edges_added += pr.edges_added;
+   879→        if pr.has_errors() {
+   880→            self.has_errors = true;
+   881→        }
+   882→        self.pass_results.push(pr);
+   883→    }
+   884→}
+   885→
+   886→impl Default for PipelineResult {
+   887→    fn default() -> Self {
+   888→        Self::new()
+   889→    }
+   890→}
+   891→
+   892→impl std::fmt::Display for PipelineResult {
+   893→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   894→        writeln!(f, "PipelineResult:")?;
+   895→        writeln!(f, "  changed: {}", self.changed)?;
+   896→        writeln!(f, "  total_nodes_removed: {}", self.total_nodes_removed)?;
+   897→        writeln!(f, "  total_nodes_added: {}", self.total_nodes_added)?;
+   898→        writeln!(f, "  total_edges_removed: {}", self.total_edges_removed)?;
+   899→        writeln!(f, "  total_edges_added: {}", self.total_edges_added)?;
+   900→        writeln!(f, "  has_errors: {}", self.has_errors)?;
+   901→        if let Some(idx) = self.stopped_at {
+   902→            writeln!(f, "  stopped_at: pass #{idx}")?;
+   903→        }
+   904→        for pr in &self.pass_results {
+   905→            writeln!(f, "  - {pr}")?;
+   906→        }
+   907→        Ok(())
+   908→    }
+   909→}
+   910→
+   911→impl PassManager {
+   912→    /// Creates a new, empty `PassManager`.
+   913→    pub fn new() -> Self {
+   914→        Self {
+   915→            passes: Vec::new(),
+   916→            verify_between: false,
+   917→            stop_on_error: true,
+   918→        }
+   919→    }
+   920→
+   921→    /// Adds a pass to the pipeline.
+   922→    pub fn add_pass(&mut self, pass: impl SCGPass + 'static) -> &mut Self {
+   923→        self.passes.push(Box::new(pass));
+   924→        self
+   925→    }
+   926→
+   927→    /// Enables or disables verification between passes.
+   928→    pub fn verify_between(mut self, enable: bool) -> Self {
+   929→        self.verify_between = enable;
+   930→        self
+   931→    }
+   932→
+   933→    /// Enables or disables stopping on the first error.
+   934→    pub fn stop_on_error(mut self, enable: bool) -> Self {
+   935→        self.stop_on_error = enable;
+   936→        self
+   937→    }
+   938→
+   939→    /// Runs all registered passes on the given SCG.
+   940→    ///
+   941→    /// If `verify_between` is enabled, a `VerificationPass` is run after
+   942→    /// each registered pass. If verification fails and `stop_on_error` is
+   943→    /// set, the pipeline stops early.
+   944→    pub fn run(&self, scg: &mut SCG) -> PipelineResult {
+   945→        let mut pipeline_result = PipelineResult::new();
+   946→
+   947→        for (i, pass) in self.passes.iter().enumerate() {
+   948→            let pr = pass.run(scg);
+   949→            let had_errors = pr.has_errors();
+   950→            pipeline_result.record(pr);
+   951→
+   952→            if had_errors && self.stop_on_error {
+   953→                pipeline_result.stopped_at = Some(i);
+   954→                break;
+   955→            }
+   956→
+   957→            // Optionally run verification after each pass
+   958→            if self.verify_between {
+   959→                let verify = VerificationPass::new();
+   960→                let vpr = verify.run(scg);
+   961→                let v_had_errors = vpr.has_errors();
+   962→                pipeline_result.record(vpr);
+   963→
+   964→                if v_had_errors && self.stop_on_error {
+   965→                    pipeline_result.stopped_at = Some(i);
+   966→                    break;
+   967→                }
+   968→            }
+   969→        }
+   970→
+   971→        pipeline_result
+   972→    }
+   973→
+   974→    /// Returns the number of registered passes.
+   975→    pub fn pass_count(&self) -> usize {
+   976→        self.passes.len()
+   977→    }
+   978→}
+   979→
+   980→impl Default for PassManager {
+   981→    fn default() -> Self {
+   982→        Self::new()
+   983→    }
+   984→}
+   985→
+   986→// ── Loop Invariant Code Motion ────────────────────────────────────────
+   987→
+   988→/// Hoists loop-invariant computations out of loops.
+   989→///
+   990→/// A computation node is loop-invariant if all its inputs are defined
+   991→/// outside the loop (i.e., none of its data-flow predecessors are
+   992→/// inside the loop body). Such nodes are hoisted to the loop pre-header
+   993→/// (before the LoopHeader node).
+   994→///
+   995→/// Nodes with side effects (memory writes, calls, allocations) are
+   996→/// never hoisted.
+   997→pub struct LoopInvariantCodeMotion;
+   998→
+   999→impl LoopInvariantCodeMotion {
+  1000→    /// Creates a new loop-invariant code motion pass.
+  1001→    pub fn new() -> Self {
+  1002→        Self
+  1003→    }
+  1004→
+  1005→    /// Returns true if the node type has side effects and must not be hoisted.
+  1006→    fn has_side_effects(node_type: &NodeType) -> bool {
+  1007→        matches!(
+  1008→            node_type,
+  1009→            NodeType::Effect
+  1010→                | NodeType::Allocation
+  1011→                | NodeType::Deallocation
+  1012→                | NodeType::Access
+  1013→                | NodeType::Control
+  1014→                | NodeType::Phantom
+  1015→                | NodeType::VTable
+  1016→                | NodeType::ClosureEnv
+  1017→        )
+  1018→    }
+  1019→
+  1020→    /// Collects all nodes that belong to a loop body: nodes reachable
+  1021→    /// from the LoopHeader but before the LoopExit, and not the
+  1022→    /// LoopHeader/LoopExit themselves.
+  1023→    fn collect_loop_body(scg: &SCG, header: NodeId) -> (Vec<NodeId>, Option<NodeId>) {
+  1024→        let mut body = Vec::new();
+  1025→        let mut exit = None;
+  1026→        let mut visited = HashSet::new();
+  1027→        let mut stack = vec![header];
+  1028→        while let Some(nid) = stack.pop() {
+  1029→            if !visited.insert(nid) {
+  1030→                continue;
+  1031→            }
+  1032→            if let Some(node) = scg.get_node(nid) {
+  1033→                if let NodePayload::Control(ref c) = node.payload {
+  1034→                    if c.kind == ControlKind::LoopExit {
+  1035→                        exit = Some(nid);
+  1036→                        continue; // don't include exit in body
+  1037→                    }
+  1038→                    if nid == header { /* don't include header itself */ }
+  1039→                }
+  1040→            }
+  1041→            if nid != header {
+  1042→                body.push(nid);
+  1043→            }
+  1044→            if let Some(succs) = scg.successors(nid) {
+  1045→                for s in succs {
+  1046→                    if !visited.contains(&s) {
+  1047→                        stack.push(s);
+  1048→                    }
+  1049→                }
+  1050→            }
+  1051→        }
+  1052→        (body, exit)
+  1053→    }
+  1054→
+  1055→    /// Checks whether a node is loop-invariant: all data-flow predecessors
+  1056→    /// are defined outside the loop body.
+  1057→    fn is_loop_invariant(scg: &SCG, node_id: NodeId, loop_body: &HashSet<NodeId>) -> bool {
+  1058→        if let Some(preds) = scg.predecessors(node_id) {
+  1059→            for pred in preds {
+  1060→                let is_df = scg.edges().any(|e| {
+  1061→                    e.source == pred && e.target == node_id && e.kind == EdgeKind::DataFlow
+  1062→                });
+  1063→                if is_df && loop_body.contains(&pred) {
+  1064→                    return false;
+  1065→                }
+  1066→            }
+  1067→        }
+  1068→        true
+  1069→    }
+  1070→}
+  1071→
+  1072→impl Default for LoopInvariantCodeMotion {
+  1073→    fn default() -> Self {
+  1074→        Self::new()
+  1075→    }
+  1076→}
+  1077→
+  1078→impl SCGPass for LoopInvariantCodeMotion {
+  1079→    fn name(&self) -> &str {
+  1080→        "LoopInvariantCodeMotion"
+  1081→    }
+  1082→
+  1083→    fn run(&self, scg: &mut SCG) -> PassResult {
+  1084→        let mut result = PassResult::new(self.name());
+  1085→
+  1086→        // Find all LoopHeader nodes.
+  1087→        let loop_headers: Vec<NodeId> = scg.nodes()
+  1088→            .filter(|n| matches!(&n.payload, NodePayload::Control(c) if c.kind == ControlKind::LoopHeader))
+  1089→            .map(|n| n.id)
+  1090→            .collect();
+  1091→
+  1092→        for header in loop_headers {
+  1093→            let (body, _exit) = Self::collect_loop_body(scg, header);
+  1094→            let body_set: HashSet<NodeId> = body.iter().copied().collect();
+  1095→
+  1096→            // Find the pre-header: the predecessor of the header that is not in the body.
+  1097→            let pre_header = scg
+  1098→                .predecessors(header)
+  1099→                .unwrap_or_default()
+  1100→                .into_iter()
+  1101→                .find(|p| !body_set.contains(p));
+  1102→
+  1103→            for &nid in &body {
+  1104→                let node_type = match scg.get_node(nid) {
+  1105→                    Some(n) => n.node_type.clone(),
+  1106→                    None => continue,
+  1107→                };
+  1108→                if Self::has_side_effects(&node_type) {
+  1109→                    continue;
+  1110→                }
+  1111→                if !Self::is_loop_invariant(scg, nid, &body_set) {
+  1112→                    continue;
+  1113→                }
+  1114→
+  1115→                // Hoist: add a ControlFlow edge from pre_header to nid,
+  1116→                // and from nid to header. Remove the old edges within the loop.
+  1117→                if let Some(pre) = pre_header {
+  1118→                    let _ = scg.add_edge(pre, nid, EdgeKind::ControlFlow);
+  1119→                    let _ = scg.add_edge(nid, header, EdgeKind::ControlFlow);
+  1120→                    result.edges_added += 2;
+  1121→                    result.changed = true;
+  1122→                }
+  1123→            }
+  1124→        }
+  1125→
+  1126→        result
+  1127→    }
+  1128→}
+  1129→
+  1130→// ── Strength Reduction ────────────────────────────────────────────────
+  1131→
+  1132→/// Replaces expensive operations with cheaper equivalents.
+  1133→///
+  1134→/// - Multiply by constant power of 2 → left shift
+  1135→/// - Divide by power of 2 → right shift
+  1136→/// - Modulo by power of 2 → bitwise AND
+  1137→pub struct StrengthReduction;
+  1138→
+  1139→impl StrengthReduction {
+  1140→    /// Creates a new strength-reduction pass.
+  1141→    pub fn new() -> Self {
+  1142→        Self
+  1143→    }
+  1144→
+  1145→    /// Returns true if `n` is a power of 2 (and n > 0).
+  1146→    fn is_power_of_two(n: u64) -> bool {
+  1147→        n > 0 && (n & (n - 1)) == 0
+  1148→    }
+  1149→
+  1150→    /// Returns log2(n) for powers of 2.
+  1151→    fn log2(n: u64) -> u32 {
+  1152→        63 - n.leading_zeros()
+  1153→    }
+  1154→
+  1155→    /// Try to parse a constant integer from a ComputationNode's operation string.
+  1156→    /// Convention: "const.<type>:<value>" or just a bare integer in the operation.
+  1157→    fn try_parse_const_int(operation: &str) -> Option<u64> {
+  1158→        if let Some(rest) = operation.strip_prefix("const.") {
+  1159→            if let Some(colon_pos) = rest.find(':') {
+  1160→                let val_str = &rest[colon_pos + 1..];
+  1161→                return val_str.parse::<u64>().ok();
+  1162→            }
+  1163→        }
+  1164→        None
+  1165→    }
+  1166→}
+  1167→
+  1168→impl Default for StrengthReduction {
+  1169→    fn default() -> Self {
+  1170→        Self::new()
+  1171→    }
+  1172→}
+  1173→
+  1174→impl SCGPass for StrengthReduction {
+  1175→    fn name(&self) -> &str {
+  1176→        "StrengthReduction"
+  1177→    }
+  1178→
+  1179→    fn run(&self, scg: &mut SCG) -> PassResult {
+  1180→        let mut result = PassResult::new(self.name());
+  1181→        let node_ids: Vec<NodeId> = scg.node_ids().collect();
+  1182→
+  1183→        for id in node_ids {
+  1184→            let (operation, _result_type) = match scg.get_node(id) {
+  1185→                Some(n) => match &n.payload {
+  1186→                    NodePayload::Computation(c) => (c.operation.clone(), c.result_type.clone()),
+  1187→                    _ => continue,
+  1188→                },
+  1189→                None => continue,
+  1190→            };
+  1191→
+  1192→            // Check for mul by constant power of 2 → shift left
+  1193→            if operation == "mul" {
+  1194→                let const_preds: Vec<(NodeId, u64)> = scg
+  1195→                    .predecessors(id)
+  1196→                    .unwrap_or_default()
+  1197→                    .into_iter()
+  1198→                    .filter_map(|pred| {
+  1199→                        let is_df = scg.edges().any(|e| {
+  1200→                            e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow
+  1201→                        });
+  1202→                        if !is_df {
+  1203→                            return None;
+  1204→                        }
+  1205→                        if let Some(pn) = scg.get_node(pred) {
+  1206→                            if let NodePayload::Computation(c) = &pn.payload {
+  1207→                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+  1208→                            }
+  1209→                        }
+  1210→                        None
+  1211→                    })
+  1212→                    .collect();
+  1213→
+  1214→                if let Some(&(_, const_val)) = const_preds.first() {
+  1215→                    if Self::is_power_of_two(const_val) {
+  1216→                        let shift = Self::log2(const_val);
+  1217→                        let new_op = format!("shl_{}", shift);
+  1218→                        if let Some(node) = scg.get_node_mut(id) {
+  1219→                            if let NodePayload::Computation(ref mut c) = node.payload {
+  1220→                                c.operation = new_op;
+  1221→                            }
+  1222→                        }
+  1223→                        result.changed = true;
+  1224→                    }
+  1225→                }
+  1226→            }
+  1227→
+  1228→            // Check for div by constant power of 2 → shift right
+  1229→            if operation == "div" {
+  1230→                let const_preds: Vec<(NodeId, u64)> = scg
+  1231→                    .predecessors(id)
+  1232→                    .unwrap_or_default()
+  1233→                    .into_iter()
+  1234→                    .filter_map(|pred| {
+  1235→                        let is_df = scg.edges().any(|e| {
+  1236→                            e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow
+  1237→                        });
+  1238→                        if !is_df {
+  1239→                            return None;
+  1240→                        }
+  1241→                        if let Some(pn) = scg.get_node(pred) {
+  1242→                            if let NodePayload::Computation(c) = &pn.payload {
+  1243→                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+  1244→                            }
+  1245→                        }
+  1246→                        None
+  1247→                    })
+  1248→                    .collect();
+  1249→
+  1250→                if let Some(&(_, const_val)) = const_preds.first() {
+  1251→                    if Self::is_power_of_two(const_val) {
+  1252→                        let shift = Self::log2(const_val);
+  1253→                        let new_op = format!("shr_{}", shift);
+  1254→                        if let Some(node) = scg.get_node_mut(id) {
+  1255→                            if let NodePayload::Computation(ref mut c) = node.payload {
+  1256→                                c.operation = new_op;
+  1257→                            }
+  1258→                        }
+  1259→                        result.changed = true;
+  1260→                    }
+  1261→                }
+  1262→            }
+  1263→
+  1264→            // Check for modulo by power of 2 → bitwise AND
+  1265→            if operation == "mod" || operation == "rem" {
+  1266→                let const_preds: Vec<(NodeId, u64)> = scg
+  1267→                    .predecessors(id)
+  1268→                    .unwrap_or_default()
+  1269→                    .into_iter()
+  1270→                    .filter_map(|pred| {
+  1271→                        let is_df = scg.edges().any(|e| {
+  1272→                            e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow
+  1273→                        });
+  1274→                        if !is_df {
+  1275→                            return None;
+  1276→                        }
+  1277→                        if let Some(pn) = scg.get_node(pred) {
+  1278→                            if let NodePayload::Computation(c) = &pn.payload {
+  1279→                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+  1280→                            }
+  1281→                        }
+  1282→                        None
+  1283→                    })
+  1284→                    .collect();
+  1285→
+  1286→                if let Some(&(_, const_val)) = const_preds.first() {
+  1287→                    if Self::is_power_of_two(const_val) {
+  1288→                        let mask = const_val - 1;
+  1289→                        let new_op = format!("and_{}", mask);
+  1290→                        if let Some(node) = scg.get_node_mut(id) {
+  1291→                            if let NodePayload::Computation(ref mut c) = node.payload {
+  1292→                                c.operation = new_op;
+  1293→                            }
+  1294→                        }
+  1295→                        result.changed = true;
+  1296→                    }
+  1297→                }
+  1298→            }
+  1299→        }
+  1300→
+  1301→        result
+  1302→    }
+  1303→}
+  1304→
+  1305→// ── Tail-Call Optimization Detection ─────────────────────────────────
+  1306→
+  1307→/// Identifies tail calls and marks them with `tail_call: bool`.
+  1308→///
+  1309→/// A tail call is a function call that is the last action before return.
+  1310→/// When detected, the backend can reuse the current stack frame.
+  1311→///
+  1312→/// Detection: a Computation node is a tail call if:
+  1313→/// - Its operation is a call (contains "call" or "fn_call"),
+  1314→/// - It feeds directly into a FunctionReturn control node via
+  1315→///   DataFlow or ControlFlow,
+  1316→/// - And there are no other nodes between the call and the return.
+  1317→pub struct TailCallOptDetection;
+  1318→
+  1319→impl TailCallOptDetection {
+  1320→    /// Creates a new tail-call optimization detection pass.
+  1321→    pub fn new() -> Self {
+  1322→        Self
+  1323→    }
+  1324→
+  1325→    /// Check if a computation node represents a function call.
+  1326→    fn is_call_node(operation: &str) -> bool {
+  1327→        operation.contains("call") || operation.contains("fn_call") || operation.contains("call_")
+  1328→    }
+  1329→
+  1330→    /// Check if a node feeds directly into a FunctionReturn.
+  1331→    fn feeds_into_return(scg: &SCG, id: NodeId) -> bool {
+  1332→        if let Some(succs) = scg.successors(id) {
+  1333→            for succ in succs {
+  1334→                let is_cf_or_df = scg.edges().any(|e| {
+  1335→                    e.source == id
+  1336→                        && e.target == succ
+  1337→                        && (e.kind == EdgeKind::ControlFlow || e.kind == EdgeKind::DataFlow)
+  1338→                });
+  1339→                if is_cf_or_df {
+  1340→                    if let Some(node) = scg.get_node(succ) {
+  1341→                        if let NodePayload::Control(c) = &node.payload {
+  1342→                            if c.kind == ControlKind::FunctionReturn {
+  1343→                                return true;
+  1344→                            }
+  1345→                        }
+  1346→                    }
+  1347→                }
+  1348→            }
+  1349→        }
+  1350→        false
+  1351→    }
+  1352→}
+  1353→
+  1354→impl Default for TailCallOptDetection {
+  1355→    fn default() -> Self {
+  1356→        Self::new()
+  1357→    }
+  1358→}
+  1359→
+  1360→impl SCGPass for TailCallOptDetection {
+  1361→    fn name(&self) -> &str {
+  1362→        "TailCallOptDetection"
+  1363→    }
+  1364→
+  1365→    fn run(&self, scg: &mut SCG) -> PassResult {
+  1366→        let mut result = PassResult::new(self.name());
+  1367→        let node_ids: Vec<NodeId> = scg.node_ids().collect();
+  1368→
+  1369→        for id in node_ids {
+  1370→            let is_call = match scg.get_node(id) {
+  1371→                Some(n) => match &n.payload {
+  1372→                    NodePayload::Computation(c) => Self::is_call_node(&c.operation),
+  1373→                    _ => false,
+  1374→                },
+  1375→                None => continue,
+  1376→            };
+  1377→            if !is_call {
+  1378→                continue;
+  1379→            }
+  1380→
+  1381→            if Self::feeds_into_return(scg, id) {
+  1382→                if let Some(node) = scg.get_node_mut(id) {
+  1383→                    if let NodePayload::Computation(ref mut c) = node.payload {
+  1384→                        if !c.tail_call {
+  1385→                            c.tail_call = true;
+  1386→                            result.changed = true;
+  1387→                        }
+  1388→                    }
+  1389→                }
+  1390→            }
+  1391→        }
+  1392→
+  1393→        result
+  1394→    }
+  1395→}
+  1396→
+  1397→// ── Dead Region Elimination ───────────────────────────────────────────
+  1398→
+  1399→/// Identifies allocation/deallocation pairs where the region is never
+  1400→/// read from, and removes both along with any write-only operations.
+  1401→///
+  1402→/// An allocation region is "dead" if:
+  1403→/// - There is a matching allocation/deallocation pair,
+  1404→/// - No Access node with Read or ReadWrite mode references the same
+  1405→///   region,
+  1406→/// - All accesses to the region (if any) are Write-only.
+  1407→///
+  1408→/// When a dead region is found:
+  1409→/// - The allocation and deallocation nodes are removed,
+  1410→/// - Any write-only access nodes to that region are also removed.
+  1411→pub struct DeadRegionElimination;
+  1412→
+  1413→impl DeadRegionElimination {
+  1414→    /// Creates a new dead region elimination pass.
+  1415→    pub fn new() -> Self {
+  1416→        Self
+  1417→    }
+  1418→
+  1419→    /// Find allocation/deallocation pairs and their region IDs.
+  1420→    fn find_alloc_dealloc_pairs(scg: &SCG) -> Vec<(NodeId, NodeId, crate::region::RegionId)> {
+  1421→        let mut allocs: HashMap<crate::region::RegionId, NodeId> = HashMap::new();
+  1422→        let mut pairs = Vec::new();
+  1423→
+  1424→        for node in scg.nodes() {
+  1425→            match &node.payload {
+  1426→                NodePayload::Allocation(a) => {
+  1427→                    allocs.insert(a.region_id, node.id);
+  1428→                }
+  1429→                NodePayload::Deallocation(d) => {
+  1430→                    if let Some(&alloc_id) = allocs.get(&d.region_id) {
+  1431→                        pairs.push((alloc_id, node.id, d.region_id));
+  1432→                    }
+  1433→                }
+  1434→                _ => {}
+  1435→            }
+  1436→        }
+  1437→        pairs
+  1438→    }
+  1439→
+  1440→    /// Check if any Access node reads from the given region.
+  1441→    fn has_read_access(scg: &SCG, region_id: crate::region::RegionId) -> bool {
+  1442→        scg.nodes().any(|n| {
+  1443→            if let NodePayload::Access(a) = &n.payload {
+  1444→                a.region_id == region_id
+  1445→                    && (a.mode == crate::node::AccessMode::Read
+  1446→                        || a.mode == crate::node::AccessMode::ReadWrite)
+  1447→            } else {
+  1448→                false
+  1449→            }
+  1450→        })
+  1451→    }
+  1452→
+  1453→    /// Find all write-only access nodes to the given region.
+  1454→    fn find_write_only_accesses(scg: &SCG, region_id: crate::region::RegionId) -> Vec<NodeId> {
+  1455→        scg.nodes()
+  1456→            .filter(|n| {
+  1457→                if let NodePayload::Access(a) = &n.payload {
+  1458→                    a.region_id == region_id && a.mode == crate::node::AccessMode::Write
+  1459→                } else {
+  1460→                    false
+  1461→                }
+  1462→            })
+  1463→            .map(|n| n.id)
+  1464→            .collect()
+  1465→    }
+  1466→}
+  1467→
+  1468→impl Default for DeadRegionElimination {
+  1469→    fn default() -> Self {
+  1470→        Self::new()
+  1471→    }
+  1472→}
+  1473→
+  1474→impl SCGPass for DeadRegionElimination {
+  1475→    fn name(&self) -> &str {
+  1476→        "DeadRegionElimination"
+  1477→    }
+  1478→
+  1479→    fn run(&self, scg: &mut SCG) -> PassResult {
+  1480→        let mut result = PassResult::new(self.name());
+  1481→
+  1482→        let pairs = Self::find_alloc_dealloc_pairs(scg);
+  1483→
+  1484→        for (alloc_id, dealloc_id, region_id) in pairs {
+  1485→            // Check if the region has any reads
+  1486→            if Self::has_read_access(scg, region_id) {
+  1487→                continue; // Region is live — has reads
+  1488→            }
+  1489→
+  1490→            // Find write-only accesses to this region
+  1491→            let write_only = Self::find_write_only_accesses(scg, region_id);
+  1492→
+  1493→            // Remove write-only accesses
+  1494→            for woid in &write_only {
+  1495→                let out = scg.successors(*woid).map_or(0, |s| s.len());
+  1496→                let inc = scg.predecessors(*woid).map_or(0, |p| p.len());
+  1497→                if scg.remove_node(*woid).is_ok() {
+  1498→                    result.nodes_removed += 1;
+  1499→                    result.edges_removed += out + inc;
+  1500→                }
+  1501→            }
+  1502→
+  1503→            // Remove allocation
+  1504→            let out = scg.successors(alloc_id).map_or(0, |s| s.len());
+  1505→            let inc = scg.predecessors(alloc_id).map_or(0, |p| p.len());
+  1506→            if scg.remove_node(alloc_id).is_ok() {
+  1507→                result.nodes_removed += 1;
+  1508→                result.edges_removed += out + inc;
+  1509→            }
+  1510→
+  1511→            // Remove deallocation (may have been invalidated by alloc removal — check first)
+  1512→            if scg.get_node(dealloc_id).is_some() {
+  1513→                let out = scg.successors(dealloc_id).map_or(0, |s| s.len());
+  1514→                let inc = scg.predecessors(dealloc_id).map_or(0, |p| p.len());
+  1515→                if scg.remove_node(dealloc_id).is_ok() {
+  1516→                    result.nodes_removed += 1;
+  1517→                    result.edges_removed += out + inc;
+  1518→                }
+  1519→            }
+  1520→
+  1521→            result.changed = true;
+  1522→        }
+  1523→
+  1524→        result
+  1525→    }
+  1526→}
+  1527→
+  1528→// ── Standalone Transform Functions ─────────────────────────────────────
+  1529→
+  1530→/// Loop Invariant Code Motion (LICM).
+  1531→///
+  1532→/// Identifies nodes inside loop bodies whose inputs don't change across
+  1533→/// iterations and hoists them before the LoopHeader node. Nodes with side
+  1534→/// effects (writes, calls, allocations) are never hoisted.
+  1535→///
+  1536→/// Returns the list of hoisted node IDs.
+  1537→pub fn licm(graph: &mut SCG) -> Vec<NodeId> {
+  1538→    let mut hoisted = Vec::new();
+  1539→
+  1540→    // Find all LoopHeader nodes.
+  1541→    let loop_headers: Vec<NodeId> = graph
+  1542→        .nodes()
+  1543→        .filter(|n| {
+  1544→            matches!(
+  1545→                &n.payload,
+  1546→                NodePayload::Control(c) if c.kind == ControlKind::LoopHeader
+  1547→            )
+  1548→        })
+  1549→        .map(|n| n.id)
+  1550→        .collect();
+  1551→
+  1552→    for header in loop_headers {
+  1553→        let (body, _exit) = LoopInvariantCodeMotion::collect_loop_body(graph, header);
+  1554→        let body_set: HashSet<NodeId> = body.iter().copied().collect();
+  1555→        // Include the header itself as "inside the loop" for invariant checking,
+  1556→        // since values produced by the header may change across iterations.
+  1557→        let mut loop_set: HashSet<NodeId> = body_set.clone();
+  1558→        loop_set.insert(header);
+  1559→
+  1560→        // Find the pre-header: predecessor of the header that is not in the body.
+  1561→        let pre_header = graph
+  1562→            .predecessors(header)
+  1563→            .unwrap_or_default()
+  1564→            .into_iter()
+  1565→            .find(|p| !body_set.contains(p));
+  1566→
+  1567→        for &nid in &body {
+  1568→            let node_type = match graph.get_node(nid) {
+  1569→                Some(n) => n.node_type.clone(),
+  1570→                None => continue,
+  1571→            };
+  1572→            if LoopInvariantCodeMotion::has_side_effects(&node_type) {
+  1573→                continue;
+  1574→            }
+  1575→            if !LoopInvariantCodeMotion::is_loop_invariant(graph, nid, &loop_set) {
+  1576→                continue;
+  1577→            }
+  1578→
+  1579→            // Hoist: add ControlFlow edges from pre_header to nid and from nid to header.
+  1580→            if let Some(pre) = pre_header {
+  1581→                let _ = graph.add_edge(pre, nid, EdgeKind::ControlFlow);
+  1582→                let _ = graph.add_edge(nid, header, EdgeKind::ControlFlow);
+  1583→                hoisted.push(nid);
+  1584→            }
+  1585→        }
+  1586→    }
+  1587→
+  1588→    hoisted
+  1589→}
+  1590→
+  1591→/// Strength Reduction.
+  1592→///
+  1593→/// Replaces multiply-by-constant-2^n with left shift, divide-by-power-of-2
+  1594→/// with right shift, and modulo-by-power-of-2 with bitwise AND.
+  1595→///
+  1596→/// Returns the list of replaced node IDs.
+  1597→pub fn strength_reduce(graph: &mut SCG) -> Vec<NodeId> {
+  1598→    let mut replaced = Vec::new();
+  1599→    let node_ids: Vec<NodeId> = graph.node_ids().collect();
+  1600→
+  1601→    for id in node_ids {
+  1602→        let operation = match graph.get_node(id) {
+  1603→            Some(n) => match &n.payload {
+  1604→                NodePayload::Computation(c) => c.operation.clone(),
+  1605→                _ => continue,
+  1606→            },
+  1607→            None => continue,
+  1608→        };
+  1609→
+  1610→        let new_op = if operation == "mul" {
+  1611→            let const_val = get_const_df_predecessor(graph, id);
+  1612→            const_val.and_then(|v| {
+  1613→                if StrengthReduction::is_power_of_two(v) {
+  1614→                    Some(format!("shl_{}", StrengthReduction::log2(v)))
+  1615→                } else {
+  1616→                    None
+  1617→                }
+  1618→            })
+  1619→        } else if operation == "div" {
+  1620→            let const_val = get_const_df_predecessor(graph, id);
+  1621→            const_val.and_then(|v| {
+  1622→                if StrengthReduction::is_power_of_two(v) {
+  1623→                    Some(format!("shr_{}", StrengthReduction::log2(v)))
+  1624→                } else {
+  1625→                    None
+  1626→                }
+  1627→            })
+  1628→        } else if operation == "mod" || operation == "rem" {
+  1629→            let const_val = get_const_df_predecessor(graph, id);
+  1630→            const_val.and_then(|v| {
+  1631→                if StrengthReduction::is_power_of_two(v) {
+  1632→                    Some(format!("and_{}", v - 1))
+  1633→                } else {
+  1634→                    None
+  1635→                }
+  1636→            })
+  1637→        } else {
+  1638→            None
+  1639→        };
+  1640→
+  1641→        if let Some(op) = new_op {
+  1642→            if let Some(node) = graph.get_node_mut(id) {
+  1643→                if let NodePayload::Computation(ref mut c) = node.payload {
+  1644→                    c.operation = op;
+  1645→                    replaced.push(id);
+  1646→                }
+  1647→            }
+  1648→        }
+  1649→    }
+  1650→
+  1651→    replaced
+  1652→}
+  1653→
+  1654→/// Helper: get the constant integer value of the first data-flow predecessor
+  1655→/// that is a constant node, if any.
+  1656→fn get_const_df_predecessor(graph: &SCG, id: NodeId) -> Option<u64> {
+  1657→    let preds = graph.predecessors(id).unwrap_or_default();
+  1658→    for pred in preds {
+  1659→        let is_df = graph
+  1660→            .edges()
+  1661→            .any(|e| e.source == pred && e.target == id && e.kind == EdgeKind::DataFlow);
+  1662→        if !is_df {
+  1663→            continue;
+  1664→        }
+  1665→        if let Some(pn) = graph.get_node(pred) {
+  1666→            if let NodePayload::Computation(c) = &pn.payload {
+  1667→                if let Some(v) = StrengthReduction::try_parse_const_int(&c.operation) {
+  1668→                    return Some(v);
+  1669→                }
+  1670→            }
+  1671→        }
+  1672→    }
+  1673→    None
+  1674→}
+  1675→
+  1676→/// Tail Call Detection.
+  1677→///
+  1678→/// Finds function calls that are the last action before FunctionReturn and
+  1679→/// marks the `ComputationNode.tail_call` field as `true`.
+  1680→///
+  1681→/// Returns the list of tail call node IDs.
+  1682→pub fn detect_tail_calls(graph: &mut SCG) -> Vec<NodeId> {
+  1683→    let mut tail_calls = Vec::new();
+  1684→    let node_ids: Vec<NodeId> = graph.node_ids().collect();
+  1685→
+  1686→    for id in node_ids {
+  1687→        let is_call = match graph.get_node(id) {
+  1688→            Some(n) => match &n.payload {
+  1689→                NodePayload::Computation(c) => TailCallOptDetection::is_call_node(&c.operation),
+  1690→                _ => false,
+  1691→            },
+  1692→            None => continue,
+  1693→        };
+  1694→        if !is_call {
+  1695→            continue;
+  1696→        }
+  1697→
+  1698→        if TailCallOptDetection::feeds_into_return(graph, id) {
+  1699→            if let Some(node) = graph.get_node_mut(id) {
+  1700→                if let NodePayload::Computation(ref mut c) = node.payload {
+  1701→                    if !c.tail_call {
+  1702→                        c.tail_call = true;
+  1703→                        tail_calls.push(id);
+  1704→                    }
+  1705→                }
+  1706→            }
+  1707→        }
+  1708→    }
+  1709→
+  1710→    tail_calls
+  1711→}
+  1712→
+  1713→/// Dead Region Elimination.
+  1714→///
+  1715→/// Finds Allocate nodes whose region is never read from (only written) and
+  1716→/// removes the Allocate, corresponding Free, and any write-only operations.
+  1717→///
+  1718→/// Returns the list of removed node IDs.
+  1719→pub fn dead_region_elim(graph: &mut SCG) -> Vec<NodeId> {
+  1720→    let mut removed = Vec::new();
+  1721→
+  1722→    let pairs = DeadRegionElimination::find_alloc_dealloc_pairs(graph);
+  1723→
+  1724→    for (alloc_id, dealloc_id, region_id) in pairs {
+  1725→        // Check if the region has any reads
+  1726→        if DeadRegionElimination::has_read_access(graph, region_id) {
+  1727→            continue; // Region is live — has reads
+  1728→        }
+  1729→
+  1730→        // Find write-only accesses to this region
+  1731→        let write_only = DeadRegionElimination::find_write_only_accesses(graph, region_id);
+  1732→
+  1733→        // Remove write-only accesses
+  1734→        for woid in &write_only {
+  1735→            if graph.remove_node(*woid).is_ok() {
+  1736→                removed.push(*woid);
+  1737→            }
+  1738→        }
+  1739→
+  1740→        // Remove allocation
+  1741→        if graph.remove_node(alloc_id).is_ok() {
+  1742→            removed.push(alloc_id);
+  1743→        }
+  1744→
+  1745→        // Remove deallocation (may have been invalidated by alloc removal — check first)
+  1746→        if graph.get_node(dealloc_id).is_some() && graph.remove_node(dealloc_id).is_ok() {
+  1747→            removed.push(dealloc_id);
+  1748→        }
+  1749→    }
+  1750→
+  1751→    removed
+  1752→}
+  1753→
+  1754→#[cfg(test)]
+  1755→mod tests {
+  1756→    use super::*;
+  1757→    use crate::edge::EdgeKind;
+  1758→    use crate::graph::SCG;
+  1759→    use crate::node::{
+  1760→        ComputationNode, ControlKind, ControlNode, EffectNode, NodePayload, NodeType, ProgramPoint,
+  1761→    };
+  1762→
+  1763→    /// Helper: create a default program point for tests.
+  1764→    fn pp() -> ProgramPoint {
+  1765→        ProgramPoint {
+  1766→            file: None,
+  1767→            line: None,
+  1768→            column: None,
+  1769→            offset: None,
+  1770→        }
+  1771→    }
+  1772→
+  1773→    // ── DeadCodeElimination Tests ─────────────────────────────────────
+  1774→
+  1775→    #[test]
+  1776→    fn test_dce_removes_unused_computation() {
+  1777→        let mut scg = SCG::new();
+  1778→        // n1 is a constant feeding into a live n2, and n3 is unused
+  1779→        let n1 = scg.add_node(
+  1780→            NodeType::Computation,
+  1781→            NodePayload::Computation(ComputationNode {
+  1782→                operation: "const.i32:10".to_string(),
+  1783→                result_type: Some("i32".to_string()),
+  1784→                tail_call: false,
+  1785→            }),
+  1786→            pp(),
+  1787→        );
+  1788→        let n2 = scg.add_node(
+  1789→            NodeType::Effect,
+  1790→            NodePayload::Effect(EffectNode {
+  1791→                effect_kind: "use".to_string(),
+  1792→                is_observable: true,
+  1793→            }),
+  1794→            pp(),
+  1795→        );
+  1796→        let n3 = scg.add_node(
+  1797→            NodeType::Computation,
+  1798→            NodePayload::Computation(ComputationNode {
+  1799→                operation: "sub".to_string(),
+  1800→                result_type: Some("i32".to_string()),
+  1801→                tail_call: false,
+  1802→            }),
+  1803→            pp(),
+  1804→        );
+  1805→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1806→        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+  1807→
+  1808→        // n3 has no data-flow successors, so DCE removes it.
+  1809→        // n1 is preserved because n2 (an Effect node) still consumes it.
+  1810→        let result = DeadCodeElimination.run(&mut scg);
+  1811→        assert!(result.changed);
+  1812→        assert_eq!(result.nodes_removed, 1);
+  1813→        // n3 should be gone; n1 and n2 are preserved
+  1814→        assert!(scg.get_node(n3).is_none());
+  1815→        assert!(scg.get_node(n1).is_some());
+  1816→        assert!(scg.get_node(n2).is_some());
+  1817→    }
+  1818→
+  1819→    #[test]
+  1820→    fn test_dce_preserves_effect_nodes() {
+  1821→        let mut scg = SCG::new();
+  1822→        let n1 = scg.add_node(
+  1823→            NodeType::Effect,
+  1824→            NodePayload::Effect(EffectNode {
+  1825→                effect_kind: "print".to_string(),
+  1826→                is_observable: true,
+  1827→            }),
+  1828→            pp(),
+  1829→        );
+  1830→        // Effect node has no successors but must be preserved
+  1831→        let result = DeadCodeElimination.run(&mut scg);
+  1832→        assert!(!result.changed);
+  1833→        assert!(scg.get_node(n1).is_some());
+  1834→    }
+  1835→
+  1836→    #[test]
+  1837→    fn test_dce_cascades_removals() {
+  1838→        let mut scg = SCG::new();
+  1839→        let n1 = scg.add_node(
+  1840→            NodeType::Computation,
+  1841→            NodePayload::Computation(ComputationNode {
+  1842→                operation: "const.i32:1".to_string(),
+  1843→                result_type: Some("i32".to_string()),
+  1844→                tail_call: false,
+  1845→            }),
+  1846→            pp(),
+  1847→        );
+  1848→        let n2 = scg.add_node(
+  1849→            NodeType::Computation,
+  1850→            NodePayload::Computation(ComputationNode {
+  1851→                operation: "const.i32:2".to_string(),
+  1852→                result_type: Some("i32".to_string()),
+  1853→                tail_call: false,
+  1854→            }),
+  1855→            pp(),
+  1856→        );
+  1857→        let n3 = scg.add_node(
+  1858→            NodeType::Computation,
+  1859→            NodePayload::Computation(ComputationNode {
+  1860→                operation: "add".to_string(),
+  1861→                result_type: Some("i32".to_string()),
+  1862→                tail_call: false,
+  1863→            }),
+  1864→            pp(),
+  1865→        );
+  1866→        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+  1867→        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+  1868→        // n3 has no data-flow successors → dead. After n3 removed,
+  1869→        // n1 and n2 also have no data-flow successors → dead.
+  1870→        let result = DeadCodeElimination.run(&mut scg);
+  1871→        assert!(result.changed);
+  1872→        assert_eq!(result.nodes_removed, 3);
+  1873→        assert_eq!(scg.node_count(), 0);
+  1874→    }
+  1875→
+  1876→    // ── ConstantFolding Tests ─────────────────────────────────────────
+  1877→
+  1878→    #[test]
+  1879→    fn test_constant_fold_binary_add() {
+  1880→        let mut scg = SCG::new();
+  1881→        let n1 = scg.add_node(
+  1882→            NodeType::Computation,
+  1883→            NodePayload::Computation(ComputationNode {
+  1884→                operation: "const.i32:10".to_string(),
+  1885→                result_type: Some("i32".to_string()),
+  1886→                tail_call: false,
+  1887→            }),
+  1888→            pp(),
+  1889→        );
+  1890→        let n2 = scg.add_node(
+  1891→            NodeType::Computation,
+  1892→            NodePayload::Computation(ComputationNode {
+  1893→                operation: "const.i32:20".to_string(),
+  1894→                result_type: Some("i32".to_string()),
+  1895→                tail_call: false,
+  1896→            }),
+  1897→            pp(),
+  1898→        );
+  1899→        let n3 = scg.add_node(
+  1900→            NodeType::Computation,
+  1901→            NodePayload::Computation(ComputationNode {
+  1902→                operation: "add".to_string(),
+  1903→                result_type: Some("i32".to_string()),
+  1904→                tail_call: false,
+  1905→            }),
+  1906→            pp(),
+  1907→        );
+  1908→        scg.add_edge(n1, n3, EdgeKind::DataFlow).unwrap();
+  1909→        scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+  1910→
+  1911→        let result = ConstantFolding.run(&mut scg);
+  1912→        assert!(result.changed);
+  1913→
+  1914→        // n3 should now be a constant with value 30
+  1915→        let folded = scg.get_node(n3).unwrap();
+  1916→        match &folded.payload {
+  1917→            NodePayload::Computation(c) => {
+  1918→                assert!(c.operation.starts_with("const.i32:"));
+  1919→                assert!(c.operation.contains("30"));
+  1920→            }
+  1921→            _ => panic!("expected computation node"),
+  1922→        }
+  1923→    }
+  1924→
+  1925→    #[test]
+  1926→    fn test_constant_fold_does_not_fold_non_constant() {
+  1927→        let mut scg = SCG::new();
+  1928→        let n1 = scg.add_node(
+  1929→            NodeType::Computation,
+  1930→            NodePayload::Computation(ComputationNode {
+  1931→                operation: "load".to_string(),
+  1932→                result_type: Some("i32".to_string()),
+  1933→                tail_call: false,
+  1934→            }),
+  1935→            pp(),
+  1936→        );
+  1937→        let n2 = scg.add_node(
+  1938→            NodeType::Computation,
+  1939→            NodePayload::Computation(ComputationNode {
+  1940→                operation: "add".to_string(),
+  1941→                result_type: Some("i32".to_string()),
+  1942→                tail_call: false,
+  1943→            }),
+  1944→            pp(),
+  1945→        );
+  1946→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1947→
+  1948→        let result = ConstantFolding.run(&mut scg);
+  1949→        assert!(!result.changed);
+  1950→    }
+  1951→
+  1952→    // ── CommonSubexpressionElimination Tests ───────────────────────────
+  1953→
+  1954→    #[test]
+  1955→    fn test_cse_merges_identical_computations() {
+  1956→        let mut scg = SCG::new();
+  1957→        let n1 = scg.add_node(
+  1958→            NodeType::Computation,
+  1959→            NodePayload::Computation(ComputationNode {
+  1960→                operation: "const.i32:5".to_string(),
+  1961→                result_type: Some("i32".to_string()),
+  1962→                tail_call: false,
+  1963→            }),
+  1964→            pp(),
+  1965→        );
+  1966→        let n2 = scg.add_node(
+  1967→            NodeType::Computation,
+  1968→            NodePayload::Computation(ComputationNode {
+  1969→                operation: "const.i32:3".to_string(),
+  1970→                result_type: Some("i32".to_string()),
+  1971→                tail_call: false,
+  1972→            }),
+  1973→            pp(),
+  1974→        );
+  1975→        // Two identical add nodes consuming same inputs
+  1976→        let n3 = scg.add_node(
+  1977→            NodeType::Computation,
+  1978→            NodePayload::Computation(ComputationNode {
+  1979→                operation: "add".to_string(),
+  1980→                result_type: Some("i32".to_string()),
+  1981→                tail_call: false,
+  1982→            }),
+  1983→            pp(),
+  1984→        );
+  1985→        let n4 = scg.add_node(
+  1986→            NodeType::Computation,
+  1987→            NodePayload::Computation(ComputationNode {
+  1988→                operation: "add".to_string(),
+  1989→                result_type: Some("i32".to_string()),
+  1990→                tail_call: false,
+  1991→            }),
+  1992→            pp(),
+  1993→        );
+  1994→        let n5 = scg.add_node(
+  1995→            NodeType::Computation,
+  1996→            NodePayload::Computation(ComputationNode {
+  1997→                operation: "use".to_string(),
+  1998→                result_type: Some("i32".to_string()),
+  1999→                tail_call: false,
+  2000→            }),
+
+[showing lines 1-2000 of 3331; use offset=2001 with limit to continue reading]
