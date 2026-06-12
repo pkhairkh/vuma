@@ -1,0 +1,824 @@
+     1→//! # x86_64 Mnemonic Disassembler
+     2→//!
+     3→//! Decodes x86_64 machine-code bytes into human-readable mnemonic form.
+     4→//! Covers the most common REX-prefixed 64-bit instructions used by the
+     5→//! VUMA ISel lowering: add, sub, imul, idiv, and, or, xor, shl, shr,
+     6→//! sar, cmp, test, mov, lea, push, pop, call, ret, jmp, jcc, nop,
+     7→//! movsxd, cqo, setcc, cmovcc, neg, not, mul, div, xchg, syscall,
+     8→//! int3.
+     9→
+    10→#[allow(unused_imports)]
+    11→use super::Gpr;
+    12→
+    13→// ---------------------------------------------------------------------------
+    14→// Decoded instruction
+    15→// ---------------------------------------------------------------------------
+    16→
+    17→/// A decoded x86_64 instruction with mnemonic and operand information.
+    18→#[derive(Debug, Clone, PartialEq, Eq)]
+    19→pub struct DecodedInstruction {
+    20→    /// The mnemonic string (e.g. "add", "mov", "ret").
+    21→    pub mnemonic: String,
+    22→    /// The full assembly line (e.g. "add rax, rcx").
+    23→    pub text: String,
+    24→    /// Number of bytes consumed.
+    25→    pub len: usize,
+    26→}
+    27→
+    28→impl std::fmt::Display for DecodedInstruction {
+    29→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    30→        f.write_str(&self.text)
+    31→    }
+    32→}
+    33→
+    34→// ---------------------------------------------------------------------------
+    35→// Decode error
+    36→// ---------------------------------------------------------------------------
+    37→
+    38→/// Error produced when decoding fails.
+    39→#[derive(Debug, Clone, PartialEq, Eq)]
+    40→pub enum DecodeError {
+    41→    /// The byte slice is too short.
+    42→    Truncated { needed: usize, available: usize },
+    43→    /// The byte sequence is not a recognised instruction.
+    44→    UnknownEncoding { bytes: Vec<u8> },
+    45→}
+    46→
+    47→impl std::fmt::Display for DecodeError {
+    48→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    49→        match self {
+    50→            DecodeError::Truncated { needed, available } => {
+    51→                write!(f, "truncated: need {needed} bytes, have {available}")
+    52→            }
+    53→            DecodeError::UnknownEncoding { bytes } => {
+    54→                let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    55→                write!(f, "unknown encoding: {}", hex.join(" "))
+    56→            }
+    57→        }
+    58→    }
+    59→}
+    60→
+    61→impl std::error::Error for DecodeError {}
+    62→
+    63→// ---------------------------------------------------------------------------
+    64→// Helpers
+    65→// ---------------------------------------------------------------------------
+    66→
+    67→fn gpr_name_64(idx: u8) -> String {
+    68→    match idx {
+    69→        0 => "rax".into(),
+    70→        1 => "rcx".into(),
+    71→        2 => "rdx".into(),
+    72→        3 => "rbx".into(),
+    73→        4 => "rsp".into(),
+    74→        5 => "rbp".into(),
+    75→        6 => "rsi".into(),
+    76→        7 => "rdi".into(),
+    77→        8 => "r8".into(),
+    78→        9 => "r9".into(),
+    79→        10 => "r10".into(),
+    80→        11 => "r11".into(),
+    81→        12 => "r12".into(),
+    82→        13 => "r13".into(),
+    83→        14 => "r14".into(),
+    84→        15 => "r15".into(),
+    85→        _ => format!("r??({idx})"),
+    86→    }
+    87→}
+    88→
+    89→fn gpr_name_8(idx: u8, has_rex: bool) -> String {
+    90→    match idx {
+    91→        0 => "al".into(),
+    92→        1 => "cl".into(),
+    93→        2 => "dl".into(),
+    94→        3 => "bl".into(),
+    95→        4 if has_rex => "spl".into(),
+    96→        4 => "ah".into(),
+    97→        5 if has_rex => "bpl".into(),
+    98→        5 => "ch".into(),
+    99→        6 if has_rex => "sil".into(),
+   100→        6 => "dh".into(),
+   101→        7 if has_rex => "dil".into(),
+   102→        7 => "bh".into(),
+   103→        8 => "r8b".into(),
+   104→        9 => "r9b".into(),
+   105→        10 => "r10b".into(),
+   106→        11 => "r11b".into(),
+   107→        12 => "r12b".into(),
+   108→        13 => "r13b".into(),
+   109→        14 => "r14b".into(),
+   110→        15 => "r15b".into(),
+   111→        _ => format!("??b({idx})"),
+   112→    }
+   113→}
+   114→
+   115→/// Decode ModR/M reg and r/m fields (register-register mode, mod=3 only).
+   116→fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
+   117→    if pos >= bytes.len() {
+   118→        return (0, 0, pos);
+   119→    }
+   120→    let modrm = bytes[pos];
+   121→    let new_pos = pos + 1;
+   122→    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+   123→    let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
+   124→    (reg, rm, new_pos)
+   125→}
+   126→
+   127→/// Decode a ModR/M byte for memory operands (simplified: only reg-reg and
+   128→/// base+disp modes used by our encoder).
+   129→fn decode_modrm_mem(
+   130→    bytes: &[u8],
+   131→    pos: usize,
+   132→    rex_r: bool,
+   133→    _rex_x: bool,
+   134→    rex_b: bool,
+   135→) -> (u8, u8, i32, usize) {
+   136→    if pos >= bytes.len() {
+   137→        return (0, 0, 0, pos);
+   138→    }
+   139→    let modrm = bytes[pos];
+   140→    let new_pos = pos + 1;
+   141→    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+   142→    let mod_bits = (modrm >> 6) & 3;
+   143→    let rm_raw = modrm & 7;
+   144→
+   145→    if mod_bits == 3 {
+   146→        // register-direct
+   147→        let rm = rm_raw | (if rex_b { 8 } else { 0 });
+   148→        return (reg, rm, 0, new_pos);
+   149→    }
+   150→
+   151→    let base = rm_raw | (if rex_b { 8 } else { 0 });
+   152→
+   153→    // SIB byte if rm == 4 (RSP)
+   154→    let _has_sib = rm_raw == 4;
+   155→    let mut adv = new_pos;
+   156→    if _has_sib && adv < bytes.len() {
+   157→        adv += 1; // skip SIB
+   158→    }
+   159→
+   160→    let disp = match mod_bits {
+   161→        // RBP/R13 with mod=0 needs disp32
+   162→        0 if rm_raw == 5 && adv + 4 <= bytes.len() => {
+   163→            let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
+   164→            adv += 4;
+   165→            d
+   166→        }
+   167→        1 if adv < bytes.len() => {
+   168→            let d = bytes[adv] as i8 as i32;
+   169→            adv += 1;
+   170→            d
+   171→        }
+   172→        2 if adv + 4 <= bytes.len() => {
+   173→            let d = i32::from_le_bytes(bytes[adv..adv + 4].try_into().unwrap_or([0; 4]));
+   174→            adv += 4;
+   175→            d
+   176→        }
+   177→        _ => 0,
+   178→    };
+   179→
+   180→    (reg, base, disp, adv)
+   181→}
+   182→
+   183→// ---------------------------------------------------------------------------
+   184→// Main decode entry point
+   185→// ---------------------------------------------------------------------------
+   186→
+   187→/// Decode a single x86_64 instruction from the byte stream.
+   188→///
+   189→/// Returns the decoded instruction and the number of bytes consumed.
+   190→pub fn decode_one(bytes: &[u8]) -> Result<DecodedInstruction, DecodeError> {
+   191→    if bytes.is_empty() {
+   192→        return Err(DecodeError::Truncated {
+   193→            needed: 1,
+   194→            available: 0,
+   195→        });
+   196→    }
+   197→
+   198→    let mut pos = 0usize;
+   199→
+   200→    // Skip legacy prefixes
+   201→    while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
+   202→        pos += 1;
+   203→    }
+   204→
+   205→    if pos >= bytes.len() {
+   206→        return Err(DecodeError::Truncated {
+   207→            needed: 1,
+   208→            available: bytes.len(),
+   209→        });
+   210→    }
+   211→
+   212→    // REX prefix
+   213→    #[allow(unused_assignments)]
+   214→    let mut rex = 0u8;
+   215→    let mut rex_w = false;
+   216→    let mut rex_r = false;
+   217→    let mut rex_x = false;
+   218→    let mut rex_b = false;
+   219→    let has_rex = if bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
+   220→        rex = bytes[pos];
+   221→        rex_w = (rex & 0x08) != 0;
+   222→        rex_r = (rex & 0x04) != 0;
+   223→        rex_x = (rex & 0x02) != 0;
+   224→        rex_b = (rex & 0x01) != 0;
+   225→        pos += 1;
+   226→        true
+   227→    } else {
+   228→        false
+   229→    };
+   230→
+   231→    if pos >= bytes.len() {
+   232→        return Err(DecodeError::Truncated {
+   233→            needed: pos + 1,
+   234→            available: bytes.len(),
+   235→        });
+   236→    }
+   237→
+   238→    let opcode = bytes[pos];
+   239→    pos += 1;
+   240→
+   241→    let text = match opcode {
+   242→        // NOP
+   243→        0x90 => "nop".to_string(),
+   244→
+   245→        // RET
+   246→        0xC3 => "ret".to_string(),
+   247→
+   248→        // INT3
+   249→        0xCC => "int3".to_string(),
+   250→
+   251→        // CQO (REX.W + 99)
+   252→        0x99 if rex_w => "cqo".to_string(),
+   253→
+   254→        // PUSH r64
+   255→        0x50..=0x57 => {
+   256→            let reg_idx = (opcode - 0x50) | (if rex_b { 8 } else { 0 });
+   257→            format!("push {}", gpr_name_64(reg_idx))
+   258→        }
+   259→
+   260→        // POP r64
+   261→        0x58..=0x5F => {
+   262→            let reg_idx = (opcode - 0x58) | (if rex_b { 8 } else { 0 });
+   263→            format!("pop {}", gpr_name_64(reg_idx))
+   264→        }
+   265→
+   266→        // MOV r64, imm64 (B8+rd with REX.W)
+   267→        0xB8..=0xBF if rex_w => {
+   268→            let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
+   269→            if pos + 8 <= bytes.len() {
+   270→                let imm = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
+   271→                pos += 8;
+   272→                format!("mov {}, {imm:#x}", gpr_name_64(reg_idx))
+   273→            } else {
+   274→                return Err(DecodeError::Truncated {
+   275→                    needed: pos + 8,
+   276→                    available: bytes.len(),
+   277→                });
+   278→            }
+   279→        }
+   280→
+   281→        // JMP rel32
+   282→        0xE9 => {
+   283→            if pos + 4 <= bytes.len() {
+   284→                let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   285→                pos += 4;
+   286→                let target = (pos as u64).wrapping_add(rel as u64);
+   287→                format!("jmp {target:#x}")
+   288→            } else {
+   289→                return Err(DecodeError::Truncated {
+   290→                    needed: pos + 4,
+   291→                    available: bytes.len(),
+   292→                });
+   293→            }
+   294→        }
+   295→
+   296→        // CALL rel32
+   297→        0xE8 => {
+   298→            if pos + 4 <= bytes.len() {
+   299→                let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   300→                pos += 4;
+   301→                let target = (pos as u64).wrapping_add(rel as u64);
+   302→                format!("call {target:#x}")
+   303→            } else {
+   304→                return Err(DecodeError::Truncated {
+   305→                    needed: pos + 4,
+   306→                    available: bytes.len(),
+   307→                });
+   308→            }
+   309→        }
+   310→
+   311→        // Two-byte opcode (0F xx)
+   312→        0x0F => {
+   313→            if pos >= bytes.len() {
+   314→                return Err(DecodeError::Truncated {
+   315→                    needed: pos + 1,
+   316→                    available: bytes.len(),
+   317→                });
+   318→            }
+   319→            let op2 = bytes[pos];
+   320→            pos += 1;
+   321→            match op2 {
+   322→                // SYSCALL
+   323→                0x05 => "syscall".to_string(),
+   324→
+   325→                // IMUL r64, r64
+   326→                0xAF => {
+   327→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   328→                    pos = np;
+   329→                    format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   330→                }
+   331→
+   332→                // Jcc rel32
+   333→                0x80..=0x8F => {
+   334→                    let cc_name = match op2 & 0xF {
+   335→                        0 => "jo",
+   336→                        1 => "jno",
+   337→                        2 => "jb",
+   338→                        3 => "jae",
+   339→                        4 => "je",
+   340→                        5 => "jne",
+   341→                        6 => "jbe",
+   342→                        7 => "ja",
+   343→                        8 => "js",
+   344→                        9 => "jns",
+   345→                        0xA => "jp",
+   346→                        0xB => "jnp",
+   347→                        0xC => "jl",
+   348→                        0xD => "jge",
+   349→                        0xE => "jle",
+   350→                        0xF => "jg",
+   351→                        _ => "j??",
+   352→                    };
+   353→                    if pos + 4 <= bytes.len() {
+   354→                        let rel =
+   355→                            i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   356→                        pos += 4;
+   357→                        let target = (pos as u64).wrapping_add(rel as u64);
+   358→                        format!("{cc_name} {target:#x}")
+   359→                    } else {
+   360→                        return Err(DecodeError::Truncated {
+   361→                            needed: pos + 4,
+   362→                            available: bytes.len(),
+   363→                        });
+   364→                    }
+   365→                }
+   366→
+   367→                // MOVZX r64, r8
+   368→                0xB6 => {
+   369→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   370→                    pos = np;
+   371→                    format!("movzx {}, {}", gpr_name_64(r), gpr_name_8(rm, has_rex))
+   372→                }
+   373→
+   374→                // MOVZX r64, r16
+   375→                0xB7 => {
+   376→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   377→                    pos = np;
+   378→                    format!("movzx {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   379→                }
+   380→
+   381→                // MOVSX r64, r8
+   382→                0xBE => {
+   383→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   384→                    pos = np;
+   385→                    format!("movsx {}, {}", gpr_name_64(r), gpr_name_8(rm, has_rex))
+   386→                }
+   387→
+   388→                // MOVSX r64, r16
+   389→                0xBF => {
+   390→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   391→                    pos = np;
+   392→                    format!("movsx {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   393→                }
+   394→
+   395→                // SETcc r/m8
+   396→                0x90..=0x9F => {
+   397→                    let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
+   398→                    pos = np;
+   399→                    let cc_name = match op2 & 0xF {
+   400→                        0 => "seto",
+   401→                        1 => "setno",
+   402→                        2 => "setb",
+   403→                        3 => "setae",
+   404→                        4 => "sete",
+   405→                        5 => "setne",
+   406→                        6 => "setbe",
+   407→                        7 => "seta",
+   408→                        8 => "sets",
+   409→                        9 => "setns",
+   410→                        0xA => "setp",
+   411→                        0xB => "setnp",
+   412→                        0xC => "setl",
+   413→                        0xD => "setge",
+   414→                        0xE => "setle",
+   415→                        0xF => "setg",
+   416→                        _ => "set??",
+   417→                    };
+   418→                    format!("{cc_name} {}", gpr_name_8(rm, has_rex))
+   419→                }
+   420→
+   421→                // CMOVcc r64, r64
+   422→                0x40..=0x4F => {
+   423→                    let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   424→                    pos = np;
+   425→                    let cc_name = match op2 & 0xF {
+   426→                        0 => "cmovo",
+   427→                        1 => "cmovno",
+   428→                        2 => "cmovb",
+   429→                        3 => "cmovae",
+   430→                        4 => "cmove",
+   431→                        5 => "cmovne",
+   432→                        6 => "cmovbe",
+   433→                        7 => "cmova",
+   434→                        8 => "cmovs",
+   435→                        9 => "cmovns",
+   436→                        0xA => "cmovp",
+   437→                        0xB => "cmovnp",
+   438→                        0xC => "cmovl",
+   439→                        0xD => "cmovge",
+   440→                        0xE => "cmovle",
+   441→                        0xF => "cmovg",
+   442→                        _ => "cmov??",
+   443→                    };
+   444→                    format!("{cc_name} {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   445→                }
+   446→
+   447→                _ => {
+   448→                    return Err(DecodeError::UnknownEncoding {
+   449→                        bytes: bytes[..pos].to_vec(),
+   450→                    });
+   451→                }
+   452→            }
+   453→        }
+   454→
+   455→        // ALU reg-reg opcodes
+   456→        0x01 => {
+   457→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   458→            pos = np;
+   459→            format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   460→        }
+   461→        0x03 => {
+   462→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   463→            pos = np;
+   464→            format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   465→        }
+   466→        0x09 => {
+   467→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   468→            pos = np;
+   469→            format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   470→        }
+   471→        0x0B => {
+   472→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   473→            pos = np;
+   474→            format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   475→        }
+   476→        0x21 => {
+   477→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   478→            pos = np;
+   479→            format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   480→        }
+   481→        0x23 => {
+   482→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   483→            pos = np;
+   484→            format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   485→        }
+   486→        0x29 => {
+   487→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   488→            pos = np;
+   489→            format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   490→        }
+   491→        0x2B => {
+   492→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   493→            pos = np;
+   494→            format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   495→        }
+   496→        0x31 => {
+   497→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   498→            pos = np;
+   499→            format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   500→        }
+   501→        0x33 => {
+   502→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   503→            pos = np;
+   504→            format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   505→        }
+   506→        0x39 => {
+   507→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   508→            pos = np;
+   509→            format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   510→        }
+   511→        0x3B => {
+   512→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   513→            pos = np;
+   514→            format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   515→        }
+   516→        0x85 => {
+   517→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   518→            pos = np;
+   519→            format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   520→        }
+   521→        0x89 => {
+   522→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   523→            pos = np;
+   524→            format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r))
+   525→        }
+   526→        0x8B => {
+   527→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   528→            pos = np;
+   529→            format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   530→        }
+   531→
+   532→        // LEA r64, [r64+offset]
+   533→        0x8D => {
+   534→            let (r, base, disp, np) = decode_modrm_mem(bytes, pos, rex_r, rex_x, rex_b);
+   535→            pos = np;
+   536→            if disp == 0 {
+   537→                format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(base))
+   538→            } else {
+   539→                format!("lea {}, [{}+{disp}]", gpr_name_64(r), gpr_name_64(base))
+   540→            }
+   541→        }
+   542→
+   543→        // MOVSXD r64, r64 (REX.W + 63)
+   544→        0x63 if rex_w => {
+   545→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   546→            pos = np;
+   547→            format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm))
+   548→        }
+   549→
+   550→        // F7 /x (NEG, NOT, MUL, DIV, IDIV)
+   551→        0xF7 => {
+   552→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   553→            pos = np;
+   554→            match r {
+   555→                2 => format!("not {}", gpr_name_64(rm)),
+   556→                3 => format!("neg {}", gpr_name_64(rm)),
+   557→                4 => format!("mul {}", gpr_name_64(rm)),
+   558→                6 => format!("div {}", gpr_name_64(rm)),
+   559→                7 => format!("idiv {}", gpr_name_64(rm)),
+   560→                _ => format!("f7 /{r}, {}", gpr_name_64(rm)),
+   561→            }
+   562→        }
+   563→
+   564→        // D3 /x (shift by CL)
+   565→        0xD3 => {
+   566→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   567→            pos = np;
+   568→            match r {
+   569→                4 => format!("shl {}, cl", gpr_name_64(rm)),
+   570→                5 => format!("shr {}, cl", gpr_name_64(rm)),
+   571→                7 => format!("sar {}, cl", gpr_name_64(rm)),
+   572→                _ => format!("d3 /{r}, {}", gpr_name_64(rm)),
+   573→            }
+   574→        }
+   575→
+   576→        // C7 /0 + imm32 (MOV r/m64, imm32)
+   577→        0xC7 => {
+   578→            let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   579→            pos = np;
+   580→            if pos + 4 <= bytes.len() {
+   581→                let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   582→                pos += 4;
+   583→                format!("mov {}, {imm}", gpr_name_64(rm))
+   584→            } else {
+   585→                return Err(DecodeError::Truncated {
+   586→                    needed: pos + 4,
+   587→                    available: bytes.len(),
+   588→                });
+   589→            }
+   590→        }
+   591→
+   592→        // 81 /x + imm32 (ADD/SUB/etc r/m64, imm32)
+   593→        0x81 => {
+   594→            let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+   595→            pos = np;
+   596→            if pos + 4 <= bytes.len() {
+   597→                let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   598→                pos += 4;
+   599→                let op_name = match r {
+   600→                    0 => "add",
+   601→                    1 => "or",
+   602→                    4 => "and",
+   603→                    5 => "sub",
+   604→                    6 => "xor",
+   605→                    7 => "cmp",
+   606→                    _ => "???",
+   607→                };
+   608→                format!("{op_name} {}, {imm}", gpr_name_64(rm))
+   609→            } else {
+   610→                return Err(DecodeError::Truncated {
+   611→                    needed: pos + 4,
+   612→                    available: bytes.len(),
+   613→                });
+   614→            }
+   615→        }
+   616→
+   617→        // XCHG rax, r64
+   618→        0x91..=0x97 => {
+   619→            let reg_idx = (opcode - 0x90) | (if rex_b { 8 } else { 0 });
+   620→            format!("xchg rax, {}", gpr_name_64(reg_idx))
+   621→        }
+   622→
+   623→        _ => {
+   624→            return Err(DecodeError::UnknownEncoding {
+   625→                bytes: bytes[..pos].to_vec(),
+   626→            });
+   627→        }
+   628→    };
+   629→
+   630→    Ok(DecodedInstruction {
+   631→        mnemonic: text.split_whitespace().next().unwrap_or("").to_string(),
+   632→        text,
+   633→        len: pos,
+   634→    })
+   635→}
+   636→
+   637→// ---------------------------------------------------------------------------
+   638→// Tests
+   639→// ---------------------------------------------------------------------------
+   640→
+   641→#[cfg(test)]
+   642→mod tests {
+   643→    use super::*;
+   644→    use crate::x86_64::{
+   645→        encode_add_reg_reg, encode_and_reg_reg, encode_call_rel32, encode_cmp_reg_reg,
+   646→        encode_idiv_reg, encode_imul_reg_reg, encode_jcc_rel32, encode_jmp_rel32,
+   647→        encode_lea_reg_mem, encode_mov_mem_reg, encode_mov_reg_mem, encode_mov_reg_reg,
+   648→        encode_neg_reg, encode_nop, encode_not_reg, encode_or_reg_reg, encode_pop, encode_push,
+   649→        encode_ret, encode_sar_reg_cl, encode_shl_reg_cl, encode_shr_reg_cl, encode_sub_reg_reg,
+   650→        encode_test_reg_reg, encode_xor_reg_reg, Gpr,
+   651→    };
+   652→
+   653→    #[test]
+   654→    fn test_decode_add() {
+   655→        let bytes = encode_add_reg_reg(Gpr::Rax, Gpr::Rcx);
+   656→        let decoded = decode_one(&bytes).unwrap();
+   657→        assert_eq!(decoded.mnemonic, "add");
+   658→        assert!(decoded.text.contains("rax"));
+   659→        assert!(decoded.text.contains("rcx"));
+   660→    }
+   661→
+   662→    #[test]
+   663→    fn test_decode_sub() {
+   664→        let bytes = encode_sub_reg_reg(Gpr::Rax, Gpr::Rdx);
+   665→        let decoded = decode_one(&bytes).unwrap();
+   666→        assert_eq!(decoded.mnemonic, "sub");
+   667→    }
+   668→
+   669→    #[test]
+   670→    fn test_decode_mov_reg_reg() {
+   671→        let bytes = encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx);
+   672→        let decoded = decode_one(&bytes).unwrap();
+   673→        assert_eq!(decoded.mnemonic, "mov");
+   674→    }
+   675→
+   676→    #[test]
+   677→    fn test_decode_ret() {
+   678→        let bytes = encode_ret();
+   679→        let decoded = decode_one(&bytes).unwrap();
+   680→        assert_eq!(decoded.text, "ret");
+   681→    }
+   682→
+   683→    #[test]
+   684→    fn test_decode_nop() {
+   685→        let bytes = encode_nop();
+   686→        let decoded = decode_one(&bytes).unwrap();
+   687→        assert_eq!(decoded.text, "nop");
+   688→    }
+   689→
+   690→    #[test]
+   691→    fn test_decode_imul() {
+   692→        let bytes = encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx);
+   693→        let decoded = decode_one(&bytes).unwrap();
+   694→        assert_eq!(decoded.mnemonic, "imul");
+   695→    }
+   696→
+   697→    #[test]
+   698→    fn test_decode_xor() {
+   699→        let bytes = encode_xor_reg_reg(Gpr::Rax, Gpr::Rax);
+   700→        let decoded = decode_one(&bytes).unwrap();
+   701→        assert_eq!(decoded.mnemonic, "xor");
+   702→    }
+   703→
+   704→    #[test]
+   705→    fn test_decode_and_or() {
+   706→        let and_bytes = encode_and_reg_reg(Gpr::Rax, Gpr::Rcx);
+   707→        let decoded = decode_one(&and_bytes).unwrap();
+   708→        assert_eq!(decoded.mnemonic, "and");
+   709→
+   710→        let or_bytes = encode_or_reg_reg(Gpr::Rax, Gpr::Rdx);
+   711→        let decoded = decode_one(&or_bytes).unwrap();
+   712→        assert_eq!(decoded.mnemonic, "or");
+   713→    }
+   714→
+   715→    #[test]
+   716→    fn test_decode_push_pop() {
+   717→        let push_bytes = encode_push(Gpr::Rbp);
+   718→        let decoded = decode_one(&push_bytes).unwrap();
+   719→        assert_eq!(decoded.mnemonic, "push");
+   720→
+   721→        let pop_bytes = encode_pop(Gpr::Rbp);
+   722→        let decoded = decode_one(&pop_bytes).unwrap();
+   723→        assert_eq!(decoded.mnemonic, "pop");
+   724→    }
+   725→
+   726→    #[test]
+   727→    fn test_decode_shifts() {
+   728→        let shl = encode_shl_reg_cl(Gpr::Rax);
+   729→        assert_eq!(decode_one(&shl).unwrap().mnemonic, "shl");
+   730→
+   731→        let shr = encode_shr_reg_cl(Gpr::Rax);
+   732→        assert_eq!(decode_one(&shr).unwrap().mnemonic, "shr");
+   733→
+   734→        let sar = encode_sar_reg_cl(Gpr::Rax);
+   735→        assert_eq!(decode_one(&sar).unwrap().mnemonic, "sar");
+   736→    }
+   737→
+   738→    #[test]
+   739→    fn test_decode_cmp() {
+   740→        let bytes = encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx);
+   741→        let decoded = decode_one(&bytes).unwrap();
+   742→        assert_eq!(decoded.mnemonic, "cmp");
+   743→    }
+   744→
+   745→    #[test]
+   746→    fn test_decode_neg_not() {
+   747→        let neg = encode_neg_reg(Gpr::Rax);
+   748→        assert_eq!(decode_one(&neg).unwrap().mnemonic, "neg");
+   749→
+   750→        let not = encode_not_reg(Gpr::Rax);
+   751→        assert_eq!(decode_one(&not).unwrap().mnemonic, "not");
+   752→    }
+   753→
+   754→    #[test]
+   755→    fn test_decode_lea() {
+   756→        let bytes = encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, 16);
+   757→        let decoded = decode_one(&bytes).unwrap();
+   758→        assert_eq!(decoded.mnemonic, "lea");
+   759→    }
+   760→
+   761→    #[test]
+   762→    fn test_decode_load_store() {
+   763→        let load = encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, 8);
+   764→        assert_eq!(decode_one(&load).unwrap().mnemonic, "mov");
+   765→
+   766→        let store = encode_mov_mem_reg(Gpr::Rbp, 8, Gpr::Rax);
+   767→        assert_eq!(decode_one(&store).unwrap().mnemonic, "mov");
+   768→    }
+   769→
+   770→    #[test]
+   771→    fn test_decode_idiv() {
+   772→        let bytes = encode_idiv_reg(Gpr::Rcx);
+   773→        let decoded = decode_one(&bytes).unwrap();
+   774→        assert_eq!(decoded.mnemonic, "idiv");
+   775→    }
+   776→
+   777→    #[test]
+   778→    fn test_decode_jcc() {
+   779→        use crate::x86_64::Cc;
+   780→        let bytes = encode_jcc_rel32(Cc::Equal, 0x100);
+   781→        let decoded = decode_one(&bytes).unwrap();
+   782→        assert_eq!(decoded.mnemonic, "je");
+   783→    }
+   784→
+   785→    #[test]
+   786→    fn test_decode_call() {
+   787→        let bytes = encode_call_rel32(0);
+   788→        let decoded = decode_one(&bytes).unwrap();
+   789→        assert_eq!(decoded.mnemonic, "call");
+   790→    }
+   791→
+   792→    #[test]
+   793→    fn test_decode_test() {
+   794→        let bytes = encode_test_reg_reg(Gpr::Rax, Gpr::Rax);
+   795→        let decoded = decode_one(&bytes).unwrap();
+   796→        assert_eq!(decoded.mnemonic, "test");
+   797→    }
+   798→
+   799→    #[test]
+   800→    fn test_roundtrip_encode_decode() {
+   801→        // Encode then decode, verify the mnemonic matches
+   802→        let bytes = encode_add_reg_reg(Gpr::Rdi, Gpr::Rsi);
+   803→        let decoded = decode_one(&bytes).unwrap();
+   804→        assert_eq!(decoded.mnemonic, "add");
+   805→
+   806→        let bytes = encode_sub_reg_reg(Gpr::R8, Gpr::R9);
+   807→        let decoded = decode_one(&bytes).unwrap();
+   808→        assert_eq!(decoded.mnemonic, "sub");
+   809→    }
+   810→
+   811→    #[test]
+   812→    fn test_decode_truncated() {
+   813→        let result = decode_one(&[]);
+   814→        assert!(matches!(result, Err(DecodeError::Truncated { .. })));
+   815→    }
+   816→
+   817→    #[test]
+   818→    fn test_decode_unknown() {
+   819→        // 0x0F 0xFF is not a standard encoding
+   820→        let result = decode_one(&[0x0F, 0xFF]);
+   821→        assert!(matches!(result, Err(DecodeError::UnknownEncoding { .. })));
+   822→    }
+   823→}
+   824→

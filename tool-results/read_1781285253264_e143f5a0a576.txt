@@ -1,0 +1,1700 @@
+     1→//! # Target Description System
+     2→//!
+     3→//! Machine-readable ISA specifications that make adding new ISAs a data-driven
+     4→//! process. Each `TargetDesc` contains the complete register file, calling
+     5→//! convention details, and instruction category metadata for an ISA.
+     6→
+     7→use crate::backend::{Endianness, OutputFormat, RegClass};
+     8→
+     9→/// A complete machine-readable description of a target ISA.
+    10→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    11→pub struct TargetDesc {
+    12→    /// ISA name in lowercase (e.g., `"aarch64"`, `"riscv64"`).
+    13→    pub name: &'static str,
+    14→    /// LLVM-style target triple (e.g., `"aarch64-unknown-linux-gnu"`).
+    15→    pub triple: &'static str,
+    16→    /// ELF `e_machine` value (0 for non-ELF targets like Wasm).
+    17→    pub elf_machine: u16,
+    18→    /// Default base address for the `.text` section.
+    19→    pub base_addr: u64,
+    20→    /// Pointer width in bytes (4 for 32-bit, 8 for 64-bit).
+    21→    pub pointer_width: usize,
+    22→    /// Byte order of the target.
+    23→    pub endianness: Endianness,
+    24→    /// Binary output format produced by the backend.
+    25→    pub output_format: OutputFormat,
+    26→    /// Register file description.
+    27→    pub registers: Vec<RegDesc>,
+    28→    /// Calling convention details.
+    29→    pub calling_convention: CallingConventionDesc,
+    30→    /// Instruction category metadata.
+    31→    pub instruction_categories: Vec<InstCategoryDesc>,
+    32→}
+    33→
+    34→/// Description of a single register.
+    35→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    36→pub struct RegDesc {
+    37→    /// Register name (e.g., `"X0"`, `"RAX"`, `"x10"`).
+    38→    pub name: &'static str,
+    39→    /// Register class (GPR, SIMD/FP, Condition, Special).
+    40→    pub class: RegClass,
+    41→    /// Register index within its class (0-based).
+    42→    pub index: usize,
+    43→    /// Whether this register is available for the register allocator.
+    44→    pub is_allocatable: bool,
+    45→    /// Whether this register always reads as zero (e.g., RISC-V `x0`).
+    46→    pub is_hardwired_zero: bool,
+    47→    /// Whether this register serves as the stack pointer.
+    48→    pub is_stack_pointer: bool,
+    49→    /// Whether this register serves as the frame pointer.
+    50→    pub is_frame_pointer: bool,
+    51→    /// Whether this register holds the return address (link register).
+    52→    pub is_link_register: bool,
+    53→    /// Whether this register holds the TOC (table of contents) pointer.
+    54→    pub is_toc_pointer: bool,
+    55→    /// Whether this register must be preserved across function calls.
+    56→    pub is_callee_saved: bool,
+    57→    /// Whether this register is used for passing arguments.
+    58→    pub is_arg_reg: bool,
+    59→    /// For argument registers, the position in the argument list (0-based).
+    60→    pub arg_position: Option<usize>,
+    61→    /// Whether this register is used for returning values.
+    62→    pub is_return_reg: bool,
+    63→}
+    64→
+    65→impl RegDesc {
+    66→    /// Create a new GPR descriptor (allocatable by default).
+    67→    fn gpr(name: &'static str, index: usize) -> Self {
+    68→        Self {
+    69→            name,
+    70→            class: RegClass::Gpr,
+    71→            index,
+    72→            is_allocatable: true,
+    73→            is_hardwired_zero: false,
+    74→            is_stack_pointer: false,
+    75→            is_frame_pointer: false,
+    76→            is_link_register: false,
+    77→            is_toc_pointer: false,
+    78→            is_callee_saved: false,
+    79→            is_arg_reg: false,
+    80→            arg_position: None,
+    81→            is_return_reg: false,
+    82→        }
+    83→    }
+    84→
+    85→    /// Create a new SIMD/FP register descriptor (allocatable by default).
+    86→    fn fpr(name: &'static str, index: usize) -> Self {
+    87→        Self {
+    88→            name,
+    89→            class: RegClass::SimdFp,
+    90→            index,
+    91→            is_allocatable: true,
+    92→            is_hardwired_zero: false,
+    93→            is_stack_pointer: false,
+    94→            is_frame_pointer: false,
+    95→            is_link_register: false,
+    96→            is_toc_pointer: false,
+    97→            is_callee_saved: false,
+    98→            is_arg_reg: false,
+    99→            arg_position: None,
+   100→            is_return_reg: false,
+   101→        }
+   102→    }
+   103→
+   104→    /// Create a new special-purpose register descriptor (not allocatable).
+   105→    fn special_reg(name: &'static str, index: usize) -> Self {
+   106→        Self {
+   107→            name,
+   108→            class: RegClass::Special,
+   109→            index,
+   110→            is_allocatable: false,
+   111→            is_hardwired_zero: false,
+   112→            is_stack_pointer: false,
+   113→            is_frame_pointer: false,
+   114→            is_link_register: false,
+   115→            is_toc_pointer: false,
+   116→            is_callee_saved: false,
+   117→            is_arg_reg: false,
+   118→            arg_position: None,
+   119→            is_return_reg: false,
+   120→        }
+   121→    }
+   122→
+   123→    /// Create a new condition register descriptor (not allocatable).
+   124→    fn cond_reg(name: &'static str, index: usize) -> Self {
+   125→        Self {
+   126→            name,
+   127→            class: RegClass::Condition,
+   128→            index,
+   129→            is_allocatable: false,
+   130→            is_hardwired_zero: false,
+   131→            is_stack_pointer: false,
+   132→            is_frame_pointer: false,
+   133→            is_link_register: false,
+   134→            is_toc_pointer: false,
+   135→            is_callee_saved: false,
+   136→            is_arg_reg: false,
+   137→            arg_position: None,
+   138→            is_return_reg: false,
+   139→        }
+   140→    }
+   141→
+   142→    // Builder-style modifiers
+   143→
+   144→    fn hardwired_zero(mut self) -> Self {
+   145→        self.is_hardwired_zero = true;
+   146→        self.is_allocatable = false;
+   147→        self
+   148→    }
+   149→
+   150→    fn stack_pointer(mut self) -> Self {
+   151→        self.is_stack_pointer = true;
+   152→        self.is_allocatable = false;
+   153→        self
+   154→    }
+   155→
+   156→    fn frame_pointer(mut self) -> Self {
+   157→        self.is_frame_pointer = true;
+   158→        self
+   159→    }
+   160→
+   161→    fn link_register(mut self) -> Self {
+   162→        self.is_link_register = true;
+   163→        self.is_allocatable = false;
+   164→        self
+   165→    }
+   166→
+   167→    fn toc_pointer(mut self) -> Self {
+   168→        self.is_toc_pointer = true;
+   169→        self.is_allocatable = false;
+   170→        self
+   171→    }
+   172→
+   173→    fn callee_saved(mut self) -> Self {
+   174→        self.is_callee_saved = true;
+   175→        self
+   176→    }
+   177→
+   178→    fn arg(mut self, pos: usize) -> Self {
+   179→        self.is_arg_reg = true;
+   180→        self.arg_position = Some(pos);
+   181→        self
+   182→    }
+   183→
+   184→    fn return_reg(mut self) -> Self {
+   185→        self.is_return_reg = true;
+   186→        self
+   187→    }
+   188→
+   189→    fn not_allocatable(mut self) -> Self {
+   190→        self.is_allocatable = false;
+   191→        self
+   192→    }
+   193→}
+   194→
+   195→/// Description of a calling convention.
+   196→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+   197→pub struct CallingConventionDesc {
+   198→    /// Calling convention name (e.g., `"aapcs64"`, `"lp64d"`, `"systemv"`).
+   199→    pub name: &'static str,
+   200→    /// GPR indices used for integer arguments, in order.
+   201→    pub int_arg_regs: Vec<usize>,
+   202→    /// FPR indices used for floating-point arguments, in order.
+   203→    pub fp_arg_regs: Vec<usize>,
+   204→    /// GPR indices used for integer return values, in order.
+   205→    pub int_return_regs: Vec<usize>,
+   206→    /// FPR indices used for floating-point return values, in order.
+   207→    pub fp_return_regs: Vec<usize>,
+   208→    /// GPR indices that are callee-saved.
+   209→    pub callee_saved_gprs: Vec<usize>,
+   210→    /// FPR indices that are callee-saved.
+   211→    pub callee_saved_fps: Vec<usize>,
+   212→    /// Required stack alignment in bytes.
+   213→    pub stack_alignment: usize,
+   214→    /// Whether the ISA uses a link register (vs pushing return address on stack).
+   215→    pub has_link_register: bool,
+   216→    /// Whether branches have delay slots (MIPS only).
+   217→    pub has_branch_delay_slots: bool,
+   218→    /// Whether the ISA uses a TOC (table of contents) pointer (PPC64).
+   219→    pub has_toc_pointer: bool,
+   220→}
+   221→
+   222→/// Description of an instruction category.
+   223→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+   224→pub struct InstCategoryDesc {
+   225→    /// Category name (e.g., `"arithmetic"`, `"branch"`, `"load_store"`).
+   226→    pub name: &'static str,
+   227→    /// Instruction mnemonics belonging to this category.
+   228→    pub insts: Vec<&'static str>,
+   229→}
+   230→
+   231→/// Registry of all target descriptions.
+   232→pub struct TargetDescRegistry {
+   233→    descs: std::collections::HashMap<&'static str, TargetDesc>,
+   234→}
+   235→
+   236→impl TargetDescRegistry {
+   237→    /// Creates a new registry pre-populated with all supported target descriptions.
+   238→    pub fn new() -> Self {
+   239→        let mut descs = std::collections::HashMap::new();
+   240→        descs.insert("aarch64", aarch64_target_desc());
+   241→        descs.insert("riscv64", riscv64_target_desc());
+   242→        descs.insert("wasm32", wasm32_target_desc());
+   243→        descs.insert("loongarch64", loongarch64_target_desc());
+   244→        descs.insert("x86_64", x86_64_target_desc());
+   245→        descs.insert("arm32", arm32_target_desc());
+   246→        descs.insert("mips64", mips64_target_desc());
+   247→        descs.insert("ppc64", ppc64_target_desc());
+   248→        Self { descs }
+   249→    }
+   250→
+   251→    /// Looks up a target description by ISA name (e.g., `"aarch64"`).
+   252→    pub fn get(&self, name: &str) -> Option<&TargetDesc> {
+   253→        self.descs.get(name)
+   254→    }
+   255→
+   256→    /// Returns the list of all registered ISA names.
+   257→    pub fn isa_names(&self) -> Vec<&'static str> {
+   258→        self.descs.keys().copied().collect()
+   259→    }
+   260→}
+   261→
+   262→impl Default for TargetDescRegistry {
+   263→    fn default() -> Self {
+   264→        Self::new()
+   265→    }
+   266→}
+   267→
+   268→// ===========================================================================
+   269→// AArch64 (AAPCS64)
+   270→// ===========================================================================
+   271→
+   272→fn aarch64_target_desc() -> TargetDesc {
+   273→    let registers = vec![
+   274→        // X0-X7: argument/return registers (caller-saved)
+   275→        RegDesc::gpr("X0", 0).arg(0).return_reg(),
+   276→        RegDesc::gpr("X1", 1).arg(1).return_reg(),
+   277→        RegDesc::gpr("X2", 2).arg(2),
+   278→        RegDesc::gpr("X3", 3).arg(3),
+   279→        RegDesc::gpr("X4", 4).arg(4),
+   280→        RegDesc::gpr("X5", 5).arg(5),
+   281→        RegDesc::gpr("X6", 6).arg(6),
+   282→        RegDesc::gpr("X7", 7).arg(7),
+   283→        // X8: indirect result location register (caller-saved)
+   284→        RegDesc::gpr("X8", 8),
+   285→        // X9-X15: caller-saved temporaries
+   286→        RegDesc::gpr("X9", 9),
+   287→        RegDesc::gpr("X10", 10),
+   288→        RegDesc::gpr("X11", 11),
+   289→        RegDesc::gpr("X12", 12),
+   290→        RegDesc::gpr("X13", 13),
+   291→        RegDesc::gpr("X14", 14),
+   292→        RegDesc::gpr("X15", 15),
+   293→        // X16-X17: intra-procedure call scratch (IP0/IP1), not allocatable
+   294→        RegDesc::gpr("X16", 16).not_allocatable(),
+   295→        RegDesc::gpr("X17", 17).not_allocatable(),
+   296→        // X18: platform register, not allocatable
+   297→        RegDesc::gpr("X18", 18).not_allocatable(),
+   298→        // X19-X28: callee-saved
+   299→        RegDesc::gpr("X19", 19).callee_saved(),
+   300→        RegDesc::gpr("X20", 20).callee_saved(),
+   301→        RegDesc::gpr("X21", 21).callee_saved(),
+   302→        RegDesc::gpr("X22", 22).callee_saved(),
+   303→        RegDesc::gpr("X23", 23).callee_saved(),
+   304→        RegDesc::gpr("X24", 24).callee_saved(),
+   305→        RegDesc::gpr("X25", 25).callee_saved(),
+   306→        RegDesc::gpr("X26", 26).callee_saved(),
+   307→        RegDesc::gpr("X27", 27).callee_saved(),
+   308→        RegDesc::gpr("X28", 28).callee_saved(),
+   309→        // X29: frame pointer (callee-saved)
+   310→        RegDesc::gpr("X29", 29).frame_pointer().callee_saved(),
+   311→        // X30: link register, not allocatable
+   312→        RegDesc::gpr("X30", 30).link_register(),
+   313→        // SP: stack pointer, not allocatable
+   314→        RegDesc::gpr("SP", 31).stack_pointer(),
+   315→        // XZR: zero register, not allocatable
+   316→        RegDesc::gpr("XZR", 32).hardwired_zero(),
+   317→        // V0-V7: FP argument/return registers (caller-saved)
+   318→        RegDesc::fpr("V0", 0).arg(0).return_reg(),
+   319→        RegDesc::fpr("V1", 1).arg(1).return_reg(),
+   320→        RegDesc::fpr("V2", 2).arg(2).return_reg(),
+   321→        RegDesc::fpr("V3", 3).arg(3).return_reg(),
+   322→        RegDesc::fpr("V4", 4).arg(4),
+   323→        RegDesc::fpr("V5", 5).arg(5),
+   324→        RegDesc::fpr("V6", 6).arg(6),
+   325→        RegDesc::fpr("V7", 7).arg(7),
+   326→        // V8-V15: callee-saved FP registers
+   327→        RegDesc::fpr("V8", 8).callee_saved(),
+   328→        RegDesc::fpr("V9", 9).callee_saved(),
+   329→        RegDesc::fpr("V10", 10).callee_saved(),
+   330→        RegDesc::fpr("V11", 11).callee_saved(),
+   331→        RegDesc::fpr("V12", 12).callee_saved(),
+   332→        RegDesc::fpr("V13", 13).callee_saved(),
+   333→        RegDesc::fpr("V14", 14).callee_saved(),
+   334→        RegDesc::fpr("V15", 15).callee_saved(),
+   335→        // V16-V31: caller-saved FP temporaries
+   336→        RegDesc::fpr("V16", 16),
+   337→        RegDesc::fpr("V17", 17),
+   338→        RegDesc::fpr("V18", 18),
+   339→        RegDesc::fpr("V19", 19),
+   340→        RegDesc::fpr("V20", 20),
+   341→        RegDesc::fpr("V21", 21),
+   342→        RegDesc::fpr("V22", 22),
+   343→        RegDesc::fpr("V23", 23),
+   344→        RegDesc::fpr("V24", 24),
+   345→        RegDesc::fpr("V25", 25),
+   346→        RegDesc::fpr("V26", 26),
+   347→        RegDesc::fpr("V27", 27),
+   348→        RegDesc::fpr("V28", 28),
+   349→        RegDesc::fpr("V29", 29),
+   350→        RegDesc::fpr("V30", 30),
+   351→        RegDesc::fpr("V31", 31),
+   352→    ];
+   353→
+   354→    let calling_convention = CallingConventionDesc {
+   355→        name: "aapcs64",
+   356→        int_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+   357→        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+   358→        int_return_regs: vec![0, 1],
+   359→        fp_return_regs: vec![0, 1, 2, 3],
+   360→        callee_saved_gprs: vec![19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+   361→        callee_saved_fps: vec![8, 9, 10, 11, 12, 13, 14, 15],
+   362→        stack_alignment: 16,
+   363→        has_link_register: true,
+   364→        has_branch_delay_slots: false,
+   365→        has_toc_pointer: false,
+   366→    };
+   367→
+   368→    let instruction_categories = vec![
+   369→        InstCategoryDesc {
+   370→            name: "arithmetic",
+   371→            insts: vec![
+   372→                "ADD", "SUB", "MUL", "SDIV", "UDIV", "AND", "ORR", "EOR", "LSL", "LSR",
+   373→            ],
+   374→        },
+   375→        InstCategoryDesc {
+   376→            name: "branch",
+   377→            insts: vec![
+   378→                "B", "BL", "BR", "B.cond", "CBZ", "CBNZ", "TBZ", "TBNZ", "RET",
+   379→            ],
+   380→        },
+   381→        InstCategoryDesc {
+   382→            name: "load_store",
+   383→            insts: vec!["LDR", "STR", "LDP", "STP", "LDUR", "STUR", "LDRB", "STRB"],
+   384→        },
+   385→        InstCategoryDesc {
+   386→            name: "fp_arithmetic",
+   387→            insts: vec!["FADD", "FSUB", "FMUL", "FDIV", "FMOV", "FCMP", "FCVT"],
+   388→        },
+   389→        InstCategoryDesc {
+   390→            name: "system",
+   391→            insts: vec!["SVC", "MRS", "MSR", "DMB", "DSB", "ISB", "NOP"],
+   392→        },
+   393→    ];
+   394→
+   395→    TargetDesc {
+   396→        name: "aarch64",
+   397→        triple: "aarch64-unknown-linux-gnu",
+   398→        elf_machine: 183,
+   399→        base_addr: 0x400000,
+   400→        pointer_width: 8,
+   401→        endianness: Endianness::Little,
+   402→        output_format: OutputFormat::Elf64,
+   403→        registers,
+   404→        calling_convention,
+   405→        instruction_categories,
+   406→    }
+   407→}
+   408→
+   409→// ===========================================================================
+   410→// RISC-V64 (LP64D)
+   411→// ===========================================================================
+   412→
+   413→fn riscv64_target_desc() -> TargetDesc {
+   414→    let registers = vec![
+   415→        // x0: hardwired zero
+   416→        RegDesc::gpr("x0", 0).hardwired_zero(),
+   417→        // x1: return address (link register)
+   418→        RegDesc::gpr("x1", 1).link_register(),
+   419→        // x2: stack pointer
+   420→        RegDesc::gpr("x2", 2).stack_pointer(),
+   421→        // x3: global pointer
+   422→        RegDesc::gpr("x3", 3).not_allocatable(),
+   423→        // x4: thread pointer
+   424→        RegDesc::gpr("x4", 4).not_allocatable(),
+   425→        // x5-x7: temporaries t0-t2 (caller-saved)
+   426→        RegDesc::gpr("x5", 5),
+   427→        RegDesc::gpr("x6", 6),
+   428→        RegDesc::gpr("x7", 7),
+   429→        // x8: s0/fp (callee-saved, frame pointer)
+   430→        RegDesc::gpr("x8", 8).frame_pointer().callee_saved(),
+   431→        // x9: s1 (callee-saved)
+   432→        RegDesc::gpr("x9", 9).callee_saved(),
+   433→        // x10-x17: arguments a0-a7 (caller-saved)
+   434→        RegDesc::gpr("x10", 10).arg(0).return_reg(),
+   435→        RegDesc::gpr("x11", 11).arg(1).return_reg(),
+   436→        RegDesc::gpr("x12", 12).arg(2),
+   437→        RegDesc::gpr("x13", 13).arg(3),
+   438→        RegDesc::gpr("x14", 14).arg(4),
+   439→        RegDesc::gpr("x15", 15).arg(5),
+   440→        RegDesc::gpr("x16", 16).arg(6),
+   441→        RegDesc::gpr("x17", 17).arg(7),
+   442→        // x18-x27: saved s2-s11 (callee-saved)
+   443→        RegDesc::gpr("x18", 18).callee_saved(),
+   444→        RegDesc::gpr("x19", 19).callee_saved(),
+   445→        RegDesc::gpr("x20", 20).callee_saved(),
+   446→        RegDesc::gpr("x21", 21).callee_saved(),
+   447→        RegDesc::gpr("x22", 22).callee_saved(),
+   448→        RegDesc::gpr("x23", 23).callee_saved(),
+   449→        RegDesc::gpr("x24", 24).callee_saved(),
+   450→        RegDesc::gpr("x25", 25).callee_saved(),
+   451→        RegDesc::gpr("x26", 26).callee_saved(),
+   452→        RegDesc::gpr("x27", 27).callee_saved(),
+   453→        // x28-x31: temporaries t3-t6 (caller-saved)
+   454→        RegDesc::gpr("x28", 28),
+   455→        RegDesc::gpr("x29", 29),
+   456→        RegDesc::gpr("x30", 30),
+   457→        RegDesc::gpr("x31", 31),
+   458→        // f0-f7: temporaries ft0-ft7 (caller-saved)
+   459→        RegDesc::fpr("f0", 0),
+   460→        RegDesc::fpr("f1", 1),
+   461→        RegDesc::fpr("f2", 2),
+   462→        RegDesc::fpr("f3", 3),
+   463→        RegDesc::fpr("f4", 4),
+   464→        RegDesc::fpr("f5", 5),
+   465→        RegDesc::fpr("f6", 6),
+   466→        RegDesc::fpr("f7", 7),
+   467→        // f8-f9: saved fs0-fs1 (callee-saved)
+   468→        RegDesc::fpr("f8", 8).callee_saved(),
+   469→        RegDesc::fpr("f9", 9).callee_saved(),
+   470→        // f10-f17: arguments fa0-fa7 (caller-saved)
+   471→        RegDesc::fpr("f10", 10).arg(0).return_reg(),
+   472→        RegDesc::fpr("f11", 11).arg(1).return_reg(),
+   473→        RegDesc::fpr("f12", 12).arg(2),
+   474→        RegDesc::fpr("f13", 13).arg(3),
+   475→        RegDesc::fpr("f14", 14).arg(4),
+   476→        RegDesc::fpr("f15", 15).arg(5),
+   477→        RegDesc::fpr("f16", 16).arg(6),
+   478→        RegDesc::fpr("f17", 17).arg(7),
+   479→        // f18-f27: saved fs2-fs11 (callee-saved)
+   480→        RegDesc::fpr("f18", 18).callee_saved(),
+   481→        RegDesc::fpr("f19", 19).callee_saved(),
+   482→        RegDesc::fpr("f20", 20).callee_saved(),
+   483→        RegDesc::fpr("f21", 21).callee_saved(),
+   484→        RegDesc::fpr("f22", 22).callee_saved(),
+   485→        RegDesc::fpr("f23", 23).callee_saved(),
+   486→        RegDesc::fpr("f24", 24).callee_saved(),
+   487→        RegDesc::fpr("f25", 25).callee_saved(),
+   488→        RegDesc::fpr("f26", 26).callee_saved(),
+   489→        RegDesc::fpr("f27", 27).callee_saved(),
+   490→        // f28-f31: temporaries ft8-ft11 (caller-saved)
+   491→        RegDesc::fpr("f28", 28),
+   492→        RegDesc::fpr("f29", 29),
+   493→        RegDesc::fpr("f30", 30),
+   494→        RegDesc::fpr("f31", 31),
+   495→    ];
+   496→
+   497→    let calling_convention = CallingConventionDesc {
+   498→        name: "lp64d",
+   499→        int_arg_regs: vec![10, 11, 12, 13, 14, 15, 16, 17],
+   500→        fp_arg_regs: vec![10, 11, 12, 13, 14, 15, 16, 17],
+   501→        int_return_regs: vec![10, 11],
+   502→        fp_return_regs: vec![10, 11],
+   503→        callee_saved_gprs: vec![8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
+   504→        callee_saved_fps: vec![8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
+   505→        stack_alignment: 16,
+   506→        has_link_register: true,
+   507→        has_branch_delay_slots: false,
+   508→        has_toc_pointer: false,
+   509→    };
+   510→
+   511→    let instruction_categories = vec![
+   512→        InstCategoryDesc {
+   513→            name: "arithmetic",
+   514→            insts: vec![
+   515→                "ADD", "SUB", "MUL", "DIV", "AND", "OR", "XOR", "SLL", "SRL", "SRA", "ADDI", "SLT",
+   516→            ],
+   517→        },
+   518→        InstCategoryDesc {
+   519→            name: "branch",
+   520→            insts: vec!["BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "JAL", "JALR"],
+   521→        },
+   522→        InstCategoryDesc {
+   523→            name: "load_store",
+   524→            insts: vec!["LW", "LD", "SW", "SD", "LB", "SB", "LH", "SH", "LBU", "LHU"],
+   525→        },
+   526→        InstCategoryDesc {
+   527→            name: "fp_arithmetic",
+   528→            insts: vec!["FADD.D", "FSUB.D", "FMUL.D", "FDIV.D", "FMV.D", "FCVT.D.W"],
+   529→        },
+   530→        InstCategoryDesc {
+   531→            name: "system",
+   532→            insts: vec![
+   533→                "ECALL", "EBREAK", "FENCE", "FENCE.I", "CSRRC", "CSRRS", "CSRRW",
+   534→            ],
+   535→        },
+   536→    ];
+   537→
+   538→    TargetDesc {
+   539→        name: "riscv64",
+   540→        triple: "riscv64-unknown-linux-gnu",
+   541→        elf_machine: 243,
+   542→        base_addr: 0x10000,
+   543→        pointer_width: 8,
+   544→        endianness: Endianness::Little,
+   545→        output_format: OutputFormat::Elf64,
+   546→        registers,
+   547→        calling_convention,
+   548→        instruction_categories,
+   549→    }
+   550→}
+   551→
+   552→// ===========================================================================
+   553→// Wasm32 (stack machine)
+   554→// ===========================================================================
+   555→
+   556→fn wasm32_target_desc() -> TargetDesc {
+   557→    let registers = vec![
+   558→        // Single pseudo-register representing the operand stack
+   559→        RegDesc::special_reg("stack", 0),
+   560→    ];
+   561→
+   562→    let calling_convention = CallingConventionDesc {
+   563→        name: "wasm-stack",
+   564→        int_arg_regs: vec![],
+   565→        fp_arg_regs: vec![],
+   566→        int_return_regs: vec![],
+   567→        fp_return_regs: vec![],
+   568→        callee_saved_gprs: vec![],
+   569→        callee_saved_fps: vec![],
+   570→        stack_alignment: 8,
+   571→        has_link_register: false,
+   572→        has_branch_delay_slots: false,
+   573→        has_toc_pointer: false,
+   574→    };
+   575→
+   576→    let instruction_categories = vec![
+   577→        InstCategoryDesc {
+   578→            name: "arithmetic",
+   579→            insts: vec![
+   580→                "i32.add", "i32.sub", "i32.mul", "i64.add", "i64.sub", "i64.mul",
+   581→            ],
+   582→        },
+   583→        InstCategoryDesc {
+   584→            name: "branch",
+   585→            insts: vec![
+   586→                "br", "br_if", "br_table", "return", "if", "else", "end", "loop", "block",
+   587→            ],
+   588→        },
+   589→        InstCategoryDesc {
+   590→            name: "load_store",
+   591→            insts: vec![
+   592→                "i32.load",
+   593→                "i32.store",
+   594→                "i64.load",
+   595→                "i64.store",
+   596→                "i32.load8_s",
+   597→                "i32.store8",
+   598→            ],
+   599→        },
+   600→        InstCategoryDesc {
+   601→            name: "fp_arithmetic",
+   602→            insts: vec![
+   603→                "f32.add", "f32.sub", "f64.add", "f64.sub", "f32.mul", "f64.mul",
+   604→            ],
+   605→        },
+   606→        InstCategoryDesc {
+   607→            name: "system",
+   608→            insts: vec![
+   609→                "call",
+   610→                "call_indirect",
+   611→                "drop",
+   612→                "nop",
+   613→                "unreachable",
+   614→                "select",
+   615→            ],
+   616→        },
+   617→    ];
+   618→
+   619→    TargetDesc {
+   620→        name: "wasm32",
+   621→        triple: "wasm32-unknown-unknown",
+   622→        elf_machine: 0,
+   623→        base_addr: 0,
+   624→        pointer_width: 4,
+   625→        endianness: Endianness::Little,
+   626→        output_format: OutputFormat::WasmBinary,
+   627→        registers,
+   628→        calling_convention,
+   629→        instruction_categories,
+   630→    }
+   631→}
+   632→
+   633→// ===========================================================================
+   634→// LoongArch64 (LP64)
+   635→// ===========================================================================
+   636→
+   637→fn loongarch64_target_desc() -> TargetDesc {
+   638→    let registers = vec![
+   639→        // r0: hardwired zero
+   640→        RegDesc::gpr("r0", 0).hardwired_zero(),
+   641→        // r1: return address (link register)
+   642→        RegDesc::gpr("r1", 1).link_register(),
+   643→        // r2: thread pointer
+   644→        RegDesc::gpr("r2", 2).not_allocatable(),
+   645→        // r3: stack pointer
+   646→        RegDesc::gpr("r3", 3).stack_pointer(),
+   647→        // r4-r11: arguments a0-a7 (caller-saved)
+   648→        RegDesc::gpr("r4", 4).arg(0).return_reg(),
+   649→        RegDesc::gpr("r5", 5).arg(1).return_reg(),
+   650→        RegDesc::gpr("r6", 6).arg(2),
+   651→        RegDesc::gpr("r7", 7).arg(3),
+   652→        RegDesc::gpr("r8", 8).arg(4),
+   653→        RegDesc::gpr("r9", 9).arg(5),
+   654→        RegDesc::gpr("r10", 10).arg(6),
+   655→        RegDesc::gpr("r11", 11).arg(7),
+   656→        // r12-r20: temporaries t0-t8 (caller-saved)
+   657→        RegDesc::gpr("r12", 12),
+   658→        RegDesc::gpr("r13", 13),
+   659→        RegDesc::gpr("r14", 14),
+   660→        RegDesc::gpr("r15", 15),
+   661→        RegDesc::gpr("r16", 16),
+   662→        RegDesc::gpr("r17", 17),
+   663→        RegDesc::gpr("r18", 18),
+   664→        RegDesc::gpr("r19", 19),
+   665→        RegDesc::gpr("r20", 20),
+   666→        // r21: temp / PIC register (caller-saved)
+   667→        RegDesc::gpr("r21", 21),
+   668→        // r22: frame pointer (callee-saved)
+   669→        RegDesc::gpr("r22", 22).frame_pointer().callee_saved(),
+   670→        // r23-r31: saved s0-s8 (callee-saved)
+   671→        RegDesc::gpr("r23", 23).callee_saved(),
+   672→        RegDesc::gpr("r24", 24).callee_saved(),
+   673→        RegDesc::gpr("r25", 25).callee_saved(),
+   674→        RegDesc::gpr("r26", 26).callee_saved(),
+   675→        RegDesc::gpr("r27", 27).callee_saved(),
+   676→        RegDesc::gpr("r28", 28).callee_saved(),
+   677→        RegDesc::gpr("r29", 29).callee_saved(),
+   678→        RegDesc::gpr("r30", 30).callee_saved(),
+   679→        RegDesc::gpr("r31", 31).callee_saved(),
+   680→        // f0-f7: arguments fa0-fa7 (caller-saved)
+   681→        RegDesc::fpr("f0", 0).arg(0).return_reg(),
+   682→        RegDesc::fpr("f1", 1).arg(1).return_reg(),
+   683→        RegDesc::fpr("f2", 2).arg(2),
+   684→        RegDesc::fpr("f3", 3).arg(3),
+   685→        RegDesc::fpr("f4", 4).arg(4),
+   686→        RegDesc::fpr("f5", 5).arg(5),
+   687→        RegDesc::fpr("f6", 6).arg(6),
+   688→        RegDesc::fpr("f7", 7).arg(7),
+   689→        // f8-f23: temporaries ft0-ft15 (caller-saved)
+   690→        RegDesc::fpr("f8", 8),
+   691→        RegDesc::fpr("f9", 9),
+   692→        RegDesc::fpr("f10", 10),
+   693→        RegDesc::fpr("f11", 11),
+   694→        RegDesc::fpr("f12", 12),
+   695→        RegDesc::fpr("f13", 13),
+   696→        RegDesc::fpr("f14", 14),
+   697→        RegDesc::fpr("f15", 15),
+   698→        RegDesc::fpr("f16", 16),
+   699→        RegDesc::fpr("f17", 17),
+   700→        RegDesc::fpr("f18", 18),
+   701→        RegDesc::fpr("f19", 19),
+   702→        RegDesc::fpr("f20", 20),
+   703→        RegDesc::fpr("f21", 21),
+   704→        RegDesc::fpr("f22", 22),
+   705→        RegDesc::fpr("f23", 23),
+   706→        // f24-f31: saved fs0-fs7 (callee-saved)
+   707→        RegDesc::fpr("f24", 24).callee_saved(),
+   708→        RegDesc::fpr("f25", 25).callee_saved(),
+   709→        RegDesc::fpr("f26", 26).callee_saved(),
+   710→        RegDesc::fpr("f27", 27).callee_saved(),
+   711→        RegDesc::fpr("f28", 28).callee_saved(),
+   712→        RegDesc::fpr("f29", 29).callee_saved(),
+   713→        RegDesc::fpr("f30", 30).callee_saved(),
+   714→        RegDesc::fpr("f31", 31).callee_saved(),
+   715→    ];
+   716→
+   717→    let calling_convention = CallingConventionDesc {
+   718→        name: "lp64",
+   719→        int_arg_regs: vec![4, 5, 6, 7, 8, 9, 10, 11],
+   720→        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+   721→        int_return_regs: vec![4, 5],
+   722→        fp_return_regs: vec![0, 1],
+   723→        callee_saved_gprs: vec![22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+   724→        callee_saved_fps: vec![24, 25, 26, 27, 28, 29, 30, 31],
+   725→        stack_alignment: 16,
+   726→        has_link_register: true,
+   727→        has_branch_delay_slots: false,
+   728→        has_toc_pointer: false,
+   729→    };
+   730→
+   731→    let instruction_categories = vec![
+   732→        InstCategoryDesc {
+   733→            name: "arithmetic",
+   734→            insts: vec![
+   735→                "ADD.W", "SUB.W", "MUL.W", "DIV.W", "AND", "OR", "XOR", "SLL.W", "SRL.W", "SRA.W",
+   736→            ],
+   737→        },
+   738→        InstCategoryDesc {
+   739→            name: "branch",
+   740→            insts: vec![
+   741→                "BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "B", "BL", "JIRL",
+   742→            ],
+   743→        },
+   744→        InstCategoryDesc {
+   745→            name: "load_store",
+   746→            insts: vec![
+   747→                "LD.W", "ST.W", "LD.D", "ST.D", "LD.BU", "ST.B", "LD.HU", "ST.H",
+   748→            ],
+   749→        },
+   750→        InstCategoryDesc {
+   751→            name: "fp_arithmetic",
+   752→            insts: vec![
+   753→                "FADD.D", "FSUB.D", "FMUL.D", "FDIV.D", "FMOV.D", "FCMP.D", "FCVT",
+   754→            ],
+   755→        },
+   756→        InstCategoryDesc {
+   757→            name: "system",
+   758→            insts: vec!["SYSCALL", "DBAR", "IBAR", "CSRRD", "CSRWR", "CSRXCHG"],
+   759→        },
+   760→    ];
+   761→
+   762→    TargetDesc {
+   763→        name: "loongarch64",
+   764→        triple: "loongarch64-unknown-linux-gnu",
+   765→        elf_machine: 258,
+   766→        base_addr: 0x120000000,
+   767→        pointer_width: 8,
+   768→        endianness: Endianness::Little,
+   769→        output_format: OutputFormat::Elf64,
+   770→        registers,
+   771→        calling_convention,
+   772→        instruction_categories,
+   773→    }
+   774→}
+   775→
+   776→// ===========================================================================
+   777→// x86_64 (SystemV)
+   778→// ===========================================================================
+   779→
+   780→fn x86_64_target_desc() -> TargetDesc {
+   781→    let registers = vec![
+   782→        // RAX: return value (caller-saved)
+   783→        RegDesc::gpr("RAX", 0).return_reg(),
+   784→        // RCX: arg4 (caller-saved)
+   785→        RegDesc::gpr("RCX", 1).arg(3),
+   786→        // RDX: arg3 (caller-saved)
+   787→        RegDesc::gpr("RDX", 2).arg(2),
+   788→        // RBX: callee-saved
+   789→        RegDesc::gpr("RBX", 3).callee_saved(),
+   790→        // RSP: stack pointer
+   791→        RegDesc::gpr("RSP", 4).stack_pointer(),
+   792→        // RBP: frame pointer (callee-saved)
+   793→        RegDesc::gpr("RBP", 5).frame_pointer().callee_saved(),
+   794→        // RSI: arg2 (caller-saved)
+   795→        RegDesc::gpr("RSI", 6).arg(1),
+   796→        // RDI: arg1 (caller-saved)
+   797→        RegDesc::gpr("RDI", 7).arg(0),
+   798→        // R8: arg5 (caller-saved)
+   799→        RegDesc::gpr("R8", 8).arg(4),
+   800→        // R9: arg6 (caller-saved)
+   801→        RegDesc::gpr("R9", 9).arg(5),
+   802→        // R10-R11: caller-saved temporaries
+   803→        RegDesc::gpr("R10", 10),
+   804→        RegDesc::gpr("R11", 11),
+   805→        // R12-R15: callee-saved
+   806→        RegDesc::gpr("R12", 12).callee_saved(),
+   807→        RegDesc::gpr("R13", 13).callee_saved(),
+   808→        RegDesc::gpr("R14", 14).callee_saved(),
+   809→        RegDesc::gpr("R15", 15).callee_saved(),
+   810→        // XMM0-XMM7: FP arguments/return (caller-saved)
+   811→        RegDesc::fpr("XMM0", 0).arg(0).return_reg(),
+   812→        RegDesc::fpr("XMM1", 1).arg(1).return_reg(),
+   813→        RegDesc::fpr("XMM2", 2).arg(2),
+   814→        RegDesc::fpr("XMM3", 3).arg(3),
+   815→        RegDesc::fpr("XMM4", 4).arg(4),
+   816→        RegDesc::fpr("XMM5", 5).arg(5),
+   817→        RegDesc::fpr("XMM6", 6).arg(6),
+   818→        RegDesc::fpr("XMM7", 7).arg(7),
+   819→        // XMM8-XMM15: caller-saved temporaries
+   820→        RegDesc::fpr("XMM8", 8),
+   821→        RegDesc::fpr("XMM9", 9),
+   822→        RegDesc::fpr("XMM10", 10),
+   823→        RegDesc::fpr("XMM11", 11),
+   824→        RegDesc::fpr("XMM12", 12),
+   825→        RegDesc::fpr("XMM13", 13),
+   826→        RegDesc::fpr("XMM14", 14),
+   827→        RegDesc::fpr("XMM15", 15),
+   828→    ];
+   829→
+   830→    let calling_convention = CallingConventionDesc {
+   831→        name: "systemv",
+   832→        int_arg_regs: vec![7, 6, 2, 1, 8, 9], // RDI, RSI, RDX, RCX, R8, R9
+   833→        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+   834→        int_return_regs: vec![0],                      // RAX
+   835→        fp_return_regs: vec![0, 1],                    // XMM0, XMM1
+   836→        callee_saved_gprs: vec![3, 5, 12, 13, 14, 15], // RBX, RBP, R12-R15
+   837→        callee_saved_fps: vec![],
+   838→        stack_alignment: 16,
+   839→        has_link_register: false,
+   840→        has_branch_delay_slots: false,
+   841→        has_toc_pointer: false,
+   842→    };
+   843→
+   844→    let instruction_categories = vec![
+   845→        InstCategoryDesc {
+   846→            name: "arithmetic",
+   847→            insts: vec![
+   848→                "ADD", "SUB", "IMUL", "IDIV", "AND", "OR", "XOR", "SHL", "SHR", "SAR", "NEG", "NOT",
+   849→            ],
+   850→        },
+   851→        InstCategoryDesc {
+   852→            name: "branch",
+   853→            insts: vec![
+   854→                "JMP", "JE", "JNE", "JL", "JG", "JLE", "JGE", "CALL", "RET", "LOOP",
+   855→            ],
+   856→        },
+   857→        InstCategoryDesc {
+   858→            name: "load_store",
+   859→            insts: vec!["MOV", "LEA", "PUSH", "POP", "MOVZX", "MOVSX"],
+   860→        },
+   861→        InstCategoryDesc {
+   862→            name: "fp_arithmetic",
+   863→            insts: vec![
+   864→                "ADDSD", "SUBSD", "MULSD", "DIVSD", "CVTSI2SD", "CVTSD2SI", "UCOMISD",
+   865→            ],
+   866→        },
+   867→        InstCategoryDesc {
+   868→            name: "system",
+   869→            insts: vec![
+   870→                "SYSCALL", "INT", "CPUID", "LFENCE", "MFENCE", "SFENCE", "NOP",
+   871→            ],
+   872→        },
+   873→    ];
+   874→
+   875→    TargetDesc {
+   876→        name: "x86_64",
+   877→        triple: "x86_64-unknown-linux-gnu",
+   878→        elf_machine: 62,
+   879→        base_addr: 0x400000,
+   880→        pointer_width: 8,
+   881→        endianness: Endianness::Little,
+   882→        output_format: OutputFormat::Elf64,
+   883→        registers,
+   884→        calling_convention,
+   885→        instruction_categories,
+   886→    }
+   887→}
+   888→
+   889→// ===========================================================================
+   890→// ARM32 (AAPCS)
+   891→// ===========================================================================
+   892→
+   893→fn arm32_target_desc() -> TargetDesc {
+   894→    let registers = vec![
+   895→        // R0-R3: argument/return registers (caller-saved)
+   896→        RegDesc::gpr("R0", 0).arg(0).return_reg(),
+   897→        RegDesc::gpr("R1", 1).arg(1).return_reg(),
+   898→        RegDesc::gpr("R2", 2).arg(2),
+   899→        RegDesc::gpr("R3", 3).arg(3),
+   900→        // R4-R11: callee-saved
+   901→        RegDesc::gpr("R4", 4).callee_saved(),
+   902→        RegDesc::gpr("R5", 5).callee_saved(),
+   903→        RegDesc::gpr("R6", 6).callee_saved(),
+   904→        RegDesc::gpr("R7", 7).callee_saved(),
+   905→        RegDesc::gpr("R8", 8).callee_saved(),
+   906→        RegDesc::gpr("R9", 9).callee_saved(),
+   907→        RegDesc::gpr("R10", 10).callee_saved(),
+   908→        // R11: frame pointer (callee-saved)
+   909→        RegDesc::gpr("R11", 11).frame_pointer().callee_saved(),
+   910→        // R12: intra-procedure scratch (IP, caller-saved)
+   911→        RegDesc::gpr("R12", 12),
+   912→        // R13: stack pointer
+   913→        RegDesc::gpr("R13", 13).stack_pointer(),
+   914→        // R14: link register
+   915→        RegDesc::gpr("R14", 14).link_register(),
+   916→        // R15: program counter
+   917→        RegDesc::gpr("R15", 15).not_allocatable(),
+   918→        // D0-D7: FP argument/return (VFP, caller-saved)
+   919→        RegDesc::fpr("D0", 0).arg(0).return_reg(),
+   920→        RegDesc::fpr("D1", 1).arg(1).return_reg(),
+   921→        RegDesc::fpr("D2", 2).arg(2).return_reg(),
+   922→        RegDesc::fpr("D3", 3).arg(3).return_reg(),
+   923→        RegDesc::fpr("D4", 4).arg(4),
+   924→        RegDesc::fpr("D5", 5).arg(5),
+   925→        RegDesc::fpr("D6", 6).arg(6),
+   926→        RegDesc::fpr("D7", 7).arg(7),
+   927→        // D8-D15: callee-saved
+   928→        RegDesc::fpr("D8", 8).callee_saved(),
+   929→        RegDesc::fpr("D9", 9).callee_saved(),
+   930→        RegDesc::fpr("D10", 10).callee_saved(),
+   931→        RegDesc::fpr("D11", 11).callee_saved(),
+   932→        RegDesc::fpr("D12", 12).callee_saved(),
+   933→        RegDesc::fpr("D13", 13).callee_saved(),
+   934→        RegDesc::fpr("D14", 14).callee_saved(),
+   935→        RegDesc::fpr("D15", 15).callee_saved(),
+   936→        // D16-D31: caller-saved (VFPv3 extension)
+   937→        RegDesc::fpr("D16", 16),
+   938→        RegDesc::fpr("D17", 17),
+   939→        RegDesc::fpr("D18", 18),
+   940→        RegDesc::fpr("D19", 19),
+   941→        RegDesc::fpr("D20", 20),
+   942→        RegDesc::fpr("D21", 21),
+   943→        RegDesc::fpr("D22", 22),
+   944→        RegDesc::fpr("D23", 23),
+   945→        RegDesc::fpr("D24", 24),
+   946→        RegDesc::fpr("D25", 25),
+   947→        RegDesc::fpr("D26", 26),
+   948→        RegDesc::fpr("D27", 27),
+   949→        RegDesc::fpr("D28", 28),
+   950→        RegDesc::fpr("D29", 29),
+   951→        RegDesc::fpr("D30", 30),
+   952→        RegDesc::fpr("D31", 31),
+   953→    ];
+   954→
+   955→    let calling_convention = CallingConventionDesc {
+   956→        name: "aapcs",
+   957→        int_arg_regs: vec![0, 1, 2, 3],
+   958→        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+   959→        int_return_regs: vec![0, 1],
+   960→        fp_return_regs: vec![0, 1, 2, 3],
+   961→        callee_saved_gprs: vec![4, 5, 6, 7, 8, 9, 10, 11],
+   962→        callee_saved_fps: vec![8, 9, 10, 11, 12, 13, 14, 15],
+   963→        stack_alignment: 8,
+   964→        has_link_register: true,
+   965→        has_branch_delay_slots: false,
+   966→        has_toc_pointer: false,
+   967→    };
+   968→
+   969→    let instruction_categories = vec![
+   970→        InstCategoryDesc {
+   971→            name: "arithmetic",
+   972→            insts: vec![
+   973→                "ADD", "SUB", "MUL", "MLA", "AND", "ORR", "EOR", "LSL", "LSR", "ASR",
+   974→            ],
+   975→        },
+   976→        InstCategoryDesc {
+   977→            name: "branch",
+   978→            insts: vec!["B", "BL", "BX", "BLX", "B.cond", "CBZ", "CBNZ"],
+   979→        },
+   980→        InstCategoryDesc {
+   981→            name: "load_store",
+   982→            insts: vec![
+   983→                "LDR", "STR", "LDM", "STM", "PUSH", "POP", "LDRB", "STRB", "LDRD", "STRD",
+   984→            ],
+   985→        },
+   986→        InstCategoryDesc {
+   987→            name: "fp_arithmetic",
+   988→            insts: vec![
+   989→                "VADD.F64", "VSUB.F64", "VMUL.F64", "VDIV.F64", "VMOV", "VCMP", "VCVT",
+   990→            ],
+   991→        },
+   992→        InstCategoryDesc {
+   993→            name: "system",
+   994→            insts: vec!["SVC", "MRS", "MSR", "DMB", "DSB", "ISB", "NOP"],
+   995→        },
+   996→    ];
+   997→
+   998→    TargetDesc {
+   999→        name: "arm32",
+  1000→        triple: "arm-unknown-linux-gnueabihf",
+  1001→        elf_machine: 40,
+  1002→        base_addr: 0x10000,
+  1003→        pointer_width: 4,
+  1004→        endianness: Endianness::Little,
+  1005→        output_format: OutputFormat::Elf32,
+  1006→        registers,
+  1007→        calling_convention,
+  1008→        instruction_categories,
+  1009→    }
+  1010→}
+  1011→
+  1012→// ===========================================================================
+  1013→// MIPS64 (N64)
+  1014→// ===========================================================================
+  1015→
+  1016→fn mips64_target_desc() -> TargetDesc {
+  1017→    let registers = vec![
+  1018→        // $0: hardwired zero
+  1019→        RegDesc::gpr("$0", 0).hardwired_zero(),
+  1020→        // $1: assembler temporary (at)
+  1021→        RegDesc::gpr("$1", 1).not_allocatable(),
+  1022→        // $2-$3: return values v0-v1 (caller-saved)
+  1023→        RegDesc::gpr("$2", 2).return_reg(),
+  1024→        RegDesc::gpr("$3", 3).return_reg(),
+  1025→        // $4-$7: arguments a0-a3 (caller-saved)
+  1026→        RegDesc::gpr("$4", 4).arg(0),
+  1027→        RegDesc::gpr("$5", 5).arg(1),
+  1028→        RegDesc::gpr("$6", 6).arg(2),
+  1029→        RegDesc::gpr("$7", 7).arg(3),
+  1030→        // $8-$15: temporaries t0-t7 (caller-saved)
+  1031→        RegDesc::gpr("$8", 8),
+  1032→        RegDesc::gpr("$9", 9),
+  1033→        RegDesc::gpr("$10", 10),
+  1034→        RegDesc::gpr("$11", 11),
+  1035→        RegDesc::gpr("$12", 12),
+  1036→        RegDesc::gpr("$13", 13),
+  1037→        RegDesc::gpr("$14", 14),
+  1038→        RegDesc::gpr("$15", 15),
+  1039→        // $16-$23: saved s0-s7 (callee-saved)
+  1040→        RegDesc::gpr("$16", 16).callee_saved(),
+  1041→        RegDesc::gpr("$17", 17).callee_saved(),
+  1042→        RegDesc::gpr("$18", 18).callee_saved(),
+  1043→        RegDesc::gpr("$19", 19).callee_saved(),
+  1044→        RegDesc::gpr("$20", 20).callee_saved(),
+  1045→        RegDesc::gpr("$21", 21).callee_saved(),
+  1046→        RegDesc::gpr("$22", 22).callee_saved(),
+  1047→        RegDesc::gpr("$23", 23).callee_saved(),
+  1048→        // $24-$25: temporaries t8-t9 (caller-saved)
+  1049→        RegDesc::gpr("$24", 24),
+  1050→        RegDesc::gpr("$25", 25),
+  1051→        // $26-$27: kernel registers k0-k1 (not allocatable)
+  1052→        RegDesc::gpr("$26", 26).not_allocatable(),
+  1053→        RegDesc::gpr("$27", 27).not_allocatable(),
+  1054→        // $28: global pointer (not allocatable)
+  1055→        RegDesc::gpr("$28", 28).not_allocatable(),
+  1056→        // $29: stack pointer
+  1057→        RegDesc::gpr("$29", 29).stack_pointer(),
+  1058→        // $30: frame pointer (callee-saved)
+  1059→        RegDesc::gpr("$30", 30).frame_pointer().callee_saved(),
+  1060→        // $31: return address (link register)
+  1061→        RegDesc::gpr("$31", 31).link_register(),
+  1062→        // $f0-$f1: FP return values (caller-saved)
+  1063→        RegDesc::fpr("$f0", 0).return_reg(),
+  1064→        RegDesc::fpr("$f1", 1).return_reg(),
+  1065→        // $f2-$f11: temporaries (caller-saved)
+  1066→        RegDesc::fpr("$f2", 2),
+  1067→        RegDesc::fpr("$f3", 3),
+  1068→        RegDesc::fpr("$f4", 4),
+  1069→        RegDesc::fpr("$f5", 5),
+  1070→        RegDesc::fpr("$f6", 6),
+  1071→        RegDesc::fpr("$f7", 7),
+  1072→        RegDesc::fpr("$f8", 8),
+  1073→        RegDesc::fpr("$f9", 9),
+  1074→        RegDesc::fpr("$f10", 10),
+  1075→        RegDesc::fpr("$f11", 11),
+  1076→        // $f12-$f19: FP arguments (caller-saved)
+  1077→        RegDesc::fpr("$f12", 12).arg(0),
+  1078→        RegDesc::fpr("$f13", 13).arg(1),
+  1079→        RegDesc::fpr("$f14", 14).arg(2),
+  1080→        RegDesc::fpr("$f15", 15).arg(3),
+  1081→        RegDesc::fpr("$f16", 16).arg(4),
+  1082→        RegDesc::fpr("$f17", 17).arg(5),
+  1083→        RegDesc::fpr("$f18", 18).arg(6),
+  1084→        RegDesc::fpr("$f19", 19).arg(7),
+  1085→        // $f20-$f31: callee-saved
+  1086→        RegDesc::fpr("$f20", 20).callee_saved(),
+  1087→        RegDesc::fpr("$f21", 21).callee_saved(),
+  1088→        RegDesc::fpr("$f22", 22).callee_saved(),
+  1089→        RegDesc::fpr("$f23", 23).callee_saved(),
+  1090→        RegDesc::fpr("$f24", 24).callee_saved(),
+  1091→        RegDesc::fpr("$f25", 25).callee_saved(),
+  1092→        RegDesc::fpr("$f26", 26).callee_saved(),
+  1093→        RegDesc::fpr("$f27", 27).callee_saved(),
+  1094→        RegDesc::fpr("$f28", 28).callee_saved(),
+  1095→        RegDesc::fpr("$f29", 29).callee_saved(),
+  1096→        RegDesc::fpr("$f30", 30).callee_saved(),
+  1097→        RegDesc::fpr("$f31", 31).callee_saved(),
+  1098→        // Special: HI, LO multiply/divide registers
+  1099→        RegDesc::special_reg("HI", 0),
+  1100→        RegDesc::special_reg("LO", 1),
+  1101→    ];
+  1102→
+  1103→    let calling_convention = CallingConventionDesc {
+  1104→        name: "n64",
+  1105→        int_arg_regs: vec![4, 5, 6, 7],
+  1106→        fp_arg_regs: vec![12, 13, 14, 15, 16, 17, 18, 19],
+  1107→        int_return_regs: vec![2, 3],
+  1108→        fp_return_regs: vec![0, 1],
+  1109→        callee_saved_gprs: vec![16, 17, 18, 19, 20, 21, 22, 23, 30],
+  1110→        callee_saved_fps: vec![20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+  1111→        stack_alignment: 16,
+  1112→        has_link_register: true,
+  1113→        has_branch_delay_slots: true,
+  1114→        has_toc_pointer: false,
+  1115→    };
+  1116→
+  1117→    let instruction_categories = vec![
+  1118→        InstCategoryDesc {
+  1119→            name: "arithmetic",
+  1120→            insts: vec![
+  1121→                "ADD", "ADDU", "SUB", "SUBU", "MULT", "DIV", "AND", "OR", "XOR", "SLL", "SRL",
+  1122→                "SRA",
+  1123→            ],
+  1124→        },
+  1125→        InstCategoryDesc {
+  1126→            name: "branch",
+  1127→            insts: vec![
+  1128→                "BEQ", "BNE", "BGTZ", "BLEZ", "BLTZ", "BGEZ", "J", "JAL", "JR", "JALR",
+  1129→            ],
+  1130→        },
+  1131→        InstCategoryDesc {
+  1132→            name: "load_store",
+  1133→            insts: vec!["LW", "LD", "SW", "SD", "LB", "SB", "LH", "SH", "LBU", "LHU"],
+  1134→        },
+  1135→        InstCategoryDesc {
+  1136→            name: "fp_arithmetic",
+  1137→            insts: vec![
+  1138→                "ADD.D", "SUB.D", "MUL.D", "DIV.D", "MOV.D", "C.LE.D", "CVT.D.W",
+  1139→            ],
+  1140→        },
+  1141→        InstCategoryDesc {
+  1142→            name: "system",
+  1143→            insts: vec!["SYSCALL", "BREAK", "ERET", "MFC0", "MTC0", "SYNC"],
+  1144→        },
+  1145→    ];
+  1146→
+  1147→    TargetDesc {
+  1148→        name: "mips64",
+  1149→        triple: "mips64-unknown-linux-gnuabi64",
+  1150→        elf_machine: 8,
+  1151→        base_addr: 0x120000000,
+  1152→        pointer_width: 8,
+  1153→        endianness: Endianness::Big,
+  1154→        output_format: OutputFormat::Elf64,
+  1155→        registers,
+  1156→        calling_convention,
+  1157→        instruction_categories,
+  1158→    }
+  1159→}
+  1160→
+  1161→// ===========================================================================
+  1162→// PowerPC64 (ELFv2)
+  1163→// ===========================================================================
+  1164→
+  1165→fn ppc64_target_desc() -> TargetDesc {
+  1166→    let registers = vec![
+  1167→        // R0: volatile / scratch (allocatable but has special meaning in some insns)
+  1168→        RegDesc::gpr("R0", 0),
+  1169→        // R1: stack pointer
+  1170→        RegDesc::gpr("R1", 1).stack_pointer(),
+  1171→        // R2: TOC pointer
+  1172→        RegDesc::gpr("R2", 2).toc_pointer(),
+  1173→        // R3-R10: arguments/return (caller-saved)
+  1174→        RegDesc::gpr("R3", 3).arg(0).return_reg(),
+  1175→        RegDesc::gpr("R4", 4).arg(1),
+  1176→        RegDesc::gpr("R5", 5).arg(2),
+  1177→        RegDesc::gpr("R6", 6).arg(3),
+  1178→        RegDesc::gpr("R7", 7).arg(4),
+  1179→        RegDesc::gpr("R8", 8).arg(5),
+  1180→        RegDesc::gpr("R9", 9).arg(6),
+  1181→        RegDesc::gpr("R10", 10).arg(7),
+  1182→        // R11-R12: volatile (caller-saved)
+  1183→        RegDesc::gpr("R11", 11),
+  1184→        RegDesc::gpr("R12", 12),
+  1185→        // R13: thread pointer (not allocatable)
+  1186→        RegDesc::gpr("R13", 13).not_allocatable(),
+  1187→        // R14-R31: callee-saved
+  1188→        RegDesc::gpr("R14", 14).callee_saved(),
+  1189→        RegDesc::gpr("R15", 15).callee_saved(),
+  1190→        RegDesc::gpr("R16", 16).callee_saved(),
+  1191→        RegDesc::gpr("R17", 17).callee_saved(),
+  1192→        RegDesc::gpr("R18", 18).callee_saved(),
+  1193→        RegDesc::gpr("R19", 19).callee_saved(),
+  1194→        RegDesc::gpr("R20", 20).callee_saved(),
+  1195→        RegDesc::gpr("R21", 21).callee_saved(),
+  1196→        RegDesc::gpr("R22", 22).callee_saved(),
+  1197→        RegDesc::gpr("R23", 23).callee_saved(),
+  1198→        RegDesc::gpr("R24", 24).callee_saved(),
+  1199→        RegDesc::gpr("R25", 25).callee_saved(),
+  1200→        RegDesc::gpr("R26", 26).callee_saved(),
+  1201→        RegDesc::gpr("R27", 27).callee_saved(),
+  1202→        RegDesc::gpr("R28", 28).callee_saved(),
+  1203→        RegDesc::gpr("R29", 29).callee_saved(),
+  1204→        RegDesc::gpr("R30", 30).callee_saved(),
+  1205→        // R31: callee-saved, traditionally used as frame pointer
+  1206→        RegDesc::gpr("R31", 31).frame_pointer().callee_saved(),
+  1207→        // F0: FP return (caller-saved)
+  1208→        RegDesc::fpr("F0", 0).return_reg(),
+  1209→        // F1-F13: FP arguments/return (caller-saved)
+  1210→        RegDesc::fpr("F1", 1).arg(0).return_reg(),
+  1211→        RegDesc::fpr("F2", 2).arg(1),
+  1212→        RegDesc::fpr("F3", 3).arg(2),
+  1213→        RegDesc::fpr("F4", 4).arg(3),
+  1214→        RegDesc::fpr("F5", 5).arg(4),
+  1215→        RegDesc::fpr("F6", 6).arg(5),
+  1216→        RegDesc::fpr("F7", 7).arg(6),
+  1217→        RegDesc::fpr("F8", 8).arg(7),
+  1218→        RegDesc::fpr("F9", 9).arg(8),
+  1219→        RegDesc::fpr("F10", 10).arg(9),
+  1220→        RegDesc::fpr("F11", 11).arg(10),
+  1221→        RegDesc::fpr("F12", 12).arg(11),
+  1222→        RegDesc::fpr("F13", 13).arg(12),
+  1223→        // F14-F31: callee-saved
+  1224→        RegDesc::fpr("F14", 14).callee_saved(),
+  1225→        RegDesc::fpr("F15", 15).callee_saved(),
+  1226→        RegDesc::fpr("F16", 16).callee_saved(),
+  1227→        RegDesc::fpr("F17", 17).callee_saved(),
+  1228→        RegDesc::fpr("F18", 18).callee_saved(),
+  1229→        RegDesc::fpr("F19", 19).callee_saved(),
+  1230→        RegDesc::fpr("F20", 20).callee_saved(),
+  1231→        RegDesc::fpr("F21", 21).callee_saved(),
+  1232→        RegDesc::fpr("F22", 22).callee_saved(),
+  1233→        RegDesc::fpr("F23", 23).callee_saved(),
+  1234→        RegDesc::fpr("F24", 24).callee_saved(),
+  1235→        RegDesc::fpr("F25", 25).callee_saved(),
+  1236→        RegDesc::fpr("F26", 26).callee_saved(),
+  1237→        RegDesc::fpr("F27", 27).callee_saved(),
+  1238→        RegDesc::fpr("F28", 28).callee_saved(),
+  1239→        RegDesc::fpr("F29", 29).callee_saved(),
+  1240→        RegDesc::fpr("F30", 30).callee_saved(),
+  1241→        RegDesc::fpr("F31", 31).callee_saved(),
+  1242→        // VS32-VS63: VMX/Altivec vector registers (VSX upper half)
+  1243→        // VS32-VS33: volatile
+  1244→        RegDesc::fpr("VS32", 32),
+  1245→        RegDesc::fpr("VS33", 33),
+  1246→        // VS34-VS45: vector argument/return registers (V2-V13)
+  1247→        RegDesc::fpr("VS34", 34),
+  1248→        RegDesc::fpr("VS35", 35),
+  1249→        RegDesc::fpr("VS36", 36),
+  1250→        RegDesc::fpr("VS37", 37),
+  1251→        RegDesc::fpr("VS38", 38),
+  1252→        RegDesc::fpr("VS39", 39),
+  1253→        RegDesc::fpr("VS40", 40),
+  1254→        RegDesc::fpr("VS41", 41),
+  1255→        RegDesc::fpr("VS42", 42),
+  1256→        RegDesc::fpr("VS43", 43),
+  1257→        RegDesc::fpr("VS44", 44),
+  1258→        RegDesc::fpr("VS45", 45),
+  1259→        // VS46-VS51: volatile
+  1260→        RegDesc::fpr("VS46", 46),
+  1261→        RegDesc::fpr("VS47", 47),
+  1262→        RegDesc::fpr("VS48", 48),
+  1263→        RegDesc::fpr("VS49", 49),
+  1264→        RegDesc::fpr("VS50", 50),
+  1265→        RegDesc::fpr("VS51", 51),
+  1266→        // VS52-VS63: callee-saved (V20-V31)
+  1267→        RegDesc::fpr("VS52", 52).callee_saved(),
+  1268→        RegDesc::fpr("VS53", 53).callee_saved(),
+  1269→        RegDesc::fpr("VS54", 54).callee_saved(),
+  1270→        RegDesc::fpr("VS55", 55).callee_saved(),
+  1271→        RegDesc::fpr("VS56", 56).callee_saved(),
+  1272→        RegDesc::fpr("VS57", 57).callee_saved(),
+  1273→        RegDesc::fpr("VS58", 58).callee_saved(),
+  1274→        RegDesc::fpr("VS59", 59).callee_saved(),
+  1275→        RegDesc::fpr("VS60", 60).callee_saved(),
+  1276→        RegDesc::fpr("VS61", 61).callee_saved(),
+  1277→        RegDesc::fpr("VS62", 62).callee_saved(),
+  1278→        RegDesc::fpr("VS63", 63).callee_saved(),
+  1279→        // CR0-CR7: condition register fields
+  1280→        RegDesc::cond_reg("CR0", 0),
+  1281→        RegDesc::cond_reg("CR1", 1),
+  1282→        RegDesc::cond_reg("CR2", 2),
+  1283→        RegDesc::cond_reg("CR3", 3),
+  1284→        RegDesc::cond_reg("CR4", 4),
+  1285→        RegDesc::cond_reg("CR5", 5),
+  1286→        RegDesc::cond_reg("CR6", 6),
+  1287→        RegDesc::cond_reg("CR7", 7),
+  1288→        // Special: LR, CTR
+  1289→        RegDesc::special_reg("LR", 0),
+  1290→        RegDesc::special_reg("CTR", 1),
+  1291→    ];
+  1292→
+  1293→    let calling_convention = CallingConventionDesc {
+  1294→        name: "elfv2",
+  1295→        int_arg_regs: vec![3, 4, 5, 6, 7, 8, 9, 10],
+  1296→        fp_arg_regs: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  1297→        int_return_regs: vec![3],
+  1298→        fp_return_regs: vec![0, 1],
+  1299→        callee_saved_gprs: vec![
+  1300→            14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+  1301→        ],
+  1302→        callee_saved_fps: vec![
+  1303→            14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+  1304→        ],
+  1305→        stack_alignment: 16,
+  1306→        has_link_register: true,
+  1307→        has_branch_delay_slots: false,
+  1308→        has_toc_pointer: true,
+  1309→    };
+  1310→
+  1311→    let instruction_categories = vec![
+  1312→        InstCategoryDesc {
+  1313→            name: "arithmetic",
+  1314→            insts: vec![
+  1315→                "ADD", "SUBF", "MULLD", "DIVD", "AND", "OR", "XOR", "SLD", "SRD", "SRAD", "ADDI",
+  1316→            ],
+  1317→        },
+  1318→        InstCategoryDesc {
+  1319→            name: "branch",
+  1320→            insts: vec!["B", "BC", "BCLR", "BCCTR", "BL", "BCLR", "BCCTR"],
+  1321→        },
+  1322→        InstCategoryDesc {
+  1323→            name: "load_store",
+  1324→            insts: vec![
+  1325→                "LD", "STD", "LWZ", "STW", "LBZ", "STB", "LHZ", "STH", "LMW", "STMW",
+  1326→            ],
+  1327→        },
+  1328→        InstCategoryDesc {
+  1329→            name: "fp_arithmetic",
+  1330→            insts: vec![
+  1331→                "FADD", "FSUB", "FMUL", "FDIV", "FMOV", "FCMP", "FCVT", "FSQRT",
+  1332→            ],
+  1333→        },
+  1334→        InstCategoryDesc {
+  1335→            name: "system",
+  1336→            insts: vec!["SC", "RFI", "MFSPR", "MTSPR", "SYNC", "ISYNC", "NOP"],
+  1337→        },
+  1338→    ];
+  1339→
+  1340→    TargetDesc {
+  1341→        name: "ppc64",
+  1342→        triple: "powerpc64le-unknown-linux-gnu",
+  1343→        elf_machine: 21,
+  1344→        base_addr: 0x10000000,
+  1345→        pointer_width: 8,
+  1346→        endianness: Endianness::Bi,
+  1347→        output_format: OutputFormat::Elf64,
+  1348→        registers,
+  1349→        calling_convention,
+  1350→        instruction_categories,
+  1351→    }
+  1352→}
+  1353→
+  1354→// ===========================================================================
+  1355→// Tests
+  1356→// ===========================================================================
+  1357→
+  1358→#[cfg(test)]
+  1359→mod tests {
+  1360→    use super::*;
+  1361→
+  1362→    /// Verify the registry contains all 8 ISAs.
+  1363→    #[test]
+  1364→    fn test_registry_contains_all_isas() {
+  1365→        let registry = TargetDescRegistry::new();
+  1366→        let expected = [
+  1367→            "aarch64",
+  1368→            "riscv64",
+  1369→            "wasm32",
+  1370→            "loongarch64",
+  1371→            "x86_64",
+  1372→            "arm32",
+  1373→            "mips64",
+  1374→            "ppc64",
+  1375→        ];
+  1376→        for name in &expected {
+  1377→            assert!(
+  1378→                registry.get(name).is_some(),
+  1379→                "Registry missing ISA: {}",
+  1380→                name
+  1381→            );
+  1382→        }
+  1383→        let names = registry.isa_names();
+  1384→        assert_eq!(names.len(), 8, "Expected 8 ISAs, got {}", names.len());
+  1385→    }
+  1386→
+  1387→    /// Verify no register is both an argument register and callee-saved
+  1388→    /// within the same register class.
+  1389→    #[test]
+  1390→    fn test_no_arg_and_callee_saved_overlap() {
+  1391→        let registry = TargetDescRegistry::new();
+  1392→        for name in registry.isa_names() {
+  1393→            let desc = registry.get(name).unwrap();
+  1394→            for reg in &desc.registers {
+  1395→                assert!(
+  1396→                    !(reg.is_arg_reg && reg.is_callee_saved),
+  1397→                    "[{}] register {} (class={:?}) is both arg and callee-saved",
+  1398→                    name,
+  1399→                    reg.name,
+  1400→                    reg.class,
+  1401→                );
+  1402→            }
+  1403→        }
+  1404→    }
+  1405→
+  1406→    /// Verify allocatable + non-allocatable = total register count.
+  1407→    #[test]
+  1408→    fn test_allocatable_plus_non_allocatable_equals_total() {
+  1409→        let registry = TargetDescRegistry::new();
+  1410→        for name in registry.isa_names() {
+  1411→            let desc = registry.get(name).unwrap();
+  1412→            let total = desc.registers.len();
+  1413→            let allocatable = desc.registers.iter().filter(|r| r.is_allocatable).count();
+  1414→            let non_allocatable = desc.registers.iter().filter(|r| !r.is_allocatable).count();
+  1415→            assert_eq!(
+  1416→                allocatable + non_allocatable,
+  1417→                total,
+  1418→                "[{}] allocatable ({}) + non-allocatable ({}) != total ({})",
+  1419→                name,
+  1420→                allocatable,
+  1421→                non_allocatable,
+  1422→                total
+  1423→            );
+  1424→        }
+  1425→    }
+  1426→
+  1427→    /// Verify arg positions are sequential starting from 0 for each
+  1428→    /// register class within each ISA.
+  1429→    #[test]
+  1430→    fn test_arg_positions_sequential_from_zero() {
+  1431→        let registry = TargetDescRegistry::new();
+  1432→        for name in registry.isa_names() {
+  1433→            let desc = registry.get(name).unwrap();
+  1434→
+  1435→            // Check GPR arg positions
+  1436→            let mut gpr_args: Vec<usize> = desc
+  1437→                .registers
+  1438→                .iter()
+  1439→                .filter(|r| r.class == RegClass::Gpr && r.is_arg_reg)
+  1440→                .filter_map(|r| r.arg_position)
+  1441→                .collect();
+  1442→            gpr_args.sort();
+  1443→            let expected: Vec<usize> = (0..gpr_args.len()).collect();
+  1444→            assert_eq!(
+  1445→                gpr_args, expected,
+  1446→                "[{}] GPR arg positions not sequential from 0: got {:?}, expected {:?}",
+  1447→                name, gpr_args, expected
+  1448→            );
+  1449→
+  1450→            // Check SimdFp arg positions
+  1451→            let mut fp_args: Vec<usize> = desc
+  1452→                .registers
+  1453→                .iter()
+  1454→                .filter(|r| r.class == RegClass::SimdFp && r.is_arg_reg)
+  1455→                .filter_map(|r| r.arg_position)
+  1456→                .collect();
+  1457→            fp_args.sort();
+  1458→            let expected: Vec<usize> = (0..fp_args.len()).collect();
+  1459→            assert_eq!(
+  1460→                fp_args, expected,
+  1461→                "[{}] SimdFp arg positions not sequential from 0: got {:?}, expected {:?}",
+  1462→                name, fp_args, expected
+  1463→            );
+  1464→        }
+  1465→    }
+  1466→
+  1467→    /// Verify each ISA has at least the "arithmetic" and "branch"
+  1468→    /// instruction categories.
+  1469→    #[test]
+  1470→    fn test_required_instruction_categories() {
+  1471→        let registry = TargetDescRegistry::new();
+  1472→        for name in registry.isa_names() {
+  1473→            let desc = registry.get(name).unwrap();
+  1474→            let category_names: Vec<&str> =
+  1475→                desc.instruction_categories.iter().map(|c| c.name).collect();
+  1476→            assert!(
+  1477→                category_names.contains(&"arithmetic"),
+  1478→                "[{}] missing 'arithmetic' instruction category",
+  1479→                name
+  1480→            );
+  1481→            assert!(
+  1482→                category_names.contains(&"branch"),
+  1483→                "[{}] missing 'branch' instruction category",
+  1484→                name
+  1485→            );
+  1486→        }
+  1487→    }
+  1488→
+  1489→    /// Verify each ISA has at least one allocatable register (except wasm32).
+  1490→    #[test]
+  1491→    fn test_allocatable_registers_exist() {
+  1492→        let registry = TargetDescRegistry::new();
+  1493→        for name in registry.isa_names() {
+  1494→            let desc = registry.get(name).unwrap();
+  1495→            let allocatable = desc.registers.iter().filter(|r| r.is_allocatable).count();
+  1496→            if name == "wasm32" {
+  1497→                assert_eq!(
+  1498→                    allocatable, 0,
+  1499→                    "[{}] wasm32 should have no allocatable registers",
+  1500→                    name
+  1501→                );
+  1502→            } else {
+  1503→                assert!(
+  1504→                    allocatable > 0,
+  1505→                    "[{}] should have at least one allocatable register",
+  1506→                    name
+  1507→                );
+  1508→            }
+  1509→        }
+  1510→    }
+  1511→
+  1512→    /// Verify the calling convention descriptor matches the register
+  1513→    /// descriptions for each ISA.
+  1514→    #[test]
+  1515→    fn test_calling_convention_matches_registers() {
+  1516→        let registry = TargetDescRegistry::new();
+  1517→        for name in registry.isa_names() {
+  1518→            let desc = registry.get(name).unwrap();
+  1519→            let cc = &desc.calling_convention;
+  1520→
+  1521→            // Check that int arg reg indices correspond to actual arg registers
+  1522→            for &idx in &cc.int_arg_regs {
+  1523→                let reg = desc
+  1524→                    .registers
+  1525→                    .iter()
+  1526→                    .find(|r| r.class == RegClass::Gpr && r.index == idx);
+  1527→                assert!(
+  1528→                    reg.is_some(),
+  1529→                    "[{}] calling convention references GPR index {} but no such register",
+  1530→                    name,
+  1531→                    idx
+  1532→                );
+  1533→                let reg = reg.unwrap();
+  1534→                assert!(
+  1535→                    reg.is_arg_reg,
+  1536→                    "[{}] calling convention int_arg_regs includes {} ({}) but it's not marked as arg_reg",
+  1537→                    name, idx, reg.name
+  1538→                );
+  1539→            }
+  1540→
+  1541→            // Check that FP arg reg indices correspond to actual FP arg registers
+  1542→            for &idx in &cc.fp_arg_regs {
+  1543→                let reg = desc
+  1544→                    .registers
+  1545→                    .iter()
+  1546→                    .find(|r| r.class == RegClass::SimdFp && r.index == idx);
+  1547→                assert!(
+  1548→                    reg.is_some(),
+  1549→                    "[{}] calling convention references SimdFp index {} but no such register",
+  1550→                    name,
+  1551→                    idx
+  1552→                );
+  1553→                let reg = reg.unwrap();
+  1554→                assert!(
+  1555→                    reg.is_arg_reg,
+  1556→                    "[{}] calling convention fp_arg_regs includes {} ({}) but it's not marked as arg_reg",
+  1557→                    name, idx, reg.name
+  1558→                );
+  1559→            }
+  1560→
+  1561→            // Check that callee-saved GPRs are actually marked callee-saved
+  1562→            for &idx in &cc.callee_saved_gprs {
+  1563→                let reg = desc
+  1564→                    .registers
+  1565→                    .iter()
+  1566→                    .find(|r| r.class == RegClass::Gpr && r.index == idx);
+  1567→                assert!(
+  1568→                    reg.is_some(),
+  1569→                    "[{}] calling convention callee_saved_gprs references index {} but no such register",
+  1570→                    name, idx
+  1571→                );
+  1572→                let reg = reg.unwrap();
+  1573→                assert!(
+  1574→                    reg.is_callee_saved,
+  1575→                    "[{}] calling convention callee_saved_gprs includes {} ({}) but it's not marked callee-saved",
+  1576→                    name, idx, reg.name
+  1577→                );
+  1578→            }
+  1579→
+  1580→            // Check that callee-saved FPRs are actually marked callee-saved
+  1581→            for &idx in &cc.callee_saved_fps {
+  1582→                let reg = desc
+  1583→                    .registers
+  1584→                    .iter()
+  1585→                    .find(|r| r.class == RegClass::SimdFp && r.index == idx);
+  1586→                assert!(
+  1587→                    reg.is_some(),
+  1588→                    "[{}] calling convention callee_saved_fps references index {} but no such register",
+  1589→                    name, idx
+  1590→                );
+  1591→                let reg = reg.unwrap();
+  1592→                assert!(
+  1593→                    reg.is_callee_saved,
+  1594→                    "[{}] calling convention callee_saved_fps includes {} ({}) but it's not marked callee-saved",
+  1595→                    name, idx, reg.name
+  1596→                );
+  1597→            }
+  1598→        }
+  1599→    }
+  1600→
+  1601→    /// Verify unique register indices within each class for each ISA.
+  1602→    #[test]
+  1603→    fn test_unique_register_indices() {
+  1604→        let registry = TargetDescRegistry::new();
+  1605→        for name in registry.isa_names() {
+  1606→            let desc = registry.get(name).unwrap();
+  1607→
+  1608→            let mut seen_gpr: std::collections::HashSet<usize> = std::collections::HashSet::new();
+  1609→            let mut seen_fpr: std::collections::HashSet<usize> = std::collections::HashSet::new();
+  1610→            let mut seen_special: std::collections::HashSet<usize> =
+  1611→                std::collections::HashSet::new();
+  1612→            let mut seen_cond: std::collections::HashSet<usize> = std::collections::HashSet::new();
+  1613→
+  1614→            for reg in &desc.registers {
+  1615→                let set = match reg.class {
+  1616→                    RegClass::Gpr => &mut seen_gpr,
+  1617→                    RegClass::SimdFp => &mut seen_fpr,
+  1618→                    RegClass::Special => &mut seen_special,
+  1619→                    RegClass::Condition => &mut seen_cond,
+  1620→                };
+  1621→                assert!(
+  1622→                    set.insert(reg.index),
+  1623→                    "[{}] duplicate {} index {} for register {}",
+  1624→                    name,
+  1625→                    match reg.class {
+  1626→                        RegClass::Gpr => "GPR",
+  1627→                        RegClass::SimdFp => "SimdFp",
+  1628→                        RegClass::Special => "Special",
+  1629→                        RegClass::Condition => "Condition",
+  1630→                    },
+  1631→                    reg.index,
+  1632→                    reg.name
+  1633→                );
+  1634→            }
+  1635→        }
+  1636→    }
+  1637→
+  1638→    /// Verify specific ISA properties that should hold.
+  1639→    #[test]
+  1640→    fn test_isa_specific_properties() {
+  1641→        let registry = TargetDescRegistry::new();
+  1642→
+  1643→        // AArch64 should have a hardwired zero register
+  1644→        let aarch64 = registry.get("aarch64").unwrap();
+  1645→        assert!(
+  1646→            aarch64.registers.iter().any(|r| r.is_hardwired_zero),
+  1647→            "AArch64 should have a hardwired zero register"
+  1648→        );
+  1649→        assert!(
+  1650→            aarch64.registers.iter().any(|r| r.is_link_register),
+  1651→            "AArch64 should have a link register"
+  1652→        );
+  1653→
+  1654→        // RISC-V should have a hardwired zero register
+  1655→        let riscv = registry.get("riscv64").unwrap();
+  1656→        assert!(
+  1657→            riscv.registers.iter().any(|r| r.is_hardwired_zero),
+  1658→            "RISC-V should have a hardwired zero register"
+  1659→        );
+  1660→
+  1661→        // MIPS should have branch delay slots
+  1662→        let mips = registry.get("mips64").unwrap();
+  1663→        assert!(
+  1664→            mips.calling_convention.has_branch_delay_slots,
+  1665→            "MIPS64 should have branch delay slots"
+  1666→        );
+  1667→
+  1668→        // PPC should have a TOC pointer
+  1669→        let ppc = registry.get("ppc64").unwrap();
+  1670→        assert!(
+  1671→            ppc.calling_convention.has_toc_pointer,
+  1672→            "PPC64 should have a TOC pointer"
+  1673→        );
+  1674→        assert!(
+  1675→            ppc.registers.iter().any(|r| r.is_toc_pointer),
+  1676→            "PPC64 should have a register marked as TOC pointer"
+  1677→        );
+  1678→
+  1679→        // x86_64 should NOT have a link register
+  1680→        let x86 = registry.get("x86_64").unwrap();
+  1681→        assert!(
+  1682→            !x86.calling_convention.has_link_register,
+  1683→            "x86_64 should not have a link register"
+  1684→        );
+  1685→        assert!(
+  1686→            !x86.registers.iter().any(|r| r.is_link_register),
+  1687→            "x86_64 should not have any register marked as link register"
+  1688→        );
+  1689→
+  1690→        // Wasm32 should have no allocatable registers
+  1691→        let wasm = registry.get("wasm32").unwrap();
+  1692→        assert_eq!(
+  1693→            wasm.registers.len(),
+  1694→            1,
+  1695→            "Wasm32 should have exactly one pseudo-register"
+  1696→        );
+  1697→        assert_eq!(wasm.registers[0].name, "stack");
+  1698→    }
+  1699→}
+  1700→

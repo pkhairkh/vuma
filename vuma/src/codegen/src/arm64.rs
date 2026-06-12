@@ -1149,24 +1149,24 @@ impl Instruction {
     /// implemented return `Err(CodegenError::EncodingError)`.
     pub fn encode(&self) -> Result<u32> {
         match self {
-            // ---- ADD (shifted register): 1 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            // ---- ADD (shifted register): sf=1 00 01011 shift 0 Rm imm6 Rn Rd ----
             Instruction::ADD { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift } => {
                     let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+                    Ok(0x8B000000u32
                         | (hw << 22)
                         | (reg.encoding() << 16)
                         | (imm6 << 10)
                         | (rn.encoding() << 5)
                         | rd.encoding())
                 }
-                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0000_0000
+                Operand::Imm12(imm) => Ok(0x91000000u32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
             },
 
-            // ---- SUB (shifted register): 1 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            // ---- SUB (shifted register): sf=1 10 01011 shift 0 Rm imm6 Rn Rd ----
             Instruction::SUB { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift } => {
                     let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
@@ -1177,86 +1177,100 @@ impl Instruction {
                         | (rn.encoding() << 5)
                         | rd.encoding())
                 }
-                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0000_0000
-                    | (1 << 30)
+                Operand::Imm12(imm) => Ok(0xD1000000u32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
             },
 
-            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
-            Instruction::MUL { rd, rn, rm } => Ok(0b1001_1011_0000_0000_0111_1100_0000_0000
+            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR (sf=1) ----
+            Instruction::MUL { rd, rn, rm } => Ok(0x9B007C00u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SDIV ----
-            Instruction::SDIV { rd, rn, rm } => Ok(0b100_1101_1000_0000_0000_1100_0000_0000
+            // ---- SDIV (sf=1) ----
+            Instruction::SDIV { rd, rn, rm } => Ok(0x9AC00C00u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- UDIV ----
-            Instruction::UDIV { rd, rn, rm } => Ok(0b100_1101_1000_0000_0000_1000_0000_0000
+            // ---- UDIV (sf=1) ----
+            Instruction::UDIV { rd, rn, rm } => Ok(0x9AC00800u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- AND (shifted register) ----
-            Instruction::AND { rd, rn, rm } => Ok(0b100_0101_0000_0000_0000_0000_0000_0000
+            // ---- AND (shifted register, sf=1) ----
+            Instruction::AND { rd, rn, rm } => Ok(0x8A000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- ORR (shifted register) ----
-            Instruction::ORR { rd, rn, rm } => Ok(0b101_0101_0000_0000_0000_0000_0000_0000
+            // ---- ORR (shifted register, sf=1) ----
+            Instruction::ORR { rd, rn, rm } => Ok(0xAA000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- EOR (shifted register) ----
-            Instruction::EOR { rd, rn, rm } => Ok(0b110_0101_0000_0000_0000_0000_0000_0000
+            // ---- EOR (shifted register, sf=1) ----
+            Instruction::EOR { rd, rn, rm } => Ok(0xCA000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- LSL / LSR / ASR (shifted register or immediate) ----
+            // ---- LSL / LSR / ASR (shifted register or immediate, sf=1) ----
             Instruction::LSL { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
                     | (ShiftKind::LSL.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
-                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
-                    | ((*imm as u32) << 16)
-                    | (rn.encoding() << 5)
-                    | rd.encoding()),
+                // LSL Rd, Rn, #shift = UBFM Rd, Rn, #(64-shift), #(63-shift)
+                Operand::Imm12(imm) => {
+                    let shift_val = *imm as u32;
+                    let immr = (64 - shift_val) & 63;
+                    let imms = 63 - shift_val;
+                    Ok(0xD3400000u32  // UBFM with sf=1, N=1
+                        | (immr << 16)
+                        | (imms << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
             },
 
             Instruction::LSR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
                     | (ShiftKind::LSR.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
-                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
-                    | ((*imm as u32) << 16)
-                    | (63u32 << 10)
-                    | (rn.encoding() << 5)
-                    | rd.encoding()),
+                // LSR Rd, Rn, #shift = UBFM Rd, Rn, #shift, #63
+                Operand::Imm12(imm) => {
+                    let immr = *imm as u32;
+                    Ok(0xD3400000u32  // UBFM with sf=1, N=1
+                        | (immr << 16)
+                        | (63u32 << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
             },
 
             Instruction::ASR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0b100_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
                     | (ShiftKind::ASR.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
-                Operand::Imm12(imm) => Ok(0b1001_0011_0000_0000_0000_0000_0000_0000
-                    | ((*imm as u32) << 16)
-                    | (63u32 << 10)
-                    | (rn.encoding() << 5)
-                    | rd.encoding()),
+                // ASR Rd, Rn, #shift = SBFM Rd, Rn, #shift, #63
+                Operand::Imm12(imm) => {
+                    let immr = *imm as u32;
+                    Ok(0x93400000u32  // SBFM with sf=1, N=1
+                        | (immr << 16)
+                        | (63u32 << 10)
+                        | (rn.encoding() << 5)
+                        | rd.encoding())
+                }
             },
 
             // ---- LDR (unsigned offset, 64-bit) ----
@@ -1264,7 +1278,7 @@ impl Instruction {
                 if *offset >= 0 && *offset % 8 == 0 {
                     let imm12 = (*offset as u32) / 8;
                     if imm12 <= 4095 {
-                        Ok(0b1111_1001_0100_0000_0000_0000_0000_0000
+                        Ok(0xF9400000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1287,7 +1301,7 @@ impl Instruction {
                 if *offset >= 0 && *offset % 8 == 0 {
                     let imm12 = (*offset as u32) / 8;
                     if imm12 <= 4095 {
-                        Ok(0b1111_1000_0100_0000_0000_0000_0000_0000
+                        Ok(0xF9000000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1306,12 +1320,12 @@ impl Instruction {
             }
 
             // ---- LDR_W (32-bit, unsigned offset) ----
-            // LDR Wt: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+            // LDR Wt: sf=0, 10 111 0 01 01 imm12 Rn Rt  (imm12 = offset/4)
             Instruction::LDR_W { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
                     if imm12 <= 4095 {
-                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+                        Ok(0xB9400000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1330,12 +1344,12 @@ impl Instruction {
             }
 
             // ---- STR_W (32-bit, unsigned offset) ----
-            // STR Wt: 1 0 1 1 1 0 0 0 01 imm12 Rn Rt  (imm12 = offset/4)
+            // STR Wt: sf=0, 10 111 0 01 00 imm12 Rn Rt  (imm12 = offset/4)
             Instruction::STR_W { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
                     if imm12 <= 4095 {
-                        Ok(0b1011_1000_0100_0000_0000_0000_0000_0000
+                        Ok(0xB9000000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1354,12 +1368,12 @@ impl Instruction {
             }
 
             // ---- LDRB (unsigned offset) ----
-            // LDRB: 0 0 1 1 1 0 0 1 01 imm12 Rn Rt
+            // LDRB: 00 111 0 01 01 imm12 Rn Rt
             Instruction::LDRB { rt, rn, offset } => {
                 if *offset >= 0 {
                     let imm12 = *offset as u32;
                     if imm12 <= 4095 {
-                        Ok(0b0011_1001_0100_0000_0000_0000_0000_0000
+                        Ok(0x39400000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1378,12 +1392,12 @@ impl Instruction {
             }
 
             // ---- LDRH (unsigned offset) ----
-            // LDRH: 0 1 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/2)
+            // LDRH: 01 111 0 01 01 imm12 Rn Rt  (imm12 = offset/2)
             Instruction::LDRH { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 2 == 0 {
                     let imm12 = (*offset as u32) / 2;
                     if imm12 <= 4095 {
-                        Ok(0b0111_1001_0100_0000_0000_0000_0000_0000
+                        Ok(0x79400000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1402,12 +1416,13 @@ impl Instruction {
             }
 
             // ---- LDRSW (unsigned offset) ----
-            // LDRSW: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+            // LDRSW: 1 10 111 0 10 imm12 Rn Rt  (imm12 = offset/4)
+            // opc=10 (bits[23:22]), not 01 like LDR W
             Instruction::LDRSW { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
                     if imm12 <= 4095 {
-                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+                        Ok(0xB9800000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1426,12 +1441,12 @@ impl Instruction {
             }
 
             // ---- STRB (unsigned offset) ----
-            // STRB: 0 0 1 1 1 0 0 0 01 imm12 Rn Rt
+            // STRB: 00 111 0 01 00 imm12 Rn Rt
             Instruction::STRB { rt, rn, offset } => {
                 if *offset >= 0 {
                     let imm12 = *offset as u32;
                     if imm12 <= 4095 {
-                        Ok(0b0011_1000_0100_0000_0000_0000_0000_0000
+                        Ok(0x39000000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1450,12 +1465,12 @@ impl Instruction {
             }
 
             // ---- STRH (unsigned offset) ----
-            // STRH: 0 1 1 1 1 0 0 0 01 imm12 Rn Rt  (imm12 = offset/2)
+            // STRH: 01 111 0 01 00 imm12 Rn Rt  (imm12 = offset/2)
             Instruction::STRH { rt, rn, offset } => {
                 if *offset >= 0 && *offset % 2 == 0 {
                     let imm12 = (*offset as u32) / 2;
                     if imm12 <= 4095 {
-                        Ok(0b0111_1000_0100_0000_0000_0000_0000_0000
+                        Ok(0x79000000u32
                             | (imm12 << 10)
                             | (rn.encoding() << 5)
                             | rt.encoding())
@@ -1473,7 +1488,9 @@ impl Instruction {
                 }
             }
 
-            // ---- LDP (signed offset) ----
+            // ---- LDP (signed offset, sf=1) ----
+            // LDP: 1 10 1001 01 imm7 Rt2 Rn Rt1
+            // Per ARM ARM: imm7[21:15], Rt2[14:10], Rn[9:5], Rt1[4:0]
             Instruction::LDP {
                 rt1,
                 rt2,
@@ -1481,14 +1498,16 @@ impl Instruction {
                 offset,
             } => {
                 let imm7 = *offset / 8;
-                Ok(0b101_0100_1100_0000_0000_0000_0000_0000
+                Ok(0xA9400000u32
                     | (((imm7 as u32) & 0x7F) << 15)
-                    | (rn.encoding() << 10)
-                    | (rt1.encoding() << 5)
-                    | rt2.encoding())
+                    | (rt2.encoding() << 10)
+                    | (rn.encoding() << 5)
+                    | rt1.encoding())
             }
 
-            // ---- STP (signed offset) ----
+            // ---- STP (signed offset, sf=1) ----
+            // STP: 1 10 1001 00 imm7 Rt2 Rn Rt1
+            // Per ARM ARM: imm7[21:15], Rt2[14:10], Rn[9:5], Rt1[4:0]
             Instruction::STP {
                 rt1,
                 rt2,
@@ -1496,20 +1515,22 @@ impl Instruction {
                 offset,
             } => {
                 let imm7 = *offset / 8;
-                Ok(0b101_0100_0100_0000_0000_0000_0000_0000
+                Ok(0xA9000000u32
                     | (((imm7 as u32) & 0x7F) << 15)
-                    | (rn.encoding() << 10)
-                    | (rt1.encoding() << 5)
-                    | rt2.encoding())
+                    | (rt2.encoding() << 10)
+                    | (rn.encoding() << 5)
+                    | rt1.encoding())
             }
 
-            // ---- LDXR ----
+            // ---- LDXR (64-bit) ----
+            // LDXR: 1x 001000 0 1 11111 0 11111 Rn Rt = 0xC85F7C00
             Instruction::LDXR { rt, rn } => {
-                Ok(0b1100_1000_0111_1000_0000_0000_0000 | (rn.encoding() << 5) | rt.encoding())
+                Ok(0xC85F7C00u32 | (rn.encoding() << 5) | rt.encoding())
             }
 
-            // ---- STXR ----
-            Instruction::STXR { rs, rt, rn } => Ok(0b1100_1000_0000_0000_0000_0000_0000
+            // ---- STXR (64-bit) ----
+            // STXR: 1x 001000 0 0 Rs 0 11111 Rn Rt = 0xC8007C00
+            Instruction::STXR { rs, rt, rn } => Ok(0xC8007C00u32
                 | (rs.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rt.encoding()),
@@ -1562,7 +1583,7 @@ impl Instruction {
 
             // ---- BLR ----
             Instruction::BLR { rn } => {
-                Ok(0b1101_0110_0001_1111_0000_0000_0000_0001 | (rn.encoding() << 5))
+                Ok(0xD63F0000u32 | (rn.encoding() << 5))
             }
 
             // ---- RET ----
@@ -1591,10 +1612,11 @@ impl Instruction {
             }
 
             // ---- TBZ ----
+            // TBZ: b5 0110 11 0 imm14[18:5] b40[4:0] Rt
             Instruction::TBZ { rt, bit, offset } => {
                 let b5 = *bit >> 5;
                 let imm14 = (*offset) >> 2;
-                Ok(0b0110_1100_0000_0000_0000_0000_0000_0000
+                Ok(0x36000000u32
                     | (b5 << 31)
                     | ((*bit & 0x1F) << 19)
                     | (((imm14 as u32) & 0x3FFF) << 5)
@@ -1605,99 +1627,93 @@ impl Instruction {
             Instruction::TBNZ { rt, bit, offset } => {
                 let b5 = *bit >> 5;
                 let imm14 = (*offset) >> 2;
-                Ok(0b0110_1110_0000_0000_0000_0000_0000_0000
+                Ok(0x37000000u32
                     | (b5 << 31)
                     | ((*bit & 0x1F) << 19)
                     | (((imm14 as u32) & 0x3FFF) << 5)
                     | rt.encoding())
             }
 
-            // ---- CMP (alias for SUBS XZR, Rn, Rm) ----
+            // ---- CMP (alias for SUBS XZR, Rn, Rm, sf=1) ----
             Instruction::CMP { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0b111_0101_1000_0000_0000_0000_0001_1111
+                Operand::Reg { reg, shift: _ } => Ok(0xEB00001Fu32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)),
-                Operand::Imm12(imm) => Ok(0b1111_0001_0000_0000_0000_0000_0001_1111
+                Operand::Imm12(imm) => Ok(0xF100001Fu32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)),
             },
 
-            // ---- CMN (alias for ADDS XZR, Rn, Rm) ----
+            // ---- CMN (alias for ADDS XZR, Rn, Rm, sf=1) ----
             Instruction::CMN { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0b101_0101_1000_0000_0000_0000_0001_1111
+                Operand::Reg { reg, shift: _ } => Ok(0xAB00001Fu32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)),
-                Operand::Imm12(imm) => Ok(0b1001_0001_0000_0000_0000_0000_0001_1111
+                Operand::Imm12(imm) => Ok(0xB100001Fu32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)),
             },
 
-            // ---- TST (alias for ANDS XZR, Rn, Rm) ----
-            Instruction::TST { rn, rm } => Ok(0b111_0101_0000_0000_0000_0000_0001_1111
+            // ---- TST (alias for ANDS XZR, Rn, Rm, sf=1) ----
+            Instruction::TST { rn, rm } => Ok(0xEA00001Fu32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)),
 
-            // ---- CSEL ----
-            // CSEL: 1 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
-            Instruction::CSEL { rd, rn, rm, cond } => Ok((0x1A800000u64
-                | (rm.encoding() as u64) << 16
-                | (cond.encoding() as u64) << 12
-                | (rn.encoding() as u64) << 5
-                | rd.encoding() as u64)
-                as u32),
+            // ---- CSEL (sf=1): 1 00 1101 0100 Rm 0000 0 cond Rn Rd ----
+            Instruction::CSEL { rd, rn, rm, cond } => Ok(0x9A800000u32
+                | (rm.encoding() << 16)
+                | (cond.encoding() << 12)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
 
-            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
-            // CSINC: 1 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
-            // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
+            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond), sf=1) ----
             Instruction::CSET { rd, cond } => {
-                Ok(0x1A800000u32
+                Ok(0x9A800000u32
                     | (Register::XZR.encoding() << 16)  // Rm = XZR
                     | (cond.invert().encoding() << 12)    // invert(cond)
                     | (Register::XZR.encoding() << 5)     // Rn = XZR
                     | rd.encoding())
             }
 
-            // ---- MSUB: Rd = Ra - Rn * Rm ----
-            // MSUB: 1 0 0 1 1 0 1 1 0 0 0 Rm 0 Ra Rn Rd
-            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x1B000000u32
+            // ---- MSUB (sf=1): 1 00 1101 1000 Rm 0 Ra Rn Rd ----
+            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x9B000000u32
                 | (rm.encoding() << 16)
                 | (ra.encoding() << 10)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- UBFM (unsigned bitfield move) ----
-            // UBFM: 1 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
-            Instruction::UBFM { rd, rn, immr, imms } => Ok(0x53000000u32
+            // ---- UBFM (sf=1): 1 00 10011 0 N immr imms Rn Rd ----
+            // N=1 for 64-bit
+            Instruction::UBFM { rd, rn, immr, imms } => Ok(0xD3400000u32
                 | ((*immr & 0x3F) << 16)
                 | ((*imms & 0x3F) << 10)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SBFM (signed bitfield move) ----
-            // SBFM: 0 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
-            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x13000000u32
+            // ---- SBFM (sf=1): 1 00 10011 0 N immr imms Rn Rd ----
+            // N=1 for 64-bit
+            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x93400000u32
                 | ((*immr & 0x3F) << 16)
                 | ((*imms & 0x3F) << 10)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
-            // SBFM: 1 0 0 1 1 0 1 1 0 0 N immr imms Rn Rd
-            // For SXTW: N=1, immr=0, imms=31
-            Instruction::SXTW { rd, rn } => Ok(0b1001_0011_0100_0000_0111_1100_0000_0000
+            // ---- SXTW (alias for SBFM Xd, Xn, #0, #31, sf=1) ----
+            // SBFM: 1 00 10011 01 000000 011111 Rn Rd = 0x93407C00
+            Instruction::SXTW { rd, rn } => Ok(0x93407C00u32
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SCVTF (signed integer to double-precision float) ----
-            // SCVTF: 1 0 0 1 1 0 1 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 Rn Rd (64-bit to double)
+            // ---- SCVTF (signed integer to double-precision float, sf=1) ----
+            // SCVTF: 1 00 1110 0 01 0 01 00010 00000 Rn Rd = 0x9E620000
             Instruction::SCVTF { rd, rn } => {
-                Ok(0b10_0110_1000_0100_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+                Ok(0x9E620000u32 | (rn.encoding() << 5) | rd.encoding())
             }
 
-            // ---- FCVTZS (double-precision float to signed integer) ----
-            // FCVTZS: 1 0 0 1 1 0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0 0 Rn Rd
+            // ---- FCVTZS (double-precision float to signed integer, sf=1) ----
+            // FCVTZS: 1 00 1110 0 11 0 01 00010 00000 Rn Rd = 0x9E660000
             Instruction::FCVTZS { rd, rn } => {
-                Ok(0b10_0110_1100_0110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+                Ok(0x9E660000u32 | (rn.encoding() << 5) | rd.encoding())
             }
 
             // ---- FCVT (convert between single and double) ----
@@ -1719,35 +1735,35 @@ impl Instruction {
 
             // ---- DMB ----
             Instruction::DMB { option } => {
-                Ok(0b1101_0101_0000_1011_1011_1011_0000_1011 | (option.encoding() << 8))
+                Ok(0xD5033BBFu32 | (option.encoding() << 8))
             }
 
             // ---- DSB ----
             Instruction::DSB { option } => {
-                Ok(0b1101_0101_0000_1011_1011_1011_0000_1001 | (option.encoding() << 8))
+                Ok(0xD5033BB9u32 | (option.encoding() << 8))
             }
 
             // ---- ISB ----
-            Instruction::ISB => Ok(0b1101_0101_0000_1011_1011_1011_0000_1110),
+            Instruction::ISB => Ok(0xD5033BBEu32),
 
-            // ---- MOV (alias for ORR Xd, XZR, Xm) ----
-            Instruction::MOV { rd, rm } => Ok(0b101_0101_0000_0000_0000_0011_1110_0000
+            // ---- MOV (alias for ORR Xd, XZR, Xm, sf=1) ----
+            Instruction::MOV { rd, rm } => Ok(0xAA0003E0u32
                 | (rm.encoding() << 16)
                 | rd.encoding()),
 
-            // ---- MOVZ ----
+            // ---- MOVZ (sf=1): 1 10 100101 hw imm16 Rd ----
             Instruction::MOVZ { rd, imm16, shift } => {
                 let hw = *shift / 16;
-                Ok(0b1101_0010_1000_0000_0000_0000_0000_0000
+                Ok(0xD2800000u32
                     | (hw << 21)
                     | ((*imm16 as u32) << 5)
                     | rd.encoding())
             }
 
-            // ---- MOVK ----
+            // ---- MOVK (sf=1): 1 11 100101 hw imm16 Rd ----
             Instruction::MOVK { rd, imm16, shift } => {
                 let hw = *shift / 16;
-                Ok(0b1111_0010_1000_0000_0000_0000_0000_0000
+                Ok(0xF2800000u32
                     | (hw << 21)
                     | ((*imm16 as u32) << 5)
                     | rd.encoding())
@@ -1788,9 +1804,9 @@ impl Instruction {
             // UMOV W0, V0.B[0] = 0x0E204000
             Instruction::UMOV { rd, vn } => Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding()),
 
-            // ---- SVC ----
+            // ---- SVC: 1101 0100 000 imm16 00001 ----
             Instruction::SVC { imm16 } => {
-                Ok(0b110_1010_0000_0000_0000_0000_0000_0001 | ((*imm16 as u32) << 5))
+                Ok(0xD4000001u32 | ((*imm16 as u32) << 5))
             }
 
             // ---- NOP ----
@@ -1817,92 +1833,80 @@ impl Instruction {
     pub fn encode_with_width(&self, width: RegWidth) -> Result<u32> {
         let sf = width.sf_bit();
         match self {
-            // ---- ADD (shifted register): sf 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            // ---- ADD (shifted register): sf 00 01011 shift 0 Rm imm6 Rn Rd ----
             Instruction::ADD { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift } => {
                     let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    Ok((sf << 31)
-                        | 0b00_0101_1000_0000_0000_0000_0000_0000
+                    Ok((sf << 31) | 0x0B000000u32
                         | (hw << 22)
                         | (reg.encoding() << 16)
                         | (imm6 << 10)
                         | (rn.encoding() << 5)
                         | rd.encoding())
                 }
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
+                Operand::Imm12(imm) => Ok((sf << 31) | 0x11000000u32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
             },
 
-            // ---- SUB (shifted register): sf 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            // ---- SUB (shifted register): sf 10 01011 shift 0 Rm imm6 Rn Rd ----
             Instruction::SUB { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift } => {
                     let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    Ok((sf << 31)
-                        | 0b01_0101_1000_0000_0000_0000_0000_0000
+                    Ok((sf << 31) | 0x4B000000u32
                         | (hw << 22)
                         | (reg.encoding() << 16)
                         | (imm6 << 10)
                         | (rn.encoding() << 5)
                         | rd.encoding())
                 }
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0b0001_0001_0000_0000_0000_0000_0000_0000
-                    | (1 << 30)
+                Operand::Imm12(imm) => Ok((sf << 31) | 0x51000000u32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
             },
 
             // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
-            // MADD: sf 0 0 1 1 0 1 1 000 Rm 0 Ra Rn Rd
-            Instruction::MUL { rd, rn, rm } => Ok((sf << 31)
-                | 0b00_1101_1000_0000_0111_1100_0000_0000
+            // MADD: sf 00 11011 000 Rm 0 Ra=XZR Rn Rd
+            Instruction::MUL { rd, rn, rm } => Ok((sf << 31) | 0x1B007C00u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SDIV ----
-            Instruction::SDIV { rd, rn, rm } => Ok((sf << 31)
-                | 0b00_1101_1000_0000_0000_1100_0000_0000
+            // ---- SDIV: sf 00 1101 0100 Rm 00001 Rn Rd ----
+            Instruction::SDIV { rd, rn, rm } => Ok((sf << 31) | 0x1AC00C00u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- UDIV ----
-            Instruction::UDIV { rd, rn, rm } => Ok((sf << 31)
-                | 0b00_1101_1000_0000_0000_1000_0000_0000
+            // ---- UDIV: sf 00 1101 0000 Rm 00001 Rn Rd ----
+            Instruction::UDIV { rd, rn, rm } => Ok((sf << 31) | 0x1AC00800u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- AND (shifted register) ----
-            Instruction::AND { rd, rn, rm } => Ok((sf << 31)
-                | 0b00_0101_0000_0000_0000_0000_0000_0000
+            // ---- AND (shifted register): sf 00 0101 0 shift 0 Rm imm6 Rn Rd ----
+            Instruction::AND { rd, rn, rm } => Ok((sf << 31) | 0x0A000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- ORR (shifted register) ----
-            Instruction::ORR { rd, rn, rm } => Ok((sf << 31)
-                | 0b01_0101_0000_0000_0000_0000_0000_0000
+            // ---- ORR (shifted register): sf 01 0101 0 shift 0 Rm imm6 Rn Rd ----
+            Instruction::ORR { rd, rn, rm } => Ok((sf << 31) | 0x2A000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- EOR (shifted register) ----
-            Instruction::EOR { rd, rn, rm } => Ok((sf << 31)
-                | 0b10_0101_0000_0000_0000_0000_0000_0000
+            // ---- EOR (shifted register): sf 10 0101 0 shift 0 Rm imm6 Rn Rd ----
+            Instruction::EOR { rd, rn, rm } => Ok((sf << 31) | 0x4A000000u32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
             // ---- LSL (shifted register or UBFM immediate) ----
             Instruction::LSL { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::LSL.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
@@ -1916,7 +1920,7 @@ impl Instruction {
                     let imms = (size - 1 - shift_val) & (size - 1);
                     Ok((sf << 31)
                         | (n_bit << 22)
-                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                        | 0x53000000u32  // UBFM base (no sf, no N)
                         | (immr << 16)
                         | (imms << 10)
                         | (rn.encoding() << 5)
@@ -1926,8 +1930,7 @@ impl Instruction {
 
             // ---- LSR (shifted register or UBFM immediate) ----
             Instruction::LSR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::LSR.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
@@ -1940,7 +1943,7 @@ impl Instruction {
                     let imms = size - 1;
                     Ok((sf << 31)
                         | (n_bit << 22)
-                        | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                        | 0x53000000u32  // UBFM base (no sf, no N)
                         | (immr << 16)
                         | (imms << 10)
                         | (rn.encoding() << 5)
@@ -1950,8 +1953,7 @@ impl Instruction {
 
             // ---- ASR (shifted register or SBFM immediate) ----
             Instruction::ASR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0b00_0101_1000_0000_0000_0000_0000_0000
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x0B000000u32
                     | (ShiftKind::ASR.encoding() << 22)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
@@ -1964,7 +1966,7 @@ impl Instruction {
                     let imms = size - 1;
                     Ok((sf << 31)
                         | (n_bit << 22)
-                        | 0b0001_0010_0000_0000_0000_0000_0000_0000
+                        | 0x13000000u32  // SBFM base (no sf, no N)
                         | (immr << 16)
                         | (imms << 10)
                         | (rn.encoding() << 5)
@@ -1972,16 +1974,14 @@ impl Instruction {
                 }
             },
 
-            // ---- LDR (unsigned offset) ----
-            // LDR Wt: size=10, opc=01 → 0b10_111_0_01_01
-            // LDR Xt: size=11, opc=01 → 0b11_111_0_01_01
+            // ---- LDR (unsigned offset, width-aware) ----
+            // LDR: sf 11 111 0 01 01 imm12 Rn Rt
             Instruction::LDR { rt, rn, offset } => {
                 let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
                 let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
                 if *offset >= 0 && (*offset as u32) % align == 0 {
                     let imm12 = (*offset as u32) / align;
-                    Ok((sf << 31)
-                        | 0b11_100_0100_0000_0000_0000_0000_0000
+                    Ok((sf << 31) | 0x79400000u32
                         | (imm12 << 10)
                         | (rn.encoding() << 5)
                         | rt.encoding())
@@ -1993,16 +1993,14 @@ impl Instruction {
                 }
             }
 
-            // ---- STR (unsigned offset) ----
-            // STR Wt: size=10, opc=00 → 0b10_111_0_00_01
-            // STR Xt: size=11, opc=00 → 0b11_111_0_00_01
+            // ---- STR (unsigned offset, width-aware) ----
+            // STR: sf 11 111 0 01 00 imm12 Rn Rt
             Instruction::STR { rt, rn, offset } => {
                 let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
                 let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
                 if *offset >= 0 && (*offset as u32) % align == 0 {
                     let imm12 = (*offset as u32) / align;
-                    Ok((sf << 31)
-                        | 0b11_100_0000_0000_0000_0000_0000_0000
+                    Ok((sf << 31) | 0x79000000u32
                         | (imm12 << 10)
                         | (rn.encoding() << 5)
                         | rt.encoding())
@@ -2016,31 +2014,26 @@ impl Instruction {
 
             // ---- CMP (alias for SUBS XZR/WZR, Rn, Rm) ----
             Instruction::CMP { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0b11_0101_1000_0000_0000_0000_0001_1111
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x6B00001Fu32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)),
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0b111_0001_0000_0000_0000_0000_0001_1111
+                Operand::Imm12(imm) => Ok((sf << 31) | 0x7100001Fu32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)),
             },
 
             // ---- CMN (alias for ADDS XZR/WZR, Rn, Rm) ----
             Instruction::CMN { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0b01_0101_1000_0000_0000_0000_0001_1111
+                Operand::Reg { reg, shift: _ } => Ok((sf << 31) | 0x2B00001Fu32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)),
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0b0001_0001_0000_0000_0000_0000_0001_1111
+                Operand::Imm12(imm) => Ok((sf << 31) | 0x3100001Fu32
                     | ((*imm as u32) << 10)
                     | (rn.encoding() << 5)),
             },
 
             // ---- TST (alias for ANDS XZR/WZR, Rn, Rm) ----
-            Instruction::TST { rn, rm } => Ok((sf << 31)
-                | 0b11_0101_0000_0000_0000_0000_0001_1111
+            Instruction::TST { rn, rm } => Ok((sf << 31) | 0x6A00001Fu32
                 | (rm.encoding() << 16)
                 | (rn.encoding() << 5)),
 
@@ -2068,27 +2061,27 @@ impl Instruction {
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- UBFM (unsigned bitfield move) ----
-            // UBFM: sf 0 0 1 0 0 1 1 0 N immr imms Rn Rd
+            // ---- UBFM (unsigned bitfield move, width-aware) ----
+            // UBFM: sf 00 10011 0 N immr imms Rn Rd
             // N = sf for 64-bit, 0 for 32-bit
             Instruction::UBFM { rd, rn, immr, imms } => {
                 let n_bit = sf; // N bit matches sf for valid UBFM
                 Ok((sf << 31)
                     | (n_bit << 22)
-                    | 0b1001_0010_0000_0000_0000_0000_0000_0000
+                    | 0x53000000u32  // UBFM base (no sf, no N)
                     | ((*immr & 0x3F) << 16)
                     | ((*imms & 0x3F) << 10)
                     | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
-            // ---- SBFM (signed bitfield move) ----
-            // SBFM: sf 0 0 1 0 0 1 1 0 N immr imms Rn Rd
+            // ---- SBFM (signed bitfield move, width-aware) ----
+            // SBFM: sf 00 10011 0 N immr imms Rn Rd
             Instruction::SBFM { rd, rn, immr, imms } => {
                 let n_bit = sf;
                 Ok((sf << 31)
                     | (n_bit << 22)
-                    | 0b0001_0010_0000_0000_0000_0000_0000_0000
+                    | 0x13000000u32  // SBFM base (no sf, no N)
                     | ((*immr & 0x3F) << 16)
                     | ((*imms & 0x3F) << 10)
                     | (rn.encoding() << 5)
@@ -2096,66 +2089,59 @@ impl Instruction {
             }
 
             // ---- MOV (alias for ORR Xd/Wd, XZR/WZR, Xm/Wm) ----
-            Instruction::MOV { rd, rm } => Ok((sf << 31)
-                | 0b01_0101_0000_0000_0000_0011_1110_0000
+            Instruction::MOV { rd, rm } => Ok((sf << 31) | 0x2A0003E0u32
                 | (rm.encoding() << 16)
                 | rd.encoding()),
 
-            // ---- MOVZ ----
+            // ---- MOVZ (width-aware): sf 10 100101 hw imm16 Rd ----
             Instruction::MOVZ { rd, imm16, shift } => {
                 let hw = *shift / 16;
-                Ok((sf << 31)
-                    | 0b0101_0010_1000_0000_0000_0000_0000_0000
+                Ok((sf << 31) | 0x52800000u32
                     | (hw << 21)
                     | ((*imm16 as u32) << 5)
                     | rd.encoding())
             }
 
-            // ---- MOVK ----
+            // ---- MOVK (width-aware): sf 11 100101 hw imm16 Rd ----
             Instruction::MOVK { rd, imm16, shift } => {
                 let hw = *shift / 16;
-                Ok((sf << 31)
-                    | 0b0111_0010_1000_0000_0000_0000_0000_0000
+                Ok((sf << 31) | 0x72800000u32
                     | (hw << 21)
                     | ((*imm16 as u32) << 5)
                     | rd.encoding())
             }
 
-            // ---- CLZ Rd, Rn ----
-            // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 010 Rn Rd
-            Instruction::CLZ { rd, rn } => Ok((sf << 31)
-                | 0b10_1101_0110_0000_0000_010_00000_00000
+            // ---- CLZ Rd, Rn (width-aware) ----
+            // One-source: sf 10 1101 0110 0000 0000 010 Rn Rd
+            Instruction::CLZ { rd, rn } => Ok((sf << 31) | 0x5AC01000u32
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- RBIT Rd, Rn ----
-            // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 000 Rn Rd
-            Instruction::RBIT { rd, rn } => Ok((sf << 31)
-                | 0b10_1101_0110_0000_0000_000_00000_00000
+            // ---- RBIT Rd, Rn (width-aware) ----
+            // One-source: sf 10 1101 0110 0000 0000 000 Rn Rd
+            Instruction::RBIT { rd, rn } => Ok((sf << 31) | 0x5AC00000u32
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- CBZ ----
+            // ---- CBZ (width-aware): sf 011 0100 imm19 Rt ----
             Instruction::CBZ { rt, offset } => {
                 let imm19 = (*offset) >> 2;
-                Ok((sf << 31)
-                    | 0b011_0100_0000_0000_0000_0000_0000_0000
+                Ok((sf << 31) | 0x34000000u32
                     | (((imm19 as u32) & 0x7FFFF) << 5)
                     | rt.encoding())
             }
 
-            // ---- CBNZ ----
+            // ---- CBNZ (width-aware): sf 011 0101 imm19 Rt ----
             Instruction::CBNZ { rt, offset } => {
                 let imm19 = (*offset) >> 2;
-                Ok((sf << 31)
-                    | 0b011_0101_0000_0000_0000_0000_0000_0000
+                Ok((sf << 31) | 0x35000000u32
                     | (((imm19 as u32) & 0x7FFFF) << 5)
                     | rt.encoding())
             }
 
             // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
             // This is always a 64-bit destination (widening), so sf=1, N=1
-            Instruction::SXTW { rd, rn } => Ok(0b1001_0011_0100_0000_0111_1100_0000_0000
+            Instruction::SXTW { rd, rn } => Ok(0x93407C00u32
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 

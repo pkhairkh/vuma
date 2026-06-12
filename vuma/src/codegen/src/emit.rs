@@ -600,27 +600,21 @@ impl Emitter {
             }
         }
 
-        // Emit prologue: STP X29, X30, [SP, #-16]!
+        // Emit prologue: SUB SP, SP, #frame_size+16 (space for saved FP/LR + locals)
+        // Then STP X29, X30, [SP, #frame_size] (save FP/LR at top of allocated frame)
+        let aligned_stack = compute_frame_size(func);
+        self.frame_size = aligned_stack;
+        let total_alloc = aligned_stack + 16; // 16 bytes for FP+LR pair
+        self.emit_instruction(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(total_alloc),
+        })?;
         self.emit_instruction(Instruction::STP {
             rt1: Register::X29,
             rt2: Register::X30,
             rn: Register::SP,
-            offset: -16,
-        })?;
-
-        // MOV X29, SP (set frame pointer)
-        self.emit_instruction(Instruction::MOV {
-            rd: Register::X29,
-            rm: Register::SP,
-        })?;
-
-        // Compute frame size from the function's Alloc instructions.
-        let aligned_stack = compute_frame_size(func);
-        self.frame_size = aligned_stack;
-        self.emit_instruction(Instruction::SUB {
-            rd: Register::SP,
-            rn: Register::SP,
-            rm: Operand::Imm12(aligned_stack),
+            offset: aligned_stack as i32, // save FP/LR at top of frame
         })?;
 
         // Emit each basic block.
@@ -1248,16 +1242,16 @@ impl Emitter {
                 }
                 // Use the same frame size computed in the prologue
                 let frame_size = self.frame_size;
-                self.emit_instruction(Instruction::ADD {
-                    rd: Register::SP,
-                    rn: Register::SP,
-                    rm: Operand::Imm12(frame_size),
-                })?;
                 self.emit_instruction(Instruction::LDP {
                     rt1: Register::X29,
                     rt2: Register::X30,
                     rn: Register::SP,
-                    offset: 16,
+                    offset: frame_size as i32, // load FP/LR from top of frame
+                })?;
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(frame_size + 16), // restore SP
                 })?;
                 self.emit_instruction(Instruction::RET { rn: None })?;
             }
@@ -1985,9 +1979,20 @@ fn fill_start_stub(
             // mov x8, #93 → syscall number for exit
             // svc #0 → syscall
 
-            // Find main function offset
-            let main_offset = function_offsets.get("main").copied().unwrap_or(16);
-            let bl_offset = main_offset as i64 - 0; // BL from offset 0 to main_offset
+            // Find main function offset — search for "main" or any key containing "main"
+            let main_offset = function_offsets.get("main").copied()
+                .or_else(|| function_offsets.get("fn_main").copied())
+                .or_else(|| {
+                    // Search for any function whose name contains "main"
+                    function_offsets.iter()
+                        .find(|(name, _)| name.contains("main"))
+                        .map(|(_, &off)| off)
+                })
+                .unwrap_or(16);
+
+            // BL offset = target - (PC + 4). BL is at offset 0 in text section,
+            // so PC after BL fetch = 4. imm26 = (target - 4) >> 2.
+            let bl_offset = main_offset as i64 - 4; // BL from offset 0 to main_offset
             // BL encoding: bits[31:26] = 100101, bits[25:0] = signed imm26
             // offset = imm26 * 4
             let imm26 = (bl_offset >> 2) as i32 & 0x03FFFFFF;
@@ -2012,7 +2017,14 @@ fn fill_start_stub(
             //   ecall
             //   (shouldn't reach) ret
 
-            let main_offset = function_offsets.get("main").copied().unwrap_or(24);
+            let main_offset = function_offsets.get("main").copied()
+                .or_else(|| function_offsets.get("fn_main").copied())
+                .or_else(|| {
+                    function_offsets.iter()
+                        .find(|(name, _)| name.contains("main"))
+                        .map(|(_, &off)| off)
+                })
+                .unwrap_or(24);
             // RISC-V CALL = AUIPC + JALR pair
             // call main: auipc ra, %pcrel_hi(main); jalr ra, %pcrel_lo(main)(ra)
             // Simplified: use direct offset since we know the exact layout
