@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
-use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -1861,7 +1860,7 @@ impl Backend for AArch64Backend {
 
         // Runtime I/O functions: __vuma_write_stdout
         let write_stdout_offset = current_offset;
-        for name in &["print_buf", "write_stdout", "__vuma_write_stdout", "print_hex"] {
+        for name in &["print_buf", "write_stdout", "__vuma_write_stdout"] {
             func_offsets.insert(name.to_string(), write_stdout_offset);
         }
         // ARM64 write_stdout: mov x2,x1; mov x1,x0; mov x0,#1; mov x8,#64; svc#0; ret
@@ -1874,6 +1873,67 @@ impl Backend for AArch64Backend {
             0xC0, 0x03, 0x5F, 0xD6, // ret
         ];
         current_offset += runtime_write_stdout.len();
+
+        // __vuma_print_hex(ptr: x0, len: x1)
+        // Converts each byte to 2 hex chars and writes to stdout via sys_write.
+        let print_hex_offset = current_offset;
+        for name in &["print_hex", "__vuma_print_hex"] {
+            func_offsets.insert(name.to_string(), print_hex_offset);
+        }
+        let runtime_print_hex: Vec<u8> = {
+            let code: Vec<u32> = vec![
+                0xA9BD7BFD, // stp x29, x30, [sp, #-48]!
+                0x910003FD, // add x29, sp, #0
+                0xA90153F3, // stp x19, x20, [sp, #16]
+                0xA9025BF5, // stp x21, x22, [sp, #32]
+                0xAA0003F3, // mov x19, x0 (ptr)
+                0xAA0103F4, // mov x20, x1 (len)
+                0xD2800015, // mov x21, #0 (index)
+                // .Lhex_loop:
+                0xEB1402BF, // cmp x21, x20
+                0x5400028A, // b.ge .Lhex_done
+                0x1C356269, // ldrb w9, [x19, x21]
+                0x531044CA, // lsr w10, w9, #4 (high nibble)
+                0x1100C14B, // add w11, w10, #48 ('0'+nibble)
+                0x7100255F, // cmp w10, #9
+                0x5400002D, // b.le .Lhigh_ok
+                0x11009D6B, // add w11, w11, #39 (adjust to 'a')
+                // .Lhigh_ok:
+                0x3900A3EB, // strb w11, [sp, #40]
+                0x12107D2A, // and w10, w9, #0xF (low nibble)
+                0x1100C14B, // add w11, w10, #48
+                0x7100255F, // cmp w10, #9
+                0x5400002D, // b.le .Llow_ok
+                0x11009D6B, // add w11, w11, #39
+                // .Llow_ok:
+                0x3900A7EB, // strb w11, [sp, #41]
+                0xD2800020, // mov x0, #1 (fd=stdout)
+                0x9100A3E1, // add x1, sp, #40 (buf)
+                0xD2800042, // mov x2, #2 (len=2)
+                0xD2800808, // mov x8, #64 (sys_write)
+                0xD4000001, // svc #0
+                0x910006B5, // add x21, x21, #1
+                0x17FFFFEA, // b .Lhex_loop
+                // .Lhex_done:
+                0xD2800149, // mov x9, #10 ('\n')
+                0x3900A3E9, // strb w9, [sp, #40]
+                0xD2800020, // mov x0, #1
+                0x9100A3E1, // add x1, sp, #40
+                0xD2800022, // mov x2, #1
+                0xD2800808, // mov x8, #64
+                0xD4000001, // svc #0
+                0xA9425BF5, // ldp x21, x22, [sp, #32]
+                0xA94153F3, // ldp x19, x20, [sp, #16]
+                0xA8C37BFD, // ldp x29, x30, [sp], #48
+                0xD65F03C0, // ret
+            ];
+            let mut bytes = Vec::with_capacity(code.len() * 4);
+            for &word in &code {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            bytes
+        };
+        current_offset += runtime_print_hex.len();
 
         // print_int: stub that returns 0
         let print_int_offset = current_offset;
@@ -1911,6 +1971,7 @@ impl Backend for AArch64Backend {
             }
         }
         all_code.extend_from_slice(&runtime_write_stdout);
+        all_code.extend_from_slice(&runtime_print_hex);
         all_code.extend_from_slice(&runtime_print_int);
 
         // Patch relocations for user functions
@@ -1945,7 +2006,7 @@ impl Backend for AArch64Backend {
             func_code_offset += func_size;
         }
 
-        Ok(build_minimal_aarch64_elf(&all_code, 0x400000))
+        Ok(build_aarch64_elf_2seg(&all_code, 0x400000))
     }
 
     fn return_stub(&self) -> Vec<u8> {

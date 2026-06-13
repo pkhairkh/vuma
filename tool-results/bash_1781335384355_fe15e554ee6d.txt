@@ -1,0 +1,540 @@
+=== x86_64 ===
+[emit] IR program has 18 functions
+[emit] Function: rotr32 (2 params, 8 vregs)
+[emit]   Block: entry
+[emit]     BinOp { op: ShrL, dst: Register(3), lhs: Register(0), rhs: Register(1), ty: None }
+[emit]     Sub { dst: Register(4), lhs: Immediate(32), rhs: Register(1), ty: None }
+[emit]     BinOp { op: Shl, dst: Register(5), lhs: Register(0), rhs: Register(4), ty: None }
+[emit]     BinOp { op: Or, dst: Register(6), lhs: Register(3), rhs: Register(5), ty: None }
+[emit]     BinOp { op: And, dst: Register(7), lhs: Register(6), rhs: Immediate(4294967295), ty: None }
+[emit]     Ret { values: [Register(7)] }
+[emit] Function: ch (3 params, 8 vregs)
+[emit]   Block: entry
+[emit]     BinOp { op: And, dst: Register(12), lhs: Register(8), rhs: Register(9), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(13), lhs: Register(8), rhs: Immediate(4294967295), ty: None }
+[emit]     BinOp { op: And, dst: Register(14), lhs: Register(13), rhs: Register(10), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(15), lhs: Register(12), rhs: Register(14), ty: None }
+[emit]     Ret { values: [Register(15)] }
+[emit] Function: maj (3 params, 9 vregs)
+[emit]   Block: entry
+[emit]     BinOp { op: And, dst: Register(20), lhs: Register(16), rhs: Register(17), ty: None }
+[emit]     BinOp { op: And, dst: Register(21), lhs: Register(16), rhs: Register(18), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(22), lhs: Register(20), rhs: Register(21), ty: None }
+[emit]     BinOp { op: And, dst: Register(23), lhs: Register(17), rhs: Register(18), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(24), lhs: Register(22), rhs: Register(23), ty: None }
+[emit]     Ret { values: [Register(24)] }
+[emit] Function: big_sigma0 (1 params, 7 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(27)), func: "rotr32", args: [Register(25), Immediate(2)] }
+[emit]     Call { dst: Some(Register(28)), func: "rotr32", args: [Register(25), Immediate(13)] }
+[emit]     BinOp { op: Xor, dst: Register(29), lhs: Register(27), rhs: Register(28), ty: None }
+[emit]     Call { dst: Some(Register(30)), func: "rotr32", args: [Register(25), Immediate(22)] }
+[emit]     BinOp { op: Xor, dst: Register(31), lhs: Register(29), rhs: Register(30), ty: None }
+[emit]     Ret { values: [Register(31)] }
+[emit] Function: big_sigma1 (1 params, 7 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(34)), func: "rotr32", args: [Register(32), Immediate(6)] }
+[emit]     Call { dst: Some(Register(35)), func: "rotr32", args: [Register(32), Immediate(11)] }
+[emit]     BinOp { op: Xor, dst: Register(36), lhs: Register(34), rhs: Register(35), ty: None }
+[emit]     Call { dst: Some(Register(37)), func: "rotr32", args: [Register(32), Immediate(25)] }
+[emit]     BinOp { op: Xor, dst: Register(38), lhs: Register(36), rhs: Register(37), ty: None }
+[emit]     Ret { values: [Register(38)] }
+[emit] Function: small_sigma0 (1 params, 8 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(41)), func: "rotr32", args: [Register(39), Immediate(7)] }
+[emit]     Call { dst: Some(Register(42)), func: "rotr32", args: [Register(39), Immediate(18)] }
+[emit]     BinOp { op: Xor, dst: Register(43), lhs: Register(41), rhs: Register(42), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(44), lhs: Register(39), rhs: Immediate(3), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(45), lhs: Register(43), rhs: Register(44), ty: None }
+[emit]     BinOp { op: And, dst: Register(46), lhs: Register(45), rhs: Immediate(4294967295), ty: None }
+[emit]     Ret { values: [Register(46)] }
+[emit] Function: small_sigma1 (1 params, 8 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(49)), func: "rotr32", args: [Register(47), Immediate(17)] }
+[emit]     Call { dst: Some(Register(50)), func: "rotr32", args: [Register(47), Immediate(19)] }
+[emit]     BinOp { op: Xor, dst: Register(51), lhs: Register(49), rhs: Register(50), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(52), lhs: Register(47), rhs: Immediate(10), ty: None }
+[emit]     BinOp { op: Xor, dst: Register(53), lhs: Register(51), rhs: Register(52), ty: None }
+[emit]     BinOp { op: And, dst: Register(54), lhs: Register(53), rhs: Immediate(4294967295), ty: None }
+[emit]     Ret { values: [Register(54)] }
+[emit] Function: read_u32_be (2 params, 25 vregs)
+[emit]   Block: entry
+[emit]     Add { dst: Register(58), lhs: Register(55), rhs: Register(56), ty: None }
+[emit]     Load { dst: Register(59), addr: Register(58), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(60), lhs: Register(59), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(61), lhs: Register(55), rhs: Register(56), ty: None }
+[emit]     Add { dst: Register(62), lhs: Register(61), rhs: Immediate(1), ty: None }
+[emit]     Load { dst: Register(63), addr: Register(62), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(64), lhs: Register(63), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(65), lhs: Register(55), rhs: Register(56), ty: None }
+[emit]     Add { dst: Register(66), lhs: Register(65), rhs: Immediate(2), ty: None }
+[emit]     Load { dst: Register(67), addr: Register(66), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(68), lhs: Register(67), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(69), lhs: Register(55), rhs: Register(56), ty: None }
+[emit]     Add { dst: Register(70), lhs: Register(69), rhs: Immediate(3), ty: None }
+[emit]     Load { dst: Register(71), addr: Register(70), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(72), lhs: Register(71), rhs: Immediate(0), ty: None }
+[emit]     BinOp { op: Shl, dst: Register(73), lhs: Register(60), rhs: Immediate(24), ty: None }
+[emit]     BinOp { op: Shl, dst: Register(74), lhs: Register(64), rhs: Immediate(16), ty: None }
+[emit]     BinOp { op: Or, dst: Register(75), lhs: Register(73), rhs: Register(74), ty: None }
+[emit]     BinOp { op: Shl, dst: Register(76), lhs: Register(68), rhs: Immediate(8), ty: None }
+[emit]     BinOp { op: Or, dst: Register(77), lhs: Register(75), rhs: Register(76), ty: None }
+[emit]     BinOp { op: Or, dst: Register(78), lhs: Register(77), rhs: Register(72), ty: None }
+[emit]     BinOp { op: And, dst: Register(79), lhs: Register(78), rhs: Immediate(4294967295), ty: None }
+[emit]     Ret { values: [Register(79)] }
+[emit] Function: write_u32_be (3 params, 17 vregs)
+[emit]   Block: entry
+[emit]     Add { dst: Register(83), lhs: Register(80), rhs: Register(81), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(84), lhs: Register(82), rhs: Immediate(24), ty: None }
+[emit]     BinOp { op: And, dst: Register(85), lhs: Register(84), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(85), addr: Register(83), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(86), lhs: Register(80), rhs: Register(81), ty: None }
+[emit]     Add { dst: Register(87), lhs: Register(86), rhs: Immediate(1), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(88), lhs: Register(82), rhs: Immediate(16), ty: None }
+[emit]     BinOp { op: And, dst: Register(89), lhs: Register(88), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(89), addr: Register(87), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(90), lhs: Register(80), rhs: Register(81), ty: None }
+[emit]     Add { dst: Register(91), lhs: Register(90), rhs: Immediate(2), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(92), lhs: Register(82), rhs: Immediate(8), ty: None }
+[emit]     BinOp { op: And, dst: Register(93), lhs: Register(92), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(93), addr: Register(91), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(94), lhs: Register(80), rhs: Register(81), ty: None }
+[emit]     Add { dst: Register(95), lhs: Register(94), rhs: Immediate(3), ty: None }
+[emit]     BinOp { op: And, dst: Register(96), lhs: Register(82), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(96), addr: Register(95), offset: 0, ty: U8 }
+[emit]     Ret { values: [] }
+[emit] Function: w_store (3 params, 5 vregs)
+[emit]   Block: entry
+[emit]     Mul { dst: Register(100), lhs: Register(98), rhs: Immediate(4), ty: None }
+[emit]     Call { dst: Some(Register(101)), func: "write_u32_be", args: [Register(97), Register(100), Register(99)] }
+[emit]     Ret { values: [] }
+[emit] Function: w_load (2 params, 5 vregs)
+[emit]   Block: entry
+[emit]     Mul { dst: Register(105), lhs: Register(103), rhs: Immediate(4), ty: None }
+[emit]     Call { dst: Some(Register(106)), func: "read_u32_be", args: [Register(102), Register(105)] }
+[emit]     Ret { values: [Register(106)] }
+[emit] Function: sha256_init_state (1 params, 9 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(108)), func: "write_u32_be", args: [Register(107), Immediate(0), Immediate(1779033703)] }
+[emit]     Call { dst: Some(Register(109)), func: "write_u32_be", args: [Register(107), Immediate(4), Immediate(3144134277)] }
+[emit]     Call { dst: Some(Register(110)), func: "write_u32_be", args: [Register(107), Immediate(8), Immediate(1013904242)] }
+[emit]     Call { dst: Some(Register(111)), func: "write_u32_be", args: [Register(107), Immediate(12), Immediate(2773480762)] }
+[emit]     Call { dst: Some(Register(112)), func: "write_u32_be", args: [Register(107), Immediate(16), Immediate(1359893119)] }
+[emit]     Call { dst: Some(Register(113)), func: "write_u32_be", args: [Register(107), Immediate(20), Immediate(2600822924)] }
+[emit]     Call { dst: Some(Register(114)), func: "write_u32_be", args: [Register(107), Immediate(24), Immediate(528734635)] }
+[emit]     Call { dst: Some(Register(115)), func: "write_u32_be", args: [Register(107), Immediate(28), Immediate(1541459225)] }
+[emit]     Ret { values: [] }
+[emit] Function: sha256_init_k (1 params, 65 vregs)
+[emit]   Block: entry
+[emit]     Call { dst: Some(Register(117)), func: "write_u32_be", args: [Register(116), Immediate(0), Immediate(1116352408)] }
+[emit]     Call { dst: Some(Register(118)), func: "write_u32_be", args: [Register(116), Immediate(4), Immediate(1899447441)] }
+[emit]     Call { dst: Some(Register(119)), func: "write_u32_be", args: [Register(116), Immediate(8), Immediate(3049323471)] }
+[emit]     Call { dst: Some(Register(120)), func: "write_u32_be", args: [Register(116), Immediate(12), Immediate(3921009573)] }
+[emit]     Call { dst: Some(Register(121)), func: "write_u32_be", args: [Register(116), Immediate(16), Immediate(961987163)] }
+[emit]     Call { dst: Some(Register(122)), func: "write_u32_be", args: [Register(116), Immediate(20), Immediate(1508970993)] }
+[emit]     Call { dst: Some(Register(123)), func: "write_u32_be", args: [Register(116), Immediate(24), Immediate(2453635748)] }
+[emit]     Call { dst: Some(Register(124)), func: "write_u32_be", args: [Register(116), Immediate(28), Immediate(2870763221)] }
+[emit]     Call { dst: Some(Register(125)), func: "write_u32_be", args: [Register(116), Immediate(32), Immediate(3624381080)] }
+[emit]     Call { dst: Some(Register(126)), func: "write_u32_be", args: [Register(116), Immediate(36), Immediate(310598401)] }
+[emit]     Call { dst: Some(Register(127)), func: "write_u32_be", args: [Register(116), Immediate(40), Immediate(607225278)] }
+[emit]     Call { dst: Some(Register(128)), func: "write_u32_be", args: [Register(116), Immediate(44), Immediate(1426881987)] }
+[emit]     Call { dst: Some(Register(129)), func: "write_u32_be", args: [Register(116), Immediate(48), Immediate(1925078388)] }
+[emit]     Call { dst: Some(Register(130)), func: "write_u32_be", args: [Register(116), Immediate(52), Immediate(2162078206)] }
+[emit]     Call { dst: Some(Register(131)), func: "write_u32_be", args: [Register(116), Immediate(56), Immediate(2614888103)] }
+[emit]     Call { dst: Some(Register(132)), func: "write_u32_be", args: [Register(116), Immediate(60), Immediate(3248222580)] }
+[emit]     Call { dst: Some(Register(133)), func: "write_u32_be", args: [Register(116), Immediate(64), Immediate(3835390401)] }
+[emit]     Call { dst: Some(Register(134)), func: "write_u32_be", args: [Register(116), Immediate(68), Immediate(4022224774)] }
+[emit]     Call { dst: Some(Register(135)), func: "write_u32_be", args: [Register(116), Immediate(72), Immediate(264347078)] }
+[emit]     Call { dst: Some(Register(136)), func: "write_u32_be", args: [Register(116), Immediate(76), Immediate(604807628)] }
+[emit]     Call { dst: Some(Register(137)), func: "write_u32_be", args: [Register(116), Immediate(80), Immediate(770255983)] }
+[emit]     Call { dst: Some(Register(138)), func: "write_u32_be", args: [Register(116), Immediate(84), Immediate(1249150122)] }
+[emit]     Call { dst: Some(Register(139)), func: "write_u32_be", args: [Register(116), Immediate(88), Immediate(1555081692)] }
+[emit]     Call { dst: Some(Register(140)), func: "write_u32_be", args: [Register(116), Immediate(92), Immediate(1996064986)] }
+[emit]     Call { dst: Some(Register(141)), func: "write_u32_be", args: [Register(116), Immediate(96), Immediate(2554220882)] }
+[emit]     Call { dst: Some(Register(142)), func: "write_u32_be", args: [Register(116), Immediate(100), Immediate(2821834349)] }
+[emit]     Call { dst: Some(Register(143)), func: "write_u32_be", args: [Register(116), Immediate(104), Immediate(2952996808)] }
+[emit]     Call { dst: Some(Register(144)), func: "write_u32_be", args: [Register(116), Immediate(108), Immediate(3210313671)] }
+[emit]     Call { dst: Some(Register(145)), func: "write_u32_be", args: [Register(116), Immediate(112), Immediate(3336571891)] }
+[emit]     Call { dst: Some(Register(146)), func: "write_u32_be", args: [Register(116), Immediate(116), Immediate(3584528711)] }
+[emit]     Call { dst: Some(Register(147)), func: "write_u32_be", args: [Register(116), Immediate(120), Immediate(113926993)] }
+[emit]     Call { dst: Some(Register(148)), func: "write_u32_be", args: [Register(116), Immediate(124), Immediate(338241895)] }
+[emit]     Call { dst: Some(Register(149)), func: "write_u32_be", args: [Register(116), Immediate(128), Immediate(666307205)] }
+[emit]     Call { dst: Some(Register(150)), func: "write_u32_be", args: [Register(116), Immediate(132), Immediate(773529912)] }
+[emit]     Call { dst: Some(Register(151)), func: "write_u32_be", args: [Register(116), Immediate(136), Immediate(1294757372)] }
+[emit]     Call { dst: Some(Register(152)), func: "write_u32_be", args: [Register(116), Immediate(140), Immediate(1396182291)] }
+[emit]     Call { dst: Some(Register(153)), func: "write_u32_be", args: [Register(116), Immediate(144), Immediate(1695183700)] }
+[emit]     Call { dst: Some(Register(154)), func: "write_u32_be", args: [Register(116), Immediate(148), Immediate(1986661051)] }
+[emit]     Call { dst: Some(Register(155)), func: "write_u32_be", args: [Register(116), Immediate(152), Immediate(2177026350)] }
+[emit]     Call { dst: Some(Register(156)), func: "write_u32_be", args: [Register(116), Immediate(156), Immediate(2456956037)] }
+[emit]     Call { dst: Some(Register(157)), func: "write_u32_be", args: [Register(116), Immediate(160), Immediate(2730485921)] }
+[emit]     Call { dst: Some(Register(158)), func: "write_u32_be", args: [Register(116), Immediate(164), Immediate(2820302411)] }
+[emit]     Call { dst: Some(Register(159)), func: "write_u32_be", args: [Register(116), Immediate(168), Immediate(3259730800)] }
+[emit]     Call { dst: Some(Register(160)), func: "write_u32_be", args: [Register(116), Immediate(172), Immediate(3345764771)] }
+[emit]     Call { dst: Some(Register(161)), func: "write_u32_be", args: [Register(116), Immediate(176), Immediate(3516065817)] }
+[emit]     Call { dst: Some(Register(162)), func: "write_u32_be", args: [Register(116), Immediate(180), Immediate(3600352804)] }
+[emit]     Call { dst: Some(Register(163)), func: "write_u32_be", args: [Register(116), Immediate(184), Immediate(4094571909)] }
+[emit]     Call { dst: Some(Register(164)), func: "write_u32_be", args: [Register(116), Immediate(188), Immediate(275423344)] }
+[emit]     Call { dst: Some(Register(165)), func: "write_u32_be", args: [Register(116), Immediate(192), Immediate(430227734)] }
+[emit]     Call { dst: Some(Register(166)), func: "write_u32_be", args: [Register(116), Immediate(196), Immediate(506948616)] }
+[emit]     Call { dst: Some(Register(167)), func: "write_u32_be", args: [Register(116), Immediate(200), Immediate(659060556)] }
+[emit]     Call { dst: Some(Register(168)), func: "write_u32_be", args: [Register(116), Immediate(204), Immediate(883997877)] }
+[emit]     Call { dst: Some(Register(169)), func: "write_u32_be", args: [Register(116), Immediate(208), Immediate(958139571)] }
+[emit]     Call { dst: Some(Register(170)), func: "write_u32_be", args: [Register(116), Immediate(212), Immediate(1322822218)] }
+[emit]     Call { dst: Some(Register(171)), func: "write_u32_be", args: [Register(116), Immediate(216), Immediate(1537002063)] }
+[emit]     Call { dst: Some(Register(172)), func: "write_u32_be", args: [Register(116), Immediate(220), Immediate(1747873779)] }
+[emit]     Call { dst: Some(Register(173)), func: "write_u32_be", args: [Register(116), Immediate(224), Immediate(1955562222)] }
+[emit]     Call { dst: Some(Register(174)), func: "write_u32_be", args: [Register(116), Immediate(228), Immediate(2024104815)] }
+[emit]     Call { dst: Some(Register(175)), func: "write_u32_be", args: [Register(116), Immediate(232), Immediate(2227730452)] }
+[emit]     Call { dst: Some(Register(176)), func: "write_u32_be", args: [Register(116), Immediate(236), Immediate(2361852424)] }
+[emit]     Call { dst: Some(Register(177)), func: "write_u32_be", args: [Register(116), Immediate(240), Immediate(2428436474)] }
+[emit]     Call { dst: Some(Register(178)), func: "write_u32_be", args: [Register(116), Immediate(244), Immediate(2756734187)] }
+[emit]     Call { dst: Some(Register(179)), func: "write_u32_be", args: [Register(116), Immediate(248), Immediate(3204031479)] }
+[emit]     Call { dst: Some(Register(180)), func: "write_u32_be", args: [Register(116), Immediate(252), Immediate(3329325298)] }
+[emit]     Ret { values: [] }
+[emit] Function: sha256_transform (4 params, 147 vregs)
+[emit]   Block: entry
+[emit]     Add { dst: Register(185), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(186), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(187), lhs: Register(184), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(188), lhs: Register(186), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(189), lhs: Register(182), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(190), lhs: Register(181), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(191), lhs: Register(183), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_0" }
+[emit]   Block: loop_header_0
+[emit]     Branch { target: "loop_body_1" }
+[emit]   Block: loop_body_1
+[emit]     Cmp { kind: SLt, dst: Register(192), lhs: Register(188), rhs: Immediate(16), ty: None }
+[emit]     CondBranch { cond: Register(192), true_target: "then_3", false_target: "else_4" }
+[emit]   Block: then_3
+[emit]     Mul { dst: Register(193), lhs: Register(188), rhs: Immediate(4), ty: None }
+[emit]     Call { dst: Some(Register(194)), func: "read_u32_be", args: [Register(187), Register(193)] }
+[emit]     Call { dst: Some(Register(195)), func: "w_store", args: [Register(191), Register(188), Register(194)] }
+[emit]     Add { dst: Register(196), lhs: Register(188), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_5" }
+[emit]   Block: else_4
+[emit]     Branch { target: "loop_exit_2" }
+[emit]   Block: merge_5
+[emit]     Add { dst: Register(188), lhs: Register(196), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_0" }
+[emit]   Block: loop_exit_2
+[emit]     Add { dst: Register(197), lhs: Immediate(16), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(198), lhs: Register(193), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(199), lhs: Register(195), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(200), lhs: Register(187), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(201), lhs: Register(197), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(202), lhs: Register(192), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(203), lhs: Register(189), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(204), lhs: Register(190), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(205), lhs: Register(194), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(206), lhs: Register(191), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_6" }
+[emit]   Block: loop_header_6
+[emit]     Branch { target: "loop_body_7" }
+[emit]   Block: loop_body_7
+[emit]     Cmp { kind: SLt, dst: Register(207), lhs: Register(201), rhs: Immediate(64), ty: None }
+[emit]     CondBranch { cond: Register(207), true_target: "then_9", false_target: "else_10" }
+[emit]   Block: then_9
+[emit]     Sub { dst: Register(208), lhs: Register(201), rhs: Immediate(15), ty: None }
+[emit]     Call { dst: Some(Register(209)), func: "w_load", args: [Register(206), Register(208)] }
+[emit]     Sub { dst: Register(210), lhs: Register(201), rhs: Immediate(2), ty: None }
+[emit]     Call { dst: Some(Register(211)), func: "w_load", args: [Register(206), Register(210)] }
+[emit]     Sub { dst: Register(212), lhs: Register(201), rhs: Immediate(7), ty: None }
+[emit]     Call { dst: Some(Register(213)), func: "w_load", args: [Register(206), Register(212)] }
+[emit]     Sub { dst: Register(214), lhs: Register(201), rhs: Immediate(16), ty: None }
+[emit]     Call { dst: Some(Register(215)), func: "w_load", args: [Register(206), Register(214)] }
+[emit]     Call { dst: Some(Register(216)), func: "small_sigma1", args: [Register(211)] }
+[emit]     Add { dst: Register(217), lhs: Register(216), rhs: Register(213), ty: None }
+[emit]     Call { dst: Some(Register(218)), func: "small_sigma0", args: [Register(209)] }
+[emit]     Add { dst: Register(219), lhs: Register(217), rhs: Register(218), ty: None }
+[emit]     Add { dst: Register(220), lhs: Register(219), rhs: Register(215), ty: None }
+[emit]     BinOp { op: And, dst: Register(221), lhs: Register(220), rhs: Immediate(4294967295), ty: None }
+[emit]     Add { dst: Register(222), lhs: Register(221), rhs: Immediate(0), ty: None }
+[emit]     Call { dst: Some(Register(223)), func: "w_store", args: [Register(206), Register(201), Register(222)] }
+[emit]     Add { dst: Register(224), lhs: Register(201), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_11" }
+[emit]   Block: else_10
+[emit]     Branch { target: "loop_exit_8" }
+[emit]   Block: merge_11
+[emit]     Add { dst: Register(201), lhs: Register(224), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(202), lhs: Register(207), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(205), lhs: Register(222), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_6" }
+[emit]   Block: loop_exit_8
+[emit]     Call { dst: Some(Register(225)), func: "read_u32_be", args: [Register(204), Immediate(0)] }
+[emit]     Call { dst: Some(Register(226)), func: "read_u32_be", args: [Register(204), Immediate(4)] }
+[emit]     Call { dst: Some(Register(227)), func: "read_u32_be", args: [Register(204), Immediate(8)] }
+[emit]     Call { dst: Some(Register(228)), func: "read_u32_be", args: [Register(204), Immediate(12)] }
+[emit]     Call { dst: Some(Register(229)), func: "read_u32_be", args: [Register(204), Immediate(16)] }
+[emit]     Call { dst: Some(Register(230)), func: "read_u32_be", args: [Register(204), Immediate(20)] }
+[emit]     Call { dst: Some(Register(231)), func: "read_u32_be", args: [Register(204), Immediate(24)] }
+[emit]     Call { dst: Some(Register(232)), func: "read_u32_be", args: [Register(204), Immediate(28)] }
+[emit]     Add { dst: Register(233), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(234), lhs: Register(198), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(235), lhs: Register(199), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(236), lhs: Register(220), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(237), lhs: Register(221), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(238), lhs: Register(223), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(239), lhs: Register(208), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(240), lhs: Register(210), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(241), lhs: Register(212), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(242), lhs: Register(214), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(243), lhs: Register(216), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(244), lhs: Register(217), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(245), lhs: Register(218), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(246), lhs: Register(219), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(247), lhs: Register(225), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(248), lhs: Register(226), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(249), lhs: Register(200), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(250), lhs: Register(227), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(251), lhs: Register(228), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(252), lhs: Register(229), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(253), lhs: Register(230), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(254), lhs: Register(231), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(255), lhs: Register(232), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(256), lhs: Register(233), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(257), lhs: Register(202), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(258), lhs: Register(203), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(259), lhs: Register(204), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(260), lhs: Register(205), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(261), lhs: Register(206), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(262), lhs: Register(209), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(263), lhs: Register(215), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(264), lhs: Register(211), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(265), lhs: Register(213), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_12" }
+[emit]   Block: loop_header_12
+[emit]     Branch { target: "loop_body_13" }
+[emit]   Block: loop_body_13
+[emit]     Cmp { kind: SLt, dst: Register(266), lhs: Register(256), rhs: Immediate(64), ty: None }
+[emit]     CondBranch { cond: Register(266), true_target: "then_15", false_target: "else_16" }
+[emit]   Block: then_15
+[emit]     Mul { dst: Register(267), lhs: Register(256), rhs: Immediate(4), ty: None }
+[emit]     Call { dst: Some(Register(268)), func: "read_u32_be", args: [Register(258), Register(267)] }
+[emit]     Call { dst: Some(Register(269)), func: "w_load", args: [Register(261), Register(256)] }
+[emit]     Call { dst: Some(Register(270)), func: "big_sigma1", args: [Register(252)] }
+[emit]     Add { dst: Register(271), lhs: Register(255), rhs: Register(270), ty: None }
+[emit]     Call { dst: Some(Register(272)), func: "ch", args: [Register(252), Register(253), Register(254)] }
+[emit]     Add { dst: Register(273), lhs: Register(271), rhs: Register(272), ty: None }
+[emit]     Add { dst: Register(274), lhs: Register(273), rhs: Register(268), ty: None }
+[emit]     Add { dst: Register(275), lhs: Register(274), rhs: Register(269), ty: None }
+[emit]     BinOp { op: And, dst: Register(276), lhs: Register(275), rhs: Immediate(4294967295), ty: None }
+[emit]     Add { dst: Register(277), lhs: Register(276), rhs: Immediate(0), ty: None }
+[emit]     Call { dst: Some(Register(278)), func: "big_sigma0", args: [Register(247)] }
+[emit]     Call { dst: Some(Register(279)), func: "maj", args: [Register(247), Register(248), Register(250)] }
+[emit]     Add { dst: Register(280), lhs: Register(278), rhs: Register(279), ty: None }
+[emit]     BinOp { op: And, dst: Register(281), lhs: Register(280), rhs: Immediate(4294967295), ty: None }
+[emit]     Add { dst: Register(282), lhs: Register(281), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(283), lhs: Register(254), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(284), lhs: Register(253), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(285), lhs: Register(252), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(286), lhs: Register(251), rhs: Register(277), ty: None }
+[emit]     BinOp { op: And, dst: Register(287), lhs: Register(286), rhs: Immediate(4294967295), ty: None }
+[emit]     Add { dst: Register(288), lhs: Register(287), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(289), lhs: Register(250), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(290), lhs: Register(248), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(291), lhs: Register(247), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(292), lhs: Register(277), rhs: Register(282), ty: None }
+[emit]     BinOp { op: And, dst: Register(293), lhs: Register(292), rhs: Immediate(4294967295), ty: None }
+[emit]     Add { dst: Register(294), lhs: Register(293), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(295), lhs: Register(256), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_17" }
+[emit]   Block: else_16
+[emit]     Branch { target: "loop_exit_14" }
+[emit]   Block: merge_17
+[emit]     Add { dst: Register(247), lhs: Register(294), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(248), lhs: Register(291), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(250), lhs: Register(290), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(251), lhs: Register(289), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(252), lhs: Register(288), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(253), lhs: Register(285), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(254), lhs: Register(284), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(255), lhs: Register(283), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(256), lhs: Register(295), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(257), lhs: Register(266), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_12" }
+[emit]   Block: loop_exit_14
+[emit]     Call { dst: Some(Register(296)), func: "read_u32_be", args: [Register(259), Immediate(0)] }
+[emit]     Add { dst: Register(297), lhs: Register(296), rhs: Register(247), ty: None }
+[emit]     BinOp { op: And, dst: Register(298), lhs: Register(297), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(299)), func: "write_u32_be", args: [Register(259), Immediate(0), Register(298)] }
+[emit]     Call { dst: Some(Register(300)), func: "read_u32_be", args: [Register(259), Immediate(4)] }
+[emit]     Add { dst: Register(301), lhs: Register(300), rhs: Register(248), ty: None }
+[emit]     BinOp { op: And, dst: Register(302), lhs: Register(301), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(303)), func: "write_u32_be", args: [Register(259), Immediate(4), Register(302)] }
+[emit]     Call { dst: Some(Register(304)), func: "read_u32_be", args: [Register(259), Immediate(8)] }
+[emit]     Add { dst: Register(305), lhs: Register(304), rhs: Register(250), ty: None }
+[emit]     BinOp { op: And, dst: Register(306), lhs: Register(305), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(307)), func: "write_u32_be", args: [Register(259), Immediate(8), Register(306)] }
+[emit]     Call { dst: Some(Register(308)), func: "read_u32_be", args: [Register(259), Immediate(12)] }
+[emit]     Add { dst: Register(309), lhs: Register(308), rhs: Register(251), ty: None }
+[emit]     BinOp { op: And, dst: Register(310), lhs: Register(309), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(311)), func: "write_u32_be", args: [Register(259), Immediate(12), Register(310)] }
+[emit]     Call { dst: Some(Register(312)), func: "read_u32_be", args: [Register(259), Immediate(16)] }
+[emit]     Add { dst: Register(313), lhs: Register(312), rhs: Register(252), ty: None }
+[emit]     BinOp { op: And, dst: Register(314), lhs: Register(313), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(315)), func: "write_u32_be", args: [Register(259), Immediate(16), Register(314)] }
+[emit]     Call { dst: Some(Register(316)), func: "read_u32_be", args: [Register(259), Immediate(20)] }
+[emit]     Add { dst: Register(317), lhs: Register(316), rhs: Register(253), ty: None }
+[emit]     BinOp { op: And, dst: Register(318), lhs: Register(317), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(319)), func: "write_u32_be", args: [Register(259), Immediate(20), Register(318)] }
+[emit]     Call { dst: Some(Register(320)), func: "read_u32_be", args: [Register(259), Immediate(24)] }
+[emit]     Add { dst: Register(321), lhs: Register(320), rhs: Register(254), ty: None }
+[emit]     BinOp { op: And, dst: Register(322), lhs: Register(321), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(323)), func: "write_u32_be", args: [Register(259), Immediate(24), Register(322)] }
+[emit]     Call { dst: Some(Register(324)), func: "read_u32_be", args: [Register(259), Immediate(28)] }
+[emit]     Add { dst: Register(325), lhs: Register(324), rhs: Register(255), ty: None }
+[emit]     BinOp { op: And, dst: Register(326), lhs: Register(325), rhs: Immediate(4294967295), ty: None }
+[emit]     Call { dst: Some(Register(327)), func: "write_u32_be", args: [Register(259), Immediate(28), Register(326)] }
+[emit]     Ret { values: [] }
+[emit] Function: sha256_pad_block (3 params, 55 vregs)
+[emit]   Block: entry
+[emit]     Add { dst: Register(331), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(332), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(333), lhs: Register(328), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(334), lhs: Register(332), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(335), lhs: Register(329), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(336), lhs: Register(330), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_18" }
+[emit]   Block: loop_header_18
+[emit]     Branch { target: "loop_body_19" }
+[emit]   Block: loop_body_19
+[emit]     Cmp { kind: SLt, dst: Register(337), lhs: Register(334), rhs: Register(336), ty: None }
+[emit]     CondBranch { cond: Register(337), true_target: "then_21", false_target: "else_22" }
+[emit]   Block: then_21
+[emit]     Add { dst: Register(338), lhs: Register(333), rhs: Register(334), ty: None }
+[emit]     Add { dst: Register(339), lhs: Register(335), rhs: Register(334), ty: None }
+[emit]     Load { dst: Register(340), addr: Register(339), offset: 0, ty: U8 }
+[emit]     Store { value: Register(340), addr: Register(338), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(341), lhs: Register(334), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_23" }
+[emit]   Block: else_22
+[emit]     Branch { target: "loop_exit_20" }
+[emit]   Block: merge_23
+[emit]     Add { dst: Register(334), lhs: Register(341), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_18" }
+[emit]   Block: loop_exit_20
+[emit]     Add { dst: Register(342), lhs: Register(333), rhs: Register(336), ty: None }
+[emit]     Store { value: Immediate(128), addr: Register(342), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(343), lhs: Register(336), rhs: Immediate(1), ty: None }
+[emit]     Add { dst: Register(344), lhs: Register(343), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(345), lhs: Register(338), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(346), lhs: Register(339), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(347), lhs: Register(340), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(348), lhs: Register(342), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(349), lhs: Register(343), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(350), lhs: Register(333), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(351), lhs: Register(344), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(352), lhs: Register(337), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(353), lhs: Register(335), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(354), lhs: Register(336), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_24" }
+[emit]   Block: loop_header_24
+[emit]     Branch { target: "loop_body_25" }
+[emit]   Block: loop_body_25
+[emit]     Cmp { kind: SLt, dst: Register(355), lhs: Register(351), rhs: Immediate(56), ty: None }
+[emit]     CondBranch { cond: Register(355), true_target: "then_27", false_target: "else_28" }
+[emit]   Block: then_27
+[emit]     Add { dst: Register(356), lhs: Register(350), rhs: Register(351), ty: None }
+[emit]     Store { value: Immediate(0), addr: Register(356), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(357), lhs: Register(351), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_29" }
+[emit]   Block: else_28
+[emit]     Branch { target: "loop_exit_26" }
+[emit]   Block: merge_29
+[emit]     Add { dst: Register(351), lhs: Register(357), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(352), lhs: Register(355), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_24" }
+[emit]   Block: loop_exit_26
+[emit]     Mul { dst: Register(358), lhs: Register(354), rhs: Immediate(8), ty: None }
+[emit]     Add { dst: Register(359), lhs: Register(358), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(360), lhs: Register(350), rhs: Immediate(56), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(361), lhs: Register(359), rhs: Immediate(56), ty: None }
+[emit]     BinOp { op: And, dst: Register(362), lhs: Register(361), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(362), addr: Register(360), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(363), lhs: Register(350), rhs: Immediate(57), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(364), lhs: Register(359), rhs: Immediate(48), ty: None }
+[emit]     BinOp { op: And, dst: Register(365), lhs: Register(364), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(365), addr: Register(363), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(366), lhs: Register(350), rhs: Immediate(58), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(367), lhs: Register(359), rhs: Immediate(40), ty: None }
+[emit]     BinOp { op: And, dst: Register(368), lhs: Register(367), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(368), addr: Register(366), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(369), lhs: Register(350), rhs: Immediate(59), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(370), lhs: Register(359), rhs: Immediate(32), ty: None }
+[emit]     BinOp { op: And, dst: Register(371), lhs: Register(370), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(371), addr: Register(369), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(372), lhs: Register(350), rhs: Immediate(60), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(373), lhs: Register(359), rhs: Immediate(24), ty: None }
+[emit]     BinOp { op: And, dst: Register(374), lhs: Register(373), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(374), addr: Register(372), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(375), lhs: Register(350), rhs: Immediate(61), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(376), lhs: Register(359), rhs: Immediate(16), ty: None }
+[emit]     BinOp { op: And, dst: Register(377), lhs: Register(376), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(377), addr: Register(375), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(378), lhs: Register(350), rhs: Immediate(62), ty: None }
+[emit]     BinOp { op: ShrL, dst: Register(379), lhs: Register(359), rhs: Immediate(8), ty: None }
+[emit]     BinOp { op: And, dst: Register(380), lhs: Register(379), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(380), addr: Register(378), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(381), lhs: Register(350), rhs: Immediate(63), ty: None }
+[emit]     BinOp { op: And, dst: Register(382), lhs: Register(359), rhs: Immediate(255), ty: None }
+[emit]     Store { value: Register(382), addr: Register(381), offset: 0, ty: U8 }
+[emit]     Ret { values: [] }
+[emit] Function: copy32 (2 params, 12 vregs)
+[emit]   Block: entry
+[emit]     Add { dst: Register(385), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(386), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(387), lhs: Register(383), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(388), lhs: Register(386), rhs: Immediate(0), ty: None }
+[emit]     Add { dst: Register(389), lhs: Register(384), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_30" }
+[emit]   Block: loop_header_30
+[emit]     Branch { target: "loop_body_31" }
+[emit]   Block: loop_body_31
+[emit]     Cmp { kind: SLt, dst: Register(390), lhs: Register(388), rhs: Immediate(32), ty: None }
+[emit]     CondBranch { cond: Register(390), true_target: "then_33", false_target: "else_34" }
+[emit]   Block: then_33
+[emit]     Add { dst: Register(391), lhs: Register(387), rhs: Register(388), ty: None }
+[emit]     Add { dst: Register(392), lhs: Register(389), rhs: Register(388), ty: None }
+[emit]     Load { dst: Register(393), addr: Register(392), offset: 0, ty: U8 }
+[emit]     Store { value: Register(393), addr: Register(391), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(394), lhs: Register(388), rhs: Immediate(1), ty: None }
+[emit]     Branch { target: "merge_35" }
+[emit]   Block: else_34
+[emit]     Branch { target: "loop_exit_32" }
+[emit]   Block: merge_35
+[emit]     Add { dst: Register(388), lhs: Register(394), rhs: Immediate(0), ty: None }
+[emit]     Branch { target: "loop_header_30" }
+[emit]   Block: loop_exit_32
+[emit]     Ret { values: [] }
+[emit] Function: sha256d (3 params, 17 vregs)
+[emit]   Block: entry
+[emit]     Alloc { dst: Register(398), size: 32 }
+[emit]     Alloc { dst: Register(399), size: 256 }
+[emit]     Alloc { dst: Register(400), size: 256 }
+[emit]     Alloc { dst: Register(401), size: 64 }
+[emit]     Alloc { dst: Register(402), size: 32 }
+[emit]     Call { dst: Some(Register(403)), func: "sha256_init_k", args: [Register(399)] }
+[emit]     Call { dst: Some(Register(404)), func: "sha256_init_state", args: [Register(398)] }
+[emit]     Call { dst: Some(Register(405)), func: "sha256_pad_block", args: [Register(401), Register(395), Register(396)] }
+[emit]     Call { dst: Some(Register(406)), func: "sha256_transform", args: [Register(398), Register(399), Register(400), Register(401)] }
+[emit]     Call { dst: Some(Register(407)), func: "copy32", args: [Register(402), Register(398)] }
+[emit]     Call { dst: Some(Register(408)), func: "sha256_init_state", args: [Register(398)] }
+[emit]     Call { dst: Some(Register(409)), func: "sha256_pad_block", args: [Register(401), Register(402), Immediate(32)] }
+[emit]     Call { dst: Some(Register(410)), func: "sha256_transform", args: [Register(398), Register(399), Register(400), Register(401)] }
+[emit]     Call { dst: Some(Register(411)), func: "copy32", args: [Register(397), Register(398)] }
+[emit]     Ret { values: [] }
+[emit] Function: main (0 params, 8 vregs)
+[emit]   Block: entry
+[emit]     Alloc { dst: Register(413), size: 3 }
+[emit]     Add { dst: Register(414), lhs: Register(413), rhs: Immediate(0), ty: None }
+[emit]     Store { value: Immediate(97), addr: Register(414), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(415), lhs: Register(413), rhs: Immediate(1), ty: None }
+[emit]     Store { value: Immediate(98), addr: Register(415), offset: 0, ty: U8 }
+[emit]     Add { dst: Register(416), lhs: Register(413), rhs: Immediate(2), ty: None }
+[emit]     Store { value: Immediate(99), addr: Register(416), offset: 0, ty: U8 }
+[emit]     Alloc { dst: Register(417), size: 32 }
+[emit]     Call { dst: Some(Register(418)), func: "sha256d", args: [Register(413), Immediate(3), Register(417)] }
+[emit]     Call { dst: Some(Register(419)), func: "print_hex", args: [Register(417), Immediate(32)] }
+[emit]     Ret { values: [Immediate(0)] }
+Emitted examples/sha256d.vuma -> /home/z/my-project/download/sha256d/sha256d.x86_64.bin (14621 bytes, ISA: x86_64)

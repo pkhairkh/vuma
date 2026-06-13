@@ -2040,107 +2040,119 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 /// - `__vuma_print_newline`: Print a newline character to stdout.
 ///
 /// All functions follow the LP64D calling convention.
-fn build_riscv64_runtime() -> Vec<u8> {
+fn build_riscv64_runtime() -> (Vec<u8>, HashMap<String, usize>) {
     let mut code = Vec::new();
+    let mut offsets: HashMap<String, usize> = HashMap::new();
 
-    // ── __vuma_print_hex ──
-    // Input: a0 = 64-bit value to print as 8 hex digits
-    // Clobbers: t0, t1, t2, t3, a7
-    // Stack frame: 32 bytes (save ra + s0 + buffer)
+    // ── __vuma_write_stdout(ptr: a0, len: a1) ──
+    let ws_off = code.len();
+    offsets.insert("write_stdout".to_string(), ws_off);
+    offsets.insert("__vuma_write_stdout".to_string(), ws_off);
+    offsets.insert("print_buf".to_string(), ws_off);
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::A1, imm: 0 }.encode()); // mv a2, a1
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A0, imm: 0 }.encode()); // mv a1, a0
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // li a0, 1
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // li a7, 64
+    code.extend(Instruction::Ecall.encode());
+    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
 
-    // Prologue
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+    // ── __vuma_print_hex(ptr: a0, len: a1) ──
+    // Converts each byte to 2 hex chars and writes to stdout.
+    // Uses per-byte sys_write(2 hex chars) + final newline sys_write.
+    let ph_off = code.len();
+    offsets.insert("print_hex".to_string(), ph_off);
+    offsets.insert("__vuma_print_hex".to_string(), ph_off);
 
-    // t0 = loop counter (0..8), t1 = shift amount (28, 24, ..., 0)
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 28 }.encode());
+    // Prologue: save s0, s1, s2, ra
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -48 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::S1, rs1: Gpr::Sp, imm: 8 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::S2, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 32 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::A0, imm: 0 }.encode()); // s0 = ptr
+    code.extend(Instruction::Addi { rd: Gpr::S1, rs1: Gpr::A1, imm: 0 }.encode()); // s1 = len
+    code.extend(Instruction::Addi { rd: Gpr::S2, rs1: Gpr::Zero, imm: 0 }.encode()); // s2 = index
 
-    // hex_loop:
+    // .Lhex_loop:
     let hex_loop_start = code.len();
 
-    // Extract nibble: t2 = (a0 >> t1) & 0xF
-    code.extend(Instruction::Srl { rd: Gpr::T2, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
-    code.extend(Instruction::Andi { rd: Gpr::T2, rs1: Gpr::T2, imm: 15 }.encode());
+    // bge s2, s1, .Lhex_done
+    let bge_pos = code.len();
+    code.extend(Instruction::Bge { rs1: Gpr::S2, rs2: Gpr::S1, offset: 0 }.encode()); // placeholder
 
-    // Convert nibble to hex char:
-    // t3 = t2 + 48 ('0')  (default)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
-    // if t2 > 9: t3 = t2 + 87 ('a' - 10)
-    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T2, imm: -10 }.encode()); // t4 = t2 - 10 (temp)
-    // Use SLTIU to check: if t2 >= 10, t4 = 1, else t4 = 0
-    // Actually: SLTIU t4, t2, 10 → if t2 < 10 then t4=1 else t4=0
-    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
-    // If t4 == 0 (t2 >= 10), use alpha: t3 = t2 + 87
-    // BNE t4, zero, store_digit (t2 < 10, use default t3 = t2 + 48)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode()); // t3 = t2 + 87 (alpha)
-    // Now we have two possibilities: if t2 < 10, use t2+48, else use t2+87
-    // Simple approach: use CSEL-like pattern
-    // t3 = t2 + 48 always, then if t2 >= 10, add 39 more (87-48=39)
-    // Actually let me redo this properly:
-    // t3 = t2 + 48
-    // if t2 >= 10: t3 += 39
-    // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10, 0 if t2 >= 10
-    // We need to add 39 only when t2 >= 10 (t4 == 0)
-    // XORI t4, t4, 1 → invert: t4 = 1 if t2 >= 10
-    // But this is getting complicated. Let me just use a branch.
+    // Load byte: lbu t0, 0(s0+s2)
+    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::S2 }.encode()); // t3 = ptr+idx
+    code.extend(Instruction::Lbu { rd: Gpr::T0, rs1: Gpr::T3, imm: 0 }.encode());       // t0 = byte
 
-    // Let me restart the nibble conversion with a simpler approach.
-    // Remove the last 2 instructions we just added.
-    code.truncate(code.len() - 2);
+    // High nibble: t1 = t0 >> 4
+    code.extend(Instruction::Srli { rd: Gpr::T1, rs1: Gpr::T0, shamt: 4 }.encode());
+    // t2 = t1 + 48 (assume digit)
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T1, imm: 48 }.encode());
+    // if t1 < 10, skip alpha adjust
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 10 }.encode());
+    let blt_high_pos = code.len();
+    code.extend(Instruction::Blt { rs1: Gpr::T1, rs2: Gpr::T3, offset: 4 }.encode()); // skip 1 instr
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T2, imm: 39 }.encode()); // alpha adjust
 
-    // t3 = t2 + 48  (default for 0-9)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
-    // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10
-    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
-    // BNE t4, zero, +2 (skip alpha adjustment if t2 < 10)
-    // We'll compute the branch offset after we know where we are
-    let bne_offset_pos = code.len();
-    code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
-    // Alpha: t3 = t2 + 87
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode());
-    // Patch the BNE to skip this instruction
-    let bne_patch_pos = code.len();
-    let bne_offset = (bne_patch_pos - bne_offset_pos) as i32;
-    let bne_patched = Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: bne_offset };
-    code[bne_offset_pos..bne_offset_pos + 4].copy_from_slice(&bne_patched.encode());
+    // Store high hex char at sp+40
+    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::Sp, imm: 40 }.encode());
 
-    // Store char at sp + t0
-    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
-    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T5, imm: 0 }.encode());
+    // Low nibble: t1 = t0 & 0xF
+    code.extend(Instruction::Andi { rd: Gpr::T1, rs1: Gpr::T0, imm: 15 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T1, imm: 48 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 10 }.encode());
+    let blt_low_pos = code.len();
+    code.extend(Instruction::Blt { rs1: Gpr::T1, rs2: Gpr::T3, offset: 4 }.encode()); // skip 1 instr
+    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T2, imm: 39 }.encode());
 
-    // Increment: SUB t1, t1, 4; ADD t0, t0, 1; BLT t0, 8, hex_loop
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -4 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
-    // Compute branch back to hex_loop_start
-    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
-    // Wait, t4 was used above. Let me use a different register for the limit.
-    // Actually BLT t0, 8 → we need imm=8 in a register. Use ADDI t4, zero, 8.
-    // Remove the last BLT and redo.
-    code.truncate(code.len() - 1);
-    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Zero, imm: 8 }.encode());
-    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
+    // Store low hex char at sp+41
+    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::Sp, imm: 41 }.encode());
 
-    // ── sys_write(1, sp, 8) ──
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd=1
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf=sp
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode()); // len=8
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    // sys_write(1, sp+40, 2)
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode());  // fd
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 40 }.encode());    // buf
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 2 }.encode());   // len
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());  // sys_write
+    code.extend(Instruction::Ecall.encode());
+
+    // Increment index
+    code.extend(Instruction::Addi { rd: Gpr::S2, rs1: Gpr::S2, imm: 1 }.encode());
+
+    // j .Lhex_loop
+    let loop_back = (hex_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: loop_back }.encode());
+
+    // .Lhex_done: Patch BGE
+    let hex_done_pos = code.len() as i32;
+    let bge_offset = hex_done_pos - (bge_pos as i32);
+    let bge_patched = Instruction::Bge { rs1: Gpr::S2, rs2: Gpr::S1, offset: bge_offset };
+    code[bge_pos..bge_pos + 4].copy_from_slice(&bge_patched.encode());
+
+    // Write newline
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 10 }.encode()); // '\n'
+    code.extend(Instruction::Sb { rs1: Gpr::T0, rs2: Gpr::Sp, imm: 40 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 40 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());
     code.extend(Instruction::Ecall.encode());
 
     // Epilogue
-    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
-    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 32 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::S1, rs1: Gpr::Sp, imm: 8 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::S2, rs1: Gpr::Sp, imm: 16 }.encode());
+    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 32 }.encode());
+    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 48 }.encode());
     code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
 
-    // ── __vuma_print_int ──
+    // ── __vuma_print_int(val: a0) ──
     // Input: a0 = 64-bit signed integer to print as decimal
     // Strategy: divide by 10, store digits, reverse, write.
+
+    let pi_off = code.len();
+    offsets.insert("print_int".to_string(), pi_off);
+    offsets.insert("print".to_string(), pi_off);
+    offsets.insert("__vuma_print_int".to_string(), pi_off);
 
     // Prologue
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -64 }.encode());
@@ -2270,20 +2282,7 @@ fn build_riscv64_runtime() -> Vec<u8> {
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 64 }.encode());
     code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
 
-    // ── __vuma_print_newline ──
-    // Simple: write '\n' to stdout
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 10 }.encode()); // '\n'
-    code.extend(Instruction::Sb { rs1: Gpr::T0, rs2: Gpr::Sp, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode()); // len
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
-    code.extend(Instruction::Ecall.encode());
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
-
-    code
+    (code, offsets)
 }
 
 // ===========================================================================
@@ -5078,7 +5077,7 @@ impl Backend for RiscV64Backend {
         let start_stub_size: usize = 16; // 4 × 4-byte instructions
 
         // ── Build runtime I/O code ──
-        let runtime_code = build_riscv64_runtime();
+        let (runtime_code, runtime_offsets) = build_riscv64_runtime();
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -5091,6 +5090,11 @@ impl Backend for RiscV64Backend {
                 .map(|i| i.encoded.len())
                 .sum();
             current_offset += func_size;
+        }
+
+        // ── Register runtime I/O function offsets ──
+        for (name, rel_off) in &runtime_offsets {
+            func_offsets.insert(name.clone(), current_offset + rel_off);
         }
 
         // ── Build _start stub ──

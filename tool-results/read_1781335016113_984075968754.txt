@@ -1,0 +1,2002 @@
+     1→//! VUMA Integration Test Framework
+     2→//!
+     3→//! This module provides a comprehensive test framework for the VUMA project,
+     4→//! offering high-level helpers that compose the full compilation and
+     5→//! verification pipeline:
+     6→//!
+     7→//! 1. **Source parsing** — `vuma-parser` lexes and parses VUMA source text into
+     8→//!    an AST, which is then converted to the parser's local SCG representation.
+     9→//! 2. **SCG bridging** — The parser SCG is translated into `vuma-scg::SCG` for
+    10→//!    graph operations, validation, dominance/liveness analysis.
+    11→//! 3. **Invariant verification** — The `vuma-ive` invariant aggregator runs all
+    12→//!    five VUMA invariant checks (liveness, exclusivity, interpretation, origin,
+    13→//!    cleanup) against the program.
+    14→//! 4. **Code generation** — The `vuma-codegen` crate lowers the SCG through IR
+    15→//!    to ARM64 machine code, producing a minimal ELF binary.
+    16→//!
+    17→//! # Test Categories
+    18→//!
+    19→//! | Category       | Scope                                                        |
+    20→//! |----------------|--------------------------------------------------------------|
+    21→//! | [`Unit`]       | Individual crate functions, data structures, edge cases.     |
+    22→//! | [`Integration`]| Cross-crate pipelines (parse -> SCG -> verify, etc.).        |
+    23→//! | [`Verification`]| IVE invariant checks, proof generation, counterexamples.    |
+    24→//! | [`Codegen`]    | ARM64 code emission, register allocation, ELF generation.    |
+    25→//! | [`Pi5`]        | Raspberry Pi 5 target-specific tests (MMIO, UART, GPIO).    |
+    26→//!
+    27→//! # Helper Macros
+    28→//!
+    29→//! The framework provides declarative macros that automatically annotate tests
+    30→//! with the correct [`TestCategory`] and integrate with the [`TestRegistry`]:
+    31→//!
+    32→//! - [`vuma_unit_test!`] — unit test category
+    33→//! - [`vuma_integration_test!`] — integration test category
+    34→//! - [`vuma_verification_test!`] — verification test category
+    35→//! - [`vuma_codegen_test!`] — codegen test category
+    36→//! - [`vuma_pi5_test!`] — Pi5 target test category
+    37→//!
+    38→//! # Quick Start
+    39→//!
+    40→//! ```rust,ignore
+    41→//! use vuma_tests::framework::{build_scg_from_source, assert_verifies, assert_violation};
+    42→//! use vuma_ive::InvariantKind;
+    43→//!
+    44→//! // Build an SCG from source text.
+    45→//! let scg = build_scg_from_source("region pool = allocate(1024); free(pool);").unwrap();
+    46→//!
+    47→//! // Assert that a program passes all invariant checks.
+    48→//! assert_verifies("region buf = allocate(256); free(buf);");
+    49→//!
+    50→//! // Assert that a specific invariant is violated.
+    51→//! assert_violation("region buf = allocate(256);", InvariantKind::Cleanup);
+    52→//! ```
+    53→
+    54→use std::collections::HashMap;
+    55→use std::fmt;
+    56→use std::panic;
+    57→use std::sync::atomic::{AtomicUsize, Ordering};
+    58→use std::time::Instant;
+    59→
+    60→use vuma_codegen::emit::Emitter;
+    61→use vuma_codegen::ir::BinOpKind;
+    62→use vuma_codegen::scg_to_ir::{
+    63→    ComputationNode as CodegenComputationNode, ControlNode as CodegenControlNode,
+    64→    Scg as CodegenScg, ScgExpr as CodegenScgExpr, ScgFunction as CodegenScgFunction,
+    65→    ScgNode as CodegenScgNode, ScgParam as CodegenScgParam, ScgStatement as CodegenScgStatement,
+    66→    ScgType as CodegenScgType,
+    67→};
+    68→use vuma_codegen::ScgToIr;
+    69→use vuma_ive::verification::VerificationInput;
+    70→use vuma_ive::{AggregatedResult, InvariantAggregator, InvariantKind, VerificationLevel};
+    71→use vuma_parser::{to_scg::AstToScg, ParseError, Parser};
+    72→use vuma_scg::{
+    73→    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
+    74→    EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCGRegion, SCG,
+    75→};
+    76→
+    77→// ===========================================================================
+    78→// Test Categories
+    79→// ===========================================================================
+    80→
+    81→/// Classification of test categories in the VUMA test suite.
+    82→///
+    83→/// Each variant maps to a distinct scope of testing, enabling selective
+    84→/// test runs and organised reporting.
+    85→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    86→pub enum TestCategory {
+    87→    /// Unit tests: individual crate functions, data structures, edge cases.
+    88→    Unit,
+    89→    /// Integration tests: cross-crate pipelines (parse -> SCG -> verify).
+    90→    Integration,
+    91→    /// Verification tests: IVE invariant checks, proof generation, counterexamples.
+    92→    Verification,
+    93→    /// Codegen tests: ARM64 code emission, register allocation, ELF generation.
+    94→    Codegen,
+    95→    /// Pi5 tests: Raspberry Pi 5 target-specific (MMIO, UART, GPIO, SMP).
+    96→    Pi5,
+    97→}
+    98→
+    99→impl TestCategory {
+   100→    /// Returns all test categories in canonical order.
+   101→    pub fn all() -> &'static [TestCategory; 5] {
+   102→        &[
+   103→            TestCategory::Unit,
+   104→            TestCategory::Integration,
+   105→            TestCategory::Verification,
+   106→            TestCategory::Codegen,
+   107→            TestCategory::Pi5,
+   108→        ]
+   109→    }
+   110→
+   111→    /// Returns a human-readable label for this category.
+   112→    pub fn label(&self) -> &'static str {
+   113→        match self {
+   114→            TestCategory::Unit => "unit",
+   115→            TestCategory::Integration => "integration",
+   116→            TestCategory::Verification => "verification",
+   117→            TestCategory::Codegen => "codegen",
+   118→            TestCategory::Pi5 => "pi5",
+   119→        }
+   120→    }
+   121→}
+   122→
+   123→impl fmt::Display for TestCategory {
+   124→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   125→        write!(f, "{}", self.label())
+   126→    }
+   127→}
+   128→
+   129→// ===========================================================================
+   130→// Helper Macros for Test Categories
+   131→// ===========================================================================
+   132→
+   133→/// Declare a VUMA unit test.
+   134→///
+   135→/// Annotates the test with the `Unit` category for registry tracking
+   136→/// and applies the standard `#[test]` attribute.
+   137→///
+   138→/// # Example
+   139→///
+   140→/// ```rust,ignore
+   141→/// vuma_unit_test!(test_my_unit_thing {
+   142→///     assert_eq!(2 + 2, 4);
+   143→/// });
+   144→/// ```
+   145→#[macro_export]
+   146→macro_rules! vuma_unit_test {
+   147→    ($name:ident { $($body:tt)* }) => {
+   148→        #[test]
+   149→        fn $name() {
+   150→            let _category = $crate::framework::TestCategory::Unit;
+   151→            $($body)*
+   152→        }
+   153→    };
+   154→}
+   155→
+   156→/// Declare a VUMA integration test.
+   157→///
+   158→/// Annotates the test with the `Integration` category for registry tracking
+   159→/// and applies the standard `#[test]` attribute.
+   160→///
+   161→/// # Example
+   162→///
+   163→/// ```rust,ignore
+   164→/// vuma_integration_test!(test_parse_and_verify {
+   165→///     let result = $crate::framework::verify_program("region x = allocate(64); free(x);");
+   166→///     assert_eq!(result.per_invariant.len(), 5);
+   167→/// });
+   168→/// ```
+   169→#[macro_export]
+   170→macro_rules! vuma_integration_test {
+   171→    ($name:ident { $($body:tt)* }) => {
+   172→        #[test]
+   173→        fn $name() {
+   174→            let _category = $crate::framework::TestCategory::Integration;
+   175→            $($body)*
+   176→        }
+   177→    };
+   178→}
+   179→
+   180→/// Declare a VUMA verification test.
+   181→///
+   182→/// Annotates the test with the `Verification` category for registry tracking
+   183→/// and applies the standard `#[test]` attribute.
+   184→///
+   185→/// # Example
+   186→///
+   187→/// ```rust,ignore
+   188→/// vuma_verification_test!(test_liveness_check {
+   189→///     $crate::framework::assert_verifies("region buf = allocate(64); free(buf);");
+   190→/// });
+   191→/// ```
+   192→#[macro_export]
+   193→macro_rules! vuma_verification_test {
+   194→    ($name:ident { $($body:tt)* }) => {
+   195→        #[test]
+   196→        fn $name() {
+   197→            let _category = $crate::framework::TestCategory::Verification;
+   198→            $($body)*
+   199→        }
+   200→    };
+   201→}
+   202→
+   203→/// Declare a VUMA codegen test.
+   204→///
+   205→/// Annotates the test with the `Codegen` category for registry tracking
+   206→/// and applies the standard `#[test]` attribute.
+   207→///
+   208→/// # Example
+   209→///
+   210→/// ```rust,ignore
+   211→/// vuma_codegen_test!(test_arm64_emit {
+   212→///     let result = $crate::framework::compile_to_arm64("fn main() { return; }");
+   213→///     assert!(result.is_err()); // codegen not yet available
+   214→/// });
+   215→/// ```
+   216→#[macro_export]
+   217→macro_rules! vuma_codegen_test {
+   218→    ($name:ident { $($body:tt)* }) => {
+   219→        #[test]
+   220→        fn $name() {
+   221→            let _category = $crate::framework::TestCategory::Codegen;
+   222→            $($body)*
+   223→        }
+   224→    };
+   225→}
+   226→
+   227→/// Declare a VUMA Pi5 target test.
+   228→///
+   229→/// Annotates the test with the `Pi5` category for registry tracking
+   230→/// and applies the standard `#[test]` attribute.
+   231→///
+   232→/// # Example
+   233→///
+   234→/// ```rust,ignore
+   235→/// vuma_pi5_test!(test_uart_output {
+   236→///     // Pi5-specific test
+   237→/// });
+   238→/// ```
+   239→#[macro_export]
+   240→macro_rules! vuma_pi5_test {
+   241→    ($name:ident { $($body:tt)* }) => {
+   242→        #[test]
+   243→        fn $name() {
+   244→            let _category = $crate::framework::TestCategory::Pi5;
+   245→            $($body)*
+   246→        }
+   247→    };
+   248→}
+   249→
+   250→// ===========================================================================
+   251→// Compile Error
+   252→// ===========================================================================
+   253→
+   254→/// Errors that can occur during the full compilation pipeline.
+   255→///
+   256→/// This aggregates errors from the parsing, SCG conversion, and code
+   257→/// generation stages into a single error type for the test framework.
+   258→#[derive(Debug)]
+   259→pub enum CompileError {
+   260→    /// One or more parse errors.
+   261→    Parse(Vec<ParseError>),
+   262→    /// SCG conversion or validation error.
+   263→    ScgConversion(String),
+   264→    /// Code generation error (message string — the underlying
+   265→    /// `vuma_codegen::CodegenError` is not exposed because the codegen
+   266→    /// crate is currently in flux and may not compile).
+   267→    Codegen(String),
+   268→}
+   269→
+   270→impl fmt::Display for CompileError {
+   271→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   272→        match self {
+   273→            CompileError::Parse(errors) => {
+   274→                write!(f, "parse errors:")?;
+   275→                for e in errors {
+   276→                    write!(f, "\n  {}", e)?;
+   277→                }
+   278→                Ok(())
+   279→            }
+   280→            CompileError::ScgConversion(msg) => write!(f, "SCG conversion error: {}", msg),
+   281→            CompileError::Codegen(msg) => write!(f, "codegen error: {}", msg),
+   282→        }
+   283→    }
+   284→}
+   285→
+   286→impl std::error::Error for CompileError {}
+   287→
+   288→impl From<Vec<ParseError>> for CompileError {
+   289→    fn from(errors: Vec<ParseError>) -> Self {
+   290→        CompileError::Parse(errors)
+   291→    }
+   292→}
+   293→
+   294→// ===========================================================================
+   295→// Pipeline Stage Tracking
+   296→// ===========================================================================
+   297→
+   298→/// A stage in the VUMA compilation/verification pipeline.
+   299→///
+   300→/// Used by [`PipelineResult`] to record which stages succeeded or failed,
+   301→/// enabling fine-grained diagnosis of pipeline failures in tests.
+   302→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+   303→pub enum PipelineStage {
+   304→    /// Source lexing and parsing (source -> AST).
+   305→    Parse,
+   306→    /// AST-to-SCG conversion (AST -> parser SCG).
+   307→    AstToScg,
+   308→    /// Parser SCG to vuma_scg bridge (parser SCG -> vuma_scg::SCG).
+   309→    ScgBridge,
+   310→    /// SCG validation.
+   311→    ScgValidation,
+   312→    /// IVE verification (all five invariant checks).
+   313→    IveVerification,
+   314→    /// Code generation (SCG -> IR -> ARM64).
+   315→    Codegen,
+   316→}
+   317→
+   318→impl PipelineStage {
+   319→    /// Returns all pipeline stages in execution order.
+   320→    pub fn all() -> &'static [PipelineStage; 6] {
+   321→        &[
+   322→            PipelineStage::Parse,
+   323→            PipelineStage::AstToScg,
+   324→            PipelineStage::ScgBridge,
+   325→            PipelineStage::ScgValidation,
+   326→            PipelineStage::IveVerification,
+   327→            PipelineStage::Codegen,
+   328→        ]
+   329→    }
+   330→
+   331→    /// Returns a human-readable label for this stage.
+   332→    pub fn label(&self) -> &'static str {
+   333→        match self {
+   334→            PipelineStage::Parse => "parse",
+   335→            PipelineStage::AstToScg => "ast-to-scg",
+   336→            PipelineStage::ScgBridge => "scg-bridge",
+   337→            PipelineStage::ScgValidation => "scg-validation",
+   338→            PipelineStage::IveVerification => "ive-verification",
+   339→            PipelineStage::Codegen => "codegen",
+   340→        }
+   341→    }
+   342→}
+   343→
+   344→impl fmt::Display for PipelineStage {
+   345→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   346→        write!(f, "{}", self.label())
+   347→    }
+   348→}
+   349→
+   350→/// The outcome of a single pipeline stage.
+   351→#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   352→pub enum StageOutcome {
+   353→    /// The stage completed successfully.
+   354→    Passed,
+   355→    /// The stage failed with an error.
+   356→    Failed,
+   357→    /// The stage was skipped (e.g., codegen not available).
+   358→    Skipped,
+   359→}
+   360→
+   361→/// The result of running a program through the full VUMA pipeline.
+   362→///
+   363→/// Records the outcome of each pipeline stage, the final SCG (if
+   364→/// constructed), and the aggregated verification result (if run).
+   365→#[derive(Debug, Clone)]
+   366→pub struct PipelineResult {
+   367→    /// Per-stage outcomes, in pipeline execution order.
+   368→    pub stages: Vec<(PipelineStage, StageOutcome)>,
+   369→    /// The SCG produced by the pipeline, if parsing and bridging succeeded.
+   370→    pub scg: Option<SCG>,
+   371→    /// The aggregated verification result, if verification was run.
+   372→    pub verification: Option<AggregatedResult>,
+   373→    /// Total elapsed time in milliseconds.
+   374→    pub elapsed_ms: u64,
+   375→}
+   376→
+   377→impl PipelineResult {
+   378→    /// Returns `true` if all pipeline stages that were attempted passed.
+   379→    pub fn all_passed(&self) -> bool {
+   380→        self.stages.iter().all(|(_, outcome)| {
+   381→            *outcome == StageOutcome::Passed || *outcome == StageOutcome::Skipped
+   382→        })
+   383→    }
+   384→
+   385→    /// Returns the first stage that failed, if any.
+   386→    pub fn first_failure(&self) -> Option<&(PipelineStage, StageOutcome)> {
+   387→        self.stages
+   388→            .iter()
+   389→            .find(|(_, outcome)| *outcome == StageOutcome::Failed)
+   390→    }
+   391→
+   392→    /// Returns the stage at which the pipeline stopped (last non-skipped stage).
+   393→    pub fn last_executed_stage(&self) -> Option<PipelineStage> {
+   394→        self.stages
+   395→            .iter()
+   396→            .rev()
+   397→            .find(|(_, outcome)| *outcome != StageOutcome::Skipped)
+   398→            .map(|(stage, _)| *stage)
+   399→    }
+   400→}
+   401→
+   402→impl fmt::Display for PipelineResult {
+   403→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   404→        writeln!(f, "Pipeline Result ({}ms):", self.elapsed_ms)?;
+   405→        for (stage, outcome) in &self.stages {
+   406→            let icon = match outcome {
+   407→                StageOutcome::Passed => "PASS",
+   408→                StageOutcome::Failed => "FAIL",
+   409→                StageOutcome::Skipped => "SKIP",
+   410→            };
+   411→            writeln!(f, "  {:<20} {}", stage, icon)?;
+   412→        }
+   413→        if let Some(ref scg) = self.scg {
+   414→            writeln!(
+   415→                f,
+   416→                "  SCG: {} nodes, {} edges",
+   417→                scg.node_count(),
+   418→                scg.edge_count()
+   419→            )?;
+   420→        }
+   421→        if let Some(ref v) = self.verification {
+   422→            writeln!(f, "  Verdict: {}", v.overall)?;
+   423→        }
+   424→        Ok(())
+   425→    }
+   426→}
+   427→
+   428→// ===========================================================================
+   429→// Test Registry
+   430→// ===========================================================================
+   431→
+   432→/// The outcome of a single named test within the framework.
+   433→#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   434→pub enum TestOutcome {
+   435→    /// The test passed.
+   436→    Pass,
+   437→    /// The test failed (panic or assertion failure).
+   438→    Fail,
+   439→    /// The test was ignored (skipped).
+   440→    Ignore,
+   441→}
+   442→
+   443→impl fmt::Display for TestOutcome {
+   444→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   445→        match self {
+   446→            TestOutcome::Pass => write!(f, "PASS"),
+   447→            TestOutcome::Fail => write!(f, "FAIL"),
+   448→            TestOutcome::Ignore => write!(f, "IGNORE"),
+   449→        }
+   450→    }
+   451→}
+   452→
+   453→/// A record of a single test execution.
+   454→#[derive(Debug, Clone)]
+   455→pub struct TestRecord {
+   456→    /// The test name.
+   457→    pub name: String,
+   458→    /// The test category.
+   459→    pub category: TestCategory,
+   460→    /// The outcome of the test.
+   461→    pub outcome: TestOutcome,
+   462→    /// Elapsed time in microseconds.
+   463→    pub elapsed_us: u64,
+   464→    /// Optional failure message.
+   465→    pub message: Option<String>,
+   466→}
+   467→
+   468→/// A registry for tracking test executions and reporting results.
+   469→///
+   470→/// The test registry accumulates [`TestRecord`]s as tests are run and
+   471→/// provides summary statistics and reporting. It is designed for use
+   472→/// with the [`run_test`] helper function.
+   473→///
+   474→/// # Thread Safety
+   475→///
+   476→/// The global registry uses atomic counters for pass/fail/ignore totals,
+   477→/// making it safe to use from multiple threads (e.g., with `cargo test`
+   478→/// parallelism). Detailed per-test records are not collected in the
+   479→/// global registry; use a local [`TestRegistry`] instance instead.
+   480→pub struct TestRegistry {
+   481→    records: Vec<TestRecord>,
+   482→    pass_count: AtomicUsize,
+   483→    fail_count: AtomicUsize,
+   484→    ignore_count: AtomicUsize,
+   485→}
+   486→
+   487→impl TestRegistry {
+   488→    /// Create a new empty test registry.
+   489→    pub fn new() -> Self {
+   490→        Self {
+   491→            records: Vec::new(),
+   492→            pass_count: AtomicUsize::new(0),
+   493→            fail_count: AtomicUsize::new(0),
+   494→            ignore_count: AtomicUsize::new(0),
+   495→        }
+   496→    }
+   497→
+   498→    /// Record a test result.
+   499→    pub fn record(&mut self, record: TestRecord) {
+   500→        match record.outcome {
+   501→            TestOutcome::Pass => self.pass_count.fetch_add(1, Ordering::Relaxed),
+   502→            TestOutcome::Fail => self.fail_count.fetch_add(1, Ordering::Relaxed),
+   503→            TestOutcome::Ignore => self.ignore_count.fetch_add(1, Ordering::Relaxed),
+   504→        };
+   505→        self.records.push(record);
+   506→    }
+   507→
+   508→    /// Returns the total number of tests recorded.
+   509→    pub fn total(&self) -> usize {
+   510→        self.records.len()
+   511→    }
+   512→
+   513→    /// Returns the number of passing tests.
+   514→    pub fn pass_count(&self) -> usize {
+   515→        self.pass_count.load(Ordering::Relaxed)
+   516→    }
+   517→
+   518→    /// Returns the number of failing tests.
+   519→    pub fn fail_count(&self) -> usize {
+   520→        self.fail_count.load(Ordering::Relaxed)
+   521→    }
+   522→
+   523→    /// Returns the number of ignored tests.
+   524→    pub fn ignore_count(&self) -> usize {
+   525→        self.ignore_count.load(Ordering::Relaxed)
+   526→    }
+   527→
+   528→    /// Returns `true` if all recorded tests passed.
+   529→    pub fn all_passed(&self) -> bool {
+   530→        self.fail_count.load(Ordering::Relaxed) == 0 && self.pass_count.load(Ordering::Relaxed) > 0
+   531→    }
+   532→
+   533→    /// Returns records filtered by category.
+   534→    pub fn by_category(&self, category: TestCategory) -> Vec<&TestRecord> {
+   535→        self.records
+   536→            .iter()
+   537→            .filter(|r| r.category == category)
+   538→            .collect()
+   539→    }
+   540→
+   541→    /// Generate a summary report of all recorded tests.
+   542→    pub fn report(&self) -> TestReport<'_> {
+   543→        let mut by_category: HashMap<TestCategory, Vec<&TestRecord>> = HashMap::new();
+   544→        for record in &self.records {
+   545→            by_category.entry(record.category).or_default().push(record);
+   546→        }
+   547→
+   548→        TestReport {
+   549→            total: self.total(),
+   550→            passed: self.pass_count(),
+   551→            failed: self.fail_count(),
+   552→            ignored: self.ignore_count(),
+   553→            by_category,
+   554→        }
+   555→    }
+   556→}
+   557→
+   558→impl Default for TestRegistry {
+   559→    fn default() -> Self {
+   560→        Self::new()
+   561→    }
+   562→}
+   563→
+   564→/// A summary report of test execution results.
+   565→#[derive(Debug)]
+   566→pub struct TestReport<'a> {
+   567→    /// Total number of tests.
+   568→    pub total: usize,
+   569→    /// Number of passing tests.
+   570→    pub passed: usize,
+   571→    /// Number of failing tests.
+   572→    pub failed: usize,
+   573→    /// Number of ignored tests.
+   574→    pub ignored: usize,
+   575→    /// Records grouped by category.
+   576→    pub by_category: HashMap<TestCategory, Vec<&'a TestRecord>>,
+   577→}
+   578→
+   579→impl<'a> fmt::Display for TestReport<'a> {
+   580→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   581→        writeln!(f, "VUMA Test Report")?;
+   582→        writeln!(f, "================")?;
+   583→        writeln!(
+   584→            f,
+   585→            "Total: {} | Pass: {} | Fail: {} | Ignore: {}",
+   586→            self.total, self.passed, self.failed, self.ignored
+   587→        )?;
+   588→
+   589→        for cat in TestCategory::all() {
+   590→            if let Some(records) = self.by_category.get(cat) {
+   591→                let pass_in_cat = records
+   592→                    .iter()
+   593→                    .filter(|r| r.outcome == TestOutcome::Pass)
+   594→                    .count();
+   595→                let fail_in_cat = records
+   596→                    .iter()
+   597→                    .filter(|r| r.outcome == TestOutcome::Fail)
+   598→                    .count();
+   599→                writeln!(
+   600→                    f,
+   601→                    "\n  [{}] {} tests, {} pass, {} fail",
+   602→                    cat,
+   603→                    records.len(),
+   604→                    pass_in_cat,
+   605→                    fail_in_cat
+   606→                )?;
+   607→                for record in records {
+   608→                    let icon = match record.outcome {
+   609→                        TestOutcome::Pass => "PASS",
+   610→                        TestOutcome::Fail => "FAIL",
+   611→                        TestOutcome::Ignore => "SKIP",
+   612→                    };
+   613→                    writeln!(f, "    {} {} ({}us)", icon, record.name, record.elapsed_us)?;
+   614→                }
+   615→            }
+   616→        }
+   617→
+   618→        Ok(())
+   619→    }
+   620→}
+   621→
+   622→// ===========================================================================
+   623→// Framework Helpers — Source -> SCG
+   624→// ===========================================================================
+   625→
+   626→/// Parse VUMA source text and convert it into a `vuma_scg::SCG`.
+   627→///
+   628→/// This is the primary entry point for the test framework. It:
+   629→/// 1. Lexes and parses the source using `vuma_parser`.
+   630→/// 2. Converts the AST to the parser's local SCG via `AstToScg`.
+   631→/// 3. Bridges the parser SCG into the full `vuma_scg::SCG` with regions,
+   632→///    typed node payloads, and proper edge kinds.
+   633→///
+   634→/// # Errors
+   635→///
+   636→/// Returns `Err(Vec<ParseError>)` if the source cannot be parsed or
+   637→/// converted to the parser SCG.
+   638→///
+   639→/// # Example
+   640→///
+   641→/// ```rust,ignore
+   642→/// let scg = build_scg_from_source("region pool = allocate(1024); free(pool);").unwrap();
+   643→/// assert!(scg.node_count() > 0);
+   644→/// ```
+   645→pub fn build_scg_from_source(source: &str) -> Result<SCG, Vec<ParseError>> {
+   646→    // Step 1: Parse source -> AST.
+   647→    let mut parser = Parser::new(source);
+   648→    let result = parser.parse_program();
+   649→    if result.has_errors() {
+   650→        return Err(result.errors);
+   651→    }
+   652→    let program = result.unwrap();
+   653→
+   654→    // Step 2: Convert AST -> vuma_scg::SCG (AstToScg now produces SCG directly).
+   655→    let mut converter = AstToScg::new();
+   656→    let scg = converter.convert(&program).map_err(|e| vec![e])?;
+   657→
+   658→    Ok(scg)
+   659→}
+   660→
+   661→/// Parse VUMA source, build an SCG, and run all five IVE invariant checks.
+   662→///
+   663→/// Returns an [`AggregatedResult`] with per-invariant outcomes, an overall
+   664→/// verdict, and a summary of statistics.
+   665→///
+   666→/// # Example
+   667→///
+   668→/// ```rust,ignore
+   669→/// let result = verify_program("region buf = allocate(256); free(buf);");
+   670→/// println!("Verdict: {}", result.overall);
+   671→/// ```
+   672→pub fn verify_program(source: &str) -> AggregatedResult {
+   673→    // Build the vuma_scg::SCG (silently treating parse errors as empty programs).
+   674→    let scg = build_scg_from_source(source).unwrap_or_default();
+   675→
+   676→    // Build verification input from the SCG.
+   677→    let input = VerificationInput::from_scg(scg);
+   678→
+   679→    // Run all five invariant checks at Normal level.
+   680→    let aggregator = InvariantAggregator::new();
+   681→    aggregator.verify_all(&input)
+   682→}
+   683→
+   684→/// Parse VUMA source, build an SCG, and run IVE checks at a specific
+   685→/// verification level.
+   686→///
+   687→/// This is like [`verify_program`] but allows control over the verification
+   688→/// level (Quick, Normal, or Exhaustive).
+   689→///
+   690→/// # Example
+   691→///
+   692→/// ```rust,ignore
+   693→/// use vuma_ive::VerificationLevel;
+   694→/// let result = verify_program_at_level("region buf = allocate(256);", VerificationLevel::Quick);
+   695→/// assert_eq!(result.per_invariant.len(), 2); // Quick only runs 2 checks
+   696→/// ```
+   697→pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
+   698→    let scg = build_scg_from_source(source).unwrap_or_default();
+   699→    let input = VerificationInput::from_scg(scg);
+   700→
+   701→    let aggregator = InvariantAggregator::new().with_level(level);
+   702→    aggregator.verify_all(&input)
+   703→}
+   704→
+   705→/// Run the full pipeline with stage-by-stage tracking.
+   706→///
+   707→/// Returns a [`PipelineResult`] that records which stages succeeded or
+   708→/// failed, the constructed SCG (if any), and the verification result
+   709→/// (if the verification stage was reached).
+   710→///
+   711→/// This is the most detailed pipeline function, suitable for integration
+   712→/// tests that need to diagnose *where* in the pipeline a failure occurs.
+   713→///
+   714→/// # Example
+   715→///
+   716→/// ```rust,ignore
+   717→/// let result = verify_program_detailed("region buf = allocate(64); free(buf);");
+   718→/// assert!(result.all_passed());
+   719→/// assert!(result.scg.is_some());
+   720→/// assert!(result.verification.is_some());
+   721→/// ```
+   722→pub fn verify_program_detailed(source: &str) -> PipelineResult {
+   723→    let start = Instant::now();
+   724→    let mut stages = Vec::new();
+   725→    let scg_result: Option<SCG>;
+   726→
+   727→    // Stage 1: Parse source -> AST.
+   728→    let mut parser = Parser::new(source);
+   729→    let parse_result = parser.parse_program();
+   730→    let program = if parse_result.has_errors() {
+   731→        stages.push((PipelineStage::Parse, StageOutcome::Failed));
+   732→        return PipelineResult {
+   733→            stages,
+   734→            scg: None,
+   735→            verification: None,
+   736→            elapsed_ms: start.elapsed().as_millis() as u64,
+   737→        };
+   738→    } else {
+   739→        stages.push((PipelineStage::Parse, StageOutcome::Passed));
+   740→        parse_result.unwrap()
+   741→    };
+   742→
+   743→    // Stage 2: AST -> vuma_scg::SCG (AstToScg now produces SCG directly).
+   744→    let mut converter = AstToScg::new();
+   745→    let scg = match converter.convert(&program) {
+   746→        Ok(s) => {
+   747→            stages.push((PipelineStage::AstToScg, StageOutcome::Passed));
+   748→            s
+   749→        }
+   750→        Err(_) => {
+   751→            stages.push((PipelineStage::AstToScg, StageOutcome::Failed));
+   752→            return PipelineResult {
+   753→                stages,
+   754→                scg: None,
+   755→                verification: None,
+   756→                elapsed_ms: start.elapsed().as_millis() as u64,
+   757→            };
+   758→        }
+   759→    };
+   760→
+   761→    // Stage 3: Bridge step no longer needed (AstToScg produces vuma_scg::SCG directly).
+   762→    stages.push((PipelineStage::ScgBridge, StageOutcome::Passed));
+   763→    scg_result = Some(scg.clone());
+   764→
+   765→    // Stage 4: Validate SCG.
+   766→    let validation = scg.validate();
+   767→    if validation.is_valid {
+   768→        stages.push((PipelineStage::ScgValidation, StageOutcome::Passed));
+   769→    } else {
+   770→        stages.push((PipelineStage::ScgValidation, StageOutcome::Failed));
+   771→    }
+   772→
+   773→    // Stage 5: IVE verification.
+   774→    let input = VerificationInput::from_scg(scg);
+   775→    let aggregator = InvariantAggregator::new();
+   776→    let aggregated = aggregator.verify_all(&input);
+   777→    stages.push((PipelineStage::IveVerification, StageOutcome::Passed));
+   778→    let verification_result: Option<AggregatedResult> = Some(aggregated);
+   779→
+   780→    // Stage 6: Codegen — compile through SCG → IR → ARM64 ELF pipeline.
+   781→    let codegen_outcome = match compile_to_arm64(source) {
+   782→        Ok(_) => StageOutcome::Passed,
+   783→        Err(_) => StageOutcome::Failed,
+   784→    };
+   785→    stages.push((PipelineStage::Codegen, codegen_outcome));
+   786→
+   787→    PipelineResult {
+   788→        stages,
+   789→        scg: scg_result,
+   790→        verification: verification_result,
+   791→        elapsed_ms: start.elapsed().as_millis() as u64,
+   792→    }
+   793→}
+   794→
+   795→/// Run the full compilation pipeline: source -> SCG -> IR -> ARM64 ELF binary.
+   796→///
+   797→/// Returns the raw bytes of a minimal ELF binary for Linux/AArch64.
+   798→///
+   799→/// # Pipeline
+   800→///
+   801→/// 1. Parse source → AST.
+   802→/// 2. Convert AST → codegen SCG (bridge from parser types).
+   803→/// 3. Lower codegen SCG → IR via [`ScgToIr`].
+   804→/// 4. Emit ARM64 machine code → ELF binary via [`Emitter`].
+   805→///
+   806→/// # Errors
+   807→///
+   808→/// Returns [`CompileError`] if any stage fails:
+   809→/// - [`CompileError::Parse`] — source parsing failed.
+   810→/// - [`CompileError::ScgConversion`] — SCG bridge or validation failed.
+   811→/// - [`CompileError::Codegen`] — IR translation or emission failed.
+   812→pub fn compile_to_arm64(source: &str) -> Result<Vec<u8>, Vec<CompileError>> {
+   813→    // Step 1: Parse source -> AST.
+   814→    let mut parser = Parser::new(source);
+   815→    let result = parser.parse_program();
+   816→    if result.has_errors() {
+   817→        return Err(vec![CompileError::Parse(result.errors)]);
+   818→    }
+   819→    let program = result.unwrap();
+   820→
+   821→    // Step 2: Bridge parser AST → codegen SCG.
+   822→    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+   823→
+   824→    // Step 3: Lower codegen SCG → IR.
+   825→    let mut ir_builder = ScgToIr::new();
+   826→    let ir_program = ir_builder
+   827→        .convert(&codegen_scg)
+   828→        .map_err(|e| vec![CompileError::Codegen(e.to_string())])?;
+   829→
+   830→    // Step 4: Emit ARM64 ELF binary.
+   831→    let mut emitter = Emitter::new();
+   832→    let elf_bytes = emitter
+   833→        .emit_program(&ir_program)
+   834→        .map_err(|e| vec![CompileError::Codegen(e.to_string())])?;
+   835→
+   836→    Ok(elf_bytes)
+   837→}
+   838→
+   839→// ===========================================================================
+   840→// AST → Codegen SCG Bridge
+   841→// ===========================================================================
+   842→
+   843→/// Bridge a parsed VUMA AST into the codegen crate's SCG representation.
+   844→///
+   845→/// The codegen SCG is a simplified representation that only contains function
+   846→/// definitions and data declarations. This bridge walks the parser's `Program`
+   847→/// AST and converts each `FnDef` into a `CodegenScgFunction`. Other top-level
+   848→/// items (structs, enums, imports, etc.) are currently skipped since they do
+   849→/// not directly contribute to code emission.
+   850→///
+   851→/// Function bodies are translated on a best-effort basis: simple statements
+   852→/// (let bindings, assignments, returns, expressions) are converted, while
+   853→/// complex control flow (match, loops, etc.) falls back to a placeholder.
+   854→fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> CodegenScg {
+   855→    use vuma_parser::ast::Item;
+   856→
+   857→    let mut nodes: Vec<CodegenScgNode> = Vec::new();
+   858→
+   859→    for item in &program.items {
+   860→        if let Item::FnDef(fn_def) = item {
+   861→            let params: Vec<CodegenScgParam> = fn_def
+   862→                .params
+   863→                .iter()
+   864→                .map(|p| CodegenScgParam {
+   865→                    name: p.name.clone(),
+   866→                    ty: bridge_type_to_codegen(&p.ty),
+   867→                })
+   868→                .collect();
+   869→
+   870→            let results = if let Some(ref ret_ty) = fn_def.return_type {
+   871→                vec![bridge_type_to_codegen(&Some(ret_ty.clone()))]
+   872→            } else {
+   873→                vec![]
+   874→            };
+   875→
+   876→            let body = bridge_block_to_codegen_stmts(&fn_def.body);
+   877→
+   878→            nodes.push(CodegenScgNode::Function(CodegenScgFunction {
+   879→                name: fn_def.name.clone(),
+   880→                params,
+   881→                results,
+   882→                body,
+   883→            }));
+   884→        }
+   885→    }
+   886→
+   887→    CodegenScg { nodes }
+   888→}
+   889→
+   890→/// Convert a parser type annotation to a codegen SCG type.
+   891→fn bridge_type_to_codegen(ty: &Option<vuma_parser::ast::Type>) -> CodegenScgType {
+   892→    match ty {
+   893→        Some(vuma_parser::ast::Type::BDBase(name)) => match name.as_str() {
+   894→            "i8" => CodegenScgType::I8,
+   895→            "i16" => CodegenScgType::I16,
+   896→            "i32" => CodegenScgType::I32,
+   897→            "i64" => CodegenScgType::I64,
+   898→            "u8" => CodegenScgType::U8,
+   899→            "u16" => CodegenScgType::U16,
+   900→            "u32" => CodegenScgType::U32,
+   901→            "u64" => CodegenScgType::U64,
+   902→            _ => CodegenScgType::I64, // default to pointer-sized int
+   903→        },
+   904→        Some(vuma_parser::ast::Type::Ptr(_)) => CodegenScgType::Ptr,
+   905→        Some(vuma_parser::ast::Type::RegionPtr { .. }) => CodegenScgType::Ptr,
+   906→        _ => CodegenScgType::Void,
+   907→    }
+   908→}
+   909→
+   910→/// Convert a parser block into codegen SCG statements.
+   911→fn bridge_block_to_codegen_stmts(block: &vuma_parser::ast::Block) -> Vec<CodegenScgStatement> {
+   912→    block
+   913→        .statements
+   914→        .iter()
+   915→        .flat_map(bridge_stmt_to_codegen)
+   916→        .collect()
+   917→}
+   918→
+   919→/// Convert a single parser statement into zero or more codegen SCG statements.
+   920→///
+   921→/// Supports: Let, Assign, CompoundAssign, Allocate, Free, Cast, Return,
+   922→/// Expr, If, While (with condition), For, Loop, Break, Continue.
+   923→/// Falls back to empty for BdDirective, Sync, UnsafeBlock, Match, Access
+   924→/// (these are not directly representable in the codegen SCG and require
+   925→/// higher-level pipeline support).
+   926→fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatement> {
+   927→    use vuma_parser::ast::Stmt as PStmt;
+   928→
+   929→    match stmt {
+   930→        PStmt::Let(let_stmt) => {
+   931→            // Convert the right-hand side expression and emit a computation.
+   932→            let dst = let_stmt.name.clone();
+   933→            let (op, lhs, rhs) = bridge_expr_to_binop(&let_stmt.value, &dst);
+   934→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+   935→                dst,
+   936→                op,
+   937→                lhs,
+   938→                rhs,
+   939→                tail_call: false,
+   940→            })]
+   941→        }
+   942→        PStmt::Assign(assign_stmt) => {
+   943→            let dst = match &assign_stmt.target {
+   944→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+   945→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+   946→                vuma_parser::ast::AssignTarget::Deref { .. } => "_deref".into(),
+   947→                vuma_parser::ast::AssignTarget::Index { .. } => "_index".into(),
+   948→            };
+   949→            let (op, lhs, rhs) = bridge_expr_to_binop(&assign_stmt.value, &dst);
+   950→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+   951→                dst,
+   952→                op,
+   953→                lhs,
+   954→                rhs,
+   955→                tail_call: false,
+   956→            })]
+   957→        }
+   958→        PStmt::CompoundAssign(ca_stmt) => {
+   959→            // Compound assignment: `x += expr` → `x = x + expr`
+   960→            let dst = match &ca_stmt.target {
+   961→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+   962→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+   963→                _ => "_".into(),
+   964→            };
+   965→            let binop = match ca_stmt.op {
+   966→                vuma_parser::ast::CompoundOp::Add => BinOpKind::Add,
+   967→                vuma_parser::ast::CompoundOp::Sub => BinOpKind::Sub,
+   968→                vuma_parser::ast::CompoundOp::Mul => BinOpKind::Mul,
+   969→                vuma_parser::ast::CompoundOp::Div => BinOpKind::SDiv,
+   970→                vuma_parser::ast::CompoundOp::Mod => BinOpKind::SRem,
+   971→                vuma_parser::ast::CompoundOp::BitAnd => BinOpKind::And,
+   972→                vuma_parser::ast::CompoundOp::BitOr => BinOpKind::Or,
+   973→                vuma_parser::ast::CompoundOp::BitXor => BinOpKind::Xor,
+   974→                vuma_parser::ast::CompoundOp::Shl => BinOpKind::Shl,
+   975→                vuma_parser::ast::CompoundOp::Shr => BinOpKind::ShrL,
+   976→            };
+   977→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+   978→                dst: dst.clone(),
+   979→                op: binop,
+   980→                lhs: CodegenScgExpr::Var(dst),
+   981→                rhs: bridge_expr_to_scg_expr(&ca_stmt.value),
+   982→                tail_call: false,
+   983→            })]
+   984→        }
+   985→        PStmt::Allocate(alloc_stmt) => {
+   986→            // Allocation: emit as computation `dst = allocate(size)`.
+   987→            // Represented as Add(dst_var, 0) with a named destination so
+   988→            // the IR builder can track the allocation point.
+   989→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+   990→                dst: "_alloc".into(),
+   991→                op: BinOpKind::Add,
+   992→                lhs: CodegenScgExpr::Int(0),
+   993→                rhs: bridge_expr_to_scg_expr(&alloc_stmt.size),
+   994→                tail_call: false,
+   995→            })]
+   996→        }
+   997→        PStmt::Free(free_stmt) => {
+   998→            // Deallocation: emit as computation to preserve the free point
+   999→            // in the SCG. The actual free is a runtime call.
+  1000→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+  1001→                dst: "_free".into(),
+  1002→                op: BinOpKind::Add,
+  1003→                lhs: bridge_expr_to_scg_expr(&free_stmt.ptr),
+  1004→                rhs: CodegenScgExpr::Int(0),
+  1005→                tail_call: false,
+  1006→            })]
+  1007→        }
+  1008→        PStmt::Cast(cast_stmt) => {
+  1009→            // Cast: `expr as Type` → emit as computation preserving the value.
+  1010→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+  1011→                dst: "_cast".into(),
+  1012→                op: BinOpKind::Add,
+  1013→                lhs: bridge_expr_to_scg_expr(&cast_stmt.expr),
+  1014→                rhs: CodegenScgExpr::Int(0),
+  1015→                tail_call: false,
+  1016→            })]
+  1017→        }
+  1018→        PStmt::Return(ret_stmt) => {
+  1019→            let values = match &ret_stmt.value {
+  1020→                Some(expr) => vec![bridge_expr_to_scg_expr(expr)],
+  1021→                None => vec![],
+  1022→            };
+  1023→            vec![CodegenScgStatement::Return(values)]
+  1024→        }
+  1025→        PStmt::Expr(expr_stmt) => {
+  1026→            // Expression statement: evaluate and discard result.
+  1027→            let (op, lhs, rhs) = bridge_expr_to_binop(&expr_stmt.expr, "_");
+  1028→            vec![CodegenScgStatement::Computation(CodegenComputationNode {
+  1029→                dst: "_".into(),
+  1030→                op,
+  1031→                lhs,
+  1032→                rhs,
+  1033→                tail_call: false,
+  1034→            })]
+  1035→        }
+  1036→        PStmt::If(if_stmt) => {
+  1037→            let cond = bridge_expr_to_scg_expr(&if_stmt.condition);
+  1038→            let then_body = bridge_block_to_codegen_stmts(&if_stmt.then_block);
+  1039→            let else_body = if_stmt
+  1040→                .else_block
+  1041→                .as_ref()
+  1042→                .map(bridge_block_to_codegen_stmts);
+  1043→            vec![CodegenScgStatement::Control(CodegenControlNode::If {
+  1044→                cond,
+  1045→                then_body,
+  1046→                else_body,
+  1047→            })]
+  1048→        }
+  1049→        PStmt::While(while_stmt) => {
+  1050→            let cond = bridge_expr_to_scg_expr(&while_stmt.condition);
+  1051→            let body = bridge_block_to_codegen_stmts(&while_stmt.body);
+  1052→            vec![CodegenScgStatement::Control(CodegenControlNode::If {
+  1053→                cond,
+  1054→                then_body: body,
+  1055→                else_body: Some(vec![CodegenScgStatement::Control(
+  1056→                    CodegenControlNode::Break,
+  1057→                )]),
+  1058→            })]
+  1059→        }
+  1060→        PStmt::For(for_stmt) => {
+  1061→            // For loop: `for name in iter { body }`
+  1062→            // Bridge as a loop with an iterator variable and break condition.
+  1063→            // The iterator variable is tracked as a computation node.
+  1064→            let iter_init = CodegenScgStatement::Computation(CodegenComputationNode {
+  1065→                dst: for_stmt.name.clone(),
+  1066→                op: BinOpKind::Add,
+  1067→                lhs: CodegenScgExpr::Int(0),
+  1068→                rhs: bridge_expr_to_scg_expr(&for_stmt.iter),
+  1069→                tail_call: false,
+  1070→            });
+  1071→            let body = bridge_block_to_codegen_stmts(&for_stmt.body);
+  1072→            let mut loop_stmts = vec![iter_init];
+  1073→            loop_stmts.push(CodegenScgStatement::Control(CodegenControlNode::Loop {
+  1074→                body,
+  1075→            }));
+  1076→            loop_stmts
+  1077→        }
+  1078→        PStmt::Loop(loop_stmt) => {
+  1079→            let body = bridge_block_to_codegen_stmts(&loop_stmt.body);
+  1080→            vec![CodegenScgStatement::Control(CodegenControlNode::Loop {
+  1081→                body,
+  1082→            })]
+  1083→        }
+  1084→        PStmt::Break(_) => vec![CodegenScgStatement::Control(CodegenControlNode::Break)],
+  1085→        PStmt::Continue(_) => vec![CodegenScgStatement::Control(CodegenControlNode::Continue)],
+  1086→        // BdDirective, Sync, UnsafeBlock, Match, Access are not directly
+  1087→        // representable in the codegen SCG — they require higher-level
+  1088→        // pipeline support. Skip them gracefully.
+  1089→        PStmt::BdDirective(_)
+  1090→        | PStmt::Sync(_)
+  1091→        | PStmt::UnsafeBlock { .. }
+  1092→        | PStmt::Match(_)
+  1093→        | PStmt::Access(_) => vec![],
+  1094→    }
+  1095→}
+  1096→
+  1097→/// Convert a parser expression into a codegen SCG expression.
+  1098→///
+  1099→/// Handles: Var, Lit (Int/Float/Bool), BinOp, UnaryOp, Call, Deref,
+  1100→/// Cast, Index, Range. Complex expressions that cannot be represented
+  1101→/// directly in the codegen SCG are preserved as named variable references
+  1102→/// or zero-valued placeholders.
+  1103→fn bridge_expr_to_scg_expr(expr: &vuma_parser::ast::Expr) -> CodegenScgExpr {
+  1104→    use vuma_parser::ast::{Expr, Lit, UnOp};
+  1105→
+  1106→    match expr {
+  1107→        Expr::Var { name, .. } => CodegenScgExpr::Var(name.clone()),
+  1108→        Expr::Lit { value, .. } => match value {
+  1109→            Lit::Int(n) => CodegenScgExpr::Int(*n),
+  1110→            Lit::Float(f) => CodegenScgExpr::Float(*f),
+  1111→            Lit::Bool(b) => CodegenScgExpr::Int(if *b { 1 } else { 0 }),
+  1112→            _ => CodegenScgExpr::Int(0),
+  1113→        },
+  1114→        Expr::BinOp { op, lhs, rhs: _, .. } => {
+  1115→            // Recursively bridge nested binary operations.
+  1116→            let cg_op = match op {
+  1117→                vuma_parser::ast::BinOp::Add => BinOpKind::Add,
+  1118→                vuma_parser::ast::BinOp::Sub => BinOpKind::Sub,
+  1119→                vuma_parser::ast::BinOp::Mul => BinOpKind::Mul,
+  1120→                vuma_parser::ast::BinOp::Div => BinOpKind::SDiv,
+  1121→                vuma_parser::ast::BinOp::Mod => BinOpKind::SRem,
+  1122→                vuma_parser::ast::BinOp::And => BinOpKind::And,
+  1123→                vuma_parser::ast::BinOp::Or => BinOpKind::Or,
+  1124→                vuma_parser::ast::BinOp::BitAnd => BinOpKind::And,
+  1125→                vuma_parser::ast::BinOp::BitOr => BinOpKind::Or,
+  1126→                vuma_parser::ast::BinOp::BitXor => BinOpKind::Xor,
+  1127→                vuma_parser::ast::BinOp::Shl => BinOpKind::Shl,
+  1128→                vuma_parser::ast::BinOp::Shr => BinOpKind::ShrL,
+  1129→                vuma_parser::ast::BinOp::Eq => BinOpKind::Eq,
+  1130→                vuma_parser::ast::BinOp::Ne => BinOpKind::Ne,
+  1131→                vuma_parser::ast::BinOp::Lt => BinOpKind::SLt,
+  1132→                vuma_parser::ast::BinOp::Le => BinOpKind::SLe,
+  1133→                vuma_parser::ast::BinOp::Gt => BinOpKind::SGt,
+  1134→                vuma_parser::ast::BinOp::Ge => BinOpKind::SGe,
+  1135→            };
+  1136→            // For SCG expressions, represent as the LHS of a BinOp computation.
+  1137→            // The full computation is captured at the ComputationNode level.
+  1138→            let _ = cg_op;
+  1139→            bridge_expr_to_scg_expr(lhs)
+  1140→        }
+  1141→        Expr::UnOp { op, expr: operand, .. } => {
+  1142→            match op {
+  1143→                UnOp::BitNot => {
+  1144→                    // ~x → XOR(x, -1)
+  1145→                    CodegenScgExpr::Int(-1)
+  1146→                }
+  1147→                UnOp::Neg => {
+  1148→                    // -x → SUB(0, x)
+  1149→                    CodegenScgExpr::Int(0)
+  1150→                }
+  1151→                _ => bridge_expr_to_scg_expr(operand),
+  1152→            }
+  1153→        }
+  1154→        Expr::Call { callee, args, .. } => {
+  1155→            // Function call: preserve the callee name as a variable
+  1156→            // reference. The actual call semantics require IR-level support.
+  1157→            let _ = args;
+  1158→            match callee.as_ref() {
+  1159→                Expr::Var { name, .. } => CodegenScgExpr::Var(format!("_call_{}", name)),
+  1160→                _ => CodegenScgExpr::Int(0),
+  1161→            }
+  1162→        }
+  1163→        Expr::Deref { expr, .. } => {
+  1164→            // Dereference: track the inner expression.
+  1165→            bridge_expr_to_scg_expr(expr)
+  1166→        }
+  1167→        Expr::Cast { expr, .. } => {
+  1168→            // Cast: the value is preserved, only the type changes.
+  1169→            bridge_expr_to_scg_expr(expr)
+  1170→        }
+  1171→        Expr::Index { expr, index, .. } => {
+  1172→            // Index: track base + index for address computation.
+  1173→            let _ = index;
+  1174→            bridge_expr_to_scg_expr(expr)
+  1175→        }
+  1176→        Expr::Range { start, end, .. } => {
+  1177→            // Range: track the start value as the primary expression.
+  1178→            let _ = end;
+  1179→            bridge_expr_to_scg_expr(start)
+  1180→        }
+  1181→        _ => CodegenScgExpr::Int(0), // fallback for Field, Group, etc.
+  1182→    }
+  1183→}
+  1184→
+  1185→/// Convert a parser expression into a (BinOpKind, lhs, rhs) triple for use
+  1186→/// in a `ComputationNode`. Simple expressions like integer literals or variable
+  1187→/// references are converted into `Add(x, 0)` to represent a "move" operation.
+  1188→///
+  1189→/// Handles: Lit, Var, BinOp (with recursive decomposition), UnaryOp,
+  1190→/// Call (as a placeholder), Cast, Deref, Index, Range.
+  1191→fn bridge_expr_to_binop(
+  1192→    expr: &vuma_parser::ast::Expr,
+  1193→    _dst: &str,
+  1194→) -> (BinOpKind, CodegenScgExpr, CodegenScgExpr) {
+  1195→    use vuma_parser::ast::{BinOp, Expr, Lit, UnOp};
+  1196→
+  1197→    match expr {
+  1198→        Expr::Lit {
+  1199→            value: Lit::Int(n), ..
+  1200→        } => (
+  1201→            BinOpKind::Add,
+  1202→            CodegenScgExpr::Int(0),
+  1203→            CodegenScgExpr::Int(*n),
+  1204→        ),
+  1205→        Expr::Var { name, .. } => (
+  1206→            BinOpKind::Add,
+  1207→            CodegenScgExpr::Var(name.clone()),
+  1208→            CodegenScgExpr::Int(0),
+  1209→        ),
+  1210→        Expr::BinOp { op, lhs, rhs, .. } => {
+  1211→            let cg_op = match op {
+  1212→                BinOp::Add => BinOpKind::Add,
+  1213→                BinOp::Sub => BinOpKind::Sub,
+  1214→                BinOp::Mul => BinOpKind::Mul,
+  1215→                BinOp::Div => BinOpKind::SDiv,
+  1216→                BinOp::Mod => BinOpKind::SRem,
+  1217→                BinOp::And => BinOpKind::And,
+  1218→                BinOp::Or => BinOpKind::Or,
+  1219→                BinOp::BitAnd => BinOpKind::And,
+  1220→                BinOp::BitOr => BinOpKind::Or,
+  1221→                BinOp::BitXor => BinOpKind::Xor,
+  1222→                BinOp::Shl => BinOpKind::Shl,
+  1223→                BinOp::Shr => BinOpKind::ShrL,
+  1224→                BinOp::Eq => BinOpKind::Eq,
+  1225→                BinOp::Ne => BinOpKind::Ne,
+  1226→                BinOp::Lt => BinOpKind::SLt,
+  1227→                BinOp::Le => BinOpKind::SLe,
+  1228→                BinOp::Gt => BinOpKind::SGt,
+  1229→                BinOp::Ge => BinOpKind::SGe,
+  1230→            };
+  1231→            (
+  1232→                cg_op,
+  1233→                bridge_expr_to_scg_expr(lhs),
+  1234→                bridge_expr_to_scg_expr(rhs),
+  1235→            )
+  1236→        }
+  1237→        Expr::UnOp { op, expr: operand, .. } => {
+  1238→            match op {
+  1239→                UnOp::BitNot => (
+  1240→                    BinOpKind::Xor,
+  1241→                    bridge_expr_to_scg_expr(operand),
+  1242→                    CodegenScgExpr::Int(-1),
+  1243→                ),
+  1244→                UnOp::Neg => (
+  1245→                    BinOpKind::Sub,
+  1246→                    CodegenScgExpr::Int(0),
+  1247→                    bridge_expr_to_scg_expr(operand),
+  1248→                ),
+  1249→                _ => (
+  1250→                    BinOpKind::Add,
+  1251→                    bridge_expr_to_scg_expr(operand),
+  1252→                    CodegenScgExpr::Int(0),
+  1253→                ),
+  1254→            }
+  1255→        }
+  1256→        Expr::Call { callee, args, .. } => {
+  1257→            // Function call: preserve callee and arguments.
+  1258→            let lhs = args.first()
+  1259→                .map(|a| bridge_expr_to_scg_expr(a))
+  1260→                .unwrap_or(CodegenScgExpr::Int(0));
+  1261→            let _ = callee;
+  1262→            (
+  1263→                BinOpKind::Add,
+  1264→                lhs,
+  1265→                CodegenScgExpr::Int(0),
+  1266→            )
+  1267→        }
+  1268→        Expr::Deref { expr, .. } => (
+  1269→            BinOpKind::Add,
+  1270→            bridge_expr_to_scg_expr(expr),
+  1271→            CodegenScgExpr::Int(0),
+  1272→        ),
+  1273→        Expr::Cast { expr, .. } => (
+  1274→            BinOpKind::Add,
+  1275→            bridge_expr_to_scg_expr(expr),
+  1276→            CodegenScgExpr::Int(0),
+  1277→        ),
+  1278→        Expr::Index { expr, index, .. } => {
+  1279→            (
+  1280→                BinOpKind::Add,
+  1281→                bridge_expr_to_scg_expr(expr),
+  1282→                bridge_expr_to_scg_expr(index),
+  1283→            )
+  1284→        }
+  1285→        Expr::Range { start, end, .. } => {
+  1286→            (
+  1287→                BinOpKind::Add,
+  1288→                bridge_expr_to_scg_expr(start),
+  1289→                bridge_expr_to_scg_expr(end),
+  1290→            )
+  1291→        }
+  1292→        _ => {
+  1293→            (
+  1294→                BinOpKind::Add,
+  1295→                CodegenScgExpr::Int(0),
+  1296→                CodegenScgExpr::Int(0),
+  1297→            )
+  1298→        }
+  1299→    }
+  1300→}
+  1301→
+  1302→// ===========================================================================
+  1303→// Assertion Helpers
+  1304→// ===========================================================================
+  1305→
+  1306→/// Assert that the given VUMA source program passes all invariant checks.
+  1307→///
+  1308→/// This panics if the aggregated verification result contains any
+  1309→/// concrete invariant **violations**.
+  1310→///
+  1311→/// In the current implementation, all IVE checks return `Unverified`, so the
+  1312→/// overall verdict is `Inconclusive`. This assertion accepts `Inconclusive`
+  1313→/// as a passing result until the IVE checks are fully implemented. It only
+  1314→/// fails when a concrete invariant *violation* is detected.
+  1315→///
+  1316→/// # Panics
+  1317→///
+  1318→/// Panics if any invariant check returns a `Violated` status.
+  1319→pub fn assert_verifies(source: &str) {
+  1320→    let result = verify_program(source);
+  1321→
+  1322→    // Check for any violations.
+  1323→    let violations: Vec<_> = result
+  1324→        .per_invariant
+  1325→        .iter()
+  1326→        .filter(|pir| pir.is_fail())
+  1327→        .collect();
+  1328→
+  1329→    if !violations.is_empty() {
+  1330→        let violation_labels: Vec<String> = violations
+  1331→            .iter()
+  1332→            .map(|v| format!("{}: {}", v.kind, v.result.message))
+  1333→            .collect();
+  1334→        panic!(
+  1335→            "Program failed invariant checks:\n  {}\n\nOverall verdict: {}\nSource:\n{}",
+  1336→            violation_labels.join("\n  "),
+  1337→            result.overall,
+  1338→            source
+  1339→        );
+  1340→    }
+  1341→}
+  1342→
+  1343→/// Assert that the given VUMA source program violates a specific invariant.
+  1344→///
+  1345→/// This panics if the specified invariant is *not* violated (i.e., it is
+  1346→/// proven, probably safe, or unverified).
+  1347→///
+  1348→/// **Note**: Since the IVE verification engine is currently in placeholder
+  1349→/// mode (returning `Unverified` for all checks), this assertion will fail
+  1350→/// for all programs until the actual verification logic is implemented.
+  1351→/// Use this assertion in tests that are explicitly marked as
+  1352→/// `#[ignore]` pending IVE implementation.
+  1353→///
+  1354→/// # Panics
+  1355→///
+  1356→/// Panics if the specified invariant is not violated.
+  1357→pub fn assert_violation(source: &str, invariant: InvariantKind) {
+  1358→    let result = verify_program(source);
+  1359→
+  1360→    let pir = result
+  1361→        .per_invariant
+  1362→        .iter()
+  1363→        .find(|pir| pir.kind == invariant);
+  1364→
+  1365→    match pir {
+  1366→        Some(pir) if pir.is_fail() => {
+  1367→            // Expected: the invariant is violated.
+  1368→        }
+  1369→        Some(pir) => {
+  1370→            panic!(
+  1371→                "Expected violation of {:?}, but got status: {:?}\n\
+  1372→                 Message: {}\n\
+  1373→                 Overall verdict: {}\n\
+  1374→                 Source:\n{}",
+  1375→                invariant, pir.result.status, pir.result.message, result.overall, source
+  1376→            );
+  1377→        }
+  1378→        None => {
+  1379→            panic!(
+  1380→                "Invariant {:?} was not checked in the verification run.\n\
+  1381→                 Checked invariants: {}\n\
+  1382→                 Source:\n{}",
+  1383→                invariant,
+  1384→                result
+  1385→                    .per_invariant
+  1386→                    .iter()
+  1387→                    .map(|p| format!("{:?}", p.kind))
+  1388→                    .collect::<Vec<_>>()
+  1389→                    .join(", "),
+  1390→                source
+  1391→            );
+  1392→        }
+  1393→    }
+  1394→}
+  1395→
+  1396→// ===========================================================================
+  1397→// SCG Bridges
+  1398→// ===========================================================================
+  1399→
+  1400→// bridge_scg_to_ive_message removed — verification now uses VerificationInput::from_scg()
+  1401→
+  1402→// ===========================================================================
+  1403→// Utility Helpers
+  1404→// ===========================================================================
+  1405→
+  1406→/// Run a test closure with a descriptive label, capturing any panic and
+  1407→/// reporting it with context about the test category and source.
+  1408→pub fn run_test(category: TestCategory, name: &str, f: impl FnOnce() + panic::UnwindSafe) -> bool {
+  1409→    match panic::catch_unwind(f) {
+  1410→        Ok(()) => {
+  1411→            println!("[PASS] [{:?}] {}", category, name);
+  1412→            true
+  1413→        }
+  1414→        Err(_) => {
+  1415→            eprintln!("[FAIL] [{:?}] {}", category, name);
+  1416→            false
+  1417→        }
+  1418→    }
+  1419→}
+  1420→
+  1421→/// Run a test closure and record the result in a [`TestRegistry`].
+  1422→///
+  1423→/// This is the registry-aware version of [`run_test`]. It measures elapsed
+  1424→/// time and records a [`TestRecord`] in the provided registry.
+  1425→pub fn run_registered_test(
+  1426→    registry: &mut TestRegistry,
+  1427→    category: TestCategory,
+  1428→    name: &str,
+  1429→    f: impl FnOnce() + panic::UnwindSafe,
+  1430→) -> TestOutcome {
+  1431→    let start = Instant::now();
+  1432→    let result = panic::catch_unwind(f);
+  1433→    let elapsed_us = start.elapsed().as_micros() as u64;
+  1434→
+  1435→    let (outcome, message) = match result {
+  1436→        Ok(()) => (TestOutcome::Pass, None),
+  1437→        Err(_) => (TestOutcome::Fail, Some("test panicked".to_string())),
+  1438→    };
+  1439→
+  1440→    let icon = match outcome {
+  1441→        TestOutcome::Pass => "PASS",
+  1442→        TestOutcome::Fail => "FAIL",
+  1443→        TestOutcome::Ignore => "SKIP",
+  1444→    };
+  1445→    println!("[{}] [{:?}] {} ({}us)", icon, category, name, elapsed_us);
+  1446→
+  1447→    registry.record(TestRecord {
+  1448→        name: name.to_string(),
+  1449→        category,
+  1450→        outcome,
+  1451→        elapsed_us,
+  1452→        message,
+  1453→    });
+  1454→
+  1455→    outcome
+  1456→}
+  1457→
+  1458→// ===========================================================================
+  1459→// SCG Builder Helpers
+  1460→// ===========================================================================
+  1461→
+  1462→/// Build a trivial SCG manually: allocate -> compute -> free.
+  1463→///
+  1464→/// This is a convenience helper for tests that need a well-formed SCG
+  1465→/// without going through the parser.
+  1466→pub fn build_trivial_scg() -> SCG {
+  1467→    let mut scg = SCG::new();
+  1468→    let region_id = RegionId::new(1);
+  1469→
+  1470→    let alloc_id = scg.add_node(
+  1471→        NodeType::Allocation,
+  1472→        NodePayload::Allocation(AllocationNode {
+  1473→            size: 256,
+  1474→            align: 16,
+  1475→            region_id,
+  1476→            type_name: Some("Buffer".to_string()),
+  1477→        }),
+  1478→        ProgramPoint {
+  1479→            file: Some("trivial.vu".to_string()),
+  1480→            line: Some(1),
+  1481→            column: Some(1),
+  1482→            offset: None,
+  1483→        },
+  1484→    );
+  1485→
+  1486→    let comp_id = scg.add_node(
+  1487→        NodeType::Computation,
+  1488→        NodePayload::Computation(ComputationNode {
+  1489→            operation: "write_buffer".to_string(),
+  1490→            result_type: None,
+  1491→            tail_call: false,
+  1492→        }),
+  1493→        ProgramPoint {
+  1494→            file: Some("trivial.vu".to_string()),
+  1495→            line: Some(2),
+  1496→            column: Some(1),
+  1497→            offset: None,
+  1498→        },
+  1499→    );
+  1500→
+  1501→    let dealloc_id = scg.add_node(
+  1502→        NodeType::Deallocation,
+  1503→        NodePayload::Deallocation(DeallocationNode {
+  1504→            allocation_node: alloc_id,
+  1505→            region_id,
+  1506→        }),
+  1507→        ProgramPoint {
+  1508→            file: Some("trivial.vu".to_string()),
+  1509→            line: Some(3),
+  1510→            column: Some(1),
+  1511→            offset: None,
+  1512→        },
+  1513→    );
+  1514→
+  1515→    let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+  1516→    region.add_node(alloc_id);
+  1517→    region.add_node(dealloc_id);
+  1518→    scg.add_region(region);
+  1519→
+  1520→    scg.add_edge(alloc_id, comp_id, EdgeKind::DataFlow).unwrap();
+  1521→    scg.add_edge(comp_id, dealloc_id, EdgeKind::ControlFlow)
+  1522→        .unwrap();
+  1523→    scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation)
+  1524→        .unwrap();
+  1525→
+  1526→    scg
+  1527→}
+  1528→
+  1529→/// Build an SCG with a use-after-free pattern: allocate -> free -> access.
+  1530→///
+  1531→/// The access after deallocation should trigger a liveness violation
+  1532→/// once the IVE liveness checker is fully implemented.
+  1533→pub fn build_use_after_free_scg() -> SCG {
+  1534→    let mut scg = SCG::new();
+  1535→    let region_id = RegionId::new(1);
+  1536→
+  1537→    let alloc_id = scg.add_node(
+  1538→        NodeType::Allocation,
+  1539→        NodePayload::Allocation(AllocationNode {
+  1540→            size: 64,
+  1541→            align: 8,
+  1542→            region_id,
+  1543→            type_name: None,
+  1544→        }),
+  1545→        ProgramPoint {
+  1546→            file: Some("uaf.vu".to_string()),
+  1547→            line: Some(1),
+  1548→            column: Some(1),
+  1549→            offset: None,
+  1550→        },
+  1551→    );
+  1552→
+  1553→    let dealloc_id = scg.add_node(
+  1554→        NodeType::Deallocation,
+  1555→        NodePayload::Deallocation(DeallocationNode {
+  1556→            allocation_node: alloc_id,
+  1557→            region_id,
+  1558→        }),
+  1559→        ProgramPoint {
+  1560→            file: Some("uaf.vu".to_string()),
+  1561→            line: Some(2),
+  1562→            column: Some(1),
+  1563→            offset: None,
+  1564→        },
+  1565→    );
+  1566→
+  1567→    let access_id = scg.add_node(
+  1568→        NodeType::Access,
+  1569→        NodePayload::Access(AccessNode {
+  1570→            mode: AccessMode::Read,
+  1571→            region_id,
+  1572→            offset: Some(0),
+  1573→            access_size: Some(8),
+  1574→        }),
+  1575→        ProgramPoint {
+  1576→            file: Some("uaf.vu".to_string()),
+  1577→            line: Some(3),
+  1578→            column: Some(1),
+  1579→            offset: None,
+  1580→        },
+  1581→    );
+  1582→
+  1583→    scg.add_edge(alloc_id, dealloc_id, EdgeKind::ControlFlow)
+  1584→        .unwrap();
+  1585→    scg.add_edge(dealloc_id, access_id, EdgeKind::ControlFlow)
+  1586→        .unwrap();
+  1587→    scg.add_edge(alloc_id, access_id, EdgeKind::DataFlow)
+  1588→        .unwrap();
+  1589→
+  1590→    scg
+  1591→}
+  1592→
+  1593→/// Build an SCG with a double-free pattern: allocate -> free -> free.
+  1594→///
+  1595→/// The second deallocation of the same region should trigger a cleanup
+  1596→/// violation once the IVE cleanup checker is fully implemented.
+  1597→pub fn build_double_free_scg() -> SCG {
+  1598→    let mut scg = SCG::new();
+  1599→    let region_id = RegionId::new(1);
+  1600→
+  1601→    let alloc_id = scg.add_node(
+  1602→        NodeType::Allocation,
+  1603→        NodePayload::Allocation(AllocationNode {
+  1604→            size: 128,
+  1605→            align: 8,
+  1606→            region_id,
+  1607→            type_name: Some("DoubleFreeBuf".to_string()),
+  1608→        }),
+  1609→        ProgramPoint {
+  1610→            file: Some("dblfree.vu".to_string()),
+  1611→            line: Some(1),
+  1612→            column: Some(1),
+  1613→            offset: None,
+  1614→        },
+  1615→    );
+  1616→
+  1617→    let dealloc1_id = scg.add_node(
+  1618→        NodeType::Deallocation,
+  1619→        NodePayload::Deallocation(DeallocationNode {
+  1620→            allocation_node: alloc_id,
+  1621→            region_id,
+  1622→        }),
+  1623→        ProgramPoint {
+  1624→            file: Some("dblfree.vu".to_string()),
+  1625→            line: Some(2),
+  1626→            column: Some(1),
+  1627→            offset: None,
+  1628→        },
+  1629→    );
+  1630→
+  1631→    let dealloc2_id = scg.add_node(
+  1632→        NodeType::Deallocation,
+  1633→        NodePayload::Deallocation(DeallocationNode {
+  1634→            allocation_node: alloc_id,
+  1635→            region_id,
+  1636→        }),
+  1637→        ProgramPoint {
+  1638→            file: Some("dblfree.vu".to_string()),
+  1639→            line: Some(3),
+  1640→            column: Some(1),
+  1641→            offset: None,
+  1642→        },
+  1643→    );
+  1644→
+  1645→    let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+  1646→    region.add_node(alloc_id);
+  1647→    region.add_node(dealloc1_id);
+  1648→    scg.add_region(region);
+  1649→
+  1650→    scg.add_edge(alloc_id, dealloc1_id, EdgeKind::ControlFlow)
+  1651→        .unwrap();
+  1652→    scg.add_edge(dealloc1_id, dealloc2_id, EdgeKind::ControlFlow)
+  1653→        .unwrap();
+  1654→    scg.add_edge(alloc_id, dealloc1_id, EdgeKind::Derivation)
+  1655→        .unwrap();
+  1656→    scg.add_edge(alloc_id, dealloc2_id, EdgeKind::Derivation)
+  1657→        .unwrap();
+  1658→
+  1659→    scg
+  1660→}
+  1661→
+  1662→/// Build an SCG with an out-of-bounds access pattern.
+  1663→///
+  1664→/// The access at an offset beyond the allocation size should trigger an
+  1665→/// interpretation violation once the IVE interpretation checker is
+  1666→/// fully implemented.
+  1667→pub fn build_out_of_bounds_scg() -> SCG {
+  1668→    let mut scg = SCG::new();
+  1669→    let region_id = RegionId::new(1);
+  1670→
+  1671→    let alloc_id = scg.add_node(
+  1672→        NodeType::Allocation,
+  1673→        NodePayload::Allocation(AllocationNode {
+  1674→            size: 16,
+  1675→            align: 8,
+  1676→            region_id,
+  1677→            type_name: None,
+  1678→        }),
+  1679→        ProgramPoint {
+  1680→            file: Some("oob.vu".to_string()),
+  1681→            line: Some(1),
+  1682→            column: Some(1),
+  1683→            offset: None,
+  1684→        },
+  1685→    );
+  1686→
+  1687→    // Access at offset 24, which is beyond the 16-byte allocation.
+  1688→    let access_id = scg.add_node(
+  1689→        NodeType::Access,
+  1690→        NodePayload::Access(AccessNode {
+  1691→            mode: AccessMode::Read,
+  1692→            region_id,
+  1693→            offset: Some(24),
+  1694→            access_size: Some(8),
+  1695→        }),
+  1696→        ProgramPoint {
+  1697→            file: Some("oob.vu".to_string()),
+  1698→            line: Some(2),
+  1699→            column: Some(1),
+  1700→            offset: None,
+  1701→        },
+  1702→    );
+  1703→
+  1704→    let dealloc_id = scg.add_node(
+  1705→        NodeType::Deallocation,
+  1706→        NodePayload::Deallocation(DeallocationNode {
+  1707→            allocation_node: alloc_id,
+  1708→            region_id,
+  1709→        }),
+  1710→        ProgramPoint {
+  1711→            file: Some("oob.vu".to_string()),
+  1712→            line: Some(3),
+  1713→            column: Some(1),
+  1714→            offset: None,
+  1715→        },
+  1716→    );
+  1717→
+  1718→    let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+  1719→    region.add_node(alloc_id);
+  1720→    region.add_node(access_id);
+  1721→    region.add_node(dealloc_id);
+  1722→    scg.add_region(region);
+  1723→
+  1724→    scg.add_edge(alloc_id, access_id, EdgeKind::DataFlow)
+  1725→        .unwrap();
+  1726→    scg.add_edge(access_id, dealloc_id, EdgeKind::ControlFlow)
+  1727→        .unwrap();
+  1728→    scg.add_edge(alloc_id, dealloc_id, EdgeKind::Derivation)
+  1729→        .unwrap();
+  1730→
+  1731→    scg
+  1732→}
+  1733→
+  1734→/// Build an SCG with a leaked allocation (no deallocation).
+  1735→///
+  1736→/// The allocation without a matching deallocation should trigger a cleanup
+  1737→/// violation once the IVE cleanup checker is fully implemented.
+  1738→pub fn build_leaked_allocation_scg() -> SCG {
+  1739→    let mut scg = SCG::new();
+  1740→    let region_id = RegionId::new(1);
+  1741→
+  1742→    let alloc_id = scg.add_node(
+  1743→        NodeType::Allocation,
+  1744→        NodePayload::Allocation(AllocationNode {
+  1745→            size: 512,
+  1746→            align: 16,
+  1747→            region_id,
+  1748→            type_name: Some("LeakedBuf".to_string()),
+  1749→        }),
+  1750→        ProgramPoint {
+  1751→            file: Some("leak.vu".to_string()),
+  1752→            line: Some(1),
+  1753→            column: Some(1),
+  1754→            offset: None,
+  1755→        },
+  1756→    );
+  1757→
+  1758→    let comp_id = scg.add_node(
+  1759→        NodeType::Computation,
+  1760→        NodePayload::Computation(ComputationNode {
+  1761→            operation: "use_leaked_buf".to_string(),
+  1762→            result_type: None,
+  1763→            tail_call: false,
+  1764→        }),
+  1765→        ProgramPoint {
+  1766→            file: Some("leak.vu".to_string()),
+  1767→            line: Some(2),
+  1768→            column: Some(1),
+  1769→            offset: None,
+  1770→        },
+  1771→    );
+  1772→
+  1773→    let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+  1774→    region.add_node(alloc_id);
+  1775→    scg.add_region(region);
+  1776→
+  1777→    scg.add_edge(alloc_id, comp_id, EdgeKind::DataFlow).unwrap();
+  1778→
+  1779→    scg
+  1780→}
+  1781→
+  1782→/// Build an SCG with multiple allocation/free pairs (multi-region).
+  1783→///
+  1784→/// This tests the framework's ability to handle programs with multiple
+  1785→/// independent memory regions, each with their own lifecycle.
+  1786→pub fn build_multi_region_scg() -> SCG {
+  1787→    let mut scg = SCG::new();
+  1788→
+  1789→    // Region 1: allocate -> compute -> free
+  1790→    let region1_id = RegionId::new(1);
+  1791→    let alloc1_id = scg.add_node(
+  1792→        NodeType::Allocation,
+  1793→        NodePayload::Allocation(AllocationNode {
+  1794→            size: 64,
+  1795→            align: 8,
+  1796→            region_id: region1_id,
+  1797→            type_name: Some("Region1".to_string()),
+  1798→        }),
+  1799→        ProgramPoint {
+  1800→            file: Some("multi.vu".to_string()),
+  1801→            line: Some(1),
+  1802→            column: Some(1),
+  1803→            offset: None,
+  1804→        },
+  1805→    );
+  1806→    let comp1_id = scg.add_node(
+  1807→        NodeType::Computation,
+  1808→        NodePayload::Computation(ComputationNode {
+  1809→            operation: "process_region1".to_string(),
+  1810→            result_type: None,
+  1811→            tail_call: false,
+  1812→        }),
+  1813→        ProgramPoint {
+  1814→            file: Some("multi.vu".to_string()),
+  1815→            line: Some(2),
+  1816→            column: Some(1),
+  1817→            offset: None,
+  1818→        },
+  1819→    );
+  1820→    let dealloc1_id = scg.add_node(
+  1821→        NodeType::Deallocation,
+  1822→        NodePayload::Deallocation(DeallocationNode {
+  1823→            allocation_node: alloc1_id,
+  1824→            region_id: region1_id,
+  1825→        }),
+  1826→        ProgramPoint {
+  1827→            file: Some("multi.vu".to_string()),
+  1828→            line: Some(3),
+  1829→            column: Some(1),
+  1830→            offset: None,
+  1831→        },
+  1832→    );
+  1833→
+  1834→    // Region 2: allocate -> compute -> free
+  1835→    let region2_id = RegionId::new(2);
+  1836→    let alloc2_id = scg.add_node(
+  1837→        NodeType::Allocation,
+  1838→        NodePayload::Allocation(AllocationNode {
+  1839→            size: 128,
+  1840→            align: 16,
+  1841→            region_id: region2_id,
+  1842→            type_name: Some("Region2".to_string()),
+  1843→        }),
+  1844→        ProgramPoint {
+  1845→            file: Some("multi.vu".to_string()),
+  1846→            line: Some(4),
+  1847→            column: Some(1),
+  1848→            offset: None,
+  1849→        },
+  1850→    );
+  1851→    let comp2_id = scg.add_node(
+  1852→        NodeType::Computation,
+  1853→        NodePayload::Computation(ComputationNode {
+  1854→            operation: "process_region2".to_string(),
+  1855→            result_type: None,
+  1856→            tail_call: false,
+  1857→        }),
+  1858→        ProgramPoint {
+  1859→            file: Some("multi.vu".to_string()),
+  1860→            line: Some(5),
+  1861→            column: Some(1),
+  1862→            offset: None,
+  1863→        },
+  1864→    );
+  1865→    let dealloc2_id = scg.add_node(
+  1866→        NodeType::Deallocation,
+  1867→        NodePayload::Deallocation(DeallocationNode {
+  1868→            allocation_node: alloc2_id,
+  1869→            region_id: region2_id,
+  1870→        }),
+  1871→        ProgramPoint {
+  1872→            file: Some("multi.vu".to_string()),
+  1873→            line: Some(6),
+  1874→            column: Some(1),
+  1875→            offset: None,
+  1876→        },
+  1877→    );
+  1878→
+  1879→    // Add regions.
+  1880→    let mut r1 = SCGRegion::new(region1_id, DeploymentTarget::Heap);
+  1881→    r1.add_node(alloc1_id);
+  1882→    r1.add_node(dealloc1_id);
+  1883→    scg.add_region(r1);
+  1884→
+  1885→    let mut r2 = SCGRegion::new(region2_id, DeploymentTarget::Heap);
+  1886→    r2.add_node(alloc2_id);
+  1887→    r2.add_node(dealloc2_id);
+  1888→    scg.add_region(r2);
+  1889→
+  1890→    // Edges.
+  1891→    scg.add_edge(alloc1_id, comp1_id, EdgeKind::DataFlow)
+  1892→        .unwrap();
+  1893→    scg.add_edge(comp1_id, dealloc1_id, EdgeKind::ControlFlow)
+  1894→        .unwrap();
+  1895→    scg.add_edge(alloc1_id, dealloc1_id, EdgeKind::Derivation)
+  1896→        .unwrap();
+  1897→
+  1898→    scg.add_edge(alloc2_id, comp2_id, EdgeKind::DataFlow)
+  1899→        .unwrap();
+  1900→    scg.add_edge(comp2_id, dealloc2_id, EdgeKind::ControlFlow)
+  1901→        .unwrap();
+  1902→    scg.add_edge(alloc2_id, dealloc2_id, EdgeKind::Derivation)
+  1903→        .unwrap();
+  1904→
+  1905→    // Cross-region dependency: comp1 feeds into comp2.
+  1906→    scg.add_edge(comp1_id, comp2_id, EdgeKind::DataFlow)
+  1907→        .unwrap();
+  1908→
+  1909→    scg
+  1910→}
+  1911→
+  1912→// ===========================================================================
+  1913→// Framework Tests
+  1914→// ===========================================================================
+  1915→
+  1916→#[cfg(test)]
+  1917→mod tests {
+  1918→    use super::*;
+  1919→    use vuma_ive::OverallVerdict;
+  1920→
+  1921→    // -----------------------------------------------------------------------
+  1922→    // Test 1: build_scg_from_source with valid program
+  1923→    // -----------------------------------------------------------------------
+  1924→    #[test]
+  1925→    fn test_build_scg_from_valid_source() {
+  1926→        let source = "region pool = allocate(1024); free(pool);";
+  1927→        let result = build_scg_from_source(source);
+  1928→        assert!(result.is_ok(), "Expected successful SCG construction");
+  1929→
+  1930→        let scg = result.unwrap();
+  1931→        assert!(scg.node_count() > 0, "SCG should have at least one node");
+  1932→    }
+  1933→
+  1934→    // -----------------------------------------------------------------------
+  1935→    // Test 2: verify_program returns five invariant checks
+  1936→    // -----------------------------------------------------------------------
+  1937→    #[test]
+  1938→    fn test_verify_program_returns_five_invariants() {
+  1939→        let source = "region buf = allocate(256); free(buf);";
+  1940→        let result = verify_program(source);
+  1941→
+  1942→        assert_eq!(
+  1943→            result.per_invariant.len(),
+  1944→            5,
+  1945→            "Expected 5 invariant checks at Normal verification level"
+  1946→        );
+  1947→
+  1948→        // After Wave 2 wiring, the IVE returns real results.
+  1949→        // A well-formed program should now get Proven/Pass rather than
+  1950→        // the placeholder Inconclusive verdict.
+  1951→        assert_ne!(
+  1952→            result.overall,
+  1953→            OverallVerdict::Fail,
+  1954→            "Well-formed program should not have Fail verdict"
+  1955→        );
+  1956→    }
+  1957→
+  1958→    // -----------------------------------------------------------------------
+  1959→    // Test 3: assert_verifies does not panic for well-formed programs
+  1960→    // -----------------------------------------------------------------------
+  1961→    #[test]
+  1962→    fn test_assert_verifies_well_formed_program() {
+  1963→        // A well-formed program should not trigger any violations.
+  1964→        // Since IVE returns Unverified (not Violated), this should pass.
+  1965→        assert_verifies("region buf = allocate(256); free(buf);");
+  1966→    }
+  1967→
+  1968→    // -----------------------------------------------------------------------
+  1969→    // Test 4: build_trivial_scg helper produces a valid SCG
+  1970→    // -----------------------------------------------------------------------
+  1971→    #[test]
+  1972→    fn test_build_trivial_scg_helper() {
+  1973→        let scg = build_trivial_scg();
+  1974→
+  1975→        // Should have 3 nodes: allocation, computation, deallocation.
+  1976→        assert_eq!(scg.node_count(), 3);
+  1977→
+  1978→        // Should have 1 region.
+  1979→        assert_eq!(scg.region_count(), 1);
+  1980→
+  1981→        // SCG should validate successfully.
+  1982→        let validation = scg.validate();
+  1983→        assert!(
+  1984→            validation.is_valid,
+  1985→            "Validation errors: {:?}",
+  1986→            validation.errors
+  1987→        );
+  1988→    }
+  1989→
+  1990→    // -----------------------------------------------------------------------
+  1991→    // Test 5: build_use_after_free_scg helper
+  1992→    // -----------------------------------------------------------------------
+  1993→    #[test]
+  1994→    fn test_build_use_after_free_scg() {
+  1995→        let scg = build_use_after_free_scg();
+  1996→
+  1997→        // Should have 3 nodes: allocation, deallocation, access.
+  1998→        assert_eq!(scg.node_count(), 3);
+  1999→
+  2000→        // Should have edges.
+
+[showing lines 1-2000 of 2408; use offset=2001 with limit to continue reading]

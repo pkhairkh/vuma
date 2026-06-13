@@ -658,7 +658,7 @@ impl Emitter {
         self.emit_instruction(Instruction::SUB {
             rd: Register::SP,
             rn: Register::SP,
-            rm: Operand::Imm12(total_alloc),
+            rm: Operand::Imm12(total_alloc as u16),
         })?;
         self.emit_instruction(Instruction::STP {
             rt1: Register::X29,
@@ -1439,7 +1439,7 @@ impl Emitter {
                 self.emit_instruction(Instruction::ADD {
                     rd: Register::SP,
                     rn: Register::SP,
-                    rm: Operand::Imm12(frame_size + 16), // restore SP
+                    rm: Operand::Imm12((frame_size + 16) as u16), // restore SP
                 })?;
                 self.emit_instruction(Instruction::RET { rn: None })?;
             }
@@ -3467,45 +3467,62 @@ fn append_runtime_io(
             }
 
             // __vuma_print_hex(ptr: x0, len: x1)
+            // Converts each byte to 2 hex chars and writes to stdout via sys_write.
+            // Uses per-byte sys_write(2 hex chars) + final newline sys_write.
             let print_hex_offset = text_section.len() as u64;
             let print_hex_code: Vec<u32> = vec![
-                0xA9BF7BFD, // stp x29, x30, [sp, #-32]!
-                0x910003FD, // mov x29, sp
+                0xA9BD7BFD, // stp x29, x30, [sp, #-48]!
+                0x910003FD, // add x29, sp, #0
                 0xA90153F3, // stp x19, x20, [sp, #16]
-                0xAA0003F3, // mov x19, x0
-                0xAA0103F4, // mov x20, x1
-                0x10000495, // adr x21, hex_table (placeholder — patched below)
-                0xD2800009, // mov x9, #0
+                0xA9025BF5, // stp x21, x22, [sp, #32]
+                0xAA0003F3, // mov x19, x0 (ptr)
+                0xAA0103F4, // mov x20, x1 (len)
+                0xD2800015, // mov x21, #0 (index)
                 // .Lhex_loop:
-                0xEB0901BF, // cmp x9, x20
-                0x5400026A, // b.ge .Lhex_done (+0x4c = 19 instructions * 4)
-                0x38696A6A, // ldrb w10, [x19, x9]
-                0x531044EB, // lsr w11, w10, #4
-                0x38756A6C, // ldrb w12, [x21, x11]
-                0x3901830C, // strb w12, [x24, #0]  — wait, we need a stack buffer
+                0xEB1402BF, // cmp x21, x20
+                0x5400028A, // b.ge .Lhex_done
+                0x1C356269, // ldrb w9, [x19, x21]
+                0x531044CA, // lsr w10, w9, #4 (high nibble)
+                0x1100C14B, // add w11, w10, #48 ('0'+nibble)
+                0x7100255F, // cmp w10, #9
+                0x5400002D, // b.le .Lhigh_ok
+                0x11009D6B, // add w11, w11, #39 (adjust to 'a')
+                // .Lhigh_ok:
+                0x3900A3EB, // strb w11, [sp, #40]
+                0x12107D2A, // and w10, w9, #0xF (low nibble)
+                0x1100C14B, // add w11, w10, #48
+                0x7100255F, // cmp w10, #9
+                0x5400002D, // b.le .Llow_ok
+                0x11009D6B, // add w11, w11, #39
+                // .Llow_ok:
+                0x3900A7EB, // strb w11, [sp, #41]
+                0xD2800020, // mov x0, #1 (fd=stdout)
+                0x9100A3E1, // add x1, sp, #40 (buf)
+                0xD2800042, // mov x2, #2 (len=2)
+                0xD2800808, // mov x8, #64 (sys_write)
+                0xD4000001, // svc #0
+                0x910006B5, // add x21, x21, #1
+                0x17FFFFEA, // b .Lhex_loop
+                // .Lhex_done:
+                0xD2800149, // mov x9, #10 ('\n')
+                0x3900A3E9, // strb w9, [sp, #40]
+                0xD2800020, // mov x0, #1
+                0x9100A3E1, // add x1, sp, #40
+                0xD2800022, // mov x2, #1
+                0xD2800808, // mov x8, #64
+                0xD4000001, // svc #0
+                0xA9425BF5, // ldp x21, x22, [sp, #32]
+                0xA94153F3, // ldp x19, x20, [sp, #16]
+                0xA8C37BFD, // ldp x29, x30, [sp], #48
+                0xD65F03C0, // ret
             ];
-            // This approach is getting too complex with manual encoding.
-            // Let me use a simpler approach: pre-assemble with a cross-assembler
-            // or use a much simpler hex print that doesn't need a hex_table.
-
-            // Actually, let me take the simplest possible approach:
-            // For ARM64/RISC-V, just use write_stdout (raw bytes) and pipe through xxd
-            // This avoids the need for complex hex conversion in the runtime itself.
-
-            // Remove the partial print_hex code
-            text_section.truncate(write_stdout_offset as usize + ws_size as usize);
-
-            // For print_hex on ARM64, we'll use a simple approach:
-            // write each byte's hex representation using two syscalls with a 1-byte buffer
-            // No — that's too many syscalls. Let me just provide write_stdout for now
-            // and document that print_hex is only available on x86_64.
-            // The VUMA program can use print_buf() and pipe output through xxd.
-
-            // Register print_hex as an alias for write_stdout (raw bytes, not hex)
-            // This is a temporary measure until proper ARM64 print_hex is implemented.
-            for name in &["print_hex"] {
-                function_offsets.insert(name.to_string(), write_stdout_offset);
-                function_sizes.insert(name.to_string(), ws_size);
+            for &word in &print_hex_code {
+                text_section.extend_from_slice(&word.to_le_bytes());
+            }
+            let ph_size = (print_hex_code.len() as u64) * 4;
+            for name in &["print_hex", "__vuma_print_hex"] {
+                function_offsets.insert(name.to_string(), print_hex_offset);
+                function_sizes.insert(name.to_string(), ph_size);
             }
 
             // __vuma_print_int(val: x0)
@@ -3543,9 +3560,71 @@ fn append_runtime_io(
                 text_section.extend_from_slice(&word.to_le_bytes());
             }
             let ws_size = (ws_code.len() as u64) * 4;
-            for name in &["print_buf", "write_stdout", "__vuma_write_stdout", "print_hex"] {
+            for name in &["print_buf", "write_stdout", "__vuma_write_stdout"] {
                 function_offsets.insert(name.to_string(), write_stdout_offset);
                 function_sizes.insert(name.to_string(), ws_size);
+            }
+
+            // __vuma_print_hex(ptr: a0, len: a1)
+            // Converts each byte to 2 hex chars and writes to stdout via sys_write.
+            // Uses per-byte sys_write(2 hex chars) + final newline sys_write.
+            let print_hex_offset = text_section.len() as u64;
+            let print_hex_code: Vec<u32> = vec![
+                0xFD010113, // addi sp, sp, -48
+                0x00813023, // sd s0, 0(sp)
+                0x00913423, // sd s1, 8(sp)
+                0x01213823, // sd s2, 16(sp)
+                0x02113023, // sd ra, 32(sp)
+                0x00050413, // mv s0, a0 (ptr)
+                0x00058493, // mv s1, a1 (len)
+                0x00000913, // li s2, 0 (index)
+                // .Lhex_loop:
+                0x04995A63, // bge s2, s1, .Lhex_done
+                0x01240E33, // add t3, s0, s2
+                0x000E4283, // lbu t0, 0(t3)
+                0x0042D313, // srli t1, t0, 4 (high nibble)
+                0x03030393, // addi t2, t1, 48 ('0'+nibble)
+                0x00A00E13, // li t3, 10
+                0x01C34263, // blt t1, t3, .Lhigh_digit
+                0x02738393, // addi t2, t2, 39 (adjust to 'a')
+                // .Lhigh_digit:
+                0x02710423, // sb t2, 40(sp)
+                0x00F2F313, // andi t1, t0, 15 (low nibble)
+                0x03030393, // addi t2, t1, 48
+                0x00A00E13, // li t3, 10
+                0x01C34263, // blt t1, t3, .Llow_digit
+                0x02738393, // addi t2, t2, 39
+                // .Llow_digit:
+                0x027104A3, // sb t2, 41(sp)
+                0x00100513, // li a0, 1 (stdout)
+                0x02810593, // addi a1, sp, 40
+                0x00200613, // li a2, 2
+                0x04000893, // li a7, 64 (sys_write)
+                0x00000073, // ecall
+                0x00190913, // addi s2, s2, 1
+                0xFA9FF06F, // j .Lhex_loop
+                // .Lhex_done:
+                0x00A00293, // li t0, 10 ('\n')
+                0x02510423, // sb t0, 40(sp)
+                0x00100513, // li a0, 1
+                0x02810593, // addi a1, sp, 40
+                0x00100613, // li a2, 1
+                0x04000893, // li a7, 64
+                0x00000073, // ecall
+                0x00013403, // ld s0, 0(sp)
+                0x00813483, // ld s1, 8(sp)
+                0x01013903, // ld s2, 16(sp)
+                0x02013083, // ld ra, 32(sp)
+                0x03010113, // addi sp, sp, 48
+                0x00008067, // ret
+            ];
+            for &word in &print_hex_code {
+                text_section.extend_from_slice(&word.to_le_bytes());
+            }
+            let ph_size = (print_hex_code.len() as u64) * 4;
+            for name in &["print_hex", "__vuma_print_hex"] {
+                function_offsets.insert(name.to_string(), print_hex_offset);
+                function_sizes.insert(name.to_string(), ph_size);
             }
 
             // print_int: stub that returns 0
