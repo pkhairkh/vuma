@@ -62,6 +62,12 @@ use crate::regalloc::RegAllocator;
 use crate::CodegenError;
 use crate::Result;
 
+/// Vreg count threshold above which the stack-slot emitter is used instead of
+/// the greedy register allocator.  Functions with more than this many virtual
+/// registers are likely to experience spill/reload corruption with the greedy
+/// allocator.
+const STACK_SLOT_VREG_THRESHOLD: u32 = 0;
+
 // ---------------------------------------------------------------------------
 // Branch fixup format
 // ---------------------------------------------------------------------------
@@ -573,7 +579,9 @@ pub struct Emitter {
     /// Byte offset of the current function within the text section (set externally).
     func_text_offset: u64,
     /// Computed stack frame size (in bytes) for the current function.
-    frame_size: u16,
+    frame_size: u32,
+    /// Registers pinned for the current instruction (auto-unpinned after each instruction).
+    instr_pinned_regs: Vec<Register>,
 }
 
 impl Emitter {
@@ -589,6 +597,7 @@ impl Emitter {
             current_func_name: String::new(),
             func_text_offset: 0,
             frame_size: 0,
+            instr_pinned_regs: Vec::new(),
         }
     }
 
@@ -598,8 +607,26 @@ impl Emitter {
 
     /// Emit a single IR function to ARM64 machine code.
     ///
+    /// For functions with more than `STACK_SLOT_VREG_THRESHOLD` virtual
+    /// registers, the stack-slot emitter is used (every vreg gets a stack
+    /// slot, scratch registers only).  For simpler functions, the greedy
+    /// register allocator is used.
+    ///
     /// Returns a vector of 32-bit ARM64 instruction words.
     pub fn emit_function(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
+        let vreg_count = count_vregs(func);
+        if vreg_count > STACK_SLOT_VREG_THRESHOLD {
+            self.emit_function_stack_slot(func)
+        } else {
+            self.emit_function_greedy(func)
+        }
+    }
+
+    /// Emit a single IR function using the greedy register allocator.
+    ///
+    /// This is the original emission strategy — suitable for functions with
+    /// a small number of virtual registers.
+    fn emit_function_greedy(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
         self.code.clear();
         self.fixups.clear();
         self.label_offsets.clear();
@@ -668,6 +695,10 @@ impl Emitter {
     fn emit_block(&mut self, block: &IRBlock) -> Result<()> {
         for instr in &block.instructions {
             self.emit_ir_instr(instr)?;
+            // Auto-unpin all registers that were pinned during this instruction.
+            for reg in self.instr_pinned_regs.drain(..) {
+                self.reg_alloc.unpin(reg);
+            }
         }
         self.emit_terminator(&block.terminator)?;
         Ok(())
@@ -681,15 +712,24 @@ impl Emitter {
     fn emit_ir_instr(&mut self, instr: &IRInstr) -> Result<()> {
         match instr {
             IRInstr::Load { dst, addr, offset, ty } => {
-                let rt = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(addr)?;
+                let rt = self.resolve_reg(dst)?;
                 self.emit_load(rt, rn, *offset, ty)?;
             }
 
             IRInstr::Store { value, addr, offset, ty } => {
                 let rt = self.resolve_reg(value)?;
                 let rn = self.resolve_reg(addr)?;
-                self.emit_store(rt, rn, *offset, ty)?;
+                if rt == rn {
+                    // Both resolved to the same register — use scratch for value
+                    self.emit_instruction(Instruction::MOV {
+                        rd: Register::X16,
+                        rm: rt,
+                    })?;
+                    self.emit_store(Register::X16, rn, *offset, ty)?;
+                } else {
+                    self.emit_store(rt, rn, *offset, ty)?;
+                }
             }
 
             IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
@@ -771,29 +811,127 @@ impl Emitter {
                 func: target_name,
                 args,
             } => {
-                // Move arguments into X0–X7.
+                // Resolve all argument source registers FIRST, before moving
+                // any of them. This prevents a later move from overwriting a
+                // register that an earlier argument is in.
+                //
+                // IMPORTANT: For immediate arguments, resolve_reg always loads
+                // into X9. When multiple immediates are present, we must use
+                // different scratch registers to avoid overwriting. We load
+                // immediates into X0-X7 directly (since they're the target
+                // registers anyway) or use X11-X15 as temporary scratch.
+                let arg_regs = [
+                    Register::X0, Register::X1, Register::X2, Register::X3,
+                    Register::X4, Register::X5, Register::X6, Register::X7,
+                ];
+                // Scratch registers for loading immediates when the target arg
+                // register isn't available yet (because of conflicts).
+                let scratch_regs = [
+                    Register::X11, Register::X12, Register::X13, Register::X14,
+                    Register::X15, Register::X3, Register::X4, Register::X5,
+                ];
+
+                let mut src_regs: Vec<Register> = Vec::new();
+                let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+                let mut next_scratch = 0;
+
                 for (i, arg) in args.iter().enumerate() {
                     if i >= 8 {
                         break;
                     }
-                    let src = self.resolve_reg(arg)?;
-                    let dst_reg = match i {
-                        0 => Register::X0,
-                        1 => Register::X1,
-                        2 => Register::X2,
-                        3 => Register::X3,
-                        4 => Register::X4,
-                        5 => Register::X5,
-                        6 => Register::X6,
-                        7 => Register::X7,
-                        _ => unreachable!(),
-                    };
-                    if src != dst_reg {
+                    let is_immediate = matches!(arg, IRValue::Immediate(_) | IRValue::Address(_));
+                    if is_immediate {
+                        let v = match arg {
+                            IRValue::Immediate(v) => *v,
+                            IRValue::Address(a) => *a as i64,
+                            _ => unreachable!(),
+                        };
+                        // Load the immediate directly into the target register
+                        // if it's not needed by another argument.
+                        // For simplicity, always load into a scratch register
+                        // and record it.
+                        if next_scratch < scratch_regs.len() {
+                            let scratch = scratch_regs[next_scratch];
+                            next_scratch += 1;
+                            self.emit_load_immediate(scratch, v)?;
+                            src_regs.push(scratch);
+                        } else {
+                            // Fallback to X9 (rare, only with 8+ immediates)
+                            let scratch = Register::X9;
+                            self.emit_load_immediate(scratch, v)?;
+                            src_regs.push(scratch);
+                        }
+                    } else {
+                        let src = self.resolve_reg(arg)?;
+                        src_regs.push(src);
+                    }
+                }
+
+                // Now move arguments into X0–X7. We need to handle the case
+                // where a source register is also a target register (cycle).
+                // Strategy: first move arguments that don't conflict, then
+                // handle conflicts using a scratch register.
+                let n = src_regs.len();
+                let mut moved = vec![false; n];
+
+                // Pass 1: move args where src != any dst that hasn't been moved yet
+                // Simple approach: iterate and move non-conflicting ones first
+                for pass in 0..2 {
+                    for i in 0..n {
+                        if moved[i] {
+                            continue;
+                        }
+                        let src = src_regs[i];
+                        let dst = arg_regs[i];
+                        if src == dst {
+                            // Already in the right register
+                            moved[i] = true;
+                            continue;
+                        }
+                        if pass == 0 {
+                            // Check if src is needed as a source by a later unmoved arg
+                            let mut conflict = false;
+                            for j in 0..n {
+                                if !moved[j] && j != i && src_regs[j] == dst {
+                                    // Moving arg i to dst would overwrite arg j's source
+                                    conflict = true;
+                                    break;
+                                }
+                            }
+                            if conflict {
+                                continue; // Defer to pass 2
+                            }
+                        }
+                        // Safe to move now
                         self.emit_instruction(Instruction::MOV {
-                            rd: dst_reg,
+                            rd: dst,
                             rm: src,
                         })?;
+                        moved[i] = true;
                     }
+                }
+
+                // Pass 2: handle any remaining conflicts with scratch register
+                for i in 0..n {
+                    if moved[i] {
+                        continue;
+                    }
+                    let src = src_regs[i];
+                    let dst = arg_regs[i];
+                    if src == dst {
+                        moved[i] = true;
+                        continue;
+                    }
+                    // Use X16 as scratch to break the cycle
+                    self.emit_instruction(Instruction::MOV {
+                        rd: Register::X16,
+                        rm: src,
+                    })?;
+                    self.emit_instruction(Instruction::MOV {
+                        rd: dst,
+                        rm: Register::X16,
+                    })?;
+                    moved[i] = true;
                 }
 
                 // BL — record a relocation for later patching.
@@ -1591,7 +1729,67 @@ impl Emitter {
 
     fn resolve_reg(&mut self, val: &IRValue) -> Result<Register> {
         match val {
-            IRValue::Register(id) => self.reg_alloc.allocate(*id),
+            IRValue::Register(id) => {
+                let result = self.reg_alloc.allocate(*id)?;
+                let reg = result.reg;
+
+                // Auto-pin this register for the duration of the current instruction.
+                // This prevents subsequent resolve_reg calls within the same
+                // instruction from spilling this register.
+                if !self.instr_pinned_regs.contains(&reg) {
+                    self.reg_alloc.pin(reg);
+                    self.instr_pinned_regs.push(reg);
+                }
+
+                // If a spill occurred, emit STR to save the spilled register's
+                // value to the stack before it gets overwritten.
+                if let Some(spill_info) = result.spilled {
+                    // Spill slot offset from X29 (frame pointer).
+                    // Layout: X29 points to saved FP/LR. Spill slots are at
+                    // negative offsets from X29: slot 0 at [X29, #-8],
+                    // slot 1 at [X29, #-16], etc.
+                    let sp_offset = 8 + (spill_info.slot as i32) * 8;
+                    // Compute address using X16 as scratch (NOT X9, since X9 is
+                    // used by resolve_reg for immediate values).
+                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+                    self.emit_instruction(Instruction::ADD {
+                        rd: Register::X16,
+                        rn: Register::X29,
+                        rm: Operand::Reg {
+                            reg: Register::X16,
+                            shift: None,
+                        },
+                    })?;
+                    self.emit_instruction(Instruction::STR {
+                        rt: spill_info.reg,
+                        rn: Register::X16,
+                        offset: 0,
+                    })?;
+                }
+
+                // If this vreg was previously spilled and needs to be reloaded,
+                // emit LDR to restore its value from the stack.
+                if let Some(slot) = result.reload_slot {
+                    let sp_offset = 8 + (slot as i32) * 8;
+                    // Compute address using X16 as scratch (NOT X9).
+                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+                    self.emit_instruction(Instruction::ADD {
+                        rd: Register::X16,
+                        rn: Register::X29,
+                        rm: Operand::Reg {
+                            reg: Register::X16,
+                            shift: None,
+                        },
+                    })?;
+                    self.emit_instruction(Instruction::LDR {
+                        rt: reg,
+                        rn: Register::X16,
+                        offset: 0,
+                    })?;
+                }
+
+                Ok(reg)
+            }
             IRValue::Immediate(v) => {
                 let temp = Register::X9;
                 self.emit_load_immediate(temp, *v)?;
@@ -1764,6 +1962,1272 @@ impl Emitter {
     }
 
     // -----------------------------------------------------------------------
+    // Stack-slot emission (for functions with many vregs)
+    // -----------------------------------------------------------------------
+
+    /// Emit a single IR function using the stack-slot strategy.
+    ///
+    /// Every virtual register gets a stack slot at `[X29, #-offset]` (8 bytes
+    /// per slot).  Alloc vregs get larger regions.  For each IR instruction,
+    /// operands are loaded from stack slots into scratch registers (X9, X10,
+    /// X16, X17), the operation is performed, and the result is stored back.
+    ///
+    /// ## Scratch Registers (never assigned to vregs)
+    ///
+    /// - X9: primary accumulator / result
+    /// - X10: secondary operand
+    /// - X16: address computation / tertiary scratch (IP0)
+    /// - X17: quaternary scratch (IP1)
+    pub fn emit_function_stack_slot(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
+        self.code.clear();
+        self.fixups.clear();
+        self.label_offsets.clear();
+        self.call_relocs.clear();
+        self.relocations.clear();
+        self.current_func_name = func.name.clone();
+        self.instr_pinned_regs.clear();
+
+        // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+
+        let mut all_vreg_ids: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for &id in func.vregs.keys() {
+            all_vreg_ids.insert(id);
+        }
+        for param in &func.params {
+            if let Some(id) = param.as_register() {
+                all_vreg_ids.insert(id);
+            }
+        }
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                for id in instr.defined_regs() {
+                    all_vreg_ids.insert(id);
+                }
+                for id in instr.used_regs() {
+                    all_vreg_ids.insert(id);
+                }
+            }
+            // Also check terminator for vreg usage
+            match &block.terminator {
+                IRTerminator::Branch { cond, .. } => {
+                    if let Some(id) = cond.as_register() {
+                        all_vreg_ids.insert(id);
+                    }
+                }
+                IRTerminator::Return(vals) => {
+                    for val in vals {
+                        if let Some(id) = val.as_register() {
+                            all_vreg_ids.insert(id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for val in &func.results {
+            if let Some(id) = val.as_register() {
+                all_vreg_ids.insert(id);
+            }
+        }
+
+        // Identify Alloc vregs and their sizes
+        let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        let mut alloc_sizes: HashMap<u32, i32> = HashMap::new();
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Alloc { dst, size } = instr {
+                    if let Some(id) = dst.as_register() {
+                        stack_alloc_vregs.insert(id);
+                        let aligned_size = ((*size as i32 + 15) & !15) as i32;
+                        alloc_sizes.insert(id, aligned_size);
+                    }
+                }
+            }
+        }
+
+        // ── Stack Layout ──
+        // [high address]
+        //   saved X29, X30     ← X29 points here
+        //   Alloc data region N ← [X29, #-alloc_offset_N]
+        //   ...
+        //   Alloc data region 1
+        //   vreg slot M         ← [X29, #-vreg_offset_M]  (8 bytes each)
+        //   ...
+        //   vreg slot 1
+        // [low address]         ← SP
+
+        let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
+        let mut current_offset: i32 = 0;
+        let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
+        alloc_vreg_ids.sort();
+        for &id in &alloc_vreg_ids {
+            let size = alloc_sizes[&id];
+            current_offset += size;
+            alloc_offsets.insert(id, current_offset); // slot at [X29, #-current_offset]
+        }
+
+        let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
+        let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+        all_vreg_ids_sorted.sort();
+        for &id in &all_vreg_ids_sorted {
+            current_offset += 8;
+            vreg_stack_slots.insert(id, current_offset); // slot at [X29, #-current_offset]
+        }
+
+        let frame_size = ((current_offset + 15) & !15) as u32;
+        self.frame_size = frame_size;
+
+        // ── Phase 2: Emit prologue ──
+
+        // SUB SP, SP, #16  (room for FP/LR save pair)
+        self.emit_instruction(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(16),
+        })?;
+        // STP X29, X30, [SP]
+        self.emit_instruction(Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0,
+        })?;
+        // ADD X29, SP, #0  (set frame pointer)
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0),
+        })?;
+        // SUB SP, SP, #frame_size
+        if frame_size > 0 {
+            if frame_size <= 4095 {
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(frame_size as u16),
+                })?;
+            } else {
+                self.emit_load_immediate(Register::X9, frame_size as i64)?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Reg {
+                        reg: Register::X9,
+                        shift: None,
+                    },
+                })?;
+            }
+        }
+
+        // Store function parameters from X0-X7 to their stack slots
+        let arg_regs = [
+            Register::X0, Register::X1, Register::X2, Register::X3,
+            Register::X4, Register::X5, Register::X6, Register::X7,
+        ];
+        for (i, param) in func.params.iter().enumerate() {
+            if let Some(id) = param.as_register() {
+                if i < 8 {
+                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                    self.ss_store_to_slot(arg_regs[i], offset)?;
+                }
+            }
+        }
+
+        // ── Phase 3: Emit each basic block ──
+
+        for block in &func.blocks {
+            self.label_offsets.insert(block.label.clone(), self.code.len());
+            for instr in &block.instructions {
+                self.ss_emit_instr(
+                    instr,
+                    &vreg_stack_slots,
+                    &alloc_offsets,
+                    &stack_alloc_vregs,
+                )?;
+            }
+            self.ss_emit_terminator(&block.terminator, &vreg_stack_slots)?;
+        }
+
+        // ── Phase 4: Apply fixups ──
+        self.apply_fixups()?;
+
+        Ok(self.code.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // Stack-slot helpers
+    // -----------------------------------------------------------------------
+
+    /// Compute the address of a stack slot into `dst`.
+    /// The slot is at `[X29, #-offset]` where `offset > 0`.
+    fn ss_emit_slot_addr(&mut self, dst: Register, offset: i32) -> Result<()> {
+        if offset <= 4095 {
+            self.emit_instruction(Instruction::SUB {
+                rd: dst,
+                rn: Register::X29,
+                rm: Operand::Imm12(offset as u16),
+            })?;
+        } else {
+            self.emit_load_immediate(dst, offset as i64)?;
+            self.emit_instruction(Instruction::SUB {
+                rd: dst,
+                rn: Register::X29,
+                rm: Operand::Reg {
+                    reg: dst,
+                    shift: None,
+                },
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Load a value from a stack slot into `dst`.
+    /// `offset` is the positive offset from X29 (slot at `[X29, #-offset]`).
+    fn ss_load_from_slot(&mut self, dst: Register, offset: i32) -> Result<()> {
+        let addr_reg = if dst == Register::X16 {
+            Register::X17
+        } else {
+            Register::X16
+        };
+        self.ss_emit_slot_addr(addr_reg, offset)?;
+        self.emit_instruction(Instruction::LDR {
+            rt: dst,
+            rn: addr_reg,
+            offset: 0,
+        })?;
+        Ok(())
+    }
+
+    /// Store a value from `src` into a stack slot.
+    /// `offset` is the positive offset from X29 (slot at `[X29, #-offset]`).
+    fn ss_store_to_slot(&mut self, src: Register, offset: i32) -> Result<()> {
+        let addr_reg = if src == Register::X16 {
+            Register::X17
+        } else {
+            Register::X16
+        };
+        self.ss_emit_slot_addr(addr_reg, offset)?;
+        self.emit_instruction(Instruction::STR {
+            rt: src,
+            rn: addr_reg,
+            offset: 0,
+        })?;
+        Ok(())
+    }
+
+    /// Load an [`IRValue`] into a scratch register.
+    /// For registers: load from the stack slot.
+    /// For immediates: load via MOVZ/MOVK.
+    fn ss_load_value(
+        &mut self,
+        val: &IRValue,
+        dst: Register,
+        slots: &HashMap<u32, i32>,
+    ) -> Result<()> {
+        match val {
+            IRValue::Register(id) => {
+                let offset = slots.get(id).copied().unwrap_or(0);
+                self.ss_load_from_slot(dst, offset)?;
+            }
+            IRValue::Immediate(v) => {
+                self.emit_load_immediate(dst, *v)?;
+            }
+            IRValue::Address(a) => {
+                self.emit_load_immediate(dst, *a as i64)?;
+            }
+            IRValue::Label(_) => {
+                return Err(CodegenError::EncodingError(
+                    "label value cannot be resolved to a register".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Load an [`IRValue`] into a scratch register with a specific width.
+    /// For 32-bit values, uses 32-bit MOVZ/MOVK.
+    fn ss_load_value_with_width(
+        &mut self,
+        val: &IRValue,
+        dst: Register,
+        slots: &HashMap<u32, i32>,
+        width: RegWidth,
+    ) -> Result<()> {
+        match val {
+            IRValue::Register(id) => {
+                let offset = slots.get(id).copied().unwrap_or(0);
+                // Always load 64-bit from stack slot; the arithmetic
+                // will use the correct width.
+                self.ss_load_from_slot(dst, offset)?;
+            }
+            IRValue::Immediate(v) => {
+                self.emit_load_immediate_with_width(dst, *v, width)?;
+            }
+            IRValue::Address(a) => {
+                self.emit_load_immediate(dst, *a as i64)?;
+            }
+            IRValue::Label(_) => {
+                return Err(CodegenError::EncodingError(
+                    "label value cannot be resolved to a register".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Stack-slot instruction emission
+    // -----------------------------------------------------------------------
+
+    /// Emit a single IR instruction using the stack-slot strategy.
+    fn ss_emit_instr(
+        &mut self,
+        instr: &IRInstr,
+        slots: &HashMap<u32, i32>,
+        alloc_offsets: &HashMap<u32, i32>,
+        stack_alloc_vregs: &std::collections::HashSet<u32>,
+    ) -> Result<()> {
+        match instr {
+            // ── Load ──
+            IRInstr::Load { dst, addr, offset, ty } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                // Load address into X10 (not X9, because emit_load uses X9 internally)
+                self.ss_load_value(addr, Register::X10, slots)?;
+                // Load from memory [X10 + offset] into X9
+                self.emit_load(Register::X9, Register::X10, *offset, ty)?;
+                // Store result to dst's stack slot
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Store ──
+            IRInstr::Store { value, addr, offset, ty } => {
+                // Load value into X16 (not X9, emit_store uses X9 internally)
+                self.ss_load_value(value, Register::X16, slots)?;
+                // Load address into X10
+                self.ss_load_value(addr, Register::X10, slots)?;
+                self.emit_store(Register::X16, Register::X10, *offset, ty)?;
+            }
+
+            // ── BinOp (generic) ──
+            IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+                self.ss_emit_binop(*op, dst, lhs, rhs, ty.as_ref(), slots)?;
+            }
+
+            // ── UnaryOp ──
+            IRInstr::UnaryOp { op, dst, operand, ty } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let width = RegWidth::from_ir_type(ty.as_ref());
+                self.ss_load_value_with_width(operand, Register::X9, slots, width)?;
+
+                match op {
+                    UnaryOpKind::Neg => {
+                        self.emit_instruction_with_width(
+                            Instruction::SUB {
+                                rd: Register::X9,
+                                rn: Register::XZR,
+                                rm: Operand::Reg {
+                                    reg: Register::X9,
+                                    shift: None,
+                                },
+                            },
+                            width,
+                        )?;
+                    }
+                    UnaryOpKind::Not => {
+                        self.emit_load_immediate(Register::X10, -1)?;
+                        self.emit_instruction_with_width(
+                            Instruction::EOR {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Register::X10,
+                            },
+                            width,
+                        )?;
+                    }
+                    UnaryOpKind::Clz => {
+                        self.emit_instruction(Instruction::CLZ {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                        })?;
+                    }
+                    UnaryOpKind::Ctz => {
+                        // CTZ = RBIT + CLZ
+                        self.emit_instruction(Instruction::RBIT {
+                            rd: Register::X10,
+                            rn: Register::X9,
+                        })?;
+                        self.emit_instruction(Instruction::CLZ {
+                            rd: Register::X9,
+                            rn: Register::X10,
+                        })?;
+                    }
+                    UnaryOpKind::Popcnt => {
+                        const SIMD_SCRATCH: u8 = 8;
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: SIMD_SCRATCH,
+                            rn: Register::X9,
+                        })?;
+                        self.emit_instruction(Instruction::CNT {
+                            vd: SIMD_SCRATCH,
+                            vn: SIMD_SCRATCH,
+                        })?;
+                        self.emit_instruction(Instruction::ADDV {
+                            vd: SIMD_SCRATCH,
+                            vn: SIMD_SCRATCH,
+                        })?;
+                        self.emit_instruction(Instruction::UMOV {
+                            rd: Register::X9,
+                            vn: SIMD_SCRATCH,
+                        })?;
+                    }
+                }
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Call ──
+            IRInstr::Call { dst, func: target_name, args } => {
+                let arg_regs = [
+                    Register::X0, Register::X1, Register::X2, Register::X3,
+                    Register::X4, Register::X5, Register::X6, Register::X7,
+                ];
+                // Load arguments from stack slots into X0-X7
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= 8 {
+                        break;
+                    }
+                    self.ss_load_value(arg, arg_regs[i], slots)?;
+                }
+                // BL — record a relocation for later patching
+                let bl_word_idx = self.code.len();
+                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+                self.call_relocs.push(CallRelocation {
+                    text_byte_offset: bl_byte_offset,
+                    target_func: target_name.clone(),
+                });
+                self.relocations.push(RelocationEntry {
+                    offset: bl_byte_offset,
+                    symbol: target_name.clone(),
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
+                });
+                self.emit_instruction(Instruction::BL { offset: 0 })?;
+
+                if let Some(dst_val) = dst {
+                    let dst_id = dst_val.as_register().unwrap_or(0);
+                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                    self.ss_store_to_slot(Register::X0, dst_offset)?;
+                }
+            }
+
+            // ── Alloc ──
+            IRInstr::Alloc { dst, .. } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let alloc_off = alloc_offsets
+                    .get(&dst_id)
+                    .copied()
+                    .unwrap_or(0);
+                // Compute X9 = X29 - alloc_off (pointer to data region)
+                self.ss_emit_slot_addr(Register::X9, alloc_off)?;
+                // Store pointer into dst's stack slot
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Free ──
+            IRInstr::Free { ptr } => {
+                let is_stack = ptr
+                    .as_register()
+                    .map(|id| stack_alloc_vregs.contains(&id))
+                    .unwrap_or(false);
+                if !is_stack {
+                    // Heap allocation — call __vuma_free(ptr)
+                    self.ss_load_value(ptr, Register::X0, slots)?;
+                    let bl_word_idx = self.code.len();
+                    let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+                    self.call_relocs.push(CallRelocation {
+                        text_byte_offset: bl_byte_offset,
+                        target_func: "__vuma_free".to_string(),
+                    });
+                    self.relocations.push(RelocationEntry {
+                        offset: bl_byte_offset,
+                        symbol: "__vuma_free".to_string(),
+                        reloc_type: "R_AARCH64_CALL26".to_string(),
+                    });
+                    self.emit_instruction(Instruction::BL { offset: 0 })?;
+                }
+                // Stack allocation — no-op
+            }
+
+            // ── Cast ──
+            IRInstr::Cast { kind, dst, src } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                self.ss_load_value(src, Register::X9, slots)?;
+
+                match kind {
+                    CastKind::ZExt => {
+                        // Zero-extend 32-bit to 64-bit
+                        self.emit_instruction(Instruction::UBFM {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            immr: 0,
+                            imms: 31,
+                        })?;
+                    }
+                    CastKind::SExt => {
+                        // Sign-extend 32-bit to 64-bit
+                        self.emit_instruction(Instruction::SBFM {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            immr: 0,
+                            imms: 31,
+                        })?;
+                    }
+                    CastKind::Trunc | CastKind::BitCast => {
+                        // No-op: just store the value
+                    }
+                }
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Phi ──
+            IRInstr::Phi { dst, incoming } => {
+                let non_self: Vec<_> = incoming
+                    .iter()
+                    .filter(|(val, _)| val != dst)
+                    .collect();
+                if non_self.len() == 1 {
+                    let (val, _) = non_self[0];
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                    self.ss_load_value(val, Register::X9, slots)?;
+                    self.ss_store_to_slot(Register::X9, dst_offset)?;
+                } else if !non_self.is_empty() {
+                    let (val, _) = non_self[0];
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                    self.ss_load_value(val, Register::X9, slots)?;
+                    self.ss_store_to_slot(Register::X9, dst_offset)?;
+                }
+                // Empty phi = self-loop = no-op
+            }
+
+            // ── GetAddress ──
+            IRInstr::GetAddress { dst, name } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let name_hash = name
+                    .chars()
+                    .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
+                self.emit_load_immediate(Register::X0, name_hash as i64)?;
+                let bl_word_idx = self.code.len();
+                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+                self.call_relocs.push(CallRelocation {
+                    text_byte_offset: bl_byte_offset,
+                    target_func: "__vuma_getaddr".to_string(),
+                });
+                self.relocations.push(RelocationEntry {
+                    offset: bl_byte_offset,
+                    symbol: "__vuma_getaddr".to_string(),
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
+                });
+                self.emit_instruction(Instruction::BL { offset: 0 })?;
+                self.ss_store_to_slot(Register::X0, dst_offset)?;
+            }
+
+            // ── Offset ──
+            IRInstr::Offset { dst, base, offset } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                self.ss_load_value(base, Register::X9, slots)?;
+                match offset {
+                    IRValue::Immediate(v) => {
+                        if *v >= 0 && *v <= 4095 {
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            })?;
+                        } else {
+                            self.emit_load_immediate(Register::X10, *v)?;
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Reg {
+                                    reg: Register::X10,
+                                    shift: None,
+                                },
+                            })?;
+                        }
+                    }
+                    _ => {
+                        self.ss_load_value(offset, Register::X10, slots)?;
+                        self.emit_instruction(Instruction::ADD {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            rm: Operand::Reg {
+                                reg: Register::X10,
+                                shift: None,
+                            },
+                        })?;
+                    }
+                }
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Dedicated arithmetic ──
+            IRInstr::Add { dst, lhs, rhs, ty } => {
+                self.ss_emit_binop(BinOpKind::Add, dst, lhs, rhs, ty.as_ref(), slots)?;
+            }
+            IRInstr::Sub { dst, lhs, rhs, ty } => {
+                self.ss_emit_binop(BinOpKind::Sub, dst, lhs, rhs, ty.as_ref(), slots)?;
+            }
+            IRInstr::Mul { dst, lhs, rhs, ty } => {
+                self.ss_emit_binop(BinOpKind::Mul, dst, lhs, rhs, ty.as_ref(), slots)?;
+            }
+            IRInstr::Div { dst, lhs, rhs, ty } => {
+                self.ss_emit_binop(BinOpKind::SDiv, dst, lhs, rhs, ty.as_ref(), slots)?;
+            }
+
+            // ── Cmp ──
+            IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let width = RegWidth::from_ir_type(ty.as_ref());
+                self.ss_load_value_with_width(lhs, Register::X9, slots, width)?;
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn: Register::X9,
+                        rm: Operand::Reg {
+                            reg: Register::X10,
+                            shift: None,
+                        },
+                    },
+                    width,
+                )?;
+                let cond = cmp_kind_to_condition(kind);
+                self.emit_instruction_with_width(
+                    Instruction::CSET { rd: Register::X9, cond },
+                    width,
+                )?;
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Ret (instruction-level) ──
+            IRInstr::Ret { values } => {
+                for (i, val) in values.iter().enumerate() {
+                    if i >= 8 {
+                        break;
+                    }
+                    let dst_reg = match i {
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
+                        _ => unreachable!(),
+                    };
+                    self.ss_load_value(val, dst_reg, slots)?;
+                }
+            }
+
+            // ── Branch (instruction-level) ──
+            IRInstr::Branch { target } => {
+                let fixup_idx = self.code.len();
+                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+                self.emit_instruction(Instruction::B { offset: 0 })?;
+            }
+
+            // ── CondBranch (instruction-level) ──
+            IRInstr::CondBranch { cond, true_target, false_target } => {
+                self.ss_load_value(cond, Register::X9, slots)?;
+                let fixup_cbz = self.code.len();
+                self.fixups.push((fixup_cbz, true_target.clone(), BranchFormat::Cond19));
+                self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                let fixup_b = self.code.len();
+                self.fixups.push((fixup_b, false_target.clone(), BranchFormat::B26));
+                self.emit_instruction(Instruction::B { offset: 0 })?;
+            }
+
+            // ── Select ──
+            IRInstr::Select { dst, cond, true_val, false_val, ty } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let width = RegWidth::from_ir_type(ty.as_ref());
+                // Load cond and set flags
+                self.ss_load_value_with_width(cond, Register::X9, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn: Register::X9,
+                        rm: Operand::Imm12(0),
+                    },
+                    width,
+                )?;
+                // Load true and false values (LDR does NOT affect condition flags)
+                self.ss_load_value_with_width(true_val, Register::X10, slots, width)?;
+                self.ss_load_value_with_width(false_val, Register::X17, slots, width)?;
+                // CSEL: if NE (cond != 0), X9 = X10 (true_val); else X9 = X17 (false_val)
+                self.emit_instruction_with_width(
+                    Instruction::CSEL {
+                        rd: Register::X9,
+                        rn: Register::X10,
+                        rm: Register::X17,
+                        cond: Condition::NE,
+                    },
+                    width,
+                )?;
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a binary operation using the stack-slot strategy.
+    fn ss_emit_binop(
+        &mut self,
+        op: BinOpKind,
+        dst: &IRValue,
+        lhs: &IRValue,
+        rhs: &IRValue,
+        ty: Option<&IRType>,
+        slots: &HashMap<u32, i32>,
+    ) -> Result<()> {
+        let width = RegWidth::from_ir_type(ty);
+        let dst_id = dst.as_register().unwrap_or(0);
+        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+
+        // Load lhs into X9
+        self.ss_load_value_with_width(lhs, Register::X9, slots, width)?;
+
+        // Determine whether the operation can accept an immediate operand.
+        let supports_imm = matches!(
+            op,
+            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+        );
+
+        match op {
+            BinOpKind::Add => {
+                match rhs {
+                    IRValue::Immediate(v) if supports_imm && *v >= 0 && *v <= 4095 => {
+                        self.emit_instruction_with_width(
+                            Instruction::ADD {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            },
+                            width,
+                        )?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        self.emit_instruction_with_width(
+                            Instruction::ADD {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Reg {
+                                    reg: Register::X10,
+                                    shift: None,
+                                },
+                            },
+                            width,
+                        )?;
+                    }
+                }
+            }
+            BinOpKind::Sub => {
+                match rhs {
+                    IRValue::Immediate(v) if supports_imm && *v >= 0 && *v <= 4095 => {
+                        self.emit_instruction_with_width(
+                            Instruction::SUB {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            },
+                            width,
+                        )?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        self.emit_instruction_with_width(
+                            Instruction::SUB {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Reg {
+                                    reg: Register::X10,
+                                    shift: None,
+                                },
+                            },
+                            width,
+                        )?;
+                    }
+                }
+            }
+            BinOpKind::Mul => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::MUL {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::SDiv => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::SDIV {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::UDiv => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::UDIV {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::And => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::AND {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::Or => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::ORR {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::Xor => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::EOR {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::Shl => {
+                match rhs {
+                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                        self.emit_instruction_with_width(
+                            Instruction::LSL {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            },
+                            width,
+                        )?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        // Emit LSLV directly (the Instruction::LSL with Reg
+                        // operand has a wrong encoding using ADD-shifted form).
+                        self.ss_emit_lslv(Register::X9, Register::X9, Register::X10, width)?;
+                    }
+                }
+            }
+            BinOpKind::ShrL => {
+                match rhs {
+                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                        self.emit_instruction_with_width(
+                            Instruction::LSR {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            },
+                            width,
+                        )?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        self.ss_emit_lsrv(Register::X9, Register::X9, Register::X10, width)?;
+                    }
+                }
+            }
+            BinOpKind::ShrA => {
+                match rhs {
+                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                        self.emit_instruction_with_width(
+                            Instruction::ASR {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(*v as u16),
+                            },
+                            width,
+                        )?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        self.ss_emit_asrv(Register::X9, Register::X9, Register::X10, width)?;
+                    }
+                }
+            }
+            BinOpKind::Ror => {
+                match rhs {
+                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                        self.ss_emit_ror_imm(Register::X9, Register::X9, *v as u32, width)?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        self.ss_emit_rorv(Register::X9, Register::X9, Register::X10, width)?;
+                    }
+                }
+            }
+            BinOpKind::Rol => {
+                // ROL by N = ROR by (size - N)
+                match rhs {
+                    IRValue::Immediate(v) => {
+                        let size = width.bits();
+                        let n = (*v as u32) % size;
+                        let ror_amount = (size - n) % size;
+                        self.ss_emit_ror_imm(Register::X9, Register::X9, ror_amount, width)?;
+                    }
+                    _ => {
+                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                        let size = width.bits();
+                        // Compute X17 = size - (X10 % size)
+                        // X10 % size: use UBFM to mask to log2(size) bits
+                        if size == 64 {
+                            self.emit_load_immediate(Register::X17, 64)?;
+                            self.emit_instruction(Instruction::SUB {
+                                rd: Register::X17,
+                                rn: Register::X17,
+                                rm: Operand::Reg {
+                                    reg: Register::X10,
+                                    shift: None,
+                                },
+                            })?;
+                        } else {
+                            // 32-bit: mask X10 to 5 bits, then compute 32 - masked
+                            self.emit_instruction(Instruction::AND {
+                                rd: Register::X17,
+                                rn: Register::X10,
+                                rm: Register::X10, // This is wrong; need immediate 31
+                            })?;
+                            // Actually use UBFM to extract low 5 bits
+                            self.emit_instruction(Instruction::UBFM {
+                                rd: Register::X17,
+                                rn: Register::X10,
+                                immr: 0,
+                                imms: 4, // bits [4:0] = low 5 bits
+                            })?;
+                            self.emit_load_immediate(Register::X16, 32)?;
+                            self.emit_instruction(Instruction::SUB {
+                                rd: Register::X17,
+                                rn: Register::X16,
+                                rm: Operand::Reg {
+                                    reg: Register::X17,
+                                    shift: None,
+                                },
+                            })?;
+                        }
+                        self.ss_emit_rorv(Register::X9, Register::X9, Register::X17, width)?;
+                    }
+                }
+            }
+            BinOpKind::SRem | BinOpKind::URem => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                // Save dividend in X17 before division
+                self.emit_instruction_with_width(
+                    Instruction::MOV {
+                        rd: Register::X17,
+                        rm: Register::X9,
+                    },
+                    width,
+                )?;
+                let div_instr = if op == BinOpKind::SRem {
+                    Instruction::SDIV {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    }
+                } else {
+                    Instruction::UDIV {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                    }
+                };
+                self.emit_instruction_with_width(div_instr, width)?;
+                // MSUB X9, X9, X10, X17 = X17 - X9 * X10 = dividend - quotient * divisor
+                self.emit_instruction_with_width(
+                    Instruction::MSUB {
+                        rd: Register::X9,
+                        rn: Register::X9,
+                        rm: Register::X10,
+                        ra: Register::X17,
+                    },
+                    width,
+                )?;
+            }
+            BinOpKind::SLt
+            | BinOpKind::SLe
+            | BinOpKind::SGt
+            | BinOpKind::SGe
+            | BinOpKind::ULt
+            | BinOpKind::ULe
+            | BinOpKind::UGt
+            | BinOpKind::UGe
+            | BinOpKind::Eq
+            | BinOpKind::Ne => {
+                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn: Register::X9,
+                        rm: Operand::Reg {
+                            reg: Register::X10,
+                            shift: None,
+                        },
+                    },
+                    width,
+                )?;
+                let cond = binop_kind_to_condition(&op);
+                self.emit_instruction_with_width(
+                    Instruction::CSET { rd: Register::X9, cond },
+                    width,
+                )?;
+            }
+        }
+
+        // Store result to dst's stack slot
+        self.ss_store_to_slot(Register::X9, dst_offset)?;
+        Ok(())
+    }
+
+    /// Emit a terminator using the stack-slot strategy.
+    fn ss_emit_terminator(
+        &mut self,
+        term: &IRTerminator,
+        slots: &HashMap<u32, i32>,
+    ) -> Result<()> {
+        match term {
+            IRTerminator::Jump(target) => {
+                let fixup_idx = self.code.len();
+                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+                self.emit_instruction(Instruction::B { offset: 0 })?;
+            }
+            IRTerminator::Branch { cond, true_block, false_block } => {
+                self.ss_load_value(cond, Register::X9, slots)?;
+                let fixup_cbnz = self.code.len();
+                self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
+                self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                let fixup_b = self.code.len();
+                self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
+                self.emit_instruction(Instruction::B { offset: 0 })?;
+            }
+            IRTerminator::Return(vals) => {
+                for (i, val) in vals.iter().enumerate() {
+                    if i >= 8 {
+                        break;
+                    }
+                    let dst_reg = match i {
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
+                        _ => unreachable!(),
+                    };
+                    self.ss_load_value(val, dst_reg, slots)?;
+                }
+                // Epilogue: restore SP from X29, then LDP and ADD
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X29,
+                    rm: Operand::Imm12(0),
+                })?;
+                self.emit_instruction(Instruction::LDP {
+                    rt1: Register::X29,
+                    rt2: Register::X30,
+                    rn: Register::SP,
+                    offset: 0,
+                })?;
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(16),
+                })?;
+                self.emit_instruction(Instruction::RET { rn: None })?;
+            }
+            IRTerminator::Unreachable => {
+                self.emit_instruction(Instruction::MOV {
+                    rd: Register::XZR,
+                    rm: Register::XZR,
+                })?;
+            }
+            IRTerminator::Switch { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Switch terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::Invoke { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Invoke terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::TailCall { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "TailCall terminator must be lowered before emission".to_string(),
+                ));
+            }
+            IRTerminator::Resume { .. } => {
+                return Err(CodegenError::InvalidInstruction(
+                    "Resume terminator must be lowered before emission".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // ARM64 variable-shift / rotation helpers (correct encoding)
+    // -----------------------------------------------------------------------
+
+    /// Emit LSLV (variable left shift): `LSLV Rd, Rn, Rm`
+    ///
+    /// Encoding: sf 00 11010 11 0 Rm 001000 Rn Rd
+    fn ss_emit_lslv(
+        &mut self,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        width: RegWidth,
+    ) -> Result<()> {
+        let sf = width.sf_bit();
+        let word = (sf << 31)
+            | 0x1AC02000u32
+            | (rm.encoding() << 16)
+            | (rn.encoding() << 5)
+            | rd.encoding();
+        self.code.push(word);
+        Ok(())
+    }
+
+    /// Emit LSRV (variable logical right shift): `LSRV Rd, Rn, Rm`
+    ///
+    /// Encoding: sf 00 11010 11 0 Rm 001001 Rn Rd
+    fn ss_emit_lsrv(
+        &mut self,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        width: RegWidth,
+    ) -> Result<()> {
+        let sf = width.sf_bit();
+        let word = (sf << 31)
+            | 0x1AC02400u32
+            | (rm.encoding() << 16)
+            | (rn.encoding() << 5)
+            | rd.encoding();
+        self.code.push(word);
+        Ok(())
+    }
+
+    /// Emit ASRV (variable arithmetic right shift): `ASRV Rd, Rn, Rm`
+    ///
+    /// Encoding: sf 00 11010 11 0 Rm 001010 Rn Rd
+    fn ss_emit_asrv(
+        &mut self,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        width: RegWidth,
+    ) -> Result<()> {
+        let sf = width.sf_bit();
+        let word = (sf << 31)
+            | 0x1AC02800u32
+            | (rm.encoding() << 16)
+            | (rn.encoding() << 5)
+            | rd.encoding();
+        self.code.push(word);
+        Ok(())
+    }
+
+    /// Emit ROR via EXTR: `ROR Rd, Rn, #amount` = `EXTR Rd, Rn, Rn, #amount`
+    ///
+    /// 64-bit encoding: 1 00 100111 1 0 Rn imm6 Rn Rd  (base 0x93C00000)
+    /// 32-bit encoding: 0 00 100111 0 0 Rn imm6 Rn Rd  (base 0x13800000)
+    fn ss_emit_ror_imm(
+        &mut self,
+        rd: Register,
+        rn: Register,
+        amount: u32,
+        width: RegWidth,
+    ) -> Result<()> {
+        match width {
+            RegWidth::X64 => {
+                let word = 0x93C00000u32
+                    | (rn.encoding() << 16)
+                    | ((amount & 0x3F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding();
+                self.code.push(word);
+            }
+            RegWidth::W32 => {
+                let word = 0x13800000u32
+                    | (rn.encoding() << 16)
+                    | ((amount & 0x1F) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding();
+                self.code.push(word);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit RORV (variable rotate right): `RORV Rd, Rn, Rm`
+    ///
+    /// Encoding: sf 00 11010 11 0 Rm 001011 Rn Rd
+    fn ss_emit_rorv(
+        &mut self,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        width: RegWidth,
+    ) -> Result<()> {
+        let sf = width.sf_bit();
+        let word = (sf << 31)
+            | 0x1AC02C00u32
+            | (rm.encoding() << 16)
+            | (rn.encoding() << 5)
+            | rd.encoding();
+        self.code.push(word);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Program emission → ELF (legacy compatibility)
     // -----------------------------------------------------------------------
 
@@ -1820,6 +3284,56 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
 }
 
 // ---------------------------------------------------------------------------
+// Vreg count computation
+// ---------------------------------------------------------------------------
+
+/// Count the number of unique virtual registers used in a function.
+/// This is used to decide whether to use the stack-slot emitter or the
+/// greedy register allocator.
+fn count_vregs(func: &IRFunction) -> u32 {
+    let mut vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for &id in func.vregs.keys() {
+        vregs.insert(id);
+    }
+    for param in &func.params {
+        if let Some(id) = param.as_register() {
+            vregs.insert(id);
+        }
+    }
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.defined_regs() {
+                vregs.insert(id);
+            }
+            for id in instr.used_regs() {
+                vregs.insert(id);
+            }
+        }
+        match &block.terminator {
+            IRTerminator::Branch { cond, .. } => {
+                if let Some(id) = cond.as_register() {
+                    vregs.insert(id);
+                }
+            }
+            IRTerminator::Return(vals) => {
+                for val in vals {
+                    if let Some(id) = val.as_register() {
+                        vregs.insert(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for val in &func.results {
+        if let Some(id) = val.as_register() {
+            vregs.insert(id);
+        }
+    }
+    vregs.len() as u32
+}
+
+// ---------------------------------------------------------------------------
 // Frame-size computation
 // ---------------------------------------------------------------------------
 
@@ -1829,7 +3343,7 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
 /// NOTE: This does NOT include the 16 bytes for the FP/LR save pair,
 /// because the prologue handles that separately with an explicit
 /// `SUB SP, SP, #16` before the STP.
-fn compute_frame_size(func: &IRFunction) -> u16 {
+fn compute_frame_size(func: &IRFunction) -> u32 {
     let mut total: u32 = 0; // Alloc sizes only; FP/LR handled separately
     for block in &func.blocks {
         for instr in &block.instructions {
@@ -1839,9 +3353,37 @@ fn compute_frame_size(func: &IRFunction) -> u16 {
             }
         }
     }
+
+    // Reserve space for register spill slots. Count the total number of
+    // virtual registers used in the function. In the worst case, every
+    // vreg beyond the 23 available physical registers (13 caller-saved +
+    // 10 callee-saved) will need a spill slot (8 bytes each). Add a
+    // safety margin.
+    let mut max_vreg: u32 = 0;
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.defined_regs() {
+                max_vreg = max_vreg.max(id);
+            }
+            for id in instr.used_regs() {
+                max_vreg = max_vreg.max(id);
+            }
+        }
+    }
+    // Number of potential spills: max(0, vreg_count - available_registers)
+    let available_regs: u32 = 23; // 13 caller-saved + 10 callee-saved
+    let potential_spills = if max_vreg > available_regs {
+        max_vreg - available_regs
+    } else {
+        0
+    };
+    let spill_bytes = potential_spills * 8; // 8 bytes per spill slot
+
+    total += spill_bytes;
+
     // Round up to 16-byte alignment (should already be, but be safe).
     total = (total + 15) & !15;
-    total as u16
+    total
 }
 
 // ---------------------------------------------------------------------------

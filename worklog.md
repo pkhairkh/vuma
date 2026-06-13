@@ -49,3 +49,30 @@ Work Log:
 Stage Summary:
 - RISC-V 64 backend now has proper _start, exit syscall, JAL relocation patching, and runtime I/O
 - All three backends (x86_64, ARM64, RISC-V 64) now produce proper ELF executables with _start stubs and syscall-based I/O
+---
+Task ID: 1
+Agent: main
+Task: Fix VUMA ARM64 backend register allocation and encoding bugs for SHA256d
+
+Work Log:
+- Fixed 31-bit binary literal bugs in ARM64 instruction encodings (encode() and encode_with_width())
+- Fixed STR/STRB/STRH/LDRSW base encodings (using LDUR format instead of STR unsigned offset)
+- Fixed CSET/CSINC encoding base (0x0A800000 → 0x1A800000)
+- Fixed CondBranch logic (CBNZ was branching to false_target instead of true_target)
+- Fixed CBNZ/CBZ fixup branch format (was using B26 mask for Cond19 format)
+- Implemented proper spill/reload in the register allocator (SpillInfo, Arm64RegAllocResult)
+- Added spill slot space to frame size computation
+- Fixed Call handler to resolve all argument registers before moving (prevents overwriting)
+- Fixed Call handler to use different scratch registers for multiple immediate arguments
+- Fixed epilogue to use MOV SP, X29 (robust against Alloc SP changes)
+- Added auto-pin mechanism to prevent resolve_reg from spilling already-resolved registers
+- Fixed spill/reload address computation to use X16 instead of X9 (avoid conflict with immediates)
+- Fixed frame size computation to separate spill area from Alloc area
+- Fixed CMP with two immediates overwriting X9 scratch register
+
+Stage Summary:
+- x86_64 SHA256d: WORKING (exit code 79 = 0x4F, correct NIST hash)
+- ARM64 SHA256d: Running without crash, but producing wrong result (exit code 120 instead of 79)
+- ARM64 simple tests: WORKING (return 42, for-loop sum 10)
+- RISC-V 64: Not yet tested
+- The incorrect ARM64 SHA256d result (120 vs 79) likely indicates a remaining encoding bug in one of the SHA256 helper functions

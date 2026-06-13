@@ -1,0 +1,702 @@
+  1295→
+  1296→            // ---- LDR (unsigned offset, 64-bit) ----
+  1297→            Instruction::LDR { rt, rn, offset } => {
+  1298→                if *offset >= 0 && *offset % 8 == 0 {
+  1299→                    let imm12 = (*offset as u32) / 8;
+  1300→                    if imm12 <= 4095 {
+  1301→                        Ok(0b1111_1001_0100_0000_0000_0000_0000_0000
+  1302→                            | (imm12 << 10)
+  1303→                            | (rn.encoding() << 5)
+  1304→                            | rt.encoding())
+  1305→                    } else {
+  1306→                        Err(CodegenError::EncodingError(format!(
+  1307→                            "LDR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1308→                            offset, imm12
+  1309→                        )))
+  1310→                    }
+  1311→                } else {
+  1312→                    Err(CodegenError::EncodingError(format!(
+  1313→                        "LDR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
+  1314→                        offset
+  1315→                    )))
+  1316→                }
+  1317→            }
+  1318→
+  1319→            // ---- STR (unsigned offset, 64-bit) ----
+  1320→            Instruction::STR { rt, rn, offset } => {
+  1321→                if *offset >= 0 && *offset % 8 == 0 {
+  1322→                    let imm12 = (*offset as u32) / 8;
+  1323→                    if imm12 <= 4095 {
+  1324→                        // STR Xt, [Xn, #pimm]: 11_111_0_00_01_pimm_Rn_Rt
+  1325→                        // Base = 0xF9000000
+  1326→                        Ok(0xF9000000u32
+  1327→                            | (imm12 << 10)
+  1328→                            | (rn.encoding() << 5)
+  1329→                            | rt.encoding())
+  1330→                    } else {
+  1331→                        Err(CodegenError::EncodingError(format!(
+  1332→                            "STR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1333→                            offset, imm12
+  1334→                        )))
+  1335→                    }
+  1336→                } else {
+  1337→                    Err(CodegenError::EncodingError(format!(
+  1338→                        "STR with offset {} not supported (must be non-negative multiple of 8, 0..32760); use address computation instead",
+  1339→                        offset
+  1340→                    )))
+  1341→                }
+  1342→            }
+  1343→
+  1344→            // ---- LDR_W (32-bit, unsigned offset) ----
+  1345→            // LDR Wt: 1 0 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/4)
+  1346→            Instruction::LDR_W { rt, rn, offset } => {
+  1347→                if *offset >= 0 && *offset % 4 == 0 {
+  1348→                    let imm12 = (*offset as u32) / 4;
+  1349→                    if imm12 <= 4095 {
+  1350→                        Ok(0b1011_1001_0100_0000_0000_0000_0000_0000
+  1351→                            | (imm12 << 10)
+  1352→                            | (rn.encoding() << 5)
+  1353→                            | rt.encoding())
+  1354→                    } else {
+  1355→                        Err(CodegenError::EncodingError(format!(
+  1356→                            "LDR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1357→                            offset, imm12
+  1358→                        )))
+  1359→                    }
+  1360→                } else {
+  1361→                    Err(CodegenError::EncodingError(format!(
+  1362→                        "LDR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1363→                        offset
+  1364→                    )))
+  1365→                }
+  1366→            }
+  1367→
+  1368→            // ---- STR_W (32-bit, unsigned offset) ----
+  1369→            // STR Wt: 10_111_0_00_01_pimm_Rn_Rt  (imm12 = offset/4)
+  1370→            // Base = 0xB9000000
+  1371→            Instruction::STR_W { rt, rn, offset } => {
+  1372→                if *offset >= 0 && *offset % 4 == 0 {
+  1373→                    let imm12 = (*offset as u32) / 4;
+  1374→                    if imm12 <= 4095 {
+  1375→                        Ok(0xB9000000u32
+  1376→                            | (imm12 << 10)
+  1377→                            | (rn.encoding() << 5)
+  1378→                            | rt.encoding())
+  1379→                    } else {
+  1380→                        Err(CodegenError::EncodingError(format!(
+  1381→                            "STR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1382→                            offset, imm12
+  1383→                        )))
+  1384→                    }
+  1385→                } else {
+  1386→                    Err(CodegenError::EncodingError(format!(
+  1387→                        "STR_W with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1388→                        offset
+  1389→                    )))
+  1390→                }
+  1391→            }
+  1392→
+  1393→            // ---- LDRB (unsigned offset) ----
+  1394→            // LDRB: 0 0 1 1 1 0 0 1 01 imm12 Rn Rt
+  1395→            Instruction::LDRB { rt, rn, offset } => {
+  1396→                if *offset >= 0 {
+  1397→                    let imm12 = *offset as u32;
+  1398→                    if imm12 <= 4095 {
+  1399→                        Ok(0b0011_1001_0100_0000_0000_0000_0000_0000
+  1400→                            | (imm12 << 10)
+  1401→                            | (rn.encoding() << 5)
+  1402→                            | rt.encoding())
+  1403→                    } else {
+  1404→                        Err(CodegenError::EncodingError(format!(
+  1405→                            "LDRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1406→                            offset, imm12
+  1407→                        )))
+  1408→                    }
+  1409→                } else {
+  1410→                    Err(CodegenError::EncodingError(format!(
+  1411→                        "LDRB with negative offset {} not supported; use address computation instead",
+  1412→                        offset
+  1413→                    )))
+  1414→                }
+  1415→            }
+  1416→
+  1417→            // ---- LDRH (unsigned offset) ----
+  1418→            // LDRH: 0 1 1 1 1 0 0 1 01 imm12 Rn Rt  (imm12 = offset/2)
+  1419→            Instruction::LDRH { rt, rn, offset } => {
+  1420→                if *offset >= 0 && *offset % 2 == 0 {
+  1421→                    let imm12 = (*offset as u32) / 2;
+  1422→                    if imm12 <= 4095 {
+  1423→                        Ok(0b0111_1001_0100_0000_0000_0000_0000_0000
+  1424→                            | (imm12 << 10)
+  1425→                            | (rn.encoding() << 5)
+  1426→                            | rt.encoding())
+  1427→                    } else {
+  1428→                        Err(CodegenError::EncodingError(format!(
+  1429→                            "LDRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1430→                            offset, imm12
+  1431→                        )))
+  1432→                    }
+  1433→                } else {
+  1434→                    Err(CodegenError::EncodingError(format!(
+  1435→                        "LDRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
+  1436→                        offset
+  1437→                    )))
+  1438→                }
+  1439→            }
+  1440→
+  1441→            // ---- LDRSW (unsigned offset) ----
+  1442→            // LDRSW: 10_111_0_10_01_pimm_Rn_Rt  (imm12 = offset/4)
+  1443→            // Base = 0xB9800000
+  1444→            Instruction::LDRSW { rt, rn, offset } => {
+  1445→                if *offset >= 0 && *offset % 4 == 0 {
+  1446→                    let imm12 = (*offset as u32) / 4;
+  1447→                    if imm12 <= 4095 {
+  1448→                        Ok(0xB9800000u32
+  1449→                            | (imm12 << 10)
+  1450→                            | (rn.encoding() << 5)
+  1451→                            | rt.encoding())
+  1452→                    } else {
+  1453→                        Err(CodegenError::EncodingError(format!(
+  1454→                            "LDRSW offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1455→                            offset, imm12
+  1456→                        )))
+  1457→                    }
+  1458→                } else {
+  1459→                    Err(CodegenError::EncodingError(format!(
+  1460→                        "LDRSW with offset {} not supported (must be non-negative multiple of 4, 0..16380)",
+  1461→                        offset
+  1462→                    )))
+  1463→                }
+  1464→            }
+  1465→
+  1466→            // ---- STRB (unsigned offset) ----
+  1467→            // STRB: 00_111_0_00_01_pimm_Rn_Rt
+  1468→            // Base = 0x39000000
+  1469→            Instruction::STRB { rt, rn, offset } => {
+  1470→                if *offset >= 0 {
+  1471→                    let imm12 = *offset as u32;
+  1472→                    if imm12 <= 4095 {
+  1473→                        Ok(0x39000000u32
+  1474→                            | (imm12 << 10)
+  1475→                            | (rn.encoding() << 5)
+  1476→                            | rt.encoding())
+  1477→                    } else {
+  1478→                        Err(CodegenError::EncodingError(format!(
+  1479→                            "STRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1480→                            offset, imm12
+  1481→                        )))
+  1482→                    }
+  1483→                } else {
+  1484→                    Err(CodegenError::EncodingError(format!(
+  1485→                        "STRB with negative offset {} not supported; use address computation instead",
+  1486→                        offset
+  1487→                    )))
+  1488→                }
+  1489→            }
+  1490→
+  1491→            // ---- STRH (unsigned offset) ----
+  1492→            // STRH: 01_111_0_00_01_pimm_Rn_Rt  (imm12 = offset/2)
+  1493→            // Base = 0x79000000
+  1494→            Instruction::STRH { rt, rn, offset } => {
+  1495→                if *offset >= 0 && *offset % 2 == 0 {
+  1496→                    let imm12 = (*offset as u32) / 2;
+  1497→                    if imm12 <= 4095 {
+  1498→                        Ok(0x79000000u32
+  1499→                            | (imm12 << 10)
+  1500→                            | (rn.encoding() << 5)
+  1501→                            | rt.encoding())
+  1502→                    } else {
+  1503→                        Err(CodegenError::EncodingError(format!(
+  1504→                            "STRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
+  1505→                            offset, imm12
+  1506→                        )))
+  1507→                    }
+  1508→                } else {
+  1509→                    Err(CodegenError::EncodingError(format!(
+  1510→                        "STRH with offset {} not supported (must be non-negative multiple of 2, 0..8190)",
+  1511→                        offset
+  1512→                    )))
+  1513→                }
+  1514→            }
+  1515→
+  1516→            // ---- LDP (signed offset, 64-bit) ----
+  1517→            // Encoding: 10 101 0 01 1 imm7 Rt2 Rn Rt1
+  1518→            // Base = 0xA9400000
+  1519→            Instruction::LDP {
+  1520→                rt1,
+  1521→                rt2,
+  1522→                rn,
+  1523→                offset,
+  1524→            } => {
+  1525→                let imm7 = *offset / 8;
+  1526→                // Encoding: 10 101 0 01 1 imm7[21:15] Rt2[14:10] Rn[9:5] Rt1[4:0]
+  1527→                Ok(0xA9400000u32
+  1528→                    | (((imm7 as u32) & 0x7F) << 15)
+  1529→                    | (rt2.encoding() << 10)
+  1530→                    | (rn.encoding() << 5)
+  1531→                    | rt1.encoding())
+  1532→            }
+  1533→
+  1534→            // ---- STP (signed offset, 64-bit) ----
+  1535→            // Encoding: 10 101 0 01 0 imm7 Rt2 Rn Rt1
+  1536→            // Base = 0xA9000000
+  1537→            Instruction::STP {
+  1538→                rt1,
+  1539→                rt2,
+  1540→                rn,
+  1541→                offset,
+  1542→            } => {
+  1543→                let imm7 = *offset / 8;
+  1544→                // Encoding: 10 101 0 01 0 imm7[21:15] Rt2[14:10] Rn[9:5] Rt1[4:0]
+  1545→                Ok(0xA9000000u32
+  1546→                    | (((imm7 as u32) & 0x7F) << 15)
+  1547→                    | (rt2.encoding() << 10)
+  1548→                    | (rn.encoding() << 5)
+  1549→                    | rt1.encoding())
+  1550→            }
+  1551→
+  1552→            // ---- LDXR ----
+  1553→            // LDXR Xt, [Xn]: 1_10_01000_01_11111_0_01111_Rn_Rt
+  1554→            // Base = 0xC85F7C00
+  1555→            Instruction::LDXR { rt, rn } => {
+  1556→                Ok(0xC85F7C00u32 | (rn.encoding() << 5) | rt.encoding())
+  1557→            }
+  1558→
+  1559→            // ---- STXR ----
+  1560→            // STXR Ws, Xt, [Xn]: 1_10_001000_0_Rs_0_11111_Rn_Rt
+  1561→            // Base = 0xC8007C00
+  1562→            Instruction::STXR { rs, rt, rn } => Ok(0xC8007C00u32
+  1563→                | (rs.encoding() << 16)
+  1564→                | (rn.encoding() << 5)
+  1565→                | rt.encoding()),
+  1566→
+  1567→            // ---- LDAXR (load-acquire exclusive) ----
+  1568→            // LDAXR: 1 1 0 0 1 0 0 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1569→            Instruction::LDAXR { rt, rn } => {
+  1570→                Ok(0x08DFFC00u32 | (rn.encoding() << 5) | rt.encoding())
+  1571→            }
+  1572→
+  1573→            // ---- STLXR (store-release exclusive) ----
+  1574→            // STLXR: 1 1 0 0 1 0 0 0 0 0 Rs 0 0 0 0 0 Rn Rt
+  1575→            Instruction::STLXR { rs, rt, rn } => {
+  1576→                Ok(0x0800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+  1577→            }
+  1578→
+  1579→            // ---- CAS ----
+  1580→            Instruction::CAS { rs, rt, rn } => {
+  1581→                Ok(0x1800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+  1582→            }
+  1583→
+  1584→            // ---- LDAR (load-acquire) ----
+  1585→            // LDAR: 1 0 0 0 1 0 0 1 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1586→            Instruction::LDAR { rt, rn } => {
+  1587→                Ok(0x08DFF800u32 | (rn.encoding() << 5) | rt.encoding())
+  1588→            }
+  1589→
+  1590→            // ---- STLR (store-release) ----
+  1591→            // STLR: 1 0 0 0 1 0 0 0 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+  1592→            Instruction::STLR { rt, rn } => {
+  1593→                Ok(0x089FF800u32 | (rn.encoding() << 5) | rt.encoding())
+  1594→            }
+  1595→
+  1596→            // ---- B ----
+  1597→            Instruction::B { offset } => {
+  1598→                let imm26 = (*offset) >> 2;
+  1599→                Ok(0b000101_00000000000000000000000000 | ((imm26 as u32) & 0x03FFFFFF))
+  1600→            }
+  1601→
+  1602→            // ---- BL ----
+  1603→            Instruction::BL { offset } => {
+  1604→                let imm26 = (*offset) >> 2;
+  1605→                Ok(0b100101_00000000000000000000000000 | ((imm26 as u32) & 0x03FFFFFF))
+  1606→            }
+  1607→
+  1608→            // ---- BR ----
+  1609→            Instruction::BR { rn } => {
+  1610→                Ok(0b1101_0110_0001_1111_0000_0000_0000_0000 | (rn.encoding() << 5))
+  1611→            }
+  1612→
+  1613→            // ---- BLR ----
+  1614→            // BLR Xn: 1101_0111_0000_11111_000000_Rn_00001
+  1615→            // Base = 0xD63F0001
+  1616→            Instruction::BLR { rn } => {
+  1617→                Ok(0xD63F0001u32 | (rn.encoding() << 5))
+  1618→            }
+  1619→
+  1620→            // ---- RET ----
+  1621→            Instruction::RET { rn } => {
+  1622→                let reg = rn.unwrap_or(Register::X30);
+  1623→                Ok(0b1101_0110_0101_1111_0000_0000_0000_0000 | (reg.encoding() << 5))
+  1624→            }
+  1625→
+  1626→            // ---- B.cond ----
+  1627→            // B.cond: 0 1 0 1 0 1 0 0 imm19 0 cond
+  1628→            Instruction::BCond { cond, offset } => {
+  1629→                let imm19 = (*offset) >> 2;
+  1630→                Ok(0x54000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | cond.encoding())
+  1631→            }
+  1632→
+  1633→            // ---- CBZ ----
+  1634→            Instruction::CBZ { rt, offset } => {
+  1635→                let imm19 = (*offset) >> 2;
+  1636→                Ok(0xB4000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
+  1637→            }
+  1638→
+  1639→            // ---- CBNZ ----
+  1640→            Instruction::CBNZ { rt, offset } => {
+  1641→                let imm19 = (*offset) >> 2;
+  1642→                Ok(0xB5000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
+  1643→            }
+  1644→
+  1645→            // ---- TBZ ----
+  1646→            // TBZ: b5 011011 0 imm14 Rt
+  1647→            // Base = 0x36000000
+  1648→            Instruction::TBZ { rt, bit, offset } => {
+  1649→                let b5 = *bit >> 5;
+  1650→                let imm14 = (*offset) >> 2;
+  1651→                Ok(0x36000000u32
+  1652→                    | (b5 << 31)
+  1653→                    | ((*bit & 0x1F) << 19)
+  1654→                    | (((imm14 as u32) & 0x3FFF) << 5)
+  1655→                    | rt.encoding())
+  1656→            }
+  1657→
+  1658→            // ---- TBNZ ----
+  1659→            // TBNZ: b5 011011 1 imm14 Rt
+  1660→            // Base = 0x37000000
+  1661→            Instruction::TBNZ { rt, bit, offset } => {
+  1662→                let b5 = *bit >> 5;
+  1663→                let imm14 = (*offset) >> 2;
+  1664→                Ok(0x37000000u32
+  1665→                    | (b5 << 31)
+  1666→                    | ((*bit & 0x1F) << 19)
+  1667→                    | (((imm14 as u32) & 0x3FFF) << 5)
+  1668→                    | rt.encoding())
+  1669→            }
+  1670→
+  1671→            // ---- CMP (alias for SUBS XZR, Rn, Rm) ----
+  1672→            // CMP Xn, Xm (register): sf=1, op=01, S=1, 01011, shift=00, 0, Rm, imm6=0, Rn, Rd=XZR
+  1673→            // Base = 0xEB00001F (SUBS XZR, Xn, Xm)
+  1674→            Instruction::CMP { rn, rm } => match rm {
+  1675→                Operand::Reg { reg, shift: _ } => Ok(0xEB00001Fu32
+  1676→                    | (reg.encoding() << 16)
+  1677→                    | (rn.encoding() << 5)),
+  1678→                // CMP Xn, #imm: sf=1, op=1, S=1, 10001, shift=0, imm12, Rn, Rd=XZR
+  1679→                // Base = 0xF100001F (SUBS XZR, Xn, #imm)
+  1680→                Operand::Imm12(imm) => Ok(0xF100001Fu32
+  1681→                    | ((*imm as u32) << 10)
+  1682→                    | (rn.encoding() << 5)),
+  1683→            },
+  1684→
+  1685→            // ---- CMN (alias for ADDS XZR, Rn, Rm) ----
+  1686→            // CMN Xn, Xm (register): sf=1, op=00, S=1, 01011, shift=00, 0, Rm, imm6=0, Rn, Rd=XZR
+  1687→            // Base = 0xAB00001F (ADDS XZR, Xn, Xm)
+  1688→            Instruction::CMN { rn, rm } => match rm {
+  1689→                Operand::Reg { reg, shift: _ } => Ok(0xAB00001Fu32
+  1690→                    | (reg.encoding() << 16)
+  1691→                    | (rn.encoding() << 5)),
+  1692→                // CMN Xn, #imm: sf=1, op=0, S=1, 10001, shift=0, imm12, Rn, Rd=XZR
+  1693→                // Base = 0xB100001F (ADDS XZR, Xn, #imm)
+  1694→                Operand::Imm12(imm) => Ok(0xB100001Fu32
+  1695→                    | ((*imm as u32) << 10)
+  1696→                    | (rn.encoding() << 5)),
+  1697→            },
+  1698→
+  1699→            // ---- TST (alias for ANDS XZR, Rn, Rm) ----
+  1700→            // TST Xn, Xm: sf=1, opc=00, 01010, N=1, shift=00, Rm, imm6=0, Rn, Rd=XZR
+  1701→            // Base = 0xEA00001F (ANDS XZR, Xn, Xm)
+  1702→            // NOTE: TST has N=1 (bit23=1) unlike AND which has N=0
+  1703→            Instruction::TST { rn, rm } => Ok(0xEA00001Fu32
+  1704→                | (rm.encoding() << 16)
+  1705→                | (rn.encoding() << 5)),
+  1706→
+  1707→            // ---- CSEL ----
+  1708→            // CSEL: 1 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
+  1709→            Instruction::CSEL { rd, rn, rm, cond } => Ok((0x1A800000u64
+  1710→                | (rm.encoding() as u64) << 16
+  1711→                | (cond.encoding() as u64) << 12
+  1712→                | (rn.encoding() as u64) << 5
+  1713→                | rd.encoding() as u64)
+  1714→                as u32),
+  1715→
+  1716→            // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
+  1717→            // CSINC: 1 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
+  1718→            // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
+  1719→            Instruction::CSET { rd, cond } => {
+  1720→                Ok(0x1A800000u32
+  1721→                    | (Register::XZR.encoding() << 16)  // Rm = XZR
+  1722→                    | (cond.invert().encoding() << 12)    // invert(cond)
+  1723→                    | (Register::XZR.encoding() << 5)     // Rn = XZR
+  1724→                    | rd.encoding())
+  1725→            }
+  1726→
+  1727→            // ---- MSUB: Rd = Ra - Rn * Rm ----
+  1728→            // MSUB: 1 0 0 1 1 0 1 1 0 0 0 Rm 0 Ra Rn Rd
+  1729→            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x1B000000u32
+  1730→                | (rm.encoding() << 16)
+  1731→                | (ra.encoding() << 10)
+  1732→                | (rn.encoding() << 5)
+  1733→                | rd.encoding()),
+  1734→
+  1735→            // ---- UBFM (unsigned bitfield move) ----
+  1736→            // UBFM: 1 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+  1737→            // UBFM Xd, Xn, #immr, #imms: sf=1, opc=10, 100110, N=1, immr, imms, Rn, Rd
+  1738→            // Base = 0xD3400000
+  1739→            Instruction::UBFM { rd, rn, immr, imms } => Ok(0xD3400000u32
+  1740→                | ((*immr & 0x3F) << 16)
+  1741→                | ((*imms & 0x3F) << 10)
+  1742→                | (rn.encoding() << 5)
+  1743→                | rd.encoding()),
+  1744→
+  1745→            // ---- SBFM (signed bitfield move) ----
+  1746→            // SBFM: 0 0 0 1 0 0 1 1 0 0 N immr imms Rn Rd
+  1747→            // SBFM Xd, Xn, #immr, #imms: sf=1, opc=00, 100110, N=1, immr, imms, Rn, Rd
+  1748→            // Base = 0x93400000
+  1749→            Instruction::SBFM { rd, rn, immr, imms } => Ok(0x93400000u32
+  1750→                | ((*immr & 0x3F) << 16)
+  1751→                | ((*imms & 0x3F) << 10)
+  1752→                | (rn.encoding() << 5)
+  1753→                | rd.encoding()),
+  1754→
+  1755→            // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
+  1756→            // SBFM: 1 0 0 1 1 0 1 1 0 0 N immr imms Rn Rd
+  1757→            // For SXTW: N=1, immr=0, imms=31
+  1758→            Instruction::SXTW { rd, rn } => Ok(0b1001_0011_0100_0000_0111_1100_0000_0000
+  1759→                | (rn.encoding() << 5)
+  1760→                | rd.encoding()),
+  1761→
+  1762→            // ---- SCVTF (signed integer to double-precision float) ----
+  1763→            // SCVTF: 1 0 0 1 1 0 1 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 Rn Rd (64-bit to double)
+  1764→            Instruction::SCVTF { rd, rn } => {
+  1765→                Ok(0b10_0110_1000_0100_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+  1766→            }
+  1767→
+  1768→            // ---- FCVTZS (double-precision float to signed integer) ----
+  1769→            // FCVTZS: 1 0 0 1 1 0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0 0 Rn Rd
+  1770→            Instruction::FCVTZS { rd, rn } => {
+  1771→                Ok(0b10_0110_1100_0110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+  1772→            }
+  1773→
+  1774→            // ---- FCVT (convert between single and double) ----
+  1775→            // This is a floating-point instruction using the FP register bank.
+  1776→            // For now, we provide a placeholder encoding.
+  1777→            Instruction::FCVT {
+  1778→                rd,
+  1779→                rn,
+  1780→                to_double: _,
+  1781→            } => {
+  1782→                // FCVT Dd, Sn: 0 0 0 1 1 1 1 0 0 1 1 0 0 0 1 1 1 0 0 0 0 0 Rn Rd
+  1783→                // Placeholder — real encoding requires FP register bank
+  1784→                Ok(
+  1785→                    0b0001_1110_0110_0011_1000_0000_0000_0000
+  1786→                        | (rn.encoding() << 5)
+  1787→                        | rd.encoding(),
+  1788→                )
+  1789→            }
+  1790→
+  1791→            // ---- DMB ----
+  1792→            // DMB: 1101_0101_0000_0011_1011_1_CRm_111_11111
+  1793→            // Base (CRm=0) = 0xD50330BF
+  1794→            Instruction::DMB { option } => {
+  1795→                Ok(0xD50330BFu32 | (option.encoding() << 8))
+  1796→            }
+  1797→
+  1798→            // ---- DSB ----
+  1799→            // DSB: 1101_0101_0000_0011_1011_1_CRm_101_11111
+  1800→            // Base (CRm=0) = 0xD50330AF
+  1801→            Instruction::DSB { option } => {
+  1802→                Ok(0xD50330AFu32 | (option.encoding() << 8))
+  1803→            }
+  1804→
+  1805→            // ---- ISB ----
+  1806→            // ISB: 1101_0101_0000_0011_1101_1_1111_111_11111
+  1807→            // Fixed encoding = 0xD5033BDF
+  1808→            Instruction::ISB => Ok(0xD5033BDFu32),
+  1809→
+  1810→            // ---- MOV (alias for ORR Xd, XZR, Xm) ----
+  1811→            // IMPORTANT: When rm is SP, ORR Xd, XZR, SP treats Rm=31 as XZR (not SP),
+  1812→            // giving zero. We must emit ADD Xd, SP, #0 instead.
+  1813→            // ADD Xd, SP, #0 = 0x910003E0 | rd.encoding()
+  1814→            //   sf=1, op=0, S=0, shift=01, imm12=0, Rn=SP(31)
+  1815→            //
+  1816→            // ORR Xd, XZR, Xm encoding (64-bit default):
+  1817→            //   sf=1, opc=01, 01011, N=0, shift=00, Rm, imm6=000000, Rn=11111(XZR), Rd
+  1818→            //   = 0xAA0003E0 | (Rm << 16) | Rd
+  1819→            Instruction::MOV { rd, rm } => {
+  1820→                if matches!(rm, Register::SP) {
+  1821→                    Ok(0x910003E0 | rd.encoding())
+  1822→                } else {
+  1823→                    Ok(0xAA0003E0u32
+  1824→                        | (rm.encoding() << 16)
+  1825→                        | rd.encoding())
+  1826→                }
+  1827→            }
+  1828→
+  1829→            // ---- MOVZ ----
+  1830→            Instruction::MOVZ { rd, imm16, shift } => {
+  1831→                let hw = *shift / 16;
+  1832→                Ok(0b1101_0010_1000_0000_0000_0000_0000_0000
+  1833→                    | (hw << 21)
+  1834→                    | ((*imm16 as u32) << 5)
+  1835→                    | rd.encoding())
+  1836→            }
+  1837→
+  1838→            // ---- MOVK ----
+  1839→            Instruction::MOVK { rd, imm16, shift } => {
+  1840→                let hw = *shift / 16;
+  1841→                Ok(0b1111_0010_1000_0000_0000_0000_0000_0000
+  1842→                    | (hw << 21)
+  1843→                    | ((*imm16 as u32) << 5)
+  1844→                    | rd.encoding())
+  1845→            }
+  1846→
+  1847→            // ---- CLZ Xd, Xn ----
+  1848→            // One-source data processing: 1 10 1101 0110 0000 0000 010 Rn Rd
+  1849→            // CLZ X0, X0 = 0xDAC01000
+  1850→            Instruction::CLZ { rd, rn } => Ok(0xDAC01000 | (rn.encoding() << 5) | rd.encoding()),
+  1851→
+  1852→            // ---- RBIT Xd, Xn ----
+  1853→            // One-source data processing: 1 10 1101 0110 0000 0000 000 Rn Rd
+  1854→            // RBIT X0, X0 = 0xDAC00000
+  1855→            Instruction::RBIT { rd, rn } => Ok(0xDAC00000 | (rn.encoding() << 5) | rd.encoding()),
+  1856→
+  1857→            // ---- FMOV Dd, Xn (GPR → FP double) ----
+  1858→            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 110 000 Rn Rd
+  1859→            // FMOV D0, X0 = 0x9E670000
+  1860→            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32)),
+  1861→
+  1862→            // ---- FMOV Xd, Dn (FP double → GPR) ----
+  1863→            // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
+  1864→            // FMOV X0, D0 = 0x9E6F0000
+  1865→            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding()),
+  1866→
+  1867→            // ---- CNT Vd.8B, Vn.8B ----
+  1868→            // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
+  1869→            // CNT V0.8B, V0.8B = 0x0E205800
+  1870→            Instruction::CNT { vd, vn } => Ok(0x0E205800 | ((*vn as u32) << 5) | (*vd as u32)),
+  1871→
+  1872→            // ---- ADDV Bd, Vn.8B ----
+  1873→            // Advanced SIMD reduction: 0 0 001110 01 11000 11011 1 Vn Vd
+  1874→            // ADDV B0, V0.8B = 0x0E71B800
+  1875→            Instruction::ADDV { vd, vn } => Ok(0x0E71B800 | ((*vn as u32) << 5) | (*vd as u32)),
+  1876→
+  1877→            // ---- UMOV Wd, Vn.B[0] ----
+  1878→            // Advanced SIMD copy: 0 0 001110 00 1 00 0000 1 0 000 Vn Rd
+  1879→            // UMOV W0, V0.B[0] = 0x0E204000
+  1880→            Instruction::UMOV { rd, vn } => Ok(0x0E204000 | ((*vn as u32) << 5) | rd.encoding()),
+  1881→
+  1882→            // ---- SVC ----
+  1883→            // SVC: 1101_0100_0000_0000_0000_imm16_00001
+  1884→            // Base = 0xD4000001
+  1885→            Instruction::SVC { imm16 } => {
+  1886→                Ok(0xD4000001u32 | ((*imm16 as u32) << 5))
+  1887→            }
+  1888→
+  1889→            // ---- NOP ----
+  1890→            // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
+  1891→            Instruction::NOP => Ok(0xD503201F),
+  1892→        }
+  1893→    }
+  1894→
+  1895→    /// Encode this instruction with a specific register width.
+  1896→    ///
+  1897→    /// For instructions that support 32-bit W-register mode (arithmetic,
+  1898→    /// logical, shift, move, load/store, compare, conditional select, and
+  1899→    /// bitfield operations), the `width` parameter controls whether the
+  1900→    /// sf bit (bit 31) or size field (bits 31:30) is set for 32-bit or
+  1901→    /// 64-bit operation.
+  1902→    ///
+  1903→    /// For instructions that do not have a width variant (branches, system,
+  1904→    /// SIMD, etc.), the width parameter is ignored and the default 64-bit
+  1905→    /// encoding is used.
+  1906→    ///
+  1907→    /// Using `RegWidth::W32` produces instructions that operate on W
+  1908→    /// sub-registers, giving automatic 32-bit wrapping arithmetic — essential
+  1909→    /// for algorithms like SHA-256 that require `u32` modular arithmetic.
+  1910→    pub fn encode_with_width(&self, width: RegWidth) -> Result<u32> {
+  1911→        let sf = width.sf_bit();
+  1912→        match self {
+  1913→            // ---- ADD (shifted register): sf 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1914→            // ADD (shifted register): sf op S 01011 shift 0 Rm imm6 Rn Rd
+  1915→            // 64-bit base=0x8B000000, 32-bit base=0x0B000000
+  1916→            Instruction::ADD { rd, rn, rm } => match rm {
+  1917→                Operand::Reg { reg, shift } => {
+  1918→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1919→                    Ok((sf << 31)
+  1920→                        | 0x0B000000u32
+  1921→                        | (hw << 22)
+  1922→                        | (reg.encoding() << 16)
+  1923→                        | (imm6 << 10)
+  1924→                        | (rn.encoding() << 5)
+  1925→                        | rd.encoding())
+  1926→                }
+  1927→                // ADD (immediate): sf op S 10001 shift imm12 Rn Rd
+  1928→                // 64-bit base=0x91000000, 32-bit base=0x11000000
+  1929→                Operand::Imm12(imm) => Ok((sf << 31)
+  1930→                    | 0x11000000u32
+  1931→                    | ((*imm as u32) << 10)
+  1932→                    | (rn.encoding() << 5)
+  1933→                    | rd.encoding()),
+  1934→            },
+  1935→
+  1936→            // ---- SUB (shifted register): sf 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+  1937→            // SUB (shifted register): sf op S 01011 shift 0 Rm imm6 Rn Rd
+  1938→            // 64-bit base=0xCB000000, 32-bit base=0x4B000000
+  1939→            Instruction::SUB { rd, rn, rm } => match rm {
+  1940→                Operand::Reg { reg, shift } => {
+  1941→                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+  1942→                    Ok((sf << 31)
+  1943→                        | 0x4B000000u32
+  1944→                        | (hw << 22)
+  1945→                        | (reg.encoding() << 16)
+  1946→                        | (imm6 << 10)
+  1947→                        | (rn.encoding() << 5)
+  1948→                        | rd.encoding())
+  1949→                }
+  1950→                // SUB (immediate): 64-bit base=0xD1000000, 32-bit base=0x51000000
+  1951→                Operand::Imm12(imm) => Ok((sf << 31)
+  1952→                    | 0x51000000u32
+  1953→                    | ((*imm as u32) << 10)
+  1954→                    | (rn.encoding() << 5)
+  1955→                    | rd.encoding()),
+  1956→            },
+  1957→
+  1958→            // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
+  1959→            // MADD: sf 0 0 1 1 0 1 1 000 Rm 0 Ra Rn Rd
+  1960→            // MUL (=MADD Rd, Rn, Rm, XZR): 64-bit base=0x9B007C00, 32-bit base=0x1B007C00
+  1961→            Instruction::MUL { rd, rn, rm } => Ok((sf << 31)
+  1962→                | 0x1B007C00u32
+  1963→                | (rm.encoding() << 16)
+  1964→                | (rn.encoding() << 5)
+  1965→                | rd.encoding()),
+  1966→
+  1967→            // ---- SDIV ----
+  1968→            // SDIV: 64-bit base=0x9AC00C00, 32-bit base=0x1AC00C00
+  1969→            Instruction::SDIV { rd, rn, rm } => Ok((sf << 31)
+  1970→                | 0x1AC00C00u32
+  1971→                | (rm.encoding() << 16)
+  1972→                | (rn.encoding() << 5)
+  1973→                | rd.encoding()),
+  1974→
+  1975→            // ---- UDIV ----
+  1976→            // UDIV: 64-bit base=0x9AC00800, 32-bit base=0x1AC00800
+  1977→            Instruction::UDIV { rd, rn, rm } => Ok((sf << 31)
+  1978→                | 0x1AC00800u32
+  1979→                | (rm.encoding() << 16)
+  1980→                | (rn.encoding() << 5)
+  1981→                | rd.encoding()),
+  1982→
+  1983→            // ---- AND (shifted register) ----
+  1984→            // AND: 64-bit base=0x8A000000, 32-bit base=0x0A000000
+  1985→            Instruction::AND { rd, rn, rm } => Ok((sf << 31)
+  1986→                | 0x0A000000u32
+  1987→                | (rm.encoding() << 16)
+  1988→                | (rn.encoding() << 5)
+  1989→                | rd.encoding()),
+  1990→
+  1991→            // ---- ORR (shifted register) ----
+  1992→            // ORR: 64-bit base=0xAA000000, 32-bit base=0x2A000000
+  1993→            Instruction::ORR { rd, rn, rm } => Ok((sf << 31)
+  1994→                | 0x2A000000u32
+
+[showing lines 1295-1994 of 5184; use offset=1995 with limit to continue reading]

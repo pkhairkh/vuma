@@ -1,0 +1,399 @@
+     1→Let me trace down the source of the illegal `0x9258FC4F` instruction by reading the current state of the emitter and instruction encoding code.
+     2→Now I can see the actual file structure. The codegen files are:
+     3→- `src/codegen/src/arm64.rs` (not backend/arm64/)
+     4→- `src/codegen/src/emit.rs`
+     5→- `src/codegen/src/backend.rs`
+     6→- `src/codegen/src/riscv64.rs`
+     7→- `src/codegen/src/scg_to_ir.rs`
+     8→- `src/codegen/src/ir.rs`
+     9→- `src/codegen/src/regalloc.rs`
+    10→
+    11→Let me read the key files:
+    12→The files are very large. Let me focus on the critical sections — the ARM64 instruction `encode()` and `encode_with_width()` methods, and the `emit_ir_instr` function:
+    13→Now I see the `encode_with_width` for UBFM has `0b1001_0010_0000_0000_0000_0000_0000_0000`. Let me count bits:
+    14→Now I understand the root cause. The `0x9258FC4F` illegal instruction is the UBFM (used for ZExt / LSR / LSL immediates) with a wrong base encoding — `0x92000000` (AND immediate, opc=00) instead of `0x53000000` (UBFM, opc=10). When sf=1 and N=1 are OR'd in, it produces `0x92400000` which is an AND immediate with N=1 — an invalid encoding that QEMU rejects as SIGILL!
+    15→
+    16→Let me also check the `encode()` method for the same issue:
+    17→Now let me see the `encode()` method for UBFM, SBFM, and the rest:
+    18→Now I see the issue. Let me verify all the problematic binary literals in `encode()`:
+    19→Wow — there are many wrong binary literals! The `encode()` method has numerous 31-bit and incorrect encodings. Let me also check the `encode_with_width` method:
+    20→Now I have a comprehensive understanding of all the bugs. Let me fix them systematically. The approach: replace ALL incorrect binary literals in `encode()` with correct hex values, and fix the `encode_with_width` UBFM base.
+    21→
+    22→Let me create a comprehensive fix:
+    23→Let me do this myself. First, let me find the BarrierOption encoding and then apply all fixes:
+    24→Good. `BarrierOption::ISH` encodes as `0b1011 = 0xB`. So DMB ISH has CRm=0xB in bits[11:8].
+    25→
+    26→Now let me compute the correct DMB/DSB/ISB base values:
+    27→Now I have all the correct values. Let me apply all the fixes systematically. I'll do this in batches using MultiEdit:
+    28→Good. Now fix the LSL/LSR/ASR immediate encodings in `encode()`:
+    29→Now fix BLR, TBZ, TBNZ, SVC, DMB, DSB, ISB:
+    30→Good. BR is correct, BLR needs fix, RET is correct. Now let me apply the remaining fixes:
+    31→Now fix the `encode_with_width` UBFM and SBFM base encodings:
+    32→Now fix the UBFM/SBFM bases in `encode_with_width`:
+    33→Now fix the UBFM and SBFM encodings in `encode_with_width`:
+    34→Now let me also fix the BR encoding (it uses a binary literal which might be wrong) and the other suspicious binary literals in `encode()`:
+    35→Good - the main instructions used by SHA256d are now correct. LDXR, STXR, SCVTF, FCVTZS have wrong bit counts but aren't used by SHA256d. Let me fix them too while I'm at it, then build and test:
+    36→Fix the duplicate comment:
+    37→Now fix the SCVTF and FCVTZS binary literals that are also 29 bits:
+    38→Now let me build and test:
+    39→Build succeeds. Now let me test with the SHA256d program. First let me check what the test infrastructure looks like:
+    40→Now let me test it with the VUMA compiler. Let me find how to compile and run:
+    41→The `run` command goes through the full pipeline which includes the verification stages. The `emit` command skips those. Let me check if `emit` produced a working binary, and find a way to run it:
+    42→Segfault on ARM64. Let me check the instruction trace:
+    43→The instructions look valid now — no SIGILL! The problem is a segfault. Let me trace more to find where the segfault occurs:
+    44→There's a segfault in a loop — it's trying to load from an invalid address. The loop at `0x00402244` to `0x00402288` appears to be a `for i in 0..msg_len { *(block + i) = *(msg + i); }` copy loop, but `x11` (the loop bound) is 0, and yet `x13` keeps incrementing. The `cbz x11` at `0x00402254` checks if x11 is 0, and since x11 = 0, it branches to `0x402254` which is right after itself. But then `0x402258` branches to `0x402264` which starts the loop body anyway!
+    45→
+    46→The issue is in the loop condition — when the loop count is 0, the loop body still executes. This is a code generation bug. But let me focus on the more fundamental issue first — the segfault is likely from accessing unallocated memory.
+    47→
+    48→Let me look at what the `write_u32_be` function is doing — it's storing to `(buf + offset)` but the `buf` is a stack pointer from `allocate`, and the offset is computed as `idx * 4`. Let me check the Alloc handler:
+    49→The Alloc handler looks correct — SUB SP first, then MOV rd, SP. The problem must be elsewhere. Let me look at the actual QEMU trace more carefully. The segfault occurs in the `copy32` or `sha256_pad_block` function. Let me check the loop condition generation:
+    50→I see `ldurb` instructions — these are load unsigned byte with unscaled immediate. But the emitter generates `LDRB` and `STRB` using unsigned offset encoding. The `0x384001E9` = `ldurb w9, [x15]` is NOT an LDRB — it's `LDURB` (unscaled offset). Let me check: `0x38400000` is the LDURB base, `0x39400000` is the LDRB base.
+    51→
+    52→The problem: the emitter is generating `LDURB` (load unscaled register byte) instead of `LDRB` (load unsigned offset byte). But looking at the code, `LDRB` uses `0x39400000` and `STRB` uses `0x39000000` in `encode_with_width`. But the trace shows `0x38...` which is the LDURB encoding.
+    53→
+    54→Wait, looking at the address `0x00402584`: `384001e9` = `0011_1000_0100_0000_0000_0001_1110_1001`. Let me decode:
+    55→- bits[31:30] = 00 (size=0, byte)
+    56→- bits[29:27] = 111 (V=1?) No... 
+    57→
+    58→Actually `0x38...` is in the load/store unscaled immediate space. `0x39400000` = LDRB unsigned offset. `0x38400000` = LDURB unscaled immediate.
+    59→
+    60→The emitter should be producing LDRB but is producing LDURB. This means the STRB/LDRB encodings in `encode_with_width` are wrong.
+    61→The `encode()` method's `LDRB` at line ~1382 uses `0b0011_1001_0100_0000_0000_0000_0000_0000` = `0x39400000`. That's correct. But in `encode_with_width`, the LDRB/STRB aren't handled — they fall through to `encode()` which always uses 64-bit LDR/STR, not the byte variants!
+    62→
+    63→Let me check what happens when a byte load/store is needed with `encode_with_width`:
+    64→The LDRB/STRB are used in `emit_load_with_type` and `emit_store_with_type`. Let me check these methods:
+    65→The `emit_load` correctly uses `LDRB` for byte loads. But the trace shows `ldurb` instructions. The address `0x00402584` = `384001e9` is in the `main` function. Looking at the trace:
+    66→
+    67→```
+    68→0x00402580:  d2800c29  movz     x9, #0x61
+    69→0x00402584:  384001e9  ldurb    w9, [x15]
+    70→```
+    71→
+    72→The `movz x9, #0x61` sets x9 to 97 (='a'), then `ldurb w9, [x15]` loads from x15 — but the `movz` just set x9 to 97, and now we're loading from x15 into x9, overwriting the value! This is wrong code generation — the `movz` should be followed by a `strb w9, [x15]` (store 97 at x15), not a load!
+    73→
+    74→Wait, let me re-read the VUMA code:
+    75→```
+    76→*(msg + 0) = 97;   // 'a'
+    77→```
+    78→
+    79→This should store 97 at msg+0. But the compiler is emitting `movz x9, #0x61` followed by `ldurb w9, [x15]` instead of `strb w9, [x15]`. The store is being generated as a load!
+    80→
+    81→Let me check the `emit_store` function and how the AST bridge handles pointer dereference stores:
+    82→The `emit_store` looks correct. The issue is in how the IR is generated — the `*(msg + 0) = 97` should produce a Store IR instruction but it might be producing a Load instead. Let me check how the AST bridge handles `*(expr) = value`:
+    83→OK the SCG→IR bridge properly handles Store. Now let me check how the IR Store is handled in the emitter:
+    84→The Store handler looks correct. The issue must be that the IR is wrong or the `ldurb` in the trace is not actually from a Store. Let me look more carefully at the trace:
+    85→
+    86→```
+    87→0x0040257c:  9100022f  add      x15, x17, #0      ; x15 = x17 (msg base)
+    88→0x00402580:  d2800c29  movz     x9, #0x61         ; x9 = 97 = 'a'
+    89→0x00402584:  384001e9  ldurb    w9, [x15]          ; LOAD from [x15]? Should be STORE!
+    90→```
+    91→
+    92→Wait, `384001E9` — let me decode this more carefully:
+    93→The compiler is emitting LDURB (load) instead of STRB (store). The STRB encoding base is `0x39000000` but we're getting `0x38400000` (LDURB). This means the STRB encoding in `encode()` is wrong!
+    94→
+    95→Let me check:
+    96→Found the STRB bug! The `encode()` for STRB has the wrong base `0x38400000` (LDURB) instead of `0x39000000` (STRB unsigned offset). Let me also check all the other store encodings:
+    97→ALL store instructions have the wrong base encoding! And LDRSW is also wrong. The pattern: all the store encodings use `0bXXXX_1000_0100_...` (LDUR format) instead of `0bXXXX_1001_0000_...` (STR unsigned offset format). And LDRSW uses the LDR_W encoding.
+    98→
+    99→Let me fix all of them:
+   100→Now I need to map these line numbers to the correct instructions. Let me read them:
+   101→Now let me check which instruction each line belongs to:
+   102→Now I can map:
+   103→- Line 1324: `STR` (64-bit) — base `0b1111_1000_0100...` = `0xF8400000` → should be `0xF9000000`
+   104→- Line 1348: `LDR_W` — base `0b1011_1001_0100...` = `0xB9400000` ✓ (this is LDR Wt, correct!)
+   105→- Line 1372: `STR_W` — base `0b1011_1000_0100...` = `0xB8400000` → should be `0xB9000000`
+   106→- Line 1444: `LDRSW` — base `0b1011_1001_0100...` = `0xB9400000` → should be `0xB9800000`
+   107→- Line 1468: `STRB` — base `0b0011_1000_0100...` = `0x38400000` → should be `0x39000000`
+   108→- Line 1492: `STRH` — base `0b0111_1000_0100...` = `0x78400000` → should be `0x79000000`
+   109→The strings are too similar. Let me do them one at a time with more context:
+   110→Oh, STR is already fixed (0xF9000000). Let me check the others:
+   111→Lines 1350 (LDR_W) and 1446 (LDRSW). LDR_W at 1350 is correct (0xB9400000). LDRSW at 1446 needs to be 0xB9800000.
+   112→
+   113→Let me fix them one at a time:
+   114→Now fix LDRSW:
+   115→Now fix STRB:
+   116→Now fix STRH:
+   117→Now also need to fix the `encode_with_width` versions of STR and STR_W. Let me check:
+   118→Now let me build and test:
+   119→Still segfault. Let me trace again:
+   120→STRB is now working correctly (`0x390001E9` = `strb w9, [x15]`). The stores are happening. Let me see where the segfault occurs:
+   121→The copy loop is now correctly using `ldrb` and `strb`. But it's still crashing. The issue is the loop condition — `x11` is the loop bound (msg_len), and the `cbz x11` at `0x402290` checks if it's 0 and branches to itself. But then the code at `0x402294` branches to `0x4022a0` which enters the loop body!
+   122→
+   123→The problem: `cbz x11, #0x402290` means "if x11 == 0, branch to 0x402290". But 0x402290 IS the cbz instruction itself, creating an infinite loop! Actually wait, QEMU says it goes to `0x402294` after the cbz — so x11 is NOT zero. But the loop counter x13 keeps incrementing past x11, eventually reading from invalid memory.
+   124→
+   125→Wait, let me re-read the trace more carefully:
+   126→
+   127→```
+   128→0x00402288:  eb0b01bf  cmp      x13, x11     ; compare counter with bound
+   129→0x0040228c:  8a9fa3ea  and      x10, xzr, xzr, asr #40  ; ??? weird instruction
+   130→0x00402290:  b400000b  cbz      x11, #0x402290  ; if x11 == 0, goto self (infinite loop)
+   131→0x00402294:  14000003  b        #0x4022a0       ; else goto loop body
+   132→```
+   133→
+   134→The `cbz x11, #0x402290` branches to itself when x11 is 0, which is an infinite loop. This should be a conditional branch that skips the loop when i >= msg_len. But the code is wrong — it checks if x11 (the bound) is 0, not if x13 (the counter) has reached x11.
+   135→
+   136→And the `and x10, xzr, xzr, asr #40` is a very weird instruction. `0x8A9FA3EA` — this looks like it might be a CSET or CINC that got mis-encoded.
+   137→
+   138→The issue is in the loop code generation. The `for i in 0..msg_len` loop should generate:
+   139→1. Initialize i = 0
+   140→2. Loop header: if i >= msg_len, jump to loop exit
+   141→3. Loop body
+   142→4. Increment i
+   143→5. Jump to loop header
+   144→
+   145→But the generated code has a `cbz` checking if the bound is 0, then unconditionally entering the loop. This is a codegen bug in the loop handling. The loop counter check is missing or wrong.
+   146→
+   147→However, the immediate problem is the segfault from accessing invalid memory. The copy32 function is being called with `msg` = inner hash pointer and `msg_len` = 32, but the function is trying to copy more than 32 bytes because the loop condition isn't working.
+   148→
+   149→This is a deeper codegen issue in the SCG→IR bridge or the IR→machine code lowering for loops. Let me check how loops are compiled:
+   150→I see the problem! The `lower_loop` generates an **infinite loop** with no loop exit condition! It just creates a loop header → body → back-edge → header. There's no condition to exit the loop.
+   151→
+   152→The `for i in 0..msg_len` should have a condition `i < msg_len` at the loop header. But the loop lowering doesn't handle this — it creates an unconditional infinite loop.
+   153→
+   154→This is a fundamental code generation bug. The SCG→IR bridge doesn't properly handle `for` loops with bounds. It just creates an infinite loop and hopes for a `break` inside.
+   155→
+   156→This is a deep architectural issue. Let me check how the parser/AST→SCG bridge handles `for i in 0..n` loops:
+   157→The SCG representation of the `for` loop has a `LoopHeader` and `LoopExit`, with edges from header to body and header to exit. The SCG→IR bridge must convert this to a conditional loop. But the current `lower_loop` function doesn't use the SCG structure — it just creates an infinite loop.
+   158→
+   159→This is a significant design gap. The `for i in 0..n` loop needs:
+   160→1. Initialize i = 0
+   161→2. Loop header: if i >= n, branch to exit
+   162→3. Loop body
+   163→4. Increment i = i + 1
+   164→5. Branch to header
+   165→
+   166→But the current SCG→IR bridge treats all loops as infinite loops with no condition. The fix needs to happen in the SCG→IR bridge to properly handle for-loop bounds.
+   167→
+   168→This is a large change. Let me focus on making a targeted fix for the specific issue. The key problem is that the `lower_loop` doesn't know about the loop condition. Looking at the SCG, the `LoopHeader` node has a label like "for i in 0..n" which encodes the range, but the IR builder doesn't parse it.
+   169→
+   170→Let me check the `ControlNode` structure:
+   171→The SCG `LoopHeader` doesn't carry the loop condition or range info. The condition is in the label string. The codegen pipeline is:
+   172→
+   173→1. Parser → AST → SCG (graph with `LoopHeader`/`LoopExit` nodes)
+   174→2. SCG → IR (lower_loop creates infinite loop, no condition)
+   175→3. IR → Machine code
+   176→
+   177→The problem is at step 2. The `lower_loop` doesn't know the loop range/condition. However, looking at the actual `for i in 0..n` VUMA code, the parser should produce:
+   178→- Initialize i = 0
+   179→- Loop body with implicit condition check and increment
+   180→
+   181→But the current implementation just creates an infinite loop body without any condition or increment.
+   182→
+   183→Let me look at how the AST→SCG bridge handles `for` loops more carefully. It seems like the bridge creates the loop structure in the SCG graph but doesn't emit the initial assignment, condition check, or increment as separate computation nodes. Instead, it just connects the header to the body.
+   184→
+   185→This is a deep architectural issue. The `for` loop in VUMA needs the condition and increment to be explicit SCG nodes. But the current design relies on the SCG→IR bridge to figure out the loop semantics from the graph structure.
+   186→
+   187→Given the complexity, let me take a different approach: fix the `lower_loop` in the SCG→IR bridge to properly handle `for` loops by looking at the loop variable's range.
+   188→The for-loop issue is critical. Let me look at how the IR is actually generated for `for i in 0..n`. The key question is: does the IR contain the loop variable initialization, condition, and increment, or is it just an infinite loop body?
+   189→The IR is actually correct! The for-loop generates:
+   190→1. `Cmp { kind: SLt, lhs: i, rhs: 5 }` — condition check: `i < 5`
+   191→2. `CondBranch` — branch to then (loop body) or else (loop exit)
+   192→3. `Add { i = i + 1 }` — increment in the then block
+   193→4. `Branch { target: "loop_header_0" }` — back-edge
+   194→
+   195→The IR is fine! The problem must be in how the emitter handles the `Cmp` and `CondBranch`. Let me trace the test_for program:
+   196→Exit code 1 — expected sum = 0+1+2+3+4 = 10, but got 1. Let me trace:
+   197→The trace is empty but the exit code is 1. This is very fast — the program terminates immediately with exit code 1. Let me check if the sha256d trace has the same issue (the program I tested earlier had a much longer trace). Let me try the x86_64 backend:
+   198→x86_64 gives the correct result (10 = 0+1+2+3+4). ARM64 gives 1. So the ARM64 emitter has a bug in handling the `Cmp` and `CondBranch` IR instructions. Let me check how `Cmp` is emitted:
+   199→I see! The `CondBranch` uses `CBNZ` to check if the condition register is non-zero, then branches to the false_target. If the condition is zero (false), it falls through to a B (unconditional branch) to the true_target. Wait, that's backwards!
+   200→
+   201→The logic is:
+   202→1. `CBNZ rt, false_target` — if rt ≠ 0, branch to false_target
+   203→2. `B true_target` — otherwise (rt == 0), branch to true_target
+   204→
+   205→But in the IR, `CondBranch { cond, true_target, false_target }` should branch to `true_target` when cond is non-zero! The current code does the opposite — it branches to `false_target` when cond is non-zero.
+   206→
+   207→Actually wait, let me re-read. The `Cmp` instruction produces a 0 or 1 result in `dst`. The `Cmp { kind: SLt }` sets `dst = 1` if lhs < rhs. Then `CondBranch { cond: dst, true_target, false_target }` should:
+   208→- If cond ≠ 0 → branch to true_target
+   209→- If cond == 0 → branch to false_target
+   210→
+   211→But the current code:
+   212→- `CBNZ rt, false_target` → if rt ≠ 0, goto false_target (WRONG!)
+   213→- `B true_target` → else goto true_target
+   214→
+   215→This is inverted! `CBNZ` should branch to `true_target`, not `false_target`.
+   216→Now rebuild and test:
+   217→Still exit code 1. The for-loop is still wrong. Let me check if the issue is in the fixups (branch target resolution) or in the condition evaluation itself. Let me disassemble the ARM64 binary:
+   218→The disassembler is treating it as raw bytes, not ARM64 instructions. Let me trace the execution instead:
+   219→The trace is going to stderr, which seems to be swallowed. Let me redirect explicitly:
+   220→So SHA256D trace works but test_for doesn't. The difference: SHA256D crashes (segfault) and produces a trace. test_for exits normally with code 1 and doesn't produce a trace. This is because the test_for binary exits too quickly — before any TB (translation block) is compiled. The static QEMU only logs when it compiles a TB, and if the program is very short, it might not log.
+   221→
+   222→Let me try a more complex for-loop test:
+   223→Exit code 1 again. Expected 4950 (0+1+...+99). The program is exiting with code 1, which means the loop isn't executing correctly. The issue is that the `Cmp` instruction with `SLt` comparison is probably generating the wrong condition.
+   224→
+   225→Let me check `cmp_kind_to_condition`:
+   226→The condition mapping looks correct. The `Cmp` emits `CMP rn, rm` then `CSET rd, LT` for `SLt`. So the CSET should set rd=1 if rn < rm (signed less than). Then the `CondBranch` uses `CBNZ rd, true_target`.
+   227→
+   228→The problem might be that the CSET is using the wrong width. The `Cmp` uses `emit_instruction_with_width` for both CMP and CSET. But the CSET result should be 0 or 1, which doesn't need a specific width. Let me check if CSET with W32 mode would produce wrong results.
+   229→
+   230→Actually, the `Cmp` IR instruction has `ty: None`, which means `RegWidth::from_ir_type(None)` returns `X64` (default). But the comparison values might be 32-bit. The issue could be that the CMP is comparing 64-bit values when it should compare 32-bit values. In the for-loop `for i in 0..5`, `i` is a 64-bit value, and 5 is also 64-bit. So CMP with X64 width should work.
+   231→
+   232→Wait, let me check the actual generated code by looking at the emitted bytes. Let me add debug output:
+   233→The IR looks correct. The `Cmp { kind: SLt, lhs: i, rhs: 5 }` should set dst=1 when i < 5. Then `CondBranch { cond: dst, true_target: "then_3", false_target: "else_4" }` should branch to then_3 when dst != 0 (i.e., when i < 5).
+   234→
+   235→The problem must be in the fixup resolution. When the `CondBranch` generates `CBNZ rt, true_target` and `B false_target`, the fixup offsets might be wrong. Let me check how fixups are resolved:
+   236→The fixup resolution at line 1736 computes the offset as `target_offset - word_idx`, which is the number of words between the branch and the target. This is correct for `B` and `BL` which use a 26-bit word offset.
+   237→
+   238→But for `CBNZ`, the offset encoding is different! CBNZ uses a 19-bit immediate (imm19) that encodes the word offset in the same way as B (imm26), but with only 19 bits. The fixup code masks with `0x03FFFFFF` which is 26 bits — that's correct for B/BL but wrong for CBNZ which needs a different mask!
+   239→
+   240→Wait, actually, both B and CBNZ use the same offset encoding: the immediate value is `(target - branch) / 4`, stored in the lower bits. For B, it's bits[25:0] (26 bits). For CBNZ, it's bits[23:5] (19 bits). The fixup code just does `old_word & !0x03FFFFFF | (offset & 0x03FFFFFF)` which puts the offset in the lower 26 bits — correct for B, but for CBNZ it puts the offset in bits[25:0] which overlaps with the register field!
+   241→
+   242→This is a bug. The fixup code assumes all branches use the same 26-bit offset encoding as B/BL, but CBNZ uses a different encoding where the offset is in bits[23:5] with the register in bits[4:0].
+   243→
+   244→However, looking more carefully, the `offset` value computed is `(target_offset - word_idx)` which is the word offset. For CBNZ, this word offset needs to go into bits[23:5] (shifted by 5). But the fixup just ORs it into bits[25:0], which would corrupt the register field.
+   245→
+   246→Actually wait — let me re-read the CBNZ encoding:
+   247→```
+   248→CBNZ: sf 0110101 imm19 Rt
+   249→```
+   250→The `imm19` is at bits[23:5], and `Rt` is at bits[4:0]. The fixup masks with `0x03FFFFFF` and puts the result in bits[25:0], which would overwrite the CBNZ opcode bits[31:24] and the register bits[4:0].
+   251→
+   252→This is definitely wrong! The fixup needs to handle different branch encoding formats. For CBNZ/CBZ/B.cond, the offset is in a different bit position than for B/BL.
+   253→
+   254→This is a significant bug. The fixup code needs to be format-aware. But for now, the simplest fix is to use a different approach: store the instruction format alongside the fixup so the patching code knows how to encode the offset.
+   255→
+   256→However, looking at the CBNZ encoding more carefully: the offset for CBNZ is `imm19` at bits[23:5]. The current fixup does `(offset & 0x03FFFFFF)` which puts up to 26 bits in the low 26 bits. For CBNZ, the offset should be `(imm19 << 5)`, not just `offset` in the low bits.
+   257→
+   258→The simplest fix: use `B.cond` instead of `CBNZ` for conditional branches, since B.cond uses the same offset encoding as CBZ/CBNZ but we can encode it properly. Actually, a simpler approach: change the CondBranch to use `CBZ` (branch if zero = false condition) with inverted logic, and then `B` for the true branch.
+   259→
+   260→Wait, actually the real fix is simpler. The problem is that `apply_fixups` uses a generic mask `0x03FFFFFF` for all branch instructions. But CBNZ has a different field layout. Let me fix this by making the fixup resolution format-aware.
+   261→
+   262→Instead of trying to fix the complex fixup system, let me take a simpler approach: emit the CondBranch using a test-and-branch approach where I manually compute the offset.
+   263→Infinite loop! The `CondBranch` fixup is creating an infinite loop by corrupting the CBNZ instruction. The fixup puts the offset in the wrong bit position for CBNZ, which corrupts the register field, making the branch always taken (or never taken).
+   264→
+   265→This confirms the fixup bug. Let me fix it properly by making the fixup resolution format-aware. The key insight: for CBNZ/CBZ/B.cond, the offset is in `imm19` at bits[23:5], not in bits[25:0] like B/BL.
+   266→
+   267→Let me redesign the fixup system to store the instruction format:
+   268→I need to change the fixup type from `(usize, String)` to include the format type. Let me add a `BranchFormat` enum and update the fixup logic:
+   269→Now add the `BranchFormat` enum and update all fixup-related code. Let me add the enum near the top of the file:
+   270→Now update all the fixup push sites and the apply_fixups function:
+   271→Now fix the other fixup sites (for the if/else lowering):
+   272→Now update the `apply_fixups` function:
+   273→Now build and test:
+   274→Still 0 instead of 42! The condition `1 < 2` should be true but the branch goes to the false path. Let me check the simple test more carefully:
+   275→Good, simple return works. Now let me test the if with a trace:
+   276→Now I can see the problem! Look at this:
+   277→
+   278→```
+   279→0x00401020:  d2800029  movz     x9, #0x1       ; x9 = 1
+   280→0x00401024:  d2800049  movz     x9, #0x2       ; x9 = 2 (OVERWRITES x9!)
+   281→0x00401028:  eb09013f  cmp      x9, x9          ; compares 2 with 2 (SAME!)
+   282→```
+   283→
+   284→The emitter is loading both the LHS (1) and RHS (2) into the SAME register (X9)! The register allocator is reusing X9 for both operands. This is a register allocation bug — it doesn't properly track that the LHS value is still live when the RHS is being loaded.
+   285→
+   286→The `Cmp { lhs: Register(5), rhs: Immediate(5) }` — wait, both lhs and rhs are `Immediate`? No, the IR says `Cmp { kind: SLt, dst: Register(1), lhs: Immediate(1), rhs: Immediate(2) }`. Both are immediates, and the emitter resolves them to the same scratch register X9.
+   287→
+   288→The problem is in how the emitter resolves immediates for the CMP instruction. It uses `resolve_reg` for both lhs and rhs, which loads each into a scratch register. But since both use the same scratch register, the second load overwrites the first.
+   289→
+   290→Let me check the `resolve_reg` and immediate loading logic:
+   291→Found it! `resolve_reg` uses `X9` for all immediates and `X10` for all addresses. When both the LHS and RHS of a CMP are immediates, both get loaded into X9, and the second load overwrites the first.
+   292→
+   293→The fix: when the CMP instruction has two immediates, we need to use different scratch registers. Let me fix the CMP emission:
+   294→The problem is that `resolve_reg(lhs)` loads into X9, then `resolve_reg(rhs)` loads into X9 again (overwriting lhs). The fix: use different scratch registers for LHS and RHS when both are immediates.
+   295→The same scratch register conflict exists in `emit_binop` too. Let me check:
+   296→I see — `emit_binop` already handles this correctly! It uses `X16` as a scratch for large immediates (line 1170). But `resolve_reg` uses `X9` for all immediates. The CMP handler uses `resolve_reg` which puts everything in X9.
+   297→
+   298→Actually, the deeper problem is that `resolve_reg` always uses the same scratch register (X9) for all immediates. This means ANY instruction where both operands are immediates will have this bug. The `emit_binop` handles it specially by using X16 for the RHS, but `resolve_reg` doesn't.
+   299→
+   300→For now, the CMP fix I just made should help. Let me build and test:
+   301→Still 0. Let me trace:
+   302→Good progress! Now:
+   303→- `movz x9, #0x1` (LHS)
+   304→- `movz x10, #0x2` (RHS — using X10 now!)
+   305→- `cmp x9, x10` (comparing 1 and 2 — correct!)
+   306→- `and x17, xzr, xzr, asr #40` (??? weird instruction — this is the CSET)
+   307→- `cbnz x17, #0x401040` (if x17 != 0, goto true block)
+   308→
+   309→The CSET is producing `0x8A9FA3F1` which is `and x17, xzr, xzr, asr #40`. This is NOT a CSET instruction! Let me decode:
+   310→The CSET encoding base is `0x0A800000` but should be `0x1A800000`! This is another 31-bit vs 32-bit binary literal bug. The `0x0A800000` base produces AND (opc=00) instead of CSINC (opc=01, 1101 pattern).
+   311→Now also check the CSEL encoding in `encode_with_width`:
+   312→CSEL also has `0x0A800000` base! CSEL encoding: `sf 00 1101 0100 Rm cond Rn Rd` — same as CSINC. The base should also be `0x1A800000`.
+   313→Now build and test:
+   314→Still 0. Let me trace again:
+   315→Now the CSET is properly decoded as `csel x17, xzr, xzr, ge` — but this is wrong! The CSET should be `csinc x17, xzr, xzr, ge` (which sets x17=1 when LT, i.e., NOT GE). But the encoding produces `CSEL` instead of `CSINC`.
+   316→
+   317→The issue: CSET = CSINC (not CSEL). The CSEL and CSINC have different opcodes:
+   318→- CSEL: `sf 00 1101 0100 Rm cond Rn Rd` — bit 11:10 = 00
+   319→- CSINC: `sf 00 1101 0100 Rm cond Rn Rd` — bit 11:10 = 01
+   320→
+   321→Wait, they're the same format? Let me check more carefully:
+   322→Now build and test:
+   323→**Exit code 42! The if-condition works!** Now let me test the for-loop:
+   324→Still 1 for the for-loop. Expected 10. Let me test with a larger loop to get a trace:
+   325→Still 1. The for-loop is exiting early with sum=1 (only the first iteration's addition of 0+0=0, then some issue). Let me get a trace:
+   326→Add function works! Now let me test a simple loop with a counter:
+   327→Still exit 1. The `loop` with `break` also fails. The break path goes to `loop_exit_2`, but the Cmp/CondBranch seems wrong. Let me check the `SGe` condition: `if i >= 5` — this should be `Cmp { kind: SGe, lhs: i, rhs: 5 }`. When i >= 5, the CSET should produce 1, and CondBranch should branch to `then_3` (the break).
+   328→
+   329→But looking at the IR, `Cmp { kind: SGe, dst: Register(5), lhs: Register(3), rhs: Immediate(5) }` — the result register is Register(5), which is the same as the loop counter register X5 (if register 5 maps to X5). Wait, the `resolve_reg` for the Cmp result might be colliding with the loop counter!
+   330→
+   331→Let me check: the loop counter `i` is `Register(3)`, which maps to X3. The Cmp result is `Register(5)`, which maps to X5. The CondBranch checks Register(5). These should be different registers. But wait — the `resolve_reg` for immediates uses X9 or X10, not the virtual register number.
+   332→
+   333→The real issue: the `Cmp` emits `CMP X9, X10` then `CSET X17, GE` then `CBNZ X17, then_3`. When i=0, `CMP 0, 5` → GE is false → CSET produces 0 → CBNZ doesn't branch → falls through to merge_5 (loop body). When i=5, `CMP 5, 5` → GE is true → CSET produces 1 → CBNZ branches to then_3 (break).
+   334→
+   335→But the result is 1, not 10. The sum should be 0+1+2+3+4=10. Let me check if there's a register allocation issue. The Cmp result goes into X17 (scratch), but then the CondBranch checks X17. After the loop body, the code does `sum = sum + i`, which uses X4 and X3. But X17 might be getting overwritten in the loop body!
+   336→
+   337→Actually, the CSET result in X17 is only needed for the CBNZ. After the CBNZ, X17 is free. The issue must be elsewhere.
+   338→
+   339→Wait — the loop body has `Add { dst: Register(9), lhs: Register(8), rhs: Immediate(0) }` — this `+ 0` is a no-op that creates a new vreg. But Register(9) maps to X9, which is the scratch register used by `resolve_reg` for immediates! So when the loop body does `Add { dst: Register(9), lhs: Register(8), rhs: Immediate(0) }`, the `rhs: Immediate(0)` is loaded into X9, but X9 is also the destination! This would zero out X9 (which might be fine for +0) but it corrupts the register allocator's state.
+   340→
+   341→The real problem is that the register allocator is assigning vregs to X9, X10, X16, X17 which are the scratch registers used by `resolve_reg`. These should be reserved for the emitter's internal use and not assigned to vregs.
+   342→
+   343→Let me check the register allocator:
+   344→There it is! The register allocator includes **X9, X10, X17** in its free pool! These are the scratch registers used by `resolve_reg` (X9 for immediates, X10 for addresses, X17 for CSET results). When the register allocator assigns vreg 9 to X9, and then `resolve_reg` also uses X9 for immediate loading, they collide.
+   345→
+   346→The fix: remove X9, X10, X16, and X17 from the register allocator's free pool since they're reserved for the emitter's internal use.
+   347→Now build and test:
+   348→Still 1. The register allocator fix isn't enough because there might still be other conflicts. The deeper issue is that the `resolve_reg` function uses fixed scratch registers (X9, X10) without checking if they're already in use. This is a fundamental architectural problem with the emitter.
+   349→
+   350→But for now, let me try the `test_loop_basic.vuma` which uses `loop` + `break` instead of `for`:
+   351→Same issue. The register allocator's scratch registers are still conflicting with vreg assignments. With fewer free registers, the allocator will spill more, but the scratch registers should be safe now. Let me check if the test_simple (if condition) still works:
+   352→Simple if still works! The for-loop issue is likely in the phi node handling or the register assignment across loop iterations. Let me try the SHA256d — it might work despite the simple for-loop test failing, because SHA256d uses function calls heavily:
+   353→Still segfault on SHA256d. The for-loop inside sha256d is also broken. The register allocation conflict with scratch registers is a systemic problem.
+   354→
+   355→Given the time constraints, let me take a different approach: instead of trying to fix the register allocator deeply, let me make `resolve_reg` use a pool of scratch registers that the allocator won't touch, and track which ones are in use:
+   356→The fundamental issue is that `resolve_reg` for `IRValue::Register(id)` calls `self.reg_alloc.allocate(*id)` which may assign X9, X10, etc. since they were in the free pool before my fix. After my fix, X9/X10/X16/X17 are no longer in the free pool, so the allocator should use X0-X7, X11-X15, and X19+ instead.
+   357→
+   358→But the problem might be that the allocator still assigns X9/X10 via the `preassign_param` method or that the emitter's internal `resolve_reg` for non-immediate values still returns the vreg's physical register, which could be X9 if it was assigned before the fix was applied.
+   359→
+   360→Wait — I already removed X9, X10, X16, X17 from the free pool. So `reg_alloc.allocate(id)` should never return these registers. The only way they'd be used is via `resolve_reg` for immediates. So the vregs should never be assigned to scratch registers.
+   361→
+   362→Let me verify by checking the emitted code for the for-loop:
+   363→Let me trace this more carefully. The virtual registers are:
+   364→- vreg 1: sum initial value (0)
+   365→- vreg 2: i initial value (0)
+   366→- vreg 3: i (loop counter)
+   367→- vreg 4: sum (accumulator)
+   368→- vreg 5: Cmp result
+   369→- vreg 6: sum + i
+   370→- vreg 7: sum + i (identity copy)
+   371→- vreg 8: i + 1
+   372→
+   373→With the new allocator (no X9/X10/X16/X17), these should be assigned to:
+   374→- vreg 0: X0 (but not used here - no params)
+   375→- vreg 1: X1 (or later in the free list)
+   376→- ...
+   377→
+   378→The allocator uses a stack, popping from the end. Free regs: [X0, X1, X2, X3, X4, X5, X6, X7, X11, X12, X13, X14, X15]. So:
+   379→- vreg 1 → X15 (last in the list)
+   380→- vreg 2 → X14
+   381→- vreg 3 → X13
+   382→- vreg 4 → X12
+   383→- vreg 5 → X11
+   384→- vreg 6 → X7
+   385→- vreg 7 → X6
+   386→- vreg 8 → X5
+   387→
+   388→These should all be safe now. The issue might be that the `Add { dst: Register(7), lhs: Register(6), rhs: Immediate(0) }` is a phi node copy that uses `resolve_reg(Register(6))` = X7, then `resolve_reg(Immediate(0))` = X9 (scratch). The ADD becomes `ADD X6, X7, X9` which adds 0 — that's fine.
+   389→
+   390→But the phi nodes in the merge block: `Add { dst: Register(3), lhs: Register(8), rhs: Immediate(0) }` — this assigns vreg 8's value (i+1) to vreg 3 (i). The `resolve_reg(Register(8))` = X5, `resolve_reg(Immediate(0))` = X9, `resolve_reg(Register(3))` = X13. So it's `ADD X13, X5, X9` = i = i+1+0. But then the old vreg 3 is X13, and the new vreg 3 is also X13! That's correct.
+   391→
+   392→But wait — when the loop header uses phi nodes, it's supposed to use the NEW value of i (vreg 3 after the loop body). The loop body updates vreg 3 to vreg 8 (i+1). The merge block copies vreg 8 back to vreg 3. So when the loop back-edge jumps to the loop header, vreg 3 should have the new value.
+   393→
+   394→The issue might be that the register allocator doesn't know about the phi node semantics — it might assign different physical registers to vreg 3 at different points, but the code doesn't properly move the values.
+   395→
+   396→This is getting deep into register allocation territory. Given the complexity, let me test if x86_64 SHA256d still works with all the ARM64-focused changes, and then try to get the RISC-V backend working:
+   397→**x86_64 SHA256d still works!** Exit code 79 = 0x4F (first byte of the expected hash `4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358`).
+   398→
+   399→Now let me update the worklog and summarize the progress:
