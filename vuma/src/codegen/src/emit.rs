@@ -2304,11 +2304,15 @@ impl Emitter {
 
             // ── Store ──
             IRInstr::Store { value, addr, offset, ty } => {
-                // Load value into X16 (not X9, emit_store uses X9 internally)
-                self.ss_load_value(value, Register::X16, slots)?;
-                // Load address into X10
+                // Load address into X10 FIRST (before value), because
+                // ss_load_from_slot uses X16 as scratch when dst != X16,
+                // which would clobber a value previously loaded into X16.
                 self.ss_load_value(addr, Register::X10, slots)?;
-                self.emit_store(Register::X16, Register::X10, *offset, ty)?;
+                // Load value into X15 (not X9/X16 — emit_store uses X9 for
+                // address computation, and ss_load_from_slot uses X16 as
+                // scratch; X15 is safe from both).
+                self.ss_load_value(value, Register::X15, slots)?;
+                self.emit_store(Register::X15, Register::X10, *offset, ty)?;
             }
 
             // ── BinOp (generic) ──
@@ -3480,19 +3484,19 @@ fn append_runtime_io(
                 0xD2800015, // mov x21, #0 (index)
                 // .Lhex_loop:
                 0xEB1402BF, // cmp x21, x20
-                0x5400028A, // b.ge .Lhex_done
-                0x1C356269, // ldrb w9, [x19, x21]
-                0x531044CA, // lsr w10, w9, #4 (high nibble)
+                0x540002AA, // b.ge .Lhex_done (imm19=21)
+                0x38756A69, // ldrb w9, [x19, x21] (register offset, UXTX)
+                0x53047D2A, // lsr w10, w9, #4 (high nibble)
                 0x1100C14B, // add w11, w10, #48 ('0'+nibble)
                 0x7100255F, // cmp w10, #9
-                0x5400002D, // b.le .Lhigh_ok
+                0x5400004D, // b.le .Lhigh_ok (imm19=2, skip ADD)
                 0x11009D6B, // add w11, w11, #39 (adjust to 'a')
                 // .Lhigh_ok:
                 0x3900A3EB, // strb w11, [sp, #40]
-                0x12107D2A, // and w10, w9, #0xF (low nibble)
+                0x12000D2A, // and w10, w9, #0xF (low nibble)
                 0x1100C14B, // add w11, w10, #48
                 0x7100255F, // cmp w10, #9
-                0x5400002D, // b.le .Llow_ok
+                0x5400004D, // b.le .Llow_ok (imm19=2, skip ADD)
                 0x11009D6B, // add w11, w11, #39
                 // .Llow_ok:
                 0x3900A7EB, // strb w11, [sp, #41]
@@ -3502,7 +3506,7 @@ fn append_runtime_io(
                 0xD2800808, // mov x8, #64 (sys_write)
                 0xD4000001, // svc #0
                 0x910006B5, // add x21, x21, #1
-                0x17FFFFEA, // b .Lhex_loop
+                0x17FFFFEB, // b .Lhex_loop (imm26=-21, back to CMP)
                 // .Lhex_done:
                 0xD2800149, // mov x9, #10 ('\n')
                 0x3900A3E9, // strb w9, [sp, #40]

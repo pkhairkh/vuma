@@ -1,0 +1,1642 @@
+  2541→                0,
+  2542→                frame_size as u32 & 0xFF,
+  2543→            );
+  2544→            encoded_instrs.push(AllocatedInstruction {
+  2545→                opcode: "sub".to_string(),
+  2546→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
+  2547→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
+  2548→                encoded: sub_bytes.to_vec(),
+  2549→            });
+  2550→        }
+  2551→
+  2552→        // Encode each IR instruction
+  2553→        for block in &func.blocks {
+  2554→            for instr in &block.instructions {
+  2555→                let encoded = match instr {
+  2556→                    crate::ir::IRInstr::Add { dst, lhs, rhs, .. } => {
+  2557→                        let d = reg_map
+  2558→                            .get(&dst.as_register().unwrap_or(0))
+  2559→                            .copied()
+  2560→                            .unwrap_or(Gpr::R0);
+  2561→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+  2562→                        // Optimise: if rhs is an immediate that fits in ARM rotated form, use ADD imm
+  2563→                        if let crate::ir::IRValue::Immediate(imm) = rhs {
+  2564→                            if let Some((rotate, imm8)) = try_encode_arm_imm(*imm as u32) {
+  2565→                                if l != d {
+  2566→                                    code.extend_from_slice(&encode_dp_reg(
+  2567→                                        Condition::Al,
+  2568→                                        DP_MOV,
+  2569→                                        false,
+  2570→                                        0,
+  2571→                                        d.encoding(),
+  2572→                                        l.encoding(),
+  2573→                                    ));
+  2574→                                }
+  2575→                                code.extend_from_slice(&encode_dp_imm(
+  2576→                                    Condition::Al,
+  2577→                                    DP_ADD,
+  2578→                                    false,
+  2579→                                    l.encoding(),
+  2580→                                    d.encoding(),
+  2581→                                    rotate,
+  2582→                                    imm8,
+  2583→                                ));
+  2584→                                code
+  2585→                            } else {
+  2586→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2587→                                code.extend_from_slice(&pre);
+  2588→                                if l != d {
+  2589→                                    code.extend_from_slice(&encode_dp_reg(
+  2590→                                        Condition::Al,
+  2591→                                        DP_MOV,
+  2592→                                        false,
+  2593→                                        0,
+  2594→                                        d.encoding(),
+  2595→                                        l.encoding(),
+  2596→                                    ));
+  2597→                                }
+  2598→                                code.extend_from_slice(&encode_dp_reg(
+  2599→                                    Condition::Al,
+  2600→                                    DP_ADD,
+  2601→                                    false,
+  2602→                                    l.encoding(),
+  2603→                                    d.encoding(),
+  2604→                                    r.encoding(),
+  2605→                                ));
+  2606→                                code
+  2607→                            }
+  2608→                        } else {
+  2609→                            let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2610→                            code.extend_from_slice(&pre);
+  2611→                            if l != d {
+  2612→                                code.extend_from_slice(&encode_dp_reg(
+  2613→                                    Condition::Al,
+  2614→                                    DP_MOV,
+  2615→                                    false,
+  2616→                                    0,
+  2617→                                    d.encoding(),
+  2618→                                    l.encoding(),
+  2619→                                ));
+  2620→                            }
+  2621→                            code.extend_from_slice(&encode_dp_reg(
+  2622→                                Condition::Al,
+  2623→                                DP_ADD,
+  2624→                                false,
+  2625→                                l.encoding(),
+  2626→                                d.encoding(),
+  2627→                                r.encoding(),
+  2628→                            ));
+  2629→                            code
+  2630→                        }
+  2631→                    }
+  2632→                    crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
+  2633→                        let d = reg_map
+  2634→                            .get(&dst.as_register().unwrap_or(0))
+  2635→                            .copied()
+  2636→                            .unwrap_or(Gpr::R0);
+  2637→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+  2638→                        if let crate::ir::IRValue::Immediate(imm) = rhs {
+  2639→                            if let Some((rotate, imm8)) = try_encode_arm_imm(*imm as u32) {
+  2640→                                if l != d {
+  2641→                                    code.extend_from_slice(&encode_dp_reg(
+  2642→                                        Condition::Al,
+  2643→                                        DP_MOV,
+  2644→                                        false,
+  2645→                                        0,
+  2646→                                        d.encoding(),
+  2647→                                        l.encoding(),
+  2648→                                    ));
+  2649→                                }
+  2650→                                code.extend_from_slice(&encode_dp_imm(
+  2651→                                    Condition::Al,
+  2652→                                    DP_SUB,
+  2653→                                    false,
+  2654→                                    l.encoding(),
+  2655→                                    d.encoding(),
+  2656→                                    rotate,
+  2657→                                    imm8,
+  2658→                                ));
+  2659→                                code
+  2660→                            } else {
+  2661→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2662→                                code.extend_from_slice(&pre);
+  2663→                                if l != d {
+  2664→                                    code.extend_from_slice(&encode_dp_reg(
+  2665→                                        Condition::Al,
+  2666→                                        DP_MOV,
+  2667→                                        false,
+  2668→                                        0,
+  2669→                                        d.encoding(),
+  2670→                                        l.encoding(),
+  2671→                                    ));
+  2672→                                }
+  2673→                                code.extend_from_slice(&encode_dp_reg(
+  2674→                                    Condition::Al,
+  2675→                                    DP_SUB,
+  2676→                                    false,
+  2677→                                    l.encoding(),
+  2678→                                    d.encoding(),
+  2679→                                    r.encoding(),
+  2680→                                ));
+  2681→                                code
+  2682→                            }
+  2683→                        } else {
+  2684→                            let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2685→                            code.extend_from_slice(&pre);
+  2686→                            if l != d {
+  2687→                                code.extend_from_slice(&encode_dp_reg(
+  2688→                                    Condition::Al,
+  2689→                                    DP_MOV,
+  2690→                                    false,
+  2691→                                    0,
+  2692→                                    d.encoding(),
+  2693→                                    l.encoding(),
+  2694→                                ));
+  2695→                            }
+  2696→                            code.extend_from_slice(&encode_dp_reg(
+  2697→                                Condition::Al,
+  2698→                                DP_SUB,
+  2699→                                false,
+  2700→                                l.encoding(),
+  2701→                                d.encoding(),
+  2702→                                r.encoding(),
+  2703→                            ));
+  2704→                            code
+  2705→                        }
+  2706→                    }
+  2707→                    crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
+  2708→                        let d = reg_map
+  2709→                            .get(&dst.as_register().unwrap_or(0))
+  2710→                            .copied()
+  2711→                            .unwrap_or(Gpr::R0);
+  2712→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+  2713→                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2714→                        code.extend_from_slice(&pre);
+  2715→                        // MUL: we need l in d, then MUL d, d, r (Rd=Rn in MUL encoding)
+  2716→                        if l != d {
+  2717→                            code.extend_from_slice(&encode_dp_reg(
+  2718→                                Condition::Al,
+  2719→                                DP_MOV,
+  2720→                                false,
+  2721→                                0,
+  2722→                                d.encoding(),
+  2723→                                l.encoding(),
+  2724→                            ));
+  2725→                        }
+  2726→                        code.extend_from_slice(&encode_mul(
+  2727→                            Condition::Al,
+  2728→                            false,
+  2729→                            d.encoding(),
+  2730→                            d.encoding(),
+  2731→                            r.encoding(),
+  2732→                            d.encoding(),
+  2733→                        ));
+  2734→                        code
+  2735→                    }
+  2736→                    crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
+  2737→                        let d = reg_map
+  2738→                            .get(&dst.as_register().unwrap_or(0))
+  2739→                            .copied()
+  2740→                            .unwrap_or(Gpr::R0);
+  2741→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R0);
+  2742→                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R1);
+  2743→                        code.extend_from_slice(&pre);
+  2744→                        // ARM32 baseline doesn't have hardware divide; set up r0/r1 and use SVC
+  2745→                        if l != Gpr::R0 {
+  2746→                            code.extend_from_slice(&encode_dp_reg(
+  2747→                                Condition::Al,
+  2748→                                DP_MOV,
+  2749→                                false,
+  2750→                                0,
+  2751→                                Gpr::R0.encoding(),
+  2752→                                l.encoding(),
+  2753→                            ));
+  2754→                        }
+  2755→                        if r != Gpr::R1 {
+  2756→                            code.extend_from_slice(&encode_dp_reg(
+  2757→                                Condition::Al,
+  2758→                                DP_MOV,
+  2759→                                false,
+  2760→                                0,
+  2761→                                Gpr::R1.encoding(),
+  2762→                                r.encoding(),
+  2763→                            ));
+  2764→                        }
+  2765→                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+  2766→                        if d != Gpr::R0 {
+  2767→                            code.extend_from_slice(&encode_dp_reg(
+  2768→                                Condition::Al,
+  2769→                                DP_MOV,
+  2770→                                false,
+  2771→                                0,
+  2772→                                d.encoding(),
+  2773→                                Gpr::R0.encoding(),
+  2774→                            ));
+  2775→                        }
+  2776→                        code
+  2777→                    }
+  2778→                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+  2779→                        let d = reg_map
+  2780→                            .get(&dst.as_register().unwrap_or(0))
+  2781→                            .copied()
+  2782→                            .unwrap_or(Gpr::R0);
+  2783→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+  2784→                        match op {
+  2785→                            BinOpKind::And => {
+  2786→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2787→                                code.extend_from_slice(&pre);
+  2788→                                if l != d {
+  2789→                                    code.extend_from_slice(&encode_dp_reg(
+  2790→                                        Condition::Al,
+  2791→                                        DP_MOV,
+  2792→                                        false,
+  2793→                                        0,
+  2794→                                        d.encoding(),
+  2795→                                        l.encoding(),
+  2796→                                    ));
+  2797→                                }
+  2798→                                code.extend_from_slice(&encode_dp_reg(
+  2799→                                    Condition::Al,
+  2800→                                    DP_AND,
+  2801→                                    false,
+  2802→                                    l.encoding(),
+  2803→                                    d.encoding(),
+  2804→                                    r.encoding(),
+  2805→                                ));
+  2806→                            }
+  2807→                            BinOpKind::Or => {
+  2808→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2809→                                code.extend_from_slice(&pre);
+  2810→                                if l != d {
+  2811→                                    code.extend_from_slice(&encode_dp_reg(
+  2812→                                        Condition::Al,
+  2813→                                        DP_MOV,
+  2814→                                        false,
+  2815→                                        0,
+  2816→                                        d.encoding(),
+  2817→                                        l.encoding(),
+  2818→                                    ));
+  2819→                                }
+  2820→                                code.extend_from_slice(&encode_dp_reg(
+  2821→                                    Condition::Al,
+  2822→                                    DP_ORR,
+  2823→                                    false,
+  2824→                                    l.encoding(),
+  2825→                                    d.encoding(),
+  2826→                                    r.encoding(),
+  2827→                                ));
+  2828→                            }
+  2829→                            BinOpKind::Xor => {
+  2830→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2831→                                code.extend_from_slice(&pre);
+  2832→                                if l != d {
+  2833→                                    code.extend_from_slice(&encode_dp_reg(
+  2834→                                        Condition::Al,
+  2835→                                        DP_MOV,
+  2836→                                        false,
+  2837→                                        0,
+  2838→                                        d.encoding(),
+  2839→                                        l.encoding(),
+  2840→                                    ));
+  2841→                                }
+  2842→                                code.extend_from_slice(&encode_dp_reg(
+  2843→                                    Condition::Al,
+  2844→                                    DP_EOR,
+  2845→                                    false,
+  2846→                                    l.encoding(),
+  2847→                                    d.encoding(),
+  2848→                                    r.encoding(),
+  2849→                                ));
+  2850→                            }
+  2851→                            BinOpKind::Shl => {
+  2852→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2853→                                code.extend_from_slice(&pre);
+  2854→                                if l != d {
+  2855→                                    code.extend_from_slice(&encode_dp_reg(
+  2856→                                        Condition::Al,
+  2857→                                        DP_MOV,
+  2858→                                        false,
+  2859→                                        0,
+  2860→                                        d.encoding(),
+  2861→                                        l.encoding(),
+  2862→                                    ));
+  2863→                                }
+  2864→                                // LSL Rd, Rn, Rs: shift_type=0, by register
+  2865→                                code.extend_from_slice(&encode_dp_shift_reg(
+  2866→                                    Condition::Al,
+  2867→                                    DP_MOV,
+  2868→                                    false,
+  2869→                                    0,
+  2870→                                    d.encoding(),
+  2871→                                    0,
+  2872→                                    r.encoding(),
+  2873→                                    l.encoding(),
+  2874→                                ));
+  2875→                            }
+  2876→                            BinOpKind::ShrL => {
+  2877→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2878→                                code.extend_from_slice(&pre);
+  2879→                                if l != d {
+  2880→                                    code.extend_from_slice(&encode_dp_reg(
+  2881→                                        Condition::Al,
+  2882→                                        DP_MOV,
+  2883→                                        false,
+  2884→                                        0,
+  2885→                                        d.encoding(),
+  2886→                                        l.encoding(),
+  2887→                                    ));
+  2888→                                }
+  2889→                                // LSR Rd, Rn, Rs: shift_type=1, by register
+  2890→                                code.extend_from_slice(&encode_dp_shift_reg(
+  2891→                                    Condition::Al,
+  2892→                                    DP_MOV,
+  2893→                                    false,
+  2894→                                    0,
+  2895→                                    d.encoding(),
+  2896→                                    1,
+  2897→                                    r.encoding(),
+  2898→                                    l.encoding(),
+  2899→                                ));
+  2900→                            }
+  2901→                            BinOpKind::ShrA => {
+  2902→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2903→                                code.extend_from_slice(&pre);
+  2904→                                if l != d {
+  2905→                                    code.extend_from_slice(&encode_dp_reg(
+  2906→                                        Condition::Al,
+  2907→                                        DP_MOV,
+  2908→                                        false,
+  2909→                                        0,
+  2910→                                        d.encoding(),
+  2911→                                        l.encoding(),
+  2912→                                    ));
+  2913→                                }
+  2914→                                // ASR Rd, Rn, Rs: shift_type=2, by register
+  2915→                                code.extend_from_slice(&encode_dp_shift_reg(
+  2916→                                    Condition::Al,
+  2917→                                    DP_MOV,
+  2918→                                    false,
+  2919→                                    0,
+  2920→                                    d.encoding(),
+  2921→                                    2,
+  2922→                                    r.encoding(),
+  2923→                                    l.encoding(),
+  2924→                                ));
+  2925→                            }
+  2926→                            BinOpKind::Ror | BinOpKind::Rol => {
+  2927→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2928→                                code.extend_from_slice(&pre);
+  2929→                                if l != d {
+  2930→                                    code.extend_from_slice(&encode_dp_reg(
+  2931→                                        Condition::Al,
+  2932→                                        DP_MOV,
+  2933→                                        false,
+  2934→                                        0,
+  2935→                                        d.encoding(),
+  2936→                                        l.encoding(),
+  2937→                                    ));
+  2938→                                }
+  2939→                                // ROR shift_type=3, by register
+  2940→                                code.extend_from_slice(&encode_dp_shift_reg(
+  2941→                                    Condition::Al,
+  2942→                                    DP_MOV,
+  2943→                                    false,
+  2944→                                    0,
+  2945→                                    d.encoding(),
+  2946→                                    3,
+  2947→                                    r.encoding(),
+  2948→                                    l.encoding(),
+  2949→                                ));
+  2950→                            }
+  2951→                            BinOpKind::Add | BinOpKind::Sub => {
+  2952→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2953→                                code.extend_from_slice(&pre);
+  2954→                                if l != d {
+  2955→                                    code.extend_from_slice(&encode_dp_reg(
+  2956→                                        Condition::Al,
+  2957→                                        DP_MOV,
+  2958→                                        false,
+  2959→                                        0,
+  2960→                                        d.encoding(),
+  2961→                                        l.encoding(),
+  2962→                                    ));
+  2963→                                }
+  2964→                                let arm_op = match op {
+  2965→                                    BinOpKind::Add => DP_ADD,
+  2966→                                    BinOpKind::Sub => DP_SUB,
+  2967→                                    _ => DP_ADD,
+  2968→                                };
+  2969→                                code.extend_from_slice(&encode_dp_reg(
+  2970→                                    Condition::Al,
+  2971→                                    arm_op,
+  2972→                                    false,
+  2973→                                    l.encoding(),
+  2974→                                    d.encoding(),
+  2975→                                    r.encoding(),
+  2976→                                ));
+  2977→                            }
+  2978→                            BinOpKind::Mul => {
+  2979→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  2980→                                code.extend_from_slice(&pre);
+  2981→                                if l != d {
+  2982→                                    code.extend_from_slice(&encode_dp_reg(
+  2983→                                        Condition::Al,
+  2984→                                        DP_MOV,
+  2985→                                        false,
+  2986→                                        0,
+  2987→                                        d.encoding(),
+  2988→                                        l.encoding(),
+  2989→                                    ));
+  2990→                                }
+  2991→                                code.extend_from_slice(&encode_mul(
+  2992→                                    Condition::Al,
+  2993→                                    false,
+  2994→                                    d.encoding(),
+  2995→                                    d.encoding(),
+  2996→                                    r.encoding(),
+  2997→                                    d.encoding(),
+  2998→                                ));
+  2999→                            }
+  3000→                            BinOpKind::SDiv
+  3001→                            | BinOpKind::UDiv
+  3002→                            | BinOpKind::SRem
+  3003→                            | BinOpKind::URem => {
+  3004→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  3005→                                code.extend_from_slice(&pre);
+  3006→                                // Set up r0=l, r1=r for software div/rem via SVC
+  3007→                                if l != Gpr::R0 {
+  3008→                                    code.extend_from_slice(&encode_dp_reg(
+  3009→                                        Condition::Al,
+  3010→                                        DP_MOV,
+  3011→                                        false,
+  3012→                                        0,
+  3013→                                        Gpr::R0.encoding(),
+  3014→                                        l.encoding(),
+  3015→                                    ));
+  3016→                                }
+  3017→                                if r != Gpr::R1 {
+  3018→                                    code.extend_from_slice(&encode_dp_reg(
+  3019→                                        Condition::Al,
+  3020→                                        DP_MOV,
+  3021→                                        false,
+  3022→                                        0,
+  3023→                                        Gpr::R1.encoding(),
+  3024→                                        r.encoding(),
+  3025→                                    ));
+  3026→                                }
+  3027→                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+  3028→                                if d != Gpr::R0 {
+  3029→                                    code.extend_from_slice(&encode_dp_reg(
+  3030→                                        Condition::Al,
+  3031→                                        DP_MOV,
+  3032→                                        false,
+  3033→                                        0,
+  3034→                                        d.encoding(),
+  3035→                                        Gpr::R0.encoding(),
+  3036→                                    ));
+  3037→                                }
+  3038→                            }
+  3039→                            // Comparison BinOps: produce 0 or 1
+  3040→                            BinOpKind::SLt
+  3041→                            | BinOpKind::SLe
+  3042→                            | BinOpKind::SGt
+  3043→                            | BinOpKind::SGe
+  3044→                            | BinOpKind::ULt
+  3045→                            | BinOpKind::ULe
+  3046→                            | BinOpKind::UGt
+  3047→                            | BinOpKind::UGe
+  3048→                            | BinOpKind::Eq
+  3049→                            | BinOpKind::Ne => {
+  3050→                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  3051→                                code.extend_from_slice(&pre);
+  3052→                                // CMP l, r; MOV d, #0; MOVcond d, #1
+  3053→                                let cmp_cond = match op {
+  3054→                                    BinOpKind::SLt | BinOpKind::ULt => Condition::Lt,
+  3055→                                    BinOpKind::SLe | BinOpKind::ULe => Condition::Le,
+  3056→                                    BinOpKind::SGt | BinOpKind::UGt => Condition::Gt,
+  3057→                                    BinOpKind::SGe | BinOpKind::UGe => Condition::Ge,
+  3058→                                    BinOpKind::Eq => Condition::Eq,
+  3059→                                    BinOpKind::Ne => Condition::Ne,
+  3060→                                    _ => Condition::Eq,
+  3061→                                };
+  3062→                                code.extend_from_slice(&encode_dp_reg(
+  3063→                                    Condition::Al,
+  3064→                                    DP_CMP,
+  3065→                                    true,
+  3066→                                    l.encoding(),
+  3067→                                    0,
+  3068→                                    r.encoding(),
+  3069→                                ));
+  3070→                                code.extend_from_slice(&encode_dp_imm(
+  3071→                                    Condition::Al,
+  3072→                                    DP_MOV,
+  3073→                                    false,
+  3074→                                    0,
+  3075→                                    d.encoding(),
+  3076→                                    0,
+  3077→                                    0,
+  3078→                                ));
+  3079→                                code.extend_from_slice(&encode_dp_imm(
+  3080→                                    cmp_cond,
+  3081→                                    DP_MOV,
+  3082→                                    false,
+  3083→                                    0,
+  3084→                                    d.encoding(),
+  3085→                                    0,
+  3086→                                    1,
+  3087→                                ));
+  3088→                            }
+  3089→                        }
+  3090→                        code
+  3091→                    }
+  3092→                    crate::ir::IRInstr::UnaryOp { op, dst, operand, .. } => {
+  3093→                        let d = reg_map
+  3094→                            .get(&dst.as_register().unwrap_or(0))
+  3095→                            .copied()
+  3096→                            .unwrap_or(Gpr::R0);
+  3097→                        let (s, mut code) = resolve_gpr_arm32(operand, &reg_map, Gpr::R12);
+  3098→                        match op {
+  3099→                            UnaryOpKind::Neg => {
+  3100→                                // RSB d, s, #0 (reverse subtract)
+  3101→                                code.extend_from_slice(&encode_dp_imm(
+  3102→                                    Condition::Al,
+  3103→                                    0b0011,
+  3104→                                    false,
+  3105→                                    s.encoding(),
+  3106→                                    d.encoding(),
+  3107→                                    0,
+  3108→                                    0,
+  3109→                                ));
+  3110→                            }
+  3111→                            UnaryOpKind::Not => {
+  3112→                                // MVN d, s
+  3113→                                code.extend_from_slice(&encode_dp_reg(
+  3114→                                    Condition::Al,
+  3115→                                    DP_MVN,
+  3116→                                    false,
+  3117→                                    0,
+  3118→                                    d.encoding(),
+  3119→                                    s.encoding(),
+  3120→                                ));
+  3121→                            }
+  3122→                            UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+  3123→                                // Placeholder: MOV d, s
+  3124→                                if s != d {
+  3125→                                    code.extend_from_slice(&encode_dp_reg(
+  3126→                                        Condition::Al,
+  3127→                                        DP_MOV,
+  3128→                                        false,
+  3129→                                        0,
+  3130→                                        d.encoding(),
+  3131→                                        s.encoding(),
+  3132→                                    ));
+  3133→                                }
+  3134→                            }
+  3135→                        }
+  3136→                        code
+  3137→                    }
+  3138→                    crate::ir::IRInstr::Cmp {
+  3139→                        kind,
+  3140→                        dst,
+  3141→                        lhs,
+  3142→                        rhs, ty: _,
+  3143→                    .. } => {
+  3144→                        let d = reg_map
+  3145→                            .get(&dst.as_register().unwrap_or(0))
+  3146→                            .copied()
+  3147→                            .unwrap_or(Gpr::R0);
+  3148→                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+  3149→                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
+  3150→                        code.extend_from_slice(&pre);
+  3151→                        let cmp_cond = match kind {
+  3152→                            CmpKind::Eq => Condition::Eq,
+  3153→                            CmpKind::Ne => Condition::Ne,
+  3154→                            CmpKind::SLt => Condition::Lt,
+  3155→                            CmpKind::SLe => Condition::Le,
+  3156→                            CmpKind::SGt => Condition::Gt,
+  3157→                            CmpKind::SGe => Condition::Ge,
+  3158→                            CmpKind::ULt => Condition::Cc,
+  3159→                            CmpKind::ULe => Condition::Ls,
+  3160→                            CmpKind::UGt => Condition::Hi,
+  3161→                            CmpKind::UGe => Condition::Cs,
+  3162→                        };
+  3163→                        code.extend_from_slice(&encode_dp_reg(
+  3164→                            Condition::Al,
+  3165→                            DP_CMP,
+  3166→                            true,
+  3167→                            l.encoding(),
+  3168→                            0,
+  3169→                            r.encoding(),
+  3170→                        ));
+  3171→                        code.extend_from_slice(&encode_dp_imm(
+  3172→                            Condition::Al,
+  3173→                            DP_MOV,
+  3174→                            false,
+  3175→                            0,
+  3176→                            d.encoding(),
+  3177→                            0,
+  3178→                            0,
+  3179→                        ));
+  3180→                        code.extend_from_slice(&encode_dp_imm(
+  3181→                            cmp_cond,
+  3182→                            DP_MOV,
+  3183→                            false,
+  3184→                            0,
+  3185→                            d.encoding(),
+  3186→                            0,
+  3187→                            1,
+  3188→                        ));
+  3189→                        code
+  3190→                    }
+  3191→                    crate::ir::IRInstr::Load { dst, addr, .. } => {
+  3192→                        let d = reg_map
+  3193→                            .get(&dst.as_register().unwrap_or(0))
+  3194→                            .copied()
+  3195→                            .unwrap_or(Gpr::R0);
+  3196→                        let (a, mut code) = resolve_gpr_arm32(addr, &reg_map, Gpr::R12);
+  3197→                        code.extend_from_slice(&encode_ls_imm(
+  3198→                            Condition::Al,
+  3199→                            true,
+  3200→                            true,
+  3201→                            false,
+  3202→                            false,
+  3203→                            true,
+  3204→                            a.encoding(),
+  3205→                            d.encoding(),
+  3206→                            0,
+  3207→                        ));
+  3208→                        code
+  3209→                    }
+  3210→                    crate::ir::IRInstr::Store { value, addr, .. } => {
+  3211→                        let (v, mut code) = resolve_gpr_arm32(value, &reg_map, Gpr::R12);
+  3212→                        let (a, pre) = resolve_gpr_arm32(addr, &reg_map, Gpr::R3);
+  3213→                        code.extend_from_slice(&pre);
+  3214→                        code.extend_from_slice(&encode_ls_imm(
+  3215→                            Condition::Al,
+  3216→                            true,
+  3217→                            true,
+  3218→                            false,
+  3219→                            false,
+  3220→                            false,
+  3221→                            a.encoding(),
+  3222→                            v.encoding(),
+  3223→                            0,
+  3224→                        ));
+  3225→                        code
+  3226→                    }
+  3227→                    crate::ir::IRInstr::Alloc { dst, size } => {
+  3228→                        let d = reg_map
+  3229→                            .get(&dst.as_register().unwrap_or(0))
+  3230→                            .copied()
+  3231→                            .unwrap_or(Gpr::R0);
+  3232→                        let mut code = Vec::new();
+  3233→                        // SUB SP, SP, #size (decrement stack pointer)
+  3234→                        let size_val = *size;
+  3235→                        if let Some((rotate, imm8)) = try_encode_arm_imm(size_val) {
+  3236→                            code.extend_from_slice(&encode_dp_imm(
+  3237→                                Condition::Al,
+  3238→                                DP_SUB,
+  3239→                                false,
+  3240→                                Gpr::R13.encoding(),
+  3241→                                Gpr::R13.encoding(),
+  3242→                                rotate,
+  3243→                                imm8,
+  3244→                            ));
+  3245→                        } else {
+  3246→                            // For sizes that don't fit in ARM rotated-immediate, use a
+  3247→                            // scratch register to hold the value.
+  3248→                            code.extend_from_slice(&load_immediate_arm32(Gpr::R12, size_val));
+  3249→                            code.extend_from_slice(&encode_dp_reg(
+  3250→                                Condition::Al,
+  3251→                                DP_SUB,
+  3252→                                false,
+  3253→                                Gpr::R13.encoding(),
+  3254→                                Gpr::R13.encoding(),
+  3255→                                Gpr::R12.encoding(),
+  3256→                            ));
+  3257→                        }
+  3258→                        // ADD d, SP, #0 (copy new SP to destination)
+  3259→                        if d != Gpr::R13 {
+  3260→                            code.extend_from_slice(&encode_dp_imm(
+  3261→                                Condition::Al,
+  3262→                                DP_ADD,
+  3263→                                false,
+  3264→                                Gpr::R13.encoding(),
+  3265→                                d.encoding(),
+  3266→                                0,
+  3267→                                0,
+  3268→                            ));
+  3269→                        }
+  3270→                        code
+  3271→                    }
+  3272→                    crate::ir::IRInstr::Call { dst, func: _, args } => {
+  3273→                        let mut code = Vec::new();
+  3274→                        // Move args to argument registers using resolve_gpr_arm32
+  3275→                        for (i, arg) in args.iter().enumerate() {
+  3276→                            if let Some(arg_reg) = Gpr::arg_register(i) {
+  3277→                                let (a, pre) = resolve_gpr_arm32(arg, &reg_map, arg_reg);
+  3278→                                code.extend_from_slice(&pre);
+  3279→                                if a != arg_reg {
+  3280→                                    code.extend_from_slice(&encode_dp_reg(
+  3281→                                        Condition::Al,
+  3282→                                        DP_MOV,
+  3283→                                        false,
+  3284→                                        0,
+  3285→                                        arg_reg.encoding(),
+  3286→                                        a.encoding(),
+  3287→                                    ));
+  3288→                                }
+  3289→                            }
+  3290→                        }
+  3291→                        // BL offset (placeholder)
+  3292→                        code.extend_from_slice(&encode_branch(Condition::Al, true, 0));
+  3293→                        // Move return value from R0 to dst
+  3294→                        if let Some(d) = dst {
+  3295→                            let d_reg = reg_map
+  3296→                                .get(&d.as_register().unwrap_or(0))
+  3297→                                .copied()
+  3298→                                .unwrap_or(Gpr::R0);
+  3299→                            if d_reg != Gpr::R0 {
+  3300→                                code.extend_from_slice(&encode_dp_reg(
+  3301→                                    Condition::Al,
+  3302→                                    DP_MOV,
+  3303→                                    false,
+  3304→                                    0,
+  3305→                                    d_reg.encoding(),
+  3306→                                    Gpr::R0.encoding(),
+  3307→                                ));
+  3308→                            }
+  3309→                        }
+  3310→                        code
+  3311→                    }
+  3312→                    crate::ir::IRInstr::Branch { target: _ } => {
+  3313→                        // B offset (placeholder)
+  3314→                        encode_branch(Condition::Al, false, 0).to_vec()
+  3315→                    }
+  3316→                    crate::ir::IRInstr::CondBranch {
+  3317→                        cond,
+  3318→                        true_target: _,
+  3319→                        false_target: _,
+  3320→                    } => {
+  3321→                        let (c, mut code) = resolve_gpr_arm32(cond, &reg_map, Gpr::R12);
+  3322→                        // CMP c, #0; BNE true_target; B false_target
+  3323→                        code.extend_from_slice(&encode_dp_imm(
+  3324→                            Condition::Al,
+  3325→                            DP_CMP,
+  3326→                            true,
+  3327→                            c.encoding(),
+  3328→                            0,
+  3329→                            0,
+  3330→                            0,
+  3331→                        ));
+  3332→                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+  3333→                        code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+  3334→                        code
+  3335→                    }
+  3336→                    crate::ir::IRInstr::Cast { dst, src, .. } => {
+  3337→                        let d = reg_map
+  3338→                            .get(&dst.as_register().unwrap_or(0))
+  3339→                            .copied()
+  3340→                            .unwrap_or(Gpr::R0);
+  3341→                        let (s, mut code) = resolve_gpr_arm32(src, &reg_map, Gpr::R12);
+  3342→                        // Bitwise reinterpret: just move the register
+  3343→                        if s != d {
+  3344→                            code.extend_from_slice(
+  3345→                                &Instruction::Mov {
+  3346→                                    rd: d,
+  3347→                                    rm: s,
+  3348→                                    cond: Condition::Al,
+  3349→                                }
+  3350→                                .encode(),
+  3351→                            );
+  3352→                        }
+  3353→                        code
+  3354→                    }
+  3355→                    crate::ir::IRInstr::Select {
+  3356→                        dst,
+  3357→                        cond,
+  3358→                        true_val,
+  3359→                        false_val, ty: _,
+  3360→                    } => {
+  3361→                        // dst = if cond != 0 { true_val } else { false_val }
+  3362→                        // Lowered as: MOV dst, false_val; CMP cond, #0; MOVNE dst, true_val
+  3363→                        let d = reg_map
+  3364→                            .get(&dst.as_register().unwrap_or(0))
+  3365→                            .copied()
+  3366→                            .unwrap_or(Gpr::R0);
+  3367→                        let (c, mut code) = resolve_gpr_arm32(cond, &reg_map, Gpr::R12);
+  3368→                        let (tv, pre_tv) = resolve_gpr_arm32(true_val, &reg_map, Gpr::R3);
+  3369→                        let (fv, pre_fv) = resolve_gpr_arm32(false_val, &reg_map, Gpr::R2);
+  3370→                        // MOV dst, fv
+  3371→                        code.extend_from_slice(&pre_fv);
+  3372→                        if fv != d {
+  3373→                            code.extend_from_slice(
+  3374→                                &Instruction::Mov {
+  3375→                                    rd: d,
+  3376→                                    rm: fv,
+  3377→                                    cond: Condition::Al,
+  3378→                                }
+  3379→                                .encode(),
+  3380→                            );
+  3381→                        } else if fv == d {
+  3382→                            // fv is already in d, nothing needed
+  3383→                        }
+  3384→                        // CMP c, #0
+  3385→                        code.extend_from_slice(
+  3386→                            &Instruction::CmpImm {
+  3387→                                rn: c,
+  3388→                                rotate: 0,
+  3389→                                imm8: 0,
+  3390→                                cond: Condition::Al,
+  3391→                            }
+  3392→                            .encode(),
+  3393→                        );
+  3394→                        // MOVNE dst, tv
+  3395→                        code.extend_from_slice(&pre_tv);
+  3396→                        code.extend_from_slice(
+  3397→                            &Instruction::Mov {
+  3398→                                rd: d,
+  3399→                                rm: tv,
+  3400→                                cond: Condition::Ne,
+  3401→                            }
+  3402→                            .encode(),
+  3403→                        );
+  3404→                        code
+  3405→                    }
+  3406→                    crate::ir::IRInstr::Offset { dst, base, offset } => {
+  3407→                        let d = reg_map
+  3408→                            .get(&dst.as_register().unwrap_or(0))
+  3409→                            .copied()
+  3410→                            .unwrap_or(Gpr::R0);
+  3411→                        let (b, mut code) = resolve_gpr_arm32(base, &reg_map, Gpr::R12);
+  3412→                        match offset {
+  3413→                            crate::ir::IRValue::Immediate(imm) => {
+  3414→                                let off = *imm as u32;
+  3415→                                // Try ADD imm form first
+  3416→                                if let Some((rotate, imm8)) = try_encode_arm_imm(off) {
+  3417→                                    if b != d {
+  3418→                                        code.extend_from_slice(
+  3419→                                            &Instruction::Mov {
+  3420→                                                rd: d,
+  3421→                                                rm: b,
+  3422→                                                cond: Condition::Al,
+  3423→                                            }
+  3424→                                            .encode(),
+  3425→                                        );
+  3426→                                    }
+  3427→                                    code.extend_from_slice(
+  3428→                                        &Instruction::AddImm {
+  3429→                                            rd: d,
+  3430→                                            rn: d,
+  3431→                                            rotate,
+  3432→                                            imm8,
+  3433→                                            cond: Condition::Al,
+  3434→                                        }
+  3435→                                        .encode(),
+  3436→                                    );
+  3437→                                } else {
+  3438→                                    // Load offset to scratch, then ADD reg
+  3439→                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R3, off));
+  3440→                                    if b != d {
+  3441→                                        code.extend_from_slice(
+  3442→                                            &Instruction::Mov {
+  3443→                                                rd: d,
+  3444→                                                rm: b,
+  3445→                                                cond: Condition::Al,
+  3446→                                            }
+  3447→                                            .encode(),
+  3448→                                        );
+  3449→                                    }
+  3450→                                    code.extend_from_slice(
+  3451→                                        &Instruction::Add {
+  3452→                                            rd: d,
+  3453→                                            rn: d,
+  3454→                                            rm: Gpr::R3,
+  3455→                                            cond: Condition::Al,
+  3456→                                        }
+  3457→                                        .encode(),
+  3458→                                    );
+  3459→                                }
+  3460→                            }
+  3461→                            _ => {
+  3462→                                let (o, pre) = resolve_gpr_arm32(offset, &reg_map, Gpr::R3);
+  3463→                                code.extend_from_slice(&pre);
+  3464→                                if b != d {
+  3465→                                    code.extend_from_slice(
+  3466→                                        &Instruction::Mov {
+  3467→                                            rd: d,
+  3468→                                            rm: b,
+  3469→                                            cond: Condition::Al,
+  3470→                                        }
+  3471→                                        .encode(),
+  3472→                                    );
+  3473→                                }
+  3474→                                code.extend_from_slice(
+  3475→                                    &Instruction::Add {
+  3476→                                        rd: d,
+  3477→                                        rn: d,
+  3478→                                        rm: o,
+  3479→                                        cond: Condition::Al,
+  3480→                                    }
+  3481→                                    .encode(),
+  3482→                                );
+  3483→                            }
+  3484→                        }
+  3485→                        code
+  3486→                    }
+  3487→                    crate::ir::IRInstr::GetAddress { dst, name: _ } => {
+  3488→                        let d = reg_map
+  3489→                            .get(&dst.as_register().unwrap_or(0))
+  3490→                            .copied()
+  3491→                            .unwrap_or(Gpr::R0);
+  3492→                        // Placeholder: load 0 as the address (relocation needed at link time)
+  3493→                        load_immediate_arm32(d, 0)
+  3494→                    }
+  3495→                    crate::ir::IRInstr::Free { ptr: _ } => {
+  3496→                        // Free is not directly implementable as a single instruction;
+  3497→                        // emit an undefined instruction (UDF) to trap if executed.
+  3498→                        // UDF encoding: condition=AL, imm12=0, opcode=0b1111=0xE7F000F0
+  3499→                        0xE7F000F0u32.to_le_bytes().to_vec()
+  3500→                    }
+  3501→                    crate::ir::IRInstr::Phi { .. } => {
+  3502→                        // Phi nodes are eliminated during register allocation; no code to emit
+  3503→                        Vec::new()
+  3504→                    }
+  3505→                    crate::ir::IRInstr::Ret { values } => {
+  3506→                        let mut code = Vec::new();
+  3507→                        // Move return value to R0 if needed
+  3508→                        if let Some(val) = values.first() {
+  3509→                            let (src, pre) = resolve_gpr_arm32(val, &reg_map, Gpr::R0);
+  3510→                            code.extend_from_slice(&pre);
+  3511→                            if src != Gpr::R0 {
+  3512→                                code.extend_from_slice(&encode_dp_reg(
+  3513→                                    Condition::Al,
+  3514→                                    DP_MOV,
+  3515→                                    false,
+  3516→                                    0,
+  3517→                                    Gpr::R0.encoding(),
+  3518→                                    src.encoding(),
+  3519→                                ));
+  3520→                            }
+  3521→                        }
+  3522→                        // Epilogue: MOV SP, R11; POP {R11, PC}
+  3523→                        code.extend_from_slice(&encode_dp_reg(
+  3524→                            Condition::Al,
+  3525→                            DP_MOV,
+  3526→                            false,
+  3527→                            0,
+  3528→                            Gpr::R13.encoding(),
+  3529→                            Gpr::R11.encoding(),
+  3530→                        ));
+  3531→                        // POP {R11, PC} — LDM IA SP!, {R11, PC}
+  3532→                        // register_list: R11=bit11, PC=bit15 → 0x8800
+  3533→                        code.extend_from_slice(&encode_ldm(
+  3534→                            Condition::Al,
+  3535→                            false,
+  3536→                            true,
+  3537→                            false,
+  3538→                            true,
+  3539→                            Gpr::R13.encoding(),
+  3540→                            0x8800,
+  3541→                        ));
+  3542→                        code
+  3543→                    }
+  3544→                };
+  3545→
+  3546→                encoded_instrs.push(AllocatedInstruction {
+  3547→                    opcode: "arm32".to_string(),
+  3548→                    reads: vec![],
+  3549→                    writes: vec![],
+  3550→                    encoded,
+  3551→                });
+  3552→            }
+  3553→        }
+  3554→
+  3555→        let code_size = encoded_instrs.len() * 4;
+  3556→
+  3557→        Ok(AllocatedFunction {
+  3558→            name: func_name,
+  3559→            blocks: vec![AllocatedBlock {
+  3560→                label: "entry".to_string(),
+  3561→                instructions: encoded_instrs,
+  3562→                code_offset: 0,
+  3563→            }],
+  3564→            frame_size,
+  3565→            callee_saved,
+  3566→            spill_slots: 0,
+  3567→            code_size,
+  3568→            relocations: Vec::new(),
+  3569→        })
+  3570→    }
+  3571→
+  3572→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+  3573→        let mut bytes = Vec::new();
+  3574→        for block in &func.blocks {
+  3575→            for instr in &block.instructions {
+  3576→                bytes.extend_from_slice(&instr.encoded);
+  3577→            }
+  3578→        }
+  3579→        Ok(bytes)
+  3580→    }
+  3581→
+  3582→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+  3583→        // Collect all encoded bytes from every function and block.
+  3584→        let mut all_code = Vec::new();
+  3585→        for func in &program.functions {
+  3586→            for block in &func.blocks {
+  3587→                for instr in &block.instructions {
+  3588→                    all_code.extend_from_slice(&instr.encoded);
+  3589→                }
+  3590→            }
+  3591→        }
+  3592→
+  3593→        // Wrap in a minimal ELF32 binary for ARM.
+  3594→        Ok(build_minimal_arm32_elf(&all_code, 0x10000))
+  3595→    }
+  3596→
+  3597→    fn return_stub(&self) -> Vec<u8> {
+  3598→        // BX LR — branch to link register (return)
+  3599→        encode_bx(Condition::Al, Gpr::R14.encoding()).to_vec()
+  3600→    }
+  3601→
+  3602→    fn trampoline(&self, entry_addr: u64) -> Vec<u8> {
+  3603→        // LDR PC, [PC, #0] ; <4 bytes addr>
+  3604→        // On ARM32: LDR PC, [PC, #4] then .word addr
+  3605→        // Actually, PC reads as current + 8 in ARM mode.
+  3606→        // LDR PC, [PC, #4] loads from PC+8+4 = PC+12, but we want
+  3607→        // the word right after the LDR instruction.
+  3608→        // Simplest: LDR R12, [PC, #0]; BX R12; .word addr
+  3609→        let mut code = Vec::with_capacity(12);
+  3610→        // LDR R12, [PC, #4] — loads from PC+8+4 = after the BX instruction
+  3611→        let ldr_bytes = encode_ls_imm(
+  3612→            Condition::Al,
+  3613→            true,
+  3614→            true,
+  3615→            false,
+  3616→            false,
+  3617→            true,
+  3618→            Gpr::R15.encoding(),
+  3619→            Gpr::R12.encoding(),
+  3620→            4,
+  3621→        );
+  3622→        code.extend_from_slice(&ldr_bytes);
+  3623→        // BX R12
+  3624→        code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R12.encoding()));
+  3625→        // 32-bit address (little-endian)
+  3626→        code.extend_from_slice(&(entry_addr as u32).to_le_bytes());
+  3627→        code
+  3628→    }
+  3629→
+  3630→    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
+  3631→        // Mnemonic decoder for ARM32 (4-byte fixed-width instructions).
+  3632→        let mut lines = Vec::new();
+  3633→        let mut offset = 0usize;
+  3634→        let mut pc = addr;
+  3635→        while offset + 4 <= bytes.len() {
+  3636→            let word = u32::from_le_bytes([
+  3637→                bytes[offset],
+  3638→                bytes[offset + 1],
+  3639→                bytes[offset + 2],
+  3640→                bytes[offset + 3],
+  3641→            ]);
+  3642→            let mnemonic = decode_arm32(word);
+  3643→            lines.push(format!("{:#010x}:  {:08x}  {}", pc, word, mnemonic));
+  3644→            offset += 4;
+  3645→            pc += 4;
+  3646→        }
+  3647→        if offset < bytes.len() {
+  3648→            let remaining = &bytes[offset..];
+  3649→            lines.push(format!("{:#010x}:  {:02x?}", pc, remaining));
+  3650→        }
+  3651→        lines
+  3652→    }
+  3653→
+  3654→    fn name(&self) -> &'static str {
+  3655→        "arm32"
+  3656→    }
+  3657→}
+  3658→
+  3659→// ===========================================================================
+  3660→// Tests
+  3661→// ===========================================================================
+  3662→
+  3663→#[cfg(test)]
+  3664→mod tests {
+  3665→    use super::*;
+  3666→
+  3667→    // ── Gpr Tests ──────────────────────────────────────────────────────
+  3668→
+  3669→    #[test]
+  3670→    fn test_gpr_encoding() {
+  3671→        assert_eq!(Gpr::R0.encoding(), 0);
+  3672→        assert_eq!(Gpr::R3.encoding(), 3);
+  3673→        assert_eq!(Gpr::R12.encoding(), 12);
+  3674→        assert_eq!(Gpr::R13.encoding(), 13);
+  3675→        assert_eq!(Gpr::R15.encoding(), 15);
+  3676→    }
+  3677→
+  3678→    #[test]
+  3679→    fn test_gpr_allocatable() {
+  3680→        assert!(Gpr::R0.is_allocatable());
+  3681→        assert!(Gpr::R4.is_allocatable());
+  3682→        assert!(Gpr::R12.is_allocatable());
+  3683→        assert!(!Gpr::R13.is_allocatable()); // SP
+  3684→        assert!(!Gpr::R14.is_allocatable()); // LR
+  3685→        assert!(!Gpr::R15.is_allocatable()); // PC
+  3686→    }
+  3687→
+  3688→    #[test]
+  3689→    fn test_gpr_callee_saved() {
+  3690→        assert!(!Gpr::R0.is_callee_saved());
+  3691→        assert!(!Gpr::R3.is_callee_saved());
+  3692→        assert!(Gpr::R4.is_callee_saved());
+  3693→        assert!(Gpr::R11.is_callee_saved());
+  3694→        assert!(!Gpr::R12.is_callee_saved());
+  3695→    }
+  3696→
+  3697→    #[test]
+  3698→    fn test_gpr_arg_reg() {
+  3699→        assert!(Gpr::R0.is_arg_reg());
+  3700→        assert!(Gpr::R3.is_arg_reg());
+  3701→        assert!(!Gpr::R4.is_arg_reg());
+  3702→    }
+  3703→
+  3704→    #[test]
+  3705→    fn test_gpr_asm_name() {
+  3706→        assert_eq!(Gpr::R0.asm_name(), "r0");
+  3707→        assert_eq!(Gpr::R12.asm_name(), "ip");
+  3708→        assert_eq!(Gpr::R13.asm_name(), "sp");
+  3709→        assert_eq!(Gpr::R14.asm_name(), "lr");
+  3710→        assert_eq!(Gpr::R15.asm_name(), "pc");
+  3711→    }
+  3712→
+  3713→    #[test]
+  3714→    fn test_gpr_arg_register() {
+  3715→        assert_eq!(Gpr::arg_register(0), Some(Gpr::R0));
+  3716→        assert_eq!(Gpr::arg_register(3), Some(Gpr::R3));
+  3717→        assert_eq!(Gpr::arg_register(4), None);
+  3718→    }
+  3719→
+  3720→    // ── Dpr Tests ──────────────────────────────────────────────────────
+  3721→
+  3722→    #[test]
+  3723→    fn test_dpr_encoding() {
+  3724→        assert_eq!(Dpr::D0.encoding(), 0);
+  3725→        assert_eq!(Dpr::D15.encoding(), 15);
+  3726→        assert_eq!(Dpr::D31.encoding(), 31);
+  3727→    }
+  3728→
+  3729→    #[test]
+  3730→    fn test_dpr_callee_saved() {
+  3731→        assert!(!Dpr::D7.is_callee_saved());
+  3732→        assert!(Dpr::D8.is_callee_saved());
+  3733→        assert!(Dpr::D15.is_callee_saved());
+  3734→        assert!(!Dpr::D16.is_callee_saved());
+  3735→    }
+  3736→
+  3737→    #[test]
+  3738→    fn test_dpr_arg_reg() {
+  3739→        assert!(Dpr::D0.is_arg_reg());
+  3740→        assert!(Dpr::D15.is_arg_reg());
+  3741→        assert!(!Dpr::D16.is_arg_reg());
+  3742→    }
+  3743→
+  3744→    // ── Condition Tests ────────────────────────────────────────────────
+  3745→
+  3746→    #[test]
+  3747→    fn test_condition_encoding() {
+  3748→        assert_eq!(Condition::Eq.encoding(), 0b0000);
+  3749→        assert_eq!(Condition::Ne.encoding(), 0b0001);
+  3750→        assert_eq!(Condition::Al.encoding(), 0b1110);
+  3751→    }
+  3752→
+  3753→    #[test]
+  3754→    fn test_condition_display() {
+  3755→        assert_eq!(format!("{}", Condition::Eq), "eq");
+  3756→        assert_eq!(format!("{}", Condition::Al), "al");
+  3757→        assert_eq!(format!("{}", Condition::Gt), "gt");
+  3758→    }
+  3759→
+  3760→    // ── Instruction Encoding Tests ─────────────────────────────────────
+  3761→
+  3762→    #[test]
+  3763→    fn test_add_reg_encoding() {
+  3764→        // ADD R0, R1, R2 (AL)
+  3765→        let instr = Instruction::Add {
+  3766→            rd: Gpr::R0,
+  3767→            rn: Gpr::R1,
+  3768→            rm: Gpr::R2,
+  3769→            cond: Condition::Al,
+  3770→        };
+  3771→        let bytes = instr.encode();
+  3772→        let word = u32::from_le_bytes(bytes);
+  3773→        // cond=1110, 00, I=0, opcode=0100(ADD), S=0, Rn=0001, Rd=0000, 00000000, Rm=0010
+  3774→        // = 1110 00 0 0100 0 0001 0000 0000 0000 0000 0010
+  3775→        let expected = 0xE0810002u32;
+  3776→        assert_eq!(word, expected);
+  3777→    }
+  3778→
+  3779→    #[test]
+  3780→    fn test_sub_reg_encoding() {
+  3781→        // SUB R3, R4, R5 (AL)
+  3782→        let instr = Instruction::Sub {
+  3783→            rd: Gpr::R3,
+  3784→            rn: Gpr::R4,
+  3785→            rm: Gpr::R5,
+  3786→            cond: Condition::Al,
+  3787→        };
+  3788→        let bytes = instr.encode();
+  3789→        let word = u32::from_le_bytes(bytes);
+  3790→        // cond=1110, 00, I=0, opcode=0010(SUB), S=0, Rn=0100, Rd=0011, 00000000, Rm=0101
+  3791→        let expected = 0xE0443005u32;
+  3792→        assert_eq!(word, expected);
+  3793→    }
+  3794→
+  3795→    #[test]
+  3796→    fn test_mov_reg_encoding() {
+  3797→        // MOV R0, R1 (AL) — Rn should be 0 (SBZ)
+  3798→        let instr = Instruction::Mov {
+  3799→            rd: Gpr::R0,
+  3800→            rm: Gpr::R1,
+  3801→            cond: Condition::Al,
+  3802→        };
+  3803→        let bytes = instr.encode();
+  3804→        let word = u32::from_le_bytes(bytes);
+  3805→        // cond=1110, 00, I=0, opcode=1101(MOV), S=0, Rn=0000, Rd=0000, 00000000, Rm=0001
+  3806→        let expected = 0xE1A00001u32;
+  3807→        assert_eq!(word, expected);
+  3808→    }
+  3809→
+  3810→    #[test]
+  3811→    fn test_cmp_reg_encoding() {
+  3812→        // CMP R0, R1 (AL) — Rd=0 (SBZ), S=1
+  3813→        let instr = Instruction::Cmp {
+  3814→            rn: Gpr::R0,
+  3815→            rm: Gpr::R1,
+  3816→            cond: Condition::Al,
+  3817→        };
+  3818→        let bytes = instr.encode();
+  3819→        let word = u32::from_le_bytes(bytes);
+  3820→        // cond=1110, 00, I=0, opcode=1010(CMP), S=1, Rn=0000, Rd=0000, 00000000, Rm=0001
+  3821→        let expected = 0xE1500001u32;
+  3822→        assert_eq!(word, expected);
+  3823→    }
+  3824→
+  3825→    #[test]
+  3826→    fn test_conditional_add() {
+  3827→        // ADD R0, R1, R2 (EQ)
+  3828→        let instr = Instruction::Add {
+  3829→            rd: Gpr::R0,
+  3830→            rn: Gpr::R1,
+  3831→            rm: Gpr::R2,
+  3832→            cond: Condition::Eq,
+  3833→        };
+  3834→        let bytes = instr.encode();
+  3835→        let word = u32::from_le_bytes(bytes);
+  3836→        // cond=0000 instead of 1110
+  3837→        let expected = 0x00810002u32;
+  3838→        assert_eq!(word, expected);
+  3839→    }
+  3840→
+  3841→    #[test]
+  3842→    fn test_ldr_encoding() {
+  3843→        // LDR R0, [R1, #8] (AL)
+  3844→        let instr = Instruction::Ldr {
+  3845→            rd: Gpr::R0,
+  3846→            rn: Gpr::R1,
+  3847→            offset: 8,
+  3848→            cond: Condition::Al,
+  3849→        };
+  3850→        let bytes = instr.encode();
+  3851→        let word = u32::from_le_bytes(bytes);
+  3852→        // cond=1110, 01, I=0, P=1, U=1, B=0, W=0, L=1, Rn=0001, Rd=0000, offset=000000001000
+  3853→        let expected = 0xE5910008u32;
+  3854→        assert_eq!(word, expected);
+  3855→    }
+  3856→
+  3857→    #[test]
+  3858→    fn test_str_encoding() {
+  3859→        // STR R0, [R1, #-4] (AL)
+  3860→        let instr = Instruction::Str {
+  3861→            rd: Gpr::R0,
+  3862→            rn: Gpr::R1,
+  3863→            offset: -4,
+  3864→            cond: Condition::Al,
+  3865→        };
+  3866→        let bytes = instr.encode();
+  3867→        let word = u32::from_le_bytes(bytes);
+  3868→        // cond=1110, 01, I=0, P=1, U=0, B=0, W=0, L=0, Rn=0001, Rd=0000, offset=000000000100
+  3869→        let expected = 0xE5010004u32;
+  3870→        assert_eq!(word, expected);
+  3871→    }
+  3872→
+  3873→    #[test]
+  3874→    fn test_ldrb_encoding() {
+  3875→        // LDRB R0, [R1, #0] (AL)
+  3876→        let instr = Instruction::Ldrb {
+  3877→            rd: Gpr::R0,
+  3878→            rn: Gpr::R1,
+  3879→            offset: 0,
+  3880→            cond: Condition::Al,
+  3881→        };
+  3882→        let bytes = instr.encode();
+  3883→        let word = u32::from_le_bytes(bytes);
+  3884→        let expected = 0xE5D10000u32;
+  3885→        assert_eq!(word, expected);
+  3886→    }
+  3887→
+  3888→    #[test]
+  3889→    fn test_nop_encoding() {
+  3890→        // NOP = MOV R0, R0 = 0xE1A00000
+  3891→        let instr = Instruction::Nop;
+  3892→        let bytes = instr.encode();
+  3893→        let word = u32::from_le_bytes(bytes);
+  3894→        assert_eq!(word, 0xE1A00000);
+  3895→    }
+  3896→
+  3897→    #[test]
+  3898→    fn test_bx_encoding() {
+  3899→        // BX LR (AL)
+  3900→        let instr = Instruction::Bx {
+  3901→            rm: Gpr::R14,
+  3902→            cond: Condition::Al,
+  3903→        };
+  3904→        let bytes = instr.encode();
+  3905→        let word = u32::from_le_bytes(bytes);
+  3906→        let expected = 0xE12FFF1Eu32;
+  3907→        assert_eq!(word, expected);
+  3908→    }
+  3909→
+  3910→    #[test]
+  3911→    fn test_mul_encoding() {
+  3912→        // MUL R0, R1, R2 (AL) — Rd=R0, Rn=R1, Rs=R2, Rm=R1
+  3913→        let instr = Instruction::Mul {
+  3914→            rd: Gpr::R0,
+  3915→            rn: Gpr::R1,
+  3916→            rs: Gpr::R2,
+  3917→            rm: Gpr::R1,
+  3918→            cond: Condition::Al,
+  3919→        };
+  3920→        let bytes = instr.encode();
+  3921→        let word = u32::from_le_bytes(bytes);
+  3922→        // cond=1110, 000000, S=0, Rd[19:16]=0000, Rn[15:12]=0001, Rs[11:8]=0010, 1001, Rm[3:0]=0001
+  3923→        let expected = 0xE0001291u32;
+  3924→        assert_eq!(word, expected);
+  3925→    }
+  3926→
+  3927→    // ── Backend Tests ──────────────────────────────────────────────────
+  3928→
+  3929→    #[test]
+  3930→    fn test_arm32_backend_target_info() {
+  3931→        let backend = Arm32Backend::new();
+  3932→        let info = backend.target_info();
+  3933→        assert_eq!(info.isa_name(), "arm32");
+  3934→        assert_eq!(info.pointer_width(), 4);
+  3935→        assert_eq!(info.elf_machine_type(), 40);
+  3936→    }
+  3937→
+  3938→    #[test]
+  3939→    fn test_arm32_backend_return_stub() {
+  3940→        let backend = Arm32Backend::new();
+  3941→        let stub = backend.return_stub();
+  3942→        // BX LR should be 4 bytes
+  3943→        assert_eq!(stub.len(), 4);
+  3944→        let word = u32::from_le_bytes([stub[0], stub[1], stub[2], stub[3]]);
+  3945→        assert_eq!(word, 0xE12FFF1E); // BX LR
+  3946→    }
+  3947→
+  3948→    #[test]
+  3949→    fn test_arm32_elf_em_arm() {
+  3950→        let backend = Arm32Backend::new();
+  3951→        let program = AllocatedProgram {
+  3952→            functions: vec![AllocatedFunction {
+  3953→                name: "_start".to_string(),
+  3954→                blocks: vec![AllocatedBlock {
+  3955→                    label: "entry".to_string(),
+  3956→                    instructions: vec![AllocatedInstruction {
+  3957→                        opcode: "nop".to_string(),
+  3958→                        reads: vec![],
+  3959→                        writes: vec![],
+  3960→                        encoded: Instruction::Nop.encode().to_vec(),
+  3961→                    }],
+  3962→                    code_offset: 0,
+  3963→                }],
+  3964→                frame_size: 0,
+  3965→                callee_saved: vec![],
+  3966→                spill_slots: 0,
+  3967→                code_size: 4,
+  3968→                relocations: Vec::new(),
+  3969→            }],
+  3970→            total_code_size: 4,
+  3971→            total_data_size: 0,
+  3972→        };
+  3973→        let elf = backend.encode_program(&program).unwrap();
+  3974→        // Check ELF magic
+  3975→        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
+  3976→        // Check ELFCLASS32
+  3977→        assert_eq!(elf[4], 1);
+  3978→        // Check EM_ARM (at offset 0x12, 2 bytes)
+  3979→        let e_machine = u16::from_le_bytes([elf[0x12], elf[0x13]]);
+  3980→        assert_eq!(e_machine, 40);
+  3981→    }
+  3982→
+  3983→    #[test]
+  3984→    fn test_arm32_disassemble() {
+  3985→        let backend = Arm32Backend::new();
+  3986→        let nop_bytes = Instruction::Nop.encode();
+  3987→        let lines = backend.disassemble(&nop_bytes, 0x10000);
+  3988→        assert_eq!(lines.len(), 1);
+  3989→        assert!(lines[0].contains("e1a00000"));
+  3990→    }
+  3991→
+  3992→    // ── ISel Tests (resolve_gpr_arm32 + load_immediate_arm32) ──────────
+  3993→
+  3994→    #[test]
+  3995→    fn test_isel_add_with_immediate() {
+  3996→        // ADD dst, lhs, #42 should emit ADD Rd, Rn, #imm (rotated form)
+  3997→        let backend = Arm32Backend::new();
+  3998→        let func = crate::ir::IRFunction {
+  3999→            name: "add_imm".to_string(),
+  4000→            params: vec![],
+  4001→            results: vec![],
+  4002→            param_types: vec![],
+  4003→            result_types: vec![],
+  4004→            vregs: std::collections::HashMap::new(),
+  4005→            blocks: vec![crate::ir::IRBlock {
+  4006→                label: "entry".to_string(),
+  4007→                instructions: vec![
+  4008→                    crate::ir::IRInstr::Add {
+  4009→                        dst: crate::ir::IRValue::Register(0),
+  4010→                        lhs: crate::ir::IRValue::Register(1),
+  4011→                        rhs: crate::ir::IRValue::Immediate(42),
+  4012→                    },
+  4013→                    crate::ir::IRInstr::Ret {
+  4014→                        values: vec![crate::ir::IRValue::Register(0)],
+  4015→                    },
+  4016→                ],
+  4017→                terminator: crate::ir::IRTerminator::Return(vec![]),
+  4018→                predecessors: std::collections::HashSet::new(),
+  4019→                successors: std::collections::HashSet::new(),
+  4020→            }],
+  4021→        };
+  4022→        let result = backend.allocate_registers(&func).unwrap();
+  4023→        // Should have: prologue (PUSH, MOV FP, SUB SP) + ADD imm + MOV R0 + epilogue
+  4024→        // The ADD imm should use the immediate form, not load into scratch first
+  4025→        let all_code: Vec<u8> = result
+  4026→            .blocks
+  4027→            .iter()
+  4028→            .flat_map(|b| b.instructions.iter().flat_map(|i| i.encoded.clone()))
+  4029→            .collect();
+  4030→        // Verify the code is non-empty and contains ARM instructions
+  4031→        assert!(!all_code.is_empty());
+  4032→        // Find the ADD immediate instruction: opcode DP_ADD with I=1
+  4033→        // We expect at least one ADD immediate in the stream
+  4034→        let mut found_add_imm = false;
+  4035→        for chunk in all_code.chunks_exact(4) {
+  4036→            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+  4037→            let bits27_25 = (word >> 25) & 0x7;
+  4038→            let opcode = (word >> 21) & 0xF;
+  4039→            if bits27_25 == 0b001 && opcode == DP_ADD {
+  4040→                found_add_imm = true;
+  4041→                break;
+  4042→            }
+  4043→        }
+  4044→        assert!(
+  4045→            found_add_imm,
+  4046→            "Expected ADD immediate instruction in generated code"
+  4047→        );
+  4048→    }
+  4049→
+  4050→    #[test]
+  4051→    fn test_isel_resolve_gpr_immediate() {
+  4052→        // resolve_gpr_arm32 with an immediate should load it into the scratch register
+  4053→        let mut reg_map = std::collections::HashMap::new();
+  4054→        reg_map.insert(0, Gpr::R0);
+  4055→        reg_map.insert(1, Gpr::R1);
+  4056→
+  4057→        // Register value: should return the mapped register with no pre-code
+  4058→        let (gpr, pre_code) =
+  4059→            resolve_gpr_arm32(&crate::ir::IRValue::Register(0), &reg_map, Gpr::R12);
+  4060→        assert_eq!(gpr, Gpr::R0);
+  4061→        assert!(pre_code.is_empty());
+  4062→
+  4063→        // Immediate value 0: should load into scratch with a single MOV Rd, #0
+  4064→        let (gpr, pre_code) =
+  4065→            resolve_gpr_arm32(&crate::ir::IRValue::Immediate(0), &reg_map, Gpr::R12);
+  4066→        assert_eq!(gpr, Gpr::R12);
+  4067→        assert_eq!(pre_code.len(), 4); // single MOV instruction
+  4068→        let word = u32::from_le_bytes([pre_code[0], pre_code[1], pre_code[2], pre_code[3]]);
+  4069→        // MOV R12, #0 = cond=1110, 001, opcode=1101, S=0, Rn=0, Rd=12, rotate=0, imm8=0
+  4070→        assert_eq!(word, 0xE3A0C000); // MOV R12, #0
+  4071→
+  4072→        // Immediate value 42: should load into scratch with MOV Rd, #42
+  4073→        let (gpr, pre_code) =
+  4074→            resolve_gpr_arm32(&crate::ir::IRValue::Immediate(42), &reg_map, Gpr::R3);
+  4075→        assert_eq!(gpr, Gpr::R3);
+  4076→        assert_eq!(pre_code.len(), 4); // single MOV instruction
+  4077→        let word = u32::from_le_bytes([pre_code[0], pre_code[1], pre_code[2], pre_code[3]]);
+  4078→        // MOV R3, #42 = cond=1110, 001, opcode=1101, S=0, Rn=0, Rd=3, rotate=0, imm8=42
+  4079→        assert_eq!(word, 0xE3A0302A); // MOV R3, #42
+  4080→    }
+  4081→
+  4082→    #[test]
+  4083→    fn test_isel_try_encode_arm_imm() {
+  4084→        // Simple 8-bit values: rotate=0
+  4085→        assert_eq!(try_encode_arm_imm(0), Some((0, 0)));
+  4086→        assert_eq!(try_encode_arm_imm(1), Some((0, 1)));
+  4087→        assert_eq!(try_encode_arm_imm(255), Some((0, 255)));
+  4088→
+  4089→        // Rotated values: 0x100 = 1 ROR 30 = 1 << 8 → rotate=15 (2*15=30)
+  4090→        // Actually 0x100 = 1 rotated right by 24 bits, wait no...
+  4091→        // 0x100 = 0x01 << 8 = rotate_left(0x100, 2*rotate) for some rotate
+  4092→        // val.rotate_left(2*rotate) must be <= 0xFF
+  4093→        // 0x100.rotate_left(30) = 0x100 >> 2 = 0x40, which is 64
+  4094→        // So rotate=15, imm8=64
+  4095→        assert!(try_encode_arm_imm(0x100).is_some());
+  4096→
+  4097→        // 0xFF0 = 0xFF << 4 → rotate_left(0xFF0, 2*rotate) for some rotate
+  4098→        // 0xFF0.rotate_left(28) = 0xFF0 >> 4 = 0xFF → rotate=14, imm8=0xFF
+  4099→        assert_eq!(try_encode_arm_imm(0xFF0), Some((14, 0xFF)));
+  4100→
+  4101→        // Values that CANNOT be encoded as rotated immediates
+  4102→        assert!(try_encode_arm_imm(0x101).is_none());
+  4103→        assert!(try_encode_arm_imm(0x12345678).is_none());
+  4104→    }
+  4105→
+  4106→    #[test]
+  4107→    fn test_isel_load_immediate_large() {
+  4108→        // Load a 32-bit value that cannot be encoded as a single rotated immediate
+  4109→        // Should use MOV + ORR sequence
+  4110→        let code = load_immediate_arm32(Gpr::R0, 0x12345678);
+  4111→        assert!(!code.is_empty());
+  4112→        // Each instruction is 4 bytes
+  4113→        assert_eq!(code.len() % 4, 0);
+  4114→        // Should be more than one instruction for a complex value
+  4115→        assert!(
+  4116→            code.len() >= 8,
+  4117→            "Expected at least 2 instructions for large immediate, got {} bytes",
+  4118→            code.len()
+  4119→        );
+  4120→
+  4121→        // Verify all instructions are valid ARM (condition code AL = 0xE in top nibble)
+  4122→        for chunk in code.chunks_exact(4) {
+  4123→            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+  4124→            let cond = (word >> 28) & 0xF;
+  4125→            assert_eq!(cond, 0xE, "Expected AL condition code, got {:04b}", cond);
+  4126→        }
+  4127→    }
+  4128→
+  4129→    #[test]
+  4130→    fn test_isel_sub_with_immediate_rhs() {
+  4131→        // SUB dst, lhs, #10 should emit SUB Rd, Rn, #10
+  4132→        let backend = Arm32Backend::new();
+  4133→        let func = crate::ir::IRFunction {
+  4134→            name: "sub_imm".to_string(),
+  4135→            params: vec![],
+  4136→            results: vec![],
+  4137→            param_types: vec![],
+  4138→            result_types: vec![],
+  4139→            vregs: std::collections::HashMap::new(),
+  4140→            blocks: vec![crate::ir::IRBlock {
+  4141→                label: "entry".to_string(),
+  4142→                instructions: vec![
+  4143→                    crate::ir::IRInstr::Sub {
+  4144→                        dst: crate::ir::IRValue::Register(0),
+  4145→                        lhs: crate::ir::IRValue::Register(1),
+  4146→                        rhs: crate::ir::IRValue::Immediate(10),
+  4147→                    },
+  4148→                    crate::ir::IRInstr::Ret {
+  4149→                        values: vec![crate::ir::IRValue::Register(0)],
+  4150→                    },
+  4151→                ],
+  4152→                terminator: crate::ir::IRTerminator::Return(vec![]),
+  4153→                predecessors: std::collections::HashSet::new(),
+  4154→                successors: std::collections::HashSet::new(),
+  4155→            }],
+  4156→        };
+  4157→        let result = backend.allocate_registers(&func).unwrap();
+  4158→        let all_code: Vec<u8> = result
+  4159→            .blocks
+  4160→            .iter()
+  4161→            .flat_map(|b| b.instructions.iter().flat_map(|i| i.encoded.clone()))
+  4162→            .collect();
+  4163→        assert!(!all_code.is_empty());
+  4164→        // Find the SUB immediate instruction: opcode DP_SUB with I=1
+  4165→        let mut found_sub_imm = false;
+  4166→        for chunk in all_code.chunks_exact(4) {
+  4167→            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+  4168→            let bits27_25 = (word >> 25) & 0x7;
+  4169→            let opcode = (word >> 21) & 0xF;
+  4170→            if bits27_25 == 0b001 && opcode == DP_SUB {
+  4171→                found_sub_imm = true;
+  4172→                break;
+  4173→            }
+  4174→        }
+  4175→        assert!(
+  4176→            found_sub_imm,
+  4177→            "Expected SUB immediate instruction in generated code"
+  4178→        );
+  4179→    }
+  4180→}
+  4181→pub mod disasm;
+  4182→

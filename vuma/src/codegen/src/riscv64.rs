@@ -1983,9 +1983,9 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
-    // e_flags: RISC-V float ABI = double (0x5), RVC = 0
-    // EF_RISCV_FLOAT_ABI_DOUBLE = 0x5 << 5 = 0xA0
-    elf.extend_from_slice(&0xA0u32.to_le_bytes()); // e_flags (LP64D ABI)
+    // e_flags: RISC-V float ABI = double (0x2), RVC = 0
+    // EF_RISCV_FLOAT_ABI_DOUBLE = 0x2 << 5 = 0x40
+    elf.extend_from_slice(&0x40u32.to_le_bytes()); // e_flags (LP64D ABI)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2

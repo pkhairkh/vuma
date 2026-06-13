@@ -1,0 +1,2002 @@
+     1→//! # x86_64 Backend
+     2→//!
+     3→//! Implements the `Backend` trait for the x86_64 target (SystemV ABI).
+     4→//! This module provides:
+     5→//!
+     6→//! - `Gpr` — General-purpose register enum (RAX–R15)
+     7→//! - `Xmm` — SSE/SIMD register enum (XMM0–XMM15)
+     8→//! - REX prefix generation
+     9→//! - ModR/M + SIB byte encoding
+    10→//! - Instruction encoding for all key x86_64 instructions
+    11→//! - `X86_64Backend` — `Backend` implementation that lowers IR to x86_64 machine code
+    12→//!
+    13→//! ## x86_64 Register Convention (SystemV ABI)
+    14→//!
+    15→//! | Register | Role                    | Callee-saved |
+    16→//! |----------|-------------------------|-------------|
+    17→//! | RAX      | Return value / scratch  | No          |
+    18→//! | RCX      | 4th int arg / scratch   | No          |
+    19→//! | RDX      | 3rd int arg / scratch   | No          |
+    20→//! | RBX      | Callee-saved            | Yes         |
+    21→//! | RSP      | Stack pointer           | (special)   |
+    22→//! | RBP      | Frame pointer           | Yes         |
+    23→//! | RSI      | 2nd int arg / scratch   | No          |
+    24→//! | RDI      | 1st int arg / scratch   | No          |
+    25→//! | R8–R9    | 5th/6th int arg         | No          |
+    26→//! | R10–R11  | Scratch                 | No          |
+    27→//! | R12–R15  | Callee-saved            | Yes         |
+    28→//!
+    29→//! ## References
+    30→//!
+    31→//! - Intel 64 and IA-32 Architectures Software Developer's Manual, Volumes 2A/2B
+    32→//! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
+    33→
+    34→use crate::backend::{
+    35→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    36→    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
+    37→};
+    38→use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+    39→use std::collections::HashMap;
+    40→use std::fmt;
+    41→
+    42→// ===========================================================================
+    43→// Linux x86_64 Runtime Functions (syscall-based I/O)
+    44→// ===========================================================================
+    45→// Pre-assembled machine code for built-in I/O functions.
+    46→// These are appended to the .text section after user functions.
+    47→//
+    48→// Functions provided:
+    49→//   __vuma_write_stdout(ptr: rdi, len: rsi) — write raw bytes to stdout
+    50→//   __vuma_print_hex(ptr: rdi, len: rsi)    — write bytes as hex + newline to stdout
+    51→//   __vuma_print_int(val: rdi)              — write integer as decimal + newline to stdout
+    52→
+    53→/// Machine code for `__vuma_write_stdout`: sys_write(1, ptr, len)
+    54→///   mov rdx, rsi; mov rsi, rdi; mov rdi, 1; mov rax, 1; syscall; ret
+    55→const RUNTIME_WRITE_STDOUT: &[u8] = &[
+    56→    0x48, 0x89, 0xf2,                         // mov rdx, rsi
+    57→    0x48, 0x89, 0xfe,                         // mov rsi, rdi
+    58→    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, // mov rdi, 1
+    59→    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, // mov rax, 1
+    60→    0x0f, 0x05,                               // syscall
+    61→    0xc3,                                     // ret
+    62→];
+    63→const RUNTIME_WRITE_STDOUT_SIZE: usize = 23;
+    64→
+    65→/// Machine code for `__vuma_print_hex`: hex conversion loop + sys_write
+    66→/// Uses r14 to hold the hex_table pointer (fix: rdx was being clobbered by movzbl)
+    67→const RUNTIME_PRINT_HEX: &[u8] = &[
+    68→    0x55,                                           // push rbp
+    69→    0x48, 0x89, 0xe5,                               // mov rbp, rsp
+    70→    0x48, 0x83, 0xec, 0x10,                         // sub rsp, 16
+    71→    0x53,                                           // push rbx
+    72→    0x41, 0x54,                                     // push r12
+    73→    0x41, 0x55,                                     // push r13
+    74→    0x41, 0x56,                                     // push r14
+    75→    0x49, 0x89, 0xfc,                               // mov r12, rdi
+    76→    0x49, 0x89, 0xf5,                               // mov r13, rsi
+    77→    0x48, 0x31, 0xdb,                               // xor rbx, rbx
+    78→    0x4c, 0x8d, 0x35, 0x00, 0x00, 0x00, 0x00,       // lea r14, [rip+hex_table] (PATCHED)
+    79→    // .Lhex_loop:
+    80→    0x4c, 0x39, 0xeb,                               // cmp rbx, r13
+    81→    0x7d, 0x3f,                                     // jge .Lhex_done (+63)
+    82→    0x41, 0x0f, 0xb6, 0x04, 0x1c,                   // movzbl (r12,rbx,1), eax
+    83→    0x89, 0xc1,                                     // mov ecx, eax
+    84→    0xc1, 0xe9, 0x04,                               // shr ecx, 4
+    85→    0x41, 0x0f, 0xb6, 0x14, 0x0e,                   // movzbl (r14,rcx,1), edx
+    86→    0x88, 0x55, 0xfe,                               // mov [rbp-2], dl
+    87→    0x89, 0xc1,                                     // mov ecx, eax
+    88→    0x83, 0xe1, 0x0f,                               // and ecx, 0xf
+    89→    0x41, 0x0f, 0xb6, 0x14, 0x0e,                   // movzbl (r14,rcx,1), edx
+    90→    0x88, 0x55, 0xff,                               // mov [rbp-1], dl
+    91→    0x48, 0x8d, 0x75, 0xfe,                         // lea rsi, [rbp-2]
+    92→    0x48, 0xc7, 0xc2, 0x02, 0x00, 0x00, 0x00,       // mov rdx, 2
+    93→    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
+    94→    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
+    95→    0x0f, 0x05,                                     // syscall
+    96→    0x48, 0xff, 0xc3,                               // inc rbx
+    97→    0xeb, 0xbc,                                     // jmp .Lhex_loop (-68)
+    98→    // .Lhex_done:
+    99→    0xc6, 0x45, 0xff, 0x0a,                         // movb [rbp-1], 10
+   100→    0x48, 0x8d, 0x75, 0xff,                         // lea rsi, [rbp-1]
+   101→    0x48, 0xc7, 0xc2, 0x01, 0x00, 0x00, 0x00,       // mov rdx, 1
+   102→    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
+   103→    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
+   104→    0x0f, 0x05,                                     // syscall
+   105→    0x41, 0x5e,                                     // pop r14
+   106→    0x41, 0x5d,                                     // pop r13
+   107→    0x41, 0x5c,                                     // pop r12
+   108→    0x5b,                                           // pop rbx
+   109→    0x48, 0x83, 0xc4, 0x10,                         // add rsp, 16
+   110→    0x5d,                                           // pop rbp
+   111→    0xc3,                                           // ret
+   112→];
+   113→const RUNTIME_PRINT_HEX_SIZE: usize = 143;
+   114→
+   115→/// Offset of the RIP-relative displacement in `__vuma_print_hex` that
+   116→/// points to `hex_table`. This is relative to the start of __vuma_print_hex.
+   117→/// The LEA instruction is at byte 24, and the 4-byte displacement starts at byte 27.
+   118→const PRINT_HEX_LEA_DISP_OFFSET: usize = 27;
+   119→
+   120→/// Machine code for `__vuma_print_int`: integer-to-decimal conversion + sys_write
+   121→const RUNTIME_PRINT_INT: &[u8] = &[
+   122→    0x55,                                           // push rbp
+   123→    0x48, 0x89, 0xe5,                               // mov rbp, rsp
+   124→    0x48, 0x83, 0xec, 0x20,                         // sub rsp, 32
+   125→    0x53,                                           // push rbx
+   126→    0x41, 0x54,                                     // push r12
+   127→    0x49, 0x89, 0xfc,                               // mov r12, rdi
+   128→    0x48, 0x8d, 0x5d, 0xff,                         // lea rbx, [rbp-1]
+   129→    0xc6, 0x03, 0x0a,                               // movb [rbx], 10
+   130→    0x48, 0xff, 0xcb,                               // dec rbx
+   131→    0x4d, 0x85, 0xe4,                               // test r12, r12
+   132→    0x75, 0x08,                                     // jne .Lint_loop
+   133→    0xc6, 0x03, 0x30,                               // movb [rbx], '0'
+   134→    0x48, 0xff, 0xcb,                               // dec rbx
+   135→    0xeb, 0x1f,                                     // jmp .Lint_write
+   136→    // .Lint_loop:
+   137→    0x4d, 0x85, 0xe4,                               // test r12, r12
+   138→    0x74, 0x1a,                                     // je .Lint_write
+   139→    0x4c, 0x89, 0xe0,                               // mov rax, r12
+   140→    0x31, 0xd2,                                     // xor edx, edx
+   141→    0xb9, 0x0a, 0x00, 0x00, 0x00,                   // mov ecx, 10
+   142→    0x48, 0xf7, 0xf1,                               // div rcx
+   143→    0x49, 0x89, 0xc4,                               // mov r12, rax
+   144→    0x80, 0xc2, 0x30,                               // add dl, '0'
+   145→    0x88, 0x13,                                     // mov [rbx], dl
+   146→    0x48, 0xff, 0xcb,                               // dec rbx
+   147→    0xeb, 0xe1,                                     // jmp .Lint_loop
+   148→    // .Lint_write:
+   149→    0x48, 0xff, 0xc3,                               // inc rbx
+   150→    0x48, 0x89, 0xe8,                               // mov rax, rbp
+   151→    0x48, 0x29, 0xd8,                               // sub rax, rbx
+   152→    0x48, 0x89, 0xde,                               // mov rsi, rbx
+   153→    0x48, 0x89, 0xc2,                               // mov rdx, rax
+   154→    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
+   155→    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
+   156→    0x0f, 0x05,                                     // syscall
+   157→    0x41, 0x5c,                                     // pop r12
+   158→    0x5b,                                           // pop rbx
+   159→    0x48, 0x83, 0xc4, 0x20,                         // add rsp, 32
+   160→    0x5d,                                           // pop rbp
+   161→    0xc3,                                           // ret
+   162→];
+   163→const RUNTIME_PRINT_INT_SIZE: usize = 108;
+   164→
+   165→/// Hex lookup table: "0123456789abcdef"
+   166→const HEX_TABLE: &[u8] = b"0123456789abcdef";
+   167→const HEX_TABLE_SIZE: usize = 16;
+   168→
+   169→/// Total size of all runtime code (write_stdout + print_hex + print_int)
+   170→const RUNTIME_CODE_SIZE: usize = RUNTIME_WRITE_STDOUT_SIZE + RUNTIME_PRINT_HEX_SIZE + RUNTIME_PRINT_INT_SIZE;
+   171→
+   172→/// Total size of runtime code + data
+   173→const RUNTIME_TOTAL_SIZE: usize = RUNTIME_CODE_SIZE + HEX_TABLE_SIZE;
+   174→
+   175→// ===========================================================================
+   176→// General-Purpose Registers
+   177→// ===========================================================================
+   178→
+   179→/// x86_64 general-purpose registers (RAX–R15).
+   180→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   181→pub enum Gpr {
+   182→    Rax = 0,
+   183→    Rcx = 1,
+   184→    Rdx = 2,
+   185→    Rbx = 3,
+   186→    Rsp = 4,
+   187→    Rbp = 5,
+   188→    Rsi = 6,
+   189→    Rdi = 7,
+   190→    R8 = 8,
+   191→    R9 = 9,
+   192→    R10 = 10,
+   193→    R11 = 11,
+   194→    R12 = 12,
+   195→    R13 = 13,
+   196→    R14 = 14,
+   197→    R15 = 15,
+   198→}
+   199→
+   200→impl Gpr {
+   201→    /// Returns the 4-bit encoding index for this register.
+   202→    pub fn encoding(&self) -> u8 {
+   203→        *self as u8
+   204→    }
+   205→
+   206→    /// Returns `true` if this register requires a REX prefix bit (R8–R15).
+   207→    pub fn needs_rex(&self) -> bool {
+   208→        *self as u8 >= 8
+   209→    }
+   210→
+   211→    /// Returns `true` if this register is callee-saved under SystemV ABI.
+   212→    pub fn is_callee_saved(&self) -> bool {
+   213→        matches!(
+   214→            self,
+   215→            Gpr::Rbx | Gpr::R12 | Gpr::R13 | Gpr::R14 | Gpr::R15 | Gpr::Rbp
+   216→        )
+   217→    }
+   218→
+   219→    /// Returns `true` if this register is an integer argument register under SystemV ABI.
+   220→    pub fn is_arg_reg(&self) -> bool {
+   221→        matches!(
+   222→            self,
+   223→            Gpr::Rdi | Gpr::Rsi | Gpr::Rdx | Gpr::Rcx | Gpr::R8 | Gpr::R9
+   224→        )
+   225→    }
+   226→
+   227→    /// Returns `true` if this register is available for register allocation.
+   228→    pub fn is_allocatable(&self) -> bool {
+   229→        !matches!(self, Gpr::Rsp)
+   230→    }
+   231→
+   232→    /// Returns the standard assembly name for this register.
+   233→    pub fn asm_name(&self) -> &'static str {
+   234→        match self {
+   235→            Gpr::Rax => "rax",
+   236→            Gpr::Rcx => "rcx",
+   237→            Gpr::Rdx => "rdx",
+   238→            Gpr::Rbx => "rbx",
+   239→            Gpr::Rsp => "rsp",
+   240→            Gpr::Rbp => "rbp",
+   241→            Gpr::Rsi => "rsi",
+   242→            Gpr::Rdi => "rdi",
+   243→            Gpr::R8 => "r8",
+   244→            Gpr::R9 => "r9",
+   245→            Gpr::R10 => "r10",
+   246→            Gpr::R11 => "r11",
+   247→            Gpr::R12 => "r12",
+   248→            Gpr::R13 => "r13",
+   249→            Gpr::R14 => "r14",
+   250→            Gpr::R15 => "r15",
+   251→        }
+   252→    }
+   253→
+   254→    /// Returns the Gpr for a given SystemV integer argument index (0–5).
+   255→    pub fn arg_register(index: usize) -> Option<Gpr> {
+   256→        match index {
+   257→            0 => Some(Gpr::Rdi),
+   258→            1 => Some(Gpr::Rsi),
+   259→            2 => Some(Gpr::Rdx),
+   260→            3 => Some(Gpr::Rcx),
+   261→            4 => Some(Gpr::R8),
+   262→            5 => Some(Gpr::R9),
+   263→            _ => None,
+   264→        }
+   265→    }
+   266→}
+   267→
+   268→impl fmt::Display for Gpr {
+   269→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   270→        f.write_str(self.asm_name())
+   271→    }
+   272→}
+   273→
+   274→// ===========================================================================
+   275→// XMM (SSE) Registers
+   276→// ===========================================================================
+   277→
+   278→/// x86_64 SSE/SIMD registers (XMM0–XMM15).
+   279→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   280→pub enum Xmm {
+   281→    Xmm0 = 0,
+   282→    Xmm1 = 1,
+   283→    Xmm2 = 2,
+   284→    Xmm3 = 3,
+   285→    Xmm4 = 4,
+   286→    Xmm5 = 5,
+   287→    Xmm6 = 6,
+   288→    Xmm7 = 7,
+   289→    Xmm8 = 8,
+   290→    Xmm9 = 9,
+   291→    Xmm10 = 10,
+   292→    Xmm11 = 11,
+   293→    Xmm12 = 12,
+   294→    Xmm13 = 13,
+   295→    Xmm14 = 14,
+   296→    Xmm15 = 15,
+   297→}
+   298→
+   299→impl Xmm {
+   300→    /// Returns the 4-bit encoding index for this register.
+   301→    pub fn encoding(&self) -> u8 {
+   302→        *self as u8
+   303→    }
+   304→
+   305→    /// Returns `true` if this register requires a REX prefix bit (XMM8–XMM15).
+   306→    pub fn needs_rex(&self) -> bool {
+   307→        *self as u8 >= 8
+   308→    }
+   309→
+   310→    /// Returns the standard assembly name for this register.
+   311→    pub fn asm_name(&self) -> &'static str {
+   312→        match self {
+   313→            Xmm::Xmm0 => "xmm0",
+   314→            Xmm::Xmm1 => "xmm1",
+   315→            Xmm::Xmm2 => "xmm2",
+   316→            Xmm::Xmm3 => "xmm3",
+   317→            Xmm::Xmm4 => "xmm4",
+   318→            Xmm::Xmm5 => "xmm5",
+   319→            Xmm::Xmm6 => "xmm6",
+   320→            Xmm::Xmm7 => "xmm7",
+   321→            Xmm::Xmm8 => "xmm8",
+   322→            Xmm::Xmm9 => "xmm9",
+   323→            Xmm::Xmm10 => "xmm10",
+   324→            Xmm::Xmm11 => "xmm11",
+   325→            Xmm::Xmm12 => "xmm12",
+   326→            Xmm::Xmm13 => "xmm13",
+   327→            Xmm::Xmm14 => "xmm14",
+   328→            Xmm::Xmm15 => "xmm15",
+   329→        }
+   330→    }
+   331→}
+   332→
+   333→impl fmt::Display for Xmm {
+   334→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   335→        f.write_str(self.asm_name())
+   336→    }
+   337→}
+   338→
+   339→// ===========================================================================
+   340→// Condition Codes
+   341→// ===========================================================================
+   342→
+   343→/// x86_64 condition codes for SETcc, Jcc, and CMOVcc instructions.
+   344→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   345→pub enum Cc {
+   346→    Overflow = 0x0,
+   347→    NoOverflow = 0x1,
+   348→    Below = 0x2,
+   349→    AboveEqual = 0x3,
+   350→    Equal = 0x4,
+   351→    NotEqual = 0x5,
+   352→    BelowEqual = 0x6,
+   353→    Above = 0x7,
+   354→    Sign = 0x8,
+   355→    NotSign = 0x9,
+   356→    Parity = 0xA,
+   357→    NotParity = 0xB,
+   358→    Less = 0xC,
+   359→    GreaterEqual = 0xD,
+   360→    LessEqual = 0xE,
+   361→    Greater = 0xF,
+   362→}
+   363→
+   364→impl Cc {
+   365→    /// Returns the 4-bit condition code encoding.
+   366→    pub fn encoding(&self) -> u8 {
+   367→        *self as u8
+   368→    }
+   369→}
+   370→
+   371→// ===========================================================================
+   372→// REX Prefix
+   373→// ===========================================================================
+   374→
+   375→/// Generate a REX prefix byte.
+   376→///
+   377→/// - `w`: REX.W — 64-bit operand size
+   378→/// - `r`: Extension of the ModR/M `reg` field (for R8–R15 / XMM8–XMM15)
+   379→/// - `x`: Extension of the SIB `index` field
+   380→/// - `b`: Extension of the ModR/M `rm` field or SIB `base` field
+   381→///
+   382→/// Returns `None` if no REX byte is needed (all bits are 0).
+   383→fn rex_prefix(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
+   384→    let byte = 0x40 | (w as u8) << 3 | (r as u8) << 2 | (x as u8) << 1 | b as u8;
+   385→    if byte > 0x40 {
+   386→        Some(byte)
+   387→    } else {
+   388→        None
+   389→    }
+   390→}
+   391→
+   392→// ===========================================================================
+   393→// ModR/M + SIB Encoding
+   394→// ===========================================================================
+   395→
+   396→/// Encode a ModR/M byte.
+   397→///
+   398→/// - `mod_bits`: 2-bit mod field (0=mem, 1=mem+disp8, 2=mem+disp32, 3=reg)
+   399→/// - `reg`: 3-bit reg field (register or opcode extension)
+   400→/// - `rm`: 3-bit r/m field (register or memory operand)
+   401→fn modrm(mod_bits: u8, reg: u8, rm: u8) -> u8 {
+   402→    (mod_bits & 3) << 6 | (reg & 7) << 3 | (rm & 7)
+   403→}
+   404→
+   405→/// Encode a SIB byte.
+   406→///
+   407→/// - `scale`: 2-bit scale factor (0=1, 1=2, 2=4, 3=8)
+   408→/// - `index`: 3-bit index register
+   409→/// - `base`: 3-bit base register
+   410→fn sib(scale: u8, index: u8, base: u8) -> u8 {
+   411→    (scale & 3) << 6 | (index & 7) << 3 | (base & 7)
+   412→}
+   413→
+   414→// ===========================================================================
+   415→// Instruction Encoding Functions
+   416→// ===========================================================================
+   417→
+   418→/// Emit a REX.W prefix plus opcode, then a ModR/M byte for reg-reg operations.
+   419→///
+   420→/// This is the common pattern for 64-bit ALU instructions: REX.W + opcode + ModR/M(mod=3, reg, rm).
+   421→fn emit_rexw_reg_reg(code: &mut Vec<u8>, opcode: u8, reg: Gpr, rm: Gpr) {
+   422→    let r = reg.needs_rex();
+   423→    let b = rm.needs_rex();
+   424→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   425→        code.push(rex);
+   426→    } else {
+   427→        // REX.W is still needed for 64-bit operations even if r and b are 0
+   428→        code.push(0x48);
+   429→    }
+   430→    code.push(opcode);
+   431→    code.push(modrm(3, reg.encoding() & 7, rm.encoding() & 7));
+   432→}
+   433→
+   434→/// Emit a REX.W prefix (always), then opcode, then ModR/M for reg-reg with
+   435→/// specific reg field (opcode extension) and rm register.
+   436→fn emit_rexw_opext_reg(code: &mut Vec<u8>, opcode: u8, opext: u8, rm: Gpr) {
+   437→    let b = rm.needs_rex();
+   438→    // Always emit REX.W for 64-bit
+   439→    let rex = 0x48 | (b as u8);
+   440→    code.push(rex);
+   441→    code.push(opcode);
+   442→    code.push(modrm(3, opext & 7, rm.encoding() & 7));
+   443→}
+   444→
+   445→/// Encode MOV r64, r64 (REX.W + 89 /r)
+   446→pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   447→    let mut code = Vec::with_capacity(3);
+   448→    emit_rexw_reg_reg(&mut code, 0x89, src, dst);
+   449→    code
+   450→}
+   451→
+   452→/// Encode MOV r64, imm64 (REX.W + B8+rd + 8-byte imm)
+   453→pub fn encode_mov_reg_imm64(dst: Gpr, imm: u64) -> Vec<u8> {
+   454→    let mut code = Vec::with_capacity(10);
+   455→    let b = dst.needs_rex();
+   456→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   457→        code.push(rex);
+   458→    } else {
+   459→        code.push(0x48);
+   460→    }
+   461→    code.push(0xB8 + (dst.encoding() & 7));
+   462→    code.extend_from_slice(&imm.to_le_bytes());
+   463→    code
+   464→}
+   465→
+   466→/// Encode MOV r64, imm32 (REX.W + C7 /0 + 4-byte imm, sign-extended)
+   467→pub fn encode_mov_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   468→    let mut code = Vec::with_capacity(7);
+   469→    let b = dst.needs_rex();
+   470→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   471→        code.push(rex);
+   472→    } else {
+   473→        code.push(0x48);
+   474→    }
+   475→    code.push(0xC7);
+   476→    code.push(modrm(3, 0, dst.encoding() & 7));
+   477→    code.extend_from_slice(&imm.to_le_bytes());
+   478→    code
+   479→}
+   480→
+   481→/// Encode MOV r64, [r64+offset] (REX.W + 8B /r + displacement)
+   482→///
+   483→/// Handles special cases:
+   484→/// - RSP/R12 as base: SIB byte required
+   485→/// - RBP/R13 as base: mod=1 with disp8=0 even for zero offset
+   486→/// - Offset fits in i8: disp8; otherwise: disp32
+   487→pub fn encode_mov_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+   488→    let mut code = Vec::with_capacity(8);
+   489→    let r = dst.needs_rex();
+   490→    let b = base.needs_rex();
+   491→
+   492→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   493→        code.push(rex);
+   494→    } else {
+   495→        code.push(0x48);
+   496→    }
+   497→    code.push(0x8B);
+   498→
+   499→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   500→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   501→
+   502→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   503→        // mod=00, no displacement
+   504→        code.push(modrm(0, dst.encoding() & 7, base.encoding() & 7));
+   505→    } else if needs_sib {
+   506→        // SIB byte required: base = RSP(4), index = RSP(4) means "no index"
+   507→        if offset == 0 {
+   508→            code.push(modrm(0, dst.encoding() & 7, 4));
+   509→            code.push(sib(0, 4, base.encoding() & 7));
+   510→        } else if (-128..=127).contains(&offset) {
+   511→            code.push(modrm(1, dst.encoding() & 7, 4));
+   512→            code.push(sib(0, 4, base.encoding() & 7));
+   513→            code.push(offset as u8);
+   514→        } else {
+   515→            code.push(modrm(2, dst.encoding() & 7, 4));
+   516→            code.push(sib(0, 4, base.encoding() & 7));
+   517→            code.extend_from_slice(&offset.to_le_bytes());
+   518→        }
+   519→    } else if (-128..=127).contains(&offset) {
+   520→        // mod=01, disp8
+   521→        code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
+   522→        code.push(offset as u8);
+   523→    } else {
+   524→        // mod=10, disp32
+   525→        code.push(modrm(2, dst.encoding() & 7, base.encoding() & 7));
+   526→        code.extend_from_slice(&offset.to_le_bytes());
+   527→    }
+   528→
+   529→    code
+   530→}
+   531→
+   532→/// Encode MOV [r64+offset], r64 (REX.W + 89 /r + displacement)
+   533→pub fn encode_mov_mem_reg(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
+   534→    let mut code = Vec::with_capacity(8);
+   535→    let r = src.needs_rex();
+   536→    let b = base.needs_rex();
+   537→
+   538→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   539→        code.push(rex);
+   540→    } else {
+   541→        code.push(0x48);
+   542→    }
+   543→    code.push(0x89);
+   544→
+   545→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   546→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   547→
+   548→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   549→        code.push(modrm(0, src.encoding() & 7, base.encoding() & 7));
+   550→    } else if needs_sib {
+   551→        if offset == 0 {
+   552→            code.push(modrm(0, src.encoding() & 7, 4));
+   553→            code.push(sib(0, 4, base.encoding() & 7));
+   554→        } else if (-128..=127).contains(&offset) {
+   555→            code.push(modrm(1, src.encoding() & 7, 4));
+   556→            code.push(sib(0, 4, base.encoding() & 7));
+   557→            code.push(offset as u8);
+   558→        } else {
+   559→            code.push(modrm(2, src.encoding() & 7, 4));
+   560→            code.push(sib(0, 4, base.encoding() & 7));
+   561→            code.extend_from_slice(&offset.to_le_bytes());
+   562→        }
+   563→    } else if (-128..=127).contains(&offset) {
+   564→        code.push(modrm(1, src.encoding() & 7, base.encoding() & 7));
+   565→        code.push(offset as u8);
+   566→    } else {
+   567→        code.push(modrm(2, src.encoding() & 7, base.encoding() & 7));
+   568→        code.extend_from_slice(&offset.to_le_bytes());
+   569→    }
+   570→
+   571→    code
+   572→}
+   573→
+   574→/// Encode ADD r64, r64 (REX.W + 01 /r)
+   575→pub fn encode_add_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   576→    let mut code = Vec::with_capacity(3);
+   577→    emit_rexw_reg_reg(&mut code, 0x01, src, dst);
+   578→    code
+   579→}
+   580→
+   581→/// Encode SUB r64, r64 (REX.W + 29 /r)
+   582→pub fn encode_sub_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   583→    let mut code = Vec::with_capacity(3);
+   584→    emit_rexw_reg_reg(&mut code, 0x29, src, dst);
+   585→    code
+   586→}
+   587→
+   588→/// Encode IMUL r64, r64 (REX.W + 0F AF /r)
+   589→pub fn encode_imul_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   590→    let mut code = Vec::with_capacity(4);
+   591→    let r = dst.needs_rex();
+   592→    let b = src.needs_rex();
+   593→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   594→        code.push(rex);
+   595→    } else {
+   596→        code.push(0x48);
+   597→    }
+   598→    code.push(0x0F);
+   599→    code.push(0xAF);
+   600→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   601→    code
+   602→}
+   603→
+   604→/// Encode IDIV r64 (REX.W + F7 /7)
+   605→pub fn encode_idiv_reg(src: Gpr) -> Vec<u8> {
+   606→    let mut code = Vec::with_capacity(3);
+   607→    emit_rexw_opext_reg(&mut code, 0xF7, 7, src);
+   608→    code
+   609→}
+   610→
+   611→/// Encode CMP r64, r64 (REX.W + 39 /r)
+   612→pub fn encode_cmp_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   613→    let mut code = Vec::with_capacity(3);
+   614→    emit_rexw_reg_reg(&mut code, 0x39, src, dst);
+   615→    code
+   616→}
+   617→
+   618→/// Encode CMP r64, imm32 (REX.W + 81 /7 + imm)
+   619→pub fn encode_cmp_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   620→    let mut code = Vec::with_capacity(7);
+   621→    let b = dst.needs_rex();
+   622→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   623→        code.push(rex);
+   624→    } else {
+   625→        code.push(0x48);
+   626→    }
+   627→    code.push(0x81);
+   628→    code.push(modrm(3, 7, dst.encoding() & 7));
+   629→    code.extend_from_slice(&imm.to_le_bytes());
+   630→    code
+   631→}
+   632→
+   633→/// Encode TEST r64, r64 (REX.W + 85 /r)
+   634→pub fn encode_test_reg_reg(a: Gpr, b: Gpr) -> Vec<u8> {
+   635→    let mut code = Vec::with_capacity(3);
+   636→    emit_rexw_reg_reg(&mut code, 0x85, a, b);
+   637→    code
+   638→}
+   639→
+   640→/// Encode AND r64, r64 (REX.W + 21 /r)
+   641→pub fn encode_and_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   642→    let mut code = Vec::with_capacity(3);
+   643→    emit_rexw_reg_reg(&mut code, 0x21, src, dst);
+   644→    code
+   645→}
+   646→
+   647→/// Encode OR r64, r64 (REX.W + 09 /r)
+   648→pub fn encode_or_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   649→    let mut code = Vec::with_capacity(3);
+   650→    emit_rexw_reg_reg(&mut code, 0x09, src, dst);
+   651→    code
+   652→}
+   653→
+   654→/// Encode XOR r64, r64 (REX.W + 31 /r)
+   655→pub fn encode_xor_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+   656→    let mut code = Vec::with_capacity(3);
+   657→    emit_rexw_reg_reg(&mut code, 0x31, src, dst);
+   658→    code
+   659→}
+   660→
+   661→/// Encode SHL r64, CL (REX.W + D3 /4)
+   662→pub fn encode_shl_reg_cl(dst: Gpr) -> Vec<u8> {
+   663→    let mut code = Vec::with_capacity(3);
+   664→    emit_rexw_opext_reg(&mut code, 0xD3, 4, dst);
+   665→    code
+   666→}
+   667→
+   668→/// Encode SHR r64, CL (REX.W + D3 /5)
+   669→pub fn encode_shr_reg_cl(dst: Gpr) -> Vec<u8> {
+   670→    let mut code = Vec::with_capacity(3);
+   671→    emit_rexw_opext_reg(&mut code, 0xD3, 5, dst);
+   672→    code
+   673→}
+   674→
+   675→/// Encode SAR r64, CL (REX.W + D3 /7)
+   676→pub fn encode_sar_reg_cl(dst: Gpr) -> Vec<u8> {
+   677→    let mut code = Vec::with_capacity(3);
+   678→    emit_rexw_opext_reg(&mut code, 0xD3, 7, dst);
+   679→    code
+   680→}
+   681→
+   682→/// Encode JMP rel32 (E9 + 4-byte offset)
+   683→pub fn encode_jmp_rel32(offset: i32) -> Vec<u8> {
+   684→    let mut code = Vec::with_capacity(5);
+   685→    code.push(0xE9);
+   686→    code.extend_from_slice(&offset.to_le_bytes());
+   687→    code
+   688→}
+   689→
+   690→/// Encode CALL rel32 (E8 + 4-byte offset)
+   691→pub fn encode_call_rel32(offset: i32) -> Vec<u8> {
+   692→    let mut code = Vec::with_capacity(5);
+   693→    code.push(0xE8);
+   694→    code.extend_from_slice(&offset.to_le_bytes());
+   695→    code
+   696→}
+   697→
+   698→/// Encode RET (C3)
+   699→pub fn encode_ret() -> Vec<u8> {
+   700→    vec![0xC3]
+   701→}
+   702→
+   703→/// Encode NOP (90)
+   704→pub fn encode_nop() -> Vec<u8> {
+   705→    vec![0x90]
+   706→}
+   707→
+   708→/// Encode PUSH r64 (50+rd or REX.B+50+rd for R8–R15)
+   709→pub fn encode_push(src: Gpr) -> Vec<u8> {
+   710→    let mut code = Vec::with_capacity(2);
+   711→    if src.needs_rex() {
+   712→        code.push(0x41); // REX.B
+   713→    }
+   714→    code.push(0x50 + (src.encoding() & 7));
+   715→    code
+   716→}
+   717→
+   718→/// Encode POP r64 (58+rd or REX.B+58+rd for R8–R15)
+   719→pub fn encode_pop(dst: Gpr) -> Vec<u8> {
+   720→    let mut code = Vec::with_capacity(2);
+   721→    if dst.needs_rex() {
+   722→        code.push(0x41); // REX.B
+   723→    }
+   724→    code.push(0x58 + (dst.encoding() & 7));
+   725→    code
+   726→}
+   727→
+   728→/// Encode SETcc r/m8 (0F 9x /r)
+   729→pub fn encode_setcc(cc: Cc, dst: Gpr) -> Vec<u8> {
+   730→    let mut code = Vec::with_capacity(3);
+   731→    // SETcc always uses a byte register. For registers < 8, no REX needed
+   732→    // (unless we need to force REX to access SPL, BPL, SIL, DIL for RSP/RBP/RSI/RDI).
+   733→    // For R8B-R15B, we need REX.B.
+   734→    if dst.needs_rex() {
+   735→        code.push(0x41); // REX.B for R8B-R15B
+   736→    } else if matches!(dst, Gpr::Rsp | Gpr::Rbp | Gpr::Rsi | Gpr::Rdi) {
+   737→        // Accessing SPL, BPL, SIL, DIL requires a REX prefix
+   738→        code.push(0x40); // Bare REX
+   739→    }
+   740→    code.push(0x0F);
+   741→    code.push(0x90 + cc.encoding());
+   742→    code.push(modrm(3, 0, dst.encoding() & 7));
+   743→    code
+   744→}
+   745→
+   746→/// Encode Jcc rel32 (0F 8x + 4-byte offset)
+   747→pub fn encode_jcc_rel32(cc: Cc, offset: i32) -> Vec<u8> {
+   748→    let mut code = Vec::with_capacity(6);
+   749→    code.push(0x0F);
+   750→    code.push(0x80 + cc.encoding());
+   751→    code.extend_from_slice(&offset.to_le_bytes());
+   752→    code
+   753→}
+   754→
+   755→/// Encode CMOVcc r64, r64 (REX.W + 0F 4x /r)
+   756→pub fn encode_cmovcc_reg_reg(cc: Cc, dst: Gpr, src: Gpr) -> Vec<u8> {
+   757→    let mut code = Vec::with_capacity(4);
+   758→    let r = dst.needs_rex();
+   759→    let b = src.needs_rex();
+   760→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   761→        code.push(rex);
+   762→    } else {
+   763→        code.push(0x48);
+   764→    }
+   765→    code.push(0x0F);
+   766→    code.push(0x40 + cc.encoding());
+   767→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   768→    code
+   769→}
+   770→
+   771→/// Encode LEA r64, [r64+offset] (REX.W + 8D /r)
+   772→pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+   773→    let mut code = Vec::with_capacity(8);
+   774→    let r = dst.needs_rex();
+   775→    let b = base.needs_rex();
+   776→
+   777→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   778→        code.push(rex);
+   779→    } else {
+   780→        code.push(0x48);
+   781→    }
+   782→    code.push(0x8D);
+   783→
+   784→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+   785→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+   786→
+   787→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+   788→        code.push(modrm(0, dst.encoding() & 7, base.encoding() & 7));
+   789→    } else if needs_sib {
+   790→        if offset == 0 {
+   791→            code.push(modrm(0, dst.encoding() & 7, 4));
+   792→            code.push(sib(0, 4, base.encoding() & 7));
+   793→        } else if (-128..=127).contains(&offset) {
+   794→            code.push(modrm(1, dst.encoding() & 7, 4));
+   795→            code.push(sib(0, 4, base.encoding() & 7));
+   796→            code.push(offset as u8);
+   797→        } else {
+   798→            code.push(modrm(2, dst.encoding() & 7, 4));
+   799→            code.push(sib(0, 4, base.encoding() & 7));
+   800→            code.extend_from_slice(&offset.to_le_bytes());
+   801→        }
+   802→    } else if (-128..=127).contains(&offset) {
+   803→        code.push(modrm(1, dst.encoding() & 7, base.encoding() & 7));
+   804→        code.push(offset as u8);
+   805→    } else {
+   806→        code.push(modrm(2, dst.encoding() & 7, base.encoding() & 7));
+   807→        code.extend_from_slice(&offset.to_le_bytes());
+   808→    }
+   809→
+   810→    code
+   811→}
+   812→
+   813→/// Encode MOVZX r64, r8 (REX.W + 0F B6 /r) — zero-extend byte to 64 bits
+   814→pub fn encode_movzx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
+   815→    let mut code = Vec::with_capacity(4);
+   816→    let r = dst.needs_rex();
+   817→    let b = src.needs_rex();
+   818→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   819→        code.push(rex);
+   820→    } else {
+   821→        code.push(0x48);
+   822→    }
+   823→    code.push(0x0F);
+   824→    code.push(0xB6);
+   825→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   826→    code
+   827→}
+   828→
+   829→/// Encode MOVZX r64, r16 (REX.W + 0F B7 /r) — zero-extend word to 64 bits
+   830→pub fn encode_movzx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
+   831→    let mut code = Vec::with_capacity(4);
+   832→    let r = dst.needs_rex();
+   833→    let b = src.needs_rex();
+   834→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   835→        code.push(rex);
+   836→    } else {
+   837→        code.push(0x48);
+   838→    }
+   839→    code.push(0x0F);
+   840→    code.push(0xB7);
+   841→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   842→    code
+   843→}
+   844→
+   845→/// Encode MOVSX r64, r8 (REX.W + 0F BE /r) — sign-extend byte to 64 bits
+   846→pub fn encode_movsx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
+   847→    let mut code = Vec::with_capacity(4);
+   848→    let r = dst.needs_rex();
+   849→    let b = src.needs_rex();
+   850→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   851→        code.push(rex);
+   852→    } else {
+   853→        code.push(0x48);
+   854→    }
+   855→    code.push(0x0F);
+   856→    code.push(0xBE);
+   857→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   858→    code
+   859→}
+   860→
+   861→/// Encode MOVSX r64, r16 (REX.W + 0F BF /r) — sign-extend word to 64 bits
+   862→pub fn encode_movsx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
+   863→    let mut code = Vec::with_capacity(4);
+   864→    let r = dst.needs_rex();
+   865→    let b = src.needs_rex();
+   866→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   867→        code.push(rex);
+   868→    } else {
+   869→        code.push(0x48);
+   870→    }
+   871→    code.push(0x0F);
+   872→    code.push(0xBF);
+   873→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   874→    code
+   875→}
+   876→
+   877→/// Encode MOVSX r64, r32 (REX.W + 63 /r) — sign-extend dword to 64 bits
+   878→pub fn encode_movsxd(dst: Gpr, src: Gpr) -> Vec<u8> {
+   879→    let mut code = Vec::with_capacity(3);
+   880→    let r = dst.needs_rex();
+   881→    let b = src.needs_rex();
+   882→    if let Some(rex) = rex_prefix(true, r, false, b) {
+   883→        code.push(rex);
+   884→    } else {
+   885→        code.push(0x48);
+   886→    }
+   887→    code.push(0x63);
+   888→    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+   889→    code
+   890→}
+   891→
+   892→/// Encode XCHG rax, r64 (REX.W + 90+rd)
+   893→pub fn encode_xchg_rax_reg(src: Gpr) -> Vec<u8> {
+   894→    let mut code = Vec::with_capacity(2);
+   895→    let b = src.needs_rex();
+   896→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   897→        code.push(rex);
+   898→    } else {
+   899→        code.push(0x48);
+   900→    }
+   901→    code.push(0x90 + (src.encoding() & 7));
+   902→    code
+   903→}
+   904→
+   905→/// Encode SYSCALL (0F 05)
+   906→pub fn encode_syscall() -> Vec<u8> {
+   907→    vec![0x0F, 0x05]
+   908→}
+   909→
+   910→/// Encode INT3 (CC)
+   911→pub fn encode_int3() -> Vec<u8> {
+   912→    vec![0xCC]
+   913→}
+   914→
+   915→/// Encode NEG r64 (REX.W + F7 /3)
+   916→pub fn encode_neg_reg(dst: Gpr) -> Vec<u8> {
+   917→    let mut code = Vec::with_capacity(3);
+   918→    emit_rexw_opext_reg(&mut code, 0xF7, 3, dst);
+   919→    code
+   920→}
+   921→
+   922→/// Encode NOT r64 (REX.W + F7 /2)
+   923→pub fn encode_not_reg(dst: Gpr) -> Vec<u8> {
+   924→    let mut code = Vec::with_capacity(3);
+   925→    emit_rexw_opext_reg(&mut code, 0xF7, 2, dst);
+   926→    code
+   927→}
+   928→
+   929→/// Encode MUL r64 (REX.W + F7 /4) — unsigned multiply, result in RDX:RAX
+   930→pub fn encode_mul_reg(src: Gpr) -> Vec<u8> {
+   931→    let mut code = Vec::with_capacity(3);
+   932→    emit_rexw_opext_reg(&mut code, 0xF7, 4, src);
+   933→    code
+   934→}
+   935→
+   936→/// Encode DIV r64 (REX.W + F7 /6) — unsigned divide
+   937→pub fn encode_div_reg(src: Gpr) -> Vec<u8> {
+   938→    let mut code = Vec::with_capacity(3);
+   939→    emit_rexw_opext_reg(&mut code, 0xF7, 6, src);
+   940→    code
+   941→}
+   942→
+   943→/// Encode CQO (REX.W + 99) — sign-extend RAX into RDX:RAX
+   944→pub fn encode_cqo() -> Vec<u8> {
+   945→    vec![0x48, 0x99]
+   946→}
+   947→
+   948→/// Encode SUB r64, imm32 (REX.W + 81 /5 + imm)
+   949→pub fn encode_sub_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   950→    let mut code = Vec::with_capacity(7);
+   951→    let b = dst.needs_rex();
+   952→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   953→        code.push(rex);
+   954→    } else {
+   955→        code.push(0x48);
+   956→    }
+   957→    code.push(0x81);
+   958→    code.push(modrm(3, 5, dst.encoding() & 7));
+   959→    code.extend_from_slice(&imm.to_le_bytes());
+   960→    code
+   961→}
+   962→
+   963→/// Encode ADD r64, imm32 (REX.W + 81 /0 + imm)
+   964→pub fn encode_add_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   965→    let mut code = Vec::with_capacity(7);
+   966→    let b = dst.needs_rex();
+   967→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   968→        code.push(rex);
+   969→    } else {
+   970→        code.push(0x48);
+   971→    }
+   972→    code.push(0x81);
+   973→    code.push(modrm(3, 0, dst.encoding() & 7));
+   974→    code.extend_from_slice(&imm.to_le_bytes());
+   975→    code
+   976→}
+   977→
+   978→/// Encode AND r64, imm32 (REX.W + 81 /4 + imm32)
+   979→pub fn encode_and_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   980→    let mut code = Vec::with_capacity(7);
+   981→    let b = dst.needs_rex();
+   982→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   983→        code.push(rex);
+   984→    } else {
+   985→        code.push(0x48);
+   986→    }
+   987→    code.push(0x81);
+   988→    code.push(modrm(3, 4, dst.encoding() & 7)); // /4 is the AND extension
+   989→    code.extend_from_slice(&imm.to_le_bytes());
+   990→    code
+   991→}
+   992→
+   993→/// Encode OR r64, imm32 (REX.W + 81 /1 + imm32)
+   994→pub fn encode_or_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+   995→    let mut code = Vec::with_capacity(7);
+   996→    let b = dst.needs_rex();
+   997→    if let Some(rex) = rex_prefix(true, false, false, b) {
+   998→        code.push(rex);
+   999→    } else {
+  1000→        code.push(0x48);
+  1001→    }
+  1002→    code.push(0x81);
+  1003→    code.push(modrm(3, 1, dst.encoding() & 7)); // /1 is the OR extension
+  1004→    code.extend_from_slice(&imm.to_le_bytes());
+  1005→    code
+  1006→}
+  1007→
+  1008→/// Encode XOR r64, imm32 (REX.W + 81 /6 + imm32)
+  1009→pub fn encode_xor_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+  1010→    let mut code = Vec::with_capacity(7);
+  1011→    let b = dst.needs_rex();
+  1012→    if let Some(rex) = rex_prefix(true, false, false, b) {
+  1013→        code.push(rex);
+  1014→    } else {
+  1015→        code.push(0x48);
+  1016→    }
+  1017→    code.push(0x81);
+  1018→    code.push(modrm(3, 6, dst.encoding() & 7)); // /6 is the XOR extension
+  1019→    code.extend_from_slice(&imm.to_le_bytes());
+  1020→    code
+  1021→}
+  1022→
+  1023→/// Encode ROR r64, CL (REX.W + D3 /1)
+  1024→pub fn encode_ror_reg_cl(dst: Gpr) -> Vec<u8> {
+  1025→    let mut code = Vec::with_capacity(3);
+  1026→    emit_rexw_opext_reg(&mut code, 0xD3, 1, dst);
+  1027→    code
+  1028→}
+  1029→
+  1030→/// Encode ROL r64, CL (REX.W + D3 /0)
+  1031→pub fn encode_rol_reg_cl(dst: Gpr) -> Vec<u8> {
+  1032→    let mut code = Vec::with_capacity(3);
+  1033→    emit_rexw_opext_reg(&mut code, 0xD3, 0, dst);
+  1034→    code
+  1035→}
+  1036→
+  1037→// ===========================================================================
+  1038→// Memory Operand Helper
+  1039→// ===========================================================================
+  1040→
+  1041→/// Encode a memory operand (ModR/M + optional SIB + displacement) for [base + offset].
+  1042→/// Appends the ModR/M byte, SIB byte (if needed), and displacement to `code`.
+  1043→fn encode_mem_operand(code: &mut Vec<u8>, reg: u8, base: Gpr, offset: i32) {
+  1044→    let needs_sib = base == Gpr::Rsp || base == Gpr::R12;
+  1045→    let needs_disp8_for_zero = base == Gpr::Rbp || base == Gpr::R13;
+  1046→
+  1047→    if offset == 0 && !needs_disp8_for_zero && !needs_sib {
+  1048→        // mod=00, no displacement
+  1049→        code.push(modrm(0, reg, base.encoding() & 7));
+  1050→    } else if needs_sib {
+  1051→        // SIB byte required: base = RSP(4), index = RSP(4) means "no index"
+  1052→        if offset == 0 {
+  1053→            code.push(modrm(0, reg, 4));
+  1054→            code.push(sib(0, 4, base.encoding() & 7));
+  1055→        } else if (-128..=127).contains(&offset) {
+  1056→            code.push(modrm(1, reg, 4));
+  1057→            code.push(sib(0, 4, base.encoding() & 7));
+  1058→            code.push(offset as u8);
+  1059→        } else {
+  1060→            code.push(modrm(2, reg, 4));
+  1061→            code.push(sib(0, 4, base.encoding() & 7));
+  1062→            code.extend_from_slice(&offset.to_le_bytes());
+  1063→        }
+  1064→    } else if (-128..=127).contains(&offset) {
+  1065→        // mod=01, disp8
+  1066→        code.push(modrm(1, reg, base.encoding() & 7));
+  1067→        code.push(offset as u8);
+  1068→    } else {
+  1069→        // mod=10, disp32
+  1070→        code.push(modrm(2, reg, base.encoding() & 7));
+  1071→        code.extend_from_slice(&offset.to_le_bytes());
+  1072→    }
+  1073→}
+  1074→
+  1075→/// Encode MOVZX r64, byte [r64 + offset] (REX.W + 0F B6 /r with memory operand)
+  1076→pub fn encode_movzx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+  1077→    let mut code = Vec::new();
+  1078→    let r = dst.needs_rex();
+  1079→    let b = base.needs_rex();
+  1080→    // Always need REX.W for 64-bit dest
+  1081→    if let Some(rex) = rex_prefix(true, r, false, b) {
+  1082→        code.push(rex);
+  1083→    } else {
+  1084→        code.push(0x48);
+  1085→    }
+  1086→    code.push(0x0F);
+  1087→    code.push(0xB6);
+  1088→    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+  1089→    code
+  1090→}
+  1091→
+  1092→/// Encode MOV byte [r64 + offset], r8 (low byte of GPR) (88 /r with memory operand, no REX.W)
+  1093→pub fn encode_mov_mem8_reg8(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
+  1094→    let mut code = Vec::new();
+  1095→    let r = src.needs_rex();
+  1096→    let b = base.needs_rex();
+  1097→    // We need REX prefix if r or b is extended register, but NOT REX.W
+  1098→    if r || b {
+  1099→        if let Some(rex) = rex_prefix(false, r, false, b) {
+  1100→            code.push(rex);
+  1101→        }
+  1102→    }
+  1103→    code.push(0x88);
+  1104→    encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
+  1105→    code
+  1106→}
+  1107→
+  1108→/// Encode MOV dword [r64 + offset], r32 (89 /r with no REX.W, 32-bit store that zero-extends)
+  1109→pub fn encode_mov_mem32_reg32(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
+  1110→    let mut code = Vec::new();
+  1111→    let r = src.needs_rex();
+  1112→    let b = base.needs_rex();
+  1113→    // No REX.W for 32-bit operand size
+  1114→    if r || b {
+  1115→        if let Some(rex) = rex_prefix(false, r, false, b) {
+  1116→            code.push(rex);
+  1117→        }
+  1118→    }
+  1119→    code.push(0x89);
+  1120→    encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
+  1121→    code
+  1122→}
+  1123→
+  1124→/// Encode MOV r32, dword [r64 + offset] (8B /r with no REX.W, 32-bit load that zero-extends to 64)
+  1125→pub fn encode_mov_reg32_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+  1126→    let mut code = Vec::new();
+  1127→    let r = dst.needs_rex();
+  1128→    let b = base.needs_rex();
+  1129→    // No REX.W for 32-bit operand size
+  1130→    if r || b {
+  1131→        if let Some(rex) = rex_prefix(false, r, false, b) {
+  1132→            code.push(rex);
+  1133→        }
+  1134→    }
+  1135→    code.push(0x8B);
+  1136→    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+  1137→    code
+  1138→}
+  1139→
+  1140→/// Encode MOVSX r64, byte [r64 + offset] (REX.W + 0F BE /r with memory operand)
+  1141→pub fn encode_movsx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+  1142→    let mut code = Vec::new();
+  1143→    let r = dst.needs_rex();
+  1144→    let b = base.needs_rex();
+  1145→    if let Some(rex) = rex_prefix(true, r, false, b) {
+  1146→        code.push(rex);
+  1147→    } else {
+  1148→        code.push(0x48);
+  1149→    }
+  1150→    code.push(0x0F);
+  1151→    code.push(0xBE);
+  1152→    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+  1153→    code
+  1154→}
+  1155→
+  1156→/// Encode MOVSX r64, word [r64 + offset] (REX.W + 0F BF /r with memory operand)
+  1157→pub fn encode_movsx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+  1158→    let mut code = Vec::new();
+  1159→    let r = dst.needs_rex();
+  1160→    let b = base.needs_rex();
+  1161→    if let Some(rex) = rex_prefix(true, r, false, b) {
+  1162→        code.push(rex);
+  1163→    } else {
+  1164→        code.push(0x48);
+  1165→    }
+  1166→    code.push(0x0F);
+  1167→    code.push(0xBF);
+  1168→    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+  1169→    code
+  1170→}
+  1171→
+  1172→/// Encode MOV word [r64 + offset], r16 (66 89 /r with memory operand)
+  1173→pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
+  1174→    let mut code = Vec::new();
+  1175→    let r = src.needs_rex();
+  1176→    let b = base.needs_rex();
+  1177→    // 16-bit operand size prefix
+  1178→    code.push(0x66);
+  1179→    if r || b {
+  1180→        if let Some(rex) = rex_prefix(false, r, false, b) {
+  1181→            code.push(rex);
+  1182→        }
+  1183→    }
+  1184→    code.push(0x89);
+  1185→    encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
+  1186→    code
+  1187→}
+  1188→
+  1189→/// Encode MOVZX r64, word [r64 + offset] (REX.W + 0F B7 /r with memory operand)
+  1190→pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
+  1191→    let mut code = Vec::new();
+  1192→    let r = dst.needs_rex();
+  1193→    let b = base.needs_rex();
+  1194→    if let Some(rex) = rex_prefix(true, r, false, b) {
+  1195→        code.push(rex);
+  1196→    } else {
+  1197→        code.push(0x48);
+  1198→    }
+  1199→    code.push(0x0F);
+  1200→    code.push(0xB7);
+  1201→    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+  1202→    code
+  1203→}
+  1204→
+  1205→// ===========================================================================
+  1206→// x86_64 Mnemonic Disassembler
+  1207→// ===========================================================================
+  1208→
+  1209→/// Decode x86_64 bytes into mnemonic strings with (offset, mnemonic) pairs.
+  1210→///
+  1211→/// Handles the top 20+ most common x86_64 instructions including mov, add, sub,
+  1212→/// push, pop, call, ret, jmp, cmp, test, lea, xor, and, or, shl, shr, nop,
+  1213→/// mul, div, imul.
+  1214→fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
+  1215→    let mut lines = Vec::new();
+  1216→    let mut offset = 0usize;
+  1217→    let mut pc = addr;
+  1218→
+  1219→    while offset < bytes.len() {
+  1220→        let start = offset;
+  1221→        let start_pc = pc;
+  1222→        let mut pos = offset;
+  1223→
+  1224→        // Skip legacy prefixes
+  1225→        while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
+  1226→            pos += 1;
+  1227→        }
+  1228→
+  1229→        // REX prefix
+  1230→        let mut rex = 0u8;
+  1231→        let mut _rex_w = false;
+  1232→        let mut rex_r = false;
+  1233→        let mut rex_b = false;
+  1234→        if pos < bytes.len() && bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
+  1235→            rex = bytes[pos];
+  1236→            _rex_w = (rex & 0x08) != 0;
+  1237→            rex_r = (rex & 0x04) != 0;
+  1238→            rex_b = (rex & 0x01) != 0;
+  1239→            pos += 1;
+  1240→        }
+  1241→
+  1242→        if pos >= bytes.len() {
+  1243→            let end = pos.min(bytes.len());
+  1244→            let hex_bytes: Vec<String> = bytes[start..end]
+  1245→                .iter()
+  1246→                .map(|b| format!("{:02x}", b))
+  1247→                .collect();
+  1248→            lines.push(format!("{:#010x}:  {}", start_pc, hex_bytes.join(" ")));
+  1249→            offset = end;
+  1250→            pc = start_pc + (end - start) as u64;
+  1251→            continue;
+  1252→        }
+  1253→
+  1254→        let opcode = bytes[pos];
+  1255→        pos += 1;
+  1256→
+  1257→        let mnemonic = match opcode {
+  1258→            // NOP
+  1259→            0x90 => "nop".to_string(),
+  1260→
+  1261→            // RET
+  1262→            0xC3 => "ret".to_string(),
+  1263→
+  1264→            // INT3
+  1265→            0xCC => "int3".to_string(),
+  1266→
+  1267→            // PUSH r64
+  1268→            0x50..=0x57 => {
+  1269→                let reg_idx = (opcode - 0x50) | (if rex_b { 8 } else { 0 });
+  1270→                format!("push {}", gpr_name_64(reg_idx))
+  1271→            }
+  1272→
+  1273→            // POP r64
+  1274→            0x58..=0x5F => {
+  1275→                let reg_idx = (opcode - 0x58) | (if rex_b { 8 } else { 0 });
+  1276→                format!("pop {}", gpr_name_64(reg_idx))
+  1277→            }
+  1278→
+  1279→            // MOV r64, imm64 (B8+rd)
+  1280→            0xB8..=0xBF => {
+  1281→                let reg_idx = (opcode - 0xB8) | (if rex_b { 8 } else { 0 });
+  1282→                if pos + 8 <= bytes.len() {
+  1283→                    let imm = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
+  1284→                    pos += 8;
+  1285→                    format!("mov {}, {:#x}", gpr_name_64(reg_idx), imm)
+  1286→                } else {
+  1287→                    pos = bytes.len();
+  1288→                    format!("mov {}, ???", gpr_name_64(reg_idx))
+  1289→                }
+  1290→            }
+  1291→
+  1292→            // JMP rel32
+  1293→            0xE9 => {
+  1294→                if pos + 4 <= bytes.len() {
+  1295→                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1296→                    pos += 4;
+  1297→                    format!(
+  1298→                        "jmp {:#x}",
+  1299→                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+  1300→                    )
+  1301→                } else {
+  1302→                    pos = bytes.len();
+  1303→                    "jmp ???".to_string()
+  1304→                }
+  1305→            }
+  1306→
+  1307→            // CALL rel32
+  1308→            0xE8 => {
+  1309→                if pos + 4 <= bytes.len() {
+  1310→                    let rel = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1311→                    pos += 4;
+  1312→                    format!(
+  1313→                        "call {:#x}",
+  1314→                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+  1315→                    )
+  1316→                } else {
+  1317→                    pos = bytes.len();
+  1318→                    "call ???".to_string()
+  1319→                }
+  1320→            }
+  1321→
+  1322→            // Two-byte opcode (0F xx)
+  1323→            0x0F => {
+  1324→                if pos >= bytes.len() {
+  1325→                    "0f ???".to_string()
+  1326→                } else {
+  1327→                    let op2 = bytes[pos];
+  1328→                    pos += 1;
+  1329→                    match op2 {
+  1330→                        // SYSCALL
+  1331→                        0x05 => "syscall".to_string(),
+  1332→                        // IMUL r64, r64
+  1333→                        0xAF => {
+  1334→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1335→                            pos = new_pos;
+  1336→                            format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1337→                        }
+  1338→                        // Jcc rel32
+  1339→                        0x80..=0x8F => {
+  1340→                            let cc_name = match op2 & 0xF {
+  1341→                                0 => "jo",
+  1342→                                1 => "jno",
+  1343→                                2 => "jb",
+  1344→                                3 => "jae",
+  1345→                                4 => "je",
+  1346→                                5 => "jne",
+  1347→                                6 => "jbe",
+  1348→                                7 => "ja",
+  1349→                                8 => "js",
+  1350→                                9 => "jns",
+  1351→                                0xA => "jp",
+  1352→                                0xB => "jnp",
+  1353→                                0xC => "jl",
+  1354→                                0xD => "jge",
+  1355→                                0xE => "jle",
+  1356→                                0xF => "jg",
+  1357→                                _ => "j??",
+  1358→                            };
+  1359→                            if pos + 4 <= bytes.len() {
+  1360→                                let rel = i32::from_le_bytes(
+  1361→                                    bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
+  1362→                                );
+  1363→                                pos += 4;
+  1364→                                format!(
+  1365→                                    "{} {:#x}",
+  1366→                                    cc_name,
+  1367→                                    (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+  1368→                                )
+  1369→                            } else {
+  1370→                                pos = bytes.len();
+  1371→                                format!("{} ???", cc_name)
+  1372→                            }
+  1373→                        }
+  1374→                        // MOVZX r64, r8
+  1375→                        0xB6 => {
+  1376→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1377→                            pos = new_pos;
+  1378→                            format!("movzx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+  1379→                        }
+  1380→                        // MOVZX r64, r16
+  1381→                        0xB7 => {
+  1382→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1383→                            pos = new_pos;
+  1384→                            format!("movzx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+  1385→                        }
+  1386→                        // MOVSX r64, r8
+  1387→                        0xBE => {
+  1388→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1389→                            pos = new_pos;
+  1390→                            format!("movsx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+  1391→                        }
+  1392→                        // MOVSX r64, r16
+  1393→                        0xBF => {
+  1394→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1395→                            pos = new_pos;
+  1396→                            format!("movsx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+  1397→                        }
+  1398→                        // SETcc r/m8
+  1399→                        0x90..=0x9F => {
+  1400→                            let (_, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
+  1401→                            pos = new_pos;
+  1402→                            let cc_name = match op2 & 0xF {
+  1403→                                0 => "seto",
+  1404→                                1 => "setno",
+  1405→                                2 => "setb",
+  1406→                                3 => "setae",
+  1407→                                4 => "sete",
+  1408→                                5 => "setne",
+  1409→                                6 => "setbe",
+  1410→                                7 => "seta",
+  1411→                                8 => "sets",
+  1412→                                9 => "setns",
+  1413→                                0xA => "setp",
+  1414→                                0xB => "setnp",
+  1415→                                0xC => "setl",
+  1416→                                0xD => "setge",
+  1417→                                0xE => "setle",
+  1418→                                0xF => "setg",
+  1419→                                _ => "set??",
+  1420→                            };
+  1421→                            format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
+  1422→                        }
+  1423→                        // CMOVcc r64, r64
+  1424→                        0x40..=0x4F => {
+  1425→                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1426→                            pos = new_pos;
+  1427→                            let cc_name = match op2 & 0xF {
+  1428→                                0 => "cmovo",
+  1429→                                1 => "cmovno",
+  1430→                                2 => "cmovb",
+  1431→                                3 => "cmovae",
+  1432→                                4 => "cmove",
+  1433→                                5 => "cmovne",
+  1434→                                6 => "cmovbe",
+  1435→                                7 => "cmova",
+  1436→                                8 => "cmovs",
+  1437→                                9 => "cmovns",
+  1438→                                0xA => "cmovp",
+  1439→                                0xB => "cmovnp",
+  1440→                                0xC => "cmovl",
+  1441→                                0xD => "cmovge",
+  1442→                                0xE => "cmovle",
+  1443→                                0xF => "cmovg",
+  1444→                                _ => "cmov??",
+  1445→                            };
+  1446→                            format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
+  1447→                        }
+  1448→                        _ => format!("0f {:02x}", op2),
+  1449→                    }
+  1450→                }
+  1451→            }
+  1452→
+  1453→            // ALU reg-reg opcodes (with ModR/M byte)
+  1454→            0x01 => {
+  1455→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1456→                pos = np;
+  1457→                format!("add {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1458→            }
+  1459→            0x03 => {
+  1460→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1461→                pos = np;
+  1462→                format!("add {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1463→            }
+  1464→            0x09 => {
+  1465→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1466→                pos = np;
+  1467→                format!("or {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1468→            }
+  1469→            0x0B => {
+  1470→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1471→                pos = np;
+  1472→                format!("or {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1473→            }
+  1474→            0x21 => {
+  1475→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1476→                pos = np;
+  1477→                format!("and {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1478→            }
+  1479→            0x23 => {
+  1480→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1481→                pos = np;
+  1482→                format!("and {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1483→            }
+  1484→            0x29 => {
+  1485→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1486→                pos = np;
+  1487→                format!("sub {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1488→            }
+  1489→            0x2B => {
+  1490→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1491→                pos = np;
+  1492→                format!("sub {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1493→            }
+  1494→            0x31 => {
+  1495→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1496→                pos = np;
+  1497→                format!("xor {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1498→            }
+  1499→            0x33 => {
+  1500→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1501→                pos = np;
+  1502→                format!("xor {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1503→            }
+  1504→            0x39 => {
+  1505→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1506→                pos = np;
+  1507→                format!("cmp {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1508→            }
+  1509→            0x3B => {
+  1510→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1511→                pos = np;
+  1512→                format!("cmp {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1513→            }
+  1514→            0x85 => {
+  1515→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1516→                pos = np;
+  1517→                format!("test {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1518→            }
+  1519→            0x87 => {
+  1520→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1521→                pos = np;
+  1522→                format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1523→            }
+  1524→            0x89 => {
+  1525→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1526→                pos = np;
+  1527→                format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r))
+  1528→            }
+  1529→            0x8B => {
+  1530→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1531→                pos = np;
+  1532→                format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1533→            }
+  1534→            0x8D => {
+  1535→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1536→                pos = np;
+  1537→                format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm))
+  1538→            }
+  1539→            0x63 => {
+  1540→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1541→                pos = np;
+  1542→                format!("movsxd {}, {}", gpr_name_64(r), gpr_name_64(rm))
+  1543→            }
+  1544→
+  1545→            // F7 /x (NEG, NOT, MUL, DIV, IDIV)
+  1546→            0xF7 => {
+  1547→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1548→                pos = np;
+  1549→                match r {
+  1550→                    2 => format!("not {}", gpr_name_64(rm)),
+  1551→                    3 => format!("neg {}", gpr_name_64(rm)),
+  1552→                    4 => format!("mul {}", gpr_name_64(rm)),
+  1553→                    6 => format!("div {}", gpr_name_64(rm)),
+  1554→                    7 => format!("idiv {}", gpr_name_64(rm)),
+  1555→                    _ => format!("f7 /{}, {}", r, gpr_name_64(rm)),
+  1556→                }
+  1557→            }
+  1558→
+  1559→            // D3 /x (shift by CL)
+  1560→            0xD3 => {
+  1561→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1562→                pos = np;
+  1563→                match r {
+  1564→                    4 => format!("shl {}, cl", gpr_name_64(rm)),
+  1565→                    5 => format!("shr {}, cl", gpr_name_64(rm)),
+  1566→                    7 => format!("sar {}, cl", gpr_name_64(rm)),
+  1567→                    _ => format!("d3 /{}, {}", r, gpr_name_64(rm)),
+  1568→                }
+  1569→            }
+  1570→
+  1571→            // C7 /0 + imm32 (MOV r/m64, imm32)
+  1572→            0xC7 => {
+  1573→                let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1574→                pos = np;
+  1575→                if pos + 4 <= bytes.len() {
+  1576→                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1577→                    pos += 4;
+  1578→                    format!("mov {}, {}", gpr_name_64(rm), imm)
+  1579→                } else {
+  1580→                    pos = bytes.len();
+  1581→                    format!("mov {}, ???", gpr_name_64(rm))
+  1582→                }
+  1583→            }
+  1584→
+  1585→            // 81 /x + imm32 (ADD/SUB/etc r/m64, imm32)
+  1586→            0x81 => {
+  1587→                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+  1588→                pos = np;
+  1589→                if pos + 4 <= bytes.len() {
+  1590→                    let imm = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+  1591→                    pos += 4;
+  1592→                    let op_name = match r {
+  1593→                        0 => "add",
+  1594→                        1 => "or",
+  1595→                        2 => "adc",
+  1596→                        3 => "sbb",
+  1597→                        4 => "and",
+  1598→                        5 => "sub",
+  1599→                        6 => "xor",
+  1600→                        7 => "cmp",
+  1601→                        _ => "???",
+  1602→                    };
+  1603→                    format!("{} {}, {}", op_name, gpr_name_64(rm), imm)
+  1604→                } else {
+  1605→                    pos = bytes.len();
+  1606→                    format!("81 /{}, {}", r, gpr_name_64(rm))
+  1607→                }
+  1608→            }
+  1609→
+  1610→            // 99 (CQO)
+  1611→            0x99 => "cqo".to_string(),
+  1612→
+  1613→            // XCHG rax, r64
+  1614→            0x91..=0x97 => {
+  1615→                let reg_idx = (opcode - 0x90) | (if rex_b { 8 } else { 0 });
+  1616→                format!("xchg rax, {}", gpr_name_64(reg_idx))
+  1617→            }
+  1618→
+  1619→            _ => {
+  1620→                // Unknown opcode — just show hex
+  1621→                format!(".byte {:02x}", opcode)
+  1622→            }
+  1623→        };
+  1624→
+  1625→        let end = pos.min(bytes.len());
+  1626→        let hex_bytes: Vec<String> = bytes[start..end]
+  1627→            .iter()
+  1628→            .map(|b| format!("{:02x}", b))
+  1629→            .collect();
+  1630→        lines.push(format!(
+  1631→            "{:#010x}:  {:20} {}",
+  1632→            start_pc,
+  1633→            hex_bytes.join(" "),
+  1634→            mnemonic
+  1635→        ));
+  1636→
+  1637→        offset = end;
+  1638→        pc = start_pc + (end - start) as u64;
+  1639→    }
+  1640→
+  1641→    lines
+  1642→}
+  1643→
+  1644→/// Helper: get 64-bit GPR name from index (0-15).
+  1645→fn gpr_name_64(idx: u8) -> &'static str {
+  1646→    match idx & 0xF {
+  1647→        0 => "rax",
+  1648→        1 => "rcx",
+  1649→        2 => "rdx",
+  1650→        3 => "rbx",
+  1651→        4 => "rsp",
+  1652→        5 => "rbp",
+  1653→        6 => "rsi",
+  1654→        7 => "rdi",
+  1655→        8 => "r8",
+  1656→        9 => "r9",
+  1657→        10 => "r10",
+  1658→        11 => "r11",
+  1659→        12 => "r12",
+  1660→        13 => "r13",
+  1661→        14 => "r14",
+  1662→        15 => "r15",
+  1663→        _ => "r??",
+  1664→    }
+  1665→}
+  1666→
+  1667→/// Helper: get 8-bit GPR name from index (0-15).
+  1668→fn gpr_name_8(idx: u8, has_rex: bool) -> &'static str {
+  1669→    match idx & 0xF {
+  1670→        0 => {
+  1671→            if has_rex {
+  1672→                "r8b"
+  1673→            } else {
+  1674→                "al"
+  1675→            }
+  1676→        }
+  1677→        1 => {
+  1678→            if has_rex {
+  1679→                "r9b"
+  1680→            } else {
+  1681→                "cl"
+  1682→            }
+  1683→        }
+  1684→        2 => {
+  1685→            if has_rex {
+  1686→                "r10b"
+  1687→            } else {
+  1688→                "dl"
+  1689→            }
+  1690→        }
+  1691→        3 => {
+  1692→            if has_rex {
+  1693→                "r11b"
+  1694→            } else {
+  1695→                "bl"
+  1696→            }
+  1697→        }
+  1698→        4 => {
+  1699→            if has_rex {
+  1700→                "r12b"
+  1701→            } else {
+  1702→                "spl"
+  1703→            }
+  1704→        } // REX required for spl
+  1705→        5 => {
+  1706→            if has_rex {
+  1707→                "r13b"
+  1708→            } else {
+  1709→                "bpl"
+  1710→            }
+  1711→        }
+  1712→        6 => {
+  1713→            if has_rex {
+  1714→                "r14b"
+  1715→            } else {
+  1716→                "sil"
+  1717→            }
+  1718→        }
+  1719→        7 => {
+  1720→            if has_rex {
+  1721→                "r15b"
+  1722→            } else {
+  1723→                "dil"
+  1724→            }
+  1725→        }
+  1726→        8 => "r8b",
+  1727→        9 => "r9b",
+  1728→        10 => "r10b",
+  1729→        11 => "r11b",
+  1730→        12 => "r12b",
+  1731→        13 => "r13b",
+  1732→        14 => "r14b",
+  1733→        15 => "r15b",
+  1734→        _ => "??b",
+  1735→    }
+  1736→}
+  1737→
+  1738→/// Decode a ModR/M byte, returning (reg, rm, new_pos).
+  1739→/// Handles register-register (mod=3) only for simplicity.
+  1740→fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
+  1741→    if pos >= bytes.len() {
+  1742→        return (0, 0, pos);
+  1743→    }
+  1744→    let modrm = bytes[pos];
+  1745→    let new_pos = pos + 1;
+  1746→    let mod_bits = (modrm >> 6) & 3;
+  1747→    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+  1748→    let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
+  1749→
+  1750→    if mod_bits == 3 {
+  1751→        // Register-register
+  1752→        (reg, rm, new_pos)
+  1753→    } else {
+  1754→        // For memory operands, just return the rm as-is (simplified)
+  1755→        (reg, rm, new_pos)
+  1756→    }
+  1757→}
+  1758→
+  1759→// ===========================================================================
+  1760→// ELF64 Emission
+  1761→// ===========================================================================
+  1762→
+  1763→/// Build a minimal ELF64 binary for x86_64 from raw code bytes.
+  1764→///
+  1765→/// Produces a static executable with a single LOAD segment containing the
+  1766→/// `.text` section. Entry point is at `base_addr` + header offset.
+  1767→fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1768→    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+  1769→
+  1770→    let elf_header_size: u64 = 64;
+  1771→    let phdr_size: u64 = 56;
+  1772→    let phdr_end = elf_header_size + phdr_size;
+  1773→    // Page-align the text segment start for mmap compatibility (required by QEMU).
+  1774→    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+  1775→    let text_size = code.len() as u64;
+  1776→    let entry_point = base_addr + text_offset;
+  1777→
+  1778→    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+  1779→
+  1780→    // --- e_ident ---
+  1781→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1782→    elf.push(2); // ELFCLASS64
+  1783→    elf.push(1); // ELFDATA2LSB
+  1784→    elf.push(1); // EV_CURRENT
+  1785→    elf.push(3); // ELFOSABI_LINUX
+  1786→    elf.push(0); // padding
+  1787→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1788→
+  1789→    // --- ELF header fields ---
+  1790→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1791→    elf.extend_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
+  1792→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1793→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1794→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1795→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1796→    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+  1797→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1798→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1799→    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+  1800→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1801→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1802→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1803→
+  1804→    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+  1805→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1806→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1807→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1808→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1809→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1810→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1811→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1812→    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+  1813→
+  1814→    // --- Padding + Code section ---
+  1815→    // Pad to page-aligned text_offset
+  1816→    while (elf.len() as u64) < text_offset {
+  1817→        elf.push(0);
+  1818→    }
+  1819→    elf.extend_from_slice(code);
+  1820→
+  1821→    elf
+  1822→}
+  1823→
+  1824→// ===========================================================================
+  1825→// X86_64Backend
+  1826→// ===========================================================================
+  1827→
+  1828→/// x86_64 code generation backend (SystemV ABI).
+  1829→pub struct X86_64Backend {
+  1830→    target_info: X86_64TargetInfo,
+  1831→}
+  1832→
+  1833→impl X86_64Backend {
+  1834→    /// Create a new x86_64 backend.
+  1835→    pub fn new() -> Self {
+  1836→        Self {
+  1837→            target_info: X86_64TargetInfo,
+  1838→        }
+  1839→    }
+  1840→}
+  1841→
+  1842→impl Default for X86_64Backend {
+  1843→    fn default() -> Self {
+  1844→        Self::new()
+  1845→    }
+  1846→}
+  1847→
+  1848→/// Compute the stack frame size for an IR function on x86_64.
+  1849→///
+  1850→/// Sums `Alloc` instruction sizes, adds 8 bytes for the RBP save,
+  1851→/// and rounds up to 16-byte alignment.
+  1852→fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
+  1853→    let mut total: usize = 8; // Saved RBP
+  1854→    for block in &func.blocks {
+  1855→        for instr in &block.instructions {
+  1856→            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
+  1857→                let aligned = (*size as usize).div_ceil(16) * 16;
+  1858→                total += aligned;
+  1859→            }
+  1860→        }
+  1861→    }
+  1862→    // Round up to 16-byte alignment
+  1863→    (total + 15) & !15
+  1864→}
+  1865→
+  1866→// ── x86_64 ELF Relocation Types ─────────────────────────────────────────
+  1867→
+  1868→/// R_X86_64_64 — S + A, 64-bit absolute relocation.
+  1869→const R_X86_64_64: &str = "R_X86_64_64";
+  1870→/// R_X86_64_PLT32 — L + A - P, 32-bit PC-relative PLT relocation for calls/jumps.
+  1871→const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
+  1872→
+  1873→// ── ISel helpers ─────────────────────────────────────────────────────────
+  1874→
+  1875→/// Resolve an IRValue to a physical GPR.
+  1876→/// For registers, looks up in the reg_map. For immediates, loads the value
+  1877→/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
+  1878→fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+  1879→    match val {
+  1880→        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
+  1881→        IRValue::Immediate(imm) => {
+  1882→            let imm = *imm;
+  1883→            let code = if (-2147483648..=2147483647).contains(&imm) {
+  1884→                encode_mov_reg_imm32(scratch, imm as i32)
+  1885→            } else {
+  1886→                encode_mov_reg_imm64(scratch, imm as u64)
+  1887→            };
+  1888→            (scratch, code)
+  1889→        }
+  1890→        IRValue::Address(addr) => {
+  1891→            let code = encode_mov_reg_imm64(scratch, *addr);
+  1892→            (scratch, code)
+  1893→        }
+  1894→        IRValue::Label(_) => {
+  1895→            // Labels need relocation; emit a placeholder mov for now
+  1896→            let code = encode_mov_reg_imm64(scratch, 0);
+  1897→            (scratch, code)
+  1898→        }
+  1899→    }
+  1900→}
+  1901→
+  1902→/// Map an IR CmpKind to an x86_64 condition code.
+  1903→fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
+  1904→    match kind {
+  1905→        CmpKind::Eq => Cc::Equal,
+  1906→        CmpKind::Ne => Cc::NotEqual,
+  1907→        CmpKind::SLt => Cc::Less,
+  1908→        CmpKind::SLe => Cc::LessEqual,
+  1909→        CmpKind::SGt => Cc::Greater,
+  1910→        CmpKind::SGe => Cc::GreaterEqual,
+  1911→        CmpKind::ULt => Cc::Below,
+  1912→        CmpKind::ULe => Cc::BelowEqual,
+  1913→        CmpKind::UGt => Cc::Above,
+  1914→        CmpKind::UGe => Cc::AboveEqual,
+  1915→    }
+  1916→}
+  1917→
+  1918→/// Map an IR BinOpKind comparison to an x86_64 condition code.
+  1919→fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
+  1920→    match op {
+  1921→        BinOpKind::Eq => Cc::Equal,
+  1922→        BinOpKind::Ne => Cc::NotEqual,
+  1923→        BinOpKind::SLt => Cc::Less,
+  1924→        BinOpKind::SLe => Cc::LessEqual,
+  1925→        BinOpKind::SGt => Cc::Greater,
+  1926→        BinOpKind::SGe => Cc::GreaterEqual,
+  1927→        BinOpKind::ULt => Cc::Below,
+  1928→        BinOpKind::ULe => Cc::BelowEqual,
+  1929→        BinOpKind::UGt => Cc::Above,
+  1930→        BinOpKind::UGe => Cc::AboveEqual,
+  1931→        _ => Cc::Equal, // fallback, shouldn't be reached
+  1932→    }
+  1933→}
+  1934→
+  1935→/// Emit a CMP + SETcc + zero-extend sequence for a comparison that produces
+  1936→/// a boolean (0 or 1) in the destination register.
+  1937→fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+  1938→    let mut code = Vec::new();
+  1939→    code.extend(encode_cmp_reg_reg(lhs, rhs));
+  1940→    code.extend(encode_setcc(cc, dst));
+  1941→    // Zero-extend the byte result to 64 bits to clear upper bits
+  1942→    code.extend(encode_movzx_reg8(dst, dst));
+  1943→    code
+  1944→}
+  1945→
+  1946→impl Backend for X86_64Backend {
+  1947→    fn target_info(&self) -> &dyn TargetInfo {
+  1948→        &self.target_info
+  1949→    }
+  1950→
+  1951→
+  1952→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  1953→        stack_slot_isel::allocate_registers(func)
+  1954→    }
+  1955→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+  1956→        let mut bytes = Vec::new();
+  1957→        for block in &func.blocks {
+  1958→            for instr in &block.instructions {
+  1959→                bytes.extend_from_slice(&instr.encoded);
+  1960→            }
+  1961→        }
+  1962→        Ok(bytes)
+  1963→    }
+  1964→
+  1965→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+  1966→        // Build the _start stub: call main; mov rdi, rax; mov rax, 60; syscall
+  1967→        // E8 <rel32 to main>          ; call main       (5 bytes)
+  1968→        // 48 89 C7                    ; mov rdi, rax    (3 bytes)
+  1969→        // 48 C7 C0 3C 00 00 00       ; mov rax, 60     (7 bytes)
+  1970→        // 0F 05                       ; syscall          (2 bytes)
+  1971→        // Total = 5 + 3 + 7 + 2 = 17 bytes
+  1972→        let start_stub_size: usize = 17;
+  1973→
+  1974→        // ── Phase 1: Compute layout offsets ──────────────────────────────
+  1975→        // Layout: [_start stub] [user functions] [runtime functions] [hex_table]
+  1976→        let mut func_offsets: HashMap<String, usize> = HashMap::new();
+  1977→        let mut current_offset: usize = start_stub_size;
+  1978→
+  1979→        // User functions
+  1980→        for func in &program.functions {
+  1981→            func_offsets.insert(func.name.clone(), current_offset);
+  1982→            let func_size: usize = func.blocks.iter()
+  1983→                .flat_map(|b| b.instructions.iter())
+  1984→                .map(|i| i.encoded.len())
+  1985→                .sum();
+  1986→            current_offset += func_size;
+  1987→        }
+  1988→
+  1989→        // Runtime I/O functions — registered under VUMA-friendly names
+  1990→        let write_stdout_offset = current_offset;
+  1991→        func_offsets.insert("print_buf".to_string(), write_stdout_offset);
+  1992→        func_offsets.insert("write_stdout".to_string(), write_stdout_offset);
+  1993→        func_offsets.insert("__vuma_write_stdout".to_string(), write_stdout_offset);
+  1994→        current_offset += RUNTIME_WRITE_STDOUT_SIZE;
+  1995→
+  1996→        let print_hex_offset = current_offset;
+  1997→        func_offsets.insert("print_hex".to_string(), print_hex_offset);
+  1998→        func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
+  1999→        current_offset += RUNTIME_PRINT_HEX_SIZE;
+  2000→
+
+[showing lines 1-2000 of 3020; use offset=2001 with limit to continue reading]
