@@ -76,3 +76,36 @@ Stage Summary:
 - ARM64 simple tests: WORKING (return 42, for-loop sum 10)
 - RISC-V 64: Not yet tested
 - The incorrect ARM64 SHA256d result (120 vs 79) likely indicates a remaining encoding bug in one of the SHA256 helper functions
+
+---
+Task ID: 4
+Agent: main
+Task: Comprehensive ARM64 backend fixes: Store/Call/Cmp/prologue/spill-reload
+
+Work Log:
+- Fixed Store handler: resolve address BEFORE value to prevent X16 overwrite during spill/reload address computation
+- Fixed Call handler: resolve all argument sources FIRST, then move to arg registers using two-pass cycle-breaking approach with X16 as temp
+- Fixed Call handler: use dedicated scratch registers (X11-X14) for immediate arguments instead of reusing X9
+- Implemented proper CSET for comparisons: added CSINC instruction variant to arm64.rs
+- Fixed CSEL encoding base: changed from 0x1A800000 (32-bit, wrong) to 0x9A800000 (64-bit correct)
+- Added CSINC encoding: base 0x9AC00000 for 64-bit CSINC
+- Added Condition variants LO, HS, AL, NV to arm64.rs with proper encoding, asm_suffix, and invert
+- Implemented Cmp instruction: emits CMP then CSINC (CSET) instead of placeholder MOV XZR
+- Implemented BinOp comparison ops: same CMP + CSINC pattern
+- Fixed prologue: uses ADD X29, SP, #0 instead of MOV X29, SP (MOV with SP gives zero due to ORR encoding)
+- Fixed prologue: compute_frame_size estimates spill slots and alloc space, handles large frames via X16
+- Fixed epilogue: uses ADD SP, X29, #0 (MOV SP, X29) instead of fixed ADD SP, SP, #64
+- Added emit_large_sub_sp/emit_large_add_sp helpers for frame sizes > 4095
+- Implemented spill/reload code generation in resolve_reg: uses X16 for address computation to avoid X9 conflicts
+- Added Arm64RegAllocResult type with spill/reload info
+- Added pin/unpin/unpin_all mechanism to RegAllocator to protect resolved registers from being spilled
+- Auto-pin: resolve_reg pins all resolved registers; emit_ir_instr calls unpin_all after each instruction
+- Fixed Alloc handler: uses ADD rd, SP, #0 instead of MOV rd, SP
+- Fixed CondBranch: CBNZ now branches to true_target (was false_target), fall-through goes to false_target
+- Build succeeds with no errors
+
+Stage Summary:
+- All critical ARM64 backend bugs identified in previous session have been fixed
+- Project builds successfully with `cargo build`
+- Key fixes: Store resolve order, Call argument ordering, CSET/CSINC encoding, prologue/epilogue frame management, spill/reload code generation, register pinning
+- ARM64 SHA256d needs runtime testing to verify the fixes produce the correct result

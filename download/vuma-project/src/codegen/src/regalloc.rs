@@ -1536,6 +1536,26 @@ pub struct RegAllocator {
     callee_saved_pool: Vec<Register>,
     /// Track which callee-saved registers are in use.
     callee_saved_used: HashMap<IRValueId, Register>,
+    /// Registers that are temporarily pinned and must not be spilled.
+    /// Used to protect registers that have been resolved for the current
+    /// instruction but are still needed.
+    pinned_regs: HashSet<Register>,
+}
+
+/// Result of a register allocation that may involve spill or reload.
+#[derive(Debug, Clone)]
+pub struct Arm64RegAllocResult {
+    /// The physical register assigned to the vreg.
+    pub reg: Register,
+    /// If a vreg was spilled to make room, this contains spill info.
+    pub spill_vreg: Option<IRValueId>,
+    /// The physical register that was freed by the spill.
+    pub spill_reg: Option<Register>,
+    /// The spill slot assigned to the spilled vreg.
+    pub spill_slot: Option<u32>,
+    /// If the requested vreg was reloaded from a spill slot, this contains
+    /// the slot it was reloaded from.
+    pub reload_slot: Option<u32>,
 }
 
 impl RegAllocator {
@@ -1581,26 +1601,123 @@ impl RegAllocator {
             spill_map: HashMap::new(),
             callee_saved_pool,
             callee_saved_used: HashMap::new(),
+            pinned_regs: HashSet::new(),
         }
     }
 
+    /// Pin a physical register so it won't be spilled by subsequent allocations.
+    pub fn pin(&mut self, reg: Register) {
+        self.pinned_regs.insert(reg);
+    }
+
+    /// Unpin a physical register, allowing it to be spilled again.
+    pub fn unpin(&mut self, reg: Register) {
+        self.pinned_regs.remove(&reg);
+    }
+
+    /// Unpin all registers (called at the end of each instruction emission).
+    pub fn unpin_all(&mut self) {
+        self.pinned_regs.clear();
+    }
+
     /// Allocate a physical register for the given virtual register ID.
+    /// Returns a simple Register for backward compatibility.
     pub fn allocate(&mut self, vreg: IRValueId) -> Result<Register> {
+        let result = self.allocate_full(vreg)?;
+        Ok(result.reg)
+    }
+
+    /// Allocate a physical register, returning full spill/reload information.
+    pub fn allocate_full(&mut self, vreg: IRValueId) -> Result<Arm64RegAllocResult> {
+        // If already allocated in caller-saved pool, return it.
         if let Some(&reg) = self.used_regs.get(&vreg) {
-            return Ok(reg);
+            self.pinned_regs.insert(reg);
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spill_vreg: None,
+                spill_reg: None,
+                spill_slot: None,
+                reload_slot: None,
+            });
         }
+        // If already allocated in callee-saved pool, return it.
+        if let Some(&reg) = self.callee_saved_used.get(&vreg) {
+            self.pinned_regs.insert(reg);
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spill_vreg: None,
+                spill_reg: None,
+                spill_slot: None,
+                reload_slot: None,
+            });
+        }
+        // If the vreg was previously spilled, reload it.
+        if let Some(slot) = self.spill_map.remove(&vreg) {
+            if let Some(reg) = self.free_regs.pop() {
+                self.used_regs.insert(vreg, reg);
+                self.pinned_regs.insert(reg);
+                return Ok(Arm64RegAllocResult {
+                    reg,
+                    spill_vreg: None,
+                    spill_reg: None,
+                    spill_slot: None,
+                    reload_slot: Some(slot),
+                });
+            }
+            // No free register; need to spill something else first.
+            self.spill_with_pin()?;
+            if let Some(reg) = self.free_regs.pop() {
+                self.used_regs.insert(vreg, reg);
+                self.pinned_regs.insert(reg);
+                return Ok(Arm64RegAllocResult {
+                    reg,
+                    spill_vreg: None,
+                    spill_reg: None,
+                    spill_slot: None,
+                    reload_slot: Some(slot),
+                });
+            }
+            return Err(CodegenError::RegisterAllocFailed(format!(
+                "cannot allocate a register for vreg {} — all registers exhausted after spill",
+                vreg
+            )));
+        }
+        // Try to get a free caller-saved register.
         if let Some(reg) = self.free_regs.pop() {
             self.used_regs.insert(vreg, reg);
-            return Ok(reg);
+            self.pinned_regs.insert(reg);
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spill_vreg: None,
+                spill_reg: None,
+                spill_slot: None,
+                reload_slot: None,
+            });
         }
+        // Try callee-saved pool.
         if let Some(reg) = self.callee_saved_pool.pop() {
             self.callee_saved_used.insert(vreg, reg);
-            return Ok(reg);
+            self.pinned_regs.insert(reg);
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spill_vreg: None,
+                spill_reg: None,
+                spill_slot: None,
+                reload_slot: None,
+            });
         }
-        self.spill()?;
+        // Need to spill a register to make room.
+        let spill_result = self.spill_with_pin_full()?;
         if let Some(reg) = self.free_regs.pop() {
             self.used_regs.insert(vreg, reg);
-            return Ok(reg);
+            self.pinned_regs.insert(reg);
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spill_vreg: spill_result.0,
+                spill_reg: spill_result.1,
+                spill_slot: spill_result.2,
+                reload_slot: None,
+            });
         }
         Err(CodegenError::RegisterAllocFailed(format!(
             "cannot allocate a register for vreg {} — all registers exhausted",
@@ -1640,12 +1757,44 @@ impl RegAllocator {
 
     /// Spill the oldest (first-inserted) mapped register to the stack.
     pub fn spill(&mut self) -> Result<()> {
-        let vreg_to_spill = self
-            .used_regs
-            .keys()
-            .copied()
-            .next()
-            .ok_or_else(|| CodegenError::RegisterAllocFailed("no register to spill".into()))?;
+        self.spill_with_pin()?;
+        Ok(())
+    }
+
+    /// Spill a non-pinned register to make room.  Respects pinned_regs.
+    pub fn spill_with_pin(&mut self) -> Result<()> {
+        let _ = self.spill_with_pin_full()?;
+        Ok(())
+    }
+
+    /// Spill a non-pinned register, returning info about what was spilled.
+    /// Returns (spilled_vreg, freed_register, spill_slot).
+    pub fn spill_with_pin_full(&mut self) -> Result<(Option<IRValueId>, Option<Register>, Option<u32>)> {
+        // Find a vreg to spill that is NOT pinned.
+        let mut vreg_to_spill: Option<IRValueId> = None;
+        for &vreg in self.used_regs.keys() {
+            if let Some(&reg) = self.used_regs.get(&vreg) {
+                if !self.pinned_regs.contains(&reg) {
+                    vreg_to_spill = Some(vreg);
+                    break;
+                }
+            }
+        }
+
+        let vreg_to_spill = match vreg_to_spill {
+            Some(v) => v,
+            None => {
+                // All registers are pinned! Try callee-saved pool as a fallback.
+                // If even that fails, we have no choice but to spill a pinned
+                // register (which is a bug, but better than crashing).
+                log::warn!("all registers pinned during spill — spilling a pinned register");
+                self.used_regs
+                    .keys()
+                    .copied()
+                    .next()
+                    .ok_or_else(|| CodegenError::RegisterAllocFailed("no register to spill".into()))?
+            }
+        };
 
         let reg = self.used_regs.remove(&vreg_to_spill).unwrap();
         let slot = self.next_spill_slot;
@@ -1659,7 +1808,7 @@ impl RegAllocator {
             slot,
             reg
         );
-        Ok(())
+        Ok((Some(vreg_to_spill), Some(reg), Some(slot)))
     }
 
     /// Look up the physical register for a virtual register, allocating one

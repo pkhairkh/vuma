@@ -1,0 +1,2002 @@
+     1→//! # Register Allocation
+     2→//!
+     3→//! Provides register allocators that map IR virtual registers to ARM64
+     4→//! physical registers.
+     5→//!
+     6→//! ## Allocators
+     7→//!
+     8→//! ### `RegAllocator` (legacy greedy)
+     9→//!
+    10→//! A simple greedy allocator that walks the IR and assigns caller-saved
+    11→//! registers first, then callee-saved, spilling when all are exhausted.
+    12→//! Kept for backward-compatibility with the existing emitter.
+    13→//!
+    14→//! ### `LinearScanAllocator` (production)
+    15→//!
+    16→//! A real **linear-scan** register allocator that:
+    17→//!
+    18→//! 1. Computes live ranges from the IR (per-function, across all blocks).
+    19→//! 2. Sorts intervals by start point.
+    20→//! 3. Walks intervals in order, assigning free physical registers.
+    21→//! 4. When the pool is exhausted, evicts the interval whose end point is
+    22→//!    farthest in the future (or spills the current one if it ends latest).
+    23→//! 5. Generates spill/reload code as needed — including reloads at each
+    24→//!    use position after eviction.
+    25→//! 6. Applies register coalescing to eliminate redundant copies.
+    26→//!
+    27→//! ## ARM64 Register Conventions (AAPCS64)
+    28→//!
+    29→//! | Register(s) | Role                                   | Class        |
+    30→//! |-------------|----------------------------------------|--------------|
+    31→//! | X0–X7       | Argument / result registers            | Caller-saved |
+    32→//! | X8          | Indirect result location register      | Caller-saved |
+    33→//! | X9–X15      | Caller-saved temporary registers       | Caller-saved |
+    34→//! | X16–X17     | Intra-procedure-call scratch (IP0/IP1) | Caller-saved |
+    35→//! | X18         | Platform register                      | Reserved     |
+    36→//! | X19–X28     | Callee-saved registers                 | Callee-saved |
+    37→//! | X29         | Frame pointer (FP)                     | Reserved     |
+    38→//! | X30         | Link register (LR)                     | Reserved     |
+    39→//! | SP          | Stack pointer                          | Reserved     |
+    40→//! | XZR         | Zero register                          | Reserved     |
+    41→//! | V0–V7       | FP/SIMD argument / result registers    | Caller-saved |
+    42→//! | V8–V15      | FP/SIMD callee-saved (lower 64 bits)   | Callee-saved |
+    43→//! | V16–V31     | FP/SIMD caller-saved temporaries       | Caller-saved |
+    44→
+    45→use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    46→
+    47→use crate::arm64::Register;
+    48→use crate::ir::{IRFunction, IRInstr, IRProgram, IRTerminator, IRValue};
+    49→use crate::CodegenError;
+    50→use crate::Result;
+    51→
+    52→/// ID type for IR virtual registers.
+    53→pub type IRValueId = u32;
+    54→
+    55→// ═══════════════════════════════════════════════════════════════════════════
+    56→// SIMD / FP Register enum
+    57→// ═══════════════════════════════════════════════════════════════════════════
+    58→
+    59→/// ARM64 SIMD and Floating-Point registers (V0–V31).
+    60→///
+    61→/// Each V register is 128 bits wide.  The lower 64 bits can be accessed as
+    62→/// `Dn` (double-precision) and the lower 32 bits as `Sn` (single-precision).
+    63→///
+    64→/// AAPCS64 classification:
+    65→/// - V0–V7: caller-saved (argument / result)
+    66→/// - V8–V15: callee-saved (only lower 64 bits, D8–D15, must be preserved)
+    67→/// - V16–V31: caller-saved temporaries
+    68→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    69→pub enum SimdFpRegister {
+    70→    V0,
+    71→    V1,
+    72→    V2,
+    73→    V3,
+    74→    V4,
+    75→    V5,
+    76→    V6,
+    77→    V7,
+    78→    V8,
+    79→    V9,
+    80→    V10,
+    81→    V11,
+    82→    V12,
+    83→    V13,
+    84→    V14,
+    85→    V15,
+    86→    V16,
+    87→    V17,
+    88→    V18,
+    89→    V19,
+    90→    V20,
+    91→    V21,
+    92→    V22,
+    93→    V23,
+    94→    V24,
+    95→    V25,
+    96→    V26,
+    97→    V27,
+    98→    V28,
+    99→    V29,
+   100→    V30,
+   101→    V31,
+   102→}
+   103→
+   104→impl SimdFpRegister {
+   105→    /// Returns the 5-bit encoding index for this register (0–31).
+   106→    pub fn encoding(&self) -> u32 {
+   107→        *self as u32
+   108→    }
+   109→
+   110→    /// Returns the standard assembly name.
+   111→    pub fn asm_name(&self) -> &'static str {
+   112→        match self {
+   113→            SimdFpRegister::V0 => "v0",
+   114→            SimdFpRegister::V1 => "v1",
+   115→            SimdFpRegister::V2 => "v2",
+   116→            SimdFpRegister::V3 => "v3",
+   117→            SimdFpRegister::V4 => "v4",
+   118→            SimdFpRegister::V5 => "v5",
+   119→            SimdFpRegister::V6 => "v6",
+   120→            SimdFpRegister::V7 => "v7",
+   121→            SimdFpRegister::V8 => "v8",
+   122→            SimdFpRegister::V9 => "v9",
+   123→            SimdFpRegister::V10 => "v10",
+   124→            SimdFpRegister::V11 => "v11",
+   125→            SimdFpRegister::V12 => "v12",
+   126→            SimdFpRegister::V13 => "v13",
+   127→            SimdFpRegister::V14 => "v14",
+   128→            SimdFpRegister::V15 => "v15",
+   129→            SimdFpRegister::V16 => "v16",
+   130→            SimdFpRegister::V17 => "v17",
+   131→            SimdFpRegister::V18 => "v18",
+   132→            SimdFpRegister::V19 => "v19",
+   133→            SimdFpRegister::V20 => "v20",
+   134→            SimdFpRegister::V21 => "v21",
+   135→            SimdFpRegister::V22 => "v22",
+   136→            SimdFpRegister::V23 => "v23",
+   137→            SimdFpRegister::V24 => "v24",
+   138→            SimdFpRegister::V25 => "v25",
+   139→            SimdFpRegister::V26 => "v26",
+   140→            SimdFpRegister::V27 => "v27",
+   141→            SimdFpRegister::V28 => "v28",
+   142→            SimdFpRegister::V29 => "v29",
+   143→            SimdFpRegister::V30 => "v30",
+   144→            SimdFpRegister::V31 => "v31",
+   145→        }
+   146→    }
+   147→
+   148→    /// Returns `true` if this register is callee-saved (V8–V15).
+   149→    pub fn is_callee_saved(&self) -> bool {
+   150→        matches!(
+   151→            self,
+   152→            SimdFpRegister::V8
+   153→                | SimdFpRegister::V9
+   154→                | SimdFpRegister::V10
+   155→                | SimdFpRegister::V11
+   156→                | SimdFpRegister::V12
+   157→                | SimdFpRegister::V13
+   158→                | SimdFpRegister::V14
+   159→                | SimdFpRegister::V15
+   160→        )
+   161→    }
+   162→
+   163→    /// Returns `true` if this register is caller-saved (V0–V7, V16–V31).
+   164→    pub fn is_caller_saved(&self) -> bool {
+   165→        !self.is_callee_saved()
+   166→    }
+   167→
+   168→    /// Return all 32 SIMD/FP registers in order.
+   169→    pub fn all() -> &'static [SimdFpRegister; 32] {
+   170→        static ALL: [SimdFpRegister; 32] = [
+   171→            SimdFpRegister::V0,
+   172→            SimdFpRegister::V1,
+   173→            SimdFpRegister::V2,
+   174→            SimdFpRegister::V3,
+   175→            SimdFpRegister::V4,
+   176→            SimdFpRegister::V5,
+   177→            SimdFpRegister::V6,
+   178→            SimdFpRegister::V7,
+   179→            SimdFpRegister::V8,
+   180→            SimdFpRegister::V9,
+   181→            SimdFpRegister::V10,
+   182→            SimdFpRegister::V11,
+   183→            SimdFpRegister::V12,
+   184→            SimdFpRegister::V13,
+   185→            SimdFpRegister::V14,
+   186→            SimdFpRegister::V15,
+   187→            SimdFpRegister::V16,
+   188→            SimdFpRegister::V17,
+   189→            SimdFpRegister::V18,
+   190→            SimdFpRegister::V19,
+   191→            SimdFpRegister::V20,
+   192→            SimdFpRegister::V21,
+   193→            SimdFpRegister::V22,
+   194→            SimdFpRegister::V23,
+   195→            SimdFpRegister::V24,
+   196→            SimdFpRegister::V25,
+   197→            SimdFpRegister::V26,
+   198→            SimdFpRegister::V27,
+   199→            SimdFpRegister::V28,
+   200→            SimdFpRegister::V29,
+   201→            SimdFpRegister::V30,
+   202→            SimdFpRegister::V31,
+   203→        ];
+   204→        &ALL
+   205→    }
+   206→}
+   207→
+   208→impl std::fmt::Display for SimdFpRegister {
+   209→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   210→        f.write_str(self.asm_name())
+   211→    }
+   212→}
+   213→
+   214→// ═══════════════════════════════════════════════════════════════════════════
+   215→// Physical register union — either a GPR or a SIMD/FP register
+   216→// ═══════════════════════════════════════════════════════════════════════════
+   217→
+   218→/// A physical register on ARM64 — either a general-purpose register or a
+   219→/// SIMD/FP register.
+   220→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   221→pub enum PhysReg {
+   222→    Gpr(Register),
+   223→    SimdFp(SimdFpRegister),
+   224→}
+   225→
+   226→impl PhysReg {
+   227→    /// Returns `true` if this is a callee-saved register.
+   228→    pub fn is_callee_saved(&self) -> bool {
+   229→        match self {
+   230→            PhysReg::Gpr(r) => r.is_callee_saved(),
+   231→            PhysReg::SimdFp(r) => r.is_callee_saved(),
+   232→        }
+   233→    }
+   234→
+   235→    /// Returns `true` if this is a caller-saved register.
+   236→    pub fn is_caller_saved(&self) -> bool {
+   237→        match self {
+   238→            PhysReg::Gpr(r) => r.is_caller_saved(),
+   239→            PhysReg::SimdFp(r) => r.is_caller_saved(),
+   240→        }
+   241→    }
+   242→}
+   243→
+   244→impl std::fmt::Display for PhysReg {
+   245→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   246→        match self {
+   247→            PhysReg::Gpr(r) => write!(f, "{}", r),
+   248→            PhysReg::SimdFp(r) => write!(f, "{}", r),
+   249→        }
+   250→    }
+   251→}
+   252→
+   253→// ═══════════════════════════════════════════════════════════════════════════
+   254→// Register class — determines which physical register pool to use
+   255→// ═══════════════════════════════════════════════════════════════════════════
+   256→
+   257→/// The class of a virtual register, determining which physical register
+   258→/// pool it can be allocated from.
+   259→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   260→pub enum RegClass {
+   261→    /// General-purpose integer register (X0–X30).
+   262→    Gpr,
+   263→    /// SIMD / floating-point register (V0–V31).
+   264→    SimdFp,
+   265→}
+   266→
+   267→// ═══════════════════════════════════════════════════════════════════════════
+   268→// Live Interval
+   269→// ═══════════════════════════════════════════════════════════════════════════
+   270→
+   271→/// A live interval for a virtual register, representing the range of
+   272→/// instruction positions where the register is live.
+   273→///
+   274→/// Positions are sequential instruction indices assigned during a linear
+   275→/// pass over all blocks in a function.
+   276→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   277→pub struct LiveInterval {
+   278→    /// The virtual register ID.
+   279→    pub vreg: IRValueId,
+   280→    /// The register class (GPR or SIMD/FP).
+   281→    pub class: RegClass,
+   282→    /// Start position (inclusive) — the instruction that defines this vreg.
+   283→    pub start: u32,
+   284→    /// End position (inclusive) — the last instruction that uses this vreg.
+   285→    pub end: u32,
+   286→    /// Whether this interval crosses a function call.
+   287→    pub crosses_call: bool,
+   288→    /// List of use positions (for spill/reload decisions).
+   289→    pub use_positions: Vec<u32>,
+   290→    /// List of def positions.
+   291→    pub def_positions: Vec<u32>,
+   292→    /// Set of vregs that were coalesced into this interval.
+   293→    /// When intervals are merged via coalescing, all constituent vreg IDs
+   294→    /// are tracked here so that the allocator can map them all to the same
+   295→    /// physical register.
+   296→    pub coalesced_vregs: Vec<IRValueId>,
+   297→}
+   298→
+   299→impl LiveInterval {
+   300→    /// Create a new interval starting and ending at the given positions.
+   301→    pub fn new(vreg: IRValueId, class: RegClass, start: u32, end: u32) -> Self {
+   302→        Self {
+   303→            vreg,
+   304→            class,
+   305→            start,
+   306→            end,
+   307→            crosses_call: false,
+   308→            use_positions: Vec::new(),
+   309→            def_positions: Vec::new(),
+   310→            coalesced_vregs: vec![vreg],
+   311→        }
+   312→    }
+   313→
+   314→    /// Returns `true` if the interval covers the given position.
+   315→    pub fn covers(&self, pos: u32) -> bool {
+   316→        pos >= self.start && pos <= self.end
+   317→    }
+   318→
+   319→    /// Extend the interval to include the given position.
+   320→    pub fn extend_to(&mut self, pos: u32) {
+   321→        if pos > self.end {
+   322→            self.end = pos;
+   323→        }
+   324→        if pos < self.start {
+   325→            self.start = pos;
+   326→        }
+   327→    }
+   328→
+   329→    /// Duration of the live interval.
+   330→    pub fn len(&self) -> u32 {
+   331→        self.end.saturating_sub(self.start)
+   332→    }
+   333→
+   334→    /// Returns true if this interval has zero length.
+   335→    pub fn is_empty(&self) -> bool {
+   336→        self.start == self.end
+   337→    }
+   338→
+   339→    /// Returns true if this interval ends before the other starts.
+   340→    pub fn ends_before(&self, other: &LiveInterval) -> bool {
+   341→        self.end < other.start
+   342→    }
+   343→
+   344→    /// Returns true if this interval overlaps with the other.
+   345→    pub fn overlaps(&self, other: &LiveInterval) -> bool {
+   346→        self.start <= other.end && other.start <= self.end
+   347→    }
+   348→
+   349→    /// Compute a spill weight for this interval.
+   350→    ///
+   351→    /// Higher weight = more important to keep in a register.
+   352→    /// Weight is based on:
+   353→    /// - Number of use/def positions (more references = higher weight)
+   354→    /// - Whether the interval crosses a call (callee-saved is expensive to use)
+   355→    /// - Loop nesting could be added here in the future
+   356→    pub fn spill_weight(&self) -> u32 {
+   357→        let use_count = self.use_positions.len() as u32;
+   358→        let def_count = self.def_positions.len() as u32;
+   359→        let base_weight = (use_count + def_count).max(1);
+   360→
+   361→        // Intervals that cross calls have higher weight because spilling
+   362→        // around a call requires both save and restore, and using a
+   363→        // callee-saved register has prologue/epilogue cost.
+   364→        let call_multiplier = if self.crosses_call { 2 } else { 1 };
+   365→
+   366→        base_weight * call_multiplier
+   367→    }
+   368→
+   369→    /// Returns the weight per unit of live range length — used to decide
+   370→    /// which interval to evict.  Higher = more deserving of a register.
+   371→    pub fn weight_per_length(&self) -> u32 {
+   372→        let len = self.len().max(1);
+   373→        self.spill_weight() / len
+   374→    }
+   375→}
+   376→
+   377→// ═══════════════════════════════════════════════════════════════════════════
+   378→// Allocation Result
+   379→// ═══════════════════════════════════════════════════════════════════════════
+   380→
+   381→/// The result of register allocation for a single function.
+   382→///
+   383→/// Contains the mapping from virtual registers to physical registers,
+   384→/// spill slot assignments, and metadata needed for prologue/epilogue
+   385→/// generation.
+   386→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+   387→pub struct AllocationResult {
+   388→    /// Mapping from virtual register ID to physical register.
+   389→    pub vreg_to_preg: HashMap<IRValueId, PhysReg>,
+   390→    /// Mapping from virtual register ID to spill slot index.
+   391→    /// Each slot is 8 bytes (GPR) or 16 bytes (SIMD/FP) on the stack.
+   392→    pub spill_slots: HashMap<IRValueId, SpillSlot>,
+   393→    /// Total number of spill slots used (for frame size calculation).
+   394→    pub total_spill_slots: u32,
+   395→    /// Set of callee-saved GPRs that must be saved/restored in prologue/epilogue.
+   396→    pub used_callee_saved_gprs: HashSet<Register>,
+   397→    /// Set of callee-saved SIMD/FP registers that must be saved/restored.
+   398→    pub used_callee_saved_simd: HashSet<SimdFpRegister>,
+   399→    /// Spill/reload instructions to be inserted, keyed by instruction position.
+   400→    pub spill_code: BTreeMap<u32, Vec<SpillCode>>,
+   401→    /// The original live intervals (for debugging / introspection).
+   402→    pub live_intervals: Vec<LiveInterval>,
+   403→    /// Coalescing moves that were eliminated (src_vreg, dst_preg).
+   404→    pub eliminated_copies: Vec<(IRValueId, PhysReg)>,
+   405→    /// Mapping from coalesced vreg IDs to the representative vreg ID.
+   406→    /// When intervals are merged, all constituent vregs map to the same preg.
+   407→    pub coalesced_map: HashMap<IRValueId, IRValueId>,
+   408→}
+   409→
+   410→impl AllocationResult {
+   411→    /// Create an empty allocation result.
+   412→    pub fn new() -> Self {
+   413→        Self {
+   414→            vreg_to_preg: HashMap::new(),
+   415→            spill_slots: HashMap::new(),
+   416→            total_spill_slots: 0,
+   417→            used_callee_saved_gprs: HashSet::new(),
+   418→            used_callee_saved_simd: HashSet::new(),
+   419→            spill_code: BTreeMap::new(),
+   420→            live_intervals: Vec::new(),
+   421→            eliminated_copies: Vec::new(),
+   422→            coalesced_map: HashMap::new(),
+   423→        }
+   424→    }
+   425→
+   426→    /// Look up the physical register assigned to a virtual register.
+   427→    /// Also follows the coalescing map if the vreg was merged.
+   428→    pub fn get_phys_reg(&self, vreg: IRValueId) -> Option<PhysReg> {
+   429→        if let Some(&preg) = self.vreg_to_preg.get(&vreg) {
+   430→            return Some(preg);
+   431→        }
+   432→        // Follow coalescing chain.
+   433→        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+   434→        self.vreg_to_preg.get(&rep).copied()
+   435→    }
+   436→
+   437→    /// Look up the GPR assigned to a virtual register (convenience).
+   438→    pub fn get_gpr(&self, vreg: IRValueId) -> Option<Register> {
+   439→        match self.get_phys_reg(vreg) {
+   440→            Some(PhysReg::Gpr(r)) => Some(r),
+   441→            _ => None,
+   442→        }
+   443→    }
+   444→
+   445→    /// Look up the SIMD/FP register assigned to a virtual register.
+   446→    pub fn get_simd(&self, vreg: IRValueId) -> Option<SimdFpRegister> {
+   447→        match self.get_phys_reg(vreg) {
+   448→            Some(PhysReg::SimdFp(r)) => Some(r),
+   449→            _ => None,
+   450→        }
+   451→    }
+   452→
+   453→    /// Check if a virtual register is spilled.
+   454→    pub fn is_spilled(&self, vreg: IRValueId) -> bool {
+   455→        if self.spill_slots.contains_key(&vreg) {
+   456→            return true;
+   457→        }
+   458→        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+   459→        self.spill_slots.contains_key(&rep)
+   460→    }
+   461→
+   462→    /// Get the spill slot for a virtual register.
+   463→    pub fn spill_slot(&self, vreg: IRValueId) -> Option<&SpillSlot> {
+   464→        if let Some(slot) = self.spill_slots.get(&vreg) {
+   465→            return Some(slot);
+   466→        }
+   467→        let rep = self.coalesced_map.get(&vreg).copied().unwrap_or(vreg);
+   468→        self.spill_slots.get(&rep)
+   469→    }
+   470→
+   471→    /// Calculate the total frame size needed for spill slots.
+   472→    /// GPR slots are 8 bytes each; SIMD/FP slots are 16 bytes each.
+   473→    pub fn spill_frame_bytes(&self) -> u32 {
+   474→        self.spill_slots
+   475→            .values()
+   476→            .map(|slot| slot.size_bytes())
+   477→            .sum()
+   478→    }
+   479→
+   480→    /// Number of callee-saved registers that must be saved in prologue.
+   481→    pub fn callee_saved_count(&self) -> usize {
+   482→        self.used_callee_saved_gprs.len() + self.used_callee_saved_simd.len()
+   483→    }
+   484→
+   485→    /// Record a coalescing: `src` was merged into `dst`'s interval.
+   486→    /// After allocation, both src and dst should map to the same preg.
+   487→    pub fn record_coalescing(&mut self, src: IRValueId, dst: IRValueId) {
+   488→        self.coalesced_map.insert(src, dst);
+   489→    }
+   490→
+   491→    /// Resolve a vreg through the coalescing map to the representative vreg.
+   492→    pub fn resolve_vreg(&self, vreg: IRValueId) -> IRValueId {
+   493→        self.coalesced_map.get(&vreg).copied().unwrap_or(vreg)
+   494→    }
+   495→}
+   496→
+   497→impl Default for AllocationResult {
+   498→    fn default() -> Self {
+   499→        Self::new()
+   500→    }
+   501→}
+   502→
+   503→// ═══════════════════════════════════════════════════════════════════════════
+   504→// Spill Slot
+   505→// ═══════════════════════════════════════════════════════════════════════════
+   506→
+   507→/// A spill slot on the stack, identified by an index and byte size.
+   508→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   509→pub struct SpillSlot {
+   510→    /// Slot index (sequential).
+   511→    pub index: u32,
+   512→    /// Offset from the frame pointer (SP or FP), in bytes.
+   513→    /// Negative offset means "deeper into the stack".
+   514→    pub offset: i32,
+   515→    /// The register class that occupies this slot.
+   516→    pub class: RegClass,
+   517→}
+   518→
+   519→impl SpillSlot {
+   520→    /// Create a new spill slot.
+   521→    pub fn new(index: u32, offset: i32, class: RegClass) -> Self {
+   522→        Self {
+   523→            index,
+   524→            offset,
+   525→            class,
+   526→        }
+   527→    }
+   528→
+   529→    /// Size in bytes: 8 for GPRs, 16 for SIMD/FP registers.
+   530→    pub fn size_bytes(&self) -> u32 {
+   531→        match self.class {
+   532→            RegClass::Gpr => 8,
+   533→            RegClass::SimdFp => 16,
+   534→        }
+   535→    }
+   536→}
+   537→
+   538→// ═══════════════════════════════════════════════════════════════════════════
+   539→// Spill Code
+   540→// ═══════════════════════════════════════════════════════════════════════════
+   541→
+   542→/// A spill or reload instruction to be inserted into the instruction stream.
+   543→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   544→pub enum SpillCode {
+   545→    /// Spill (store) a register to its stack slot.
+   546→    /// `vreg` is the virtual register being spilled.
+   547→    /// `preg` is the physical register holding the value.
+   548→    /// `slot` is the spill slot to store to.
+   549→    Spill {
+   550→        vreg: IRValueId,
+   551→        preg: PhysReg,
+   552→        slot: SpillSlot,
+   553→    },
+   554→    /// Reload (load) a register from its stack slot.
+   555→    /// `vreg` is the virtual register being reloaded.
+   556→    /// `preg` is the physical register to load into.
+   557→    /// `slot` is the spill slot to load from.
+   558→    Reload {
+   559→        vreg: IRValueId,
+   560→        preg: PhysReg,
+   561→        slot: SpillSlot,
+   562→    },
+   563→}
+   564→
+   565→impl std::fmt::Display for SpillCode {
+   566→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   567→        match self {
+   568→            SpillCode::Spill { vreg, preg, slot } => {
+   569→                write!(
+   570→                    f,
+   571→                    "spill %v{} -> {} [slot {} offset {}]",
+   572→                    vreg, preg, slot.index, slot.offset
+   573→                )
+   574→            }
+   575→            SpillCode::Reload { vreg, preg, slot } => {
+   576→                write!(
+   577→                    f,
+   578→                    "reload %v{} <- {} [slot {} offset {}]",
+   579→                    vreg, preg, slot.index, slot.offset
+   580→                )
+   581→            }
+   582→        }
+   583→    }
+   584→}
+   585→
+   586→// ═══════════════════════════════════════════════════════════════════════════
+   587→// Copy / Coalesce info
+   588→// ═══════════════════════════════════════════════════════════════════════════
+   589→
+   590→/// A copy instruction identified for potential coalescing.
+   591→#[derive(Debug, Clone, PartialEq, Eq)]
+   592→struct CopyInfo {
+   593→    /// Source virtual register.
+   594→    src: IRValueId,
+   595→    /// Destination virtual register.
+   596→    dst: IRValueId,
+   597→    /// Instruction position.
+   598→    pos: u32,
+   599→    /// Register class.
+   600→    class: RegClass,
+   601→}
+   602→
+   603→// ═══════════════════════════════════════════════════════════════════════════
+   604→// Live Range Computation
+   605→// ═══════════════════════════════════════════════════════════════════════════
+   606→
+   607→/// Computes live intervals for all virtual registers in a function.
+   608→///
+   609→/// Assigns sequential instruction positions across all blocks (linear order),
+   610→/// then computes def-use information to build intervals.  Also tracks which
+   611→/// intervals cross function call sites (to guide caller-saved vs callee-saved
+   612→/// allocation).
+   613→pub struct LiveRangeComputer {
+   614→    /// Default register class — assumed GPR unless the user annotates.
+   615→    default_class: RegClass,
+   616→    /// Per-vreg register class overrides.
+   617→    class_overrides: HashMap<IRValueId, RegClass>,
+   618→}
+   619→
+   620→impl LiveRangeComputer {
+   621→    /// Create a new live range computer with GPR as the default class.
+   622→    pub fn new() -> Self {
+   623→        Self {
+   624→            default_class: RegClass::Gpr,
+   625→            class_overrides: HashMap::new(),
+   626→        }
+   627→    }
+   628→
+   629→    /// Set the register class for a specific virtual register.
+   630→    pub fn set_class(&mut self, vreg: IRValueId, class: RegClass) {
+   631→        self.class_overrides.insert(vreg, class);
+   632→    }
+   633→
+   634→    /// Get the register class for a virtual register.
+   635→    fn class_of(&self, vreg: IRValueId) -> RegClass {
+   636→        self.class_overrides
+   637→            .get(&vreg)
+   638→            .copied()
+   639→            .unwrap_or(self.default_class)
+   640→    }
+   641→
+   642→    /// Compute live intervals for the given function.
+   643→    ///
+   644→    /// Returns a vector of live intervals, one per virtual register, and
+   645→    /// a set of instruction positions where function calls occur.
+   646→    pub fn compute(&self, func: &IRFunction) -> (Vec<LiveInterval>, BTreeSet<u32>) {
+   647→        // Phase 1: Assign sequential positions to every instruction.
+   648→        // We use 2*N for each instruction N, so that we can insert
+   649→        // spill/reload code at positions 2*N+1 if needed.
+   650→        let mut intervals: HashMap<IRValueId, LiveInterval> = HashMap::new();
+   651→        let mut call_positions: BTreeSet<u32> = BTreeSet::new();
+   652→        let mut copies: Vec<CopyInfo> = Vec::new();
+   653→
+   654→        let mut pos: u32 = 0;
+   655→
+   656→        for block in &func.blocks {
+   657→            for instr in &block.instructions {
+   658→                let def_regs = instr.defined_regs();
+   659→                let use_regs = instr.used_regs();
+   660→
+   661→                // Detect copies: Cast with BitCast between two registers.
+   662→                if let IRInstr::Cast {
+   663→                    kind: crate::ir::CastKind::BitCast,
+   664→                    dst: IRValue::Register(dst_id),
+   665→                    src: IRValue::Register(src_id),
+   666→                } = instr
+   667→                {
+   668→                    copies.push(CopyInfo {
+   669→                        src: *src_id,
+   670→                        dst: *dst_id,
+   671→                        pos,
+   672→                        class: self.class_of(*dst_id),
+   673→                    });
+   674→                }
+   675→
+   676→                // Process definitions.
+   677→                for &vreg in &def_regs {
+   678→                    let class = self.class_of(vreg);
+   679→                    let interval = intervals
+   680→                        .entry(vreg)
+   681→                        .or_insert_with(|| LiveInterval::new(vreg, class, pos, pos));
+   682→                    interval.def_positions.push(pos);
+   683→                    interval.extend_to(pos);
+   684→                }
+   685→
+   686→                // Process uses.
+   687→                for &vreg in &use_regs {
+   688→                    let class = self.class_of(vreg);
+   689→                    let interval = intervals
+   690→                        .entry(vreg)
+   691→                        .or_insert_with(|| LiveInterval::new(vreg, class, pos, pos));
+   692→                    interval.use_positions.push(pos);
+   693→                    interval.extend_to(pos);
+   694→                }
+   695→
+   696→                // Track function call positions.
+   697→                if matches!(instr, IRInstr::Call { .. }) {
+   698→                    call_positions.insert(pos);
+   699→                }
+   700→
+   701→                pos += 2; // leave gap for spill/reload insertion
+   702→            }
+   703→
+   704→            // Terminator uses.
+   705→            match &block.terminator {
+   706→                IRTerminator::Return(vals) => {
+   707→                    for val in vals {
+   708→                        if let IRValue::Register(vreg) = val {
+   709→                            let class = self.class_of(*vreg);
+   710→                            let interval = intervals
+   711→                                .entry(*vreg)
+   712→                                .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+   713→                            interval.use_positions.push(pos);
+   714→                            interval.extend_to(pos);
+   715→                        }
+   716→                    }
+   717→                }
+   718→                IRTerminator::Branch { cond, .. } => {
+   719→                    if let IRValue::Register(vreg) = cond {
+   720→                        let class = self.class_of(*vreg);
+   721→                        let interval = intervals
+   722→                            .entry(*vreg)
+   723→                            .or_insert_with(|| LiveInterval::new(*vreg, class, pos, pos));
+   724→                        interval.use_positions.push(pos);
+   725→                        interval.extend_to(pos);
+   726→                    }
+   727→                }
+   728→                IRTerminator::Jump(_) | IRTerminator::Unreachable => {}
+   729→            }
+   730→            pos += 2;
+   731→        }
+   732→
+   733→        // Phase 2: Mark intervals that cross call sites.
+   734→        for interval in intervals.values_mut() {
+   735→            for &call_pos in &call_positions {
+   736→                if interval.start < call_pos && interval.end > call_pos {
+   737→                    interval.crosses_call = true;
+   738→                    break;
+   739→                }
+   740→            }
+   741→        }
+   742→
+   743→        let mut result: Vec<LiveInterval> = intervals.into_values().collect();
+   744→
+   745→        // Phase 3: Apply register coalescing to merge copy-related intervals.
+   746→        Self::coalesce_intervals(&mut result, &copies);
+   747→
+   748→        (result, call_positions)
+   749→    }
+   750→
+   751→    /// Coalesce intervals connected by copy instructions.
+   752→    ///
+   753→    /// Two intervals can be coalesced if they are connected by a copy and
+   754→    /// their combined range doesn't interfere with any other interval of
+   755→    /// the same register class.
+   756→    fn coalesce_intervals(intervals: &mut Vec<LiveInterval>, copies: &[CopyInfo]) {
+   757→        if copies.is_empty() {
+   758→            return;
+   759→        }
+   760→
+   761→        // Build a union-find structure for coalescing.
+   762→        let mut parent: HashMap<IRValueId, IRValueId> = HashMap::new();
+   763→        for interval in intervals.iter() {
+   764→            parent.insert(interval.vreg, interval.vreg);
+   765→        }
+   766→
+   767→        fn find(parent: &mut HashMap<IRValueId, IRValueId>, x: IRValueId) -> IRValueId {
+   768→            let root = parent[&x];
+   769→            if root == x {
+   770→                return x;
+   771→            }
+   772→            let root = find(parent, root);
+   773→            parent.insert(x, root);
+   774→            root
+   775→        }
+   776→
+   777→        fn union(parent: &mut HashMap<IRValueId, IRValueId>, a: IRValueId, b: IRValueId) {
+   778→            let ra = find(parent, a);
+   779→            let rb = find(parent, b);
+   780→            if ra != rb {
+   781→                parent.insert(ra, rb);
+   782→            }
+   783→        }
+   784→
+   785→        // Build interval lookup.
+   786→        let interval_map: HashMap<IRValueId, &LiveInterval> = intervals
+   787→            .iter()
+   788→            .map(|i| (i.vreg, i))
+   789→            .collect();
+   790→
+   791→        // Try to coalesce each copy.
+   792→        for copy in copies {
+   793→            let src_interval = match interval_map.get(&copy.src) {
+   794→                Some(i) => i,
+   795→                None => continue,
+   796→            };
+   797→            let dst_interval = match interval_map.get(&copy.dst) {
+   798→                Some(i) => i,
+   799→                None => continue,
+   800→            };
+   801→
+   802→            // Only coalesce same-class intervals.
+   803→            if src_interval.class != dst_interval.class {
+   804→                continue;
+   805→            }
+   806→
+   807→            // Check if the combined interval would conflict with any existing
+   808→            // interval of the same class.
+   809→            let combined_start = src_interval.start.min(dst_interval.start);
+   810→            let combined_end = src_interval.end.max(dst_interval.end);
+   811→
+   812→            let mut can_coalesce = true;
+   813→            for other in intervals.iter() {
+   814→                if other.class != src_interval.class {
+   815→                    continue;
+   816→                }
+   817→                let other_root = find(&mut parent, other.vreg);
+   818→                let src_root = find(&mut parent, copy.src);
+   819→                let dst_root = find(&mut parent, copy.dst);
+   820→                if other_root == src_root || other_root == dst_root {
+   821→                    continue; // same coalescing group
+   822→                }
+   823→                if other.start <= combined_end && other.end >= combined_start {
+   824→                    can_coalesce = false;
+   825→                    break;
+   826→                }
+   827→            }
+   828→
+   829→            if can_coalesce {
+   830→                union(&mut parent, copy.src, copy.dst);
+   831→            }
+   832→        }
+   833→
+   834→        // Merge intervals that were coalesced.
+   835→        let mut groups: HashMap<IRValueId, Vec<&LiveInterval>> = HashMap::new();
+   836→        for interval in intervals.iter() {
+   837→            let root = find(&mut parent, interval.vreg);
+   838→            groups.entry(root).or_default().push(interval);
+   839→        }
+   840→
+   841→        let mut new_intervals: Vec<LiveInterval> = Vec::new();
+   842→        for (_root, group) in groups {
+   843→            if group.len() == 1 {
+   844→                new_intervals.push(group[0].clone());
+   845→            } else {
+   846→                // Merge all intervals in the group into one.
+   847→                let class = group[0].class;
+   848→                let start = group.iter().map(|i| i.start).min().unwrap();
+   849→                let end = group.iter().map(|i| i.end).max().unwrap();
+   850→                let crosses_call = group.iter().any(|i| i.crosses_call);
+   851→                let mut use_positions: Vec<u32> = group
+   852→                    .iter()
+   853→                    .flat_map(|i| i.use_positions.iter().copied())
+   854→                    .collect();
+   855→                use_positions.sort();
+   856→                use_positions.dedup();
+   857→                let mut def_positions: Vec<u32> = group
+   858→                    .iter()
+   859→                    .flat_map(|i| i.def_positions.iter().copied())
+   860→                    .collect();
+   861→                def_positions.sort();
+   862→                def_positions.dedup();
+   863→
+   864→                // Collect all vreg IDs from the coalesced group.
+   865→                let coalesced_vregs: Vec<IRValueId> = group
+   866→                    .iter()
+   867→                    .flat_map(|i| i.coalesced_vregs.iter().copied())
+   868→                    .collect();
+   869→
+   870→                let vreg = group.iter().map(|i| i.vreg).min().unwrap();
+   871→                let mut merged = LiveInterval::new(vreg, class, start, end);
+   872→                merged.crosses_call = crosses_call;
+   873→                merged.use_positions = use_positions;
+   874→                merged.def_positions = def_positions;
+   875→                merged.coalesced_vregs = coalesced_vregs;
+   876→                new_intervals.push(merged);
+   877→            }
+   878→        }
+   879→
+   880→        *intervals = new_intervals;
+   881→    }
+   882→}
+   883→
+   884→impl Default for LiveRangeComputer {
+   885→    fn default() -> Self {
+   886→        Self::new()
+   887→    }
+   888→}
+   889→
+   890→// ═══════════════════════════════════════════════════════════════════════════
+   891→// Linear Scan Allocator
+   892→// ═══════════════════════════════════════════════════════════════════════════
+   893→
+   894→/// A real linear-scan register allocator for ARM64.
+   895→///
+   896→/// ## Algorithm
+   897→///
+   898→/// 1. **Compute live intervals** for the function.
+   899→/// 2. **Sort intervals** by start position.
+   900→/// 3. **Scan intervals** in order:
+   901→///    - Expire old intervals (free their registers).
+   902→///    - Try to allocate a free register.
+   903→///    - If no free register, evict the active interval with the lowest
+   904→///      spill weight per length, or spill the current interval if it has
+   905→///      the lowest weight.
+   906→/// 4. **Handle calling conventions**: intervals that cross calls are
+   907→///    preferentially assigned callee-saved registers.
+   908→/// 5. **Generate spill/reload code** as needed, with reloads inserted at
+   909→///    every use position for evicted intervals.
+   910→/// 6. **Record coalescing**: when intervals were merged, map all original
+   911→///    vregs to the same physical register.
+   912→pub struct LinearScanAllocator {
+   913→    /// Caller-saved GPRs available for allocation.
+   914→    caller_saved_gprs: Vec<Register>,
+   915→    /// Callee-saved GPRs available for allocation.
+   916→    callee_saved_gprs: Vec<Register>,
+   917→    /// Caller-saved SIMD/FP registers available for allocation.
+   918→    caller_saved_simd: Vec<SimdFpRegister>,
+   919→    /// Callee-saved SIMD/FP registers available for allocation.
+   920→    callee_saved_simd: Vec<SimdFpRegister>,
+   921→}
+   922→
+   923→impl LinearScanAllocator {
+   924→    /// Create a new linear-scan allocator with the full ARM64 register set.
+   925→    ///
+   926→    /// The following registers are **not** in the allocation pool:
+   927→    /// - `X8` (indirect result location) — reserved for special ABI use
+   928→    /// - `X16` (IP0) / `X17` (IP1) — linker veneer scratch
+   929→    /// - `X18` (platform register)
+   930→    /// - `X29` (frame pointer)
+   931→    /// - `X30` (link register)
+   932→    /// - `SP`, `XZR`
+   933→    pub fn new() -> Self {
+   934→        let caller_saved_gprs = vec![
+   935→            Register::X0,
+   936→            Register::X1,
+   937→            Register::X2,
+   938→            Register::X3,
+   939→            Register::X4,
+   940→            Register::X5,
+   941→            Register::X6,
+   942→            Register::X7,
+   943→            Register::X9,
+   944→            Register::X10,
+   945→            Register::X11,
+   946→            Register::X12,
+   947→            Register::X13,
+   948→            Register::X14,
+   949→            Register::X15,
+   950→        ];
+   951→
+   952→        let callee_saved_gprs = vec![
+   953→            Register::X19,
+   954→            Register::X20,
+   955→            Register::X21,
+   956→            Register::X22,
+   957→            Register::X23,
+   958→            Register::X24,
+   959→            Register::X25,
+   960→            Register::X26,
+   961→            Register::X27,
+   962→            Register::X28,
+   963→        ];
+   964→
+   965→        let caller_saved_simd = vec![
+   966→            SimdFpRegister::V0,
+   967→            SimdFpRegister::V1,
+   968→            SimdFpRegister::V2,
+   969→            SimdFpRegister::V3,
+   970→            SimdFpRegister::V4,
+   971→            SimdFpRegister::V5,
+   972→            SimdFpRegister::V6,
+   973→            SimdFpRegister::V7,
+   974→            SimdFpRegister::V16,
+   975→            SimdFpRegister::V17,
+   976→            SimdFpRegister::V18,
+   977→            SimdFpRegister::V19,
+   978→            SimdFpRegister::V20,
+   979→            SimdFpRegister::V21,
+   980→            SimdFpRegister::V22,
+   981→            SimdFpRegister::V23,
+   982→            SimdFpRegister::V24,
+   983→            SimdFpRegister::V25,
+   984→            SimdFpRegister::V26,
+   985→            SimdFpRegister::V27,
+   986→            SimdFpRegister::V28,
+   987→            SimdFpRegister::V29,
+   988→            SimdFpRegister::V30,
+   989→            SimdFpRegister::V31,
+   990→        ];
+   991→
+   992→        let callee_saved_simd = vec![
+   993→            SimdFpRegister::V8,
+   994→            SimdFpRegister::V9,
+   995→            SimdFpRegister::V10,
+   996→            SimdFpRegister::V11,
+   997→            SimdFpRegister::V12,
+   998→            SimdFpRegister::V13,
+   999→            SimdFpRegister::V14,
+  1000→            SimdFpRegister::V15,
+  1001→        ];
+  1002→
+  1003→        Self {
+  1004→            caller_saved_gprs,
+  1005→            callee_saved_gprs,
+  1006→            caller_saved_simd,
+  1007→            callee_saved_simd,
+  1008→        }
+  1009→    }
+  1010→
+  1011→    /// The number of allocatable GPRs (caller + callee saved): 15 + 10 = 25.
+  1012→    pub fn gpr_count(&self) -> usize {
+  1013→        self.caller_saved_gprs.len() + self.callee_saved_gprs.len()
+  1014→    }
+  1015→
+  1016→    /// The number of allocatable SIMD/FP registers (caller + callee saved): 24 + 8 = 32.
+  1017→    pub fn simd_count(&self) -> usize {
+  1018→        self.caller_saved_simd.len() + self.callee_saved_simd.len()
+  1019→    }
+  1020→
+  1021→    /// Run linear-scan register allocation on a single function.
+  1022→    pub fn allocate_function(&self, func: &IRFunction) -> Result<AllocationResult> {
+  1023→        let computer = LiveRangeComputer::new();
+  1024→        let (mut intervals, call_positions) = computer.compute(func);
+  1025→
+  1026→        // Sort intervals by start position, then by end position (longer
+  1027→        // intervals first at the same start — they're harder to allocate).
+  1028→        intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+  1029→
+  1030→        self.allocate_intervals(&intervals, &call_positions)
+  1031→    }
+  1032→
+  1033→    /// Run linear-scan register allocation on a single function with
+  1034→    /// explicit register class overrides.
+  1035→    pub fn allocate_function_with_classes(
+  1036→        &self,
+  1037→        func: &IRFunction,
+  1038→        class_overrides: HashMap<IRValueId, RegClass>,
+  1039→    ) -> Result<AllocationResult> {
+  1040→        let mut computer = LiveRangeComputer::new();
+  1041→        for (&vreg, &class) in &class_overrides {
+  1042→            computer.set_class(vreg, class);
+  1043→        }
+  1044→        let (mut intervals, call_positions) = computer.compute(func);
+  1045→
+  1046→        intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+  1047→
+  1048→        self.allocate_intervals(&intervals, &call_positions)
+  1049→    }
+  1050→
+  1051→    /// Core linear-scan algorithm over sorted intervals.
+  1052→    fn allocate_intervals(
+  1053→        &self,
+  1054→        intervals: &[LiveInterval],
+  1055→        _call_positions: &BTreeSet<u32>,
+  1056→    ) -> Result<AllocationResult> {
+  1057→        let mut result = AllocationResult::new();
+  1058→
+  1059→        // Active intervals: (vreg, phys_reg, interval_end, spill_weight_per_length)
+  1060→        let mut active_gprs: Vec<(IRValueId, Register, u32, u32)> = Vec::new();
+  1061→        let mut active_simd: Vec<(IRValueId, SimdFpRegister, u32, u32)> = Vec::new();
+  1062→
+  1063→        // Free pools.
+  1064→        let mut free_caller_gprs: Vec<Register> = self.caller_saved_gprs.clone();
+  1065→        let mut free_callee_gprs: Vec<Register> = self.callee_saved_gprs.clone();
+  1066→        let mut free_caller_simd: Vec<SimdFpRegister> = self.caller_saved_simd.clone();
+  1067→        let mut free_callee_simd: Vec<SimdFpRegister> = self.callee_saved_simd.clone();
+  1068→
+  1069→        let mut next_spill_index: u32 = 0;
+  1070→
+  1071→        for interval in intervals {
+  1072→            // Expire old intervals — free registers for intervals that have ended.
+  1073→            Self::expire_old_intervals(
+  1074→                &mut active_gprs,
+  1075→                &mut free_caller_gprs,
+  1076→                &mut free_callee_gprs,
+  1077→                interval.start,
+  1078→            );
+  1079→            Self::expire_old_simd_intervals(
+  1080→                &mut active_simd,
+  1081→                &mut free_caller_simd,
+  1082→                &mut free_callee_simd,
+  1083→                interval.start,
+  1084→            );
+  1085→
+  1086→            match interval.class {
+  1087→                RegClass::Gpr => {
+  1088→                    if let Some(preg) = self.try_alloc_gpr(
+  1089→                        interval,
+  1090→                        &mut free_caller_gprs,
+  1091→                        &mut free_callee_gprs,
+  1092→                        &mut active_gprs,
+  1093→                        &mut next_spill_index,
+  1094→                        &mut result,
+  1095→                    )? {
+  1096→                        Self::assign_gpr(interval, preg, &mut result);
+  1097→                    }
+  1098→                }
+  1099→                RegClass::SimdFp => {
+  1100→                    if let Some(preg) = self.try_alloc_simd(
+  1101→                        interval,
+  1102→                        &mut free_caller_simd,
+  1103→                        &mut free_callee_simd,
+  1104→                        &mut active_simd,
+  1105→                        &mut next_spill_index,
+  1106→                        &mut result,
+  1107→                    )? {
+  1108→                        Self::assign_simd(interval, preg, &mut result);
+  1109→                    }
+  1110→                }
+  1111→            }
+  1112→        }
+  1113→
+  1114→        result.live_intervals = intervals.to_vec();
+  1115→        result.total_spill_slots = next_spill_index;
+  1116→        Ok(result)
+  1117→    }
+  1118→
+  1119→    /// Assign a GPR to an interval, recording the mapping for all coalesced vregs.
+  1120→    fn assign_gpr(interval: &LiveInterval, preg: Register, result: &mut AllocationResult) {
+  1121→        let phys = PhysReg::Gpr(preg);
+  1122→        result.vreg_to_preg.insert(interval.vreg, phys);
+  1123→        if preg.is_callee_saved() {
+  1124→            result.used_callee_saved_gprs.insert(preg);
+  1125→        }
+  1126→        // Map all coalesced vregs to the same physical register.
+  1127→        for &coalesced_vreg in &interval.coalesced_vregs {
+  1128→            if coalesced_vreg != interval.vreg {
+  1129→                result.record_coalescing(coalesced_vreg, interval.vreg);
+  1130→            }
+  1131→        }
+  1132→    }
+  1133→
+  1134→    /// Assign a SIMD/FP register to an interval, recording the mapping for all coalesced vregs.
+  1135→    fn assign_simd(interval: &LiveInterval, preg: SimdFpRegister, result: &mut AllocationResult) {
+  1136→        let phys = PhysReg::SimdFp(preg);
+  1137→        result.vreg_to_preg.insert(interval.vreg, phys);
+  1138→        if preg.is_callee_saved() {
+  1139→            result.used_callee_saved_simd.insert(preg);
+  1140→        }
+  1141→        // Map all coalesced vregs to the same physical register.
+  1142→        for &coalesced_vreg in &interval.coalesced_vregs {
+  1143→            if coalesced_vreg != interval.vreg {
+  1144→                result.record_coalescing(coalesced_vreg, interval.vreg);
+  1145→            }
+  1146→        }
+  1147→    }
+  1148→
+  1149→    /// Try to allocate a GPR for the given interval.
+  1150→    fn try_alloc_gpr(
+  1151→        &self,
+  1152→        interval: &LiveInterval,
+  1153→        free_caller: &mut Vec<Register>,
+  1154→        free_callee: &mut Vec<Register>,
+  1155→        active: &mut Vec<(IRValueId, Register, u32, u32)>,
+  1156→        next_spill_idx: &mut u32,
+  1157→        result: &mut AllocationResult,
+  1158→    ) -> Result<Option<Register>> {
+  1159→        // If the interval crosses a call, prefer callee-saved.
+  1160→        let reg = if interval.crosses_call {
+  1161→            free_callee.pop().or_else(|| free_caller.pop())
+  1162→        } else {
+  1163→            free_caller.pop().or_else(|| free_callee.pop())
+  1164→        };
+  1165→
+  1166→        if let Some(r) = reg {
+  1167→            active.push((interval.vreg, r, interval.end, interval.weight_per_length()));
+  1168→            return Ok(Some(r));
+  1169→        }
+  1170→
+  1171→        // No free register — need to spill/evict.
+  1172→        Self::spill_gpr(interval, active, next_spill_idx, result)
+  1173→    }
+  1174→
+  1175→    /// Spill logic for GPRs — evict the active interval with the lowest
+  1176→    /// spill weight per length, or spill the current one if it has the
+  1177→    /// lowest weight.
+  1178→    fn spill_gpr(
+  1179→        interval: &LiveInterval,
+  1180→        active: &mut Vec<(IRValueId, Register, u32, u32)>,
+  1181→        next_spill_idx: &mut u32,
+  1182→        result: &mut AllocationResult,
+  1183→    ) -> Result<Option<Register>> {
+  1184→        if active.is_empty() {
+  1185→            // Spill the current interval entirely.
+  1186→            let slot_idx = *next_spill_idx;
+  1187→            *next_spill_idx += 1;
+  1188→            let offset = Self::spill_offset(slot_idx, RegClass::Gpr);
+  1189→            let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
+  1190→
+  1191→            Self::gen_spill_reload(interval, PhysReg::Gpr(Register::X0), &slot, result);
+  1192→            result.spill_slots.insert(interval.vreg, slot);
+  1193→
+  1194→            return Ok(None);
+  1195→        }
+  1196→
+  1197→        // Find the active interval with the lowest spill weight per length
+  1198→        // (least deserving of a register).  Fall back to farthest end point
+  1199→        // as a tiebreaker.
+  1200→        let evict_idx = active
+  1201→            .iter()
+  1202→            .enumerate()
+  1203→            .min_by(|a, b| {
+  1204→                // Compare by weight_per_length (4th element), then by end position
+  1205→                // (farthest end = less urgent).
+  1206→                a.1 .3
+  1207→                    .cmp(&b.1 .3)
+  1208→                    .then_with(|| b.1 .2.cmp(&a.1 .2))
+  1209→            })
+  1210→            .map(|(i, _)| i)
+  1211→            .unwrap();
+  1212→
+  1213→        let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
+  1214→        let current_weight = interval.weight_per_length();
+  1215→
+  1216→        // If the current interval has lower weight than the best eviction
+  1217→        // candidate, spill the current interval instead.
+  1218→        if current_weight <= evict_weight {
+  1219→            let slot_idx = *next_spill_idx;
+  1220→            *next_spill_idx += 1;
+  1221→            let offset = Self::spill_offset(slot_idx, RegClass::Gpr);
+  1222→            let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
+  1223→
+  1224→            Self::gen_spill_reload(interval, PhysReg::Gpr(Register::X0), &slot, result);
+  1225→            result.spill_slots.insert(interval.vreg, slot);
+  1226→
+  1227→            return Ok(None);
+  1228→        }
+  1229→
+  1230→        // Evict the chosen active interval.
+  1231→        active.remove(evict_idx);
+  1232→
+  1233→        let slot_idx = *next_spill_idx;
+  1234→        *next_spill_idx += 1;
+  1235→        let offset = Self::spill_offset(slot_idx, RegClass::Gpr);
+  1236→        let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
+  1237→        result.spill_slots.insert(evict_vreg, slot.clone());
+  1238→
+  1239→        // Remove the evicted vreg's physical register mapping.
+  1240→        result.vreg_to_preg.remove(&evict_vreg);
+  1241→        result.used_callee_saved_gprs.remove(&evict_reg);
+  1242→
+  1243→        // Generate spill for evicted interval (at the point of eviction,
+  1244→        // the value must be stored to its slot) and reloads at each future
+  1245→        // use position.
+  1246→        Self::gen_eviction_spill_reload(
+  1247→            evict_vreg,
+  1248→            PhysReg::Gpr(evict_reg),
+  1249→            evict_end,
+  1250→            &slot,
+  1251→            result,
+  1252→        );
+  1253→
+  1254→        // Return the freed register.
+  1255→        active.push((interval.vreg, evict_reg, interval.end, interval.weight_per_length()));
+  1256→        Ok(Some(evict_reg))
+  1257→    }
+  1258→
+  1259→    /// Try to allocate a SIMD/FP register.
+  1260→    fn try_alloc_simd(
+  1261→        &self,
+  1262→        interval: &LiveInterval,
+  1263→        free_caller: &mut Vec<SimdFpRegister>,
+  1264→        free_callee: &mut Vec<SimdFpRegister>,
+  1265→        active: &mut Vec<(IRValueId, SimdFpRegister, u32, u32)>,
+  1266→        next_spill_idx: &mut u32,
+  1267→        result: &mut AllocationResult,
+  1268→    ) -> Result<Option<SimdFpRegister>> {
+  1269→        let reg = if interval.crosses_call {
+  1270→            free_callee.pop().or_else(|| free_caller.pop())
+  1271→        } else {
+  1272→            free_caller.pop().or_else(|| free_callee.pop())
+  1273→        };
+  1274→
+  1275→        if let Some(r) = reg {
+  1276→            active.push((interval.vreg, r, interval.end, interval.weight_per_length()));
+  1277→            return Ok(Some(r));
+  1278→        }
+  1279→
+  1280→        // No free register — spill.
+  1281→        Self::spill_simd(interval, active, next_spill_idx, result)
+  1282→    }
+  1283→
+  1284→    /// Spill logic for SIMD/FP registers with weight-based eviction.
+  1285→    fn spill_simd(
+  1286→        interval: &LiveInterval,
+  1287→        active: &mut Vec<(IRValueId, SimdFpRegister, u32, u32)>,
+  1288→        next_spill_idx: &mut u32,
+  1289→        result: &mut AllocationResult,
+  1290→    ) -> Result<Option<SimdFpRegister>> {
+  1291→        if active.is_empty() {
+  1292→            let slot_idx = *next_spill_idx;
+  1293→            *next_spill_idx += 1;
+  1294→            let offset = Self::spill_offset(slot_idx, RegClass::SimdFp);
+  1295→            let slot = SpillSlot::new(slot_idx, offset, RegClass::SimdFp);
+  1296→
+  1297→            Self::gen_spill_reload(
+  1298→                interval,
+  1299→                PhysReg::SimdFp(SimdFpRegister::V0),
+  1300→                &slot,
+  1301→                result,
+  1302→            );
+  1303→            result.spill_slots.insert(interval.vreg, slot);
+  1304→
+  1305→            return Ok(None);
+  1306→        }
+  1307→
+  1308→        let evict_idx = active
+  1309→            .iter()
+  1310→            .enumerate()
+  1311→            .min_by(|a, b| {
+  1312→                a.1 .3
+  1313→                    .cmp(&b.1 .3)
+  1314→                    .then_with(|| b.1 .2.cmp(&a.1 .2))
+  1315→            })
+  1316→            .map(|(i, _)| i)
+  1317→            .unwrap();
+  1318→
+  1319→        let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
+  1320→        let current_weight = interval.weight_per_length();
+  1321→
+  1322→        if current_weight <= evict_weight {
+  1323→            let slot_idx = *next_spill_idx;
+  1324→            *next_spill_idx += 1;
+  1325→            let offset = Self::spill_offset(slot_idx, RegClass::SimdFp);
+  1326→            let slot = SpillSlot::new(slot_idx, offset, RegClass::SimdFp);
+  1327→
+  1328→            Self::gen_spill_reload(
+  1329→                interval,
+  1330→                PhysReg::SimdFp(SimdFpRegister::V0),
+  1331→                &slot,
+  1332→                result,
+  1333→            );
+  1334→            result.spill_slots.insert(interval.vreg, slot);
+  1335→
+  1336→            return Ok(None);
+  1337→        }
+  1338→
+  1339→        active.remove(evict_idx);
+  1340→
+  1341→        let slot_idx = *next_spill_idx;
+  1342→        *next_spill_idx += 1;
+  1343→        let offset = Self::spill_offset(slot_idx, RegClass::SimdFp);
+  1344→        let slot = SpillSlot::new(slot_idx, offset, RegClass::SimdFp);
+  1345→        result.spill_slots.insert(evict_vreg, slot.clone());
+  1346→
+  1347→        result.vreg_to_preg.remove(&evict_vreg);
+  1348→        result.used_callee_saved_simd.remove(&evict_reg);
+  1349→
+  1350→        Self::gen_eviction_spill_reload(
+  1351→            evict_vreg,
+  1352→            PhysReg::SimdFp(evict_reg),
+  1353→            evict_end,
+  1354→            &slot,
+  1355→            result,
+  1356→        );
+  1357→
+  1358→        active.push((interval.vreg, evict_reg, interval.end, interval.weight_per_length()));
+  1359→        Ok(Some(evict_reg))
+  1360→    }
+  1361→
+  1362→    /// Expire old GPR intervals whose end point is before `position`.
+  1363→    fn expire_old_intervals(
+  1364→        active: &mut Vec<(IRValueId, Register, u32, u32)>,
+  1365→        free_caller: &mut Vec<Register>,
+  1366→        free_callee: &mut Vec<Register>,
+  1367→        position: u32,
+  1368→    ) {
+  1369→        let mut i = 0;
+  1370→        while i < active.len() {
+  1371→            if active[i].2 < position {
+  1372→                let (_, reg, _, _) = active.remove(i);
+  1373→                if reg.is_callee_saved() {
+  1374→                    free_callee.push(reg);
+  1375→                } else {
+  1376→                    free_caller.push(reg);
+  1377→                }
+  1378→            } else {
+  1379→                i += 1;
+  1380→            }
+  1381→        }
+  1382→    }
+  1383→
+  1384→    /// Expire old SIMD/FP intervals whose end point is before `position`.
+  1385→    fn expire_old_simd_intervals(
+  1386→        active: &mut Vec<(IRValueId, SimdFpRegister, u32, u32)>,
+  1387→        free_caller: &mut Vec<SimdFpRegister>,
+  1388→        free_callee: &mut Vec<SimdFpRegister>,
+  1389→        position: u32,
+  1390→    ) {
+  1391→        let mut i = 0;
+  1392→        while i < active.len() {
+  1393→            if active[i].2 < position {
+  1394→                let (_, reg, _, _) = active.remove(i);
+  1395→                if reg.is_callee_saved() {
+  1396→                    free_callee.push(reg);
+  1397→                } else {
+  1398→                    free_caller.push(reg);
+  1399→                }
+  1400→            } else {
+  1401→                i += 1;
+  1402→            }
+  1403→        }
+  1404→    }
+  1405→
+  1406→    /// Generate spill and reload code for an interval that is entirely spilled.
+  1407→    ///
+  1408→    /// For each def position, a `SpillCode::Spill` is inserted after the
+  1409→    /// definition. For each use position, a `SpillCode::Reload` is inserted
+  1410→    /// before the use.
+  1411→    fn gen_spill_reload(
+  1412→        interval: &LiveInterval,
+  1413→        preg: PhysReg,
+  1414→        slot: &SpillSlot,
+  1415→        result: &mut AllocationResult,
+  1416→    ) {
+  1417→        // Generate a spill after each definition.
+  1418→        for &def_pos in &interval.def_positions {
+  1419→            let spill = SpillCode::Spill {
+  1420→                vreg: interval.vreg,
+  1421→                preg,
+  1422→                slot: slot.clone(),
+  1423→            };
+  1424→            result.spill_code.entry(def_pos + 1).or_default().push(spill);
+  1425→        }
+  1426→
+  1427→        // Generate a reload before each use.
+  1428→        for &use_pos in &interval.use_positions {
+  1429→            let reload = SpillCode::Reload {
+  1430→                vreg: interval.vreg,
+  1431→                preg,
+  1432→                slot: slot.clone(),
+  1433→            };
+  1434→            result.spill_code.entry(use_pos).or_default().push(reload);
+  1435→        }
+  1436→    }
+  1437→
+  1438→    /// Generate spill code for an evicted interval.
+  1439→    ///
+  1440→    /// When an interval is evicted from a register, we need to:
+  1441→    /// 1. Spill the current value to the stack slot.
+  1442→    /// 2. Generate reloads at every future use position that falls within
+  1443→    ///    the evicted interval's remaining live range.
+  1444→    fn gen_eviction_spill_reload(
+  1445→        evict_vreg: IRValueId,
+  1446→        evict_preg: PhysReg,
+  1447→        _evict_end: u32,
+  1448→        slot: &SpillSlot,
+  1449→        result: &mut AllocationResult,
+  1450→    ) {
+  1451→        // Spill the evicted value to its slot.
+  1452→        let spill = SpillCode::Spill {
+  1453→            vreg: evict_vreg,
+  1454→            preg: evict_preg,
+  1455→            slot: slot.clone(),
+  1456→        };
+  1457→        result.spill_code.entry(0).or_default().push(spill);
+  1458→
+  1459→        // For a proper implementation, we would need the use positions of the
+  1460→        // evicted interval to generate reloads. Since we only track the vreg
+  1461→        // and end position in the active list, we record a generic spill.
+  1462→        // The emitter will need to handle reloads when it encounters uses of
+  1463→        // spilled vregs.
+  1464→    }
+  1465→
+  1466→    /// Calculate the stack offset for a spill slot.
+  1467→    fn spill_offset(slot_index: u32, class: RegClass) -> i32 {
+  1468→        let size: i32 = match class {
+  1469→            RegClass::Gpr => 8,
+  1470→            RegClass::SimdFp => 16,
+  1471→        };
+  1472→        -((slot_index as i32 + 1) * size)
+  1473→    }
+  1474→
+  1475→    /// Run allocation over an entire IR program, returning per-function
+  1476→    /// allocation results.
+  1477→    pub fn allocate_program(
+  1478→        &self,
+  1479→        program: &IRProgram,
+  1480→    ) -> Result<HashMap<String, AllocationResult>> {
+  1481→        let mut results = HashMap::new();
+  1482→        for func in &program.functions {
+  1483→            let result = self.allocate_function(func)?;
+  1484→            results.insert(func.name.clone(), result);
+  1485→        }
+  1486→        Ok(results)
+  1487→    }
+  1488→
+  1489→    /// Run allocation over an entire IR program with per-function register
+  1490→    /// class overrides, returning per-function allocation results.
+  1491→    pub fn allocate_program_with_classes(
+  1492→        &self,
+  1493→        program: &IRProgram,
+  1494→        class_overrides: &HashMap<String, HashMap<IRValueId, RegClass>>,
+  1495→    ) -> Result<HashMap<String, AllocationResult>> {
+  1496→        let mut results = HashMap::new();
+  1497→        for func in &program.functions {
+  1498→            let overrides = class_overrides.get(&func.name).cloned().unwrap_or_default();
+  1499→            let result = self.allocate_function_with_classes(func, overrides)?;
+  1500→            results.insert(func.name.clone(), result);
+  1501→        }
+  1502→        Ok(results)
+  1503→    }
+  1504→}
+  1505→
+  1506→impl Default for LinearScanAllocator {
+  1507→    fn default() -> Self {
+  1508→        Self::new()
+  1509→    }
+  1510→}
+  1511→
+  1512→// ═══════════════════════════════════════════════════════════════════════════
+  1513→// Legacy RegAllocator (kept for backward compatibility with emit.rs)
+  1514→// ═══════════════════════════════════════════════════════════════════════════
+  1515→
+  1516→/// A simple greedy register allocator.
+  1517→///
+  1518→/// Maintains a pool of free physical registers and a mapping from virtual
+  1519→/// register IDs to physical registers.  When the pool is exhausted, values
+  1520→/// are spilled to the stack.
+  1521→///
+  1522→/// **Note:** For new code, prefer [`LinearScanAllocator`] which provides
+  1523→/// proper live-range-aware allocation.
+  1524→#[derive(Debug)]
+  1525→pub struct RegAllocator {
+  1526→    /// Physical registers available for allocation (caller-saved by default).
+  1527→    free_regs: Vec<Register>,
+  1528→    /// Current mapping: virtual register ID → physical register.
+  1529→    used_regs: HashMap<IRValueId, Register>,
+  1530→    /// Spill slot counter (each slot is 8 bytes on the stack).
+  1531→    next_spill_slot: u32,
+  1532→    /// Records which virtual registers have been spilled and their stack
+  1533→    /// slot offset.
+  1534→    spill_map: HashMap<IRValueId, u32>,
+  1535→    /// Callee-saved registers reserved for cross-call values.
+  1536→    callee_saved_pool: Vec<Register>,
+  1537→    /// Track which callee-saved registers are in use.
+  1538→    callee_saved_used: HashMap<IRValueId, Register>,
+  1539→}
+  1540→
+  1541→impl RegAllocator {
+  1542→    /// Create a new allocator with the default ARM64 caller-saved register
+  1543→    /// pool.
+  1544→    pub fn new() -> Self {
+  1545→        let free_regs = vec![
+  1546→            Register::X0,
+  1547→            Register::X1,
+  1548→            Register::X2,
+  1549→            Register::X3,
+  1550→            Register::X4,
+  1551→            Register::X5,
+  1552→            Register::X6,
+  1553→            Register::X7,
+  1554→            Register::X9,
+  1555→            Register::X10,
+  1556→            Register::X11,
+  1557→            Register::X12,
+  1558→            Register::X13,
+  1559→            Register::X14,
+  1560→            Register::X15,
+  1561→            Register::X17,
+  1562→        ];
+  1563→
+  1564→        let callee_saved_pool = vec![
+  1565→            Register::X19,
+  1566→            Register::X20,
+  1567→            Register::X21,
+  1568→            Register::X22,
+  1569→            Register::X23,
+  1570→            Register::X24,
+  1571→            Register::X25,
+  1572→            Register::X26,
+  1573→            Register::X27,
+  1574→            Register::X28,
+  1575→        ];
+  1576→
+  1577→        Self {
+  1578→            free_regs,
+  1579→            used_regs: HashMap::new(),
+  1580→            next_spill_slot: 0,
+  1581→            spill_map: HashMap::new(),
+  1582→            callee_saved_pool,
+  1583→            callee_saved_used: HashMap::new(),
+  1584→        }
+  1585→    }
+  1586→
+  1587→    /// Allocate a physical register for the given virtual register ID.
+  1588→    pub fn allocate(&mut self, vreg: IRValueId) -> Result<Register> {
+  1589→        if let Some(&reg) = self.used_regs.get(&vreg) {
+  1590→            return Ok(reg);
+  1591→        }
+  1592→        if let Some(reg) = self.free_regs.pop() {
+  1593→            self.used_regs.insert(vreg, reg);
+  1594→            return Ok(reg);
+  1595→        }
+  1596→        if let Some(reg) = self.callee_saved_pool.pop() {
+  1597→            self.callee_saved_used.insert(vreg, reg);
+  1598→            return Ok(reg);
+  1599→        }
+  1600→        self.spill()?;
+  1601→        if let Some(reg) = self.free_regs.pop() {
+  1602→            self.used_regs.insert(vreg, reg);
+  1603→            return Ok(reg);
+  1604→        }
+  1605→        Err(CodegenError::RegisterAllocFailed(format!(
+  1606→            "cannot allocate a register for vreg {} — all registers exhausted",
+  1607→            vreg
+  1608→        )))
+  1609→    }
+  1610→
+  1611→    /// Allocate a callee-saved register (for values that must survive
+  1612→    /// function calls).
+  1613→    pub fn allocate_callee_saved(&mut self, vreg: IRValueId) -> Result<Register> {
+  1614→        if let Some(&reg) = self.callee_saved_used.get(&vreg) {
+  1615→            return Ok(reg);
+  1616→        }
+  1617→        if let Some(&reg) = self.used_regs.get(&vreg) {
+  1618→            return Ok(reg);
+  1619→        }
+  1620→        if let Some(reg) = self.callee_saved_pool.pop() {
+  1621→            self.callee_saved_used.insert(vreg, reg);
+  1622→            return Ok(reg);
+  1623→        }
+  1624→        Err(CodegenError::RegisterAllocFailed(format!(
+  1625→            "no callee-saved register available for vreg {}",
+  1626→            vreg
+  1627→        )))
+  1628→    }
+  1629→
+  1630→    /// Free a physical register previously allocated to `vreg`.
+  1631→    pub fn free(&mut self, vreg: IRValueId) {
+  1632→        if let Some(reg) = self.used_regs.remove(&vreg) {
+  1633→            self.free_regs.push(reg);
+  1634→        }
+  1635→        if let Some(reg) = self.callee_saved_used.remove(&vreg) {
+  1636→            self.callee_saved_pool.push(reg);
+  1637→        }
+  1638→        self.spill_map.remove(&vreg);
+  1639→    }
+  1640→
+  1641→    /// Spill the oldest (first-inserted) mapped register to the stack.
+  1642→    pub fn spill(&mut self) -> Result<()> {
+  1643→        let vreg_to_spill = self
+  1644→            .used_regs
+  1645→            .keys()
+  1646→            .copied()
+  1647→            .next()
+  1648→            .ok_or_else(|| CodegenError::RegisterAllocFailed("no register to spill".into()))?;
+  1649→
+  1650→        let reg = self.used_regs.remove(&vreg_to_spill).unwrap();
+  1651→        let slot = self.next_spill_slot;
+  1652→        self.next_spill_slot += 1;
+  1653→        self.spill_map.insert(vreg_to_spill, slot);
+  1654→        self.free_regs.push(reg);
+  1655→
+  1656→        log::debug!(
+  1657→            "spilled vreg {} to stack slot {} (freed {})",
+  1658→            vreg_to_spill,
+  1659→            slot,
+  1660→            reg
+  1661→        );
+  1662→        Ok(())
+  1663→    }
+  1664→
+  1665→    /// Look up the physical register for a virtual register, allocating one
+  1666→    /// if necessary.
+  1667→    pub fn get_or_alloc(&mut self, vreg: IRValueId) -> Result<Register> {
+  1668→        self.allocate(vreg)
+  1669→    }
+  1670→
+  1671→    /// Get the physical register for a virtual register, if it has already
+  1672→    /// been allocated.
+  1673→    pub fn get(&self, vreg: IRValueId) -> Option<Register> {
+  1674→        self.used_regs
+  1675→            .get(&vreg)
+  1676→            .copied()
+  1677→            .or_else(|| self.callee_saved_used.get(&vreg).copied())
+  1678→    }
+  1679→
+  1680→    /// Check whether a virtual register has been spilled.
+  1681→    pub fn is_spilled(&self, vreg: IRValueId) -> bool {
+  1682→        self.spill_map.contains_key(&vreg)
+  1683→    }
+  1684→
+  1685→    /// Get the spill slot offset for a spilled vreg.
+  1686→    pub fn spill_slot(&self, vreg: IRValueId) -> Option<u32> {
+  1687→        self.spill_map.get(&vreg).copied()
+  1688→    }
+  1689→
+  1690→    /// Total number of spill slots currently in use.
+  1691→    pub fn spill_count(&self) -> u32 {
+  1692→        self.next_spill_slot
+  1693→    }
+  1694→
+  1695→    /// Returns the set of callee-saved registers that are in use.
+  1696→    pub fn used_callee_saved(&self) -> Vec<Register> {
+  1697→        self.callee_saved_used.values().copied().collect()
+  1698→    }
+  1699→
+  1700→    /// Reset the allocator state (e.g. between functions).
+  1701→    pub fn reset(&mut self) {
+  1702→        *self = Self::new();
+  1703→    }
+  1704→
+  1705→    /// Run allocation over an entire IR program.
+  1706→    pub fn allocate_program(
+  1707→        &mut self,
+  1708→        program: &IRProgram,
+  1709→    ) -> Result<HashMap<IRValueId, Register>> {
+  1710→        let mut all_mappings = HashMap::new();
+  1711→        for func in &program.functions {
+  1712→            self.reset();
+  1713→            let func_mappings = self.allocate_function(func)?;
+  1714→            all_mappings.extend(func_mappings);
+  1715→        }
+  1716→        Ok(all_mappings)
+  1717→    }
+  1718→
+  1719→    /// Run allocation over a single IR function.
+  1720→    pub fn allocate_function(&mut self, func: &IRFunction) -> Result<HashMap<IRValueId, Register>> {
+  1721→        for block in &func.blocks {
+  1722→            for instr in &block.instructions {
+  1723→                for vreg_id in instr.used_regs() {
+  1724→                    self.allocate(vreg_id)?;
+  1725→                }
+  1726→                for vreg_id in instr.defined_regs() {
+  1727→                    self.allocate(vreg_id)?;
+  1728→                }
+  1729→            }
+  1730→        }
+  1731→
+  1732→        let mut mappings = HashMap::new();
+  1733→        for (&vreg, &reg) in &self.used_regs {
+  1734→            mappings.insert(vreg, reg);
+  1735→        }
+  1736→        for (&vreg, &reg) in &self.callee_saved_used {
+  1737→            mappings.insert(vreg, reg);
+  1738→        }
+  1739→        Ok(mappings)
+  1740→    }
+  1741→
+  1742→    /// Resolve an [`IRValue`] to a physical register or immediate.
+  1743→    pub fn resolve_value(&mut self, val: &IRValue) -> Result<Option<Register>> {
+  1744→        match val {
+  1745→            IRValue::Register(id) => Ok(Some(self.allocate(*id)?)),
+  1746→            IRValue::Immediate(_) => Ok(None),
+  1747→            IRValue::Address(_) => Ok(None),
+  1748→            IRValue::Label(_) => Ok(None),
+  1749→        }
+  1750→    }
+  1751→}
+  1752→
+  1753→impl Default for RegAllocator {
+  1754→    fn default() -> Self {
+  1755→        Self::new()
+  1756→    }
+  1757→}
+  1758→
+  1759→// ═══════════════════════════════════════════════════════════════════════════
+  1760→// Tests
+  1761→// ═══════════════════════════════════════════════════════════════════════════
+  1762→
+  1763→#[cfg(test)]
+  1764→mod tests {
+  1765→    use super::*;
+  1766→    use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator};
+  1767→
+  1768→    // ---- Legacy RegAllocator tests (kept for backward compatibility) ----
+  1769→
+  1770→    #[test]
+  1771→    fn allocate_basic() {
+  1772→        let mut alloc = RegAllocator::new();
+  1773→        let r0 = alloc.allocate(0).unwrap();
+  1774→        let r1 = alloc.allocate(1).unwrap();
+  1775→        assert_ne!(r0, r1);
+  1776→    }
+  1777→
+  1778→    #[test]
+  1779→    fn free_and_reuse() {
+  1780→        let mut alloc = RegAllocator::new();
+  1781→        let r0 = alloc.allocate(0).unwrap();
+  1782→        alloc.free(0);
+  1783→        let r1 = alloc.allocate(1).unwrap();
+  1784→        assert_eq!(r0, r1);
+  1785→    }
+  1786→
+  1787→    #[test]
+  1788→    fn spill_when_exhausted() {
+  1789→        let mut alloc = RegAllocator::new();
+  1790→        for i in 0..30 {
+  1791→            let result = alloc.allocate(i);
+  1792→            assert!(result.is_ok(), "allocation for vreg {} failed", i);
+  1793→        }
+  1794→        assert!(alloc.spill_count() > 0, "expected some spills");
+  1795→    }
+  1796→
+  1797→    #[test]
+  1798→    fn callee_saved_tracking() {
+  1799→        let mut alloc = RegAllocator::new();
+  1800→        let _ = alloc.allocate_callee_saved(0).unwrap();
+  1801→        let saved = alloc.used_callee_saved();
+  1802→        assert!(!saved.is_empty());
+  1803→    }
+  1804→
+  1805→    #[test]
+  1806→    fn legacy_allocate_function() {
+  1807→        let mut func = crate::ir::IRFunction::new("test");
+  1808→        func.params.push(IRValue::Register(0));
+  1809→        func.params.push(IRValue::Register(1));
+  1810→        let block = func.current_block();
+  1811→        block.push(IRInstr::BinOp {
+  1812→            op: BinOpKind::Add,
+  1813→            dst: IRValue::Register(2),
+  1814→            lhs: IRValue::Register(0),
+  1815→            rhs: IRValue::Register(1),
+  1816→        });
+  1817→        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1818→
+  1819→        let mut alloc = RegAllocator::new();
+  1820→        let mappings = alloc.allocate_function(&func).unwrap();
+  1821→        assert!(mappings.contains_key(&0));
+  1822→        assert!(mappings.contains_key(&1));
+  1823→        assert!(mappings.contains_key(&2));
+  1824→    }
+  1825→
+  1826→    // ---- LinearScanAllocator tests ----
+  1827→
+  1828→    #[test]
+  1829→    fn linear_scan_simple_function() {
+  1830→        let mut func = crate::ir::IRFunction::new("add");
+  1831→        func.params.push(IRValue::Register(0));
+  1832→        func.params.push(IRValue::Register(1));
+  1833→        let block = func.current_block();
+  1834→        block.push(IRInstr::BinOp {
+  1835→            op: BinOpKind::Add,
+  1836→            dst: IRValue::Register(2),
+  1837→            lhs: IRValue::Register(0),
+  1838→            rhs: IRValue::Register(1),
+  1839→        });
+  1840→        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1841→
+  1842→        let alloc = LinearScanAllocator::new();
+  1843→        let result = alloc.allocate_function(&func).unwrap();
+  1844→
+  1845→        assert!(
+  1846→            result.get_phys_reg(0).is_some(),
+  1847→            "vreg 0 should have a physical reg"
+  1848→        );
+  1849→        assert!(
+  1850→            result.get_phys_reg(1).is_some(),
+  1851→            "vreg 1 should have a physical reg"
+  1852→        );
+  1853→        assert!(
+  1854→            result.get_phys_reg(2).is_some(),
+  1855→            "vreg 2 should have a physical reg"
+  1856→        );
+  1857→
+  1858→        // All three are live at the same time — no two should share a register.
+  1859→        let p0 = result.get_phys_reg(0).unwrap();
+  1860→        let p1 = result.get_phys_reg(1).unwrap();
+  1861→        let p2 = result.get_phys_reg(2).unwrap();
+  1862→        assert_ne!(p0, p1, "v0 and v1 should not share a register");
+  1863→        assert_ne!(p0, p2, "v0 and v2 should not share a register");
+  1864→        assert_ne!(p1, p2, "v1 and v2 should not share a register");
+  1865→    }
+  1866→
+  1867→    #[test]
+  1868→    fn linear_scan_no_spills_for_few_regs() {
+  1869→        let mut func = crate::ir::IRFunction::new("simple");
+  1870→        func.params.push(IRValue::Register(0));
+  1871→        let block = func.current_block();
+  1872→        block.push(IRInstr::BinOp {
+  1873→            op: BinOpKind::Add,
+  1874→            dst: IRValue::Register(1),
+  1875→            lhs: IRValue::Register(0),
+  1876→            rhs: IRValue::Immediate(1),
+  1877→        });
+  1878→        block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1879→
+  1880→        let alloc = LinearScanAllocator::new();
+  1881→        let result = alloc.allocate_function(&func).unwrap();
+  1882→
+  1883→        assert!(
+  1884→            result.spill_slots.is_empty(),
+  1885→            "no spills expected with 2 vregs"
+  1886→        );
+  1887→    }
+  1888→
+  1889→    #[test]
+  1890→    fn linear_scan_spill_many_vregs() {
+  1891→        let mut func = crate::ir::IRFunction::new("pressure");
+  1892→        func.params.push(IRValue::Register(0));
+  1893→        let block = func.current_block();
+  1894→
+  1895→        // Chain: v1 = v0 + 1, v2 = v1 + 1, ..., v30 = v29 + 1
+  1896→        // All vregs kept live by using them in the return.
+  1897→        for i in 0..30u32 {
+  1898→            block.push(IRInstr::BinOp {
+  1899→                op: BinOpKind::Add,
+  1900→                dst: IRValue::Register(i + 1),
+  1901→                lhs: IRValue::Register(i),
+  1902→                rhs: IRValue::Immediate(1),
+  1903→            });
+  1904→        }
+  1905→        let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();
+  1906→        block.terminator = IRTerminator::Return(ret_vals);
+  1907→
+  1908→        let alloc = LinearScanAllocator::new();
+  1909→        let result = alloc.allocate_function(&func).unwrap();
+  1910→
+  1911→        assert!(
+  1912→            !result.spill_slots.is_empty(),
+  1913→            "expected spills with 31 live vregs"
+  1914→        );
+  1915→        assert!(result.total_spill_slots > 0);
+  1916→    }
+  1917→
+  1918→    #[test]
+  1919→    fn linear_scan_call_crossing_gets_callee_saved() {
+  1920→        let mut func = crate::ir::IRFunction::new("cross_call");
+  1921→        func.params.push(IRValue::Register(0));
+  1922→        let block = func.current_block();
+  1923→
+  1924→        // v0 is live from the start...
+  1925→        block.push(IRInstr::Call {
+  1926→            dst: Some(IRValue::Register(1)),
+  1927→            func: "other".to_string(),
+  1928→            args: vec![],
+  1929→        });
+  1930→
+  1931→        // ...and used after the call.
+  1932→        block.push(IRInstr::BinOp {
+  1933→            op: BinOpKind::Add,
+  1934→            dst: IRValue::Register(2),
+  1935→            lhs: IRValue::Register(0),
+  1936→            rhs: IRValue::Register(1),
+  1937→        });
+  1938→
+  1939→        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1940→
+  1941→        let alloc = LinearScanAllocator::new();
+  1942→        let result = alloc.allocate_function(&func).unwrap();
+  1943→
+  1944→        // v0 should be assigned a register (ideally callee-saved for call-crossing,
+  1945→        // but the current allocator may use caller-saved with save/restore).
+  1946→        let reg0 = result.get_gpr(0);
+  1947→        assert!(reg0.is_some(), "v0 should have a GPR assigned");
+  1948→    }
+  1949→
+  1950→    #[test]
+  1951→    fn linear_scan_sequential_reuse() {
+  1952→        // v0 is used then dies; v2 can reuse its register.
+  1953→        let mut func = crate::ir::IRFunction::new("seq");
+  1954→        func.params.push(IRValue::Register(0));
+  1955→        let block = func.current_block();
+  1956→
+  1957→        // v1 = v0 + 1  (v0 is used, v1 is defined)
+  1958→        block.push(IRInstr::BinOp {
+  1959→            op: BinOpKind::Add,
+  1960→            dst: IRValue::Register(1),
+  1961→            lhs: IRValue::Register(0),
+  1962→            rhs: IRValue::Immediate(1),
+  1963→        });
+  1964→        // v2 = v1 + 1  (v1 is used, v2 is defined; v0 is dead)
+  1965→        block.push(IRInstr::BinOp {
+  1966→            op: BinOpKind::Add,
+  1967→            dst: IRValue::Register(2),
+  1968→            lhs: IRValue::Register(1),
+  1969→            rhs: IRValue::Immediate(1),
+  1970→        });
+  1971→        // Only v2 is returned — v0 and v1 are dead here.
+  1972→        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1973→
+  1974→        let alloc = LinearScanAllocator::new();
+  1975→        let result = alloc.allocate_function(&func).unwrap();
+  1976→
+  1977→        let p0 = result.get_phys_reg(0);
+  1978→        let p2 = result.get_phys_reg(2);
+  1979→        assert!(p0.is_some());
+  1980→        assert!(p2.is_some());
+  1981→        // v0 and v2 should share a register since their live ranges don't overlap.
+  1982→        assert_eq!(
+  1983→            p0, p2,
+  1984→            "v0 and v2 should share a register (non-overlapping live ranges)"
+  1985→        );
+  1986→    }
+  1987→
+  1988→    #[test]
+  1989→    fn linear_scan_live_intervals_computation() {
+  1990→        let mut func = crate::ir::IRFunction::new("interval_test");
+  1991→        func.params.push(IRValue::Register(0));
+  1992→        let block = func.current_block();
+  1993→        block.push(IRInstr::BinOp {
+  1994→            op: BinOpKind::Add,
+  1995→            dst: IRValue::Register(1),
+  1996→            lhs: IRValue::Register(0),
+  1997→            rhs: IRValue::Immediate(1),
+  1998→        });
+  1999→        block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  2000→
+
+[showing lines 1-2000 of 2498; use offset=2001 with limit to continue reading]
