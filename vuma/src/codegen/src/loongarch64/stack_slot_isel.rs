@@ -164,32 +164,31 @@ fn fits_si12(val: i64) -> bool {
 /// Stack slot is at $fp - offset_from_fp.
 fn encode_load_vreg(scratch: Gpr, fp: Gpr, offset_from_fp: i32) -> Vec<u8> {
     // offset_from_fp is negative (e.g., -24 for vreg 0)
-    // We need: ld.d scratch, $fp, offset_from_fp
-    // But ld.d's immediate is si12, so we need offset_from_fp to fit in si12
+    // Use ld.wu (load word unsigned) which zero-extends 32-bit values to 64 bits,
+    // preventing upper-half garbage from corrupting comparisons and branches.
     if fits_si12(offset_from_fp as i64) {
-        Instruction::LdD { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
+        Instruction::LdWu { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
     } else {
-        // Compute address: load offset into scratch, add to $fp, then load
-        // We need a temp register... use S2 as temp, but be careful
+        // Compute address: load offset into temp, add to $fp, then load
         let mut code = Vec::new();
-        code.extend(encode_load_imm(scratch, offset_from_fp as i64));
-        code.extend_from_slice(&Instruction::AddD { rd: scratch, rj: fp, rk: scratch }.encode());
-        code.extend_from_slice(&Instruction::LdD { rd: scratch, rj: scratch, imm12: 0 }.encode());
+        code.extend(encode_load_imm(S2, offset_from_fp as i64));
+        code.extend_from_slice(&Instruction::AddD { rd: S2, rj: fp, rk: S2 }.encode());
+        code.extend_from_slice(&Instruction::LdWu { rd: scratch, rj: S2, imm12: 0 }.encode());
         code
     }
 }
 
 /// Store a scratch register into a vreg's stack slot.
 fn encode_store_vreg(scratch: Gpr, fp: Gpr, offset_from_fp: i32) -> Vec<u8> {
+    // Use st.w (store word) to store only 32 bits, matching the ld.wu load.
     if fits_si12(offset_from_fp as i64) {
-        Instruction::StD { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
+        Instruction::StW { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
     } else {
         // Compute address: load offset into temp, add to $fp, then store
-        // Use S2 as temp address register
         let mut code = Vec::new();
         code.extend(encode_load_imm(S2, offset_from_fp as i64));
         code.extend_from_slice(&Instruction::AddD { rd: S2, rj: fp, rk: S2 }.encode());
-        code.extend_from_slice(&Instruction::StD { rd: scratch, rj: S2, imm12: 0 }.encode());
+        code.extend_from_slice(&Instruction::StW { rd: scratch, rj: S2, imm12: 0 }.encode());
         code
     }
 }
@@ -1126,15 +1125,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 | ((offs26 >> 16) & 0x3FF);
                             instrs[i].encoded[within_instr..within_instr + 4]
                                 .copy_from_slice(&new_word.to_le_bytes());
-                        } else if opcode == 0x1C || opcode == 0x1D {
-                            // BEQZ or BNEZ: 1RI21 format with non-linear bit layout
-                            // Instruction bits: opcode[31:26] | offs21[15:0] in [25:10] | offs21[20:16] in [9:5] | rj[4:0]
+                        } else if opcode == 0x10 || opcode == 0x11 {
+                            // BEQZ (0x10) or BNEZ (0x11): 1RI21 format with non-linear bit layout
+                            // Instruction bits: opcode[31:26] | offs[15:0] at [25:10] | rj at [9:5] | offs[20:16] at [4:0]
                             let offs21 = (offset_instrs as u32) & 0x1FFFFF;
-                            let rj = word & 0x1F;
+                            let rj = (word >> 5) & 0x1F;
                             let new_word = ((opcode & 0x3F) << 26)
                                 | ((offs21 & 0xFFFF) << 10)
-                                | ((offs21 >> 16) & 0x1F) << 5
-                                | (rj & 0x1F);
+                                | ((rj & 0x1F) << 5)
+                                | ((offs21 >> 16) & 0x1F);
                             instrs[i].encoded[within_instr..within_instr + 4]
                                 .copy_from_slice(&new_word.to_le_bytes());
                         } else if opcode == 0x13 {

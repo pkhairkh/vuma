@@ -413,11 +413,11 @@ fn encode_2ri16(opcode: u32, imm16: u32, rj: u32, rd: u32) -> [u8; 4] {
 /// The lower 16 bits of the offset go in the higher position (bits[25:10]),
 /// and the upper 5 bits go in the lower position (bits[9:5]).
 fn encode_1ri21(opcode: u32, imm21: u32, rj: u32) -> [u8; 4] {
-    // reg1i21 format: opcode[31:26] | imm_hi[25:10] | rj[9:5] | imm_lo[4:0]
+    // 1RI21 format (BEQZ/BNEZ): opcode[31:26] | offs[15:0] at [25:10] | rj[9:5] | offs[20:16] at [4:0]
     let word = ((opcode & 0x3F) << 26)
-        | ((imm21 >> 5) & 0xFFFF) << 10  // imm[20:5] at bits 25:10
+        | ((imm21 & 0xFFFF) << 10)       // offs[15:0] at bits 25:10
         | ((rj & 0x1F) << 5)             // rj at bits 9:5
-        | (imm21 & 0x1F);                // imm[4:0] at bits 4:0
+        | ((imm21 >> 16) & 0x1F);        // offs[20:16] at bits 4:0
     word.to_le_bytes()
 }
 
@@ -3327,9 +3327,9 @@ impl Backend for LoongArch64Backend {
         // BL encoding: I26 format, opcode = 0x15
         start_stub.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
 
-        // addi.w $a7, $r0, 93 (sys_exit = 93)
+        // addi.d $a7, $r0, 93 (sys_exit = 93)
         start_stub.extend_from_slice(
-            &Instruction::AddiW {
+            &Instruction::AddiD {
                 rd: Gpr::A7,
                 rj: Gpr::R0,
                 imm12: 93,
@@ -3803,7 +3803,7 @@ mod tests {
         }
         .encode();
         let word = u32::from_le_bytes(bytes);
-        assert_eq!((word >> 26) & 0x3F, 0x1C); // opcode check
+        assert_eq!((word >> 26) & 0x3F, OPC_BEQZ); // opcode check
     }
 
     // ── Format encoding tests ──────────────────────────────────────────
