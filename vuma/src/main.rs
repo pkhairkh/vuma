@@ -287,6 +287,17 @@ fn cmd_build(
             e
         )
     })?;
+    // Make the output file executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&out_path)
+            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&out_path, perms)
+            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+    }
 
     println!(
         "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
@@ -489,6 +500,17 @@ fn cmd_emit(
                 fs::write(&out_path, &bytes).map_err(|e| {
                     format!("error: cannot write output file '{}': {}", out_path.display(), e)
                 })?;
+                // Make the output file executable on Unix.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = fs::metadata(&out_path)
+                        .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+                        .permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&out_path, perms)
+                        .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+                }
                 println!(
                     "Emitted {} -> {} ({} bytes, ISA: {})",
                     file.display(),

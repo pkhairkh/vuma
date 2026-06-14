@@ -68,29 +68,24 @@ fn emit_instr(inst: Instruction, name: &str) -> AllocatedInstruction {
     emit(inst.encode().to_vec(), name)
 }
 
-/// Load a 64-bit immediate into a register.
+/// Load a 64-bit immediate into a register using the canonical LoongArch sequence.
 ///
 /// Strategy:
 /// 1. `lu12i.w rd, bits[31:12]` — sets bits[31:12] and sign-extends to 64 bits
 /// 2. `ori rd, rd, bits[11:0]` — sets bits[11:0]
 /// 3. If bits[63:32] don't match the sign-extension of bits[31]:
-///    a. If bits[51:32] are non-zero: use `lu52i.d rd, rd, bits[63:52]` then
-///       shift-rotate to set bits[51:32]. For simplicity, use slli.d+srli.d to
-///       zero-extend when the value fits in 32 unsigned bits.
-///    b. If only bits[63:52] differ: `lu52i.d rd, rd, bits[63:52]`
-///
-/// Note: `lu32i.d` (opcode 0x06 in 1RI20 format) is actually `pcaddi` in the
-/// LoongArch ISA as implemented by QEMU. It computes `rd = PC + imm20 << 2`,
-/// which destroys the register value. We avoid using it entirely.
+///    a. If it's a 32-bit unsigned value with bit 31 set: use `slli.d`+`srli.d` to zero-extend
+///    b. Otherwise: `lu32i.d rd, bits[51:32]` — sets bits[51:32], preserving bits[31:0] and bits[63:52]
+///    c. Then: `lu52i.d rd, rd, bits[63:52]` — sets bits[63:52], preserving bits[51:0]
 fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
     let val = imm as u64;
-    let mut code = Vec::with_capacity(24);
+    let mut code = Vec::with_capacity(16);
 
-    // lu12i.w rd, bits[31:12]
+    // Step 1: lu12i.w rd, bits[31:12]
     let hi20 = ((val >> 12) & 0xFFFFF) as i32;
     code.extend_from_slice(&Instruction::Lu12iW { rd, imm20: hi20 }.encode());
 
-    // ori rd, rd, bits[11:0]
+    // Step 2: ori rd, rd, bits[11:0]
     let lo12 = (val & 0xFFF) as u32;
     code.extend_from_slice(&Instruction::Ori { rd, rj: rd, imm12: lo12 }.encode());
 
@@ -102,9 +97,8 @@ fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
     } else {
         0u64
     };
-    let upper_after_sign_ext = sign_ext >> 32;
 
-    if val >> 32 == upper_after_sign_ext {
+    if val >> 32 == sign_ext >> 32 {
         // Upper bits already correct from sign extension — nothing more needed
         return code;
     }
@@ -119,38 +113,14 @@ fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
         return code;
     }
 
-    // For full 64-bit values, use lu52i.d to set bits[63:52]
-    // and slli.d/srli.d tricks for bits[51:32]
-    // First, set bits[63:52] with lu52i.d
+    // Full 64-bit value: use lu32i.d then lu52i.d
+    // Step 3: lu32i.d rd, bits[51:32] — sets bits[51:32], preserves bits[31:0] and bits[63:52]
+    let hi32 = ((val >> 32) & 0xFFFFF) as i32;
+    code.extend_from_slice(&Instruction::Lu32iD { rd, imm20: hi32 }.encode());
+
+    // Step 4: lu52i.d rd, rd, bits[63:52] — sets bits[63:52], preserves bits[51:0]
     let hi52 = ((val >> 52) & 0xFFF) as i32;
     code.extend_from_slice(&Instruction::Lu52iD { rd, rj: rd, imm12: hi52 }.encode());
-
-    // Now handle bits[51:32] if they differ from the sign-extended value
-    // After lu52i.d, bits[63:52] are correct but bits[51:32] may still be wrong
-    // Strategy: use bstrins.d (bit field insert) or shift+mask
-    // For simplicity, use a 4-instruction sequence:
-    //   lu12i.w temp, bits[51:32] upper
-    //   slli.d temp, temp, 32
-    //   bstrpick.d rd, rd, 31, 0  (mask rd to lower 32 bits)
-    //   or rd, rd, temp
-    // But bstrpick.d may not be in our instruction set. Use slli+srli instead.
-
-    // Actually, let's use a simpler approach: if bits[51:32] need setting,
-    // rebuild the upper portion.
-    let bits_51_32 = ((val >> 32) & 0xFFFFF) as u32;
-    if bits_51_32 != 0 {
-        // Use S2 as temp
-        // lu12i.w S2, bits[51:32]
-        let hi_51_32 = ((val >> 32) & 0xFFFFF) as i32;
-        code.extend_from_slice(&Instruction::Lu12iW { rd: S2, imm20: hi_51_32 }.encode());
-        // slli.d S2, S2, 32
-        code.extend_from_slice(&Instruction::SlliD { rd: S2, rj: S2, imm8: 32 }.encode());
-        // bstrpick.d rd, rd, 31, 0 => slli.d rd, rd, 32; srli.d rd, rd, 32
-        code.extend_from_slice(&Instruction::SlliD { rd, rj: rd, imm8: 32 }.encode());
-        code.extend_from_slice(&Instruction::SrliD { rd, rj: rd, imm8: 32 }.encode());
-        // or rd, rd, S2
-        code.extend_from_slice(&Instruction::Or { rd, rj: rd, rk: S2 }.encode());
-    }
 
     code
 }
@@ -164,31 +134,34 @@ fn fits_si12(val: i64) -> bool {
 /// Stack slot is at $fp - offset_from_fp.
 fn encode_load_vreg(scratch: Gpr, fp: Gpr, offset_from_fp: i32) -> Vec<u8> {
     // offset_from_fp is negative (e.g., -24 for vreg 0)
-    // Use ld.wu (load word unsigned) which zero-extends 32-bit values to 64 bits,
-    // preventing upper-half garbage from corrupting comparisons and branches.
+    // Use ld.d (load doubleword) since stack slots are 8 bytes and may hold
+    // 64-bit values (pointers, I64, etc.). For 32-bit values, the upper 32 bits
+    // are guaranteed clean because store uses st.d which writes all 64 bits.
     if fits_si12(offset_from_fp as i64) {
-        Instruction::LdWu { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
+        Instruction::LdD { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
     } else {
         // Compute address: load offset into temp, add to $fp, then load
         let mut code = Vec::new();
         code.extend(encode_load_imm(S2, offset_from_fp as i64));
         code.extend_from_slice(&Instruction::AddD { rd: S2, rj: fp, rk: S2 }.encode());
-        code.extend_from_slice(&Instruction::LdWu { rd: scratch, rj: S2, imm12: 0 }.encode());
+        code.extend_from_slice(&Instruction::LdD { rd: scratch, rj: S2, imm12: 0 }.encode());
         code
     }
 }
 
 /// Store a scratch register into a vreg's stack slot.
 fn encode_store_vreg(scratch: Gpr, fp: Gpr, offset_from_fp: i32) -> Vec<u8> {
-    // Use st.w (store word) to store only 32 bits, matching the ld.wu load.
+    // Use st.d (store doubleword) to store all 64 bits. This ensures 64-bit
+    // values (pointers, I64, etc.) are preserved. For 32-bit values, the upper
+    // 32 bits are clean from zero-extending .w operations or explicit masking.
     if fits_si12(offset_from_fp as i64) {
-        Instruction::StW { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
+        Instruction::StD { rd: scratch, rj: fp, imm12: offset_from_fp }.encode().to_vec()
     } else {
         // Compute address: load offset into temp, add to $fp, then store
         let mut code = Vec::new();
         code.extend(encode_load_imm(S2, offset_from_fp as i64));
         code.extend_from_slice(&Instruction::AddD { rd: S2, rj: fp, rk: S2 }.encode());
-        code.extend_from_slice(&Instruction::StW { rd: scratch, rj: S2, imm12: 0 }.encode());
+        code.extend_from_slice(&Instruction::StD { rd: scratch, rj: S2, imm12: 0 }.encode());
         code
     }
 }
@@ -603,7 +576,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         BinOpKind::UDiv => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode());
+                            code.extend_from_slice(&Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode());
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::SRem => {
@@ -615,7 +588,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         BinOpKind::URem => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::ModD { rd: S0, rj: S0, rk: S1 }.encode());
+                            code.extend_from_slice(&Instruction::ModDu { rd: S0, rj: S0, rk: S1 }.encode());
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::And => {
@@ -654,7 +627,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             if let IRValue::Immediate(imm) = rhs {
                                 if *imm == -1 {
-                                    code.extend_from_slice(&Instruction::Xori { rd: S0, rj: S0, imm12: 0xFFF }.encode());
+                                    // XOR with -1 is NOT: use nor rd, rj, $r0 (flips all 64 bits)
+                                    code.extend_from_slice(&Instruction::Nor { rd: S0, rj: S0, rk: Gpr::R0 }.encode());
                                 } else {
                                     let uimm = *imm as u64;
                                     if uimm < 4096 {
@@ -919,11 +893,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Cast ──
-                IRInstr::Cast { kind: _, dst, src, .. } => {
+                IRInstr::Cast { kind, dst, src, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // For now, all casts are just copies
                     code.extend(encode_load_value(src, S0, fp, &vreg_slots));
+                    match kind {
+                        CastKind::ZExt => {
+                            // Zero-extend lower 32 bits: slli.d + srli.d clears upper 32 bits
+                            code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                            code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                        }
+                        CastKind::SExt => {
+                            // Sign-extend from 32 bits: slli.w shifts lower 32 bits and
+                            // sign-extends bit 31 to bits[63:32], then srai.d preserves
+                            // the sign-extended value
+                            code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                        }
+                        CastKind::Trunc | CastKind::BitCast => {
+                            // No-op: truncation happens naturally when storing to stack
+                        }
+                    }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }

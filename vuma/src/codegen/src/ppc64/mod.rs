@@ -539,6 +539,10 @@ pub enum Instruction {
     Divw { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Divide Doubleword: `divd rT, rA, rB` (XO-form, primary=31, xo=459)
     Divd { rt: Gpr, ra: Gpr, rb: Gpr },
+    /// Divide Word Unsigned: `divwu rT, rA, rB` (XO-form, primary=31, xo=455)
+    Divwu { rt: Gpr, ra: Gpr, rb: Gpr },
+    /// Divide Doubleword Unsigned: `divdu rT, rA, rB` (XO-form, primary=31, xo=457)
+    Divdu { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Negate: `neg rT, rA` (XO-form, primary=31, xo=104)
     Neg { rt: Gpr, ra: Gpr },
     /// Count Leading Zeros Doubleword: `cntlzd rA, rS` (X-form, primary=31, xo=58)
@@ -751,6 +755,14 @@ impl Instruction {
             Instruction::Divd { rt, ra, rb } => {
                 // DIVD rT, rA, rB: primary=31, OE=0, xo=459, Rc=0
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
+            }
+            Instruction::Divwu { rt, ra, rb } => {
+                // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 455, 0)
+            }
+            Instruction::Divdu { rt, ra, rb } => {
+                // DIVDU rT, rA, rB: primary=31, OE=0, xo=457, Rc=0
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 457, 0)
             }
             Instruction::Neg { rt, ra } => {
                 // NEG rT, rA: primary=31, OE=0, xo=104, Rc=0, rB=0
@@ -1044,6 +1056,8 @@ impl Instruction {
             Instruction::Mulhd { .. } => "mulhd",
             Instruction::Divw { .. } => "divw",
             Instruction::Divd { .. } => "divd",
+            Instruction::Divwu { .. } => "divwu",
+            Instruction::Divdu { .. } => "divdu",
             Instruction::Neg { .. } => "neg",
             Instruction::Cntlzd { .. } => "cntlzd",
             Instruction::Popcntd { .. } => "popcntd",
@@ -1120,6 +1134,8 @@ impl fmt::Display for Instruction {
             Instruction::Mulhd { rt, ra, rb } => write!(f, "mulhd {}, {}, {}", rt, ra, rb),
             Instruction::Divw { rt, ra, rb } => write!(f, "divw {}, {}, {}", rt, ra, rb),
             Instruction::Divd { rt, ra, rb } => write!(f, "divd {}, {}, {}", rt, ra, rb),
+            Instruction::Divwu { rt, ra, rb } => write!(f, "divwu {}, {}, {}", rt, ra, rb),
+            Instruction::Divdu { rt, ra, rb } => write!(f, "divdu {}, {}, {}", rt, ra, rb),
             Instruction::Neg { rt, ra } => write!(f, "neg {}, {}", rt, ra),
             Instruction::Cntlzd { ra, rs } => write!(f, "cntlzd {}, {}", ra, rs),
             Instruction::Popcntd { ra, rs } => write!(f, "popcntd {}, {}", ra, rs),
@@ -1839,7 +1855,7 @@ fn lower_ir_instr_ppc64(
                 }
                 BinOpKind::UDiv => {
                     result.push(emit_alloc_instr(
-                        Instruction::Divd {
+                        Instruction::Divdu {
                             rt: d,
                             ra: l,
                             rb: r,
@@ -1851,11 +1867,51 @@ fn lower_ir_instr_ppc64(
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
                 }
-                BinOpKind::SRem | BinOpKind::URem => {
+                BinOpKind::SRem => {
                     // div then mul then sub: rem = lhs - (lhs/rhs)*rhs
                     let scratch = Gpr::R0; // reserved scratch
                     result.push(emit_alloc_instr(
                         Instruction::Divd {
+                            rt: scratch,
+                            ra: l,
+                            rb: r,
+                        },
+                        vec![
+                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                        ],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+                    ));
+                    result.push(emit_alloc_instr(
+                        Instruction::Mulld {
+                            rt: scratch,
+                            ra: scratch,
+                            rb: r,
+                        },
+                        vec![
+                            PhysicalReg::new(RegClass::Gpr, scratch.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                        ],
+                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+                    ));
+                    result.push(emit_alloc_instr(
+                        Instruction::Subf {
+                            rt: d,
+                            ra: scratch,
+                            rb: l,
+                        },
+                        vec![
+                            PhysicalReg::new(RegClass::Gpr, scratch.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                        ],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                BinOpKind::URem => {
+                    // Unsigned: divdu then mul then sub: rem = lhs - (lhs/rhs)*rhs
+                    let scratch = Gpr::R0; // reserved scratch
+                    result.push(emit_alloc_instr(
+                        Instruction::Divdu {
                             rt: scratch,
                             ra: l,
                             rb: r,
@@ -2412,7 +2468,15 @@ fn lower_ir_instr_ppc64(
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
                 }
-                CastKind::ZExt | CastKind::Trunc | CastKind::BitCast => {
+                CastKind::ZExt => {
+                    // Zero-extend from 32 bits: use rlwinm (CLRLDI) to clear upper 32 bits
+                    result.push(emit_alloc_instr(
+                        Instruction::Rlwinm { ra: d, rs: s, sh: 0, mb: 0, me: 31 },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                CastKind::Trunc | CastKind::BitCast => {
                     // Zero-extend, trunc, and bitcast are all just moves on PPC64
                     // (zero-extension is free after load, trunc just uses lower bits)
                     if d != s {
@@ -2933,10 +2997,18 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
                                 if is_32bit {
-                                    code.extend_from_slice(&Instruction::Divw { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                    let div_instr = match op {
+                                        BinOpKind::URem => Instruction::Divwu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                        _ => Instruction::Divw { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                    };
+                                    code.extend_from_slice(&div_instr.encode());
                                     code.extend_from_slice(&Instruction::Mullw { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
                                 } else {
-                                    code.extend_from_slice(&Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                    let div_instr = match op {
+                                        BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                        _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                    };
+                                    code.extend_from_slice(&div_instr.encode());
                                     code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
                                 }
                                 code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
@@ -2975,9 +3047,17 @@ impl Backend for PPC64Backend {
                                     }
                                     BinOpKind::SDiv | BinOpKind::UDiv => {
                                         if is_32bit {
-                                            code.extend_from_slice(&Instruction::Divw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                            let div_instr = match op {
+                                                BinOpKind::UDiv => Instruction::Divwu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+                                                _ => Instruction::Divw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+                                            };
+                                            code.extend_from_slice(&div_instr.encode());
                                         } else {
-                                            code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                            let div_instr = match op {
+                                                BinOpKind::UDiv => Instruction::Divdu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+                                                _ => Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+                                            };
+                                            code.extend_from_slice(&div_instr.encode());
                                         }
                                     }
                                     BinOpKind::And => { code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
@@ -3127,8 +3207,15 @@ impl Backend for PPC64Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R3));
-                        if let CastKind::SExt = kind {
-                            code.extend_from_slice(&Instruction::Extsw { ra: Gpr::R3, rs: Gpr::R3 }.encode());
+                        match kind {
+                            CastKind::SExt => {
+                                code.extend_from_slice(&Instruction::Extsw { ra: Gpr::R3, rs: Gpr::R3 }.encode());
+                            }
+                            CastKind::ZExt => {
+                                // Zero-extend: rlwinm ra, rs, 0, 0, 31 clears upper 32 bits
+                                code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                            }
+                            CastKind::Trunc | CastKind::BitCast => {}
                         }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code

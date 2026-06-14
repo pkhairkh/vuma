@@ -407,11 +407,11 @@ fn encode_2ri16(opcode: u32, imm16: u32, rj: u32, rd: u32) -> [u8; 4] {
 
 /// Encode a 1RI21 format instruction (used for BEQZ, BNEZ).
 ///
-/// Format: `opcode[31:26] | offs21[15:0] in bits[25:10] | offs21[20:16] in bits[9:5] | rj[4:0]`
+/// Format: `opcode[31:26] | offs21[15:0] in bits[25:10] | rj[9:5] | offs21[20:16] in bits[4:0]`
 ///
-/// Note: the offset bits are SWAPPED compared to a linear layout.
-/// The lower 16 bits of the offset go in the higher position (bits[25:10]),
-/// and the upper 5 bits go in the lower position (bits[9:5]).
+/// Note: the offset bits are split non-linearly — the lower 16 bits go in the
+/// higher position (bits[25:10]), and the upper 5 bits go in the lower position
+/// (bits[4:0]). The register field `rj` sits between them at bits[9:5].
 fn encode_1ri21(opcode: u32, imm21: u32, rj: u32) -> [u8; 4] {
     // 1RI21 format (BEQZ/BNEZ): opcode[31:26] | offs[15:0] at [25:10] | rj[9:5] | offs[20:16] at [4:0]
     let word = ((opcode & 0x3F) << 26)
@@ -463,8 +463,12 @@ const OPC_MUL_W: u32 = 0x0038;
 const OPC_MUL_D: u32 = 0x003B;
 const OPC_DIV_W: u32 = 0x0040;
 const OPC_MOD_W: u32 = 0x0041;
+const OPC_DIV_WU: u32 = 0x0042;
+const OPC_MOD_WU: u32 = 0x0043;
 const OPC_DIV_D: u32 = 0x0044;
 const OPC_MOD_D: u32 = 0x0045;
+const OPC_DIV_DU: u32 = 0x0046;
+const OPC_MOD_DU: u32 = 0x0047;
 
 // ===========================================================================
 // 3R-format FP Arithmetic Opcodes (bits[31:15])
@@ -664,10 +668,18 @@ pub enum Instruction {
     DivW { rd: Gpr, rj: Gpr, rk: Gpr },
     /// Modulo Word (signed): `mod.w rd, rj, rk`
     ModW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Divide Word (unsigned): `div.wu rd, rj, rk`
+    DivWu { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Modulo Word (unsigned): `mod.wu rd, rj, rk`
+    ModWu { rd: Gpr, rj: Gpr, rk: Gpr },
     /// Divide Doubleword (signed): `div.d rd, rj, rk`
     DivD { rd: Gpr, rj: Gpr, rk: Gpr },
     /// Modulo Doubleword (signed): `mod.d rd, rj, rk`
     ModD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Divide Doubleword (unsigned): `div.du rd, rj, rk`
+    DivDu { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Modulo Doubleword (unsigned): `mod.du rd, rj, rk`
+    ModDu { rd: Gpr, rj: Gpr, rk: Gpr },
 
     // ── Logical (3R) ────────────────────────────────────────────────
     /// AND: `and rd, rj, rk`
@@ -907,11 +919,23 @@ impl Instruction {
             Instruction::ModW { rd, rj, rk } => {
                 encode_3r(OPC_MOD_W, rk.encoding(), rj.encoding(), rd.encoding())
             }
+            Instruction::DivWu { rd, rj, rk } => {
+                encode_3r(OPC_DIV_WU, rk.encoding(), rj.encoding(), rd.encoding())
+            }
+            Instruction::ModWu { rd, rj, rk } => {
+                encode_3r(OPC_MOD_WU, rk.encoding(), rj.encoding(), rd.encoding())
+            }
             Instruction::DivD { rd, rj, rk } => {
                 encode_3r(OPC_DIV_D, rk.encoding(), rj.encoding(), rd.encoding())
             }
             Instruction::ModD { rd, rj, rk } => {
                 encode_3r(OPC_MOD_D, rk.encoding(), rj.encoding(), rd.encoding())
+            }
+            Instruction::DivDu { rd, rj, rk } => {
+                encode_3r(OPC_DIV_DU, rk.encoding(), rj.encoding(), rd.encoding())
+            }
+            Instruction::ModDu { rd, rj, rk } => {
+                encode_3r(OPC_MOD_DU, rk.encoding(), rj.encoding(), rd.encoding())
             }
 
             // ── Logical (3R) ──────────────────────────────────────
@@ -1325,8 +1349,12 @@ impl Instruction {
             Instruction::MulD { .. } => "mul.d",
             Instruction::DivW { .. } => "div.w",
             Instruction::ModW { .. } => "mod.w",
+            Instruction::DivWu { .. } => "div.wu",
+            Instruction::ModWu { .. } => "mod.wu",
             Instruction::DivD { .. } => "div.d",
             Instruction::ModD { .. } => "mod.d",
+            Instruction::DivDu { .. } => "div.du",
+            Instruction::ModDu { .. } => "mod.du",
             Instruction::And { .. } => "and",
             Instruction::Or { .. } => "or",
             Instruction::Xor { .. } => "xor",
@@ -1450,8 +1478,12 @@ impl fmt::Display for Instruction {
             Instruction::MulD { rd, rj, rk } => write!(f, "mul.d {}, {}, {}", rd, rj, rk),
             Instruction::DivW { rd, rj, rk } => write!(f, "div.w {}, {}, {}", rd, rj, rk),
             Instruction::ModW { rd, rj, rk } => write!(f, "mod.w {}, {}, {}", rd, rj, rk),
+            Instruction::DivWu { rd, rj, rk } => write!(f, "div.wu {}, {}, {}", rd, rj, rk),
+            Instruction::ModWu { rd, rj, rk } => write!(f, "mod.wu {}, {}, {}", rd, rj, rk),
             Instruction::DivD { rd, rj, rk } => write!(f, "div.d {}, {}, {}", rd, rj, rk),
             Instruction::ModD { rd, rj, rk } => write!(f, "mod.d {}, {}, {}", rd, rj, rk),
+            Instruction::DivDu { rd, rj, rk } => write!(f, "div.du {}, {}, {}", rd, rj, rk),
+            Instruction::ModDu { rd, rj, rk } => write!(f, "mod.du {}, {}, {}", rd, rj, rk),
             Instruction::And { rd, rj, rk } => write!(f, "and {}, {}, {}", rd, rj, rk),
             Instruction::Or { rd, rj, rk } => write!(f, "or {}, {}, {}", rd, rj, rk),
             Instruction::Xor { rd, rj, rk } => write!(f, "xor {}, {}, {}", rd, rj, rk),

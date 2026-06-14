@@ -4365,7 +4365,12 @@ impl Backend for RiscV64Backend {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
                         match kind {
-                            CastKind::BitCast | CastKind::Trunc | CastKind::ZExt => {}
+                            CastKind::BitCast | CastKind::Trunc => {}
+                            CastKind::ZExt => {
+                                // Zero-extend from 32 bits: slli + srli clears upper 32 bits
+                                code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                            }
                             CastKind::SExt => {
                                 code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                             }
