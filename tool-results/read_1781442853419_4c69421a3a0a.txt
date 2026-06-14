@@ -1,0 +1,923 @@
+     1→//! # Wasm32 Mnemonic Disassembler
+     2→//!
+     3→//! Decodes WebAssembly bytecode into `WasmInstr` instances and provides
+     4→//! `Display` for human-readable mnemonic output. Covers the core instruction
+     5→//! set needed by the VUMA ISel lowering.
+     6→
+     7→use super::WasmInstr;
+     8→use super::WasmType;
+     9→use super::{decode_signed_leb128, decode_unsigned_leb128};
+    10→
+    11→// ---------------------------------------------------------------------------
+    12→// Decode error
+    13→// ---------------------------------------------------------------------------
+    14→
+    15→/// Error produced when wasm decoding fails.
+    16→#[derive(Debug, Clone, PartialEq, Eq)]
+    17→pub enum DecodeError {
+    18→    /// The byte slice is too short.
+    19→    Truncated { needed: usize, available: usize },
+    20→    /// The byte sequence is not a recognised wasm opcode.
+    21→    UnknownOpcode { opcode: u8 },
+    22→}
+    23→
+    24→impl std::fmt::Display for DecodeError {
+    25→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    26→        match self {
+    27→            DecodeError::Truncated { needed, available } => {
+    28→                write!(f, "truncated: need {needed} bytes, have {available}")
+    29→            }
+    30→            DecodeError::UnknownOpcode { opcode } => {
+    31→                write!(f, "unknown wasm opcode: 0x{opcode:02x}")
+    32→            }
+    33→        }
+    34→    }
+    35→}
+    36→
+    37→impl std::error::Error for DecodeError {}
+    38→
+    39→// ---------------------------------------------------------------------------
+    40→// Display for WasmInstr
+    41→// ---------------------------------------------------------------------------
+    42→
+    43→impl std::fmt::Display for WasmInstr {
+    44→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    45→        match self {
+    46→            // Control
+    47→            WasmInstr::Block(ty) => write!(f, "block {ty}"),
+    48→            WasmInstr::Loop(ty) => write!(f, "loop {ty}"),
+    49→            WasmInstr::If(ty) => write!(f, "if {ty}"),
+    50→            WasmInstr::Else => write!(f, "else"),
+    51→            WasmInstr::End => write!(f, "end"),
+    52→            WasmInstr::Br(idx) => write!(f, "br {idx}"),
+    53→            WasmInstr::BrIf(idx) => write!(f, "br_if {idx}"),
+    54→            WasmInstr::BrTable { labels, default } => {
+    55→                write!(f, "br_table")?;
+    56→                for lbl in labels {
+    57→                    write!(f, " {lbl}")?;
+    58→                }
+    59→                write!(f, " {default}")
+    60→            }
+    61→            WasmInstr::Return => write!(f, "return"),
+    62→            WasmInstr::Call(idx) => write!(f, "call {idx}"),
+    63→            WasmInstr::CallIndirect {
+    64→                type_idx,
+    65→                table_idx,
+    66→            } => {
+    67→                write!(f, "call_indirect {type_idx} {table_idx}")
+    68→            }
+    69→
+    70→            // Parametric
+    71→            WasmInstr::Select => write!(f, "select"),
+    72→            WasmInstr::Drop => write!(f, "drop"),
+    73→
+    74→            // Variable
+    75→            WasmInstr::LocalGet(idx) => write!(f, "local.get {idx}"),
+    76→            WasmInstr::LocalSet(idx) => write!(f, "local.set {idx}"),
+    77→            WasmInstr::LocalTee(idx) => write!(f, "local.tee {idx}"),
+    78→            WasmInstr::GlobalGet(idx) => write!(f, "global.get {idx}"),
+    79→            WasmInstr::GlobalSet(idx) => write!(f, "global.set {idx}"),
+    80→
+    81→            // Memory loads
+    82→            WasmInstr::I32Load { align, offset } => {
+    83→                write!(f, "i32.load align={align} offset={offset}")
+    84→            }
+    85→            WasmInstr::I64Load { align, offset } => {
+    86→                write!(f, "i64.load align={align} offset={offset}")
+    87→            }
+    88→            WasmInstr::F32Load { align, offset } => {
+    89→                write!(f, "f32.load align={align} offset={offset}")
+    90→            }
+    91→            WasmInstr::F64Load { align, offset } => {
+    92→                write!(f, "f64.load align={align} offset={offset}")
+    93→            }
+    94→            WasmInstr::I32Load8S { align, offset } => {
+    95→                write!(f, "i32.load8_s align={align} offset={offset}")
+    96→            }
+    97→            WasmInstr::I32Load8U { align, offset } => {
+    98→                write!(f, "i32.load8_u align={align} offset={offset}")
+    99→            }
+   100→            WasmInstr::I32Load16S { align, offset } => {
+   101→                write!(f, "i32.load16_s align={align} offset={offset}")
+   102→            }
+   103→            WasmInstr::I32Load16U { align, offset } => {
+   104→                write!(f, "i32.load16_u align={align} offset={offset}")
+   105→            }
+   106→            WasmInstr::I64Load8S { align, offset } => {
+   107→                write!(f, "i64.load8_s align={align} offset={offset}")
+   108→            }
+   109→            WasmInstr::I64Load8U { align, offset } => {
+   110→                write!(f, "i64.load8_u align={align} offset={offset}")
+   111→            }
+   112→            WasmInstr::I64Load16S { align, offset } => {
+   113→                write!(f, "i64.load16_s align={align} offset={offset}")
+   114→            }
+   115→            WasmInstr::I64Load16U { align, offset } => {
+   116→                write!(f, "i64.load16_u align={align} offset={offset}")
+   117→            }
+   118→            WasmInstr::I64Load32S { align, offset } => {
+   119→                write!(f, "i64.load32_s align={align} offset={offset}")
+   120→            }
+   121→            WasmInstr::I64Load32U { align, offset } => {
+   122→                write!(f, "i64.load32_u align={align} offset={offset}")
+   123→            }
+   124→
+   125→            // Memory stores
+   126→            WasmInstr::I32Store { align, offset } => {
+   127→                write!(f, "i32.store align={align} offset={offset}")
+   128→            }
+   129→            WasmInstr::I64Store { align, offset } => {
+   130→                write!(f, "i64.store align={align} offset={offset}")
+   131→            }
+   132→            WasmInstr::F32Store { align, offset } => {
+   133→                write!(f, "f32.store align={align} offset={offset}")
+   134→            }
+   135→            WasmInstr::F64Store { align, offset } => {
+   136→                write!(f, "f64.store align={align} offset={offset}")
+   137→            }
+   138→            WasmInstr::I32Store8 { align, offset } => {
+   139→                write!(f, "i32.store8 align={align} offset={offset}")
+   140→            }
+   141→            WasmInstr::I32Store16 { align, offset } => {
+   142→                write!(f, "i32.store16 align={align} offset={offset}")
+   143→            }
+   144→            WasmInstr::I64Store8 { align, offset } => {
+   145→                write!(f, "i64.store8 align={align} offset={offset}")
+   146→            }
+   147→            WasmInstr::I64Store16 { align, offset } => {
+   148→                write!(f, "i64.store16 align={align} offset={offset}")
+   149→            }
+   150→            WasmInstr::I64Store32 { align, offset } => {
+   151→                write!(f, "i64.store32 align={align} offset={offset}")
+   152→            }
+   153→
+   154→            WasmInstr::MemorySize(idx) => write!(f, "memory.size {idx}"),
+   155→            WasmInstr::MemoryGrow(idx) => write!(f, "memory.grow {idx}"),
+   156→
+   157→            // Numeric i32
+   158→            WasmInstr::I32Const(val) => write!(f, "i32.const {val}"),
+   159→            WasmInstr::I32Eqz => write!(f, "i32.eqz"),
+   160→            WasmInstr::I32Eq => write!(f, "i32.eq"),
+   161→            WasmInstr::I32Ne => write!(f, "i32.ne"),
+   162→            WasmInstr::I32LtS => write!(f, "i32.lt_s"),
+   163→            WasmInstr::I32LtU => write!(f, "i32.lt_u"),
+   164→            WasmInstr::I32GtS => write!(f, "i32.gt_s"),
+   165→            WasmInstr::I32GtU => write!(f, "i32.gt_u"),
+   166→            WasmInstr::I32LeS => write!(f, "i32.le_s"),
+   167→            WasmInstr::I32LeU => write!(f, "i32.le_u"),
+   168→            WasmInstr::I32GeS => write!(f, "i32.ge_s"),
+   169→            WasmInstr::I32GeU => write!(f, "i32.ge_u"),
+   170→            WasmInstr::I32Clz => write!(f, "i32.clz"),
+   171→            WasmInstr::I32Ctz => write!(f, "i32.ctz"),
+   172→            WasmInstr::I32Popcnt => write!(f, "i32.popcnt"),
+   173→            WasmInstr::I32Add => write!(f, "i32.add"),
+   174→            WasmInstr::I32Sub => write!(f, "i32.sub"),
+   175→            WasmInstr::I32Mul => write!(f, "i32.mul"),
+   176→            WasmInstr::I32DivS => write!(f, "i32.div_s"),
+   177→            WasmInstr::I32DivU => write!(f, "i32.div_u"),
+   178→            WasmInstr::I32RemS => write!(f, "i32.rem_s"),
+   179→            WasmInstr::I32RemU => write!(f, "i32.rem_u"),
+   180→            WasmInstr::I32And => write!(f, "i32.and"),
+   181→            WasmInstr::I32Or => write!(f, "i32.or"),
+   182→            WasmInstr::I32Xor => write!(f, "i32.xor"),
+   183→            WasmInstr::I32Shl => write!(f, "i32.shl"),
+   184→            WasmInstr::I32ShrS => write!(f, "i32.shr_s"),
+   185→            WasmInstr::I32ShrU => write!(f, "i32.shr_u"),
+   186→            WasmInstr::I32Rotl => write!(f, "i32.rotl"),
+   187→            WasmInstr::I32Rotr => write!(f, "i32.rotr"),
+   188→
+   189→            // Numeric i64
+   190→            WasmInstr::I64Const(val) => write!(f, "i64.const {val}"),
+   191→            WasmInstr::I64Eqz => write!(f, "i64.eqz"),
+   192→            WasmInstr::I64Eq => write!(f, "i64.eq"),
+   193→            WasmInstr::I64Ne => write!(f, "i64.ne"),
+   194→            WasmInstr::I64LtS => write!(f, "i64.lt_s"),
+   195→            WasmInstr::I64LtU => write!(f, "i64.lt_u"),
+   196→            WasmInstr::I64GtS => write!(f, "i64.gt_s"),
+   197→            WasmInstr::I64GtU => write!(f, "i64.gt_u"),
+   198→            WasmInstr::I64LeS => write!(f, "i64.le_s"),
+   199→            WasmInstr::I64LeU => write!(f, "i64.le_u"),
+   200→            WasmInstr::I64GeS => write!(f, "i64.ge_s"),
+   201→            WasmInstr::I64GeU => write!(f, "i64.ge_u"),
+   202→            WasmInstr::I64Clz => write!(f, "i64.clz"),
+   203→            WasmInstr::I64Ctz => write!(f, "i64.ctz"),
+   204→            WasmInstr::I64Popcnt => write!(f, "i64.popcnt"),
+   205→            WasmInstr::I64Add => write!(f, "i64.add"),
+   206→            WasmInstr::I64Sub => write!(f, "i64.sub"),
+   207→            WasmInstr::I64Mul => write!(f, "i64.mul"),
+   208→            WasmInstr::I64DivS => write!(f, "i64.div_s"),
+   209→            WasmInstr::I64DivU => write!(f, "i64.div_u"),
+   210→            WasmInstr::I64RemS => write!(f, "i64.rem_s"),
+   211→            WasmInstr::I64RemU => write!(f, "i64.rem_u"),
+   212→            WasmInstr::I64And => write!(f, "i64.and"),
+   213→            WasmInstr::I64Or => write!(f, "i64.or"),
+   214→            WasmInstr::I64Xor => write!(f, "i64.xor"),
+   215→            WasmInstr::I64Shl => write!(f, "i64.shl"),
+   216→            WasmInstr::I64ShrS => write!(f, "i64.shr_s"),
+   217→            WasmInstr::I64ShrU => write!(f, "i64.shr_u"),
+   218→            WasmInstr::I64Rotl => write!(f, "i64.rotl"),
+   219→            WasmInstr::I64Rotr => write!(f, "i64.rotr"),
+   220→
+   221→            // Numeric f32
+   222→            WasmInstr::F32Const(val) => write!(f, "f32.const {val}"),
+   223→            WasmInstr::F32Eq => write!(f, "f32.eq"),
+   224→            WasmInstr::F32Ne => write!(f, "f32.ne"),
+   225→            WasmInstr::F32Lt => write!(f, "f32.lt"),
+   226→            WasmInstr::F32Gt => write!(f, "f32.gt"),
+   227→            WasmInstr::F32Le => write!(f, "f32.le"),
+   228→            WasmInstr::F32Ge => write!(f, "f32.ge"),
+   229→            WasmInstr::F32Add => write!(f, "f32.add"),
+   230→            WasmInstr::F32Sub => write!(f, "f32.sub"),
+   231→            WasmInstr::F32Mul => write!(f, "f32.mul"),
+   232→            WasmInstr::F32Div => write!(f, "f32.div"),
+   233→            WasmInstr::F32Sqrt => write!(f, "f32.sqrt"),
+   234→            WasmInstr::F32Neg => write!(f, "f32.neg"),
+   235→
+   236→            // Numeric f64
+   237→            WasmInstr::F64Const(val) => write!(f, "f64.const {val}"),
+   238→            WasmInstr::F64Eq => write!(f, "f64.eq"),
+   239→            WasmInstr::F64Ne => write!(f, "f64.ne"),
+   240→            WasmInstr::F64Lt => write!(f, "f64.lt"),
+   241→            WasmInstr::F64Gt => write!(f, "f64.gt"),
+   242→            WasmInstr::F64Le => write!(f, "f64.le"),
+   243→            WasmInstr::F64Ge => write!(f, "f64.ge"),
+   244→            WasmInstr::F64Add => write!(f, "f64.add"),
+   245→            WasmInstr::F64Sub => write!(f, "f64.sub"),
+   246→            WasmInstr::F64Mul => write!(f, "f64.mul"),
+   247→            WasmInstr::F64Div => write!(f, "f64.div"),
+   248→            WasmInstr::F64Sqrt => write!(f, "f64.sqrt"),
+   249→            WasmInstr::F64Neg => write!(f, "f64.neg"),
+   250→
+   251→            // Conversions
+   252→            WasmInstr::I32WrapI64 => write!(f, "i32.wrap_i64"),
+   253→            WasmInstr::I64ExtendI32S => write!(f, "i64.extend_i32_s"),
+   254→            WasmInstr::I64ExtendI32U => write!(f, "i64.extend_i32_u"),
+   255→            WasmInstr::F32DemoteF64 => write!(f, "f32.demote_f64"),
+   256→            WasmInstr::F64PromoteF32 => write!(f, "f64.promote_f32"),
+   257→            WasmInstr::I32TruncF32S => write!(f, "i32.trunc_f32_s"),
+   258→            WasmInstr::I32TruncF64S => write!(f, "i32.trunc_f64_s"),
+   259→            WasmInstr::I64TruncF32S => write!(f, "i64.trunc_f32_s"),
+   260→            WasmInstr::I64TruncF64S => write!(f, "i64.trunc_f64_s"),
+   261→            WasmInstr::F32ConvertI32S => write!(f, "f32.convert_i32_s"),
+   262→            WasmInstr::F32ConvertI64S => write!(f, "f32.convert_i64_s"),
+   263→            WasmInstr::F64ConvertI32S => write!(f, "f64.convert_i32_s"),
+   264→            WasmInstr::F64ConvertI64S => write!(f, "f64.convert_i64_s"),
+   265→            WasmInstr::I32ReinterpretF32 => write!(f, "i32.reinterpret_f32"),
+   266→            WasmInstr::I64ReinterpretF64 => write!(f, "i64.reinterpret_f64"),
+   267→            WasmInstr::F32ReinterpretI32 => write!(f, "f32.reinterpret_i32"),
+   268→            WasmInstr::F64ReinterpretI64 => write!(f, "f64.reinterpret_i64"),
+   269→
+   270→            // Pseudo
+   271→            WasmInstr::Nop => write!(f, "nop"),
+   272→            WasmInstr::Unreachable => write!(f, "unreachable"),
+   273→
+   274→            // SIMD
+   275→            WasmInstr::V128Const(_) => write!(f, "v128.const"),
+   276→            WasmInstr::I32X4Add => write!(f, "i32x4.add"),
+   277→            WasmInstr::I32X4Mul => write!(f, "i32x4.mul"),
+   278→            WasmInstr::F32X4Add => write!(f, "f32x4.add"),
+   279→            WasmInstr::F32X4Mul => write!(f, "f32x4.mul"),
+   280→
+   281→            // Bulk memory
+   282→            WasmInstr::MemoryCopy { src_mem, dst_mem } => {
+   283→                write!(f, "memory.copy {src_mem} {dst_mem}")
+   284→            }
+   285→            WasmInstr::MemoryFill { mem } => write!(f, "memory.fill {mem}"),
+   286→            WasmInstr::MemoryInit { data_idx, mem } => write!(f, "memory.init {data_idx} {mem}"),
+   287→        }
+   288→    }
+   289→}
+   290→
+   291→// ---------------------------------------------------------------------------
+   292→// Decode helpers
+   293→// ---------------------------------------------------------------------------
+   294→
+   295→/// Read a memory-immediate (align + offset, both unsigned LEB128) from the
+   296→/// byte stream. Returns (align, offset, new_pos).
+   297→fn read_memarg(bytes: &[u8], pos: usize) -> Result<(u32, u32, usize), DecodeError> {
+   298→    if pos >= bytes.len() {
+   299→        return Err(DecodeError::Truncated {
+   300→            needed: pos + 1,
+   301→            available: bytes.len(),
+   302→        });
+   303→    }
+   304→    let (align, n1) = decode_unsigned_leb128(&bytes[pos..]);
+   305→    let pos2 = pos + n1;
+   306→    if pos2 >= bytes.len() {
+   307→        return Err(DecodeError::Truncated {
+   308→            needed: pos2 + 1,
+   309→            available: bytes.len(),
+   310→        });
+   311→    }
+   312→    let (offset, n2) = decode_unsigned_leb128(&bytes[pos2..]);
+   313→    Ok((align as u32, offset as u32, pos2 + n2))
+   314→}
+   315→
+   316→/// Read a signed LEB128 i32 immediate.
+   317→fn read_i32(bytes: &[u8], pos: usize) -> Result<(i32, usize), DecodeError> {
+   318→    if pos >= bytes.len() {
+   319→        return Err(DecodeError::Truncated {
+   320→            needed: pos + 1,
+   321→            available: bytes.len(),
+   322→        });
+   323→    }
+   324→    let (val, n) = decode_signed_leb128(&bytes[pos..]);
+   325→    Ok((val as i32, pos + n))
+   326→}
+   327→
+   328→/// Read a signed LEB128 i64 immediate.
+   329→fn read_i64(bytes: &[u8], pos: usize) -> Result<(i64, usize), DecodeError> {
+   330→    if pos >= bytes.len() {
+   331→        return Err(DecodeError::Truncated {
+   332→            needed: pos + 1,
+   333→            available: bytes.len(),
+   334→        });
+   335→    }
+   336→    let (val, n) = decode_signed_leb128(&bytes[pos..]);
+   337→    Ok((val, pos + n))
+   338→}
+   339→
+   340→/// Read an unsigned LEB128 index.
+   341→fn read_idx(bytes: &[u8], pos: usize) -> Result<(u32, usize), DecodeError> {
+   342→    if pos >= bytes.len() {
+   343→        return Err(DecodeError::Truncated {
+   344→            needed: pos + 1,
+   345→            available: bytes.len(),
+   346→        });
+   347→    }
+   348→    let (val, n) = decode_unsigned_leb128(&bytes[pos..]);
+   349→    Ok((val as u32, pos + n))
+   350→}
+   351→
+   352→/// Read a WasmType byte from the stream.
+   353→fn read_block_type(bytes: &[u8], pos: usize) -> Result<(WasmType, usize), DecodeError> {
+   354→    if pos >= bytes.len() {
+   355→        return Err(DecodeError::Truncated {
+   356→            needed: pos + 1,
+   357→            available: bytes.len(),
+   358→        });
+   359→    }
+   360→    let ty = match bytes[pos] {
+   361→        0x7F => WasmType::I32,
+   362→        0x7E => WasmType::I64,
+   363→        0x7D => WasmType::F32,
+   364→        0x7C => WasmType::F64,
+   365→        0x40 => WasmType::I32, // void block type — use i32 as placeholder
+   366→        other => {
+   367→            return Err(DecodeError::UnknownOpcode { opcode: other });
+   368→        }
+   369→    };
+   370→    Ok((ty, pos + 1))
+   371→}
+   372→
+   373→// ---------------------------------------------------------------------------
+   374→// Main decode entry point
+   375→// ---------------------------------------------------------------------------
+   376→
+   377→impl WasmInstr {
+   378→    /// Decode a single WebAssembly instruction from the byte stream.
+   379→    ///
+   380→    /// Returns the decoded instruction and the number of bytes consumed.
+   381→    pub fn decode(bytes: &[u8]) -> Result<(Self, usize), DecodeError> {
+   382→        if bytes.is_empty() {
+   383→            return Err(DecodeError::Truncated {
+   384→                needed: 1,
+   385→                available: 0,
+   386→            });
+   387→        }
+   388→
+   389→        let opcode = bytes[0];
+   390→        let mut pos = 1usize;
+   391→
+   392→        let instr = match opcode {
+   393→            // Control
+   394→            0x02 => {
+   395→                let (ty, np) = read_block_type(bytes, pos)?;
+   396→                pos = np;
+   397→                WasmInstr::Block(ty)
+   398→            }
+   399→            0x03 => {
+   400→                let (ty, np) = read_block_type(bytes, pos)?;
+   401→                pos = np;
+   402→                WasmInstr::Loop(ty)
+   403→            }
+   404→            0x04 => {
+   405→                let (ty, np) = read_block_type(bytes, pos)?;
+   406→                pos = np;
+   407→                WasmInstr::If(ty)
+   408→            }
+   409→            0x05 => WasmInstr::Else,
+   410→            0x0B => WasmInstr::End,
+   411→            0x0C => {
+   412→                let (idx, np) = read_idx(bytes, pos)?;
+   413→                pos = np;
+   414→                WasmInstr::Br(idx)
+   415→            }
+   416→            0x0D => {
+   417→                let (idx, np) = read_idx(bytes, pos)?;
+   418→                pos = np;
+   419→                WasmInstr::BrIf(idx)
+   420→            }
+   421→            0x0F => WasmInstr::Return,
+   422→            0x10 => {
+   423→                let (idx, np) = read_idx(bytes, pos)?;
+   424→                pos = np;
+   425→                WasmInstr::Call(idx)
+   426→            }
+   427→
+   428→            // Parametric
+   429→            0x1B => WasmInstr::Select,
+   430→            0x1A => WasmInstr::Drop,
+   431→
+   432→            // Variable
+   433→            0x20 => {
+   434→                let (idx, np) = read_idx(bytes, pos)?;
+   435→                pos = np;
+   436→                WasmInstr::LocalGet(idx)
+   437→            }
+   438→            0x21 => {
+   439→                let (idx, np) = read_idx(bytes, pos)?;
+   440→                pos = np;
+   441→                WasmInstr::LocalSet(idx)
+   442→            }
+   443→            0x22 => {
+   444→                let (idx, np) = read_idx(bytes, pos)?;
+   445→                pos = np;
+   446→                WasmInstr::LocalTee(idx)
+   447→            }
+   448→            0x23 => {
+   449→                let (idx, np) = read_idx(bytes, pos)?;
+   450→                pos = np;
+   451→                WasmInstr::GlobalGet(idx)
+   452→            }
+   453→            0x24 => {
+   454→                let (idx, np) = read_idx(bytes, pos)?;
+   455→                pos = np;
+   456→                WasmInstr::GlobalSet(idx)
+   457→            }
+   458→
+   459→            // Memory loads
+   460→            0x28 => {
+   461→                let (a, o, np) = read_memarg(bytes, pos)?;
+   462→                pos = np;
+   463→                WasmInstr::I32Load {
+   464→                    align: a,
+   465→                    offset: o,
+   466→                }
+   467→            }
+   468→            0x29 => {
+   469→                let (a, o, np) = read_memarg(bytes, pos)?;
+   470→                pos = np;
+   471→                WasmInstr::I64Load {
+   472→                    align: a,
+   473→                    offset: o,
+   474→                }
+   475→            }
+   476→            0x2A => {
+   477→                let (a, o, np) = read_memarg(bytes, pos)?;
+   478→                pos = np;
+   479→                WasmInstr::F32Load {
+   480→                    align: a,
+   481→                    offset: o,
+   482→                }
+   483→            }
+   484→            0x2B => {
+   485→                let (a, o, np) = read_memarg(bytes, pos)?;
+   486→                pos = np;
+   487→                WasmInstr::F64Load {
+   488→                    align: a,
+   489→                    offset: o,
+   490→                }
+   491→            }
+   492→            0x2C => {
+   493→                let (a, o, np) = read_memarg(bytes, pos)?;
+   494→                pos = np;
+   495→                WasmInstr::I32Load8S {
+   496→                    align: a,
+   497→                    offset: o,
+   498→                }
+   499→            }
+   500→            0x2D => {
+   501→                let (a, o, np) = read_memarg(bytes, pos)?;
+   502→                pos = np;
+   503→                WasmInstr::I32Load8U {
+   504→                    align: a,
+   505→                    offset: o,
+   506→                }
+   507→            }
+   508→            0x2E => {
+   509→                let (a, o, np) = read_memarg(bytes, pos)?;
+   510→                pos = np;
+   511→                WasmInstr::I32Load16S {
+   512→                    align: a,
+   513→                    offset: o,
+   514→                }
+   515→            }
+   516→            0x2F => {
+   517→                let (a, o, np) = read_memarg(bytes, pos)?;
+   518→                pos = np;
+   519→                WasmInstr::I32Load16U {
+   520→                    align: a,
+   521→                    offset: o,
+   522→                }
+   523→            }
+   524→            0x30 => {
+   525→                let (a, o, np) = read_memarg(bytes, pos)?;
+   526→                pos = np;
+   527→                WasmInstr::I64Load8S {
+   528→                    align: a,
+   529→                    offset: o,
+   530→                }
+   531→            }
+   532→            0x31 => {
+   533→                let (a, o, np) = read_memarg(bytes, pos)?;
+   534→                pos = np;
+   535→                WasmInstr::I64Load8U {
+   536→                    align: a,
+   537→                    offset: o,
+   538→                }
+   539→            }
+   540→            0x32 => {
+   541→                let (a, o, np) = read_memarg(bytes, pos)?;
+   542→                pos = np;
+   543→                WasmInstr::I64Load16S {
+   544→                    align: a,
+   545→                    offset: o,
+   546→                }
+   547→            }
+   548→            0x33 => {
+   549→                let (a, o, np) = read_memarg(bytes, pos)?;
+   550→                pos = np;
+   551→                WasmInstr::I64Load16U {
+   552→                    align: a,
+   553→                    offset: o,
+   554→                }
+   555→            }
+   556→            0x34 => {
+   557→                let (a, o, np) = read_memarg(bytes, pos)?;
+   558→                pos = np;
+   559→                WasmInstr::I64Load32S {
+   560→                    align: a,
+   561→                    offset: o,
+   562→                }
+   563→            }
+   564→            0x35 => {
+   565→                let (a, o, np) = read_memarg(bytes, pos)?;
+   566→                pos = np;
+   567→                WasmInstr::I64Load32U {
+   568→                    align: a,
+   569→                    offset: o,
+   570→                }
+   571→            }
+   572→
+   573→            // Memory stores
+   574→            0x36 => {
+   575→                let (a, o, np) = read_memarg(bytes, pos)?;
+   576→                pos = np;
+   577→                WasmInstr::I32Store {
+   578→                    align: a,
+   579→                    offset: o,
+   580→                }
+   581→            }
+   582→            0x37 => {
+   583→                let (a, o, np) = read_memarg(bytes, pos)?;
+   584→                pos = np;
+   585→                WasmInstr::I64Store {
+   586→                    align: a,
+   587→                    offset: o,
+   588→                }
+   589→            }
+   590→            0x38 => {
+   591→                let (a, o, np) = read_memarg(bytes, pos)?;
+   592→                pos = np;
+   593→                WasmInstr::F32Store {
+   594→                    align: a,
+   595→                    offset: o,
+   596→                }
+   597→            }
+   598→            0x39 => {
+   599→                let (a, o, np) = read_memarg(bytes, pos)?;
+   600→                pos = np;
+   601→                WasmInstr::F64Store {
+   602→                    align: a,
+   603→                    offset: o,
+   604→                }
+   605→            }
+   606→            0x3A => {
+   607→                let (a, o, np) = read_memarg(bytes, pos)?;
+   608→                pos = np;
+   609→                WasmInstr::I32Store8 {
+   610→                    align: a,
+   611→                    offset: o,
+   612→                }
+   613→            }
+   614→            0x3B => {
+   615→                let (a, o, np) = read_memarg(bytes, pos)?;
+   616→                pos = np;
+   617→                WasmInstr::I32Store16 {
+   618→                    align: a,
+   619→                    offset: o,
+   620→                }
+   621→            }
+   622→            0x3C => {
+   623→                let (a, o, np) = read_memarg(bytes, pos)?;
+   624→                pos = np;
+   625→                WasmInstr::I64Store8 {
+   626→                    align: a,
+   627→                    offset: o,
+   628→                }
+   629→            }
+   630→            0x3D => {
+   631→                let (a, o, np) = read_memarg(bytes, pos)?;
+   632→                pos = np;
+   633→                WasmInstr::I64Store16 {
+   634→                    align: a,
+   635→                    offset: o,
+   636→                }
+   637→            }
+   638→            0x3E => {
+   639→                let (a, o, np) = read_memarg(bytes, pos)?;
+   640→                pos = np;
+   641→                WasmInstr::I64Store32 {
+   642→                    align: a,
+   643→                    offset: o,
+   644→                }
+   645→            }
+   646→            0x3F => {
+   647→                let (idx, np) = read_idx(bytes, pos)?;
+   648→                pos = np;
+   649→                WasmInstr::MemorySize(idx)
+   650→            }
+   651→            0x40 => {
+   652→                let (idx, np) = read_idx(bytes, pos)?;
+   653→                pos = np;
+   654→                WasmInstr::MemoryGrow(idx)
+   655→            }
+   656→
+   657→            // i32 constants and comparisons
+   658→            0x41 => {
+   659→                let (val, np) = read_i32(bytes, pos)?;
+   660→                pos = np;
+   661→                WasmInstr::I32Const(val)
+   662→            }
+   663→            0x45 => WasmInstr::I32Eqz,
+   664→            0x46 => WasmInstr::I32Eq,
+   665→            0x47 => WasmInstr::I32Ne,
+   666→            0x48 => WasmInstr::I32LtS,
+   667→            0x49 => WasmInstr::I32LtU,
+   668→            0x4A => WasmInstr::I32GtS,
+   669→            0x4B => WasmInstr::I32GtU,
+   670→            0x4C => WasmInstr::I32LeS,
+   671→            0x4D => WasmInstr::I32LeU,
+   672→            0x4E => WasmInstr::I32GeS,
+   673→            0x4F => WasmInstr::I32GeU,
+   674→            0x67 => WasmInstr::I32Clz,
+   675→            0x68 => WasmInstr::I32Ctz,
+   676→            0x69 => WasmInstr::I32Popcnt,
+   677→            0x6A => WasmInstr::I32Add,
+   678→            0x6B => WasmInstr::I32Sub,
+   679→            0x6C => WasmInstr::I32Mul,
+   680→            0x6D => WasmInstr::I32DivS,
+   681→            0x6E => WasmInstr::I32DivU,
+   682→            0x6F => WasmInstr::I32RemS,
+   683→            0x70 => WasmInstr::I32RemU,
+   684→            0x71 => WasmInstr::I32And,
+   685→            0x72 => WasmInstr::I32Or,
+   686→            0x73 => WasmInstr::I32Xor,
+   687→            0x74 => WasmInstr::I32Shl,
+   688→            0x75 => WasmInstr::I32ShrS,
+   689→            0x76 => WasmInstr::I32ShrU,
+   690→            0x77 => WasmInstr::I32Rotl,
+   691→            0x78 => WasmInstr::I32Rotr,
+   692→
+   693→            // i64
+   694→            0x42 => {
+   695→                let (val, np) = read_i64(bytes, pos)?;
+   696→                pos = np;
+   697→                WasmInstr::I64Const(val)
+   698→            }
+   699→            0x50 => WasmInstr::I64Eqz,
+   700→            0x51 => WasmInstr::I64Eq,
+   701→            0x52 => WasmInstr::I64Ne,
+   702→            0x53 => WasmInstr::I64LtS,
+   703→            0x54 => WasmInstr::I64LtU,
+   704→            0x55 => WasmInstr::I64GtS,
+   705→            0x56 => WasmInstr::I64GtU,
+   706→            0x57 => WasmInstr::I64LeS,
+   707→            0x58 => WasmInstr::I64LeU,
+   708→            0x59 => WasmInstr::I64GeS,
+   709→            0x5A => WasmInstr::I64GeU,
+   710→            0x79 => WasmInstr::I64Clz,
+   711→            0x7A => WasmInstr::I64Ctz,
+   712→            0x7B => WasmInstr::I64Popcnt,
+   713→            0x7C => WasmInstr::I64Add,
+   714→            0x7D => WasmInstr::I64Sub,
+   715→            0x7E => WasmInstr::I64Mul,
+   716→            0x7F => WasmInstr::I64DivS,
+   717→            0x80 => WasmInstr::I64DivU,
+   718→            0x81 => WasmInstr::I64RemS,
+   719→            0x82 => WasmInstr::I64RemU,
+   720→            0x83 => WasmInstr::I64And,
+   721→            0x84 => WasmInstr::I64Or,
+   722→            0x85 => WasmInstr::I64Xor,
+   723→            0x86 => WasmInstr::I64Shl,
+   724→            0x87 => WasmInstr::I64ShrS,
+   725→            0x88 => WasmInstr::I64ShrU,
+   726→            0x89 => WasmInstr::I64Rotl,
+   727→            0x8A => WasmInstr::I64Rotr,
+   728→
+   729→            // f32
+   730→            0x43 => {
+   731→                if pos + 4 > bytes.len() {
+   732→                    return Err(DecodeError::Truncated {
+   733→                        needed: pos + 4,
+   734→                        available: bytes.len(),
+   735→                    });
+   736→                }
+   737→                let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap_or([0; 4]));
+   738→                pos += 4;
+   739→                WasmInstr::F32Const(val)
+   740→            }
+   741→            0x5B => WasmInstr::F32Eq,
+   742→            0x5C => WasmInstr::F32Ne,
+   743→            0x5D => WasmInstr::F32Lt,
+   744→            0x5E => WasmInstr::F32Gt,
+   745→            0x5F => WasmInstr::F32Le,
+   746→            0x60 => WasmInstr::F32Ge,
+   747→            0x92 => WasmInstr::F32Add,
+   748→            0x93 => WasmInstr::F32Sub,
+   749→            0x94 => WasmInstr::F32Mul,
+   750→            0x95 => WasmInstr::F32Div,
+   751→            0x91 => WasmInstr::F32Sqrt,
+   752→            0x8C => WasmInstr::F32Neg,
+   753→
+   754→            // f64
+   755→            0x44 => {
+   756→                if pos + 8 > bytes.len() {
+   757→                    return Err(DecodeError::Truncated {
+   758→                        needed: pos + 8,
+   759→                        available: bytes.len(),
+   760→                    });
+   761→                }
+   762→                let val = f64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap_or([0; 8]));
+   763→                pos += 8;
+   764→                WasmInstr::F64Const(val)
+   765→            }
+   766→            0x61 => WasmInstr::F64Eq,
+   767→            0x62 => WasmInstr::F64Ne,
+   768→            0x63 => WasmInstr::F64Lt,
+   769→            0x64 => WasmInstr::F64Gt,
+   770→            0x65 => WasmInstr::F64Le,
+   771→            0x66 => WasmInstr::F64Ge,
+   772→            0xA0 => WasmInstr::F64Add,
+   773→            0xA1 => WasmInstr::F64Sub,
+   774→            0xA2 => WasmInstr::F64Mul,
+   775→            0xA3 => WasmInstr::F64Div,
+   776→            0x9F => WasmInstr::F64Sqrt,
+   777→            0x9A => WasmInstr::F64Neg,
+   778→
+   779→            // Conversions
+   780→            0xA7 => WasmInstr::I32WrapI64,
+   781→            0xAC => WasmInstr::I64ExtendI32S,
+   782→            0xAD => WasmInstr::I64ExtendI32U,
+   783→            0xB6 => WasmInstr::F32DemoteF64,
+   784→            0xBB => WasmInstr::F64PromoteF32,
+   785→            0xA8 => WasmInstr::I32TruncF32S,
+   786→            0xA9 => WasmInstr::I32TruncF64S,
+   787→            0xAE => WasmInstr::I64TruncF32S,
+   788→            0xAF => WasmInstr::I64TruncF64S,
+   789→            0xB2 => WasmInstr::F32ConvertI32S,
+   790→            0xB3 => WasmInstr::F32ConvertI64S,
+   791→            0xB7 => WasmInstr::F64ConvertI32S,
+   792→            0xB8 => WasmInstr::F64ConvertI64S,
+   793→            0xBC => WasmInstr::I32ReinterpretF32,
+   794→            0xBD => WasmInstr::I64ReinterpretF64,
+   795→            0xBE => WasmInstr::F32ReinterpretI32,
+   796→            0xBF => WasmInstr::F64ReinterpretI64,
+   797→
+   798→            // Pseudo
+   799→            0x01 => WasmInstr::Nop,
+   800→            0x00 => WasmInstr::Unreachable,
+   801→
+   802→            _ => {
+   803→                return Err(DecodeError::UnknownOpcode { opcode });
+   804→            }
+   805→        };
+   806→
+   807→        Ok((instr, pos))
+   808→    }
+   809→}
+   810→
+   811→// ---------------------------------------------------------------------------
+   812→// Tests
+   813→// ---------------------------------------------------------------------------
+   814→
+   815→#[cfg(test)]
+   816→mod tests {
+   817→    use super::*;
+   818→
+   819→    #[test]
+   820→    fn test_decode_i32_add() {
+   821→        let bytes = [0x6A];
+   822→        let (instr, n) = WasmInstr::decode(&bytes).unwrap();
+   823→        assert_eq!(n, 1);
+   824→        assert_eq!(instr, WasmInstr::I32Add);
+   825→        assert_eq!(format!("{instr}"), "i32.add");
+   826→    }
+   827→
+   828→    #[test]
+   829→    fn test_decode_i32_const() {
+   830→        // i32.const 42 → opcode 0x41 + signed LEB128 of 42
+   831→        let mut bytes = vec![0x41];
+   832→        bytes.extend_from_slice(&super::super::encode_signed_leb128(42));
+   833→        let (instr, n) = WasmInstr::decode(&bytes).unwrap();
+   834→        assert_eq!(instr, WasmInstr::I32Const(42));
+   835→        assert_eq!(format!("{instr}"), "i32.const 42");
+   836→        assert!(n > 1);
+   837→    }
+   838→
+   839→    #[test]
+   840→    fn test_decode_local_get() {
+   841→        let mut bytes = vec![0x20];
+   842→        bytes.extend_from_slice(&super::super::encode_unsigned_leb128(5));
+   843→        let (instr, _) = WasmInstr::decode(&bytes).unwrap();
+   844→        assert_eq!(instr, WasmInstr::LocalGet(5));
+   845→        assert_eq!(format!("{instr}"), "local.get 5");
+   846→    }
+   847→
+   848→    #[test]
+   849→    fn test_roundtrip_i32_sub() {
+   850→        let original = WasmInstr::I32Sub;
+   851→        let mut encoded = Vec::new();
+   852→        original.encode(&mut encoded);
+   853→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   854→        assert_eq!(original, decoded);
+   855→        assert_eq!(format!("{decoded}"), "i32.sub");
+   856→    }
+   857→
+   858→    #[test]
+   859→    fn test_roundtrip_i64_mul() {
+   860→        let original = WasmInstr::I64Mul;
+   861→        let mut encoded = Vec::new();
+   862→        original.encode(&mut encoded);
+   863→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   864→        assert_eq!(original, decoded);
+   865→        assert_eq!(format!("{decoded}"), "i64.mul");
+   866→    }
+   867→
+   868→    #[test]
+   869→    fn test_roundtrip_i32_load() {
+   870→        let original = WasmInstr::I32Load {
+   871→            align: 2,
+   872→            offset: 8,
+   873→        };
+   874→        let mut encoded = Vec::new();
+   875→        original.encode(&mut encoded);
+   876→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   877→        assert_eq!(original, decoded);
+   878→    }
+   879→
+   880→    #[test]
+   881→    fn test_roundtrip_i32_store() {
+   882→        let original = WasmInstr::I32Store {
+   883→            align: 2,
+   884→            offset: 0,
+   885→        };
+   886→        let mut encoded = Vec::new();
+   887→        original.encode(&mut encoded);
+   888→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   889→        assert_eq!(original, decoded);
+   890→    }
+   891→
+   892→    #[test]
+   893→    fn test_roundtrip_i32_const_negative() {
+   894→        let original = WasmInstr::I32Const(-1);
+   895→        let mut encoded = Vec::new();
+   896→        original.encode(&mut encoded);
+   897→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   898→        assert_eq!(original, decoded);
+   899→    }
+   900→
+   901→    #[test]
+   902→    fn test_roundtrip_call() {
+   903→        let original = WasmInstr::Call(42);
+   904→        let mut encoded = Vec::new();
+   905→        original.encode(&mut encoded);
+   906→        let (decoded, _) = WasmInstr::decode(&encoded).unwrap();
+   907→        assert_eq!(original, decoded);
+   908→        assert_eq!(format!("{decoded}"), "call 42");
+   909→    }
+   910→
+   911→    #[test]
+   912→    fn test_decode_truncated() {
+   913→        let result = WasmInstr::decode(&[]);
+   914→        assert!(matches!(result, Err(DecodeError::Truncated { .. })));
+   915→    }
+   916→
+   917→    #[test]
+   918→    fn test_decode_unknown_opcode() {
+   919→        let result = WasmInstr::decode(&[0xFE]);
+   920→        assert!(matches!(result, Err(DecodeError::UnknownOpcode { .. })));
+   921→    }
+   922→}
+   923→
