@@ -44,9 +44,9 @@ impl std::fmt::Display for WasmInstr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Control
-            WasmInstr::Block(ty) => write!(f, "block {ty}"),
-            WasmInstr::Loop(ty) => write!(f, "loop {ty}"),
-            WasmInstr::If(ty) => write!(f, "if {ty}"),
+            WasmInstr::Block(ty) => write!(f, "block {}", ty.map_or("void".to_string(), |t| t.to_string())),
+            WasmInstr::Loop(ty) => write!(f, "loop {}", ty.map_or("void".to_string(), |t| t.to_string())),
+            WasmInstr::If(ty) => write!(f, "if {}", ty.map_or("void".to_string(), |t| t.to_string())),
             WasmInstr::Else => write!(f, "else"),
             WasmInstr::End => write!(f, "end"),
             WasmInstr::Br(idx) => write!(f, "br {idx}"),
@@ -350,7 +350,7 @@ fn read_idx(bytes: &[u8], pos: usize) -> Result<(u32, usize), DecodeError> {
 }
 
 /// Read a WasmType byte from the stream.
-fn read_block_type(bytes: &[u8], pos: usize) -> Result<(WasmType, usize), DecodeError> {
+fn read_block_type(bytes: &[u8], pos: usize) -> Result<(Option<WasmType>, usize), DecodeError> {
     if pos >= bytes.len() {
         return Err(DecodeError::Truncated {
             needed: pos + 1,
@@ -358,11 +358,11 @@ fn read_block_type(bytes: &[u8], pos: usize) -> Result<(WasmType, usize), Decode
         });
     }
     let ty = match bytes[pos] {
-        0x7F => WasmType::I32,
-        0x7E => WasmType::I64,
-        0x7D => WasmType::F32,
-        0x7C => WasmType::F64,
-        0x40 => WasmType::I32, // void block type — use i32 as placeholder
+        0x7F => Some(WasmType::I32),
+        0x7E => Some(WasmType::I64),
+        0x7D => Some(WasmType::F32),
+        0x7C => Some(WasmType::F64),
+        0x40 => None, // void block type
         other => {
             return Err(DecodeError::UnknownOpcode { opcode: other });
         }

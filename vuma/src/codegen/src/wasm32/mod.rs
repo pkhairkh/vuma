@@ -78,6 +78,17 @@ impl WasmType {
             IRType::Void | IRType::Struct { .. } | IRType::Array { .. } => None,
         }
     }
+
+    /// Decode a WasmType from its binary encoding byte.
+    pub fn from_byte(byte: u8) -> Option<WasmType> {
+        match byte {
+            0x7F => Some(WasmType::I32),
+            0x7E => Some(WasmType::I64),
+            0x7D => Some(WasmType::F32),
+            0x7C => Some(WasmType::F64),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for WasmType {
@@ -102,9 +113,9 @@ impl std::fmt::Display for WasmType {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum WasmInstr {
     // ── Control ───────────────────────────────────────────────────────
-    Block(WasmType),
-    Loop(WasmType),
-    If(WasmType),
+    Block(Option<WasmType>),
+    Loop(Option<WasmType>),
+    If(Option<WasmType>),
     Else,
     End,
     Br(u32),
@@ -383,15 +394,24 @@ impl WasmInstr {
             // ── Control ──────────────────────────────────────────────
             WasmInstr::Block(ty) => {
                 out.push(0x02);
-                out.push(ty.to_byte());
+                match ty {
+                    Some(t) => out.push(t.to_byte()),
+                    None => out.push(0x40), // void block type
+                }
             }
             WasmInstr::Loop(ty) => {
                 out.push(0x03);
-                out.push(ty.to_byte());
+                match ty {
+                    Some(t) => out.push(t.to_byte()),
+                    None => out.push(0x40), // void loop type
+                }
             }
             WasmInstr::If(ty) => {
                 out.push(0x04);
-                out.push(ty.to_byte());
+                match ty {
+                    Some(t) => out.push(t.to_byte()),
+                    None => out.push(0x40), // void if type
+                }
             }
             WasmInstr::Else => out.push(0x05),
             WasmInstr::End => out.push(0x0B),
@@ -816,6 +836,35 @@ pub fn decode_unsigned_leb128(bytes: &[u8]) -> (u64, usize) {
         shift += 7;
     }
     (result, count)
+}
+
+/// Decode a `WasmFuncType` from the raw type section bytes.
+/// The bytes should start with 0x60 (func type marker) followed by
+/// the param count, param types, result count, and result types.
+fn decode_func_type_from_bytes(bytes: &[u8]) -> WasmFuncType {
+    let mut pos = 0;
+    if bytes[pos] != 0x60 {
+        return WasmFuncType { params: vec![], results: vec![] };
+    }
+    pos += 1;
+
+    let (num_params, n) = decode_unsigned_leb128(&bytes[pos..]);
+    pos += n;
+    let mut params = Vec::new();
+    for _ in 0..num_params {
+        params.push(WasmType::from_byte(bytes[pos]).unwrap_or(WasmType::I32));
+        pos += 1;
+    }
+
+    let (num_results, n) = decode_unsigned_leb128(&bytes[pos..]);
+    pos += n;
+    let mut results = Vec::new();
+    for _ in 0..num_results {
+        results.push(WasmType::from_byte(bytes[pos]).unwrap_or(WasmType::I32));
+        pos += 1;
+    }
+
+    WasmFuncType { params, results }
 }
 
 /// Decode a signed LEB128 value from a byte slice.
@@ -1396,6 +1445,8 @@ fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
 struct LoweringContext {
     /// Map from virtual register ID to local index.
     vreg_to_local: HashMap<u32, u32>,
+    /// Map from virtual register ID to its Wasm type.
+    vreg_types: HashMap<u32, WasmType>,
     /// Number of locals (including parameters).
     num_locals: u32,
     /// Local declarations (for the function body).
@@ -1404,16 +1455,20 @@ struct LoweringContext {
     block_labels: HashMap<String, u32>,
     /// Accumulated Wasm instructions.
     instrs: Vec<WasmInstr>,
+    /// Expected result types for the function (used for return type coercion).
+    result_types: Vec<WasmType>,
 }
 
 impl LoweringContext {
-    fn new() -> Self {
+    fn new(result_types: Vec<WasmType>) -> Self {
         Self {
             vreg_to_local: HashMap::new(),
+            vreg_types: HashMap::new(),
             num_locals: 0,
             locals: Vec::new(),
             block_labels: HashMap::new(),
             instrs: Vec::new(),
+            result_types,
         }
     }
 
@@ -1421,6 +1476,7 @@ impl LoweringContext {
     fn alloc_local(&mut self, vreg_id: u32, ty: WasmType) -> u32 {
         let idx = self.num_locals;
         self.vreg_to_local.insert(vreg_id, idx);
+        self.vreg_types.insert(vreg_id, ty);
         self.num_locals += 1;
         // Try to merge with an existing (count, type) entry
         if let Some(last) = self.locals.last_mut() {
@@ -1444,18 +1500,24 @@ impl LoweringContext {
     }
 
     /// Push a value onto the Wasm stack from an IRValue.
+    /// On Wasm32, all integer values are pushed as i32.
     fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
         match val {
             IRValue::Immediate(v) => {
+                // On Wasm32, always use i32 for integer constants
                 let ty = type_hint.copied().unwrap_or(WasmType::I32);
                 match ty {
-                    WasmType::I32 => self.emit(WasmInstr::I32Const(*v as i32)),
-                    WasmType::I64 => self.emit(WasmInstr::I64Const(*v)),
                     WasmType::F32 => self.emit(WasmInstr::F32Const(*v as f32)),
                     WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
+                    _ => self.emit(WasmInstr::I32Const(*v as i32)),
                 }
             }
             IRValue::Register(id) => {
+                // If the register hasn't been allocated yet, allocate it as i32.
+                // On Wasm32, all integer locals are i32.
+                if self.get_local(*id).is_none() {
+                    self.alloc_local(*id, WasmType::I32);
+                }
                 if let Some(local_idx) = self.get_local(*id) {
                     self.emit(WasmInstr::LocalGet(local_idx));
                 }
@@ -1480,59 +1542,70 @@ impl LoweringContext {
     }
 }
 
-/// Determine the Wasm type for an IR BinOp based on the operand types.
-/// Since IR doesn't carry per-instruction types, we infer from context:
-/// 64-bit integer ops use i64, 32-bit use i32, float ops use f32/f64.
-fn wasm_type_for_binop(_op: &BinOpKind, lhs: &IRValue, rhs: &IRValue) -> WasmType {
-    // If either operand is an i64 immediate, use i64
-    if let IRValue::Immediate(v) = lhs {
-        if *v != (*v as i32 as i64) {
-            return WasmType::I64;
-        }
+/// Determine the Wasm type for an IR BinOp based on the operand types and
+/// the optional IR type annotation.  On the Wasm32 target, all integer
+/// operations use i32 since the address space is 32 bits; only float types
+/// retain their original width.
+fn wasm_type_for_binop(
+    _op: &BinOpKind,
+    _lhs: &IRValue,
+    _rhs: &IRValue,
+    ir_ty: Option<&IRType>,
+    _vreg_types: &HashMap<u32, WasmType>,
+) -> WasmType {
+    // If the IR provides a type, use it (but map I64/U64 to I32 for Wasm32).
+    if let Some(ty) = ir_ty {
+        return match ty {
+            IRType::F32 => WasmType::F32,
+            IRType::F64 => WasmType::F64,
+            _ => WasmType::I32, // all integer types → i32 on wasm32
+        };
     }
-    if let IRValue::Immediate(v) = rhs {
-        if *v != (*v as i32 as i64) {
-            return WasmType::I64;
-        }
-    }
-    // Default to i32 for integer ops
+    // Default to i32 for all integer ops on wasm32
     WasmType::I32
 }
 
 /// Infer the Wasm type of an IR value based on its representation.
 ///
-/// For immediates, we check if the value fits in i32; for registers and
-/// addresses, we default to i32 (the Wasm32 pointer type).  This is a
-/// heuristic — the IR does not carry per-value type information — but it
-/// works for the common cases needed during instruction selection.
+/// On the Wasm32 target, all integer values are i32.  Only float immediates
+/// use the wider type.
 fn infer_wasm_type(val: &IRValue) -> WasmType {
     match val {
-        IRValue::Immediate(v) => {
-            if *v != (*v as i32 as i64) {
-                WasmType::I64
-            } else {
-                WasmType::I32
-            }
-        }
-        IRValue::Register(_) | IRValue::Address(_) | IRValue::Label(_) => WasmType::I32,
+        IRValue::Immediate(_)
+        | IRValue::Register(_)
+        | IRValue::Address(_)
+        | IRValue::Label(_) => WasmType::I32,
     }
 }
 
 /// Lower an IR function to Wasm bytecode, returning the function body bytes
 /// and local declarations.
 fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), BackendError> {
-    let mut ctx = LoweringContext::new();
+    // Compute result types.
+    // In Wasm32, all integer results are i32 since it's a 32-bit target.
+    let result_types: Vec<WasmType> = func
+        .result_types
+        .iter()
+        .filter_map(WasmType::from_ir_type)
+        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+        .collect();
+    let mut ctx = LoweringContext::new(result_types);
 
-    // Assign locals for parameters
+    // Assign locals for parameters.
+    // In Wasm32, all integer parameters are i32 regardless of IR type, since
+    // pointers and all integer values fit in 32 bits on a 32-bit target.
+    // Only float types retain their original width.
     for (i, param) in func.params.iter().enumerate() {
         let ty = func
             .param_types
             .get(i)
             .and_then(WasmType::from_ir_type)
+            .map(|t| if t.is_integer() { WasmType::I32 } else { t })
             .unwrap_or(WasmType::I32);
         if let IRValue::Register(id) = param {
             let idx = ctx.num_locals;
             ctx.vreg_to_local.insert(*id, idx);
+            ctx.vreg_types.insert(*id, ty);
             ctx.num_locals += 1;
             if let Some(last) = ctx.locals.last_mut() {
                 if last.1 == ty {
@@ -1550,7 +1623,7 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
     for (block_idx, block) in func.blocks.iter().enumerate() {
         // Emit a block for structured control flow (except the entry block)
         if block_idx > 0 {
-            ctx.emit(WasmInstr::Block(WasmType::I32)); // placeholder block type
+            ctx.emit(WasmInstr::Block(None)); // void block (no result value)
             ctx.block_labels
                 .insert(block.label.clone(), block_idx as u32);
         } else {
@@ -1571,16 +1644,19 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
         }
     }
 
-    // Build the function type
+    // Build the function type.
+    // In Wasm32, all integer params/results are i32.
     let param_types: Vec<WasmType> = func
         .param_types
         .iter()
         .filter_map(WasmType::from_ir_type)
+        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
         .collect();
     let result_types: Vec<WasmType> = func
         .result_types
         .iter()
         .filter_map(WasmType::from_ir_type)
+        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
         .collect();
 
     let func_type = WasmFuncType {
@@ -1608,7 +1684,7 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
 fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), BackendError> {
     match instr {
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
-            let wasm_ty = wasm_type_for_binop(op, lhs, rhs);
+            let wasm_ty = wasm_type_for_binop(op, lhs, rhs, ty.as_ref(), &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             let mut skip_emit = false;
@@ -1809,26 +1885,34 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Load { dst, addr, offset: _, ty: _ } => {
+        IRInstr::Load { dst, addr, offset: _, ty } => {
+            let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
             ctx.push_value(addr, Some(&WasmType::I32));
-            ctx.emit(WasmInstr::I32Load {
-                align: 2,
-                offset: 0,
-            });
+            let load_op = match load_ty {
+                WasmType::I64 => WasmInstr::I64Load { align: 3, offset: 0 },
+                WasmType::F32 => WasmInstr::F32Load { align: 2, offset: 0 },
+                WasmType::F64 => WasmInstr::F64Load { align: 3, offset: 0 },
+                _ => WasmInstr::I32Load { align: 2, offset: 0 },
+            };
+            ctx.emit(load_op);
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+                ctx.pop_to_vreg(*id, load_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
         }
 
-        IRInstr::Store { value, addr, offset: _, ty: _ } => {
+        IRInstr::Store { value, addr, offset: _, ty } => {
+            let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
             ctx.push_value(addr, Some(&WasmType::I32));
-            ctx.push_value(value, None);
-            ctx.emit(WasmInstr::I32Store {
-                align: 2,
-                offset: 0,
-            });
+            ctx.push_value(value, Some(&store_ty));
+            let store_op = match store_ty {
+                WasmType::I64 => WasmInstr::I64Store { align: 3, offset: 0 },
+                WasmType::F32 => WasmInstr::F32Store { align: 2, offset: 0 },
+                WasmType::F64 => WasmInstr::F64Store { align: 3, offset: 0 },
+                _ => WasmInstr::I32Store { align: 2, offset: 0 },
+            };
+            ctx.emit(store_op);
         }
 
         IRInstr::Call { dst, func: _, args } => {
@@ -2015,7 +2099,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
 
         IRInstr::Ret { values } => {
             for val in values {
-                ctx.push_value(val, None);
+                ctx.push_value(val, Some(&WasmType::I32));
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2052,7 +2136,7 @@ fn lower_terminator(
     match term {
         IRTerminator::Return(values) => {
             for val in values {
-                ctx.push_value(val, None);
+                ctx.push_value(val, Some(&WasmType::I32));
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2141,7 +2225,7 @@ impl Backend for Wasm32Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Wasm has no registers — map virtual regs to locals.
         // We lower the IR function to Wasm bytecode here.
-        let (func_body, _func_type) =
+        let (func_body, func_type) =
             lower_function(func).map_err(|e| BackendError::RegisterAllocFailed {
                 isa: "wasm32",
                 reason: e.to_string(),
@@ -2151,6 +2235,31 @@ impl Backend for Wasm32Backend {
         // Each Wasm instruction is represented as an AllocatedInstruction
         // with its mnemonic and encoded bytes.
         let mut instructions = Vec::new();
+
+        // Encode the function type as a pseudo-instruction so that
+        // encode_program can recover it.  Format:
+        //   "wasm_type:<num_params>:<param_bytes>:<num_results>:<result_bytes>"
+        // The encoded bytes contain the raw type section entry.
+        {
+            let mut type_bytes = Vec::new();
+            type_bytes.push(0x60); // func type marker
+            type_bytes.extend_from_slice(&encode_unsigned_leb128(func_type.params.len() as u64));
+            for p in &func_type.params {
+                type_bytes.push(p.to_byte());
+            }
+            type_bytes.extend_from_slice(&encode_unsigned_leb128(func_type.results.len() as u64));
+            for r in &func_type.results {
+                type_bytes.push(r.to_byte());
+            }
+            let param_str: Vec<String> = func_type.params.iter().map(|p| p.to_string()).collect();
+            let result_str: Vec<String> = func_type.results.iter().map(|r| r.to_string()).collect();
+            instructions.push(AllocatedInstruction {
+                opcode: format!("wasm_type:{}:->:{}", param_str.join(","), result_str.join(",")),
+                reads: vec![],
+                writes: vec![],
+                encoded: type_bytes,
+            });
+        }
 
         // Emit local declarations as pseudo-instructions
         for (count, ty) in &func_body.locals {
@@ -2223,17 +2332,47 @@ impl Backend for Wasm32Backend {
 
         // For each function, add a type and function entry
         for func in &program.functions {
-            // Create a default function type: () -> ()
-            let type_idx = module.add_type(WasmFuncType {
-                params: vec![],
-                results: vec![],
-            });
-            let _func_idx = module.add_function(type_idx);
+            // Extract the function type from the first pseudo-instruction
+            let func_type = if let Some(first_instr) = func.blocks.first()
+                .and_then(|b| b.instructions.first())
+                .filter(|i| i.opcode.starts_with("wasm_type:"))
+            {
+                decode_func_type_from_bytes(&first_instr.encoded)
+            } else {
+                WasmFuncType {
+                    params: vec![],
+                    results: vec![],
+                }
+            };
 
-            // Encode the function body
+            let type_idx = module.add_type(func_type);
+            let func_idx = module.add_function(type_idx);
+
+            // Encode the function body, skipping the wasm_type pseudo-instruction
+            // and local_decl pseudo-instructions (locals are encoded separately)
+            let mut local_decls: Vec<(u32, WasmType)> = Vec::new();
             let mut body_bytes = Vec::new();
             for block in &func.blocks {
                 for instr in &block.instructions {
+                    if instr.opcode.starts_with("wasm_type:") {
+                        // Skip type pseudo-instruction
+                        continue;
+                    }
+                    if instr.opcode.starts_with("local_decl_") {
+                        // Parse local declarations from the encoded bytes
+                        let ty_name = instr.opcode.strip_prefix("local_decl_").unwrap_or("");
+                        let ty = match ty_name {
+                            "i64" => WasmType::I64,
+                            "f32" => WasmType::F32,
+                            "f64" => WasmType::F64,
+                            _ => WasmType::I32,
+                        };
+                        // The encoded bytes contain: LEB128(count) + type_byte
+                        let count_bytes = &instr.encoded[..instr.encoded.len() - 1];
+                        let (count, _) = decode_unsigned_leb128(count_bytes);
+                        local_decls.push((count as u32, ty));
+                        continue;
+                    }
                     body_bytes.extend_from_slice(&instr.encoded);
                 }
             }
@@ -2243,7 +2382,7 @@ impl Backend for Wasm32Backend {
             }
 
             module.add_code(WasmFuncBody {
-                locals: vec![],
+                locals: local_decls,
                 body: body_bytes,
             });
 
@@ -2251,7 +2390,7 @@ impl Backend for Wasm32Backend {
             module.add_export(WasmExport {
                 name: func.name.clone(),
                 kind: crate::wasm32::WasmExportKind::Function,
-                index: _func_idx,
+                index: func_idx,
             });
         }
 
