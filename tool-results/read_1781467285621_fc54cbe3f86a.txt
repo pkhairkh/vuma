@@ -1,0 +1,995 @@
+  2500→        "wasm32"
+  2501→    }
+  2502→}
+  2503→
+  2504→// ===========================================================================
+  2505→// Tests
+  2506→// ===========================================================================
+  2507→
+  2508→#[cfg(test)]
+  2509→mod tests {
+  2510→    use super::*;
+  2511→
+  2512→    // ── LEB128 tests ──────────────────────────────────────────────
+  2513→
+  2514→    #[test]
+  2515→    fn test_unsigned_leb128_zero() {
+  2516→        let encoded = encode_unsigned_leb128(0);
+  2517→        assert_eq!(encoded, vec![0x00]);
+  2518→        let (decoded, size) = decode_unsigned_leb128(&encoded);
+  2519→        assert_eq!(decoded, 0);
+  2520→        assert_eq!(size, 1);
+  2521→    }
+  2522→
+  2523→    #[test]
+  2524→    fn test_unsigned_leb128_small() {
+  2525→        let encoded = encode_unsigned_leb128(42);
+  2526→        assert_eq!(encoded, vec![42]);
+  2527→        let (decoded, size) = decode_unsigned_leb128(&encoded);
+  2528→        assert_eq!(decoded, 42);
+  2529→        assert_eq!(size, 1);
+  2530→    }
+  2531→
+  2532→    #[test]
+  2533→    fn test_unsigned_leb128_max_single_byte() {
+  2534→        let encoded = encode_unsigned_leb128(127);
+  2535→        assert_eq!(encoded, vec![0x7F]);
+  2536→        let (decoded, size) = decode_unsigned_leb128(&encoded);
+  2537→        assert_eq!(decoded, 127);
+  2538→        assert_eq!(size, 1);
+  2539→    }
+  2540→
+  2541→    #[test]
+  2542→    fn test_unsigned_leb128_two_bytes() {
+  2543→        let encoded = encode_unsigned_leb128(128);
+  2544→        assert_eq!(encoded, vec![0x80, 0x01]);
+  2545→        let (decoded, size) = decode_unsigned_leb128(&encoded);
+  2546→        assert_eq!(decoded, 128);
+  2547→        assert_eq!(size, 2);
+  2548→    }
+  2549→
+  2550→    #[test]
+  2551→    fn test_unsigned_leb128_roundtrip_large() {
+  2552→        let values = vec![
+  2553→            0,
+  2554→            1,
+  2555→            127,
+  2556→            128,
+  2557→            255,
+  2558→            256,
+  2559→            16383,
+  2560→            16384,
+  2561→            624485,
+  2562→            u32::MAX as u64,
+  2563→            u64::MAX,
+  2564→        ];
+  2565→        for val in values {
+  2566→            let encoded = encode_unsigned_leb128(val);
+  2567→            let (decoded, size) = decode_unsigned_leb128(&encoded);
+  2568→            assert_eq!(decoded, val, "Round-trip failed for {}", val);
+  2569→            assert_eq!(size, encoded.len(), "Size mismatch for {}", val);
+  2570→        }
+  2571→    }
+  2572→
+  2573→    #[test]
+  2574→    fn test_signed_leb128_zero() {
+  2575→        let encoded = encode_signed_leb128(0);
+  2576→        assert_eq!(encoded, vec![0x00]);
+  2577→        let (decoded, size) = decode_signed_leb128(&encoded);
+  2578→        assert_eq!(decoded, 0);
+  2579→        assert_eq!(size, 1);
+  2580→    }
+  2581→
+  2582→    #[test]
+  2583→    fn test_signed_leb128_positive() {
+  2584→        let encoded = encode_signed_leb128(42);
+  2585→        assert_eq!(encoded, vec![42]);
+  2586→        let (decoded, size) = decode_signed_leb128(&encoded);
+  2587→        assert_eq!(decoded, 42);
+  2588→        assert_eq!(size, 1);
+  2589→    }
+  2590→
+  2591→    #[test]
+  2592→    fn test_signed_leb128_negative() {
+  2593→        let encoded = encode_signed_leb128(-1);
+  2594→        assert_eq!(encoded, vec![0x7F]);
+  2595→        let (decoded, size) = decode_signed_leb128(&encoded);
+  2596→        assert_eq!(decoded, -1);
+  2597→        assert_eq!(size, 1);
+  2598→    }
+  2599→
+  2600→    #[test]
+  2601→    fn test_signed_leb128_roundtrip() {
+  2602→        let values = vec![
+  2603→            0i64,
+  2604→            1,
+  2605→            -1,
+  2606→            63,
+  2607→            -64,
+  2608→            64,
+  2609→            -65,
+  2610→            127,
+  2611→            -128,
+  2612→            8192,
+  2613→            -8193,
+  2614→            i32::MAX as i64,
+  2615→            i32::MIN as i64,
+  2616→            i64::MIN,
+  2617→            i64::MAX,
+  2618→        ];
+  2619→        for val in values {
+  2620→            let encoded = encode_signed_leb128(val);
+  2621→            let (decoded, size) = decode_signed_leb128(&encoded);
+  2622→            assert_eq!(decoded, val, "Signed round-trip failed for {}", val);
+  2623→            assert_eq!(size, encoded.len(), "Signed size mismatch for {}", val);
+  2624→        }
+  2625→    }
+  2626→
+  2627→    // ── WasmType tests ────────────────────────────────────────────
+  2628→
+  2629→    #[test]
+  2630→    fn test_wasm_type_bytes() {
+  2631→        assert_eq!(WasmType::I32.to_byte(), 0x7F);
+  2632→        assert_eq!(WasmType::I64.to_byte(), 0x7E);
+  2633→        assert_eq!(WasmType::F32.to_byte(), 0x7D);
+  2634→        assert_eq!(WasmType::F64.to_byte(), 0x7C);
+  2635→    }
+  2636→
+  2637→    #[test]
+  2638→    fn test_wasm_type_from_ir() {
+  2639→        assert_eq!(WasmType::from_ir_type(&IRType::I32), Some(WasmType::I32));
+  2640→        assert_eq!(WasmType::from_ir_type(&IRType::I64), Some(WasmType::I64));
+  2641→        assert_eq!(WasmType::from_ir_type(&IRType::F32), Some(WasmType::F32));
+  2642→        assert_eq!(WasmType::from_ir_type(&IRType::F64), Some(WasmType::F64));
+  2643→        assert_eq!(WasmType::from_ir_type(&IRType::Ptr), Some(WasmType::I32)); // wasm32
+  2644→        assert_eq!(WasmType::from_ir_type(&IRType::Void), None);
+  2645→    }
+  2646→
+  2647→    // ── Wasm instruction encoding tests ───────────────────────────
+  2648→
+  2649→    #[test]
+  2650→    fn test_i32_const_encoding() {
+  2651→        let instr = WasmInstr::I32Const(42);
+  2652→        let bytes = instr.to_bytes();
+  2653→        assert_eq!(bytes[0], 0x41); // i32.const opcode
+  2654→        assert_eq!(bytes[1], 42); // LEB128 of 42
+  2655→    }
+  2656→
+  2657→    #[test]
+  2658→    fn test_i32_add_encoding() {
+  2659→        let instr = WasmInstr::I32Add;
+  2660→        let bytes = instr.to_bytes();
+  2661→        assert_eq!(bytes, vec![0x6A]);
+  2662→    }
+  2663→
+  2664→    #[test]
+  2665→    fn test_local_get_encoding() {
+  2666→        let instr = WasmInstr::LocalGet(3);
+  2667→        let bytes = instr.to_bytes();
+  2668→        assert_eq!(bytes[0], 0x20);
+  2669→        assert_eq!(bytes[1], 3);
+  2670→    }
+  2671→
+  2672→    #[test]
+  2673→    fn test_i32_load_encoding() {
+  2674→        let instr = WasmInstr::I32Load {
+  2675→            align: 2,
+  2676→            offset: 0,
+  2677→        };
+  2678→        let bytes = instr.to_bytes();
+  2679→        assert_eq!(bytes[0], 0x28);
+  2680→        assert_eq!(bytes[1], 2); // align
+  2681→        assert_eq!(bytes[2], 0); // offset
+  2682→    }
+  2683→
+  2684→    #[test]
+  2685→    fn test_br_encoding() {
+  2686→        let instr = WasmInstr::Br(1);
+  2687→        let bytes = instr.to_bytes();
+  2688→        assert_eq!(bytes[0], 0x0C);
+  2689→        assert_eq!(bytes[1], 1);
+  2690→    }
+  2691→
+  2692→    #[test]
+  2693→    fn test_call_encoding() {
+  2694→        let instr = WasmInstr::Call(5);
+  2695→        let bytes = instr.to_bytes();
+  2696→        assert_eq!(bytes[0], 0x10);
+  2697→        assert_eq!(bytes[1], 5);
+  2698→    }
+  2699→
+  2700→    #[test]
+  2701→    fn test_conversion_instructions() {
+  2702→        // Verify all conversion instructions encode to their correct opcodes
+  2703→        assert_eq!(WasmInstr::I32WrapI64.to_bytes(), vec![0xA7]);
+  2704→        assert_eq!(WasmInstr::I64ExtendI32S.to_bytes(), vec![0xAC]);
+  2705→        assert_eq!(WasmInstr::I64ExtendI32U.to_bytes(), vec![0xAD]);
+  2706→        assert_eq!(WasmInstr::F32DemoteF64.to_bytes(), vec![0xB6]);
+  2707→        assert_eq!(WasmInstr::F64PromoteF32.to_bytes(), vec![0xBB]);
+  2708→        assert_eq!(WasmInstr::I32TruncF32S.to_bytes(), vec![0xA8]);
+  2709→        assert_eq!(WasmInstr::I32TruncF64S.to_bytes(), vec![0xA9]);
+  2710→        assert_eq!(WasmInstr::I64TruncF32S.to_bytes(), vec![0xAE]);
+  2711→        assert_eq!(WasmInstr::I64TruncF64S.to_bytes(), vec![0xAF]);
+  2712→        assert_eq!(WasmInstr::F32ConvertI32S.to_bytes(), vec![0xB2]);
+  2713→        assert_eq!(WasmInstr::F32ConvertI64S.to_bytes(), vec![0xB3]);
+  2714→        assert_eq!(WasmInstr::F64ConvertI32S.to_bytes(), vec![0xB7]);
+  2715→        assert_eq!(WasmInstr::F64ConvertI64S.to_bytes(), vec![0xB8]);
+  2716→        assert_eq!(WasmInstr::I32ReinterpretF32.to_bytes(), vec![0xBC]);
+  2717→        assert_eq!(WasmInstr::I64ReinterpretF64.to_bytes(), vec![0xBD]);
+  2718→        assert_eq!(WasmInstr::F32ReinterpretI32.to_bytes(), vec![0xBE]);
+  2719→        assert_eq!(WasmInstr::F64ReinterpretI64.to_bytes(), vec![0xBF]);
+  2720→    }
+  2721→
+  2722→    // ── Wasm section structure tests ──────────────────────────────
+  2723→
+  2724→    #[test]
+  2725→    fn test_wasm_module_magic_and_version() {
+  2726→        let module = WasmModuleBuilder::new().encode();
+  2727→        assert_eq!(&module[0..4], &WASM_MAGIC);
+  2728→        assert_eq!(&module[4..8], &WASM_VERSION);
+  2729→    }
+  2730→
+  2731→    #[test]
+  2732→    fn test_wasm_type_section() {
+  2733→        let mut builder = WasmModuleBuilder::new();
+  2734→        builder.add_type(WasmFuncType {
+  2735→            params: vec![WasmType::I32],
+  2736→            results: vec![WasmType::I32],
+  2737→        });
+  2738→        let module = builder.encode();
+  2739→        // After magic (4) + version (4), the first section is the type section
+  2740→        assert_eq!(module[8], SECTION_TYPE);
+  2741→    }
+  2742→
+  2743→    #[test]
+  2744→    fn test_wasm_memory_section() -> crate::Result<()> {
+  2745→        let mut builder = WasmModuleBuilder::new();
+  2746→        builder.add_memory(WasmLimits {
+  2747→            min: 1,
+  2748→            max: Some(256),
+  2749→        });
+  2750→        let module = builder.encode();
+  2751→        // Verify the memory section is present
+  2752→        let mut offset = 8; // skip magic + version
+  2753→        while offset < module.len() {
+  2754→            let section_id = module[offset];
+  2755→            offset += 1;
+  2756→            let (size, size_len) = decode_unsigned_leb128(&module[offset..]);
+  2757→            offset += size_len;
+  2758→            if section_id == SECTION_MEMORY {
+  2759→                return Ok(()); // Found memory section
+  2760→            }
+  2761→            offset += size as usize;
+  2762→        }
+  2763→        Err(crate::CodegenError::WasmSectionNotFound {
+  2764→            section: "Memory".to_string(),
+  2765→        })
+  2766→    }
+  2767→
+  2768→    // ── Complete .wasm module generation test ──────────────────────
+  2769→
+  2770→    #[test]
+  2771→    fn test_complete_wasm_module() {
+  2772→        let mut builder = WasmModuleBuilder::new();
+  2773→
+  2774→        // Add a function type: () -> i32
+  2775→        let type_idx = builder.add_type(WasmFuncType {
+  2776→            params: vec![],
+  2777→            results: vec![WasmType::I32],
+  2778→        });
+  2779→
+  2780→        // Add memory
+  2781→        builder.add_memory(WasmLimits {
+  2782→            min: 1,
+  2783→            max: Some(256),
+  2784→        });
+  2785→
+  2786→        // Add a function
+  2787→        let func_idx = builder.add_function(type_idx);
+  2788→
+  2789→        // Add function body: i32.const 42, end
+  2790→        let mut body_bytes = Vec::new();
+  2791→        WasmInstr::I32Const(42).encode(&mut body_bytes);
+  2792→        body_bytes.push(0x0B); // end
+  2793→        builder.add_code(WasmFuncBody {
+  2794→            locals: vec![],
+  2795→            body: body_bytes,
+  2796→        });
+  2797→
+  2798→        // Export the function
+  2799→        builder.add_export(WasmExport {
+  2800→            name: "main".to_string(),
+  2801→            kind: WasmExportKind::Function,
+  2802→            index: func_idx,
+  2803→        });
+  2804→
+  2805→        let module = builder.encode();
+  2806→
+  2807→        // Verify magic + version
+  2808→        assert_eq!(&module[0..4], &WASM_MAGIC);
+  2809→        assert_eq!(&module[4..8], &WASM_VERSION);
+  2810→        assert!(module.len() > 8);
+  2811→    }
+  2812→
+  2813→    // ── Stack discipline verification ──────────────────────────────
+  2814→
+  2815→    #[test]
+  2816→    fn test_stack_discipline_i32_add() {
+  2817→        // i32.add pops 2 values, pushes 1
+  2818→        let instr = WasmInstr::I32Add;
+  2819→        let bytes = instr.to_bytes();
+  2820→        assert_eq!(bytes.len(), 1);
+  2821→        assert_eq!(bytes[0], 0x6A);
+  2822→    }
+  2823→
+  2824→    #[test]
+  2825→    fn test_stack_discipline_select() {
+  2826→        // select pops 3 (val1, val2, cond), pushes 1
+  2827→        let instr = WasmInstr::Select;
+  2828→        let bytes = instr.to_bytes();
+  2829→        assert_eq!(bytes, vec![0x1B]);
+  2830→    }
+  2831→
+  2832→    #[test]
+  2833→    fn test_stack_discipline_drop() {
+  2834→        // drop pops 1, pushes 0
+  2835→        let instr = WasmInstr::Drop;
+  2836→        let bytes = instr.to_bytes();
+  2837→        assert_eq!(bytes, vec![0x1A]);
+  2838→    }
+  2839→
+  2840→    // ── Backend trait dispatch test ────────────────────────────────
+  2841→
+  2842→    #[test]
+  2843→    fn test_wasm32_backend_trait_dispatch() {
+  2844→        let backend: Box<dyn Backend> = Box::new(Wasm32Backend::new());
+  2845→        assert_eq!(backend.name(), "wasm32");
+  2846→        assert_eq!(backend.target_info().isa_name(), "wasm32");
+  2847→        assert!(!backend.target_info().has_registers());
+  2848→        assert_eq!(backend.target_info().pointer_width(), 4);
+  2849→    }
+  2850→
+  2851→    // ── return_stub test ──────────────────────────────────────────
+  2852→
+  2853→    #[test]
+  2854→    fn test_return_stub() {
+  2855→        let backend = Wasm32Backend::new();
+  2856→        let stub = backend.return_stub();
+  2857→        assert_eq!(stub, vec![0x0B]); // Wasm end byte
+  2858→    }
+  2859→
+  2860→    // ── Trampoline test ───────────────────────────────────────────
+  2861→
+  2862→    #[test]
+  2863→    fn test_trampoline_empty() {
+  2864→        let backend = Wasm32Backend::new();
+  2865→        let tramp = backend.trampoline(0x1000);
+  2866→        assert!(tramp.is_empty());
+  2867→    }
+  2868→
+  2869→    // ── WasmFuncType encoding test ────────────────────────────────
+  2870→
+  2871→    #[test]
+  2872→    fn test_func_type_encoding() {
+  2873→        let ft = WasmFuncType {
+  2874→            params: vec![WasmType::I32, WasmType::F64],
+  2875→            results: vec![WasmType::I32],
+  2876→        };
+  2877→        let encoded = ft.encode();
+  2878→        assert_eq!(encoded[0], 0x60); // func type tag
+  2879→                                      // 2 params
+  2880→        let (count, size) = decode_unsigned_leb128(&encoded[1..]);
+  2881→        assert_eq!(count, 2);
+  2882→        assert_eq!(encoded[1 + size], WasmType::I32.to_byte());
+  2883→        assert_eq!(encoded[2 + size], WasmType::F64.to_byte());
+  2884→    }
+  2885→
+  2886→    // ── Disassembler test ─────────────────────────────────────────
+  2887→
+  2888→    #[test]
+  2889→    fn test_disassemble_i32_const() {
+  2890→        let backend = Wasm32Backend::new();
+  2891→        let mut bytes = Vec::new();
+  2892→        WasmInstr::I32Const(42).encode(&mut bytes);
+  2893→        let lines = backend.disassemble(&bytes, 0);
+  2894→        assert!(!lines.is_empty());
+  2895→        assert!(lines[0].contains("i32.const"));
+  2896→    }
+  2897→
+  2898→    #[test]
+  2899→    fn test_disassemble_i32_add() {
+  2900→        let backend = Wasm32Backend::new();
+  2901→        let bytes = vec![0x6A]; // i32.add
+  2902→        let lines = backend.disassemble(&bytes, 0);
+  2903→        assert!(!lines.is_empty());
+  2904→        assert!(lines[0].contains("i32.add"));
+  2905→    }
+  2906→
+  2907→    // ── All i32 opcodes test ──────────────────────────────────────
+  2908→
+  2909→    #[test]
+  2910→    fn test_all_i32_comparison_opcodes() {
+  2911→        let opcodes = vec![
+  2912→            (WasmInstr::I32Eqz, 0x45),
+  2913→            (WasmInstr::I32Eq, 0x46),
+  2914→            (WasmInstr::I32Ne, 0x47),
+  2915→            (WasmInstr::I32LtS, 0x48),
+  2916→            (WasmInstr::I32LtU, 0x49),
+  2917→            (WasmInstr::I32GtS, 0x4A),
+  2918→            (WasmInstr::I32GtU, 0x4B),
+  2919→            (WasmInstr::I32LeS, 0x4C),
+  2920→            (WasmInstr::I32LeU, 0x4D),
+  2921→            (WasmInstr::I32GeS, 0x4E),
+  2922→            (WasmInstr::I32GeU, 0x4F),
+  2923→        ];
+  2924→        for (instr, expected_opcode) in opcodes {
+  2925→            assert_eq!(
+  2926→                instr.to_bytes(),
+  2927→                vec![expected_opcode],
+  2928→                "Opcode mismatch for {:?}",
+  2929→                instr
+  2930→            );
+  2931→        }
+  2932→    }
+  2933→
+  2934→    // ── Encode program test ───────────────────────────────────────
+  2935→
+  2936→    #[test]
+  2937→    fn test_encode_program() {
+  2938→        let backend = Wasm32Backend::new();
+  2939→        let program = AllocatedProgram {
+  2940→            functions: vec![AllocatedFunction {
+  2941→                name: "test_func".to_string(),
+  2942→                blocks: vec![AllocatedBlock {
+  2943→                    label: "entry".to_string(),
+  2944→                    instructions: vec![AllocatedInstruction {
+  2945→                        opcode: "i32.const_42".to_string(),
+  2946→                        reads: vec![],
+  2947→                        writes: vec![],
+  2948→                        encoded: {
+  2949→                            let mut b = Vec::new();
+  2950→                            WasmInstr::I32Const(42).encode(&mut b);
+  2951→                            b.push(0x0B); // end
+  2952→                            b
+  2953→                        },
+  2954→                    }],
+  2955→                    code_offset: 0,
+  2956→                }],
+  2957→                frame_size: 0,
+  2958→                callee_saved: vec![],
+  2959→                spill_slots: 0,
+  2960→                code_size: 3,
+  2961→                relocations: Vec::new(),
+  2962→                wasm_func_type: Some(crate::backend::WasmFuncType {
+  2963→                    params: vec![],
+  2964→                    results: vec![],
+  2965→                }),
+  2966→                wasm_locals: Some(vec![]),
+  2967→            }],
+  2968→            total_code_size: 3,
+  2969→            total_data_size: 0,
+  2970→        };
+  2971→        let result = backend.encode_program(&program);
+  2972→        assert!(result.is_ok());
+  2973→        let wasm_bytes = result.unwrap();
+  2974→        // Must start with Wasm magic
+  2975→        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
+  2976→    }
+  2977→
+  2978→    // ── SIMD v128 Tests ─────────────────────────────────────────────
+  2979→
+  2980→    #[test]
+  2981→    fn test_v128_const_encoding() {
+  2982→        let val = [0x01u8; 16];
+  2983→        let instr = WasmInstr::V128Const(val);
+  2984→        let bytes = instr.to_bytes();
+  2985→        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+  2986→                                    // The sub-opcode is LEB128(0x0C) = 0x0C
+  2987→        assert_eq!(bytes[1], 0x0C);
+  2988→        // 16 bytes of data follow
+  2989→        assert_eq!(&bytes[2..18], &[0x01u8; 16]);
+  2990→    }
+  2991→
+  2992→    #[test]
+  2993→    fn test_i32x4_add_encoding() {
+  2994→        let bytes = WasmInstr::I32X4Add.to_bytes();
+  2995→        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+  2996→                                    // LEB128(0x0E)
+  2997→        assert_eq!(bytes[1], 0x0E);
+  2998→    }
+  2999→
+  3000→    #[test]
+  3001→    fn test_f32x4_mul_encoding() {
+  3002→        let bytes = WasmInstr::F32X4Mul.to_bytes();
+  3003→        assert_eq!(bytes[0], 0xFD); // SIMD prefix
+  3004→                                    // LEB128(0x35)
+  3005→        assert_eq!(bytes[1], 0x35);
+  3006→    }
+  3007→
+  3008→    // ── Bulk Memory Tests ────────────────────────────────────────────
+  3009→
+  3010→    #[test]
+  3011→    fn test_memory_copy_encoding() {
+  3012→        let bytes = WasmInstr::MemoryCopy {
+  3013→            src_mem: 0,
+  3014→            dst_mem: 0,
+  3015→        }
+  3016→        .to_bytes();
+  3017→        assert_eq!(bytes[0], 0xFC); // multi-byte op prefix
+  3018→                                    // LEB128(0x0A) for memory.copy
+  3019→        assert_eq!(bytes[1], 0x0A);
+  3020→    }
+  3021→
+  3022→    #[test]
+  3023→    fn test_memory_fill_encoding() {
+  3024→        let bytes = WasmInstr::MemoryFill { mem: 0 }.to_bytes();
+  3025→        assert_eq!(bytes[0], 0xFC);
+  3026→        assert_eq!(bytes[1], 0x0B); // memory.fill
+  3027→    }
+  3028→
+  3029→    #[test]
+  3030→    fn test_memory_init_encoding() {
+  3031→        let bytes = WasmInstr::MemoryInit {
+  3032→            data_idx: 0,
+  3033→            mem: 0,
+  3034→        }
+  3035→        .to_bytes();
+  3036→        assert_eq!(bytes[0], 0xFC);
+  3037→        assert_eq!(bytes[1], 0x08); // memory.init
+  3038→    }
+  3039→
+  3040→    // ── WASI Import Tests ────────────────────────────────────────────
+  3041→
+  3042→    #[test]
+  3043→    fn test_wasi_fd_write_import() {
+  3044→        let imp = WasmImport::wasi_fd_write(0);
+  3045→        assert_eq!(imp.module, "wasi_snapshot_preview1");
+  3046→        assert_eq!(imp.name, "fd_write");
+  3047→    }
+  3048→
+  3049→    #[test]
+  3050→    fn test_wasi_proc_exit_import() {
+  3051→        let imp = WasmImport::wasi_proc_exit(1);
+  3052→        assert_eq!(imp.module, "wasi_snapshot_preview1");
+  3053→        assert_eq!(imp.name, "proc_exit");
+  3054→    }
+  3055→
+  3056→    // ── Multi-value Return / WasmFuncType Tests ─────────────────────
+  3057→
+  3058→    #[test]
+  3059→    fn test_multi_value_func_type() {
+  3060→        let ft = WasmFuncType {
+  3061→            params: vec![WasmType::I32, WasmType::I64],
+  3062→            results: vec![WasmType::I32, WasmType::I64], // multi-value return
+  3063→        };
+  3064→        let encoded = ft.encode();
+  3065→        assert_eq!(encoded[0], 0x60); // func type tag
+  3066→                                      // 2 params + 2 results should encode correctly
+  3067→        let decoded_params = decode_unsigned_leb128(&encoded[1..]);
+  3068→        assert_eq!(decoded_params.0, 2);
+  3069→    }
+  3070→
+  3071→    // ── Disassemble SIMD and Bulk Memory ────────────────────────────
+  3072→
+  3073→    #[test]
+  3074→    fn test_disassemble_simd_i32x4_add() {
+  3075→        let backend = Wasm32Backend::new();
+  3076→        let bytes = WasmInstr::I32X4Add.to_bytes();
+  3077→        let lines = backend.disassemble(&bytes, 0);
+  3078→        assert!(lines[0].contains("i32x4.add"));
+  3079→    }
+  3080→
+  3081→    #[test]
+  3082→    fn test_disassemble_memory_copy() {
+  3083→        let backend = Wasm32Backend::new();
+  3084→        let bytes = WasmInstr::MemoryCopy {
+  3085→            src_mem: 0,
+  3086→            dst_mem: 0,
+  3087→        }
+  3088→        .to_bytes();
+  3089→        let lines = backend.disassemble(&bytes, 0);
+  3090→        assert!(lines[0].contains("memory.copy"));
+  3091→    }
+  3092→
+  3093→    // ── Real Instruction Selection (ISel) Tests ───────────────────────
+  3094→
+  3095→    /// Helper: build a minimal IRFunction with a single block that contains
+  3096→    /// the given instructions and a Return terminator.
+  3097→    fn make_simple_func(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
+  3098→        let mut func = IRFunction::new(name);
+  3099→        func.blocks[0].instructions = instrs;
+  3100→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  3101→        func
+  3102→    }
+  3103→
+  3104→    #[test]
+  3105→    fn test_isel_i32_add_produces_real_opcode() {
+  3106→        // IR: %1 = add %0, 42
+  3107→        let mut func = make_simple_func(
+  3108→            "add_test",
+  3109→            vec![IRInstr::Add {
+  3110→                dst: IRValue::Register(1),
+  3111→                lhs: IRValue::Register(0),
+  3112→                rhs: IRValue::Immediate(42),
+  3113→            }],
+  3114→        );
+  3115→        func.param_types.push(IRType::I32);
+  3116→        func.params.push(IRValue::Register(0));
+  3117→
+  3118→        let backend = Wasm32Backend::new();
+  3119→        let result = backend.allocate_registers(&func);
+  3120→        assert!(
+  3121→            result.is_ok(),
+  3122→            "allocate_registers failed: {:?}",
+  3123→            result.err()
+  3124→        );
+  3125→        let alloc = result.unwrap();
+  3126→
+  3127→        // The allocated instructions must contain i32.add (opcode 0x6A),
+  3128→        // not a NOP (0x01) or a generic "wasm_body" opcode.
+  3129→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3130→            .instructions
+  3131→            .iter()
+  3132→            .map(|i| i.opcode.as_str())
+  3133→            .collect();
+  3134→        assert!(
+  3135→            opcodes.iter().any(|o| o.contains("i32.add")),
+  3136→            "Expected i32.add in opcodes, got: {:?}",
+  3137→            opcodes
+  3138→        );
+  3139→        // Verify the encoded bytes for the add instruction contain 0x6A
+  3140→        let add_instr = alloc.blocks[0]
+  3141→            .instructions
+  3142→            .iter()
+  3143→            .find(|i| i.opcode.contains("i32.add"))
+  3144→            .expect("should find i32.add instruction");
+  3145→        assert!(
+  3146→            add_instr.encoded.contains(&0x6A),
+  3147→            "i32.add encoded bytes should contain 0x6A, got: {:02x?}",
+  3148→            add_instr.encoded
+  3149→        );
+  3150→    }
+  3151→
+  3152→    #[test]
+  3153→    fn test_isel_i32_sub_produces_real_opcode() {
+  3154→        // IR: %1 = sub %0, 10
+  3155→        let mut func = make_simple_func(
+  3156→            "sub_test",
+  3157→            vec![IRInstr::Sub {
+  3158→                dst: IRValue::Register(1),
+  3159→                lhs: IRValue::Register(0),
+  3160→                rhs: IRValue::Immediate(10),
+  3161→            }],
+  3162→        );
+  3163→        func.param_types.push(IRType::I32);
+  3164→        func.params.push(IRValue::Register(0));
+  3165→
+  3166→        let backend = Wasm32Backend::new();
+  3167→        let alloc = backend.allocate_registers(&func).unwrap();
+  3168→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3169→            .instructions
+  3170→            .iter()
+  3171→            .map(|i| i.opcode.as_str())
+  3172→            .collect();
+  3173→        assert!(
+  3174→            opcodes.iter().any(|o| o.contains("i32.sub")),
+  3175→            "Expected i32.sub in opcodes, got: {:?}",
+  3176→            opcodes
+  3177→        );
+  3178→    }
+  3179→
+  3180→    #[test]
+  3181→    fn test_isel_cmp_eq_produces_real_opcode() {
+  3182→        // IR: %1 = cmp.eq %0, %0
+  3183→        let mut func = make_simple_func(
+  3184→            "cmp_test",
+  3185→            vec![IRInstr::Cmp {
+  3186→                kind: crate::ir::CmpKind::Eq,
+  3187→                dst: IRValue::Register(1),
+  3188→                lhs: IRValue::Register(0),
+  3189→                rhs: IRValue::Register(0),
+  3190→            }],
+  3191→        );
+  3192→        func.param_types.push(IRType::I32);
+  3193→        func.params.push(IRValue::Register(0));
+  3194→
+  3195→        let backend = Wasm32Backend::new();
+  3196→        let alloc = backend.allocate_registers(&func).unwrap();
+  3197→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3198→            .instructions
+  3199→            .iter()
+  3200→            .map(|i| i.opcode.as_str())
+  3201→            .collect();
+  3202→        assert!(
+  3203→            opcodes.iter().any(|o| o.contains("i32.eq")),
+  3204→            "Expected i32.eq in opcodes, got: {:?}",
+  3205→            opcodes
+  3206→        );
+  3207→    }
+  3208→
+  3209→    #[test]
+  3210→    fn test_isel_load_store_produces_real_opcodes() {
+  3211→        // IR: %1 = load %0; store %1, %0
+  3212→        let mut func = make_simple_func(
+  3213→            "ldst_test",
+  3214→            vec![
+  3215→                IRInstr::Load {
+  3216→                    dst: IRValue::Register(1),
+  3217→                    addr: IRValue::Register(0),
+  3218→                    offset: 0,
+  3219→                    ty: IRType::I64,
+  3220→                },
+  3221→                IRInstr::Store {
+  3222→                    value: IRValue::Register(1),
+  3223→                    addr: IRValue::Register(0),
+  3224→                    offset: 0,
+  3225→                    ty: IRType::I64,
+  3226→                },
+  3227→            ],
+  3228→        );
+  3229→        func.param_types.push(IRType::I32);
+  3230→        func.params.push(IRValue::Register(0));
+  3231→
+  3232→        let backend = Wasm32Backend::new();
+  3233→        let alloc = backend.allocate_registers(&func).unwrap();
+  3234→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3235→            .instructions
+  3236→            .iter()
+  3237→            .map(|i| i.opcode.as_str())
+  3238→            .collect();
+  3239→        assert!(
+  3240→            opcodes.iter().any(|o| o.contains("i32.load")),
+  3241→            "Expected i32.load in opcodes, got: {:?}",
+  3242→            opcodes
+  3243→        );
+  3244→        assert!(
+  3245→            opcodes.iter().any(|o| o.contains("i32.store")),
+  3246→            "Expected i32.store in opcodes, got: {:?}",
+  3247→            opcodes
+  3248→        );
+  3249→    }
+  3250→
+  3251→    #[test]
+  3252→    fn test_isel_return_produces_real_opcode() {
+  3253→        // IR: just return
+  3254→        let func = make_simple_func("ret_test", vec![]);
+  3255→
+  3256→        let backend = Wasm32Backend::new();
+  3257→        let alloc = backend.allocate_registers(&func).unwrap();
+  3258→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3259→            .instructions
+  3260→            .iter()
+  3261→            .map(|i| i.opcode.as_str())
+  3262→            .collect();
+  3263→        assert!(
+  3264→            opcodes.iter().any(|o| o.contains("return")),
+  3265→            "Expected return in opcodes, got: {:?}",
+  3266→            opcodes
+  3267→        );
+  3268→    }
+  3269→
+  3270→    #[test]
+  3271→    fn test_isel_binop_i32_mul_produces_real_opcode() {
+  3272→        // IR: %1 = BinOp(Mul) %0, 3
+  3273→        let mut func = make_simple_func(
+  3274→            "mul_test",
+  3275→            vec![IRInstr::BinOp {
+  3276→                op: BinOpKind::Mul,
+  3277→                dst: IRValue::Register(1),
+  3278→                lhs: IRValue::Register(0),
+  3279→                rhs: IRValue::Immediate(3),
+  3280→            }],
+  3281→        );
+  3282→        func.param_types.push(IRType::I32);
+  3283→        func.params.push(IRValue::Register(0));
+  3284→
+  3285→        let backend = Wasm32Backend::new();
+  3286→        let alloc = backend.allocate_registers(&func).unwrap();
+  3287→        let mul_instr = alloc.blocks[0]
+  3288→            .instructions
+  3289→            .iter()
+  3290→            .find(|i| i.opcode.contains("i32.mul"));
+  3291→        assert!(mul_instr.is_some(), "Expected i32.mul instruction");
+  3292→        let instr = mul_instr.unwrap();
+  3293→        assert!(
+  3294→            instr.encoded.contains(&0x6C),
+  3295→            "i32.mul encoded bytes should contain 0x6C, got: {:02x?}",
+  3296→            instr.encoded
+  3297→        );
+  3298→    }
+  3299→
+  3300→    #[test]
+  3301→    fn test_isel_binop_sdiv_produces_i32_div_s() {
+  3302→        // IR: %1 = BinOp(SDiv) %0, 2
+  3303→        let mut func = make_simple_func(
+  3304→            "sdiv_test",
+  3305→            vec![IRInstr::BinOp {
+  3306→                op: BinOpKind::SDiv,
+  3307→                dst: IRValue::Register(1),
+  3308→                lhs: IRValue::Register(0),
+  3309→                rhs: IRValue::Immediate(2),
+  3310→            }],
+  3311→        );
+  3312→        func.param_types.push(IRType::I32);
+  3313→        func.params.push(IRValue::Register(0));
+  3314→
+  3315→        let backend = Wasm32Backend::new();
+  3316→        let alloc = backend.allocate_registers(&func).unwrap();
+  3317→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3318→            .instructions
+  3319→            .iter()
+  3320→            .map(|i| i.opcode.as_str())
+  3321→            .collect();
+  3322→        assert!(
+  3323→            opcodes.iter().any(|o| o.contains("i32.div_s")),
+  3324→            "Expected i32.div_s in opcodes, got: {:?}",
+  3325→            opcodes
+  3326→        );
+  3327→    }
+  3328→
+  3329→    #[test]
+  3330→    fn test_isel_unreachable_produces_unreachable_not_nop() {
+  3331→        // IR: unreachable terminator
+  3332→        let mut func = IRFunction::new("unreachable_test");
+  3333→        func.blocks[0].terminator = IRTerminator::Unreachable;
+  3334→
+  3335→        let backend = Wasm32Backend::new();
+  3336→        let alloc = backend.allocate_registers(&func).unwrap();
+  3337→
+  3338→        // Must contain "unreachable" (0x00), NOT "nop" (0x01)
+  3339→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3340→            .instructions
+  3341→            .iter()
+  3342→            .map(|i| i.opcode.as_str())
+  3343→            .collect();
+  3344→        assert!(
+  3345→            opcodes.iter().any(|o| o.contains("unreachable")),
+  3346→            "Expected unreachable in opcodes, got: {:?}",
+  3347→            opcodes
+  3348→        );
+  3349→        assert!(
+  3350→            !opcodes.iter().any(|o| *o == "nop"),
+  3351→            "Should not have nop opcode for unreachable terminator, got: {:?}",
+  3352→            opcodes
+  3353→        );
+  3354→    }
+  3355→
+  3356→    #[test]
+  3357→    fn test_isel_f32_neg_encoding() {
+  3358→        // Verify the f32.neg instruction encodes to opcode 0x8C
+  3359→        let bytes = WasmInstr::F32Neg.to_bytes();
+  3360→        assert_eq!(bytes, vec![0x8C]);
+  3361→    }
+  3362→
+  3363→    #[test]
+  3364→    fn test_isel_f64_neg_encoding() {
+  3365→        // Verify the f64.neg instruction encodes to opcode 0x9A
+  3366→        let bytes = WasmInstr::F64Neg.to_bytes();
+  3367→        assert_eq!(bytes, vec![0x9A]);
+  3368→    }
+  3369→
+  3370→    #[test]
+  3371→    fn test_isel_unreachable_encoding() {
+  3372→        // Verify the unreachable instruction encodes to opcode 0x00
+  3373→        let bytes = WasmInstr::Unreachable.to_bytes();
+  3374→        assert_eq!(bytes, vec![0x00]);
+  3375→    }
+  3376→
+  3377→    #[test]
+  3378→    fn test_isel_cast_bitcast_uses_reinterpret() {
+  3379→        // BitCast of i32 → f32 should use f32.reinterpret_i32 (0xBE), not Nop (0x01)
+  3380→        let mut func = make_simple_func(
+  3381→            "bitcast_test",
+  3382→            vec![IRInstr::Cast {
+  3383→                kind: CastKind::BitCast,
+  3384→                dst: IRValue::Register(1),
+  3385→                src: IRValue::Register(0),
+  3386→            }],
+  3387→        );
+  3388→        func.param_types.push(IRType::I32);
+  3389→        func.params.push(IRValue::Register(0));
+  3390→
+  3391→        let backend = Wasm32Backend::new();
+  3392→        let alloc = backend.allocate_registers(&func).unwrap();
+  3393→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3394→            .instructions
+  3395→            .iter()
+  3396→            .map(|i| i.opcode.as_str())
+  3397→            .collect();
+  3398→        assert!(
+  3399→            opcodes.iter().any(|o| o.contains("reinterpret")),
+  3400→            "Expected reinterpret for BitCast, got: {:?}",
+  3401→            opcodes
+  3402→        );
+  3403→        assert!(
+  3404→            !opcodes.iter().any(|o| *o == "nop"),
+  3405→            "BitCast should not produce nop, got: {:?}",
+  3406→            opcodes
+  3407→        );
+  3408→    }
+  3409→
+  3410→    #[test]
+  3411→    fn test_isel_allocate_registers_per_instruction_opcodes() {
+  3412→        // Verify that allocate_registers produces per-instruction entries
+  3413→        // with real opcode names (not a single "wasm_body" blob).
+  3414→        let func = make_simple_func(
+  3415→            "isel_test",
+  3416→            vec![IRInstr::Add {
+  3417→                dst: IRValue::Register(1),
+  3418→                lhs: IRValue::Immediate(10),
+  3419→                rhs: IRValue::Immediate(20),
+  3420→            }],
+  3421→        );
+  3422→
+  3423→        let backend = Wasm32Backend::new();
+  3424→        let alloc = backend.allocate_registers(&func).unwrap();
+  3425→
+  3426→        // Should NOT have a "wasm_body" opcode
+  3427→        let opcodes: Vec<&str> = alloc.blocks[0]
+  3428→            .instructions
+  3429→            .iter()
+  3430→            .map(|i| i.opcode.as_str())
+  3431→            .collect();
+  3432→        assert!(
+  3433→            !opcodes.iter().any(|o| *o == "wasm_body"),
+  3434→            "Should not have wasm_body opcode, got: {:?}",
+  3435→            opcodes
+  3436→        );
+  3437→        // Should have specific instruction opcodes
+  3438→        assert!(
+  3439→            opcodes.iter().any(|o| o.contains("i32.const")),
+  3440→            "Expected i32.const in opcodes, got: {:?}",
+  3441→            opcodes
+  3442→        );
+  3443→        assert!(
+  3444→            opcodes.iter().any(|o| o.contains("i32.add")),
+  3445→            "Expected i32.add in opcodes, got: {:?}",
+  3446→            opcodes
+  3447→        );
+  3448→    }
+  3449→
+  3450→    // ── Disassembler Tests ──────────────────────────────────────────────
+  3451→
+  3452→    #[test]
+  3453→    fn test_wasm32_disassemble_nop() {
+  3454→        let backend = Wasm32Backend::new();
+  3455→        let bytes = WasmInstr::Nop.to_bytes();
+  3456→        let lines = backend.disassemble(&bytes, 0);
+  3457→        assert_eq!(lines.len(), 1);
+  3458→        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+  3459→    }
+  3460→
+  3461→    #[test]
+  3462→    fn test_wasm32_disassemble_i32_const() {
+  3463→        let backend = Wasm32Backend::new();
+  3464→        let bytes = WasmInstr::I32Const(42).to_bytes();
+  3465→        let lines = backend.disassemble(&bytes, 0);
+  3466→        assert_eq!(lines.len(), 1);
+  3467→        assert!(
+  3468→            lines[0].contains("i32.const"),
+  3469→            "Expected i32.const, got: {}",
+  3470→            lines[0]
+  3471→        );
+  3472→    }
+  3473→
+  3474→    #[test]
+  3475→    fn test_wasm32_disassemble_add_sub() {
+  3476→        let backend = Wasm32Backend::new();
+  3477→        let mut bytes = Vec::new();
+  3478→        WasmInstr::I32Add.encode(&mut bytes);
+  3479→        WasmInstr::I32Sub.encode(&mut bytes);
+  3480→        let lines = backend.disassemble(&bytes, 0);
+  3481→        assert_eq!(lines.len(), 2);
+  3482→        assert!(
+  3483→            lines[0].contains("i32.add"),
+  3484→            "Expected i32.add, got: {}",
+  3485→            lines[0]
+  3486→        );
+  3487→        assert!(
+  3488→            lines[1].contains("i32.sub"),
+  3489→            "Expected i32.sub, got: {}",
+  3490→            lines[1]
+  3491→        );
+  3492→    }
+  3493→}
+  3494→

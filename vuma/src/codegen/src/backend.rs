@@ -5,7 +5,7 @@
 //! to provide target-specific information and code generation.
 
 use crate::arm32::Arm32Backend;
-use crate::ir::{IRFunction, IRInstr, IRType};
+use crate::ir::{size_of_with_ptr_width, alignment_of_with_ptr_width, IRFunction, IRInstr, IRType};
 use crate::loongarch64::LoongArch64Backend;
 use crate::mips64::Mips64Backend;
 use crate::ppc64::PPC64Backend;
@@ -527,11 +527,11 @@ impl TargetInfo for AArch64TargetInfo {
     }
 
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty) // Uses existing ARM64 LP64 logic
+        size_of_with_ptr_width(ty, 8) // ARM64 LP64: 8-byte pointers
     }
 
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty) // Uses existing ARM64 LP64 logic
+        alignment_of_with_ptr_width(ty, 8) // ARM64 LP64: 8-byte pointers
     }
 
     fn endianness(&self) -> Endianness {
@@ -608,10 +608,10 @@ impl TargetInfo for RiscV64TargetInfo {
         8
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty)
+        size_of_with_ptr_width(ty, 8)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty)
+        alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Little
@@ -687,16 +687,10 @@ impl TargetInfo for Wasm32TargetInfo {
         4
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        match ty {
-            IRType::Ptr | IRType::Func => 4, // 32-bit pointers in wasm32
-            _ => crate::ir::size_of(ty),
-        }
+        size_of_with_ptr_width(ty, 4) // 32-bit pointers in wasm32
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        match ty {
-            IRType::Ptr | IRType::Func => 4,
-            _ => crate::ir::alignment_of(ty),
-        }
+        alignment_of_with_ptr_width(ty, 4)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Little
@@ -772,10 +766,10 @@ impl TargetInfo for LoongArch64TargetInfo {
         8
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty)
+        size_of_with_ptr_width(ty, 8)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty)
+        alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Little
@@ -851,10 +845,10 @@ impl TargetInfo for X86_64TargetInfo {
         8
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty)
+        size_of_with_ptr_width(ty, 8)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty)
+        alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Little
@@ -931,16 +925,14 @@ impl TargetInfo for Arm32TargetInfo {
     }
     fn size_of(&self, ty: &IRType) -> usize {
         match ty {
-            IRType::Ptr | IRType::Func => 4, // 32-bit pointers
             IRType::I64 | IRType::U64 => 8,
-            _ => crate::ir::size_of(ty),
+            _ => size_of_with_ptr_width(ty, 4), // 32-bit pointers
         }
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
         match ty {
-            IRType::Ptr | IRType::Func => 4,
             IRType::I64 | IRType::U64 => 4, // ARM32 aligns i64 to 4
-            _ => crate::ir::alignment_of(ty),
+            _ => alignment_of_with_ptr_width(ty, 4),
         }
     }
     fn endianness(&self) -> Endianness {
@@ -1017,10 +1009,10 @@ impl TargetInfo for Mips64TargetInfo {
         8
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty)
+        size_of_with_ptr_width(ty, 8)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty)
+        alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Big
@@ -1096,10 +1088,10 @@ impl TargetInfo for PowerPC64TargetInfo {
         8
     }
     fn size_of(&self, ty: &IRType) -> usize {
-        crate::ir::size_of(ty)
+        size_of_with_ptr_width(ty, 8)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
-        crate::ir::alignment_of(ty)
+        alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
         Endianness::Bi

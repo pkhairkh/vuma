@@ -41,7 +41,7 @@ use std::time::Instant;
 
 use vuma_bd::{repd::RepD, BD};
 use vuma_codegen::{
-    emit::{emit_elf, EmitConfig},
+    emit::{emit_binary, EmitConfig},
     ir::{BinOpKind as IrBinOpKind, IRProgram},
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
@@ -1833,7 +1833,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     // ── Stage 10: Code Emission ───────────────────────────────────────
     let t = Instant::now();
     let emit_config = config.emit_config();
-    let binary = match emit_elf(
+    let binary = match emit_binary(
         &ir_program.functions,
         &ir_program.data_sections,
         &emit_config,

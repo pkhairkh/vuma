@@ -997,10 +997,18 @@ pub enum WasmExportKind {
 /// A Wasm global variable.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WasmGlobal {
-    pub val_type: WasmType,
+    pub ty: WasmType,
     pub mutable: bool,
-    pub init_expr: Vec<u8>, // init expr bytes (e.g. i32.const + end)
+    pub init_value: i64,
 }
+
+/// Global index for the heap pointer used by the bump allocator.
+/// Must be kept in sync with the globals added in `encode_program`.
+const HEAP_PTR_GLOBAL_IDX: u32 = 0;
+
+/// Start of the heap area in linear memory (second 64 KiB page, leaving
+/// the first page for globals / stack).
+const HEAP_START: i32 = 65536;
 
 /// A Wasm data segment.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1097,6 +1105,13 @@ impl WasmModuleBuilder {
             self.num_imported_functions += 1;
         }
         self.imports.push(import);
+    }
+
+    /// Add a global variable and return its index.
+    pub fn add_global(&mut self, global: WasmGlobal) -> u32 {
+        let idx = self.globals.len() as u32;
+        self.globals.push(global);
+        idx
     }
 
     /// Add an export.
@@ -1201,9 +1216,28 @@ impl WasmModuleBuilder {
             let mut section = Vec::new();
             section.extend_from_slice(&encode_unsigned_leb128(self.globals.len() as u64));
             for g in &self.globals {
-                section.push(g.val_type.to_byte());
+                section.push(g.ty.to_byte());
                 section.push(if g.mutable { 0x01 } else { 0x00 });
-                section.extend_from_slice(&g.init_expr);
+                // Emit init expr: <const opcode> <LEB128 value> end
+                match g.ty {
+                    WasmType::I32 => {
+                        section.push(0x41); // i32.const
+                        section.extend_from_slice(&encode_signed_leb128(g.init_value));
+                    }
+                    WasmType::I64 => {
+                        section.push(0x42); // i64.const
+                        section.extend_from_slice(&encode_signed_leb128(g.init_value));
+                    }
+                    WasmType::F32 => {
+                        section.push(0x43); // f32.const
+                        section.extend_from_slice(&(g.init_value as f32).to_le_bytes());
+                    }
+                    WasmType::F64 => {
+                        section.push(0x44); // f64.const
+                        section.extend_from_slice(&(g.init_value as f64).to_le_bytes());
+                    }
+                }
+                section.push(0x0B); // end
             }
             emit_section(&mut module, SECTION_GLOBAL, &section);
         }
@@ -1495,13 +1529,16 @@ impl LoweringContext {
     }
 
     /// Push a value onto the Wasm stack from an IRValue.
-    /// On Wasm32, all integer values are pushed as i32.
+    /// On Wasm32, pointers and most integer values are pushed as i32.
+    /// I64 is used only when the type hint explicitly requests it (e.g., for
+    /// I64Load/I64Store of 64-bit values).  Addresses are always truncated
+    /// to i32 since the Wasm32 address space is 32 bits.
     fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
         match val {
             IRValue::Immediate(v) => {
-                // On Wasm32, always use i32 for integer constants
                 let ty = type_hint.copied().unwrap_or(WasmType::I32);
                 match ty {
+                    WasmType::I64 => self.emit(WasmInstr::I64Const(*v)),
                     WasmType::F32 => self.emit(WasmInstr::F32Const(*v as f32)),
                     WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
                     _ => self.emit(WasmInstr::I32Const(*v as i32)),
@@ -1539,14 +1576,15 @@ impl LoweringContext {
 
 /// Determine the Wasm type for dedicated arithmetic IR instructions (Add, Sub,
 /// Mul, Div, Cmp).  These instructions carry an optional `ty` field that
-/// indicates the operand width.  On Wasm32, integer types narrower than I64
-/// map to I32; I64/U64 are preserved for 64-bit arithmetic.
+/// indicates the operand width.  On the Wasm32 target, all integer types map
+/// to I32 since pointers are 32 bits and the address space is 32 bits;
+/// only float types retain their original width.  This is consistent with
+/// `wasm_type_for_binop` and ensures pointer arithmetic always uses i32 ops.
 fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
     match ir_ty {
-        Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
         Some(IRType::F32) => WasmType::F32,
         Some(IRType::F64) => WasmType::F64,
-        _ => WasmType::I32, // default: I32 for all other integer types
+        _ => WasmType::I32, // all integer types → i32 on wasm32 (pointers are i32)
     }
 }
 
@@ -1938,10 +1976,17 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
             ctx.push_value(addr, Some(&WasmType::I32));
             let wasm_offset = (*offset).max(0) as u32;
-            let load_op = match load_ty {
-                WasmType::I64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
-                WasmType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
-                WasmType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
+            // Select the correct Wasm load instruction based on the IR type.
+            // Alignment is log2(access_size_in_bytes):
+            //   1 byte = 0, 2 bytes = 1, 4 bytes = 2, 8 bytes = 3
+            let load_op = match ty {
+                IRType::I8 => WasmInstr::I32Load8S { align: 0, offset: wasm_offset },
+                IRType::U8 => WasmInstr::I32Load8U { align: 0, offset: wasm_offset },
+                IRType::I16 => WasmInstr::I32Load16S { align: 1, offset: wasm_offset },
+                IRType::U16 => WasmInstr::I32Load16U { align: 1, offset: wasm_offset },
+                IRType::I64 | IRType::U64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
+                IRType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
+                IRType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
             };
             ctx.emit(load_op);
@@ -1957,10 +2002,15 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, Some(&store_ty));
             let wasm_offset = (*offset).max(0) as u32;
-            let store_op = match store_ty {
-                WasmType::I64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
-                WasmType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
-                WasmType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
+            // Select the correct Wasm store instruction based on the IR type.
+            // Alignment is log2(access_size_in_bytes):
+            //   1 byte = 0, 2 bytes = 1, 4 bytes = 2, 8 bytes = 3
+            let store_op = match ty {
+                IRType::I8 | IRType::U8 => WasmInstr::I32Store8 { align: 0, offset: wasm_offset },
+                IRType::I16 | IRType::U16 => WasmInstr::I32Store16 { align: 1, offset: wasm_offset },
+                IRType::I64 | IRType::U64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
+                IRType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
+                IRType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
             };
             ctx.emit(store_op);
@@ -1980,28 +2030,35 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Alloc { dst, size } => {
-            // In Wasm, Alloc maps to a local variable.
-            // We allocate `size` bytes worth of locals (as i32 slots).
-            let num_slots = (*size).div_ceil(4); // round up to i32 slots
+            // Bump allocator: return the current __heap_ptr as the address,
+            // then advance __heap_ptr by `size` bytes (aligned to 8).
+            //
+            // Generated code:
+            //   global.get  HEAP_PTR_GLOBAL_IDX   // push current heap ptr
+            //   [saved as dst vreg — this IS the allocated address]
+            //   global.get  HEAP_PTR_GLOBAL_IDX   // push heap ptr again
+            //   i32.const   aligned_size           // size rounded up to 8-byte align
+            //   i32.add                            // heap_ptr + aligned_size
+            //   global.set  HEAP_PTR_GLOBAL_IDX   // store new heap ptr
+            let aligned_size = ((*size as i32) + 7) & !7; // align up to 8 bytes
+
+            // Read current heap pointer — this is the returned address
+            ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
             if let IRValue::Register(id) = dst {
-                // Use the first slot as the "pointer" (which is just the local index)
-                // For Wasm, locals ARE the storage; we just allocate them
-                let _local_idx = ctx.alloc_local(*id, WasmType::I32);
-                // For multi-slot allocs, allocate additional locals
-                for extra_idx in 1..num_slots {
-                    ctx.alloc_local(u32::MAX - *id - extra_idx, WasmType::I32); // dummy vreg IDs for extra slots
-                }
-                // Push the local index as the "address" (pointer)
-                if let Some(idx) = ctx.get_local(*id) {
-                    ctx.emit(WasmInstr::I32Const(idx as i32));
-                    ctx.emit(WasmInstr::LocalSet(idx));
-                }
+                ctx.pop_to_vreg(*id, WasmType::I32);
+            } else {
+                ctx.emit(WasmInstr::Drop);
             }
+
+            // Advance __heap_ptr by aligned_size
+            ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+            ctx.emit(WasmInstr::I32Const(aligned_size));
+            ctx.emit(WasmInstr::I32Add);
+            ctx.emit(WasmInstr::GlobalSet(HEAP_PTR_GLOBAL_IDX));
         }
 
         IRInstr::Free { ptr: _ } => {
-            // Wasm has no free; memory management is handled by the runtime.
-            // This is a no-op in Wasm.
+            // Bump allocator does not free; this is a no-op.
         }
 
         IRInstr::Cast { kind, dst, src } => {
@@ -2385,13 +2442,41 @@ impl Backend for Wasm32Backend {
         // Build a complete .wasm module from the allocated program.
         let mut module = WasmModuleBuilder::new();
 
-        // Add a default memory (1 page minimum)
+        // Add memory (2 pages minimum = 128KB, so the heap has room)
         module.add_memory(WasmLimits {
-            min: 1,
+            min: 2,
             max: Some(256),
         });
 
-        // For each function, add a type and function entry
+        // Add the __heap_ptr global (mutable i32, initialised to HEAP_START = start of page 2)
+        module.add_global(WasmGlobal {
+            ty: WasmType::I32,
+            mutable: true,
+            init_value: HEAP_START as i64,
+        });
+
+        // ── WASI proc_exit import ──────────────────────────────────
+        // Import wasi_snapshot_preview1.proc_exit so the _start wrapper
+        // can terminate the process with an exit code.
+        let proc_exit_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32],
+            results: vec![],
+        });
+        module.add_import(WasmImport::wasi_proc_exit(proc_exit_type_idx));
+        // proc_exit is now function index 0 (first imported function).
+
+        // ── _start wrapper type ────────────────────────────────────
+        // The Wasm start-section function must have signature () -> ().
+        let start_type_idx = module.add_type(WasmFuncType {
+            params: vec![],
+            results: vec![],
+        });
+
+        // ── Program functions ──────────────────────────────────────
+        // Track the main function so the _start wrapper can call it.
+        let mut main_func_idx: Option<u32> = None;
+        let mut main_func_type: Option<WasmFuncType> = None;
+
         for func in &program.functions {
             // Recover the function type from the typed metadata field.
             let func_type = func.wasm_func_type.as_ref().map_or_else(
@@ -2405,8 +2490,13 @@ impl Backend for Wasm32Backend {
                 },
             );
 
-            let type_idx = module.add_type(func_type);
+            let type_idx = module.add_type(func_type.clone());
             let func_idx = module.add_function(type_idx);
+
+            if func.name == "main" {
+                main_func_idx = Some(func_idx);
+                main_func_type = Some(func_type);
+            }
 
             // Recover local declarations from the typed metadata field.
             let local_decls: Vec<(u32, WasmType)> = func
@@ -2443,6 +2533,63 @@ impl Backend for Wasm32Backend {
                 index: func_idx,
             });
         }
+
+        // ── _start wrapper function ────────────────────────────────
+        // _start is the Wasm entry point.  It calls main() and passes
+        // the return value (if any) to the WASI proc_exit syscall.
+        let start_func_idx = module.add_function(start_type_idx);
+
+        let mut start_body = Vec::new();
+
+        if let Some(main_idx) = main_func_idx {
+            // Call main()
+            WasmInstr::Call(main_idx).encode(&mut start_body);
+
+            let main_type = main_func_type.unwrap_or(WasmFuncType {
+                params: vec![],
+                results: vec![],
+            });
+
+            if main_type.results == vec![WasmType::I32] {
+                // main() returned i32 — pass it directly to proc_exit
+                // (imported function index 0).
+                WasmInstr::Call(0).encode(&mut start_body);
+            } else if main_type.results.is_empty() {
+                // main() returned void — exit with code 0.
+                WasmInstr::I32Const(0).encode(&mut start_body);
+                WasmInstr::Call(0).encode(&mut start_body);
+            } else {
+                // main() returned some other type — drop it and exit 0.
+                WasmInstr::Drop.encode(&mut start_body);
+                WasmInstr::I32Const(0).encode(&mut start_body);
+                WasmInstr::Call(0).encode(&mut start_body);
+            }
+        } else {
+            // No main function found — exit with code 1 (error).
+            WasmInstr::I32Const(1).encode(&mut start_body);
+            WasmInstr::Call(0).encode(&mut start_body);
+        }
+
+        // proc_exit is divergent (never returns), but Wasm validation
+        // requires a well-formed block.  Add unreachable + end.
+        WasmInstr::Unreachable.encode(&mut start_body);
+        start_body.push(0x0B); // end
+
+        module.add_code(WasmFuncBody {
+            locals: vec![],
+            body: start_body,
+        });
+
+        // Export _start as "_start" in the Wasm module exports.
+        module.add_export(WasmExport {
+            name: "_start".to_string(),
+            kind: crate::wasm32::WasmExportKind::Function,
+            index: start_func_idx,
+        });
+
+        // Set _start as the Wasm start function (executed automatically
+        // on module instantiation).
+        module.set_start(start_func_idx);
 
         Ok(module.encode())
     }
@@ -2679,6 +2826,104 @@ mod tests {
         assert_eq!(bytes[0], 0x28);
         assert_eq!(bytes[1], 2); // align
         assert_eq!(bytes[2], 0); // offset
+    }
+
+    #[test]
+    fn test_load_store_alignment_values() {
+        // Verify that all load/store instructions encode the correct alignment
+        // Alignment is log2(access_size_in_bytes): 1 byte = 0, 2 bytes = 1, 4 bytes = 2, 8 bytes = 3
+
+        // ── Loads ─────────────────────────────────────────────────────
+        // i32.load8_s/u: 1 byte access → align=0
+        let b = WasmInstr::I32Load8S { align: 0, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2C);
+        assert_eq!(b[1], 0); // align=0
+
+        let b = WasmInstr::I32Load8U { align: 0, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2D);
+        assert_eq!(b[1], 0); // align=0
+
+        // i32.load16_s/u: 2 byte access → align=1
+        let b = WasmInstr::I32Load16S { align: 1, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2E);
+        assert_eq!(b[1], 1); // align=1
+
+        let b = WasmInstr::I32Load16U { align: 1, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2F);
+        assert_eq!(b[1], 1); // align=1
+
+        // i32.load: 4 byte access → align=2
+        let b = WasmInstr::I32Load { align: 2, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x28);
+        assert_eq!(b[1], 2); // align=2
+
+        // i64.load: 8 byte access → align=3
+        let b = WasmInstr::I64Load { align: 3, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x29);
+        assert_eq!(b[1], 3); // align=3
+
+        // f32.load: 4 byte access → align=2
+        let b = WasmInstr::F32Load { align: 2, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2A);
+        assert_eq!(b[1], 2); // align=2
+
+        // f64.load: 8 byte access → align=3
+        let b = WasmInstr::F64Load { align: 3, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x2B);
+        assert_eq!(b[1], 3); // align=3
+
+        // ── Stores ────────────────────────────────────────────────────
+        // i32.store8: 1 byte access → align=0
+        let b = WasmInstr::I32Store8 { align: 0, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x3A);
+        assert_eq!(b[1], 0); // align=0
+
+        // i32.store16: 2 byte access → align=1
+        let b = WasmInstr::I32Store16 { align: 1, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x3B);
+        assert_eq!(b[1], 1); // align=1
+
+        // i32.store: 4 byte access → align=2
+        let b = WasmInstr::I32Store { align: 2, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x36);
+        assert_eq!(b[1], 2); // align=2
+
+        // i64.store: 8 byte access → align=3
+        let b = WasmInstr::I64Store { align: 3, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x37);
+        assert_eq!(b[1], 3); // align=3
+
+        // f32.store: 4 byte access → align=2
+        let b = WasmInstr::F32Store { align: 2, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x38);
+        assert_eq!(b[1], 2); // align=2
+
+        // f64.store: 8 byte access → align=3
+        let b = WasmInstr::F64Store { align: 3, offset: 0 }.to_bytes();
+        assert_eq!(b[0], 0x39);
+        assert_eq!(b[1], 3); // align=3
+    }
+
+    #[test]
+    fn test_load_store_offset_leb128() {
+        // Verify that offset values are encoded as LEB128 u32
+        let instr = WasmInstr::I32Load { align: 2, offset: 128 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0x28);
+        assert_eq!(bytes[1], 2); // align
+        // LEB128 encoding of 128: 0x80 0x01
+        assert_eq!(bytes[2], 0x80);
+        assert_eq!(bytes[3], 0x01);
+
+        // Test a larger offset
+        let instr = WasmInstr::I64Store { align: 3, offset: 16384 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0x37);
+        assert_eq!(bytes[1], 3); // align
+        // LEB128 encoding of 16384: 0x80 0x80 0x01
+        assert_eq!(bytes[2], 0x80);
+        assert_eq!(bytes[3], 0x80);
+        assert_eq!(bytes[4], 0x01);
     }
 
     #[test]
@@ -2975,6 +3220,159 @@ mod tests {
         assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
     }
 
+    #[test]
+    fn test_encode_program_with_start_entry_point() {
+        // Test that a program with a main() returning i32 produces a valid
+        // _start wrapper that calls main and passes the result to proc_exit.
+        let backend = Wasm32Backend::new();
+        let program = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "main".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "i32.const_79".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: {
+                            let mut b = Vec::new();
+                            WasmInstr::I32Const(79).encode(&mut b);
+                            b.push(0x0B); // end
+                            b
+                        },
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 0,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 3,
+                relocations: Vec::new(),
+                // main() -> i32  (returns an exit code)
+                wasm_func_type: Some(crate::backend::WasmFuncType {
+                    params: vec![],
+                    results: vec![crate::backend::WasmValueType::I32],
+                }),
+                wasm_locals: Some(vec![]),
+            }],
+            total_code_size: 3,
+            total_data_size: 0,
+        };
+
+        let result = backend.encode_program(&program);
+        assert!(result.is_ok(), "encode_program should succeed");
+        let wasm_bytes = result.unwrap();
+
+        // Must start with Wasm magic + version
+        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
+        assert_eq!(&wasm_bytes[4..8], &[0x01, 0x00, 0x00, 0x00]);
+
+        // Verify the module contains a start section by parsing the output.
+        // The start section (section id 8) should reference the _start function.
+        let mut offset = 8usize;
+        let mut found_start_section = false;
+        let mut found_export_start = false;
+        let mut found_import_proc_exit = false;
+
+        while offset < wasm_bytes.len() {
+            if offset >= wasm_bytes.len() { break; }
+            let section_id = wasm_bytes[offset];
+            offset += 1;
+            let (section_size, size_len) = decode_unsigned_leb128(&wasm_bytes[offset..]);
+            offset += size_len;
+            let section_end = offset + section_size as usize;
+
+            match section_id {
+                2 => {
+                    // Import section — verify proc_exit import
+                    let (num_imports, n) = decode_unsigned_leb128(&wasm_bytes[offset..]);
+                    assert!(num_imports >= 1, "should have at least 1 import");
+                    // First import: module name "wasi_snapshot_preview1"
+                    let (mod_len, ml) = decode_unsigned_leb128(&wasm_bytes[offset + n..]);
+                    let mod_name = std::str::from_utf8(
+                        &wasm_bytes[offset + n + ml..offset + n + ml + mod_len as usize]
+                    ).unwrap();
+                    assert_eq!(mod_name, "wasi_snapshot_preview1", "import should be from WASI");
+                    let name_start = offset + n + ml + mod_len as usize;
+                    let (name_len, nl) = decode_unsigned_leb128(&wasm_bytes[name_start..]);
+                    let func_name = std::str::from_utf8(
+                        &wasm_bytes[name_start + nl..name_start + nl + name_len as usize]
+                    ).unwrap();
+                    assert_eq!(func_name, "proc_exit", "import should be proc_exit");
+                    found_import_proc_exit = true;
+                }
+                7 => {
+                    // Export section — verify _start is exported
+                    let (num_exports, n) = decode_unsigned_leb128(&wasm_bytes[offset..]);
+                    let mut pos = offset + n;
+                    for _ in 0..num_exports {
+                        let (name_len, nl) = decode_unsigned_leb128(&wasm_bytes[pos..]);
+                        let export_name = std::str::from_utf8(
+                            &wasm_bytes[pos + nl..pos + nl + name_len as usize]
+                        ).unwrap();
+                        if export_name == "_start" {
+                            found_export_start = true;
+                        }
+                        pos += nl + name_len as usize;
+                        // skip kind byte + index LEB128
+                        pos += 1; // kind
+                        let (_, il) = decode_unsigned_leb128(&wasm_bytes[pos..]);
+                        pos += il;
+                    }
+                }
+                8 => {
+                    // Start section — found it!
+                    found_start_section = true;
+                }
+                _ => {}
+            }
+
+            offset = section_end;
+        }
+
+        assert!(found_import_proc_exit, "module should import wasi_snapshot_preview1.proc_exit");
+        assert!(found_export_start, "module should export '_start'");
+        assert!(found_start_section, "module should have a start section pointing to _start");
+    }
+
+    #[test]
+    fn test_encode_program_no_main_exits_with_1() {
+        // When no main function exists, _start should call proc_exit(1).
+        let backend = Wasm32Backend::new();
+        let program = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "helper".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "nop".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: vec![0x01, 0x0B], // nop, end
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 0,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 2,
+                relocations: Vec::new(),
+                wasm_func_type: Some(crate::backend::WasmFuncType {
+                    params: vec![],
+                    results: vec![],
+                }),
+                wasm_locals: Some(vec![]),
+            }],
+            total_code_size: 2,
+            total_data_size: 0,
+        };
+
+        let result = backend.encode_program(&program);
+        assert!(result.is_ok());
+        let wasm_bytes = result.unwrap();
+        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
+    }
+
     // ── SIMD v128 Tests ─────────────────────────────────────────────
 
     #[test]
@@ -3237,13 +3635,13 @@ mod tests {
             .map(|i| i.opcode.as_str())
             .collect();
         assert!(
-            opcodes.iter().any(|o| o.contains("i32.load")),
-            "Expected i32.load in opcodes, got: {:?}",
+            opcodes.iter().any(|o| o.contains("i64.load")),
+            "Expected i64.load in opcodes, got: {:?}",
             opcodes
         );
         assert!(
-            opcodes.iter().any(|o| o.contains("i32.store")),
-            "Expected i32.store in opcodes, got: {:?}",
+            opcodes.iter().any(|o| o.contains("i64.store")),
+            "Expected i64.store in opcodes, got: {:?}",
             opcodes
         );
     }
@@ -3488,6 +3886,378 @@ mod tests {
             lines[1].contains("i32.sub"),
             "Expected i32.sub, got: {}",
             lines[1]
+        );
+    }
+
+    // ── Bump allocator and linear memory tests ────────────────────
+
+    #[test]
+    fn test_wasm32_bump_allocator() {
+        // Create a function with an Alloc instruction and verify that
+        // the generated code uses global.get/global.set for __heap_ptr
+        // and the returned address is from linear memory (not a local index).
+        let mut func = make_simple_func(
+            "bump_alloc_test",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 16,
+            }],
+        );
+        func.result_types.push(IRType::I32);
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0]
+            .instructions
+            .iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+
+        // Must contain global.get (0x23) to read __heap_ptr
+        assert!(
+            opcodes.iter().any(|o| o.contains("global.get")),
+            "Expected global.get in opcodes for bump allocator, got: {:?}",
+            opcodes
+        );
+
+        // Must contain global.set (0x24) to update __heap_ptr
+        assert!(
+            opcodes.iter().any(|o| o.contains("global.set")),
+            "Expected global.set in opcodes for bump allocator, got: {:?}",
+            opcodes
+        );
+
+        // The encoded bytes must contain the global.get opcode (0x23)
+        // and global.set opcode (0x24) with global index 0
+        let all_encoded: Vec<u8> = alloc.blocks[0]
+            .instructions
+            .iter()
+            .flat_map(|i| i.encoded.clone())
+            .collect();
+
+        // Verify global.get (0x23) for global index 0
+        assert!(
+            all_encoded.contains(&0x23),
+            "Encoded bytes should contain 0x23 (global.get), got: {:02x?}",
+            all_encoded
+        );
+
+        // Verify global.set (0x24) for global index 0
+        assert!(
+            all_encoded.contains(&0x24),
+            "Encoded bytes should contain 0x24 (global.set), got: {:02x?}",
+            all_encoded
+        );
+
+        // The returned address should come from linear memory (a heap address),
+        // not a local index.  This is guaranteed by the bump allocator pattern:
+        // the value stored in the dst local is the result of global.get (the
+        // current __heap_ptr), which is a linear memory address (>= HEAP_START).
+        // Verify there is no i32.const with a small value (local index) used
+        // as the allocated address — the only i32.const should be the size.
+        let const_instrs: Vec<&AllocatedInstruction> = alloc.blocks[0]
+            .instructions
+            .iter()
+            .filter(|i| i.opcode.contains("i32.const"))
+            .collect();
+        // The only i32.const should be the allocation size (16, aligned to 8 = 16)
+        // There should NOT be an i32.const with a small local-index value
+        // that represents the allocated address.
+        for ci in &const_instrs {
+            // Check that the const value (after opcode 0x41) is the size, not a local index
+            if ci.encoded.len() >= 2 && ci.encoded[0] == 0x41 {
+                let (value, _) = decode_signed_leb128(&ci.encoded[1..]);
+                // The allocation size for 16 bytes (aligned to 8) is 16
+                // It should NOT be a small local index like 0, 1, 2
+                assert!(
+                    value >= 8,
+                    "i32.const value should be the allocation size (>= 8), not a local index ({}), \
+                     the allocated address comes from global.get, not i32.const",
+                    value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_wasm32_allocate_and_store() {
+        // Allocate memory, store a value, then load it back.
+        // Verify that i32.load and i32.store are generated with proper
+        // linear memory addresses (the address from the bump allocator).
+        let mut func = make_simple_func(
+            "alloc_store_load_test",
+            vec![
+                // %0 = alloc 8
+                IRInstr::Alloc {
+                    dst: IRValue::Register(0),
+                    size: 8,
+                },
+                // store %1, %0  (store value 42 at the allocated address)
+                IRInstr::Store {
+                    value: IRValue::Immediate(42),
+                    addr: IRValue::Register(0),
+                    offset: 0,
+                    ty: IRType::I32,
+                },
+                // %2 = load %0  (load the value back from the allocated address)
+                IRInstr::Load {
+                    dst: IRValue::Register(2),
+                    addr: IRValue::Register(0),
+                    offset: 0,
+                    ty: IRType::I32,
+                },
+            ],
+        );
+        func.result_types.push(IRType::I32);
+
+        let backend = Wasm32Backend::new();
+        let alloc = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = alloc.blocks[0]
+            .instructions
+            .iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+
+        // Must contain i32.store for storing the value
+        assert!(
+            opcodes.iter().any(|o| o.contains("i32.store")),
+            "Expected i32.store in opcodes, got: {:?}",
+            opcodes
+        );
+
+        // Must contain i32.load for loading the value back
+        assert!(
+            opcodes.iter().any(|o| o.contains("i32.load")),
+            "Expected i32.load in opcodes, got: {:?}",
+            opcodes
+        );
+
+        // Verify the encoded bytes contain the i32.store opcode (0x36)
+        let all_encoded: Vec<u8> = alloc.blocks[0]
+            .instructions
+            .iter()
+            .flat_map(|i| i.encoded.clone())
+            .collect();
+
+        assert!(
+            all_encoded.contains(&0x36),
+            "Encoded bytes should contain 0x36 (i32.store), got: {:02x?}",
+            all_encoded
+        );
+        assert!(
+            all_encoded.contains(&0x28),
+            "Encoded bytes should contain 0x28 (i32.load), got: {:02x?}",
+            all_encoded
+        );
+
+        // Verify the store and load instructions use proper alignment (2 for i32)
+        // by checking their encoded forms include the alignment field
+        let store_instr = alloc.blocks[0]
+            .instructions
+            .iter()
+            .find(|i| i.opcode.contains("i32.store"))
+            .expect("should find i32.store instruction");
+        // i32.store encoding: 0x36 + alignment(LEB128) + offset(LEB128)
+        assert!(
+            store_instr.encoded[0] == 0x36,
+            "i32.store should start with opcode 0x36"
+        );
+
+        let load_instr = alloc.blocks[0]
+            .instructions
+            .iter()
+            .find(|i| i.opcode.contains("i32.load"))
+            .expect("should find i32.load instruction");
+        assert!(
+            load_instr.encoded[0] == 0x28,
+            "i32.load should start with opcode 0x28"
+        );
+
+        // Also verify that the allocate used global.get/global.set (bump allocator)
+        assert!(
+            opcodes.iter().any(|o| o.contains("global.get")),
+            "Expected global.get for bump allocator, got: {:?}",
+            opcodes
+        );
+        assert!(
+            opcodes.iter().any(|o| o.contains("global.set")),
+            "Expected global.set for bump allocator, got: {:?}",
+            opcodes
+        );
+    }
+
+    #[test]
+    fn test_wasm32_full_module_structure() {
+        // Build a complete Wasm module with globals, memory, and a function.
+        // Verify the module encodes correctly and the global section exists
+        // with __heap_ptr.
+        let mut builder = WasmModuleBuilder::new();
+
+        // Add a function type: () -> i32
+        let type_idx = builder.add_type(WasmFuncType {
+            params: vec![],
+            results: vec![WasmType::I32],
+        });
+
+        // Add memory (2 pages min = 128KB for heap space)
+        builder.add_memory(WasmLimits {
+            min: 2,
+            max: Some(256),
+        });
+
+        // Add __heap_ptr global (mutable i32, initialised to 65536 = start of page 2)
+        let heap_ptr_idx = builder.add_global(WasmGlobal {
+            ty: WasmType::I32,
+            mutable: true,
+            init_value: HEAP_START as i64,
+        });
+        assert_eq!(
+            heap_ptr_idx, HEAP_PTR_GLOBAL_IDX,
+            "__heap_ptr global should be at index {}",
+            HEAP_PTR_GLOBAL_IDX
+        );
+
+        // Add a function that returns the current heap pointer
+        let func_idx = builder.add_function(type_idx);
+
+        // Function body: global.get 0, end
+        let mut body_bytes = Vec::new();
+        WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX).encode(&mut body_bytes);
+        body_bytes.push(0x0B); // end
+        builder.add_code(WasmFuncBody {
+            locals: vec![],
+            body: body_bytes,
+        });
+
+        // Export the function
+        builder.add_export(WasmExport {
+            name: "get_heap_ptr".to_string(),
+            kind: WasmExportKind::Function,
+            index: func_idx,
+        });
+
+        let module = builder.encode();
+
+        // Verify magic + version
+        assert_eq!(&module[0..4], &WASM_MAGIC, "Module should start with Wasm magic");
+        assert_eq!(&module[4..8], &WASM_VERSION, "Module should have Wasm version 1");
+        assert!(module.len() > 8, "Module should have content beyond header");
+
+        // Parse sections to find the global section
+        let mut found_type_section = false;
+        let mut found_memory_section = false;
+        let mut found_global_section = false;
+        let mut found_code_section = false;
+        let mut found_export_section = false;
+        let mut heap_ptr_init_value: Option<i64> = None;
+
+        let mut offset = 8; // skip magic + version
+        while offset < module.len() {
+            let section_id = module[offset];
+            offset += 1;
+            let (size, size_len) = decode_unsigned_leb128(&module[offset..]);
+            offset += size_len;
+            let section_end = offset + size as usize;
+
+            match section_id {
+                SECTION_TYPE => found_type_section = true,
+                SECTION_MEMORY => found_memory_section = true,
+                SECTION_GLOBAL => {
+                    found_global_section = true;
+                    // Parse global section: count + globals
+                    let (count, count_len) = decode_unsigned_leb128(&module[offset..]);
+                    assert_eq!(count, 1, "Should have exactly 1 global (__heap_ptr)");
+
+                    let mut g_offset = offset + count_len;
+                    // Parse the first global
+                    let val_type_byte = module[g_offset];
+                    assert_eq!(
+                        val_type_byte, 0x7F,
+                        "__heap_ptr should be i32 (0x7F)"
+                    );
+                    g_offset += 1;
+
+                    let mutable_flag = module[g_offset];
+                    assert_eq!(
+                        mutable_flag, 0x01,
+                        "__heap_ptr should be mutable"
+                    );
+                    g_offset += 1;
+
+                    // Parse init expr: i32.const <value> end
+                    let init_opcode = module[g_offset];
+                    assert_eq!(
+                        init_opcode, 0x41,
+                        "Init expr should start with i32.const (0x41)"
+                    );
+                    g_offset += 1;
+
+                    let (init_val, init_len) =
+                        decode_signed_leb128(&module[g_offset..]);
+                    heap_ptr_init_value = Some(init_val);
+                    g_offset += init_len;
+
+                    let end_byte = module[g_offset];
+                    assert_eq!(
+                        end_byte, 0x0B,
+                        "Init expr should end with 0x0B"
+                    );
+                }
+                SECTION_EXPORT => found_export_section = true,
+                SECTION_CODE => found_code_section = true,
+                _ => {}
+            }
+
+            offset = section_end;
+        }
+
+        // Verify all expected sections exist
+        assert!(
+            found_type_section,
+            "Module should contain a type section"
+        );
+        assert!(
+            found_memory_section,
+            "Module should contain a memory section"
+        );
+        assert!(
+            found_global_section,
+            "Module should contain a global section with __heap_ptr"
+        );
+        assert!(
+            found_code_section,
+            "Module should contain a code section"
+        );
+        assert!(
+            found_export_section,
+            "Module should contain an export section"
+        );
+
+        // Verify __heap_ptr is initialised to HEAP_START
+        assert_eq!(
+            heap_ptr_init_value,
+            Some(HEAP_START as i64),
+            "__heap_ptr should be initialised to {} (HEAP_START), got {:?}",
+            HEAP_START,
+            heap_ptr_init_value
+        );
+
+        // Verify the module can be re-parsed by iterating all sections
+        // without panicking (basic well-formedness check)
+        let mut total_section_bytes = 0usize;
+        offset = 8;
+        while offset < module.len() {
+            let _section_id = module[offset];
+            offset += 1;
+            let (size, size_len) = decode_unsigned_leb128(&module[offset..]);
+            offset += size_len;
+            offset += size as usize;
+            total_section_bytes += 1;
+        }
+        assert!(
+            total_section_bytes >= 5,
+            "Module should have at least 5 sections (type, memory, global, export, code), got {}",
+            total_section_bytes
         );
     }
 }

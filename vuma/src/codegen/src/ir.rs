@@ -35,9 +35,10 @@ use std::fmt;
 
 /// A type in the IR type system.
 ///
-/// Models the ARM64 LP64 data model where `int` is 32 bits and pointers are
-/// 64 bits.  Supports primitive integer/float types, pointers, void,
-/// function pointers, structs, and arrays.
+/// Target-independent type representation.  The size of `Ptr` and `Func`
+/// depends on the target's pointer width (4 bytes on 32-bit targets like
+/// Wasm32/ARM32, 8 bytes on 64-bit targets like ARM64/x86_64).  All other
+/// types have fixed sizes regardless of target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IRType {
     /// Signed 8-bit integer.
@@ -60,7 +61,8 @@ pub enum IRType {
     F32,
     /// 64-bit IEEE 754 floating-point.
     F64,
-    /// Opaque pointer (64-bit on ARM64 LP64).
+    /// Opaque pointer.  Size is target-dependent: 4 bytes on 32-bit targets
+    /// (Wasm32, ARM32), 8 bytes on 64-bit targets (ARM64, x86_64, etc.).
     Ptr,
     /// Void type (size 0, only valid as a function return type).
     Void,
@@ -194,59 +196,63 @@ impl fmt::Display for IRType {
 }
 
 // ---------------------------------------------------------------------------
-// size_of / alignment_of  (ARM64 LP64)
+// size_of / alignment_of
 // ---------------------------------------------------------------------------
 
-/// Returns the byte size of `t` on ARM64 under the LP64 data model.
+/// Returns the byte size of `t` for a target with the given pointer width.
 ///
 /// - Integers: their bit-width / 8
 /// - Floats: 4 (f32) or 8 (f64)
-/// - Pointers / function pointers: 8
+/// - Pointers / function pointers: `ptr_width` (4 or 8)
 /// - Void: 0
 /// - Structs: sum of field sizes with inter-field padding for alignment,
 ///   rounded up to the struct's own alignment
 /// - Arrays: `size_of(element) * count`
-pub fn size_of(t: &IRType) -> usize {
+pub fn size_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
     match t {
         IRType::I8 | IRType::U8 => 1,
         IRType::I16 | IRType::U16 => 2,
         IRType::I32 | IRType::U32 => 4,
-        IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => 8,
+        IRType::I64 | IRType::U64 => 8,
+        IRType::Ptr | IRType::Func => ptr_width,
         IRType::F32 => 4,
         IRType::F64 => 8,
         IRType::Void => 0,
         IRType::Struct { fields, .. } => {
             let mut offset = 0usize;
             for field in fields {
-                let field_align = alignment_of(field);
+                let field_align = alignment_of_with_ptr_width(field, ptr_width);
                 // Align the current offset to the field alignment.
                 offset = (offset + field_align - 1) & !(field_align - 1);
-                offset += size_of(field);
+                offset += size_of_with_ptr_width(field, ptr_width);
             }
             // Round up to struct alignment.
-            let struct_align = alignment_of(t);
+            let struct_align = alignment_of_with_ptr_width(t, ptr_width);
             if struct_align > 0 {
                 (offset + struct_align - 1) & !(struct_align - 1)
             } else {
                 0
             }
         }
-        IRType::Array { element, count } => size_of(element) * count,
+        IRType::Array { element, count } => size_of_with_ptr_width(element, ptr_width) * count,
     }
 }
 
-/// Returns the natural alignment of `t` on ARM64 under the LP64 data model.
+/// Returns the natural alignment of `t` for a target with the given pointer
+/// width.
 ///
 /// - Primitives: their size
+/// - Pointers / function pointers: `ptr_width`
 /// - Void: 1 (by convention, so that `size_of` math works for empty structs)
 /// - Structs: maximum alignment of any field
 /// - Arrays: alignment of the element type
-pub fn alignment_of(t: &IRType) -> usize {
+pub fn alignment_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
     match t {
         IRType::I8 | IRType::U8 => 1,
         IRType::I16 | IRType::U16 => 2,
         IRType::I32 | IRType::U32 => 4,
-        IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => 8,
+        IRType::I64 | IRType::U64 => 8,
+        IRType::Ptr | IRType::Func => ptr_width,
         IRType::F32 => 4,
         IRType::F64 => 8,
         IRType::Void => 1,
@@ -254,10 +260,34 @@ pub fn alignment_of(t: &IRType) -> usize {
             if fields.is_empty() {
                 return 1;
             }
-            fields.iter().map(alignment_of).max().unwrap_or(1)
+            fields
+                .iter()
+                .map(|f| alignment_of_with_ptr_width(f, ptr_width))
+                .max()
+                .unwrap_or(1)
         }
-        IRType::Array { element, .. } => alignment_of(element),
+        IRType::Array { element, .. } => alignment_of_with_ptr_width(element, ptr_width),
     }
+}
+
+/// Returns the byte size of `t` assuming a 64-bit target (ARM64 LP64).
+///
+/// This is a convenience wrapper around [`size_of_with_ptr_width`] that
+/// assumes 8-byte pointers.  For target-correct sizes, use
+/// `TargetInfo::size_of` or [`size_of_with_ptr_width`] with the appropriate
+/// pointer width.
+pub fn size_of(t: &IRType) -> usize {
+    size_of_with_ptr_width(t, 8)
+}
+
+/// Returns the natural alignment of `t` assuming a 64-bit target (ARM64 LP64).
+///
+/// This is a convenience wrapper around [`alignment_of_with_ptr_width`] that
+/// assumes 8-byte pointers.  For target-correct alignments, use
+/// `TargetInfo::alignment_of` or [`alignment_of_with_ptr_width`] with the
+/// appropriate pointer width.
+pub fn alignment_of(t: &IRType) -> usize {
+    alignment_of_with_ptr_width(t, 8)
 }
 
 // ---------------------------------------------------------------------------
@@ -804,7 +834,9 @@ pub enum IRValue {
     Register(u32),
     /// An immediate constant.
     Immediate(i64),
-    /// A memory address (absolute).
+    /// A memory address (absolute).  Stored as `u64` for 64-bit targets;
+    /// 32-bit backends should use [`IRValue::as_address_32bit`] to safely
+    /// truncate and validate the value.
     Address(u64),
     /// A named label (for branch targets).
     Label(String),
@@ -833,6 +865,23 @@ impl IRValue {
     pub fn as_immediate(&self) -> Option<i64> {
         match self {
             IRValue::Immediate(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Extract the address as a 32-bit value, if this is an Address.
+    ///
+    /// Returns `None` if the address exceeds the 32-bit range, which would
+    /// be invalid on 32-bit targets like Wasm32 or ARM32.
+    pub fn as_address_32bit(&self) -> Option<u32> {
+        match self {
+            IRValue::Address(a) => {
+                if *a > u32::MAX as u64 {
+                    None
+                } else {
+                    Some(*a as u32)
+                }
+            }
             _ => None,
         }
     }
@@ -2011,9 +2060,15 @@ mod tests {
         assert_eq!(size_of(&IRType::U64), 8);
         assert_eq!(size_of(&IRType::F32), 4);
         assert_eq!(size_of(&IRType::F64), 8);
-        assert_eq!(size_of(&IRType::Ptr), 8);
+        assert_eq!(size_of(&IRType::Ptr), 8); // 64-bit default (size_of)
         assert_eq!(size_of(&IRType::Func), 8);
         assert_eq!(size_of(&IRType::Void), 0);
+
+        // Target-parameterized versions
+        assert_eq!(size_of_with_ptr_width(&IRType::Ptr, 4), 4); // 32-bit target
+        assert_eq!(size_of_with_ptr_width(&IRType::Ptr, 8), 8); // 64-bit target
+        assert_eq!(size_of_with_ptr_width(&IRType::Func, 4), 4);
+        assert_eq!(size_of_with_ptr_width(&IRType::I32, 4), 4); // integers unchanged
     }
 
     #[test]
@@ -2022,8 +2077,12 @@ mod tests {
         assert_eq!(alignment_of(&IRType::I32), 4);
         assert_eq!(alignment_of(&IRType::I64), 8);
         assert_eq!(alignment_of(&IRType::F64), 8);
-        assert_eq!(alignment_of(&IRType::Ptr), 8);
+        assert_eq!(alignment_of(&IRType::Ptr), 8); // 64-bit default (alignment_of)
         assert_eq!(alignment_of(&IRType::Void), 1);
+
+        // Target-parameterized versions
+        assert_eq!(alignment_of_with_ptr_width(&IRType::Ptr, 4), 4); // 32-bit target
+        assert_eq!(alignment_of_with_ptr_width(&IRType::Ptr, 8), 8); // 64-bit target
     }
 
     #[test]
@@ -2265,6 +2324,11 @@ mod tests {
         assert!(!IRType::I32.is_float());
         assert!(IRType::Ptr.is_register_passable());
         assert!(IRType::F64.is_register_passable());
+
+        // as_address_32bit
+        assert_eq!(IRValue::Address(0x1000).as_address_32bit(), Some(0x1000u32));
+        assert_eq!(IRValue::Address(0xFFFFFFFF).as_address_32bit(), Some(0xFFFFFFFFu32));
+        assert_eq!(IRValue::Address(0x100000000).as_address_32bit(), None); // > 32-bit
 
         // HFA detection
         let hfa = IRType::Struct {

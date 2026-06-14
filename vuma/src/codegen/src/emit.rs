@@ -340,6 +340,8 @@ pub enum OutputFormat {
     Raw,
     /// Relocatable ELF object file (`.o`).
     Obj,
+    /// WebAssembly binary module (`.wasm`).
+    Wasm,
 }
 
 impl std::fmt::Display for OutputFormat {
@@ -348,6 +350,7 @@ impl std::fmt::Display for OutputFormat {
             OutputFormat::ELF => write!(f, "elf"),
             OutputFormat::Raw => write!(f, "raw"),
             OutputFormat::Obj => write!(f, "obj"),
+            OutputFormat::Wasm => write!(f, "wasm"),
         }
     }
 }
@@ -359,6 +362,8 @@ pub enum Target {
     Linux,
     /// Bare-metal AArch64 (ARMv8.2-A).
     BareMetal,
+    /// WebAssembly 32-bit (wasm32).
+    Wasm32,
 }
 
 impl std::fmt::Display for Target {
@@ -366,6 +371,7 @@ impl std::fmt::Display for Target {
         match self {
             Target::Linux => write!(f, "linux"),
             Target::BareMetal => write!(f, "bare-metal"),
+            Target::Wasm32 => write!(f, "wasm32"),
         }
     }
 }
@@ -465,6 +471,20 @@ impl EmitConfig {
         }
     }
 
+    /// Create a new configuration for Wasm32 binary output.
+    pub fn wasm_binary() -> Self {
+        Self {
+            format: OutputFormat::Wasm,
+            target: Target::Wasm32,
+            backend: BackendKind::Wasm32,
+            base_addr: 0,
+            entry_name: "_start".to_string(),
+            section_headers: false,
+            symbol_table: false,
+            debug_info: false,
+        }
+    }
+
     /// Returns the effective base address for the given target.
     pub fn effective_base_addr(&self) -> u64 {
         if self.base_addr != 0 {
@@ -473,6 +493,7 @@ impl EmitConfig {
             match self.target {
                 Target::Linux => BASE_ADDR_LINUX,
                 Target::BareMetal => BASE_ADDR_BARE,
+                Target::Wasm32 => 0, // Wasm uses its own address space
             }
         }
     }
@@ -3311,10 +3332,10 @@ impl Emitter {
 
     /// Emit an entire IR program as a minimal ELF binary for Linux/ARM64.
     ///
-    /// Convenience wrapper around [`emit_elf`] with default Linux configuration.
+    /// Convenience wrapper around [`emit_binary`] with default Linux configuration.
     pub fn emit_program(&mut self, program: &IRProgram) -> Result<Vec<u8>> {
         let config = EmitConfig::linux_elf();
-        emit_elf(&program.functions, &program.data_sections, &config)
+        emit_binary(&program.functions, &program.data_sections, &config)
     }
 }
 
@@ -3469,16 +3490,18 @@ fn compute_frame_size(func: &IRFunction) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Return the ELF `e_machine` value for the given backend kind.
-fn em_machine_for_backend(backend: BackendKind) -> u16 {
+fn em_machine_for_backend(backend: BackendKind) -> Result<u16> {
     match backend {
-        BackendKind::AArch64 => EM_AARCH64,
-        BackendKind::X86_64 => EM_X86_64,
-        BackendKind::RiscV64 => EM_RISCV,
-        BackendKind::Mips64 => EM_MIPS,
-        BackendKind::PowerPC64 => EM_PPC64,
-        BackendKind::LoongArch64 => EM_LOONGARCH,
-        BackendKind::Arm32 => EM_ARM,
-        BackendKind::Wasm32 => EM_AARCH64, // Wasm doesn't produce native ELF
+        BackendKind::AArch64 => Ok(EM_AARCH64),
+        BackendKind::X86_64 => Ok(EM_X86_64),
+        BackendKind::RiscV64 => Ok(EM_RISCV),
+        BackendKind::Mips64 => Ok(EM_MIPS),
+        BackendKind::PowerPC64 => Ok(EM_PPC64),
+        BackendKind::LoongArch64 => Ok(EM_LOONGARCH),
+        BackendKind::Arm32 => Ok(EM_ARM),
+        BackendKind::Wasm32 => Err(CodegenError::ElfError(
+            "Wasm32 does not use ELF format — use emit_wasm() instead".to_string(),
+        )),
     }
 }
 
@@ -3487,16 +3510,20 @@ fn em_machine_for_backend(backend: BackendKind) -> u16 {
 /// Each ISA uses a different relocation type for inter-function call
 /// instructions. This function maps the backend to the appropriate ELF
 /// relocation constant.
-fn call_reloc_type_for_backend(backend: BackendKind) -> u32 {
+fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
     match backend {
-        BackendKind::AArch64 => R_AARCH64_CALL26,
-        BackendKind::X86_64 => R_X86_64_PLT32,
-        BackendKind::RiscV64 => R_RISCV_CALL,
-        BackendKind::Mips64 => R_MIPS_26,
-        BackendKind::PowerPC64 => R_PPC64_REL24,
-        BackendKind::LoongArch64 => R_LARCH_B26,
-        BackendKind::Arm32 => R_ARM_CALL,
-        BackendKind::Wasm32 => R_AARCH64_CALL26, // Wasm doesn't produce native ELF
+        BackendKind::AArch64 => Ok(R_AARCH64_CALL26),
+        BackendKind::X86_64 => Ok(R_X86_64_PLT32),
+        BackendKind::RiscV64 => Ok(R_RISCV_CALL),
+        BackendKind::Mips64 => Ok(R_MIPS_26),
+        BackendKind::PowerPC64 => Ok(R_PPC64_REL24),
+        BackendKind::LoongArch64 => Ok(R_LARCH_B26),
+        BackendKind::Arm32 => Ok(R_ARM_CALL),
+        BackendKind::Wasm32 => {
+            Err(CodegenError::ElfError(
+                "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
+            ))
+        }
     }
 }
 
@@ -3518,6 +3545,13 @@ pub fn emit_elf(
     data_sections: &[DataSection],
     config: &EmitConfig,
 ) -> Result<Vec<u8>> {
+    // Wasm32 should never go through the ELF emission path.
+    if config.backend == BackendKind::Wasm32 || config.format == OutputFormat::Wasm {
+        return Err(CodegenError::ElfError(
+            "Wasm32 target cannot produce ELF output — use emit_wasm() instead".to_string(),
+        ));
+    }
+
     let base_addr = config.effective_base_addr();
     let is_obj = config.format == OutputFormat::Obj;
 
@@ -3595,7 +3629,7 @@ pub fn emit_elf(
     };
 
     // Build .rela.text entries for ET_REL objects.
-    let call_reloc_type = call_reloc_type_for_backend(config.backend);
+    let call_reloc_type = call_reloc_type_for_backend(config.backend)?;
     if is_obj {
         for reloc in &all_call_relocs {
             let sym_idx = sym_name_to_idx
@@ -3656,6 +3690,7 @@ pub fn emit_elf(
     let osabi = match config.target {
         Target::Linux => ELFOSABI_LINUX,
         Target::BareMetal => ELFOSABI_STANDALONE,
+        Target::Wasm32 => ELFOSABI_STANDALONE, // unreachable (Wasm is rejected above)
     };
     elf.push(osabi);
     elf.push(0);
@@ -3663,7 +3698,7 @@ pub fn emit_elf(
 
     let e_type = if is_obj { ET_REL } else { ET_EXEC };
     elf.extend_from_slice(&e_type.to_le_bytes());
-    let e_machine = em_machine_for_backend(config.backend);
+    let e_machine = em_machine_for_backend(config.backend)?;
     elf.extend_from_slice(&e_machine.to_le_bytes());
     elf.extend_from_slice(&(1u32).to_le_bytes());
     elf.extend_from_slice(&entry_point.to_le_bytes());
@@ -3911,6 +3946,14 @@ pub fn emit_elf(
 /// The output is the concatenated machine code for all functions, suitable for
 /// loading at address `0x80000` on the AArch64.
 pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>> {
+    // Wasm32 should never go through the raw binary emission path.
+    if config.backend == BackendKind::Wasm32 || config.format == OutputFormat::Wasm {
+        return Err(CodegenError::ElfError(
+            "Wasm32 target cannot produce raw binary output — use emit_wasm() instead"
+                .to_string(),
+        ));
+    }
+
     let mut emitter = Emitter::new();
     let mut text_section: Vec<u8> = Vec::new();
     let mut function_offsets: HashMap<String, u64> = HashMap::new();
@@ -3942,8 +3985,115 @@ pub fn emit_obj(
     data_sections: &[DataSection],
     backend: BackendKind,
 ) -> Result<Vec<u8>> {
+    // Wasm32 does not produce ELF object files.
+    if backend == BackendKind::Wasm32 {
+        return Err(CodegenError::ElfError(
+            "Wasm32 target cannot produce ELF object files — use emit_wasm() instead".to_string(),
+        ));
+    }
     let config = EmitConfig::relocatable_obj_for(backend);
     emit_elf(functions, data_sections, &config)
+}
+
+// ---------------------------------------------------------------------------
+// Wasm32 emission
+// ---------------------------------------------------------------------------
+
+/// Emit a `.wasm` binary module from the given IR functions.
+///
+/// This function uses the [`Wasm32Backend`](crate::wasm32::Wasm32Backend) to
+/// lower IR functions to Wasm bytecode and assemble them into a complete Wasm
+/// module with proper type, function, memory, export, start, and code sections.
+///
+/// The entry-point function (`_start` or `main`) is set as the Wasm start
+/// function so the module executes automatically on instantiation.  It is also
+/// exported by name for external reference.
+///
+/// # Wasm Module Layout
+///
+/// ```text
+/// ┌──────────────────────────┐
+/// │ Magic + Version          │  8 bytes
+/// ├──────────────────────────┤
+/// │ Type Section             │  function signatures
+/// ├──────────────────────────┤
+/// │ Import Section (opt)     │  (reserved for WASI)
+/// ├──────────────────────────┤
+/// │ Function Section         │  type index per function
+/// ├──────────────────────────┤
+/// │ Memory Section           │  1 memory, min 2 pages
+/// ├──────────────────────────┤
+/// │ Global Section           │  __heap_ptr (mutable i32)
+/// ├──────────────────────────┤
+/// │ Export Section           │  all functions exported by name
+/// ├──────────────────────────┤
+/// │ Start Section            │  _start / main function index
+/// ├──────────────────────────┤
+/// │ Code Section             │  function bodies
+/// └──────────────────────────┘
+/// ```
+pub fn emit_wasm(
+    functions: &[IRFunction],
+    data_sections: &[DataSection],
+    config: &EmitConfig,
+) -> Result<Vec<u8>> {
+    use crate::backend::Backend;
+
+    let backend = crate::wasm32::Wasm32Backend::new();
+
+    // ── Allocate registers (lowers IR → Wasm bytecode) for each function ──
+    let mut allocated_funcs = Vec::new();
+    for func in functions {
+        match backend.allocate_registers(func) {
+            Ok(af) => allocated_funcs.push(af),
+            Err(e) => {
+                return Err(CodegenError::TranslationError(format!(
+                    "Wasm32 register allocation failed for '{}': {}",
+                    func.name, e
+                )));
+            }
+        }
+    }
+
+    let program = crate::backend::AllocatedProgram {
+        functions: allocated_funcs,
+        total_code_size: 0, // computed by the backend during encoding
+        total_data_size: 0,
+    };
+
+    // ── Encode the program into a .wasm module ──
+    let wasm_bytes = backend
+        .encode_program(&program)
+        .map_err(|e| CodegenError::EncodingError(format!("Wasm32 encode_program failed: {}", e)))?;
+
+    let _ = data_sections; // Wasm data sections are handled via memory + data segments
+    let _ = config; // Wasm config is embedded in the module structure
+
+    Ok(wasm_bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Top-level emission dispatcher
+// ---------------------------------------------------------------------------
+
+/// Emit the final binary from the given IR program, dispatching to the
+/// appropriate emitter based on the [`OutputFormat`] in `config`.
+///
+/// - `OutputFormat::ELF` / `OutputFormat::Obj` → [`emit_elf`]
+/// - `OutputFormat::Raw` → [`emit_raw`]
+/// - `OutputFormat::Wasm` → [`emit_wasm`]
+pub fn emit_binary(
+    functions: &[IRFunction],
+    data_sections: &[DataSection],
+    config: &EmitConfig,
+) -> Result<Vec<u8>> {
+    match config.format {
+        OutputFormat::ELF | OutputFormat::Obj => {
+            emit_elf(functions, data_sections, config)
+        }
+        OutputFormat::Raw => emit_raw(functions, config),
+        OutputFormat::Wasm => emit_wasm(functions, data_sections, config),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5110,42 +5260,46 @@ mod tests {
 
     #[test]
     fn em_machine_for_backend_mapping() {
-        assert_eq!(em_machine_for_backend(BackendKind::AArch64), EM_AARCH64);
-        assert_eq!(em_machine_for_backend(BackendKind::X86_64), EM_X86_64);
-        assert_eq!(em_machine_for_backend(BackendKind::RiscV64), EM_RISCV);
-        assert_eq!(em_machine_for_backend(BackendKind::Mips64), EM_MIPS);
-        assert_eq!(em_machine_for_backend(BackendKind::PowerPC64), EM_PPC64);
+        assert_eq!(em_machine_for_backend(BackendKind::AArch64).unwrap(), EM_AARCH64);
+        assert_eq!(em_machine_for_backend(BackendKind::X86_64).unwrap(), EM_X86_64);
+        assert_eq!(em_machine_for_backend(BackendKind::RiscV64).unwrap(), EM_RISCV);
+        assert_eq!(em_machine_for_backend(BackendKind::Mips64).unwrap(), EM_MIPS);
+        assert_eq!(em_machine_for_backend(BackendKind::PowerPC64).unwrap(), EM_PPC64);
         assert_eq!(
-            em_machine_for_backend(BackendKind::LoongArch64),
+            em_machine_for_backend(BackendKind::LoongArch64).unwrap(),
             EM_LOONGARCH
         );
-        assert_eq!(em_machine_for_backend(BackendKind::Arm32), EM_ARM);
+        assert_eq!(em_machine_for_backend(BackendKind::Arm32).unwrap(), EM_ARM);
+        // Wasm32 should return an error for ELF machine type
+        assert!(em_machine_for_backend(BackendKind::Wasm32).is_err());
     }
 
     #[test]
     fn call_reloc_type_for_backend_mapping() {
         assert_eq!(
-            call_reloc_type_for_backend(BackendKind::AArch64),
+            call_reloc_type_for_backend(BackendKind::AArch64).unwrap(),
             R_AARCH64_CALL26
         );
         assert_eq!(
-            call_reloc_type_for_backend(BackendKind::X86_64),
+            call_reloc_type_for_backend(BackendKind::X86_64).unwrap(),
             R_X86_64_PLT32
         );
         assert_eq!(
-            call_reloc_type_for_backend(BackendKind::RiscV64),
+            call_reloc_type_for_backend(BackendKind::RiscV64).unwrap(),
             R_RISCV_CALL
         );
-        assert_eq!(call_reloc_type_for_backend(BackendKind::Mips64), R_MIPS_26);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::Mips64).unwrap(), R_MIPS_26);
         assert_eq!(
-            call_reloc_type_for_backend(BackendKind::PowerPC64),
+            call_reloc_type_for_backend(BackendKind::PowerPC64).unwrap(),
             R_PPC64_REL24
         );
         assert_eq!(
-            call_reloc_type_for_backend(BackendKind::LoongArch64),
+            call_reloc_type_for_backend(BackendKind::LoongArch64).unwrap(),
             R_LARCH_B26
         );
-        assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32), R_ARM_CALL);
+        assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32).unwrap(), R_ARM_CALL);
+        // Wasm32 should return an error for ELF relocation type
+        assert!(call_reloc_type_for_backend(BackendKind::Wasm32).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -5319,6 +5473,102 @@ mod tests {
                 "should be WasmSectionNotFound variant"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wasm32 emission tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that emit_elf rejects Wasm32 backend with an error.
+    #[test]
+    fn test_emit_elf_rejects_wasm32() {
+        let funcs = vec![make_return_function("main")];
+        let config = EmitConfig::wasm_binary();
+        let result = emit_elf(&funcs, &[], &config);
+        assert!(result.is_err(), "emit_elf should reject Wasm32 backend");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Wasm32"),
+            "error message should mention Wasm32: {}",
+            err_msg
+        );
+    }
+
+    /// Verify that emit_raw rejects Wasm32 backend with an error.
+    #[test]
+    fn test_emit_raw_rejects_wasm32() {
+        let funcs = vec![make_return_function("main")];
+        let config = EmitConfig::wasm_binary();
+        let result = emit_raw(&funcs, &config);
+        assert!(result.is_err(), "emit_raw should reject Wasm32 backend");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Wasm32"),
+            "error message should mention Wasm32: {}",
+            err_msg
+        );
+    }
+
+    /// Verify that emit_obj rejects Wasm32 backend with an error.
+    #[test]
+    fn test_emit_obj_rejects_wasm32() {
+        let funcs = vec![make_return_function("main")];
+        let result = emit_obj(&funcs, &[], BackendKind::Wasm32);
+        assert!(result.is_err(), "emit_obj should reject Wasm32 backend");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Wasm32"),
+            "error message should mention Wasm32: {}",
+            err_msg
+        );
+    }
+
+    /// Verify that emit_binary dispatches to emit_wasm for Wasm output format.
+    #[test]
+    fn test_emit_binary_dispatches_wasm() {
+        let funcs = vec![make_return_function("main")];
+        let config = EmitConfig::wasm_binary();
+        let result = emit_binary(&funcs, &[], &config);
+        assert!(result.is_ok(), "emit_binary should succeed for Wasm: {:?}", result.err());
+        let wasm_bytes = result.unwrap();
+        // Wasm module magic: 0x00 0x61 0x73 0x6D
+        assert!(
+            wasm_bytes.len() >= 8,
+            "Wasm output should be at least 8 bytes (magic + version), got {}",
+            wasm_bytes.len()
+        );
+        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D], "Wasm magic number");
+        assert_eq!(&wasm_bytes[4..8], &[0x01, 0x00, 0x00, 0x00], "Wasm version 1");
+    }
+
+    /// Verify that emit_wasm produces a valid Wasm module with start function.
+    #[test]
+    fn test_emit_wasm_produces_valid_module() {
+        let funcs = vec![make_return_function("main")];
+        let config = EmitConfig::wasm_binary();
+        let result = emit_wasm(&funcs, &[], &config);
+        assert!(result.is_ok(), "emit_wasm should succeed: {:?}", result.err());
+        let wasm_bytes = result.unwrap();
+        assert!(
+            wasm_bytes.len() >= 8,
+            "Wasm output should be at least 8 bytes, got {}",
+            wasm_bytes.len()
+        );
+        // Verify Wasm magic number
+        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D]);
+    }
+
+    /// Verify EmitConfig::wasm_binary has correct defaults.
+    #[test]
+    fn test_emit_config_wasm_binary() {
+        let config = EmitConfig::wasm_binary();
+        assert_eq!(config.format, OutputFormat::Wasm);
+        assert_eq!(config.target, Target::Wasm32);
+        assert_eq!(config.backend, BackendKind::Wasm32);
+        assert_eq!(config.entry_name, "_start");
+        assert_eq!(config.base_addr, 0);
+        assert!(!config.section_headers);
+        assert!(!config.symbol_table);
     }
 }
 

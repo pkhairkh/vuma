@@ -1,0 +1,2002 @@
+     1→     1→//! # WebAssembly 32-bit Backend
+     2→     2→//!
+     3→     3→//! Implements the `Backend` trait for the Wasm32 target.  WebAssembly is
+     4→     4→//! fundamentally different from register-based ISAs: it is a stack machine
+     5→     5→//! with structured control flow and a binary format.  This module provides:
+     6→     6→//!
+     7→     7→//! - `WasmType` — value types (i32, i64, f32, f64)
+     8→     8→//! - `WasmInstr` — exhaustive instruction enum covering all ops needed for VUMA IR
+     9→     9→//! - LEB128 encoding/decoding (unsigned and signed)
+    10→    10→//! - Wasm binary-format encoder that emits complete `.wasm` modules
+    11→    11→//! - `Wasm32Backend` — `Backend` implementation that lowers IR to Wasm bytecode
+    12→    12→
+    13→    13→use crate::backend::{
+    14→    14→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    15→    15→    BackendError, Wasm32TargetInfo,
+    16→    16→};
+    17→    17→use crate::ir::{
+    18→    18→    BinOpKind, CastKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind,
+    19→    19→};
+    20→    20→use std::collections::HashMap;
+    21→    21→
+    22→    22→pub mod disasm;
+    23→    23→
+    24→    24→// ===========================================================================
+    25→    25→// Wasm value types
+    26→    26→// ===========================================================================
+    27→    27→
+    28→    28→/// WebAssembly value types.
+    29→    29→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    30→    30→pub enum WasmType {
+    31→    31→    I32,
+    32→    32→    I64,
+    33→    33→    F32,
+    34→    34→    F64,
+    35→    35→}
+    36→    36→
+    37→    37→impl WasmType {
+    38→    38→    /// Binary encoding of this type in the Wasm format.
+    39→    39→    pub fn to_byte(&self) -> u8 {
+    40→    40→        match self {
+    41→    41→            WasmType::I32 => 0x7F,
+    42→    42→            WasmType::I64 => 0x7E,
+    43→    43→            WasmType::F32 => 0x7D,
+    44→    44→            WasmType::F64 => 0x7C,
+    45→    45→        }
+    46→    46→    }
+    47→    47→
+    48→    48→    /// Size in bytes of this Wasm type on the stack.
+    49→    49→    pub fn byte_size(&self) -> usize {
+    50→    50→        match self {
+    51→    51→            WasmType::I32 | WasmType::F32 => 4,
+    52→    52→            WasmType::I64 | WasmType::F64 => 8,
+    53→    53→        }
+    54→    54→    }
+    55→    55→
+    56→    56→    /// Whether this is an integer type.
+    57→    57→    pub fn is_integer(&self) -> bool {
+    58→    58→        matches!(self, WasmType::I32 | WasmType::I64)
+    59→    59→    }
+    60→    60→
+    61→    61→    /// Whether this is a floating-point type.
+    62→    62→    pub fn is_float(&self) -> bool {
+    63→    63→        matches!(self, WasmType::F32 | WasmType::F64)
+    64→    64→    }
+    65→    65→
+    66→    66→    /// Map an IRType to the corresponding WasmType.
+    67→    67→    pub fn from_ir_type(ty: &IRType) -> Option<WasmType> {
+    68→    68→        match ty {
+    69→    69→            IRType::I8
+    70→    70→            | IRType::I16
+    71→    71→            | IRType::I32
+    72→    72→            | IRType::U8
+    73→    73→            | IRType::U16
+    74→    74→            | IRType::U32
+    75→    75→            | IRType::Ptr
+    76→    76→            | IRType::Func => Some(WasmType::I32),
+    77→    77→            IRType::I64 | IRType::U64 => Some(WasmType::I64),
+    78→    78→            IRType::F32 => Some(WasmType::F32),
+    79→    79→            IRType::F64 => Some(WasmType::F64),
+    80→    80→            IRType::Void | IRType::Struct { .. } | IRType::Array { .. } => None,
+    81→    81→        }
+    82→    82→    }
+    83→    83→
+    84→    84→    /// Decode a WasmType from its binary encoding byte.
+    85→    85→    pub fn from_byte(byte: u8) -> Option<WasmType> {
+    86→    86→        match byte {
+    87→    87→            0x7F => Some(WasmType::I32),
+    88→    88→            0x7E => Some(WasmType::I64),
+    89→    89→            0x7D => Some(WasmType::F32),
+    90→    90→            0x7C => Some(WasmType::F64),
+    91→    91→            _ => None,
+    92→    92→        }
+    93→    93→    }
+    94→    94→}
+    95→    95→
+    96→    96→impl std::fmt::Display for WasmType {
+    97→    97→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    98→    98→        match self {
+    99→    99→            WasmType::I32 => write!(f, "i32"),
+   100→   100→            WasmType::I64 => write!(f, "i64"),
+   101→   101→            WasmType::F32 => write!(f, "f32"),
+   102→   102→            WasmType::F64 => write!(f, "f64"),
+   103→   103→        }
+   104→   104→    }
+   105→   105→}
+   106→   106→
+   107→   107→// ===========================================================================
+   108→   108→// Wasm instructions
+   109→   109→// ===========================================================================
+   110→   110→
+   111→   111→/// WebAssembly instructions needed for VUMA IR lowering.
+   112→   112→///
+   113→   113→/// Each variant corresponds to one Wasm opcode.  Variants that take
+   114→   114→/// immediates carry them as fields.
+   115→   115→#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+   116→   116→pub enum WasmInstr {
+   117→   117→    // ── Control ───────────────────────────────────────────────────────
+   118→   118→    Block(Option<WasmType>),
+   119→   119→    Loop(Option<WasmType>),
+   120→   120→    If(Option<WasmType>),
+   121→   121→    Else,
+   122→   122→    End,
+   123→   123→    Br(u32),
+   124→   124→    BrIf(u32),
+   125→   125→    BrTable {
+   126→   126→        labels: Vec<u32>,
+   127→   127→        default: u32,
+   128→   128→    },
+   129→   129→    Return,
+   130→   130→    Call(u32),
+   131→   131→    CallIndirect {
+   132→   132→        type_idx: u32,
+   133→   133→        table_idx: u32,
+   134→   134→    },
+   135→   135→
+   136→   136→    // ── Parametric ────────────────────────────────────────────────────
+   137→   137→    Select,
+   138→   138→    Drop,
+   139→   139→
+   140→   140→    // ── Variable ──────────────────────────────────────────────────────
+   141→   141→    LocalGet(u32),
+   142→   142→    LocalSet(u32),
+   143→   143→    LocalTee(u32),
+   144→   144→    GlobalGet(u32),
+   145→   145→    GlobalSet(u32),
+   146→   146→
+   147→   147→    // ── Memory ────────────────────────────────────────────────────────
+   148→   148→    I32Load {
+   149→   149→        align: u32,
+   150→   150→        offset: u32,
+   151→   151→    },
+   152→   152→    I64Load {
+   153→   153→        align: u32,
+   154→   154→        offset: u32,
+   155→   155→    },
+   156→   156→    F32Load {
+   157→   157→        align: u32,
+   158→   158→        offset: u32,
+   159→   159→    },
+   160→   160→    F64Load {
+   161→   161→        align: u32,
+   162→   162→        offset: u32,
+   163→   163→    },
+   164→   164→    I32Store {
+   165→   165→        align: u32,
+   166→   166→        offset: u32,
+   167→   167→    },
+   168→   168→    I64Store {
+   169→   169→        align: u32,
+   170→   170→        offset: u32,
+   171→   171→    },
+   172→   172→    F32Store {
+   173→   173→        align: u32,
+   174→   174→        offset: u32,
+   175→   175→    },
+   176→   176→    F64Store {
+   177→   177→        align: u32,
+   178→   178→        offset: u32,
+   179→   179→    },
+   180→   180→    I32Load8S {
+   181→   181→        align: u32,
+   182→   182→        offset: u32,
+   183→   183→    },
+   184→   184→    I32Load8U {
+   185→   185→        align: u32,
+   186→   186→        offset: u32,
+   187→   187→    },
+   188→   188→    I32Load16S {
+   189→   189→        align: u32,
+   190→   190→        offset: u32,
+   191→   191→    },
+   192→   192→    I32Load16U {
+   193→   193→        align: u32,
+   194→   194→        offset: u32,
+   195→   195→    },
+   196→   196→    I64Load8S {
+   197→   197→        align: u32,
+   198→   198→        offset: u32,
+   199→   199→    },
+   200→   200→    I64Load8U {
+   201→   201→        align: u32,
+   202→   202→        offset: u32,
+   203→   203→    },
+   204→   204→    I64Load16S {
+   205→   205→        align: u32,
+   206→   206→        offset: u32,
+   207→   207→    },
+   208→   208→    I64Load16U {
+   209→   209→        align: u32,
+   210→   210→        offset: u32,
+   211→   211→    },
+   212→   212→    I64Load32S {
+   213→   213→        align: u32,
+   214→   214→        offset: u32,
+   215→   215→    },
+   216→   216→    I64Load32U {
+   217→   217→        align: u32,
+   218→   218→        offset: u32,
+   219→   219→    },
+   220→   220→    I32Store8 {
+   221→   221→        align: u32,
+   222→   222→        offset: u32,
+   223→   223→    },
+   224→   224→    I32Store16 {
+   225→   225→        align: u32,
+   226→   226→        offset: u32,
+   227→   227→    },
+   228→   228→    I64Store8 {
+   229→   229→        align: u32,
+   230→   230→        offset: u32,
+   231→   231→    },
+   232→   232→    I64Store16 {
+   233→   233→        align: u32,
+   234→   234→        offset: u32,
+   235→   235→    },
+   236→   236→    I64Store32 {
+   237→   237→        align: u32,
+   238→   238→        offset: u32,
+   239→   239→    },
+   240→   240→    MemorySize(u32),
+   241→   241→    MemoryGrow(u32),
+   242→   242→
+   243→   243→    // ── Numeric i32 ──────────────────────────────────────────────────
+   244→   244→    I32Const(i32),
+   245→   245→    I32Eqz,
+   246→   246→    I32Eq,
+   247→   247→    I32Ne,
+   248→   248→    I32LtS,
+   249→   249→    I32LtU,
+   250→   250→    I32GtS,
+   251→   251→    I32GtU,
+   252→   252→    I32LeS,
+   253→   253→    I32LeU,
+   254→   254→    I32GeS,
+   255→   255→    I32GeU,
+   256→   256→    I32Clz,
+   257→   257→    I32Ctz,
+   258→   258→    I32Popcnt,
+   259→   259→    I32Add,
+   260→   260→    I32Sub,
+   261→   261→    I32Mul,
+   262→   262→    I32DivS,
+   263→   263→    I32DivU,
+   264→   264→    I32RemS,
+   265→   265→    I32RemU,
+   266→   266→    I32And,
+   267→   267→    I32Or,
+   268→   268→    I32Xor,
+   269→   269→    I32Shl,
+   270→   270→    I32ShrS,
+   271→   271→    I32ShrU,
+   272→   272→    I32Rotl,
+   273→   273→    I32Rotr,
+   274→   274→
+   275→   275→    // ── Numeric i64 ──────────────────────────────────────────────────
+   276→   276→    I64Const(i64),
+   277→   277→    I64Eqz,
+   278→   278→    I64Eq,
+   279→   279→    I64Ne,
+   280→   280→    I64LtS,
+   281→   281→    I64LtU,
+   282→   282→    I64GtS,
+   283→   283→    I64GtU,
+   284→   284→    I64LeS,
+   285→   285→    I64LeU,
+   286→   286→    I64GeS,
+   287→   287→    I64GeU,
+   288→   288→    I64Clz,
+   289→   289→    I64Ctz,
+   290→   290→    I64Popcnt,
+   291→   291→    I64Add,
+   292→   292→    I64Sub,
+   293→   293→    I64Mul,
+   294→   294→    I64DivS,
+   295→   295→    I64DivU,
+   296→   296→    I64RemS,
+   297→   297→    I64RemU,
+   298→   298→    I64And,
+   299→   299→    I64Or,
+   300→   300→    I64Xor,
+   301→   301→    I64Shl,
+   302→   302→    I64ShrS,
+   303→   303→    I64ShrU,
+   304→   304→    I64Rotl,
+   305→   305→    I64Rotr,
+   306→   306→
+   307→   307→    // ── Numeric f32 ──────────────────────────────────────────────────
+   308→   308→    F32Const(f32),
+   309→   309→    F32Eq,
+   310→   310→    F32Ne,
+   311→   311→    F32Lt,
+   312→   312→    F32Gt,
+   313→   313→    F32Le,
+   314→   314→    F32Ge,
+   315→   315→    F32Add,
+   316→   316→    F32Sub,
+   317→   317→    F32Mul,
+   318→   318→    F32Div,
+   319→   319→    F32Sqrt,
+   320→   320→    F32Neg,
+   321→   321→
+   322→   322→    // ── Numeric f64 ──────────────────────────────────────────────────
+   323→   323→    F64Const(f64),
+   324→   324→    F64Eq,
+   325→   325→    F64Ne,
+   326→   326→    F64Lt,
+   327→   327→    F64Gt,
+   328→   328→    F64Le,
+   329→   329→    F64Ge,
+   330→   330→    F64Add,
+   331→   331→    F64Sub,
+   332→   332→    F64Mul,
+   333→   333→    F64Div,
+   334→   334→    F64Sqrt,
+   335→   335→    F64Neg,
+   336→   336→
+   337→   337→    // ── Conversions ──────────────────────────────────────────────────
+   338→   338→    I32WrapI64,
+   339→   339→    I64ExtendI32S,
+   340→   340→    I64ExtendI32U,
+   341→   341→    F32DemoteF64,
+   342→   342→    F64PromoteF32,
+   343→   343→    I32TruncF32S,
+   344→   344→    I32TruncF64S,
+   345→   345→    I64TruncF32S,
+   346→   346→    I64TruncF64S,
+   347→   347→    F32ConvertI32S,
+   348→   348→    F32ConvertI64S,
+   349→   349→    F64ConvertI32S,
+   350→   350→    F64ConvertI64S,
+   351→   351→    I32ReinterpretF32,
+   352→   352→    I64ReinterpretF64,
+   353→   353→    F32ReinterpretI32,
+   354→   354→    F64ReinterpretI64,
+   355→   355→
+   356→   356→    // ── Pseudo-instruction: no-op (used for IR ops that lower to nothing) ──
+   357→   357→    Nop,
+   358→   358→
+   359→   359→    // ── Unreachable ───────────────────────────────────────────────────
+   360→   360→    /// unreachable: traps unconditionally (opcode 0x00)
+   361→   361→    Unreachable,
+   362→   362→
+   363→   363→    // ── SIMD v128 instructions ────────────────────────────────────────
+   364→   364→    /// v128.const: push a 128-bit vector constant
+   365→   365→    V128Const([u8; 16]),
+   366→   366→    /// i32x4.add: lane-wise addition of two i32x4 vectors
+   367→   367→    I32X4Add,
+   368→   368→    /// i32x4.mul: lane-wise multiplication of two i32x4 vectors
+   369→   369→    I32X4Mul,
+   370→   370→    /// f32x4.add: lane-wise addition of two f32x4 vectors
+   371→   371→    F32X4Add,
+   372→   372→    /// f32x4.mul: lane-wise multiplication of two f32x4 vectors
+   373→   373→    F32X4Mul,
+   374→   374→
+   375→   375→    // ── Bulk Memory Operations ────────────────────────────────────────
+   376→   376→    /// memory.copy: copy from one memory region to another
+   377→   377→    MemoryCopy {
+   378→   378→        src_mem: u32,
+   379→   379→        dst_mem: u32,
+   380→   380→    },
+   381→   381→    /// memory.fill: fill a memory region with a byte value
+   382→   382→    MemoryFill {
+   383→   383→        mem: u32,
+   384→   384→    },
+   385→   385→    /// memory.init: initialize memory from a data segment
+   386→   386→    MemoryInit {
+   387→   387→        data_idx: u32,
+   388→   388→        mem: u32,
+   389→   389→    },
+   390→   390→}
+   391→   391→
+   392→   392→impl WasmInstr {
+   393→   393→    /// Encode this instruction into Wasm bytecode, appending bytes to `out`.
+   394→   394→    pub fn encode(&self, out: &mut Vec<u8>) {
+   395→   395→        match self {
+   396→   396→            // ── Control ──────────────────────────────────────────────
+   397→   397→            WasmInstr::Block(ty) => {
+   398→   398→                out.push(0x02);
+   399→   399→                match ty {
+   400→   400→                    Some(t) => out.push(t.to_byte()),
+   401→   401→                    None => out.push(0x40), // void block type
+   402→   402→                }
+   403→   403→            }
+   404→   404→            WasmInstr::Loop(ty) => {
+   405→   405→                out.push(0x03);
+   406→   406→                match ty {
+   407→   407→                    Some(t) => out.push(t.to_byte()),
+   408→   408→                    None => out.push(0x40), // void loop type
+   409→   409→                }
+   410→   410→            }
+   411→   411→            WasmInstr::If(ty) => {
+   412→   412→                out.push(0x04);
+   413→   413→                match ty {
+   414→   414→                    Some(t) => out.push(t.to_byte()),
+   415→   415→                    None => out.push(0x40), // void if type
+   416→   416→                }
+   417→   417→            }
+   418→   418→            WasmInstr::Else => out.push(0x05),
+   419→   419→            WasmInstr::End => out.push(0x0B),
+   420→   420→            WasmInstr::Br(idx) => {
+   421→   421→                out.push(0x0C);
+   422→   422→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   423→   423→            }
+   424→   424→            WasmInstr::BrIf(idx) => {
+   425→   425→                out.push(0x0D);
+   426→   426→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   427→   427→            }
+   428→   428→            WasmInstr::BrTable { labels, default } => {
+   429→   429→                out.push(0x0E);
+   430→   430→                out.extend_from_slice(&encode_unsigned_leb128(labels.len() as u64));
+   431→   431→                for &lbl in labels {
+   432→   432→                    out.extend_from_slice(&encode_unsigned_leb128(lbl as u64));
+   433→   433→                }
+   434→   434→                out.extend_from_slice(&encode_unsigned_leb128(*default as u64));
+   435→   435→            }
+   436→   436→            WasmInstr::Return => out.push(0x0F),
+   437→   437→            WasmInstr::Call(idx) => {
+   438→   438→                out.push(0x10);
+   439→   439→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   440→   440→            }
+   441→   441→            WasmInstr::CallIndirect {
+   442→   442→                type_idx,
+   443→   443→                table_idx,
+   444→   444→            } => {
+   445→   445→                out.push(0x11);
+   446→   446→                out.extend_from_slice(&encode_unsigned_leb128(*type_idx as u64));
+   447→   447→                out.extend_from_slice(&encode_unsigned_leb128(*table_idx as u64));
+   448→   448→            }
+   449→   449→
+   450→   450→            // ── Parametric ──────────────────────────────────────────
+   451→   451→            WasmInstr::Select => out.push(0x1B),
+   452→   452→            WasmInstr::Drop => out.push(0x1A),
+   453→   453→
+   454→   454→            // ── Variable ────────────────────────────────────────────
+   455→   455→            WasmInstr::LocalGet(idx) => {
+   456→   456→                out.push(0x20);
+   457→   457→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   458→   458→            }
+   459→   459→            WasmInstr::LocalSet(idx) => {
+   460→   460→                out.push(0x21);
+   461→   461→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   462→   462→            }
+   463→   463→            WasmInstr::LocalTee(idx) => {
+   464→   464→                out.push(0x22);
+   465→   465→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   466→   466→            }
+   467→   467→            WasmInstr::GlobalGet(idx) => {
+   468→   468→                out.push(0x23);
+   469→   469→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   470→   470→            }
+   471→   471→            WasmInstr::GlobalSet(idx) => {
+   472→   472→                out.push(0x24);
+   473→   473→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   474→   474→            }
+   475→   475→
+   476→   476→            // ── Memory ──────────────────────────────────────────────
+   477→   477→            WasmInstr::I32Load { align, offset } => {
+   478→   478→                out.push(0x28);
+   479→   479→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   480→   480→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   481→   481→            }
+   482→   482→            WasmInstr::I64Load { align, offset } => {
+   483→   483→                out.push(0x29);
+   484→   484→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   485→   485→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   486→   486→            }
+   487→   487→            WasmInstr::F32Load { align, offset } => {
+   488→   488→                out.push(0x2A);
+   489→   489→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   490→   490→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   491→   491→            }
+   492→   492→            WasmInstr::F64Load { align, offset } => {
+   493→   493→                out.push(0x2B);
+   494→   494→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   495→   495→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   496→   496→            }
+   497→   497→            WasmInstr::I32Store { align, offset } => {
+   498→   498→                out.push(0x36);
+   499→   499→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   500→   500→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   501→   501→            }
+   502→   502→            WasmInstr::I64Store { align, offset } => {
+   503→   503→                out.push(0x37);
+   504→   504→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   505→   505→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   506→   506→            }
+   507→   507→            WasmInstr::F32Store { align, offset } => {
+   508→   508→                out.push(0x38);
+   509→   509→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   510→   510→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   511→   511→            }
+   512→   512→            WasmInstr::F64Store { align, offset } => {
+   513→   513→                out.push(0x39);
+   514→   514→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   515→   515→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   516→   516→            }
+   517→   517→            WasmInstr::I32Load8S { align, offset } => {
+   518→   518→                out.push(0x2C);
+   519→   519→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   520→   520→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   521→   521→            }
+   522→   522→            WasmInstr::I32Load8U { align, offset } => {
+   523→   523→                out.push(0x2D);
+   524→   524→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   525→   525→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   526→   526→            }
+   527→   527→            WasmInstr::I32Load16S { align, offset } => {
+   528→   528→                out.push(0x2E);
+   529→   529→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   530→   530→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   531→   531→            }
+   532→   532→            WasmInstr::I32Load16U { align, offset } => {
+   533→   533→                out.push(0x2F);
+   534→   534→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   535→   535→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   536→   536→            }
+   537→   537→            WasmInstr::I64Load8S { align, offset } => {
+   538→   538→                out.push(0x30);
+   539→   539→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   540→   540→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   541→   541→            }
+   542→   542→            WasmInstr::I64Load8U { align, offset } => {
+   543→   543→                out.push(0x31);
+   544→   544→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   545→   545→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   546→   546→            }
+   547→   547→            WasmInstr::I64Load16S { align, offset } => {
+   548→   548→                out.push(0x32);
+   549→   549→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   550→   550→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   551→   551→            }
+   552→   552→            WasmInstr::I64Load16U { align, offset } => {
+   553→   553→                out.push(0x33);
+   554→   554→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   555→   555→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   556→   556→            }
+   557→   557→            WasmInstr::I64Load32S { align, offset } => {
+   558→   558→                out.push(0x34);
+   559→   559→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   560→   560→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   561→   561→            }
+   562→   562→            WasmInstr::I64Load32U { align, offset } => {
+   563→   563→                out.push(0x35);
+   564→   564→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   565→   565→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   566→   566→            }
+   567→   567→            WasmInstr::I32Store8 { align, offset } => {
+   568→   568→                out.push(0x3A);
+   569→   569→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   570→   570→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   571→   571→            }
+   572→   572→            WasmInstr::I32Store16 { align, offset } => {
+   573→   573→                out.push(0x3B);
+   574→   574→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   575→   575→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   576→   576→            }
+   577→   577→            WasmInstr::I64Store8 { align, offset } => {
+   578→   578→                out.push(0x3C);
+   579→   579→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   580→   580→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   581→   581→            }
+   582→   582→            WasmInstr::I64Store16 { align, offset } => {
+   583→   583→                out.push(0x3D);
+   584→   584→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   585→   585→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   586→   586→            }
+   587→   587→            WasmInstr::I64Store32 { align, offset } => {
+   588→   588→                out.push(0x3E);
+   589→   589→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   590→   590→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   591→   591→            }
+   592→   592→            WasmInstr::MemorySize(idx) => {
+   593→   593→                out.push(0x3F);
+   594→   594→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   595→   595→            }
+   596→   596→            WasmInstr::MemoryGrow(idx) => {
+   597→   597→                out.push(0x40);
+   598→   598→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   599→   599→            }
+   600→   600→
+   601→   601→            // ── Numeric i32 ─────────────────────────────────────────
+   602→   602→            WasmInstr::I32Const(val) => {
+   603→   603→                out.push(0x41);
+   604→   604→                out.extend_from_slice(&encode_signed_leb128(*val as i64));
+   605→   605→            }
+   606→   606→            WasmInstr::I32Eqz => out.push(0x45),
+   607→   607→            WasmInstr::I32Eq => out.push(0x46),
+   608→   608→            WasmInstr::I32Ne => out.push(0x47),
+   609→   609→            WasmInstr::I32LtS => out.push(0x48),
+   610→   610→            WasmInstr::I32LtU => out.push(0x49),
+   611→   611→            WasmInstr::I32GtS => out.push(0x4A),
+   612→   612→            WasmInstr::I32GtU => out.push(0x4B),
+   613→   613→            WasmInstr::I32LeS => out.push(0x4C),
+   614→   614→            WasmInstr::I32LeU => out.push(0x4D),
+   615→   615→            WasmInstr::I32GeS => out.push(0x4E),
+   616→   616→            WasmInstr::I32GeU => out.push(0x4F),
+   617→   617→            WasmInstr::I32Clz => out.push(0x67),
+   618→   618→            WasmInstr::I32Ctz => out.push(0x68),
+   619→   619→            WasmInstr::I32Popcnt => out.push(0x69),
+   620→   620→            WasmInstr::I32Add => out.push(0x6A),
+   621→   621→            WasmInstr::I32Sub => out.push(0x6B),
+   622→   622→            WasmInstr::I32Mul => out.push(0x6C),
+   623→   623→            WasmInstr::I32DivS => out.push(0x6D),
+   624→   624→            WasmInstr::I32DivU => out.push(0x6E),
+   625→   625→            WasmInstr::I32RemS => out.push(0x6F),
+   626→   626→            WasmInstr::I32RemU => out.push(0x70),
+   627→   627→            WasmInstr::I32And => out.push(0x71),
+   628→   628→            WasmInstr::I32Or => out.push(0x72),
+   629→   629→            WasmInstr::I32Xor => out.push(0x73),
+   630→   630→            WasmInstr::I32Shl => out.push(0x74),
+   631→   631→            WasmInstr::I32ShrS => out.push(0x75),
+   632→   632→            WasmInstr::I32ShrU => out.push(0x76),
+   633→   633→            WasmInstr::I32Rotl => out.push(0x77),
+   634→   634→            WasmInstr::I32Rotr => out.push(0x78),
+   635→   635→
+   636→   636→            // ── Numeric i64 ─────────────────────────────────────────
+   637→   637→            WasmInstr::I64Const(val) => {
+   638→   638→                out.push(0x42);
+   639→   639→                out.extend_from_slice(&encode_signed_leb128(*val));
+   640→   640→            }
+   641→   641→            WasmInstr::I64Eqz => out.push(0x50),
+   642→   642→            WasmInstr::I64Eq => out.push(0x51),
+   643→   643→            WasmInstr::I64Ne => out.push(0x52),
+   644→   644→            WasmInstr::I64LtS => out.push(0x53),
+   645→   645→            WasmInstr::I64LtU => out.push(0x54),
+   646→   646→            WasmInstr::I64GtS => out.push(0x55),
+   647→   647→            WasmInstr::I64GtU => out.push(0x56),
+   648→   648→            WasmInstr::I64LeS => out.push(0x57),
+   649→   649→            WasmInstr::I64LeU => out.push(0x58),
+   650→   650→            WasmInstr::I64GeS => out.push(0x59),
+   651→   651→            WasmInstr::I64GeU => out.push(0x5A),
+   652→   652→            WasmInstr::I64Clz => out.push(0x79),
+   653→   653→            WasmInstr::I64Ctz => out.push(0x7A),
+   654→   654→            WasmInstr::I64Popcnt => out.push(0x7B),
+   655→   655→            WasmInstr::I64Add => out.push(0x7C),
+   656→   656→            WasmInstr::I64Sub => out.push(0x7D),
+   657→   657→            WasmInstr::I64Mul => out.push(0x7E),
+   658→   658→            WasmInstr::I64DivS => out.push(0x7F),
+   659→   659→            WasmInstr::I64DivU => out.push(0x80),
+   660→   660→            WasmInstr::I64RemS => out.push(0x81),
+   661→   661→            WasmInstr::I64RemU => out.push(0x82),
+   662→   662→            WasmInstr::I64And => out.push(0x83),
+   663→   663→            WasmInstr::I64Or => out.push(0x84),
+   664→   664→            WasmInstr::I64Xor => out.push(0x85),
+   665→   665→            WasmInstr::I64Shl => out.push(0x86),
+   666→   666→            WasmInstr::I64ShrS => out.push(0x87),
+   667→   667→            WasmInstr::I64ShrU => out.push(0x88),
+   668→   668→            WasmInstr::I64Rotl => out.push(0x89),
+   669→   669→            WasmInstr::I64Rotr => out.push(0x8A),
+   670→   670→
+   671→   671→            // ── Numeric f32 ─────────────────────────────────────────
+   672→   672→            WasmInstr::F32Const(val) => {
+   673→   673→                out.push(0x43);
+   674→   674→                out.extend_from_slice(&val.to_le_bytes());
+   675→   675→            }
+   676→   676→            WasmInstr::F32Eq => out.push(0x5B),
+   677→   677→            WasmInstr::F32Ne => out.push(0x5C),
+   678→   678→            WasmInstr::F32Lt => out.push(0x5D),
+   679→   679→            WasmInstr::F32Gt => out.push(0x5E),
+   680→   680→            WasmInstr::F32Le => out.push(0x5F),
+   681→   681→            WasmInstr::F32Ge => out.push(0x60),
+   682→   682→            WasmInstr::F32Add => out.push(0x92),
+   683→   683→            WasmInstr::F32Sub => out.push(0x93),
+   684→   684→            WasmInstr::F32Mul => out.push(0x94),
+   685→   685→            WasmInstr::F32Div => out.push(0x95),
+   686→   686→            WasmInstr::F32Sqrt => out.push(0x91),
+   687→   687→            WasmInstr::F32Neg => out.push(0x8C),
+   688→   688→
+   689→   689→            // ── Numeric f64 ─────────────────────────────────────────
+   690→   690→            WasmInstr::F64Const(val) => {
+   691→   691→                out.push(0x44);
+   692→   692→                out.extend_from_slice(&val.to_le_bytes());
+   693→   693→            }
+   694→   694→            WasmInstr::F64Eq => out.push(0x61),
+   695→   695→            WasmInstr::F64Ne => out.push(0x62),
+   696→   696→            WasmInstr::F64Lt => out.push(0x63),
+   697→   697→            WasmInstr::F64Gt => out.push(0x64),
+   698→   698→            WasmInstr::F64Le => out.push(0x65),
+   699→   699→            WasmInstr::F64Ge => out.push(0x66),
+   700→   700→            WasmInstr::F64Add => out.push(0xA0),
+   701→   701→            WasmInstr::F64Sub => out.push(0xA1),
+   702→   702→            WasmInstr::F64Mul => out.push(0xA2),
+   703→   703→            WasmInstr::F64Div => out.push(0xA3),
+   704→   704→            WasmInstr::F64Sqrt => out.push(0x9F),
+   705→   705→            WasmInstr::F64Neg => out.push(0x9A),
+   706→   706→
+   707→   707→            // ── Conversions ─────────────────────────────────────────
+   708→   708→            WasmInstr::I32WrapI64 => out.push(0xA7),
+   709→   709→            WasmInstr::I64ExtendI32S => out.push(0xAC),
+   710→   710→            WasmInstr::I64ExtendI32U => out.push(0xAD),
+   711→   711→            WasmInstr::F32DemoteF64 => out.push(0xB6),
+   712→   712→            WasmInstr::F64PromoteF32 => out.push(0xBB),
+   713→   713→            WasmInstr::I32TruncF32S => out.push(0xA8),
+   714→   714→            WasmInstr::I32TruncF64S => out.push(0xA9),
+   715→   715→            WasmInstr::I64TruncF32S => out.push(0xAE),
+   716→   716→            WasmInstr::I64TruncF64S => out.push(0xAF),
+   717→   717→            WasmInstr::F32ConvertI32S => out.push(0xB2),
+   718→   718→            WasmInstr::F32ConvertI64S => out.push(0xB3),
+   719→   719→            WasmInstr::F64ConvertI32S => out.push(0xB7),
+   720→   720→            WasmInstr::F64ConvertI64S => out.push(0xB8),
+   721→   721→            WasmInstr::I32ReinterpretF32 => out.push(0xBC),
+   722→   722→            WasmInstr::I64ReinterpretF64 => out.push(0xBD),
+   723→   723→            WasmInstr::F32ReinterpretI32 => out.push(0xBE),
+   724→   724→            WasmInstr::F64ReinterpretI64 => out.push(0xBF),
+   725→   725→
+   726→   726→            // ── Nop ─────────────────────────────────────────────────
+   727→   727→            WasmInstr::Nop => out.push(0x01),
+   728→   728→
+   729→   729→            // ── Unreachable ──────────────────────────────────────────
+   730→   730→            WasmInstr::Unreachable => out.push(0x00),
+   731→   731→
+   732→   732→            // ── SIMD v128 ──────────────────────────────────────────
+   733→   733→            WasmInstr::V128Const(bytes) => {
+   734→   734→                out.push(0xFD); // SIMD prefix
+   735→   735→                out.extend_from_slice(&encode_unsigned_leb128(0x0C)); // v128.const opcode
+   736→   736→                out.extend_from_slice(bytes);
+   737→   737→            }
+   738→   738→            WasmInstr::I32X4Add => {
+   739→   739→                out.push(0xFD);
+   740→   740→                out.extend_from_slice(&encode_unsigned_leb128(0x0E)); // i32x4.add
+   741→   741→            }
+   742→   742→            WasmInstr::I32X4Mul => {
+   743→   743→                out.push(0xFD);
+   744→   744→                out.extend_from_slice(&encode_unsigned_leb128(0x15)); // i32x4.mul
+   745→   745→            }
+   746→   746→            WasmInstr::F32X4Add => {
+   747→   747→                out.push(0xFD);
+   748→   748→                out.extend_from_slice(&encode_unsigned_leb128(0x2C)); // f32x4.add
+   749→   749→            }
+   750→   750→            WasmInstr::F32X4Mul => {
+   751→   751→                out.push(0xFD);
+   752→   752→                out.extend_from_slice(&encode_unsigned_leb128(0x35)); // f32x4.mul
+   753→   753→            }
+   754→   754→
+   755→   755→            // ── Bulk Memory Operations ────────────────────────────
+   756→   756→            WasmInstr::MemoryCopy { src_mem, dst_mem } => {
+   757→   757→                out.push(0xFC); // multi-byte op prefix
+   758→   758→                out.extend_from_slice(&encode_unsigned_leb128(0x0A)); // memory.copy
+   759→   759→                out.extend_from_slice(&encode_unsigned_leb128(*src_mem as u64));
+   760→   760→                out.extend_from_slice(&encode_unsigned_leb128(*dst_mem as u64));
+   761→   761→            }
+   762→   762→            WasmInstr::MemoryFill { mem } => {
+   763→   763→                out.push(0xFC);
+   764→   764→                out.extend_from_slice(&encode_unsigned_leb128(0x0B)); // memory.fill
+   765→   765→                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+   766→   766→            }
+   767→   767→            WasmInstr::MemoryInit { data_idx, mem } => {
+   768→   768→                out.push(0xFC);
+   769→   769→                out.extend_from_slice(&encode_unsigned_leb128(0x08)); // memory.init
+   770→   770→                out.extend_from_slice(&encode_unsigned_leb128(*data_idx as u64));
+   771→   771→                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+   772→   772→            }
+   773→   773→        }
+   774→   774→    }
+   775→   775→
+   776→   776→    /// Encode this instruction and return the bytes as a new Vec.
+   777→   777→    pub fn to_bytes(&self) -> Vec<u8> {
+   778→   778→        let mut out = Vec::new();
+   779→   779→        self.encode(&mut out);
+   780→   780→        out
+   781→   781→    }
+   782→   782→}
+   783→   783→
+   784→   784→// ===========================================================================
+   785→   785→// LEB128 encoding / decoding
+   786→   786→// ===========================================================================
+   787→   787→
+   788→   788→/// Encode an unsigned 64-bit value as unsigned LEB128.
+   789→   789→pub fn encode_unsigned_leb128(value: u64) -> Vec<u8> {
+   790→   790→    let mut result = Vec::new();
+   791→   791→    let mut val = value;
+   792→   792→    loop {
+   793→   793→        let mut byte = (val & 0x7F) as u8;
+   794→   794→        val >>= 7;
+   795→   795→        if val != 0 {
+   796→   796→            byte |= 0x80;
+   797→   797→        }
+   798→   798→        result.push(byte);
+   799→   799→        if val == 0 {
+   800→   800→            break;
+   801→   801→        }
+   802→   802→    }
+   803→   803→    result
+   804→   804→}
+   805→   805→
+   806→   806→/// Encode a signed 64-bit value as signed LEB128.
+   807→   807→pub fn encode_signed_leb128(value: i64) -> Vec<u8> {
+   808→   808→    let mut result = Vec::new();
+   809→   809→    let mut val = value;
+   810→   810→    loop {
+   811→   811→        let mut byte = (val & 0x7F) as u8;
+   812→   812→        val >>= 7;
+   813→   813→        // Sign bit of byte is bit 6
+   814→   814→        let sign_bit = (byte & 0x40) != 0;
+   815→   815→        // If val is 0 and sign bit is clear, or val is -1 and sign bit is set, we're done
+   816→   816→        if (val == 0 && !sign_bit) || (val == -1 && sign_bit) {
+   817→   817→            result.push(byte);
+   818→   818→            break;
+   819→   819→        }
+   820→   820→        byte |= 0x80;
+   821→   821→        result.push(byte);
+   822→   822→    }
+   823→   823→    result
+   824→   824→}
+   825→   825→
+   826→   826→/// Decode an unsigned LEB128 value from a byte slice.
+   827→   827→/// Returns (decoded_value, number_of_bytes_consumed).
+   828→   828→pub fn decode_unsigned_leb128(bytes: &[u8]) -> (u64, usize) {
+   829→   829→    let mut result: u64 = 0;
+   830→   830→    let mut shift: u32 = 0;
+   831→   831→    let mut count = 0;
+   832→   832→    for &byte in bytes {
+   833→   833→        count += 1;
+   834→   834→        result |= ((byte & 0x7F) as u64) << shift;
+   835→   835→        if (byte & 0x80) == 0 {
+   836→   836→            break;
+   837→   837→        }
+   838→   838→        shift += 7;
+   839→   839→    }
+   840→   840→    (result, count)
+   841→   841→}
+   842→   842→
+   843→   843→/// Decode a signed LEB128 value from a byte slice.
+   844→   844→/// Returns (decoded_value, number_of_bytes_consumed).
+   845→   845→pub fn decode_signed_leb128(bytes: &[u8]) -> (i64, usize) {
+   846→   846→    let mut result: i64 = 0;
+   847→   847→    let mut shift: u32 = 0;
+   848→   848→    let mut count = 0;
+   849→   849→    let mut byte: u8;
+   850→   850→    loop {
+   851→   851→        byte = bytes[count];
+   852→   852→        count += 1;
+   853→   853→        result |= ((byte & 0x7F) as i64) << shift;
+   854→   854→        shift += 7;
+   855→   855→        if (byte & 0x80) == 0 {
+   856→   856→            break;
+   857→   857→        }
+   858→   858→    }
+   859→   859→    // Sign-extend if the sign bit is set
+   860→   860→    if shift < 64 && (byte & 0x40) != 0 {
+   861→   861→        result |= !0i64 << shift;
+   862→   862→    }
+   863→   863→    (result, count)
+   864→   864→}
+   865→   865→
+   866→   866→// ===========================================================================
+   867→   867→// Wasm binary format encoder
+   868→   868→// ===========================================================================
+   869→   869→
+   870→   870→/// Wasm section IDs.
+   871→   871→const SECTION_TYPE: u8 = 1;
+   872→   872→const SECTION_IMPORT: u8 = 2;
+   873→   873→const SECTION_FUNCTION: u8 = 3;
+   874→   874→const SECTION_TABLE: u8 = 4;
+   875→   875→const SECTION_MEMORY: u8 = 5;
+   876→   876→const SECTION_GLOBAL: u8 = 6;
+   877→   877→const SECTION_EXPORT: u8 = 7;
+   878→   878→const SECTION_START: u8 = 8;
+   879→   879→const SECTION_ELEMENT: u8 = 9;
+   880→   880→const SECTION_CODE: u8 = 10;
+   881→   881→const SECTION_DATA: u8 = 11;
+   882→   882→
+   883→   883→/// Wasm magic number and version.
+   884→   884→const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D]; // "\0asm"
+   885→   885→const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // version 1
+   886→   886→
+   887→   887→/// A Wasm function type signature: (params) -> (results).
+   888→   888→///
+   889→   889→/// Supports multi-value returns (Wasm 2.0 feature): the `results` vector
+   890→   890→/// may contain more than one type.
+   891→   891→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   892→   892→pub struct WasmFuncType {
+   893→   893→    pub params: Vec<WasmType>,
+   894→   894→    pub results: Vec<WasmType>,
+   895→   895→}
+   896→   896→
+   897→   897→impl WasmFuncType {
+   898→   898→    /// Encode this function type in Wasm binary format.
+   899→   899→    pub fn encode(&self) -> Vec<u8> {
+   900→   900→        let mut out = Vec::new();
+   901→   901→        out.push(0x60); // func type tag
+   902→   902→        out.extend_from_slice(&encode_unsigned_leb128(self.params.len() as u64));
+   903→   903→        for p in &self.params {
+   904→   904→            out.push(p.to_byte());
+   905→   905→        }
+   906→   906→        out.extend_from_slice(&encode_unsigned_leb128(self.results.len() as u64));
+   907→   907→        for r in &self.results {
+   908→   908→            out.push(r.to_byte());
+   909→   909→        }
+   910→   910→        out
+   911→   911→    }
+   912→   912→}
+   913→   913→
+   914→   914→/// A Wasm import entry.
+   915→   915→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   916→   916→pub struct WasmImport {
+   917→   917→    pub module: String,
+   918→   918→    pub name: String,
+   919→   919→    pub kind: WasmImportKind,
+   920→   920→}
+   921→   921→
+   922→   922→impl WasmImport {
+   923→   923→    /// Create a WASI `fd_write` import (wasip1).
+   924→   924→    ///
+   925→   925→    /// Signature: (fd: i32, iov_ptr: i32, iov_cnt: i32, nwritten_ptr: i32) -> i32
+   926→   926→    pub fn wasi_fd_write(type_idx: u32) -> Self {
+   927→   927→        WasmImport {
+   928→   928→            module: "wasi_snapshot_preview1".to_string(),
+   929→   929→            name: "fd_write".to_string(),
+   930→   930→            kind: WasmImportKind::Function { type_idx },
+   931→   931→        }
+   932→   932→    }
+   933→   933→
+   934→   934→    /// Create a WASI `proc_exit` import (wasip1).
+   935→   935→    ///
+   936→   936→    /// Signature: (exit_code: i32) -> ()
+   937→   937→    pub fn wasi_proc_exit(type_idx: u32) -> Self {
+   938→   938→        WasmImport {
+   939→   939→            module: "wasi_snapshot_preview1".to_string(),
+   940→   940→            name: "proc_exit".to_string(),
+   941→   941→            kind: WasmImportKind::Function { type_idx },
+   942→   942→        }
+   943→   943→    }
+   944→   944→}
+   945→   945→
+   946→   946→/// Kind of import.
+   947→   947→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   948→   948→pub enum WasmImportKind {
+   949→   949→    Function { type_idx: u32 },
+   950→   950→    Table { elem_type: u8, limits: WasmLimits },
+   951→   951→    Memory { limits: WasmLimits },
+   952→   952→    Global { val_type: WasmType, mutable: bool },
+   953→   953→}
+   954→   954→
+   955→   955→/// Wasm limits (for tables and memories).
+   956→   956→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   957→   957→pub struct WasmLimits {
+   958→   958→    pub min: u32,
+   959→   959→    pub max: Option<u32>,
+   960→   960→}
+   961→   961→
+   962→   962→impl WasmLimits {
+   963→   963→    fn encode(&self) -> Vec<u8> {
+   964→   964→        let mut out = Vec::new();
+   965→   965→        match self.max {
+   966→   966→            Some(max) => {
+   967→   967→                out.push(0x01);
+   968→   968→                out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
+   969→   969→                out.extend_from_slice(&encode_unsigned_leb128(max as u64));
+   970→   970→            }
+   971→   971→            None => {
+   972→   972→                out.push(0x00);
+   973→   973→                out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
+   974→   974→            }
+   975→   975→        }
+   976→   976→        out
+   977→   977→    }
+   978→   978→}
+   979→   979→
+   980→   980→/// A Wasm export entry.
+   981→   981→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   982→   982→pub struct WasmExport {
+   983→   983→    pub name: String,
+   984→   984→    pub kind: WasmExportKind,
+   985→   985→    pub index: u32,
+   986→   986→}
+   987→   987→
+   988→   988→/// Kind of export.
+   989→   989→#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   990→   990→pub enum WasmExportKind {
+   991→   991→    Function = 0,
+   992→   992→    Table = 1,
+   993→   993→    Memory = 2,
+   994→   994→    Global = 3,
+   995→   995→}
+   996→   996→
+   997→   997→/// A Wasm global variable.
+   998→   998→#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+   999→   999→pub struct WasmGlobal {
+  1000→  1000→    pub val_type: WasmType,
+  1001→  1001→    pub mutable: bool,
+  1002→  1002→    pub init_expr: Vec<u8>, // init expr bytes (e.g. i32.const + end)
+  1003→  1003→}
+  1004→  1004→
+  1005→  1005→/// A Wasm data segment.
+  1006→  1006→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1007→  1007→pub struct WasmDataSegment {
+  1008→  1008→    pub memory_index: u32,
+  1009→  1009→    pub offset_expr: Vec<u8>, // init expr for offset
+  1010→  1010→    pub data: Vec<u8>,
+  1011→  1011→}
+  1012→  1012→
+  1013→  1013→/// A Wasm element segment (for indirect calls).
+  1014→  1014→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1015→  1015→pub struct WasmElementSegment {
+  1016→  1016→    pub table_index: u32,
+  1017→  1017→    pub offset_expr: Vec<u8>,
+  1018→  1018→    pub func_indices: Vec<u32>,
+  1019→  1019→}
+  1020→  1020→
+  1021→  1021→/// Builder for a complete Wasm module.
+  1022→  1022→#[derive(Debug, Clone, Default)]
+  1023→  1023→pub struct WasmModuleBuilder {
+  1024→  1024→    pub types: Vec<WasmFuncType>,
+  1025→  1025→    pub imports: Vec<WasmImport>,
+  1026→  1026→    pub functions: Vec<u32>,           // type indices for each function
+  1027→  1027→    pub tables: Vec<(u8, WasmLimits)>, // (elem_type, limits)
+  1028→  1028→    pub memories: Vec<WasmLimits>,
+  1029→  1029→    pub globals: Vec<WasmGlobal>,
+  1030→  1030→    pub exports: Vec<WasmExport>,
+  1031→  1031→    pub start_func: Option<u32>,
+  1032→  1032→    pub elements: Vec<WasmElementSegment>,
+  1033→  1033→    pub code: Vec<WasmFuncBody>, // one per function (after imports)
+  1034→  1034→    pub data: Vec<WasmDataSegment>,
+  1035→  1035→    pub num_imported_functions: u32,
+  1036→  1036→}
+  1037→  1037→
+  1038→  1038→/// A Wasm function body.
+  1039→  1039→///
+  1040→  1040→/// Supports local declarations (count + type pairs) as per the Wasm binary format.
+  1041→  1041→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1042→  1042→pub struct WasmFuncBody {
+  1043→  1043→    pub locals: Vec<(u32, WasmType)>, // (count, type) pairs
+  1044→  1044→    pub body: Vec<u8>,                // bytecode of the function body
+  1045→  1045→}
+  1046→  1046→
+  1047→  1047→impl WasmFuncBody {
+  1048→  1048→    /// Create a new function body with given locals and body bytecode.
+  1049→  1049→    pub fn new(locals: Vec<(u32, WasmType)>, body: Vec<u8>) -> Self {
+  1050→  1050→        Self { locals, body }
+  1051→  1051→    }
+  1052→  1052→
+  1053→  1053→    /// Create a function body with no extra locals.
+  1054→  1054→    pub fn from_body(body: Vec<u8>) -> Self {
+  1055→  1055→        Self {
+  1056→  1056→            locals: vec![],
+  1057→  1057→            body,
+  1058→  1058→        }
+  1059→  1059→    }
+  1060→  1060→}
+  1061→  1061→
+  1062→  1062→impl WasmModuleBuilder {
+  1063→  1063→    /// Creates a new Wasm module builder with empty sections.
+  1064→  1064→    pub fn new() -> Self {
+  1065→  1065→        Self::default()
+  1066→  1066→    }
+  1067→  1067→
+  1068→  1068→    /// Add a function type and return its index.
+  1069→  1069→    pub fn add_type(&mut self, ft: WasmFuncType) -> u32 {
+  1070→  1070→        let idx = self.types.len() as u32;
+  1071→  1071→        self.types.push(ft);
+  1072→  1072→        idx
+  1073→  1073→    }
+  1074→  1074→
+  1075→  1075→    /// Add a function (type index only; body added separately).
+  1076→  1076→    pub fn add_function(&mut self, type_idx: u32) -> u32 {
+  1077→  1077→        let idx = self.num_imported_functions + (self.functions.len() as u32);
+  1078→  1078→        self.functions.push(type_idx);
+  1079→  1079→        idx
+  1080→  1080→    }
+  1081→  1081→
+  1082→  1082→    /// Add a function body (must match the function index).
+  1083→  1083→    pub fn add_code(&mut self, body: WasmFuncBody) {
+  1084→  1084→        self.code.push(body);
+  1085→  1085→    }
+  1086→  1086→
+  1087→  1087→    /// Add a memory definition.
+  1088→  1088→    pub fn add_memory(&mut self, limits: WasmLimits) -> u32 {
+  1089→  1089→        let idx = self.memories.len() as u32;
+  1090→  1090→        self.memories.push(limits);
+  1091→  1091→        idx
+  1092→  1092→    }
+  1093→  1093→
+  1094→  1094→    /// Add an import.
+  1095→  1095→    pub fn add_import(&mut self, import: WasmImport) {
+  1096→  1096→        if let WasmImportKind::Function { .. } = import.kind {
+  1097→  1097→            self.num_imported_functions += 1;
+  1098→  1098→        }
+  1099→  1099→        self.imports.push(import);
+  1100→  1100→    }
+  1101→  1101→
+  1102→  1102→    /// Add an export.
+  1103→  1103→    pub fn add_export(&mut self, export: WasmExport) {
+  1104→  1104→        self.exports.push(export);
+  1105→  1105→    }
+  1106→  1106→
+  1107→  1107→    /// Add a data segment.
+  1108→  1108→    pub fn add_data(&mut self, segment: WasmDataSegment) {
+  1109→  1109→        self.data.push(segment);
+  1110→  1110→    }
+  1111→  1111→
+  1112→  1112→    /// Set the start function.
+  1113→  1113→    pub fn set_start(&mut self, func_idx: u32) {
+  1114→  1114→        self.start_func = Some(func_idx);
+  1115→  1115→    }
+  1116→  1116→
+  1117→  1117→    /// Encode the complete module into bytes.
+  1118→  1118→    pub fn encode(self) -> Vec<u8> {
+  1119→  1119→        let mut module = Vec::new();
+  1120→  1120→
+  1121→  1121→        // Magic + version
+  1122→  1122→        module.extend_from_slice(&WASM_MAGIC);
+  1123→  1123→        module.extend_from_slice(&WASM_VERSION);
+  1124→  1124→
+  1125→  1125→        // Type section
+  1126→  1126→        if !self.types.is_empty() {
+  1127→  1127→            let mut section = Vec::new();
+  1128→  1128→            section.extend_from_slice(&encode_unsigned_leb128(self.types.len() as u64));
+  1129→  1129→            for ft in &self.types {
+  1130→  1130→                section.extend_from_slice(&ft.encode());
+  1131→  1131→            }
+  1132→  1132→            emit_section(&mut module, SECTION_TYPE, &section);
+  1133→  1133→        }
+  1134→  1134→
+  1135→  1135→        // Import section
+  1136→  1136→        if !self.imports.is_empty() {
+  1137→  1137→            let mut section = Vec::new();
+  1138→  1138→            section.extend_from_slice(&encode_unsigned_leb128(self.imports.len() as u64));
+  1139→  1139→            for imp in &self.imports {
+  1140→  1140→                section.extend_from_slice(&encode_unsigned_leb128(imp.module.len() as u64));
+  1141→  1141→                section.extend_from_slice(imp.module.as_bytes());
+  1142→  1142→                section.extend_from_slice(&encode_unsigned_leb128(imp.name.len() as u64));
+  1143→  1143→                section.extend_from_slice(imp.name.as_bytes());
+  1144→  1144→                match &imp.kind {
+  1145→  1145→                    WasmImportKind::Function { type_idx } => {
+  1146→  1146→                        section.push(0x00);
+  1147→  1147→                        section.extend_from_slice(&encode_unsigned_leb128(*type_idx as u64));
+  1148→  1148→                    }
+  1149→  1149→                    WasmImportKind::Table { elem_type, limits } => {
+  1150→  1150→                        section.push(0x01);
+  1151→  1151→                        section.push(*elem_type);
+  1152→  1152→                        section.extend_from_slice(&limits.encode());
+  1153→  1153→                    }
+  1154→  1154→                    WasmImportKind::Memory { limits } => {
+  1155→  1155→                        section.push(0x02);
+  1156→  1156→                        section.extend_from_slice(&limits.encode());
+  1157→  1157→                    }
+  1158→  1158→                    WasmImportKind::Global { val_type, mutable } => {
+  1159→  1159→                        section.push(0x03);
+  1160→  1160→                        section.push(val_type.to_byte());
+  1161→  1161→                        section.push(if *mutable { 0x01 } else { 0x00 });
+  1162→  1162→                    }
+  1163→  1163→                }
+  1164→  1164→            }
+  1165→  1165→            emit_section(&mut module, SECTION_IMPORT, &section);
+  1166→  1166→        }
+  1167→  1167→
+  1168→  1168→        // Function section
+  1169→  1169→        if !self.functions.is_empty() {
+  1170→  1170→            let mut section = Vec::new();
+  1171→  1171→            section.extend_from_slice(&encode_unsigned_leb128(self.functions.len() as u64));
+  1172→  1172→            for &type_idx in &self.functions {
+  1173→  1173→                section.extend_from_slice(&encode_unsigned_leb128(type_idx as u64));
+  1174→  1174→            }
+  1175→  1175→            emit_section(&mut module, SECTION_FUNCTION, &section);
+  1176→  1176→        }
+  1177→  1177→
+  1178→  1178→        // Table section
+  1179→  1179→        if !self.tables.is_empty() {
+  1180→  1180→            let mut section = Vec::new();
+  1181→  1181→            section.extend_from_slice(&encode_unsigned_leb128(self.tables.len() as u64));
+  1182→  1182→            for (elem_type, limits) in &self.tables {
+  1183→  1183→                section.push(*elem_type);
+  1184→  1184→                section.extend_from_slice(&limits.encode());
+  1185→  1185→            }
+  1186→  1186→            emit_section(&mut module, SECTION_TABLE, &section);
+  1187→  1187→        }
+  1188→  1188→
+  1189→  1189→        // Memory section
+  1190→  1190→        if !self.memories.is_empty() {
+  1191→  1191→            let mut section = Vec::new();
+  1192→  1192→            section.extend_from_slice(&encode_unsigned_leb128(self.memories.len() as u64));
+  1193→  1193→            for limits in &self.memories {
+  1194→  1194→                section.extend_from_slice(&limits.encode());
+  1195→  1195→            }
+  1196→  1196→            emit_section(&mut module, SECTION_MEMORY, &section);
+  1197→  1197→        }
+  1198→  1198→
+  1199→  1199→        // Global section
+  1200→  1200→        if !self.globals.is_empty() {
+  1201→  1201→            let mut section = Vec::new();
+  1202→  1202→            section.extend_from_slice(&encode_unsigned_leb128(self.globals.len() as u64));
+  1203→  1203→            for g in &self.globals {
+  1204→  1204→                section.push(g.val_type.to_byte());
+  1205→  1205→                section.push(if g.mutable { 0x01 } else { 0x00 });
+  1206→  1206→                section.extend_from_slice(&g.init_expr);
+  1207→  1207→            }
+  1208→  1208→            emit_section(&mut module, SECTION_GLOBAL, &section);
+  1209→  1209→        }
+  1210→  1210→
+  1211→  1211→        // Export section
+  1212→  1212→        if !self.exports.is_empty() {
+  1213→  1213→            let mut section = Vec::new();
+  1214→  1214→            section.extend_from_slice(&encode_unsigned_leb128(self.exports.len() as u64));
+  1215→  1215→            for exp in &self.exports {
+  1216→  1216→                section.extend_from_slice(&encode_unsigned_leb128(exp.name.len() as u64));
+  1217→  1217→                section.extend_from_slice(exp.name.as_bytes());
+  1218→  1218→                section.push(exp.kind as u8);
+  1219→  1219→                section.extend_from_slice(&encode_unsigned_leb128(exp.index as u64));
+  1220→  1220→            }
+  1221→  1221→            emit_section(&mut module, SECTION_EXPORT, &section);
+  1222→  1222→        }
+  1223→  1223→
+  1224→  1224→        // Start section
+  1225→  1225→        if let Some(func_idx) = self.start_func {
+  1226→  1226→            let section = encode_unsigned_leb128(func_idx as u64);
+  1227→  1227→            emit_section(&mut module, SECTION_START, &section);
+  1228→  1228→        }
+  1229→  1229→
+  1230→  1230→        // Element section
+  1231→  1231→        if !self.elements.is_empty() {
+  1232→  1232→            let mut section = Vec::new();
+  1233→  1233→            section.extend_from_slice(&encode_unsigned_leb128(self.elements.len() as u64));
+  1234→  1234→            for elem in &self.elements {
+  1235→  1235→                section.extend_from_slice(&encode_unsigned_leb128(elem.table_index as u64));
+  1236→  1236→                section.extend_from_slice(&elem.offset_expr);
+  1237→  1237→                section.extend_from_slice(&encode_unsigned_leb128(elem.func_indices.len() as u64));
+  1238→  1238→                for &idx in &elem.func_indices {
+  1239→  1239→                    section.extend_from_slice(&encode_unsigned_leb128(idx as u64));
+  1240→  1240→                }
+  1241→  1241→            }
+  1242→  1242→            emit_section(&mut module, SECTION_ELEMENT, &section);
+  1243→  1243→        }
+  1244→  1244→
+  1245→  1245→        // Code section
+  1246→  1246→        if !self.code.is_empty() {
+  1247→  1247→            let mut section = Vec::new();
+  1248→  1248→            section.extend_from_slice(&encode_unsigned_leb128(self.code.len() as u64));
+  1249→  1249→            for func_body in &self.code {
+  1250→  1250→                // Encode the function body: locals + code + end byte
+  1251→  1251→                let mut body_bytes = Vec::new();
+  1252→  1252→                body_bytes
+  1253→  1253→                    .extend_from_slice(&encode_unsigned_leb128(func_body.locals.len() as u64));
+  1254→  1254→                for (count, ty) in &func_body.locals {
+  1255→  1255→                    body_bytes.extend_from_slice(&encode_unsigned_leb128(*count as u64));
+  1256→  1256→                    body_bytes.push(ty.to_byte());
+  1257→  1257→                }
+  1258→  1258→                body_bytes.extend_from_slice(&func_body.body);
+  1259→  1259→                // Function body is size-prefixed
+  1260→  1260→                let body_size = body_bytes.len() as u64;
+  1261→  1261→                section.extend_from_slice(&encode_unsigned_leb128(body_size));
+  1262→  1262→                section.extend_from_slice(&body_bytes);
+  1263→  1263→            }
+  1264→  1264→            emit_section(&mut module, SECTION_CODE, &section);
+  1265→  1265→        }
+  1266→  1266→
+  1267→  1267→        // Data section
+  1268→  1268→        if !self.data.is_empty() {
+  1269→  1269→            let mut section = Vec::new();
+  1270→  1270→            section.extend_from_slice(&encode_unsigned_leb128(self.data.len() as u64));
+  1271→  1271→            for seg in &self.data {
+  1272→  1272→                section.extend_from_slice(&encode_unsigned_leb128(seg.memory_index as u64));
+  1273→  1273→                section.extend_from_slice(&seg.offset_expr);
+  1274→  1274→                section.extend_from_slice(&encode_unsigned_leb128(seg.data.len() as u64));
+  1275→  1275→                section.extend_from_slice(&seg.data);
+  1276→  1276→            }
+  1277→  1277→            emit_section(&mut module, SECTION_DATA, &section);
+  1278→  1278→        }
+  1279→  1279→
+  1280→  1280→        module
+  1281→  1281→    }
+  1282→  1282→}
+  1283→  1283→
+  1284→  1284→/// Emit a Wasm section: section ID + LEB128 size + content.
+  1285→  1285→fn emit_section(module: &mut Vec<u8>, section_id: u8, content: &[u8]) {
+  1286→  1286→    module.push(section_id);
+  1287→  1287→    module.extend_from_slice(&encode_unsigned_leb128(content.len() as u64));
+  1288→  1288→    module.extend_from_slice(content);
+  1289→  1289→}
+  1290→  1290→
+  1291→  1291→/// Skip `count` unsigned LEB128 values in the byte slice, advancing `offset`.
+  1292→  1292→fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+  1293→  1293→    for _ in 0..count {
+  1294→  1294→        while *offset < bytes.len() && (bytes[*offset] & 0x80) != 0 {
+  1295→  1295→            *offset += 1;
+  1296→  1296→        }
+  1297→  1297→        if *offset < bytes.len() {
+  1298→  1298→            *offset += 1;
+  1299→  1299→        }
+  1300→  1300→    }
+  1301→  1301→}
+  1302→  1302→
+  1303→  1303→/// Skip `count` signed LEB128 values in the byte slice, advancing `offset`.
+  1304→  1304→fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+  1305→  1305→    // Signed and unsigned LEB128 have the same encoding structure for skipping
+  1306→  1306→    skip_leb128(bytes, offset, count);
+  1307→  1307→}
+  1308→  1308→
+  1309→  1309→/// Convert a WasmType (from this module) to the serializable WasmValueType
+  1310→  1310→/// (from the backend module).
+  1311→  1311→fn wasm_type_to_backend(ty: WasmType) -> crate::backend::WasmValueType {
+  1312→  1312→    match ty {
+  1313→  1313→        WasmType::I32 => crate::backend::WasmValueType::I32,
+  1314→  1314→        WasmType::I64 => crate::backend::WasmValueType::I64,
+  1315→  1315→        WasmType::F32 => crate::backend::WasmValueType::F32,
+  1316→  1316→        WasmType::F64 => crate::backend::WasmValueType::F64,
+  1317→  1317→    }
+  1318→  1318→}
+  1319→  1319→
+  1320→  1320→/// Convert a serializable WasmValueType (from the backend module) back to
+  1321→  1321→/// the WasmType used by this module.
+  1322→  1322→fn backend_to_wasm_type(ty: &crate::backend::WasmValueType) -> WasmType {
+  1323→  1323→    match ty {
+  1324→  1324→        crate::backend::WasmValueType::I32 => WasmType::I32,
+  1325→  1325→        crate::backend::WasmValueType::I64 => WasmType::I64,
+  1326→  1326→        crate::backend::WasmValueType::F32 => WasmType::F32,
+  1327→  1327→        crate::backend::WasmValueType::F64 => WasmType::F64,
+  1328→  1328→    }
+  1329→  1329→}
+  1330→  1330→
+  1331→  1331→/// Skip a single Wasm instruction starting at `offset`, advancing past it.
+  1332→  1332→///
+  1333→  1333→/// This is used by `allocate_registers` to split the body bytecode into
+  1334→  1334→/// per-instruction `AllocatedInstruction` entries with real opcode names.
+  1335→  1335→fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
+  1336→  1336→    if *offset >= bytes.len() {
+  1337→  1337→        return;
+  1338→  1338→    }
+  1339→  1339→    let byte = bytes[*offset];
+  1340→  1340→    *offset += 1;
+  1341→  1341→
+  1342→  1342→    match byte {
+  1343→  1343→        // ── Multi-byte opcodes ────────────────────────────────────
+  1344→  1344→        0xFC => {
+  1345→  1345→            // Bulk memory / saturated arithmetic prefix
+  1346→  1346→            skip_leb128(bytes, offset, 1); // sub-opcode
+  1347→  1347→            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+  1348→  1348→            match subop {
+  1349→  1349→                0x08 => skip_leb128(bytes, offset, 2), // memory.init
+  1350→  1350→                0x0A => skip_leb128(bytes, offset, 2), // memory.copy
+  1351→  1351→                0x0B => skip_leb128(bytes, offset, 1), // memory.fill
+  1352→  1352→                _ => {}                                // other sub-ops may have 0 or more operands
+  1353→  1353→            }
+  1354→  1354→        }
+  1355→  1355→        0xFD => {
+  1356→  1356→            // SIMD prefix
+  1357→  1357→            skip_leb128(bytes, offset, 1); // sub-opcode
+  1358→  1358→            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+  1359→  1359→            if subop == 0x0C {
+  1360→  1360→                // v128.const: skip 16 bytes of payload
+  1361→  1361→                *offset += 16;
+  1362→  1362→            }
+  1363→  1363→        }
+  1364→  1364→
+  1365→  1365→        // ── Control flow ─────────────────────────────────────────
+  1366→  1366→        0x00 => {} // unreachable
+  1367→  1367→        0x01 => {} // nop
+  1368→  1368→        0x02..=0x04 => {
+  1369→  1369→            *offset += 1;
+  1370→  1370→        } // block/loop/if + blocktype
+  1371→  1371→        0x05 | 0x0B => {} // else, end
+  1372→  1372→        0x0C | 0x0D => {
+  1373→  1373→            skip_leb128(bytes, offset, 1);
+  1374→  1374→        } // br, br_if
+  1375→  1375→        0x0E => {
+  1376→  1376→            // br_table: count + labels + default
+  1377→  1377→            let (count, size) = decode_unsigned_leb128(&bytes[*offset..]);
+  1378→  1378→            *offset += size;
+  1379→  1379→            skip_leb128(bytes, offset, count as usize + 1);
+  1380→  1380→        }
+  1381→  1381→        0x0F => {} // return
+  1382→  1382→        0x10 => {
+  1383→  1383→            skip_leb128(bytes, offset, 1);
+  1384→  1384→        } // call
+  1385→  1385→        0x11 => {
+  1386→  1386→            skip_leb128(bytes, offset, 2);
+  1387→  1387→        } // call_indirect
+  1388→  1388→
+  1389→  1389→        // ── Parametric ───────────────────────────────────────────
+  1390→  1390→        0x1A | 0x1B => {} // drop, select
+  1391→  1391→
+  1392→  1392→        // ── Variable ─────────────────────────────────────────────
+  1393→  1393→        0x20..=0x24 => {
+  1394→  1394→            skip_leb128(bytes, offset, 1);
+  1395→  1395→        } // local.get/set/tee, global.get/set
+  1396→  1396→
+  1397→  1397→        // ── Memory ───────────────────────────────────────────────
+  1398→  1398→        0x28..=0x3E => {
+  1399→  1399→            skip_leb128(bytes, offset, 2);
+  1400→  1400→        } // loads/stores: align + offset
+  1401→  1401→        0x3F | 0x40 => {
+  1402→  1402→            skip_leb128(bytes, offset, 1);
+  1403→  1403→        } // memory.size, memory.grow
+  1404→  1404→
+  1405→  1405→        // ── Numeric ──────────────────────────────────────────────
+  1406→  1406→        0x41 => {
+  1407→  1407→            skip_signed_leb128(bytes, offset, 1);
+  1408→  1408→        } // i32.const
+  1409→  1409→        0x42 => {
+  1410→  1410→            skip_signed_leb128(bytes, offset, 1);
+  1411→  1411→        } // i64.const
+  1412→  1412→        0x43 => {
+  1413→  1413→            *offset += 4;
+  1414→  1414→        } // f32.const
+  1415→  1415→        0x44 => {
+  1416→  1416→            *offset += 8;
+  1417→  1417→        } // f64.const
+  1418→  1418→
+  1419→  1419→        // All other single-byte opcodes (comparisons, arithmetic, conversions)
+  1420→  1420→        0x45..=0x4F
+  1421→  1421→        | 0x50..=0x5A
+  1422→  1422→        | 0x5B..=0x66
+  1423→  1423→        | 0x67..=0x78
+  1424→  1424→        | 0x79..=0x8A
+  1425→  1425→        | 0x8C
+  1426→  1426→        | 0x91..=0x95
+  1427→  1427→        | 0x9A
+  1428→  1428→        | 0x9F..=0xA3
+  1429→  1429→        | 0xA7..=0xBF => {}
+  1430→  1430→
+  1431→  1431→        _ => {} // Unknown opcode; nothing more to skip
+  1432→  1432→    }
+  1433→  1433→}
+  1434→  1434→
+  1435→  1435→// ===========================================================================
+  1436→  1436→// IR → Wasm lowering
+  1437→  1437→// ===========================================================================
+  1438→  1438→
+  1439→  1439→/// Context for lowering an IR function to Wasm bytecode.
+  1440→  1440→struct LoweringContext {
+  1441→  1441→    /// Map from virtual register ID to local index.
+  1442→  1442→    vreg_to_local: HashMap<u32, u32>,
+  1443→  1443→    /// Map from virtual register ID to its Wasm type.
+  1444→  1444→    vreg_types: HashMap<u32, WasmType>,
+  1445→  1445→    /// Number of locals (including parameters).
+  1446→  1446→    num_locals: u32,
+  1447→  1447→    /// Local declarations (for the function body).
+  1448→  1448→    locals: Vec<(u32, WasmType)>,
+  1449→  1449→    /// Map from block label to its label depth index for branch targets.
+  1450→  1450→    block_labels: HashMap<String, u32>,
+  1451→  1451→    /// Accumulated Wasm instructions.
+  1452→  1452→    instrs: Vec<WasmInstr>,
+  1453→  1453→    /// Expected result types for the function (used for return type coercion).
+  1454→  1454→    result_types: Vec<WasmType>,
+  1455→  1455→}
+  1456→  1456→
+  1457→  1457→impl LoweringContext {
+  1458→  1458→    fn new(result_types: Vec<WasmType>) -> Self {
+  1459→  1459→        Self {
+  1460→  1460→            vreg_to_local: HashMap::new(),
+  1461→  1461→            vreg_types: HashMap::new(),
+  1462→  1462→            num_locals: 0,
+  1463→  1463→            locals: Vec::new(),
+  1464→  1464→            block_labels: HashMap::new(),
+  1465→  1465→            instrs: Vec::new(),
+  1466→  1466→            result_types,
+  1467→  1467→        }
+  1468→  1468→    }
+  1469→  1469→
+  1470→  1470→    /// Allocate a local for a virtual register, returning the local index.
+  1471→  1471→    fn alloc_local(&mut self, vreg_id: u32, ty: WasmType) -> u32 {
+  1472→  1472→        let idx = self.num_locals;
+  1473→  1473→        self.vreg_to_local.insert(vreg_id, idx);
+  1474→  1474→        self.vreg_types.insert(vreg_id, ty);
+  1475→  1475→        self.num_locals += 1;
+  1476→  1476→        // Try to merge with an existing (count, type) entry
+  1477→  1477→        if let Some(last) = self.locals.last_mut() {
+  1478→  1478→            if last.1 == ty {
+  1479→  1479→                last.0 += 1;
+  1480→  1480→                return idx;
+  1481→  1481→            }
+  1482→  1482→        }
+  1483→  1483→        self.locals.push((1, ty));
+  1484→  1484→        idx
+  1485→  1485→    }
+  1486→  1486→
+  1487→  1487→    /// Get the local index for a virtual register.
+  1488→  1488→    fn get_local(&self, vreg_id: u32) -> Option<u32> {
+  1489→  1489→        self.vreg_to_local.get(&vreg_id).copied()
+  1490→  1490→    }
+  1491→  1491→
+  1492→  1492→    /// Emit an instruction.
+  1493→  1493→    fn emit(&mut self, instr: WasmInstr) {
+  1494→  1494→        self.instrs.push(instr);
+  1495→  1495→    }
+  1496→  1496→
+  1497→  1497→    /// Push a value onto the Wasm stack from an IRValue.
+  1498→  1498→    /// On Wasm32, all integer values are pushed as i32.
+  1499→  1499→    fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
+  1500→  1500→        match val {
+  1501→  1501→            IRValue::Immediate(v) => {
+  1502→  1502→                // On Wasm32, always use i32 for integer constants
+  1503→  1503→                let ty = type_hint.copied().unwrap_or(WasmType::I32);
+  1504→  1504→                match ty {
+  1505→  1505→                    WasmType::F32 => self.emit(WasmInstr::F32Const(*v as f32)),
+  1506→  1506→                    WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
+  1507→  1507→                    _ => self.emit(WasmInstr::I32Const(*v as i32)),
+  1508→  1508→                }
+  1509→  1509→            }
+  1510→  1510→            IRValue::Register(id) => {
+  1511→  1511→                // If the register hasn't been allocated yet, allocate it as i32.
+  1512→  1512→                // On Wasm32, all integer locals are i32.
+  1513→  1513→                if self.get_local(*id).is_none() {
+  1514→  1514→                    self.alloc_local(*id, WasmType::I32);
+  1515→  1515→                }
+  1516→  1516→                if let Some(local_idx) = self.get_local(*id) {
+  1517→  1517→                    self.emit(WasmInstr::LocalGet(local_idx));
+  1518→  1518→                }
+  1519→  1519→            }
+  1520→  1520→            IRValue::Address(addr) => {
+  1521→  1521→                self.emit(WasmInstr::I32Const(*addr as i32)); // wasm32: pointers are i32
+  1522→  1522→            }
+  1523→  1523→            IRValue::Label(_) => {
+  1524→  1524→                // Labels are handled via block structure; not pushed as values
+  1525→  1525→            }
+  1526→  1526→        }
+  1527→  1527→    }
+  1528→  1528→
+  1529→  1529→    /// Store the top of the Wasm stack into a virtual register's local.
+  1530→  1530→    fn pop_to_vreg(&mut self, vreg_id: u32, ty: WasmType) {
+  1531→  1531→        if !self.vreg_to_local.contains_key(&vreg_id) {
+  1532→  1532→            self.alloc_local(vreg_id, ty);
+  1533→  1533→        }
+  1534→  1534→        if let Some(local_idx) = self.get_local(vreg_id) {
+  1535→  1535→            self.emit(WasmInstr::LocalSet(local_idx));
+  1536→  1536→        }
+  1537→  1537→    }
+  1538→  1538→}
+  1539→  1539→
+  1540→  1540→/// Determine the Wasm type for dedicated arithmetic IR instructions (Add, Sub,
+  1541→  1541→/// Mul, Div, Cmp).  These instructions carry an optional `ty` field that
+  1542→  1542→/// indicates the operand width.  On Wasm32, integer types narrower than I64
+  1543→  1543→/// map to I32; I64/U64 are preserved for 64-bit arithmetic.
+  1544→  1544→fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
+  1545→  1545→    match ir_ty {
+  1546→  1546→        Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
+  1547→  1547→        Some(IRType::F32) => WasmType::F32,
+  1548→  1548→        Some(IRType::F64) => WasmType::F64,
+  1549→  1549→        _ => WasmType::I32, // default: I32 for all other integer types
+  1550→  1550→    }
+  1551→  1551→}
+  1552→  1552→
+  1553→  1553→/// Determine the Wasm type for an IR BinOp based on the operand types and
+  1554→  1554→/// the optional IR type annotation.  On the Wasm32 target, all integer
+  1555→  1555→/// operations use i32 since the address space is 32 bits; only float types
+  1556→  1556→/// retain their original width.
+  1557→  1557→fn wasm_type_for_binop(
+  1558→  1558→    _op: &BinOpKind,
+  1559→  1559→    _lhs: &IRValue,
+  1560→  1560→    _rhs: &IRValue,
+  1561→  1561→    ir_ty: Option<&IRType>,
+  1562→  1562→    _vreg_types: &HashMap<u32, WasmType>,
+  1563→  1563→) -> WasmType {
+  1564→  1564→    // If the IR provides a type, use it (but map I64/U64 to I32 for Wasm32).
+  1565→  1565→    if let Some(ty) = ir_ty {
+  1566→  1566→        return match ty {
+  1567→  1567→            IRType::F32 => WasmType::F32,
+  1568→  1568→            IRType::F64 => WasmType::F64,
+  1569→  1569→            _ => WasmType::I32, // all integer types → i32 on wasm32
+  1570→  1570→        };
+  1571→  1571→    }
+  1572→  1572→    // Default to i32 for all integer ops on wasm32
+  1573→  1573→    WasmType::I32
+  1574→  1574→}
+  1575→  1575→
+  1576→  1576→/// Infer the Wasm type of an IR value based on its representation.
+  1577→  1577→///
+  1578→  1578→/// On the Wasm32 target, all integer values are i32.  Only float immediates
+  1579→  1579→/// use the wider type.
+  1580→  1580→fn infer_wasm_type(val: &IRValue) -> WasmType {
+  1581→  1581→    match val {
+  1582→  1582→        IRValue::Immediate(_)
+  1583→  1583→        | IRValue::Register(_)
+  1584→  1584→        | IRValue::Address(_)
+  1585→  1585→        | IRValue::Label(_) => WasmType::I32,
+  1586→  1586→    }
+  1587→  1587→}
+  1588→  1588→
+  1589→  1589→/// Lower an IR function to Wasm bytecode, returning the function body bytes
+  1590→  1590→/// and local declarations.
+  1591→  1591→fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), BackendError> {
+  1592→  1592→    // Compute result types.
+  1593→  1593→    // In Wasm32, all integer results are i32 since it's a 32-bit target.
+  1594→  1594→    let result_types: Vec<WasmType> = func
+  1595→  1595→        .result_types
+  1596→  1596→        .iter()
+  1597→  1597→        .filter_map(WasmType::from_ir_type)
+  1598→  1598→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1599→  1599→        .collect();
+  1600→  1600→    let mut ctx = LoweringContext::new(result_types);
+  1601→  1601→
+  1602→  1602→    // Assign locals for parameters.
+  1603→  1603→    // In Wasm32, all integer parameters are i32 regardless of IR type, since
+  1604→  1604→    // pointers and all integer values fit in 32 bits on a 32-bit target.
+  1605→  1605→    // Only float types retain their original width.
+  1606→  1606→    for (i, param) in func.params.iter().enumerate() {
+  1607→  1607→        let ty = func
+  1608→  1608→            .param_types
+  1609→  1609→            .get(i)
+  1610→  1610→            .and_then(WasmType::from_ir_type)
+  1611→  1611→            .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1612→  1612→            .unwrap_or(WasmType::I32);
+  1613→  1613→        if let IRValue::Register(id) = param {
+  1614→  1614→            let idx = ctx.num_locals;
+  1615→  1615→            ctx.vreg_to_local.insert(*id, idx);
+  1616→  1616→            ctx.vreg_types.insert(*id, ty);
+  1617→  1617→            ctx.num_locals += 1;
+  1618→  1618→            if let Some(last) = ctx.locals.last_mut() {
+  1619→  1619→                if last.1 == ty {
+  1620→  1620→                    last.0 += 1;
+  1621→  1621→                } else {
+  1622→  1622→                    ctx.locals.push((1, ty));
+  1623→  1623→                }
+  1624→  1624→            } else {
+  1625→  1625→                ctx.locals.push((1, ty));
+  1626→  1626→            }
+  1627→  1627→        }
+  1628→  1628→    }
+  1629→  1629→
+  1630→  1630→    // Lower each block
+  1631→  1631→    for (block_idx, block) in func.blocks.iter().enumerate() {
+  1632→  1632→        // Emit a block for structured control flow (except the entry block)
+  1633→  1633→        if block_idx > 0 {
+  1634→  1634→            ctx.emit(WasmInstr::Block(None)); // void block (no result value)
+  1635→  1635→            ctx.block_labels
+  1636→  1636→                .insert(block.label.clone(), block_idx as u32);
+  1637→  1637→        } else {
+  1638→  1638→            ctx.block_labels.insert(block.label.clone(), 0);
+  1639→  1639→        }
+  1640→  1640→
+  1641→  1641→        // Lower instructions
+  1642→  1642→        for instr in &block.instructions {
+  1643→  1643→            lower_instruction(instr, &mut ctx)?;
+  1644→  1644→        }
+  1645→  1645→
+  1646→  1646→        // Lower terminator
+  1647→  1647→        lower_terminator(&block.terminator, &mut ctx, block_idx)?;
+  1648→  1648→
+  1649→  1649→        // End the block
+  1650→  1650→        if block_idx > 0 {
+  1651→  1651→            ctx.emit(WasmInstr::End);
+  1652→  1652→        }
+  1653→  1653→    }
+  1654→  1654→
+  1655→  1655→    // Build the function type.
+  1656→  1656→    // In Wasm32, all integer params/results are i32.
+  1657→  1657→    let param_types: Vec<WasmType> = func
+  1658→  1658→        .param_types
+  1659→  1659→        .iter()
+  1660→  1660→        .filter_map(WasmType::from_ir_type)
+  1661→  1661→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1662→  1662→        .collect();
+  1663→  1663→    let result_types: Vec<WasmType> = func
+  1664→  1664→        .result_types
+  1665→  1665→        .iter()
+  1666→  1666→        .filter_map(WasmType::from_ir_type)
+  1667→  1667→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1668→  1668→        .collect();
+  1669→  1669→
+  1670→  1670→    let func_type = WasmFuncType {
+  1671→  1671→        params: param_types,
+  1672→  1672→        results: result_types,
+  1673→  1673→    };
+  1674→  1674→
+  1675→  1675→    // Encode all instructions to bytecode
+  1676→  1676→    let mut body_bytes = Vec::new();
+  1677→  1677→    for instr in &ctx.instrs {
+  1678→  1678→        instr.encode(&mut body_bytes);
+  1679→  1679→    }
+  1680→  1680→    // Append the implicit end byte for the function body
+  1681→  1681→    body_bytes.push(0x0B);
+  1682→  1682→
+  1683→  1683→    let func_body = WasmFuncBody {
+  1684→  1684→        locals: ctx.locals,
+  1685→  1685→        body: body_bytes,
+  1686→  1686→    };
+  1687→  1687→
+  1688→  1688→    Ok((func_body, func_type))
+  1689→  1689→}
+  1690→  1690→
+  1691→  1691→/// Lower a single IR instruction.
+  1692→  1692→fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), BackendError> {
+  1693→  1693→    match instr {
+  1694→  1694→        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+  1695→  1695→            let wasm_ty = wasm_type_for_binop(op, lhs, rhs, ty.as_ref(), &ctx.vreg_types);
+  1696→  1696→            ctx.push_value(lhs, Some(&wasm_ty));
+  1697→  1697→            ctx.push_value(rhs, Some(&wasm_ty));
+  1698→  1698→            let mut skip_emit = false;
+  1699→  1699→            let wasm_op = match wasm_ty {
+  1700→  1700→                WasmType::I32 => match op {
+  1701→  1701→                    BinOpKind::Add => WasmInstr::I32Add,
+  1702→  1702→                    BinOpKind::Sub => WasmInstr::I32Sub,
+  1703→  1703→                    BinOpKind::Mul => WasmInstr::I32Mul,
+  1704→  1704→                    BinOpKind::SDiv => WasmInstr::I32DivS,
+  1705→  1705→                    BinOpKind::UDiv => WasmInstr::I32DivU,
+  1706→  1706→                    BinOpKind::SRem => WasmInstr::I32RemS,
+  1707→  1707→                    BinOpKind::URem => WasmInstr::I32RemU,
+  1708→  1708→                    BinOpKind::And => WasmInstr::I32And,
+  1709→  1709→                    BinOpKind::Or => WasmInstr::I32Or,
+  1710→  1710→                    BinOpKind::Xor => WasmInstr::I32Xor,
+  1711→  1711→                    BinOpKind::Shl => WasmInstr::I32Shl,
+  1712→  1712→                    BinOpKind::ShrL => WasmInstr::I32ShrU,
+  1713→  1713→                    BinOpKind::ShrA => WasmInstr::I32ShrS,
+  1714→  1714→                    BinOpKind::Ror | BinOpKind::Rol => {
+  1715→  1715→                        skip_emit = true;
+  1716→  1716→                        let lhs_local = ctx.num_locals;
+  1717→  1717→                        ctx.num_locals += 1;
+  1718→  1718→                        ctx.locals.push((1, WasmType::I32));
+  1719→  1719→                        let rhs_local = ctx.num_locals;
+  1720→  1720→                        ctx.num_locals += 1;
+  1721→  1721→                        ctx.locals.push((1, WasmType::I32));
+  1722→  1722→                        ctx.emit(WasmInstr::LocalSet(rhs_local));
+  1723→  1723→                        ctx.emit(WasmInstr::LocalSet(lhs_local));
+  1724→  1724→                        if *op == BinOpKind::Ror {
+  1725→  1725→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1726→  1726→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1727→  1727→                            ctx.emit(WasmInstr::I32ShrU);
+  1728→  1728→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1729→  1729→                            ctx.emit(WasmInstr::I32Const(32));
+  1730→  1730→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1731→  1731→                            ctx.emit(WasmInstr::I32Sub);
+  1732→  1732→                            ctx.emit(WasmInstr::I32Shl);
+  1733→  1733→                        } else {
+  1734→  1734→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1735→  1735→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1736→  1736→                            ctx.emit(WasmInstr::I32Shl);
+  1737→  1737→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1738→  1738→                            ctx.emit(WasmInstr::I32Const(32));
+  1739→  1739→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1740→  1740→                            ctx.emit(WasmInstr::I32Sub);
+  1741→  1741→                            ctx.emit(WasmInstr::I32ShrU);
+  1742→  1742→                        }
+  1743→  1743→                        ctx.emit(WasmInstr::I32Or);
+  1744→  1744→                        WasmInstr::Nop
+  1745→  1745→                    }
+  1746→  1746→                    BinOpKind::SLt => WasmInstr::I32LtS,
+  1747→  1747→                    BinOpKind::SLe => WasmInstr::I32LeS,
+  1748→  1748→                    BinOpKind::SGt => WasmInstr::I32GtS,
+  1749→  1749→                    BinOpKind::SGe => WasmInstr::I32GeS,
+  1750→  1750→                    BinOpKind::ULt => WasmInstr::I32LtU,
+  1751→  1751→                    BinOpKind::ULe => WasmInstr::I32LeU,
+  1752→  1752→                    BinOpKind::UGt => WasmInstr::I32GtU,
+  1753→  1753→                    BinOpKind::UGe => WasmInstr::I32GeU,
+  1754→  1754→                    BinOpKind::Eq => WasmInstr::I32Eq,
+  1755→  1755→                    BinOpKind::Ne => WasmInstr::I32Ne,
+  1756→  1756→                },
+  1757→  1757→                WasmType::I64 => match op {
+  1758→  1758→                    BinOpKind::Add => WasmInstr::I64Add,
+  1759→  1759→                    BinOpKind::Sub => WasmInstr::I64Sub,
+  1760→  1760→                    BinOpKind::Mul => WasmInstr::I64Mul,
+  1761→  1761→                    BinOpKind::SDiv => WasmInstr::I64DivS,
+  1762→  1762→                    BinOpKind::UDiv => WasmInstr::I64DivU,
+  1763→  1763→                    BinOpKind::SRem => WasmInstr::I64RemS,
+  1764→  1764→                    BinOpKind::URem => WasmInstr::I64RemU,
+  1765→  1765→                    BinOpKind::And => WasmInstr::I64And,
+  1766→  1766→                    BinOpKind::Or => WasmInstr::I64Or,
+  1767→  1767→                    BinOpKind::Xor => WasmInstr::I64Xor,
+  1768→  1768→                    BinOpKind::Shl => WasmInstr::I64Shl,
+  1769→  1769→                    BinOpKind::ShrL => WasmInstr::I64ShrU,
+  1770→  1770→                    BinOpKind::ShrA => WasmInstr::I64ShrS,
+  1771→  1771→                    BinOpKind::Ror | BinOpKind::Rol => {
+  1772→  1772→                        skip_emit = true;
+  1773→  1773→                        let lhs_local = ctx.num_locals;
+  1774→  1774→                        ctx.num_locals += 1;
+  1775→  1775→                        ctx.locals.push((1, WasmType::I64));
+  1776→  1776→                        let rhs_local = ctx.num_locals;
+  1777→  1777→                        ctx.num_locals += 1;
+  1778→  1778→                        ctx.locals.push((1, WasmType::I64));
+  1779→  1779→                        ctx.emit(WasmInstr::LocalSet(rhs_local));
+  1780→  1780→                        ctx.emit(WasmInstr::LocalSet(lhs_local));
+  1781→  1781→                        if *op == BinOpKind::Ror {
+  1782→  1782→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1783→  1783→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1784→  1784→                            ctx.emit(WasmInstr::I64ShrU);
+  1785→  1785→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1786→  1786→                            ctx.emit(WasmInstr::I64Const(64));
+  1787→  1787→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1788→  1788→                            ctx.emit(WasmInstr::I64Sub);
+  1789→  1789→                            ctx.emit(WasmInstr::I64Shl);
+  1790→  1790→                        } else {
+  1791→  1791→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1792→  1792→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1793→  1793→                            ctx.emit(WasmInstr::I64Shl);
+  1794→  1794→                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+  1795→  1795→                            ctx.emit(WasmInstr::I64Const(64));
+  1796→  1796→                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+  1797→  1797→                            ctx.emit(WasmInstr::I64Sub);
+  1798→  1798→                            ctx.emit(WasmInstr::I64ShrU);
+  1799→  1799→                        }
+  1800→  1800→                        ctx.emit(WasmInstr::I64Or);
+  1801→  1801→                        WasmInstr::Nop
+  1802→  1802→                    }
+  1803→  1803→                    BinOpKind::SLt => WasmInstr::I64LtS,
+  1804→  1804→                    BinOpKind::SLe => WasmInstr::I64LeS,
+  1805→  1805→                    BinOpKind::SGt => WasmInstr::I64GtS,
+  1806→  1806→                    BinOpKind::SGe => WasmInstr::I64GeS,
+  1807→  1807→                    BinOpKind::ULt => WasmInstr::I64LtU,
+  1808→  1808→                    BinOpKind::ULe => WasmInstr::I64LeU,
+  1809→  1809→                    BinOpKind::UGt => WasmInstr::I64GtU,
+  1810→  1810→                    BinOpKind::UGe => WasmInstr::I64GeU,
+  1811→  1811→                    BinOpKind::Eq => WasmInstr::I64Eq,
+  1812→  1812→                    BinOpKind::Ne => WasmInstr::I64Ne,
+  1813→  1813→                },
+  1814→  1814→                WasmType::F32 => match op {
+  1815→  1815→                    BinOpKind::Add => WasmInstr::F32Add,
+  1816→  1816→                    BinOpKind::Sub => WasmInstr::F32Sub,
+  1817→  1817→                    BinOpKind::Mul => WasmInstr::F32Mul,
+  1818→  1818→                    BinOpKind::SDiv | BinOpKind::UDiv => WasmInstr::F32Div,
+  1819→  1819→                    BinOpKind::Eq => WasmInstr::F32Eq,
+  1820→  1820→                    BinOpKind::Ne => WasmInstr::F32Ne,
+  1821→  1821→                    BinOpKind::SLt | BinOpKind::ULt => WasmInstr::F32Lt,
+  1822→  1822→                    BinOpKind::SGt | BinOpKind::UGt => WasmInstr::F32Gt,
+  1823→  1823→                    BinOpKind::SLe | BinOpKind::ULe => WasmInstr::F32Le,
+  1824→  1824→                    BinOpKind::SGe | BinOpKind::UGe => WasmInstr::F32Ge,
+  1825→  1825→                    _ => {
+  1826→  1826→                        return Err(BackendError::UnsupportedFeature {
+  1827→  1827→                            isa: "wasm32",
+  1828→  1828→                            feature: format!("{:?} on f32", op),
+  1829→  1829→                        });
+  1830→  1830→                    }
+  1831→  1831→                },
+  1832→  1832→                WasmType::F64 => match op {
+  1833→  1833→                    BinOpKind::Add => WasmInstr::F64Add,
+  1834→  1834→                    BinOpKind::Sub => WasmInstr::F64Sub,
+  1835→  1835→                    BinOpKind::Mul => WasmInstr::F64Mul,
+  1836→  1836→                    BinOpKind::SDiv | BinOpKind::UDiv => WasmInstr::F64Div,
+  1837→  1837→                    BinOpKind::Eq => WasmInstr::F64Eq,
+  1838→  1838→                    BinOpKind::Ne => WasmInstr::F64Ne,
+  1839→  1839→                    BinOpKind::SLt | BinOpKind::ULt => WasmInstr::F64Lt,
+  1840→  1840→                    BinOpKind::SGt | BinOpKind::UGt => WasmInstr::F64Gt,
+  1841→  1841→                    BinOpKind::SLe | BinOpKind::ULe => WasmInstr::F64Le,
+  1842→  1842→                    BinOpKind::SGe | BinOpKind::UGe => WasmInstr::F64Ge,
+  1843→  1843→                    _ => {
+  1844→  1844→                        return Err(BackendError::UnsupportedFeature {
+  1845→  1845→                            isa: "wasm32",
+  1846→  1846→                            feature: format!("{:?} on f64", op),
+  1847→  1847→                        });
+  1848→  1848→                    }
+  1849→  1849→                },
+  1850→  1850→            };
+  1851→  1851→            if !skip_emit {
+  1852→  1852→                ctx.emit(wasm_op);
+  1853→  1853→            }
+  1854→  1854→            if let IRValue::Register(id) = dst {
+  1855→  1855→                ctx.pop_to_vreg(*id, wasm_ty);
+  1856→  1856→            } else {
+  1857→  1857→                ctx.emit(WasmInstr::Drop);
+  1858→  1858→            }
+  1859→  1859→        }
+  1860→  1860→
+  1861→  1861→        IRInstr::UnaryOp { op, dst, operand, .. } => {
+  1862→  1862→            // Determine the Wasm type of the operand for type-aware lowering.
+  1863→  1863→            // For register operands, we infer the type from context; for
+  1864→  1864→            // immediates, we check if the value fits in i32.
+  1865→  1865→            let ty = infer_wasm_type(operand);
+  1866→  1866→
+  1867→  1867→            match op {
+  1868→  1868→                UnaryOpKind::Neg => {
+  1869→  1869→                    // Float negation uses dedicated Wasm instructions;
+  1870→  1870→                    // integer negation is lowered as (0 - x).
+  1871→  1871→                    match ty {
+  1872→  1872→                        WasmType::F32 => {
+  1873→  1873→                            ctx.push_value(operand, Some(&WasmType::F32));
+  1874→  1874→                            ctx.emit(WasmInstr::F32Neg);
+  1875→  1875→                        }
+  1876→  1876→                        WasmType::F64 => {
+  1877→  1877→                            ctx.push_value(operand, Some(&WasmType::F64));
+  1878→  1878→                            ctx.emit(WasmInstr::F64Neg);
+  1879→  1879→                        }
+  1880→  1880→                        _ => {
+  1881→  1881→                            // Integer negation: 0 - x
+  1882→  1882→                            ctx.push_value(operand, None);
+  1883→  1883→                            // Store operand to a temp local, then compute 0 - operand
+  1884→  1884→                            if let IRValue::Register(id) = dst {
+  1885→  1885→                                let temp_local = if let Some(idx) = ctx.get_local(*id) {
+  1886→  1886→                                    idx
+  1887→  1887→                                } else {
+  1888→  1888→                                    ctx.alloc_local(*id, ty);
+  1889→  1889→                                    ctx.get_local(*id).unwrap()
+  1890→  1890→                                };
+  1891→  1891→                                ctx.emit(WasmInstr::LocalSet(temp_local));
+  1892→  1892→                                ctx.emit(WasmInstr::I32Const(0));
+  1893→  1893→                                ctx.emit(WasmInstr::LocalGet(temp_local));
+  1894→  1894→                                ctx.emit(WasmInstr::I32Sub);
+  1895→  1895→                                ctx.pop_to_vreg(*id, ty);
+  1896→  1896→                            } else {
+  1897→  1897→                                ctx.emit(WasmInstr::Drop);
+  1898→  1898→                                ctx.emit(WasmInstr::I32Const(0));
+  1899→  1899→                            }
+  1900→  1900→                            return Ok(());
+  1901→  1901→                        }
+  1902→  1902→                    }
+  1903→  1903→                    if let IRValue::Register(id) = dst {
+  1904→  1904→                        ctx.pop_to_vreg(*id, ty);
+  1905→  1905→                    } else {
+  1906→  1906→                        ctx.emit(WasmInstr::Drop);
+  1907→  1907→                    }
+  1908→  1908→                }
+  1909→  1909→                UnaryOpKind::Not => {
+  1910→  1910→                    // Logical not: i32.eqz (produces 1 if 0, 0 otherwise)
+  1911→  1911→                    ctx.push_value(operand, None);
+  1912→  1912→                    ctx.emit(WasmInstr::I32Eqz);
+  1913→  1913→                    if let IRValue::Register(id) = dst {
+  1914→  1914→                        ctx.pop_to_vreg(*id, WasmType::I32);
+  1915→  1915→                    } else {
+  1916→  1916→                        ctx.emit(WasmInstr::Drop);
+  1917→  1917→                    }
+  1918→  1918→                }
+  1919→  1919→                UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+  1920→  1920→                    ctx.push_value(operand, None);
+  1921→  1921→                    let wasm_op = match op {
+  1922→  1922→                        UnaryOpKind::Clz => WasmInstr::I32Clz,
+  1923→  1923→                        UnaryOpKind::Ctz => WasmInstr::I32Ctz,
+  1924→  1924→                        UnaryOpKind::Popcnt => WasmInstr::I32Popcnt,
+  1925→  1925→                        _ => unreachable!(),
+  1926→  1926→                    };
+  1927→  1927→                    ctx.emit(wasm_op);
+  1928→  1928→                    if let IRValue::Register(id) = dst {
+  1929→  1929→                        ctx.pop_to_vreg(*id, WasmType::I32);
+  1930→  1930→                    } else {
+  1931→  1931→                        ctx.emit(WasmInstr::Drop);
+  1932→  1932→                    }
+  1933→  1933→                }
+  1934→  1934→            }
+  1935→  1935→        }
+  1936→  1936→
+  1937→  1937→        IRInstr::Load { dst, addr, offset, ty } => {
+  1938→  1938→            let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+  1939→  1939→            ctx.push_value(addr, Some(&WasmType::I32));
+  1940→  1940→            let wasm_offset = (*offset).max(0) as u32;
+  1941→  1941→            let load_op = match load_ty {
+  1942→  1942→                WasmType::I64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
+  1943→  1943→                WasmType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
+  1944→  1944→                WasmType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
+  1945→  1945→                _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
+  1946→  1946→            };
+  1947→  1947→            ctx.emit(load_op);
+  1948→  1948→            if let IRValue::Register(id) = dst {
+  1949→  1949→                ctx.pop_to_vreg(*id, load_ty);
+  1950→  1950→            } else {
+  1951→  1951→                ctx.emit(WasmInstr::Drop);
+  1952→  1952→            }
+  1953→  1953→        }
+  1954→  1954→
+  1955→  1955→        IRInstr::Store { value, addr, offset, ty } => {
+  1956→  1956→            let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+  1957→  1957→            ctx.push_value(addr, Some(&WasmType::I32));
+  1958→  1958→            ctx.push_value(value, Some(&store_ty));
+  1959→  1959→            let wasm_offset = (*offset).max(0) as u32;
+  1960→  1960→            let store_op = match store_ty {
+  1961→  1961→                WasmType::I64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
+  1962→  1962→                WasmType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
+  1963→  1963→                WasmType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
+  1964→  1964→                _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
+  1965→  1965→            };
+  1966→  1966→            ctx.emit(store_op);
+  1967→  1967→        }
+  1968→  1968→
+  1969→  1969→        IRInstr::Call { dst, func: _, args } => {
+  1970→  1970→            for arg in args {
+  1971→  1971→                ctx.push_value(arg, None);
+  1972→  1972→            }
+  1973→  1973→            // The function index is resolved during module linking;
+  1974→  1974→            // use a placeholder index 0 here.
+  1975→  1975→            ctx.emit(WasmInstr::Call(0));
+  1976→  1976→            if let Some(IRValue::Register(id)) = dst {
+  1977→  1977→                ctx.pop_to_vreg(*id, WasmType::I32);
+  1978→  1978→            }
+  1979→  1979→            // If the function returns void, nothing to drop
+  1980→  1980→        }
+  1981→  1981→
+  1982→  1982→        IRInstr::Alloc { dst, size } => {
+  1983→  1983→            // In Wasm, Alloc maps to a local variable.
+  1984→  1984→            // We allocate `size` bytes worth of locals (as i32 slots).
+  1985→  1985→            let num_slots = (*size).div_ceil(4); // round up to i32 slots
+  1986→  1986→            if let IRValue::Register(id) = dst {
+  1987→  1987→                // Use the first slot as the "pointer" (which is just the local index)
+  1988→  1988→                // For Wasm, locals ARE the storage; we just allocate them
+  1989→  1989→                let _local_idx = ctx.alloc_local(*id, WasmType::I32);
+  1990→  1990→                // For multi-slot allocs, allocate additional locals
+  1991→  1991→                for extra_idx in 1..num_slots {
+  1992→  1992→                    ctx.alloc_local(u32::MAX - *id - extra_idx, WasmType::I32); // dummy vreg IDs for extra slots
+  1993→  1993→                }
+  1994→  1994→                // Push the local index as the "address" (pointer)
+  1995→  1995→                if let Some(idx) = ctx.get_local(*id) {
+  1996→  1996→                    ctx.emit(WasmInstr::I32Const(idx as i32));
+  1997→  1997→                    ctx.emit(WasmInstr::LocalSet(idx));
+  1998→  1998→                }
+  1999→  1999→            }
+  2000→  2000→        }
+
+[showing lines 1-2000 of 2002; use offset=2001 with limit to continue reading]
