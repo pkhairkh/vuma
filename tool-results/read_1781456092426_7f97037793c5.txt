@@ -1,0 +1,2002 @@
+     1→//! # ARM 32-bit Backend
+     2→//!
+     3→//! Implements the `Backend` trait for the ARM 32-bit target (AAPCS ABI).
+     4→//! This module provides:
+     5→//!
+     6→//! - `Gpr` — General-purpose register enum (R0–R15)
+     7→//! - `Dpr` — Double-precision FP/SIMD register enum (D0–D31)
+     8→//! - `Condition` — ARM condition code enum (EQ, NE, CS, …, AL)
+     9→//! - `Instruction` — ARM instruction enum with correct 32-bit encoding
+    10→//! - Encoding helpers for data processing, load/store, branch, and system ops
+    11→//! - `Arm32Backend` — `Backend` implementation that lowers IR to ARM machine
+    12→//!   code and emits ELF32 binaries
+    13→//!
+    14→//! ## ARM32 Register Convention (AAPCS)
+    15→//!
+    16→//! | Register(s) | ABI Name | Role                              |
+    17→//! |-------------|----------|-----------------------------------|
+    18→//! | R0–R3       | a1–a4    | Argument / return registers       |
+    19→//! | R4–R11      | v1–v8    | Callee-saved                      |
+    20→//! | R12         | IP       | Intra-procedure scratch           |
+    21→//! | R13         | SP       | Stack pointer                     |
+    22→//! | R14         | LR       | Link register                     |
+    23→//! | R15         | PC       | Program counter                   |
+    24→//!
+    25→//! ## ARM32 FP Register Convention (AAPCS VFP variant)
+    26→//!
+    27→//! | Register(s) | Role                                     |
+    28→//! |-------------|------------------------------------------|
+    29→//! | D0–D15      | FP argument / caller-saved               |
+    30→//! | D8–D15      | Callee-saved                             |
+    31→//! | D16–D31     | Caller-saved (VFPv3/NEON only)           |
+    32→//!
+    33→//! ## Instruction Encoding
+    34→//!
+    35→//! ARM instructions are 32 bits, little-endian, with a 4-bit condition code
+    36→//! in bits \[31:28\]. The `AL` (always) condition is used for unconditional
+    37→//! instructions.
+    38→//!
+    39→//! ## References
+    40→//!
+    41→//! - ARM Architecture Reference Manual (ARMv7-A and ARMv7-R edition)
+    42→//! - Procedure Call Standard for the ARM Architecture (AAPCS)
+    43→
+    44→use crate::backend::{
+    45→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Arm32TargetInfo,
+    46→    Backend, BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+    47→};
+    48→use crate::ir::{BinOpKind, CmpKind, IRFunction, UnaryOpKind};
+    49→use std::collections::HashMap;
+    50→use std::fmt;
+    51→
+    52→// ===========================================================================
+    53→// General-Purpose Registers
+    54→// ===========================================================================
+    55→
+    56→/// ARM 32-bit general-purpose registers (R0–R15).
+    57→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    58→pub enum Gpr {
+    59→    R0 = 0,
+    60→    R1 = 1,
+    61→    R2 = 2,
+    62→    R3 = 3,
+    63→    R4 = 4,
+    64→    R5 = 5,
+    65→    R6 = 6,
+    66→    R7 = 7,
+    67→    R8 = 8,
+    68→    R9 = 9,
+    69→    R10 = 10,
+    70→    R11 = 11,
+    71→    R12 = 12,
+    72→    R13 = 13,
+    73→    R14 = 14,
+    74→    R15 = 15,
+    75→}
+    76→
+    77→impl Gpr {
+    78→    /// Returns the 4-bit encoding index for this register.
+    79→    pub fn encoding(&self) -> u32 {
+    80→        *self as u32
+    81→    }
+    82→
+    83→    /// Returns `true` if this register is available for register allocation.
+    84→    ///
+    85→    /// R13 (SP), R14 (LR), and R15 (PC) are reserved.
+    86→    pub fn is_allocatable(&self) -> bool {
+    87→        !matches!(self, Gpr::R13 | Gpr::R14 | Gpr::R15)
+    88→    }
+    89→
+    90→    /// Returns `true` if this register is callee-saved (R4–R11).
+    91→    pub fn is_callee_saved(&self) -> bool {
+    92→        matches!(
+    93→            self,
+    94→            Gpr::R4 | Gpr::R5 | Gpr::R6 | Gpr::R7 | Gpr::R8 | Gpr::R9 | Gpr::R10 | Gpr::R11
+    95→        )
+    96→    }
+    97→
+    98→    /// Returns `true` if this register is an argument register (R0–R3).
+    99→    pub fn is_arg_reg(&self) -> bool {
+   100→        matches!(self, Gpr::R0 | Gpr::R1 | Gpr::R2 | Gpr::R3)
+   101→    }
+   102→
+   103→    /// Returns the standard assembly name for this register.
+   104→    pub fn asm_name(&self) -> &'static str {
+   105→        match self {
+   106→            Gpr::R0 => "r0",
+   107→            Gpr::R1 => "r1",
+   108→            Gpr::R2 => "r2",
+   109→            Gpr::R3 => "r3",
+   110→            Gpr::R4 => "r4",
+   111→            Gpr::R5 => "r5",
+   112→            Gpr::R6 => "r6",
+   113→            Gpr::R7 => "r7",
+   114→            Gpr::R8 => "r8",
+   115→            Gpr::R9 => "r9",
+   116→            Gpr::R10 => "r10",
+   117→            Gpr::R11 => "r11",
+   118→            Gpr::R12 => "ip",
+   119→            Gpr::R13 => "sp",
+   120→            Gpr::R14 => "lr",
+   121→            Gpr::R15 => "pc",
+   122→        }
+   123→    }
+   124→
+   125→    /// Returns the Gpr for a given argument index (0–3). Returns `None` for
+   126→    /// indices >= 4.
+   127→    pub fn arg_register(index: usize) -> Option<Gpr> {
+   128→        match index {
+   129→            0 => Some(Gpr::R0),
+   130→            1 => Some(Gpr::R1),
+   131→            2 => Some(Gpr::R2),
+   132→            3 => Some(Gpr::R3),
+   133→            _ => None,
+   134→        }
+   135→    }
+   136→}
+   137→
+   138→impl fmt::Display for Gpr {
+   139→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   140→        f.write_str(self.asm_name())
+   141→    }
+   142→}
+   143→
+   144→// ===========================================================================
+   145→// Double-Precision FP/SIMD Registers
+   146→// ===========================================================================
+   147→
+   148→/// ARM VFP/NEON double-precision registers (D0–D31).
+   149→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   150→pub enum Dpr {
+   151→    D0 = 0,
+   152→    D1 = 1,
+   153→    D2 = 2,
+   154→    D3 = 3,
+   155→    D4 = 4,
+   156→    D5 = 5,
+   157→    D6 = 6,
+   158→    D7 = 7,
+   159→    D8 = 8,
+   160→    D9 = 9,
+   161→    D10 = 10,
+   162→    D11 = 11,
+   163→    D12 = 12,
+   164→    D13 = 13,
+   165→    D14 = 14,
+   166→    D15 = 15,
+   167→    D16 = 16,
+   168→    D17 = 17,
+   169→    D18 = 18,
+   170→    D19 = 19,
+   171→    D20 = 20,
+   172→    D21 = 21,
+   173→    D22 = 22,
+   174→    D23 = 23,
+   175→    D24 = 24,
+   176→    D25 = 25,
+   177→    D26 = 26,
+   178→    D27 = 27,
+   179→    D28 = 28,
+   180→    D29 = 29,
+   181→    D30 = 30,
+   182→    D31 = 31,
+   183→}
+   184→
+   185→impl Dpr {
+   186→    /// Returns the 5-bit encoding index for this register.
+   187→    pub fn encoding(&self) -> u32 {
+   188→        *self as u32
+   189→    }
+   190→
+   191→    /// Returns `true` if this register is available for register allocation.
+   192→    pub fn is_allocatable(&self) -> bool {
+   193→        true
+   194→    }
+   195→
+   196→    /// Returns `true` if this register is callee-saved (D8–D15).
+   197→    pub fn is_callee_saved(&self) -> bool {
+   198→        matches!(
+   199→            self,
+   200→            Dpr::D8 | Dpr::D9 | Dpr::D10 | Dpr::D11 | Dpr::D12 | Dpr::D13 | Dpr::D14 | Dpr::D15
+   201→        )
+   202→    }
+   203→
+   204→    /// Returns `true` if this register is an FP argument register (D0–D15).
+   205→    pub fn is_arg_reg(&self) -> bool {
+   206→        (*self as u32) <= 15
+   207→    }
+   208→
+   209→    /// Returns the standard assembly name for this register.
+   210→    pub fn asm_name(&self) -> &'static str {
+   211→        match self {
+   212→            Dpr::D0 => "d0",
+   213→            Dpr::D1 => "d1",
+   214→            Dpr::D2 => "d2",
+   215→            Dpr::D3 => "d3",
+   216→            Dpr::D4 => "d4",
+   217→            Dpr::D5 => "d5",
+   218→            Dpr::D6 => "d6",
+   219→            Dpr::D7 => "d7",
+   220→            Dpr::D8 => "d8",
+   221→            Dpr::D9 => "d9",
+   222→            Dpr::D10 => "d10",
+   223→            Dpr::D11 => "d11",
+   224→            Dpr::D12 => "d12",
+   225→            Dpr::D13 => "d13",
+   226→            Dpr::D14 => "d14",
+   227→            Dpr::D15 => "d15",
+   228→            Dpr::D16 => "d16",
+   229→            Dpr::D17 => "d17",
+   230→            Dpr::D18 => "d18",
+   231→            Dpr::D19 => "d19",
+   232→            Dpr::D20 => "d20",
+   233→            Dpr::D21 => "d21",
+   234→            Dpr::D22 => "d22",
+   235→            Dpr::D23 => "d23",
+   236→            Dpr::D24 => "d24",
+   237→            Dpr::D25 => "d25",
+   238→            Dpr::D26 => "d26",
+   239→            Dpr::D27 => "d27",
+   240→            Dpr::D28 => "d28",
+   241→            Dpr::D29 => "d29",
+   242→            Dpr::D30 => "d30",
+   243→            Dpr::D31 => "d31",
+   244→        }
+   245→    }
+   246→}
+   247→
+   248→impl fmt::Display for Dpr {
+   249→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   250→        f.write_str(self.asm_name())
+   251→    }
+   252→}
+   253→
+   254→// ===========================================================================
+   255→// Condition Codes
+   256→// ===========================================================================
+   257→
+   258→/// ARM condition codes (4-bit encoding in bits \[31:28\] of every ARM instruction).
+   259→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   260→pub enum Condition {
+   261→    /// Equal / Z set
+   262→    Eq = 0b0000,
+   263→    /// Not equal / Z clear
+   264→    Ne = 0b0001,
+   265→    /// Carry set / unsigned higher or same (CS = HS)
+   266→    Cs = 0b0010,
+   267→    /// Carry clear / unsigned lower (CC = LO)
+   268→    Cc = 0b0011,
+   269→    /// Minus / negative (N set)
+   270→    Mi = 0b0100,
+   271→    /// Plus / positive or zero (N clear)
+   272→    Pl = 0b0101,
+   273→    /// Overflow (V set)
+   274→    Vs = 0b0110,
+   275→    /// No overflow (V clear)
+   276→    Vc = 0b0111,
+   277→    /// Unsigned higher (C set and Z clear)
+   278→    Hi = 0b1000,
+   279→    /// Unsigned lower or same (C clear or Z set)
+   280→    Ls = 0b1001,
+   281→    /// Signed greater or equal (N == V)
+   282→    Ge = 0b1010,
+   283→    /// Signed less than (N != V)
+   284→    Lt = 0b1011,
+   285→    /// Signed greater than (Z clear and N == V)
+   286→    Gt = 0b1100,
+   287→    /// Signed less than or equal (Z set or N != V)
+   288→    Le = 0b1101,
+   289→    /// Always (unconditional)
+   290→    Al = 0b1110,
+   291→}
+   292→
+   293→impl Condition {
+   294→    /// Returns the 4-bit encoding for this condition code.
+   295→    pub fn encoding(&self) -> u32 {
+   296→        *self as u32
+   297→    }
+   298→}
+   299→
+   300→impl fmt::Display for Condition {
+   301→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   302→        f.write_str(match self {
+   303→            Condition::Eq => "eq",
+   304→            Condition::Ne => "ne",
+   305→            Condition::Cs => "cs",
+   306→            Condition::Cc => "cc",
+   307→            Condition::Mi => "mi",
+   308→            Condition::Pl => "pl",
+   309→            Condition::Vs => "vs",
+   310→            Condition::Vc => "vc",
+   311→            Condition::Hi => "hi",
+   312→            Condition::Ls => "ls",
+   313→            Condition::Ge => "ge",
+   314→            Condition::Lt => "lt",
+   315→            Condition::Gt => "gt",
+   316→            Condition::Le => "le",
+   317→            Condition::Al => "al",
+   318→        })
+   319→    }
+   320→}
+   321→
+   322→// ===========================================================================
+   323→// ARM Instruction Encoding Constants
+   324→// ===========================================================================
+   325→
+   326→/// Data processing opcodes (bits [24:21]).
+   327→const DP_AND: u32 = 0b0000;
+   328→const DP_EOR: u32 = 0b0001;
+   329→const DP_SUB: u32 = 0b0010;
+   330→const _DP_RSB: u32 = 0b0011;
+   331→const DP_ADD: u32 = 0b0100;
+   332→const DP_TST: u32 = 0b1000;
+   333→const DP_TEQ: u32 = 0b1001;
+   334→const DP_CMP: u32 = 0b1010;
+   335→const DP_CMN: u32 = 0b1011;
+   336→const DP_ORR: u32 = 0b1100;
+   337→const DP_MOV: u32 = 0b1101;
+   338→const DP_BIC: u32 = 0b1110;
+   339→const DP_MVN: u32 = 0b1111;
+   340→
+   341→// ===========================================================================
+   342→// Instruction Encoding Helpers
+   343→// ===========================================================================
+   344→
+   345→/// Encode a data-processing instruction with register operand2 (no shift).
+   346→///
+   347→/// Format: `cond[31:28] | 00[27:26] | I=0[25] | opcode[24:21] | S[20] |
+   348→///         Rn[19:16] | Rd[15:12] | 00000000[11:4] | Rm[3:0]`
+   349→fn encode_dp_reg(cond: Condition, opcode: u32, s: bool, rn: u32, rd: u32, rm: u32) -> [u8; 4] {
+   350→    let word = (cond.encoding() << 28)
+   351→        // I=0: register operand2
+   352→        | ((opcode & 0xF) << 21)
+   353→        | ((s as u32) << 20)
+   354→        | ((rn & 0xF) << 16)
+   355→        | ((rd & 0xF) << 12)
+   356→        // shift = 0, type = 0
+   357→        | (rm & 0xF);
+   358→    word.to_le_bytes()
+   359→}
+   360→
+   361→/// Encode a data-processing instruction with immediate operand2.
+   362→///
+   363→/// Format: `cond[31:28] | 00[27:26] | I=1[25] | opcode[24:21] | S[20] |
+   364→///         Rn[19:16] | Rd[15:12] | rotate[11:8] | imm8[7:0]`
+   365→fn encode_dp_imm(
+   366→    cond: Condition,
+   367→    opcode: u32,
+   368→    s: bool,
+   369→    rn: u32,
+   370→    rd: u32,
+   371→    rotate: u32,
+   372→    imm8: u32,
+   373→) -> [u8; 4] {
+   374→    let word = (cond.encoding() << 28)
+   375→        | (1 << 25) // I=1: immediate operand2
+   376→        | ((opcode & 0xF) << 21)
+   377→        | ((s as u32) << 20)
+   378→        | ((rn & 0xF) << 16)
+   379→        | ((rd & 0xF) << 12)
+   380→        | ((rotate & 0xF) << 8)
+   381→        | (imm8 & 0xFF);
+   382→    word.to_le_bytes()
+   383→}
+   384→
+   385→/// Encode a data-processing instruction with shifted register operand2
+   386→/// (shift by immediate).
+   387→///
+   388→/// Format: `cond[31:28] | 00[27:26] | I=0[25] | opcode[24:21] | S[20] |
+   389→///         Rn[19:16] | Rd[15:12] | shift_imm[11:7] | shift_type[6:5] |
+   390→///         0[4] | Rm[3:0]`
+   391→#[allow(clippy::too_many_arguments)]
+   392→fn encode_dp_shift_imm(
+   393→    cond: Condition,
+   394→    opcode: u32,
+   395→    s: bool,
+   396→    rn: u32,
+   397→    rd: u32,
+   398→    shift_type: u32,
+   399→    shift_imm: u32,
+   400→    rm: u32,
+   401→) -> [u8; 4] {
+   402→    let word = (cond.encoding() << 28)
+   403→        // I=0: immediate shift
+   404→        | ((opcode & 0xF) << 21)
+   405→        | ((s as u32) << 20)
+   406→        | ((rn & 0xF) << 16)
+   407→        | ((rd & 0xF) << 12)
+   408→        | ((shift_imm & 0x1F) << 7)
+   409→        | ((shift_type & 0x3) << 5)
+   410→        | (rm & 0xF);
+   411→    word.to_le_bytes()
+   412→}
+   413→
+   414→/// Encode a data-processing instruction with shifted register operand2
+   415→/// (shift by register).
+   416→///
+   417→/// Format: `cond[31:28] | 00[27:26] | I=0[25] | opcode[24:21] | S[20] |
+   418→///         Rn[19:16] | Rd[15:12] | Rs[11:8] | shift_type[6:5] | 1[4] | Rm[3:0]`
+   419→#[allow(clippy::too_many_arguments)]
+   420→fn encode_dp_shift_reg(
+   421→    cond: Condition,
+   422→    opcode: u32,
+   423→    s: bool,
+   424→    rn: u32,
+   425→    rd: u32,
+   426→    shift_type: u32,
+   427→    rs: u32,
+   428→    rm: u32,
+   429→) -> [u8; 4] {
+   430→    let word = (cond.encoding() << 28)
+   431→        | ((opcode & 0xF) << 21)
+   432→        | ((s as u32) << 20)
+   433→        | ((rn & 0xF) << 16)
+   434→        | ((rd & 0xF) << 12)
+   435→        | ((rs & 0xF) << 8)
+   436→        | ((shift_type & 0x3) << 5)
+   437→        | (1 << 4)
+   438→        | (rm & 0xF);
+   439→    word.to_le_bytes()
+   440→}
+   441→
+   442→/// Encode a load/store word or byte with immediate offset.
+   443→///
+   444→/// Format: `cond[31:28] | 01[27:26] | I=0[25] | P[24] | U[23] | B[22] |
+   445→///         W[21] | L[20] | Rn[19:16] | Rd[15:12] | offset12[11:0]`
+   446→#[allow(clippy::too_many_arguments)]
+   447→fn encode_ls_imm(
+   448→    cond: Condition,
+   449→    p: bool,
+   450→    u: bool,
+   451→    b: bool,
+   452→    w: bool,
+   453→    l: bool,
+   454→    rn: u32,
+   455→    rd: u32,
+   456→    offset12: u32,
+   457→) -> [u8; 4] {
+   458→    let word = (cond.encoding() << 28)
+   459→        | (0b01 << 26)
+   460→        // I=0: immediate offset
+   461→        | ((p as u32) << 24)
+   462→        | ((u as u32) << 23)
+   463→        | ((b as u32) << 22)
+   464→        | ((w as u32) << 21)
+   465→        | ((l as u32) << 20)
+   466→        | ((rn & 0xF) << 16)
+   467→        | ((rd & 0xF) << 12)
+   468→        | (offset12 & 0xFFF);
+   469→    word.to_le_bytes()
+   470→}
+   471→
+   472→/// Encode a load/store halfword with immediate offset.
+   473→///
+   474→/// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
+   475→///         L[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1011[7:4] |
+   476→///         offset_low[3:0]`
+   477→#[allow(clippy::too_many_arguments)]
+   478→fn encode_ls_half_imm(
+   479→    cond: Condition,
+   480→    p: bool,
+   481→    u: bool,
+   482→    w: bool,
+   483→    l: bool,
+   484→    rn: u32,
+   485→    rd: u32,
+   486→    offset8: u32,
+   487→) -> [u8; 4] {
+   488→    let imm_hi = (offset8 >> 4) & 0xF;
+   489→    let imm_lo = offset8 & 0xF;
+   490→    let word = (cond.encoding() << 28)
+   491→        | ((p as u32) << 24)
+   492→        | ((u as u32) << 23)
+   493→        // I=0: immediate offset
+   494→        | ((w as u32) << 21)
+   495→        | ((l as u32) << 20)
+   496→        | ((rn & 0xF) << 16)
+   497→        | ((rd & 0xF) << 12)
+   498→        | (imm_hi << 8)
+   499→        | (0b1011 << 4)
+   500→        | imm_lo;
+   501→    word.to_le_bytes()
+   502→}
+   503→
+   504→/// Encode a load/store doubleword with immediate offset (LDRD/STRD).
+   505→///
+   506→/// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
+   507→///         L=0[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1111[7:4] |
+   508→///         offset_low[3:0]`
+   509→#[allow(clippy::too_many_arguments)]
+   510→fn encode_ls_double_imm(
+   511→    cond: Condition,
+   512→    p: bool,
+   513→    u: bool,
+   514→    w: bool,
+   515→    is_load: bool,
+   516→    rn: u32,
+   517→    rd: u32,
+   518→    offset8: u32,
+   519→) -> [u8; 4] {
+   520→    let imm_hi = (offset8 >> 4) & 0xF;
+   521→    let imm_lo = offset8 & 0xF;
+   522→    // For LDRD, the L bit (bit 20) is set; for STRD it is clear.
+   523→    // Actually, for LDRD/STRD the encoding uses bit 20 differently:
+   524→    // STRD: L=0, LDRD: L=1. But wait — the ARM ARM says for LDRD/STRD,
+   525→    // bit 20 distinguishes: 0=STRD, 1=LDRD.
+   526→    let word = (cond.encoding() << 28)
+   527→        | ((p as u32) << 24)
+   528→        | ((u as u32) << 23)
+   529→        // I=0
+   530→        | ((w as u32) << 21)
+   531→        | ((is_load as u32) << 20)
+   532→        | ((rn & 0xF) << 16)
+   533→        | ((rd & 0xF) << 12)
+   534→        | (imm_hi << 8)
+   535→        | (0b1111 << 4)
+   536→        | imm_lo;
+   537→    word.to_le_bytes()
+   538→}
+   539→
+   540→/// Encode a load halfword signed byte (LDRSB) with immediate offset.
+   541→///
+   542→/// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
+   543→///         L=1[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1101[7:4] |
+   544→///         offset_low[3:0]`
+   545→fn encode_ldrsb_imm(
+   546→    cond: Condition,
+   547→    p: bool,
+   548→    u: bool,
+   549→    w: bool,
+   550→    rn: u32,
+   551→    rd: u32,
+   552→    offset8: u32,
+   553→) -> [u8; 4] {
+   554→    let imm_hi = (offset8 >> 4) & 0xF;
+   555→    let imm_lo = offset8 & 0xF;
+   556→    let word = (cond.encoding() << 28)
+   557→        | ((p as u32) << 24)
+   558→        | ((u as u32) << 23)
+   559→        | ((w as u32) << 21)
+   560→        | (1 << 20) // L=1
+   561→        | ((rn & 0xF) << 16)
+   562→        | ((rd & 0xF) << 12)
+   563→        | (imm_hi << 8)
+   564→        | (0b1101 << 4)
+   565→        | imm_lo;
+   566→    word.to_le_bytes()
+   567→}
+   568→
+   569→/// Encode a load signed halfword (LDRSH) with immediate offset.
+   570→///
+   571→/// Format: `cond[31:28] | 000[27:25] | P[24] | U[23] | I=0[22] | W[21] |
+   572→///         L=1[20] | Rn[19:16] | Rd[15:12] | offset_high[11:8] | 1111[7:4] |
+   573→///         offset_low[3:0]`
+   574→fn encode_ldrsh_imm(
+   575→    cond: Condition,
+   576→    p: bool,
+   577→    u: bool,
+   578→    w: bool,
+   579→    rn: u32,
+   580→    rd: u32,
+   581→    offset8: u32,
+   582→) -> [u8; 4] {
+   583→    let imm_hi = (offset8 >> 4) & 0xF;
+   584→    let imm_lo = offset8 & 0xF;
+   585→    let word = (cond.encoding() << 28)
+   586→        | ((p as u32) << 24)
+   587→        | ((u as u32) << 23)
+   588→        | ((w as u32) << 21)
+   589→        | (1 << 20) // L=1
+   590→        | ((rn & 0xF) << 16)
+   591→        | ((rd & 0xF) << 12)
+   592→        | (imm_hi << 8)
+   593→        | (0b1111 << 4)
+   594→        | imm_lo;
+   595→    word.to_le_bytes()
+   596→}
+   597→
+   598→/// Encode a branch (B/BL) instruction.
+   599→///
+   600→/// Format: `cond[31:28] | 101[27:25] | L[24] | offset24[23:0]`
+   601→///
+   602→/// The offset is a signed word-aligned offset from PC+8, in words (shifted
+   603→/// right by 2). The 24-bit field is sign-extended and shifted left by 2.
+   604→fn encode_branch(cond: Condition, link: bool, offset24: i32) -> [u8; 4] {
+   605→    let word = (cond.encoding() << 28)
+   606→        | (0b101 << 25)
+   607→        | ((link as u32) << 24)
+   608→        | ((offset24 as u32) & 0x00FF_FFFF);
+   609→    word.to_le_bytes()
+   610→}
+   611→
+   612→/// Encode BX (Branch and Exchange) instruction.
+   613→///
+   614→/// Format: `cond[31:28] | 00010010[27:20] | 1111[19:16] | 1111[15:12] |
+   615→///         1111[11:8] | 0001[7:4] | Rm[3:0]`
+   616→fn encode_bx(cond: Condition, rm: u32) -> [u8; 4] {
+   617→    let word = (cond.encoding() << 28)
+   618→        | (0b0001_0010 << 20)
+   619→        | (0b1111 << 16)
+   620→        | (0b1111 << 12)
+   621→        | (0b1111 << 8) // SBZ
+   622→        | (0b0001 << 4) // BX opcode in bits [7:4]
+   623→        | (rm & 0xF);
+   624→    word.to_le_bytes()
+   625→}
+   626→
+   627→/// Encode BLX (Branch with Link and Exchange) register instruction.
+   628→///
+   629→/// Format: `cond[31:28] | 00010010[27:20] | 1111[19:16] | 1111[15:12] |
+   630→///         1111[11:8] | 0011[7:4] | Rm[3:0]`
+   631→fn encode_blx_reg(cond: Condition, rm: u32) -> [u8; 4] {
+   632→    let word = (cond.encoding() << 28)
+   633→        | (0b0001_0010 << 20)
+   634→        | (0b1111 << 16)
+   635→        | (0b1111 << 12)
+   636→        | (0b1111 << 8) // SBZ
+   637→        | (0b0011 << 4) // BLX opcode in bits [7:4]
+   638→        | (rm & 0xF);
+   639→    word.to_le_bytes()
+   640→}
+   641→
+   642→/// Encode MUL instruction.
+   643→///
+   644→/// Format: `cond[31:28] | 000000[27:22] | S[21] | Rd[19:16] | Rn[15:12] |
+   645→///         Rs[11:8] | 1001[7:4] | Rm[3:0]`
+   646→fn encode_mul(cond: Condition, s: bool, rd: u32, rn: u32, rs: u32, rm: u32) -> [u8; 4] {
+   647→    let word = (cond.encoding() << 28)
+   648→        | ((s as u32) << 20)
+   649→        | ((rd & 0xF) << 16)
+   650→        | ((rn & 0xF) << 12)
+   651→        | ((rs & 0xF) << 8)
+   652→        | (0b1001 << 4)
+   653→        | (rm & 0xF);
+   654→    word.to_le_bytes()
+   655→}
+   656→
+   657→/// Encode MLA instruction.
+   658→///
+   659→/// Format: `cond[31:28] | 0000001[27:21] | S[20] | Rd[19:16] | Rn[15:12] |
+   660→///         Rs[11:8] | 1001[7:4] | Rm[3:0]`
+   661→fn encode_mla(cond: Condition, s: bool, rd: u32, rn: u32, rs: u32, rm: u32) -> [u8; 4] {
+   662→    let word = (cond.encoding() << 28)
+   663→        | (0b0000001 << 21)
+   664→        | ((s as u32) << 20)
+   665→        | ((rd & 0xF) << 16)
+   666→        | ((rn & 0xF) << 12)
+   667→        | ((rs & 0xF) << 8)
+   668→        | (0b1001 << 4)
+   669→        | (rm & 0xF);
+   670→    word.to_le_bytes()
+   671→}
+   672→
+   673→/// Encode UMULL instruction.
+   674→///
+   675→/// Format: `cond[31:28] | 0000100[27:21] | S[20] | RdHi[19:16] | RdLo[15:12] |
+   676→///         Rs[11:8] | 1001[7:4] | Rm[3:0]`
+   677→fn encode_umull(cond: Condition, s: bool, rd_hi: u32, rd_lo: u32, rs: u32, rm: u32) -> [u8; 4] {
+   678→    let word = (cond.encoding() << 28)
+   679→        | (0b0000100 << 21)
+   680→        | ((s as u32) << 20)
+   681→        | ((rd_hi & 0xF) << 16)
+   682→        | ((rd_lo & 0xF) << 12)
+   683→        | ((rs & 0xF) << 8)
+   684→        | (0b1001 << 4)
+   685→        | (rm & 0xF);
+   686→    word.to_le_bytes()
+   687→}
+   688→
+   689→/// Encode SMULL instruction.
+   690→///
+   691→/// Format: `cond[31:28] | 0000110[27:21] | S[20] | RdHi[19:16] | RdLo[15:12] |
+   692→///         Rs[11:8] | 1001[7:4] | Rm[3:0]`
+   693→fn encode_smull(cond: Condition, s: bool, rd_hi: u32, rd_lo: u32, rs: u32, rm: u32) -> [u8; 4] {
+   694→    let word = (cond.encoding() << 28)
+   695→        | (0b0000110 << 21)
+   696→        | ((s as u32) << 20)
+   697→        | ((rd_hi & 0xF) << 16)
+   698→        | ((rd_lo & 0xF) << 12)
+   699→        | ((rs & 0xF) << 8)
+   700→        | (0b1001 << 4)
+   701→        | (rm & 0xF);
+   702→    word.to_le_bytes()
+   703→}
+   704→
+   705→/// Encode LDM (Load Multiple) instruction.
+   706→///
+   707→/// Format: `cond[31:28] | 100[27:25] | P[24] | U[23] | S[22] | W[21] | L=1[20] |
+   708→///         Rn[19:16] | register_list[15:0]`
+   709→fn encode_ldm(
+   710→    cond: Condition,
+   711→    p: bool,
+   712→    u: bool,
+   713→    s: bool,
+   714→    w: bool,
+   715→    rn: u32,
+   716→    register_list: u16,
+   717→) -> [u8; 4] {
+   718→    let word = (cond.encoding() << 28)
+   719→        | (0b100 << 25)
+   720→        | ((p as u32) << 24)
+   721→        | ((u as u32) << 23)
+   722→        | ((s as u32) << 22)
+   723→        | ((w as u32) << 21)
+   724→        | (1 << 20) // L=1 for load
+   725→        | ((rn & 0xF) << 16)
+   726→        | (register_list as u32);
+   727→    word.to_le_bytes()
+   728→}
+   729→
+   730→/// Encode STM (Store Multiple) instruction.
+   731→///
+   732→/// Format: `cond[31:28] | 100[27:25] | P[24] | U[23] | S[22] | W[21] | L=0[20] |
+   733→///         Rn[19:16] | register_list[15:0]`
+   734→fn encode_stm(
+   735→    cond: Condition,
+   736→    p: bool,
+   737→    u: bool,
+   738→    s: bool,
+   739→    w: bool,
+   740→    rn: u32,
+   741→    register_list: u16,
+   742→) -> [u8; 4] {
+   743→    let word = (cond.encoding() << 28)
+   744→        | (0b100 << 25)
+   745→        | ((p as u32) << 24)
+   746→        | ((u as u32) << 23)
+   747→        | ((s as u32) << 22)
+   748→        | ((w as u32) << 21)
+   749→        // L=0 for store
+   750→        | ((rn & 0xF) << 16)
+   751→        | (register_list as u32);
+   752→    word.to_le_bytes()
+   753→}
+   754→
+   755→/// Encode SVC (Supervisor Call) instruction.
+   756→///
+   757→/// Format: `cond[31:28] | 1111[27:24] | imm24[23:0]`
+   758→fn encode_svc(cond: Condition, imm24: u32) -> [u8; 4] {
+   759→    let word = (cond.encoding() << 28) | (0b1111 << 24) | (imm24 & 0x00FF_FFFF);
+   760→    word.to_le_bytes()
+   761→}
+   762→
+   763→/// Encode MRS instruction (Move Status Register to GPR).
+   764→///
+   765→/// Format: `cond[31:28] | 00010000[27:20] | Rd[15:12] | 111100000000[11:0]`
+   766→/// For CPSR: R=0. For SPSR: R=1 (bit 22).
+   767→fn encode_mrs(cond: Condition, rd: u32, spsr: bool) -> [u8; 4] {
+   768→    let word = (cond.encoding() << 28)
+   769→        | (0b0001_0000 << 20)
+   770→        | ((spsr as u32) << 22)
+   771→        | ((rd & 0xF) << 12)
+   772→        | 0x0F00; // bits [19:16] = 1111 (SBZ), bits [11:0] = 0
+   773→    word.to_le_bytes()
+   774→}
+   775→
+   776→/// Encode MSR instruction (Move GPR to Status Register).
+   777→///
+   778→/// Format: `cond[31:28] | 00010010[27:20] | mask[19:16] | 1111[15:12] |
+   779→///         00000000[11:4] | Rm[3:0]`
+   780→fn encode_msr(cond: Condition, mask: u32, rm: u32) -> [u8; 4] {
+   781→    let word = (cond.encoding() << 28)
+   782→        | (0b0001_0010 << 20)
+   783→        | ((mask & 0xF) << 16)
+   784→        | (0b1111 << 12)
+   785→        | (rm & 0xF);
+   786→    word.to_le_bytes()
+   787→}
+   788→
+   789→// ===========================================================================
+   790→// Instruction Enum
+   791→// ===========================================================================
+   792→
+   793→/// ARM 32-bit instruction representations for code generation.
+   794→///
+   795→/// Covers data processing, load/store, branch, multiply, and system
+   796→/// instructions. Each variant captures the operands needed for encoding and
+   797→/// disassembly. The `encode()` method produces a 4-byte little-endian machine
+   798→/// code word.
+   799→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   800→pub enum Instruction {
+   801→    // ── Data Processing: Register-Register ────────────────────────────
+   802→    /// ADD Rd, Rn, Rm
+   803→    Add {
+   804→        rd: Gpr,
+   805→        rn: Gpr,
+   806→        rm: Gpr,
+   807→        cond: Condition,
+   808→    },
+   809→    /// SUB Rd, Rn, Rm
+   810→    Sub {
+   811→        rd: Gpr,
+   812→        rn: Gpr,
+   813→        rm: Gpr,
+   814→        cond: Condition,
+   815→    },
+   816→    /// AND Rd, Rn, Rm
+   817→    And {
+   818→        rd: Gpr,
+   819→        rn: Gpr,
+   820→        rm: Gpr,
+   821→        cond: Condition,
+   822→    },
+   823→    /// ORR Rd, Rn, Rm
+   824→    Orr {
+   825→        rd: Gpr,
+   826→        rn: Gpr,
+   827→        rm: Gpr,
+   828→        cond: Condition,
+   829→    },
+   830→    /// EOR Rd, Rn, Rm
+   831→    Eor {
+   832→        rd: Gpr,
+   833→        rn: Gpr,
+   834→        rm: Gpr,
+   835→        cond: Condition,
+   836→    },
+   837→    /// BIC Rd, Rn, Rm
+   838→    Bic {
+   839→        rd: Gpr,
+   840→        rn: Gpr,
+   841→        rm: Gpr,
+   842→        cond: Condition,
+   843→    },
+   844→    /// MOV Rd, Rm
+   845→    Mov { rd: Gpr, rm: Gpr, cond: Condition },
+   846→    /// MVN Rd, Rm
+   847→    Mvn { rd: Gpr, rm: Gpr, cond: Condition },
+   848→    /// CMP Rn, Rm
+   849→    Cmp { rn: Gpr, rm: Gpr, cond: Condition },
+   850→    /// CMN Rn, Rm
+   851→    Cmn { rn: Gpr, rm: Gpr, cond: Condition },
+   852→    /// TST Rn, Rm
+   853→    Tst { rn: Gpr, rm: Gpr, cond: Condition },
+   854→    /// TEQ Rn, Rm
+   855→    Teq { rn: Gpr, rm: Gpr, cond: Condition },
+   856→
+   857→    // ── Data Processing: Immediate ───────────────────────────────────
+   858→    /// ADD Rd, Rn, #imm8 (rotated)
+   859→    AddImm {
+   860→        rd: Gpr,
+   861→        rn: Gpr,
+   862→        rotate: u32,
+   863→        imm8: u32,
+   864→        cond: Condition,
+   865→    },
+   866→    /// SUB Rd, Rn, #imm8 (rotated)
+   867→    SubImm {
+   868→        rd: Gpr,
+   869→        rn: Gpr,
+   870→        rotate: u32,
+   871→        imm8: u32,
+   872→        cond: Condition,
+   873→    },
+   874→    /// MOV Rd, #imm8 (rotated)
+   875→    MovImm {
+   876→        rd: Gpr,
+   877→        rotate: u32,
+   878→        imm8: u32,
+   879→        cond: Condition,
+   880→    },
+   881→    /// CMP Rn, #imm8 (rotated)
+   882→    CmpImm {
+   883→        rn: Gpr,
+   884→        rotate: u32,
+   885→        imm8: u32,
+   886→        cond: Condition,
+   887→    },
+   888→
+   889→    // ── Shift by Immediate ───────────────────────────────────────────
+   890→    /// LSL Rd, Rm, #shift_imm (encoded as MOV Rd, Rm, LSL #imm)
+   891→    LslImm {
+   892→        rd: Gpr,
+   893→        rm: Gpr,
+   894→        shift_imm: u32,
+   895→        cond: Condition,
+   896→    },
+   897→    /// LSR Rd, Rm, #shift_imm
+   898→    LsrImm {
+   899→        rd: Gpr,
+   900→        rm: Gpr,
+   901→        shift_imm: u32,
+   902→        cond: Condition,
+   903→    },
+   904→    /// ASR Rd, Rm, #shift_imm
+   905→    AsrImm {
+   906→        rd: Gpr,
+   907→        rm: Gpr,
+   908→        shift_imm: u32,
+   909→        cond: Condition,
+   910→    },
+   911→    /// ROR Rd, Rm, #shift_imm
+   912→    RorImm {
+   913→        rd: Gpr,
+   914→        rm: Gpr,
+   915→        shift_imm: u32,
+   916→        cond: Condition,
+   917→    },
+   918→
+   919→    // ── Shift by Register ────────────────────────────────────────────
+   920→    /// LSL Rd, Rn, Rs (encoded as MOV Rd, Rn, LSL Rs)
+   921→    LslReg {
+   922→        rd: Gpr,
+   923→        rn: Gpr,
+   924→        rs: Gpr,
+   925→        cond: Condition,
+   926→    },
+   927→    /// LSR Rd, Rn, Rs
+   928→    LsrReg {
+   929→        rd: Gpr,
+   930→        rn: Gpr,
+   931→        rs: Gpr,
+   932→        cond: Condition,
+   933→    },
+   934→    /// ASR Rd, Rn, Rs
+   935→    AsrReg {
+   936→        rd: Gpr,
+   937→        rn: Gpr,
+   938→        rs: Gpr,
+   939→        cond: Condition,
+   940→    },
+   941→    /// ROR Rd, Rn, Rs
+   942→    RorReg {
+   943→        rd: Gpr,
+   944→        rn: Gpr,
+   945→        rs: Gpr,
+   946→        cond: Condition,
+   947→    },
+   948→
+   949→    // ── Multiply ─────────────────────────────────────────────────────
+   950→    /// MUL Rd, Rm, Rs
+   951→    Mul {
+   952→        rd: Gpr,
+   953→        rn: Gpr,
+   954→        rs: Gpr,
+   955→        rm: Gpr,
+   956→        cond: Condition,
+   957→    },
+   958→    /// MLA Rd, Rn, Rm, Rs (Rd = Rn + Rm * Rs)
+   959→    Mla {
+   960→        rd: Gpr,
+   961→        rn: Gpr,
+   962→        rs: Gpr,
+   963→        rm: Gpr,
+   964→        cond: Condition,
+   965→    },
+   966→    /// UMULL RdLo, RdHi, Rm, Rs
+   967→    Umull {
+   968→        rd_hi: Gpr,
+   969→        rd_lo: Gpr,
+   970→        rs: Gpr,
+   971→        rm: Gpr,
+   972→        cond: Condition,
+   973→    },
+   974→    /// SMULL RdLo, RdHi, Rm, Rs
+   975→    Smull {
+   976→        rd_hi: Gpr,
+   977→        rd_lo: Gpr,
+   978→        rs: Gpr,
+   979→        rm: Gpr,
+   980→        cond: Condition,
+   981→    },
+   982→
+   983→    // ── Load/Store Word ──────────────────────────────────────────────
+   984→    /// LDR Rd, \[Rn, #offset\]
+   985→    Ldr {
+   986→        rd: Gpr,
+   987→        rn: Gpr,
+   988→        offset: i32,
+   989→        cond: Condition,
+   990→    },
+   991→    /// STR Rd, \[Rn, #offset\]
+   992→    Str {
+   993→        rd: Gpr,
+   994→        rn: Gpr,
+   995→        offset: i32,
+   996→        cond: Condition,
+   997→    },
+   998→
+   999→    // ── Load/Store Byte ──────────────────────────────────────────────
+  1000→    /// LDRB Rd, \[Rn, #offset\]
+  1001→    Ldrb {
+  1002→        rd: Gpr,
+  1003→        rn: Gpr,
+  1004→        offset: i32,
+  1005→        cond: Condition,
+  1006→    },
+  1007→    /// STRB Rd, \[Rn, #offset\]
+  1008→    Strb {
+  1009→        rd: Gpr,
+  1010→        rn: Gpr,
+  1011→        offset: i32,
+  1012→        cond: Condition,
+  1013→    },
+  1014→
+  1015→    // ── Load/Store Halfword ──────────────────────────────────────────
+  1016→    /// LDRH Rd, \[Rn, #offset\]
+  1017→    Ldrh {
+  1018→        rd: Gpr,
+  1019→        rn: Gpr,
+  1020→        offset: i32,
+  1021→        cond: Condition,
+  1022→    },
+  1023→    /// STRH Rd, \[Rn, #offset\]
+  1024→    Strh {
+  1025→        rd: Gpr,
+  1026→        rn: Gpr,
+  1027→        offset: i32,
+  1028→        cond: Condition,
+  1029→    },
+  1030→
+  1031→    // ── Load/Store Doubleword ────────────────────────────────────────
+  1032→    /// LDRD Rd, \[Rn, #offset\]
+  1033→    Ldrd {
+  1034→        rd: Gpr,
+  1035→        rn: Gpr,
+  1036→        offset: i32,
+  1037→        cond: Condition,
+  1038→    },
+  1039→    /// STRD Rd, \[Rn, #offset\]
+  1040→    Strd {
+  1041→        rd: Gpr,
+  1042→        rn: Gpr,
+  1043→        offset: i32,
+  1044→        cond: Condition,
+  1045→    },
+  1046→
+  1047→    // ── Load Signed Byte/Halfword ────────────────────────────────────
+  1048→    /// LDRSB Rd, \[Rn, #offset\]
+  1049→    Ldrsb {
+  1050→        rd: Gpr,
+  1051→        rn: Gpr,
+  1052→        offset: i32,
+  1053→        cond: Condition,
+  1054→    },
+  1055→    /// LDRSH Rd, \[Rn, #offset\]
+  1056→    Ldrsh {
+  1057→        rd: Gpr,
+  1058→        rn: Gpr,
+  1059→        offset: i32,
+  1060→        cond: Condition,
+  1061→    },
+  1062→
+  1063→    // ── Load/Store Multiple ──────────────────────────────────────────
+  1064→    /// LDM Rn!, {register_list}
+  1065→    Ldm {
+  1066→        rn: Gpr,
+  1067→        register_list: u16,
+  1068→        writeback: bool,
+  1069→        cond: Condition,
+  1070→    },
+  1071→    /// STM Rn!, {register_list}
+  1072→    Stm {
+  1073→        rn: Gpr,
+  1074→        register_list: u16,
+  1075→        writeback: bool,
+  1076→        cond: Condition,
+  1077→    },
+  1078→
+  1079→    // ── Branch ───────────────────────────────────────────────────────
+  1080→    /// B offset (signed 24-bit, word-aligned)
+  1081→    B { offset: i32, cond: Condition },
+  1082→    /// BL offset
+  1083→    Bl { offset: i32, cond: Condition },
+  1084→    /// BX Rm
+  1085→    Bx { rm: Gpr, cond: Condition },
+  1086→    /// BLX Rm
+  1087→    BlxReg { rm: Gpr, cond: Condition },
+  1088→
+  1089→    // ── System ───────────────────────────────────────────────────────
+  1090→    /// SVC #imm24
+  1091→    Svc { imm24: u32, cond: Condition },
+  1092→    /// NOP (MOV R0, R0)
+  1093→    Nop,
+  1094→    /// MRS Rd, CPSR
+  1095→    Mrs {
+  1096→        rd: Gpr,
+  1097→        spsr: bool,
+  1098→        cond: Condition,
+  1099→    },
+  1100→    /// MSR CPSR_f, Rm
+  1101→    Msr { mask: u32, rm: Gpr, cond: Condition },
+  1102→}
+  1103→
+  1104→impl Instruction {
+  1105→    /// Encode this instruction into a 4-byte little-endian machine code word.
+  1106→    ///
+  1107→    /// Encoding follows the ARM Architecture Reference Manual.
+  1108→    pub fn encode(&self) -> [u8; 4] {
+  1109→        match self {
+  1110→            // ── Data Processing: Register-Register ──────────────────
+  1111→            Instruction::Add { rd, rn, rm, cond } => encode_dp_reg(
+  1112→                *cond,
+  1113→                DP_ADD,
+  1114→                false,
+  1115→                rn.encoding(),
+  1116→                rd.encoding(),
+  1117→                rm.encoding(),
+  1118→            ),
+  1119→            Instruction::Sub { rd, rn, rm, cond } => encode_dp_reg(
+  1120→                *cond,
+  1121→                DP_SUB,
+  1122→                false,
+  1123→                rn.encoding(),
+  1124→                rd.encoding(),
+  1125→                rm.encoding(),
+  1126→            ),
+  1127→            Instruction::And { rd, rn, rm, cond } => encode_dp_reg(
+  1128→                *cond,
+  1129→                DP_AND,
+  1130→                false,
+  1131→                rn.encoding(),
+  1132→                rd.encoding(),
+  1133→                rm.encoding(),
+  1134→            ),
+  1135→            Instruction::Orr { rd, rn, rm, cond } => encode_dp_reg(
+  1136→                *cond,
+  1137→                DP_ORR,
+  1138→                false,
+  1139→                rn.encoding(),
+  1140→                rd.encoding(),
+  1141→                rm.encoding(),
+  1142→            ),
+  1143→            Instruction::Eor { rd, rn, rm, cond } => encode_dp_reg(
+  1144→                *cond,
+  1145→                DP_EOR,
+  1146→                false,
+  1147→                rn.encoding(),
+  1148→                rd.encoding(),
+  1149→                rm.encoding(),
+  1150→            ),
+  1151→            Instruction::Bic { rd, rn, rm, cond } => encode_dp_reg(
+  1152→                *cond,
+  1153→                DP_BIC,
+  1154→                false,
+  1155→                rn.encoding(),
+  1156→                rd.encoding(),
+  1157→                rm.encoding(),
+  1158→            ),
+  1159→            Instruction::Mov { rd, rm, cond } => {
+  1160→                // MOV: Rn is SBZ (should be 0)
+  1161→                encode_dp_reg(*cond, DP_MOV, false, 0, rd.encoding(), rm.encoding())
+  1162→            }
+  1163→            Instruction::Mvn { rd, rm, cond } => {
+  1164→                encode_dp_reg(*cond, DP_MVN, false, 0, rd.encoding(), rm.encoding())
+  1165→            }
+  1166→            Instruction::Cmp { rn, rm, cond } => {
+  1167→                // CMP: Rd is SBZ, S=1
+  1168→                encode_dp_reg(*cond, DP_CMP, true, rn.encoding(), 0, rm.encoding())
+  1169→            }
+  1170→            Instruction::Cmn { rn, rm, cond } => {
+  1171→                encode_dp_reg(*cond, DP_CMN, true, rn.encoding(), 0, rm.encoding())
+  1172→            }
+  1173→            Instruction::Tst { rn, rm, cond } => {
+  1174→                encode_dp_reg(*cond, DP_TST, true, rn.encoding(), 0, rm.encoding())
+  1175→            }
+  1176→            Instruction::Teq { rn, rm, cond } => {
+  1177→                encode_dp_reg(*cond, DP_TEQ, true, rn.encoding(), 0, rm.encoding())
+  1178→            }
+  1179→
+  1180→            // ── Data Processing: Immediate ──────────────────────────
+  1181→            Instruction::AddImm {
+  1182→                rd,
+  1183→                rn,
+  1184→                rotate,
+  1185→                imm8,
+  1186→                cond,
+  1187→            } => encode_dp_imm(
+  1188→                *cond,
+  1189→                DP_ADD,
+  1190→                false,
+  1191→                rn.encoding(),
+  1192→                rd.encoding(),
+  1193→                *rotate,
+  1194→                *imm8,
+  1195→            ),
+  1196→            Instruction::SubImm {
+  1197→                rd,
+  1198→                rn,
+  1199→                rotate,
+  1200→                imm8,
+  1201→                cond,
+  1202→            } => encode_dp_imm(
+  1203→                *cond,
+  1204→                DP_SUB,
+  1205→                false,
+  1206→                rn.encoding(),
+  1207→                rd.encoding(),
+  1208→                *rotate,
+  1209→                *imm8,
+  1210→            ),
+  1211→            Instruction::MovImm {
+  1212→                rd,
+  1213→                rotate,
+  1214→                imm8,
+  1215→                cond,
+  1216→            } => encode_dp_imm(*cond, DP_MOV, false, 0, rd.encoding(), *rotate, *imm8),
+  1217→            Instruction::CmpImm {
+  1218→                rn,
+  1219→                rotate,
+  1220→                imm8,
+  1221→                cond,
+  1222→            } => encode_dp_imm(*cond, DP_CMP, true, rn.encoding(), 0, *rotate, *imm8),
+  1223→
+  1224→            // ── Shift by Immediate ──────────────────────────────────
+  1225→            Instruction::LslImm {
+  1226→                rd,
+  1227→                rm,
+  1228→                shift_imm,
+  1229→                cond,
+  1230→            } => {
+  1231→                // LSL = shift_type 0, encoded as MOV Rd, Rm, LSL #imm
+  1232→                encode_dp_shift_imm(
+  1233→                    *cond,
+  1234→                    DP_MOV,
+  1235→                    false,
+  1236→                    0,
+  1237→                    rd.encoding(),
+  1238→                    0,
+  1239→                    *shift_imm,
+  1240→                    rm.encoding(),
+  1241→                )
+  1242→            }
+  1243→            Instruction::LsrImm {
+  1244→                rd,
+  1245→                rm,
+  1246→                shift_imm,
+  1247→                cond,
+  1248→            } => {
+  1249→                // LSR = shift_type 1
+  1250→                encode_dp_shift_imm(
+  1251→                    *cond,
+  1252→                    DP_MOV,
+  1253→                    false,
+  1254→                    0,
+  1255→                    rd.encoding(),
+  1256→                    1,
+  1257→                    *shift_imm,
+  1258→                    rm.encoding(),
+  1259→                )
+  1260→            }
+  1261→            Instruction::AsrImm {
+  1262→                rd,
+  1263→                rm,
+  1264→                shift_imm,
+  1265→                cond,
+  1266→            } => {
+  1267→                // ASR = shift_type 2
+  1268→                encode_dp_shift_imm(
+  1269→                    *cond,
+  1270→                    DP_MOV,
+  1271→                    false,
+  1272→                    0,
+  1273→                    rd.encoding(),
+  1274→                    2,
+  1275→                    *shift_imm,
+  1276→                    rm.encoding(),
+  1277→                )
+  1278→            }
+  1279→            Instruction::RorImm {
+  1280→                rd,
+  1281→                rm,
+  1282→                shift_imm,
+  1283→                cond,
+  1284→            } => {
+  1285→                // ROR = shift_type 3
+  1286→                encode_dp_shift_imm(
+  1287→                    *cond,
+  1288→                    DP_MOV,
+  1289→                    false,
+  1290→                    0,
+  1291→                    rd.encoding(),
+  1292→                    3,
+  1293→                    *shift_imm,
+  1294→                    rm.encoding(),
+  1295→                )
+  1296→            }
+  1297→
+  1298→            // ── Shift by Register ───────────────────────────────────
+  1299→            Instruction::LslReg { rd, rn, rs, cond } => encode_dp_shift_reg(
+  1300→                *cond,
+  1301→                DP_MOV,
+  1302→                false,
+  1303→                0,
+  1304→                rd.encoding(),
+  1305→                0,
+  1306→                rs.encoding(),
+  1307→                rn.encoding(),
+  1308→            ),
+  1309→            Instruction::LsrReg { rd, rn, rs, cond } => encode_dp_shift_reg(
+  1310→                *cond,
+  1311→                DP_MOV,
+  1312→                false,
+  1313→                0,
+  1314→                rd.encoding(),
+  1315→                1,
+  1316→                rs.encoding(),
+  1317→                rn.encoding(),
+  1318→            ),
+  1319→            Instruction::AsrReg { rd, rn, rs, cond } => encode_dp_shift_reg(
+  1320→                *cond,
+  1321→                DP_MOV,
+  1322→                false,
+  1323→                0,
+  1324→                rd.encoding(),
+  1325→                2,
+  1326→                rs.encoding(),
+  1327→                rn.encoding(),
+  1328→            ),
+  1329→            Instruction::RorReg { rd, rn, rs, cond } => encode_dp_shift_reg(
+  1330→                *cond,
+  1331→                DP_MOV,
+  1332→                false,
+  1333→                0,
+  1334→                rd.encoding(),
+  1335→                3,
+  1336→                rs.encoding(),
+  1337→                rn.encoding(),
+  1338→            ),
+  1339→
+  1340→            // ── Multiply ────────────────────────────────────────────
+  1341→            Instruction::Mul {
+  1342→                rd,
+  1343→                rn,
+  1344→                rs,
+  1345→                rm,
+  1346→                cond,
+  1347→            } => encode_mul(
+  1348→                *cond,
+  1349→                false,
+  1350→                rd.encoding(),
+  1351→                rn.encoding(),
+  1352→                rs.encoding(),
+  1353→                rm.encoding(),
+  1354→            ),
+  1355→            Instruction::Mla {
+  1356→                rd,
+  1357→                rn,
+  1358→                rs,
+  1359→                rm,
+  1360→                cond,
+  1361→            } => encode_mla(
+  1362→                *cond,
+  1363→                false,
+  1364→                rd.encoding(),
+  1365→                rn.encoding(),
+  1366→                rs.encoding(),
+  1367→                rm.encoding(),
+  1368→            ),
+  1369→            Instruction::Umull {
+  1370→                rd_hi,
+  1371→                rd_lo,
+  1372→                rs,
+  1373→                rm,
+  1374→                cond,
+  1375→            } => encode_umull(
+  1376→                *cond,
+  1377→                false,
+  1378→                rd_hi.encoding(),
+  1379→                rd_lo.encoding(),
+  1380→                rs.encoding(),
+  1381→                rm.encoding(),
+  1382→            ),
+  1383→            Instruction::Smull {
+  1384→                rd_hi,
+  1385→                rd_lo,
+  1386→                rs,
+  1387→                rm,
+  1388→                cond,
+  1389→            } => encode_smull(
+  1390→                *cond,
+  1391→                false,
+  1392→                rd_hi.encoding(),
+  1393→                rd_lo.encoding(),
+  1394→                rs.encoding(),
+  1395→                rm.encoding(),
+  1396→            ),
+  1397→
+  1398→            // ── Load/Store Word ─────────────────────────────────────
+  1399→            Instruction::Ldr {
+  1400→                rd,
+  1401→                rn,
+  1402→                offset,
+  1403→                cond,
+  1404→            } => {
+  1405→                let (u, off) = if *offset >= 0 {
+  1406→                    (true, *offset as u32)
+  1407→                } else {
+  1408→                    (false, (-*offset) as u32)
+  1409→                };
+  1410→                encode_ls_imm(
+  1411→                    *cond,
+  1412→                    true,
+  1413→                    u,
+  1414→                    false,
+  1415→                    false,
+  1416→                    true,
+  1417→                    rn.encoding(),
+  1418→                    rd.encoding(),
+  1419→                    off,
+  1420→                )
+  1421→            }
+  1422→            Instruction::Str {
+  1423→                rd,
+  1424→                rn,
+  1425→                offset,
+  1426→                cond,
+  1427→            } => {
+  1428→                let (u, off) = if *offset >= 0 {
+  1429→                    (true, *offset as u32)
+  1430→                } else {
+  1431→                    (false, (-*offset) as u32)
+  1432→                };
+  1433→                encode_ls_imm(
+  1434→                    *cond,
+  1435→                    true,
+  1436→                    u,
+  1437→                    false,
+  1438→                    false,
+  1439→                    false,
+  1440→                    rn.encoding(),
+  1441→                    rd.encoding(),
+  1442→                    off,
+  1443→                )
+  1444→            }
+  1445→
+  1446→            // ── Load/Store Byte ─────────────────────────────────────
+  1447→            Instruction::Ldrb {
+  1448→                rd,
+  1449→                rn,
+  1450→                offset,
+  1451→                cond,
+  1452→            } => {
+  1453→                let (u, off) = if *offset >= 0 {
+  1454→                    (true, *offset as u32)
+  1455→                } else {
+  1456→                    (false, (-*offset) as u32)
+  1457→                };
+  1458→                encode_ls_imm(
+  1459→                    *cond,
+  1460→                    true,
+  1461→                    u,
+  1462→                    true,
+  1463→                    false,
+  1464→                    true,
+  1465→                    rn.encoding(),
+  1466→                    rd.encoding(),
+  1467→                    off,
+  1468→                )
+  1469→            }
+  1470→            Instruction::Strb {
+  1471→                rd,
+  1472→                rn,
+  1473→                offset,
+  1474→                cond,
+  1475→            } => {
+  1476→                let (u, off) = if *offset >= 0 {
+  1477→                    (true, *offset as u32)
+  1478→                } else {
+  1479→                    (false, (-*offset) as u32)
+  1480→                };
+  1481→                encode_ls_imm(
+  1482→                    *cond,
+  1483→                    true,
+  1484→                    u,
+  1485→                    true,
+  1486→                    false,
+  1487→                    false,
+  1488→                    rn.encoding(),
+  1489→                    rd.encoding(),
+  1490→                    off,
+  1491→                )
+  1492→            }
+  1493→
+  1494→            // ── Load/Store Halfword ─────────────────────────────────
+  1495→            Instruction::Ldrh {
+  1496→                rd,
+  1497→                rn,
+  1498→                offset,
+  1499→                cond,
+  1500→            } => {
+  1501→                let (u, off) = if *offset >= 0 {
+  1502→                    (true, *offset as u32)
+  1503→                } else {
+  1504→                    (false, (-*offset) as u32)
+  1505→                };
+  1506→                encode_ls_half_imm(
+  1507→                    *cond,
+  1508→                    true,
+  1509→                    u,
+  1510→                    false,
+  1511→                    true,
+  1512→                    rn.encoding(),
+  1513→                    rd.encoding(),
+  1514→                    off,
+  1515→                )
+  1516→            }
+  1517→            Instruction::Strh {
+  1518→                rd,
+  1519→                rn,
+  1520→                offset,
+  1521→                cond,
+  1522→            } => {
+  1523→                let (u, off) = if *offset >= 0 {
+  1524→                    (true, *offset as u32)
+  1525→                } else {
+  1526→                    (false, (-*offset) as u32)
+  1527→                };
+  1528→                encode_ls_half_imm(
+  1529→                    *cond,
+  1530→                    true,
+  1531→                    u,
+  1532→                    false,
+  1533→                    false,
+  1534→                    rn.encoding(),
+  1535→                    rd.encoding(),
+  1536→                    off,
+  1537→                )
+  1538→            }
+  1539→
+  1540→            // ── Load/Store Doubleword ───────────────────────────────
+  1541→            Instruction::Ldrd {
+  1542→                rd,
+  1543→                rn,
+  1544→                offset,
+  1545→                cond,
+  1546→            } => {
+  1547→                let (u, off) = if *offset >= 0 {
+  1548→                    (true, *offset as u32)
+  1549→                } else {
+  1550→                    (false, (-*offset) as u32)
+  1551→                };
+  1552→                encode_ls_double_imm(
+  1553→                    *cond,
+  1554→                    true,
+  1555→                    u,
+  1556→                    false,
+  1557→                    true,
+  1558→                    rn.encoding(),
+  1559→                    rd.encoding(),
+  1560→                    off,
+  1561→                )
+  1562→            }
+  1563→            Instruction::Strd {
+  1564→                rd,
+  1565→                rn,
+  1566→                offset,
+  1567→                cond,
+  1568→            } => {
+  1569→                let (u, off) = if *offset >= 0 {
+  1570→                    (true, *offset as u32)
+  1571→                } else {
+  1572→                    (false, (-*offset) as u32)
+  1573→                };
+  1574→                encode_ls_double_imm(
+  1575→                    *cond,
+  1576→                    true,
+  1577→                    u,
+  1578→                    false,
+  1579→                    false,
+  1580→                    rn.encoding(),
+  1581→                    rd.encoding(),
+  1582→                    off,
+  1583→                )
+  1584→            }
+  1585→
+  1586→            // ── Load Signed Byte/Halfword ───────────────────────────
+  1587→            Instruction::Ldrsb {
+  1588→                rd,
+  1589→                rn,
+  1590→                offset,
+  1591→                cond,
+  1592→            } => {
+  1593→                let (u, off) = if *offset >= 0 {
+  1594→                    (true, *offset as u32)
+  1595→                } else {
+  1596→                    (false, (-*offset) as u32)
+  1597→                };
+  1598→                encode_ldrsb_imm(*cond, true, u, false, rn.encoding(), rd.encoding(), off)
+  1599→            }
+  1600→            Instruction::Ldrsh {
+  1601→                rd,
+  1602→                rn,
+  1603→                offset,
+  1604→                cond,
+  1605→            } => {
+  1606→                let (u, off) = if *offset >= 0 {
+  1607→                    (true, *offset as u32)
+  1608→                } else {
+  1609→                    (false, (-*offset) as u32)
+  1610→                };
+  1611→                encode_ldrsh_imm(*cond, true, u, false, rn.encoding(), rd.encoding(), off)
+  1612→            }
+  1613→
+  1614→            // ── Load/Store Multiple ─────────────────────────────────
+  1615→            Instruction::Ldm {
+  1616→                rn,
+  1617→                register_list,
+  1618→                writeback,
+  1619→                cond,
+  1620→            } => {
+  1621→                // LDM = Increment After (P=0, U=1) — typical IA variant
+  1622→                encode_ldm(
+  1623→                    *cond,
+  1624→                    false,
+  1625→                    true,
+  1626→                    false,
+  1627→                    *writeback,
+  1628→                    rn.encoding(),
+  1629→                    *register_list,
+  1630→                )
+  1631→            }
+  1632→            Instruction::Stm {
+  1633→                rn,
+  1634→                register_list,
+  1635→                writeback,
+  1636→                cond,
+  1637→            } => {
+  1638→                // STM = Decrement Before (P=1, U=0) — typical DB (push) variant
+  1639→                encode_stm(
+  1640→                    *cond,
+  1641→                    true,
+  1642→                    false,
+  1643→                    false,
+  1644→                    *writeback,
+  1645→                    rn.encoding(),
+  1646→                    *register_list,
+  1647→                )
+  1648→            }
+  1649→
+  1650→            // ── Branch ──────────────────────────────────────────────
+  1651→            Instruction::B { offset, cond } => encode_branch(*cond, false, *offset >> 2),
+  1652→            Instruction::Bl { offset, cond } => encode_branch(*cond, true, *offset >> 2),
+  1653→            Instruction::Bx { rm, cond } => encode_bx(*cond, rm.encoding()),
+  1654→            Instruction::BlxReg { rm, cond } => encode_blx_reg(*cond, rm.encoding()),
+  1655→
+  1656→            // ── System ──────────────────────────────────────────────
+  1657→            Instruction::Svc { imm24, cond } => encode_svc(*cond, *imm24),
+  1658→            Instruction::Nop => {
+  1659→                // NOP = MOV R0, R0 = 0xE1A00000
+  1660→                0xE1A0_0000u32.to_le_bytes()
+  1661→            }
+  1662→            Instruction::Mrs { rd, spsr, cond } => encode_mrs(*cond, rd.encoding(), *spsr),
+  1663→            Instruction::Msr { mask, rm, cond } => encode_msr(*cond, *mask, rm.encoding()),
+  1664→        }
+  1665→    }
+  1666→
+  1667→    /// Returns the mnemonic name of this instruction.
+  1668→    pub fn mnemonic(&self) -> &'static str {
+  1669→        match self {
+  1670→            Instruction::Add { .. } => "add",
+  1671→            Instruction::Sub { .. } => "sub",
+  1672→            Instruction::And { .. } => "and",
+  1673→            Instruction::Orr { .. } => "orr",
+  1674→            Instruction::Eor { .. } => "eor",
+  1675→            Instruction::Bic { .. } => "bic",
+  1676→            Instruction::Mov { .. } => "mov",
+  1677→            Instruction::Mvn { .. } => "mvn",
+  1678→            Instruction::Cmp { .. } => "cmp",
+  1679→            Instruction::Cmn { .. } => "cmn",
+  1680→            Instruction::Tst { .. } => "tst",
+  1681→            Instruction::Teq { .. } => "teq",
+  1682→            Instruction::AddImm { .. } => "add",
+  1683→            Instruction::SubImm { .. } => "sub",
+  1684→            Instruction::MovImm { .. } => "mov",
+  1685→            Instruction::CmpImm { .. } => "cmp",
+  1686→            Instruction::LslImm { .. } => "lsl",
+  1687→            Instruction::LsrImm { .. } => "lsr",
+  1688→            Instruction::AsrImm { .. } => "asr",
+  1689→            Instruction::RorImm { .. } => "ror",
+  1690→            Instruction::LslReg { .. } => "lsl",
+  1691→            Instruction::LsrReg { .. } => "lsr",
+  1692→            Instruction::AsrReg { .. } => "asr",
+  1693→            Instruction::RorReg { .. } => "ror",
+  1694→            Instruction::Mul { .. } => "mul",
+  1695→            Instruction::Mla { .. } => "mla",
+  1696→            Instruction::Umull { .. } => "umull",
+  1697→            Instruction::Smull { .. } => "smull",
+  1698→            Instruction::Ldr { .. } => "ldr",
+  1699→            Instruction::Str { .. } => "str",
+  1700→            Instruction::Ldrb { .. } => "ldrb",
+  1701→            Instruction::Strb { .. } => "strb",
+  1702→            Instruction::Ldrh { .. } => "ldrh",
+  1703→            Instruction::Strh { .. } => "strh",
+  1704→            Instruction::Ldrd { .. } => "ldrd",
+  1705→            Instruction::Strd { .. } => "strd",
+  1706→            Instruction::Ldrsb { .. } => "ldrsb",
+  1707→            Instruction::Ldrsh { .. } => "ldrsh",
+  1708→            Instruction::Ldm { .. } => "ldm",
+  1709→            Instruction::Stm { .. } => "stm",
+  1710→            Instruction::B { .. } => "b",
+  1711→            Instruction::Bl { .. } => "bl",
+  1712→            Instruction::Bx { .. } => "bx",
+  1713→            Instruction::BlxReg { .. } => "blx",
+  1714→            Instruction::Svc { .. } => "svc",
+  1715→            Instruction::Nop => "nop",
+  1716→            Instruction::Mrs { .. } => "mrs",
+  1717→            Instruction::Msr { .. } => "msr",
+  1718→        }
+  1719→    }
+  1720→}
+  1721→
+  1722→impl fmt::Display for Instruction {
+  1723→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1724→        match self {
+  1725→            Instruction::Add { rd, rn, rm, cond } => {
+  1726→                write!(f, "add{} {}, {}, {}", cond, rd, rn, rm)
+  1727→            }
+  1728→            Instruction::Sub { rd, rn, rm, cond } => {
+  1729→                write!(f, "sub{} {}, {}, {}", cond, rd, rn, rm)
+  1730→            }
+  1731→            Instruction::And { rd, rn, rm, cond } => {
+  1732→                write!(f, "and{} {}, {}, {}", cond, rd, rn, rm)
+  1733→            }
+  1734→            Instruction::Orr { rd, rn, rm, cond } => {
+  1735→                write!(f, "orr{} {}, {}, {}", cond, rd, rn, rm)
+  1736→            }
+  1737→            Instruction::Eor { rd, rn, rm, cond } => {
+  1738→                write!(f, "eor{} {}, {}, {}", cond, rd, rn, rm)
+  1739→            }
+  1740→            Instruction::Bic { rd, rn, rm, cond } => {
+  1741→                write!(f, "bic{} {}, {}, {}", cond, rd, rn, rm)
+  1742→            }
+  1743→            Instruction::Mov { rd, rm, cond } => write!(f, "mov{} {}, {}", cond, rd, rm),
+  1744→            Instruction::Mvn { rd, rm, cond } => write!(f, "mvn{} {}, {}", cond, rd, rm),
+  1745→            Instruction::Cmp { rn, rm, cond } => write!(f, "cmp{} {}, {}", cond, rn, rm),
+  1746→            Instruction::Cmn { rn, rm, cond } => write!(f, "cmn{} {}, {}", cond, rn, rm),
+  1747→            Instruction::Tst { rn, rm, cond } => write!(f, "tst{} {}, {}", cond, rn, rm),
+  1748→            Instruction::Teq { rn, rm, cond } => write!(f, "teq{} {}, {}", cond, rn, rm),
+  1749→            Instruction::AddImm {
+  1750→                rd,
+  1751→                rn,
+  1752→                rotate: _,
+  1753→                imm8,
+  1754→                cond,
+  1755→            } => {
+  1756→                write!(f, "add{} {}, {}, #{}", cond, rd, rn, imm8)
+  1757→            }
+  1758→            Instruction::SubImm {
+  1759→                rd,
+  1760→                rn,
+  1761→                rotate: _,
+  1762→                imm8,
+  1763→                cond,
+  1764→            } => {
+  1765→                write!(f, "sub{} {}, {}, #{}", cond, rd, rn, imm8)
+  1766→            }
+  1767→            Instruction::MovImm {
+  1768→                rd,
+  1769→                rotate: _,
+  1770→                imm8,
+  1771→                cond,
+  1772→            } => {
+  1773→                write!(f, "mov{} {}, #{}", cond, rd, imm8)
+  1774→            }
+  1775→            Instruction::CmpImm {
+  1776→                rn,
+  1777→                rotate: _,
+  1778→                imm8,
+  1779→                cond,
+  1780→            } => {
+  1781→                write!(f, "cmp{} {}, #{}", cond, rn, imm8)
+  1782→            }
+  1783→            Instruction::LslImm {
+  1784→                rd,
+  1785→                rm,
+  1786→                shift_imm,
+  1787→                cond,
+  1788→            } => {
+  1789→                write!(f, "lsl{} {}, {}, #{}", cond, rd, rm, shift_imm)
+  1790→            }
+  1791→            Instruction::LsrImm {
+  1792→                rd,
+  1793→                rm,
+  1794→                shift_imm,
+  1795→                cond,
+  1796→            } => {
+  1797→                write!(f, "lsr{} {}, {}, #{}", cond, rd, rm, shift_imm)
+  1798→            }
+  1799→            Instruction::AsrImm {
+  1800→                rd,
+  1801→                rm,
+  1802→                shift_imm,
+  1803→                cond,
+  1804→            } => {
+  1805→                write!(f, "asr{} {}, {}, #{}", cond, rd, rm, shift_imm)
+  1806→            }
+  1807→            Instruction::RorImm {
+  1808→                rd,
+  1809→                rm,
+  1810→                shift_imm,
+  1811→                cond,
+  1812→            } => {
+  1813→                write!(f, "ror{} {}, {}, #{}", cond, rd, rm, shift_imm)
+  1814→            }
+  1815→            Instruction::LslReg { rd, rn, rs, cond } => {
+  1816→                write!(f, "lsl{} {}, {}, {}", cond, rd, rn, rs)
+  1817→            }
+  1818→            Instruction::LsrReg { rd, rn, rs, cond } => {
+  1819→                write!(f, "lsr{} {}, {}, {}", cond, rd, rn, rs)
+  1820→            }
+  1821→            Instruction::AsrReg { rd, rn, rs, cond } => {
+  1822→                write!(f, "asr{} {}, {}, {}", cond, rd, rn, rs)
+  1823→            }
+  1824→            Instruction::RorReg { rd, rn, rs, cond } => {
+  1825→                write!(f, "ror{} {}, {}, {}", cond, rd, rn, rs)
+  1826→            }
+  1827→            Instruction::Mul {
+  1828→                rd,
+  1829→                rn,
+  1830→                rs,
+  1831→                rm: _,
+  1832→                cond,
+  1833→            } => {
+  1834→                write!(f, "mul{} {}, {}, {}", cond, rd, rn, rs)
+  1835→            }
+  1836→            Instruction::Mla {
+  1837→                rd,
+  1838→                rn,
+  1839→                rs,
+  1840→                rm,
+  1841→                cond,
+  1842→            } => {
+  1843→                write!(f, "mla{} {}, {}, {}, {}", cond, rd, rn, rm, rs)
+  1844→            }
+  1845→            Instruction::Umull {
+  1846→                rd_hi,
+  1847→                rd_lo,
+  1848→                rs,
+  1849→                rm,
+  1850→                cond,
+  1851→            } => {
+  1852→                write!(f, "umull{} {}, {}, {}, {}", cond, rd_lo, rd_hi, rm, rs)
+  1853→            }
+  1854→            Instruction::Smull {
+  1855→                rd_hi,
+  1856→                rd_lo,
+  1857→                rs,
+  1858→                rm,
+  1859→                cond,
+  1860→            } => {
+  1861→                write!(f, "smull{} {}, {}, {}, {}", cond, rd_lo, rd_hi, rm, rs)
+  1862→            }
+  1863→            Instruction::Ldr {
+  1864→                rd,
+  1865→                rn,
+  1866→                offset,
+  1867→                cond,
+  1868→            } => {
+  1869→                write!(f, "ldr{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1870→            }
+  1871→            Instruction::Str {
+  1872→                rd,
+  1873→                rn,
+  1874→                offset,
+  1875→                cond,
+  1876→            } => {
+  1877→                write!(f, "str{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1878→            }
+  1879→            Instruction::Ldrb {
+  1880→                rd,
+  1881→                rn,
+  1882→                offset,
+  1883→                cond,
+  1884→            } => {
+  1885→                write!(f, "ldrb{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1886→            }
+  1887→            Instruction::Strb {
+  1888→                rd,
+  1889→                rn,
+  1890→                offset,
+  1891→                cond,
+  1892→            } => {
+  1893→                write!(f, "strb{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1894→            }
+  1895→            Instruction::Ldrh {
+  1896→                rd,
+  1897→                rn,
+  1898→                offset,
+  1899→                cond,
+  1900→            } => {
+  1901→                write!(f, "ldrh{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1902→            }
+  1903→            Instruction::Strh {
+  1904→                rd,
+  1905→                rn,
+  1906→                offset,
+  1907→                cond,
+  1908→            } => {
+  1909→                write!(f, "strh{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1910→            }
+  1911→            Instruction::Ldrd {
+  1912→                rd,
+  1913→                rn,
+  1914→                offset,
+  1915→                cond,
+  1916→            } => {
+  1917→                write!(f, "ldrd{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1918→            }
+  1919→            Instruction::Strd {
+  1920→                rd,
+  1921→                rn,
+  1922→                offset,
+  1923→                cond,
+  1924→            } => {
+  1925→                write!(f, "strd{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1926→            }
+  1927→            Instruction::Ldrsb {
+  1928→                rd,
+  1929→                rn,
+  1930→                offset,
+  1931→                cond,
+  1932→            } => {
+  1933→                write!(f, "ldrsb{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1934→            }
+  1935→            Instruction::Ldrsh {
+  1936→                rd,
+  1937→                rn,
+  1938→                offset,
+  1939→                cond,
+  1940→            } => {
+  1941→                write!(f, "ldrsh{} {}, [{}, #{}]", cond, rd, rn, offset)
+  1942→            }
+  1943→            Instruction::Ldm {
+  1944→                rn,
+  1945→                register_list,
+  1946→                writeback,
+  1947→                cond,
+  1948→            } => {
+  1949→                write!(
+  1950→                    f,
+  1951→                    "ldm{} {}{}, {{{:#06x}}}",
+  1952→                    cond,
+  1953→                    rn,
+  1954→                    if *writeback { "!" } else { "" },
+  1955→                    register_list
+  1956→                )
+  1957→            }
+  1958→            Instruction::Stm {
+  1959→                rn,
+  1960→                register_list,
+  1961→                writeback,
+  1962→                cond,
+  1963→            } => {
+  1964→                write!(
+  1965→                    f,
+  1966→                    "stm{} {}{}, {{{:#06x}}}",
+  1967→                    cond,
+  1968→                    rn,
+  1969→                    if *writeback { "!" } else { "" },
+  1970→                    register_list
+  1971→                )
+  1972→            }
+  1973→            Instruction::B { offset, cond } => write!(f, "b{} {:+}", cond, offset),
+  1974→            Instruction::Bl { offset, cond } => write!(f, "bl{} {:+}", cond, offset),
+  1975→            Instruction::Bx { rm, cond } => write!(f, "bx{} {}", cond, rm),
+  1976→            Instruction::BlxReg { rm, cond } => write!(f, "blx{} {}", cond, rm),
+  1977→            Instruction::Svc { imm24, cond } => write!(f, "svc{} #{}", cond, imm24),
+  1978→            Instruction::Nop => write!(f, "nop"),
+  1979→            Instruction::Mrs { rd, spsr, cond } => {
+  1980→                write!(
+  1981→                    f,
+  1982→                    "mrs{} {}, {}",
+  1983→                    cond,
+  1984→                    rd,
+  1985→                    if *spsr { "spsr" } else { "cpsr" }
+  1986→                )
+  1987→            }
+  1988→            Instruction::Msr { mask, rm, cond } => {
+  1989→                write!(f, "msr{} cpsr_{}, {}", cond, mask, rm)
+  1990→            }
+  1991→        }
+  1992→    }
+  1993→}
+  1994→
+  1995→// ===========================================================================
+  1996→// ELF32 Emission
+  1997→// ===========================================================================
+  1998→
+  1999→/// Build a minimal ELF32 binary for ARM from raw code bytes with 2 LOAD segments.
+  2000→///
+
+[showing lines 1-2000 of 4617; use offset=2001 with limit to continue reading]
