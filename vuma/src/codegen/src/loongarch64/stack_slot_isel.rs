@@ -125,6 +125,38 @@ fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
     code
 }
 
+/// Always emit the full 4-instruction sequence for loading a 64-bit immediate.
+///
+/// This is needed for `GetAddress` and other cases where the immediate will be
+/// patched later by an R_LARCH_64 relocation.  The full sequence is always 16 bytes
+/// (4 × 4-byte instructions), guaranteeing room for any 64-bit value:
+///
+///   lu12i.w rd, bits[31:12]
+///   ori     rd, rd, bits[11:0]
+///   lu32i.d rd, bits[51:32]
+///   lu52i.d rd, rd, bits[63:52]
+fn encode_load_imm_full_64(rd: Gpr, val: u64) -> Vec<u8> {
+    let mut code = Vec::with_capacity(16);
+
+    // Step 1: lu12i.w rd, bits[31:12]
+    let hi20 = ((val >> 12) & 0xFFFFF) as i32;
+    code.extend_from_slice(&Instruction::Lu12iW { rd, imm20: hi20 }.encode());
+
+    // Step 2: ori rd, rd, bits[11:0]
+    let lo12 = (val & 0xFFF) as u32;
+    code.extend_from_slice(&Instruction::Ori { rd, rj: rd, imm12: lo12 }.encode());
+
+    // Step 3: lu32i.d rd, bits[51:32]
+    let hi32 = ((val >> 32) & 0xFFFFF) as i32;
+    code.extend_from_slice(&Instruction::Lu32iD { rd, imm20: hi32 }.encode());
+
+    // Step 4: lu52i.d rd, rd, bits[63:52]
+    let hi52 = ((val >> 52) & 0xFFF) as i32;
+    code.extend_from_slice(&Instruction::Lu52iD { rd, rj: rd, imm12: hi52 }.encode());
+
+    code
+}
+
 /// Check if a value fits in a signed 12-bit range.
 fn fits_si12(val: i64) -> bool {
     (-2048..=2047).contains(&val)
@@ -428,14 +460,36 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         push_code(code, "add fp, sp, frame_size");
     }
 
-    // Store function parameters from argument registers to their stack slots
-    let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+    // Store function parameters from argument registers to their stack slots.
+    // Per the LP64 ABI: first 8 params in $a0–$a7, remaining on the stack
+    // at $fp+0, $fp+8, … (the caller's outgoing arg area).
+    let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             if i < arg_regs.len() {
+                // Parameters 0–7: already in arg registers, store to vreg slot
                 push_code(
                     encode_store_to_vreg(arg_regs[i], id, fp, &vreg_slots),
                     "store_param",
+                );
+            } else {
+                // Parameters 8+: passed on the stack at $fp + (i-8)*8
+                let stack_off = ((i - 8) as i32) * 8;
+                // Load from the stack into S0 ($a0), then store to vreg slot
+                if fits_si12(stack_off as i64) {
+                    push_code(
+                        Instruction::LdD { rd: S0, rj: fp, imm12: stack_off }.encode().to_vec(),
+                        "load_stack_param",
+                    );
+                } else {
+                    let mut code = encode_load_imm(S2, stack_off as i64);
+                    code.extend_from_slice(&Instruction::AddD { rd: S2, rj: fp, rk: S2 }.encode());
+                    code.extend_from_slice(&Instruction::LdD { rd: S0, rj: S2, imm12: 0 }.encode());
+                    push_code(code, "load_stack_param");
+                }
+                push_code(
+                    encode_store_to_vreg(S0, id, fp, &vreg_slots),
+                    "store_stack_param",
                 );
             }
         }
@@ -842,14 +896,59 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Call ──
                 IRInstr::Call { dst, func: call_target, args } => {
                     let mut code = Vec::new();
-                    // Load arguments from stack into argument registers
-                    let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                    // Per the LP64 ABI: first 8 args in $a0–$a7, args 8+ on
+                    // the stack at $sp+0, $sp+8, …
+                    let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+
+                    let num_stack_args = if args.len() > 8 { args.len() - 8 } else { 0 };
+                    // Stack arg space, 16-byte aligned (ABI requirement)
+                    let stack_arg_space = ((num_stack_args * 8 + 15) & !15) as i32;
+
+                    // Step 1: Allocate stack space for stack-passed arguments
+                    if stack_arg_space > 0 {
+                        if fits_si12(-(stack_arg_space as i64)) {
+                            code.extend_from_slice(
+                                &Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: -stack_arg_space }.encode(),
+                            );
+                        } else {
+                            code.extend(encode_load_imm(S2, -(stack_arg_space as i64)));
+                            code.extend_from_slice(
+                                &Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S2 }.encode(),
+                            );
+                        }
+                    }
+
+                    // Step 2: Store stack-passed arguments (index >= 8) at $sp + (i-8)*8
+                    for (i, arg) in args.iter().enumerate() {
+                        if i >= call_arg_regs.len() {
+                            let sp_off = ((i - call_arg_regs.len()) as i32) * 8;
+                            // Load arg value into S0 (scratch), then store at $sp + sp_off
+                            code.extend(encode_load_value(arg, S0, fp, &vreg_slots));
+                            if fits_si12(sp_off as i64) {
+                                code.extend_from_slice(
+                                    &Instruction::StD { rd: S0, rj: Gpr::Sp, imm12: sp_off }.encode(),
+                                );
+                            } else {
+                                // Large offset: compute address in S2, then store
+                                code.extend(encode_load_imm(S2, sp_off as i64));
+                                code.extend_from_slice(
+                                    &Instruction::AddD { rd: S2, rj: Gpr::Sp, rk: S2 }.encode(),
+                                );
+                                code.extend_from_slice(
+                                    &Instruction::StD { rd: S0, rj: S2, imm12: 0 }.encode(),
+                                );
+                            }
+                        }
+                    }
+
+                    // Step 3: Load register-passed arguments (index 0–7) into $a0–$a7
                     for (i, arg) in args.iter().enumerate() {
                         if i < call_arg_regs.len() {
                             code.extend(encode_load_value(arg, call_arg_regs[i], fp, &vreg_slots));
                         }
                     }
-                    // BL — record a relocation for later patching
+
+                    // Step 4: BL — record a relocation for later patching
                     let bl_byte_offset = byte_offset + code.len();
                     code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
                     relocations.push(RelocationEntry {
@@ -857,6 +956,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         symbol: call_target.clone(),
                         reloc_type: "R_LARCH_B26".to_string(),
                     });
+
+                    // Step 5: Deallocate stack argument space
+                    if stack_arg_space > 0 {
+                        if fits_si12(stack_arg_space as i64) {
+                            code.extend_from_slice(
+                                &Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: stack_arg_space }.encode(),
+                            );
+                        } else {
+                            code.extend(encode_load_imm(S2, stack_arg_space as i64));
+                            code.extend_from_slice(
+                                &Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S2 }.encode(),
+                            );
+                        }
+                    }
+
                     // Store return value ($a0) to dst's stack slot
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
@@ -921,17 +1035,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Select { dst, cond, true_val, false_val, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load false_val into S0 (default)
+                    // Use branchless maskeqz/masknez:
+                    //   maskeqz S0, false_val, cond  →  S0 = (cond == 0) ? false_val : 0
+                    //   masknez S1, true_val, cond   →  S1 = (cond != 0) ? true_val : 0
+                    //   or S0, S0, S1               →  S0 = result
                     code.extend(encode_load_value(false_val, S0, fp, &vreg_slots));
-                    // Load true_val into S1
                     code.extend(encode_load_value(true_val, S1, fp, &vreg_slots));
-                    // Load cond into S2
                     code.extend(encode_load_value(cond, S2, fp, &vreg_slots));
-                    // If cond != 0, use S1 (true); otherwise keep S0 (false)
-                    // beqz S2, +2 (skip next instruction if cond == 0)
-                    code.extend_from_slice(&Instruction::Beqz { rj: S2, offs21: 2 }.encode());
-                    // add.d S0, S1, $r0 (move true_val to S0)
-                    code.extend_from_slice(&Instruction::AddD { rd: S0, rj: S1, rk: Gpr::R0 }.encode());
+                    // maskeqz S0, S0, S2: if cond==0, S0=false_val; else S0=0
+                    code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S0, rk: S2 }.encode());
+                    // masknez S1, S1, S2: if cond!=0, S1=true_val; else S1=0
+                    code.extend_from_slice(&Instruction::Masknez { rd: S1, rj: S1, rk: S2 }.encode());
+                    // or S0, S0, S1: merge
+                    code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S1 }.encode());
                     // Store result
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
@@ -952,12 +1068,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::GetAddress { dst, name } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load placeholder address
-                    code.extend(encode_load_imm(S0, 0));
+                    // Load placeholder address using the full 4-instruction sequence
+                    // (always 16 bytes) so the R_LARCH_64 relocation can patch in
+                    // any 64-bit address later.
+                    let imm_offset = byte_offset + code.len();
+                    code.extend(encode_load_imm_full_64(S0, 0));
                     // Record relocation for the immediate
                     // The immediate is spread across 4 instructions (16 bytes).
                     // The relocation offset points to the first instruction.
-                    let imm_offset = byte_offset + code.len() - 16;
                     relocations.push(RelocationEntry {
                         offset: imm_offset as u64,
                         symbol: name.clone(),

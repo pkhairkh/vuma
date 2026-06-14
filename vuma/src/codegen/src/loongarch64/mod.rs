@@ -98,6 +98,45 @@ impl Gpr {
         *self as u32
     }
 
+    /// Convert a 5-bit encoding index back to a Gpr variant.
+    pub fn from_encoding(enc: u32) -> Gpr {
+        match enc {
+            0 => Gpr::R0,
+            1 => Gpr::Ra,
+            2 => Gpr::Tp,
+            3 => Gpr::Sp,
+            4 => Gpr::A0,
+            5 => Gpr::A1,
+            6 => Gpr::A2,
+            7 => Gpr::A3,
+            8 => Gpr::A4,
+            9 => Gpr::A5,
+            10 => Gpr::A6,
+            11 => Gpr::A7,
+            12 => Gpr::T0,
+            13 => Gpr::T1,
+            14 => Gpr::T2,
+            15 => Gpr::T3,
+            16 => Gpr::T4,
+            17 => Gpr::T5,
+            18 => Gpr::T6,
+            19 => Gpr::T7,
+            20 => Gpr::T8,
+            21 => Gpr::R21,
+            22 => Gpr::Fp,
+            23 => Gpr::S0,
+            24 => Gpr::S1,
+            25 => Gpr::S2,
+            26 => Gpr::S3,
+            27 => Gpr::S4,
+            28 => Gpr::S5,
+            29 => Gpr::S6,
+            30 => Gpr::S7,
+            31 => Gpr::S8,
+            _ => Gpr::R0, // fallback: zero register
+        }
+    }
+
     /// Returns `true` if this register is available for register allocation.
     ///
     /// R0 (zero), Ra, Tp, and Sp are reserved.
@@ -445,6 +484,8 @@ const OPC_SUB_W: u32 = 0x0022;
 const OPC_SUB_D: u32 = 0x0023;
 const OPC_SLT: u32 = 0x0024;
 const OPC_SLTU: u32 = 0x0025;
+const OPC_MASKEQZ: u32 = 0x0026;
+const OPC_MASKNEZ: u32 = 0x0027;
 const OPC_NOR: u32 = 0x0028;
 const OPC_AND: u32 = 0x0029;
 const OPC_OR: u32 = 0x002A;
@@ -680,6 +721,12 @@ pub enum Instruction {
     DivDu { rd: Gpr, rj: Gpr, rk: Gpr },
     /// Modulo Doubleword (unsigned): `mod.du rd, rj, rk`
     ModDu { rd: Gpr, rj: Gpr, rk: Gpr },
+
+    // ── Conditional Mask (3R) ───────────────────────────────────────
+    /// Mask Equal Zero: `rd = (rk == 0) ? rj : 0`
+    Maskeqz { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Mask Not Equal Zero: `rd = (rk != 0) ? rj : 0`
+    Masknez { rd: Gpr, rj: Gpr, rk: Gpr },
 
     // ── Logical (3R) ────────────────────────────────────────────────
     /// AND: `and rd, rj, rk`
@@ -936,6 +983,14 @@ impl Instruction {
             }
             Instruction::ModDu { rd, rj, rk } => {
                 encode_3r(OPC_MOD_DU, rk.encoding(), rj.encoding(), rd.encoding())
+            }
+
+            // ── Conditional Mask (3R) ─────────────────────────────
+            Instruction::Maskeqz { rd, rj, rk } => {
+                encode_3r(OPC_MASKEQZ, rk.encoding(), rj.encoding(), rd.encoding())
+            }
+            Instruction::Masknez { rd, rj, rk } => {
+                encode_3r(OPC_MASKNEZ, rk.encoding(), rj.encoding(), rd.encoding())
             }
 
             // ── Logical (3R) ──────────────────────────────────────
@@ -1355,6 +1410,8 @@ impl Instruction {
             Instruction::ModD { .. } => "mod.d",
             Instruction::DivDu { .. } => "div.du",
             Instruction::ModDu { .. } => "mod.du",
+            Instruction::Maskeqz { .. } => "maskeqz",
+            Instruction::Masknez { .. } => "masknez",
             Instruction::And { .. } => "and",
             Instruction::Or { .. } => "or",
             Instruction::Xor { .. } => "xor",
@@ -1484,6 +1541,8 @@ impl fmt::Display for Instruction {
             Instruction::ModD { rd, rj, rk } => write!(f, "mod.d {}, {}, {}", rd, rj, rk),
             Instruction::DivDu { rd, rj, rk } => write!(f, "div.du {}, {}, {}", rd, rj, rk),
             Instruction::ModDu { rd, rj, rk } => write!(f, "mod.du {}, {}, {}", rd, rj, rk),
+            Instruction::Maskeqz { rd, rj, rk } => write!(f, "maskeqz {}, {}, {}", rd, rj, rk),
+            Instruction::Masknez { rd, rj, rk } => write!(f, "masknez {}, {}, {}", rd, rj, rk),
             Instruction::And { rd, rj, rk } => write!(f, "and {}, {}, {}", rd, rj, rk),
             Instruction::Or { rd, rj, rk } => write!(f, "or {}, {}, {}", rd, rj, rk),
             Instruction::Xor { rd, rj, rk } => write!(f, "xor {}, {}, {}", rd, rj, rk),
@@ -1674,6 +1733,45 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&vec![0u8; data_size as usize]);
 
     elf
+}
+
+/// Patch a 4-instruction load-immediate sequence in `code` starting at `offset`
+/// with the 64-bit value `val`.
+///
+/// The sequence is:
+///   lu12i.w rd, bits[31:12]   — sets bits[31:12] and sign-extends to 64 bits
+///   ori     rd, rd, bits[11:0] — sets bits[11:0]
+///   lu32i.d rd, bits[51:32]   — sets bits[51:32]
+///   lu52i.d rd, rd, bits[63:52] — sets bits[63:52]
+///
+/// The `rd` register is extracted from the existing first instruction.
+fn patch_load_imm_64(code: &mut [u8], offset: usize, val: u64) {
+    // Extract rd from the first instruction (lu12i.w): rd is at bits[4:0]
+    let word0 = u32::from_le_bytes([code[offset], code[offset + 1], code[offset + 2], code[offset + 3]]);
+    let rd_enc = (word0 & 0x1F) as u32;
+    let rd = Gpr::from_encoding(rd_enc);
+
+    // Re-encode all 4 instructions with the new value
+
+    // Step 1: lu12i.w rd, bits[31:12]
+    let hi20 = ((val >> 12) & 0xFFFFF) as i32;
+    let new_word0 = u32::from_le_bytes(Instruction::Lu12iW { rd, imm20: hi20 }.encode());
+    code[offset..offset + 4].copy_from_slice(&new_word0.to_le_bytes());
+
+    // Step 2: ori rd, rd, bits[11:0]
+    let lo12 = (val & 0xFFF) as u32;
+    let new_word1 = u32::from_le_bytes(Instruction::Ori { rd, rj: rd, imm12: lo12 }.encode());
+    code[offset + 4..offset + 8].copy_from_slice(&new_word1.to_le_bytes());
+
+    // Step 3: lu32i.d rd, bits[51:32]
+    let hi32 = ((val >> 32) & 0xFFFFF) as i32;
+    let new_word2 = u32::from_le_bytes(Instruction::Lu32iD { rd, imm20: hi32 }.encode());
+    code[offset + 8..offset + 12].copy_from_slice(&new_word2.to_le_bytes());
+
+    // Step 4: lu52i.d rd, rd, bits[63:52]
+    let hi52 = ((val >> 52) & 0xFFF) as i32;
+    let new_word3 = u32::from_le_bytes(Instruction::Lu52iD { rd, rj: rd, imm12: hi52 }.encode());
+    code[offset + 12..offset + 16].copy_from_slice(&new_word3.to_le_bytes());
 }
 
 // ===========================================================================
@@ -1894,72 +1992,48 @@ fn load_imm_la64(rd: Gpr, imm: i64) -> Vec<AllocatedInstruction> {
         vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
     ));
 
-    // lu32i.d is actually pcaddi in QEMU — skip it
-    // Instead, handle upper bits differently
+    // After LU12I.W + ORI, rd = sign_extend(val[31:0]) to 64 bits.
+    // This is correct only if the upper 32 bits of val match the sign extension
+    // of the lower 32 bits. Otherwise we need LU32I.D and/or LU52I.D.
 
-    let lower32 = val & 0xFFFFFFFF;
-    let sign_ext = if lower32 & 0x80000000 != 0 {
-        0xFFFFFFFF00000000u64
+    let lower32 = val as u32;
+    let sign_extended_upper: u32 = if lower32 & 0x80000000 != 0 {
+        0xFFFFFFFF
     } else {
-        0u64
+        0x00000000
     };
 
-    if val >> 32 != sign_ext >> 32 {
-        // Upper bits don't match sign extension
-        if val >> 32 == 0 && lower32 & 0x80000000 != 0 {
-            // Zero-extend: slli.d + srli.d
+    if (val >> 32) as u32 != sign_extended_upper {
+        // Upper bits don't match sign extension — need LU32I.D and/or LU52I.D.
+
+        // Step 3: LU32I.D rd, bits[51:32]
+        // Sets bits[51:32] of rd to the immediate; bits[63:52] and bits[31:0] unchanged.
+        let bits_51_32 = ((val >> 32) & 0xFFFFF) as i32;
+        let sign_ext_bits_51_32: u32 = if lower32 & 0x80000000 != 0 { 0xFFFFF } else { 0 };
+        if (bits_51_32 as u32) != sign_ext_bits_51_32 {
             result.push(emit_alloc_instr(
-                Instruction::SlliD { rd, rj: rd, imm8: 32 },
+                Instruction::Lu32iD { rd, imm20: bits_51_32 },
                 vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
             ));
-            result.push(emit_alloc_instr(
-                Instruction::SrliD { rd, rj: rd, imm8: 32 },
-                vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-            ));
-        } else {
-            // Full 64-bit: use lu52i.d for bits[63:52] then slli+srli+or for bits[51:32]
-            let hi52 = ((val >> 52) & 0xFFF) as i32;
+        }
+
+        // Step 4: LU52I.D rd, rd, bits[63:52]
+        // Sets bits[63:52] of rd to the immediate; other bits unchanged.
+        // After LU12I.W + ORI (+ optional LU32I.D), bits[63:52] are still from the
+        // sign extension of the lower 32 bits, so we need to check if they're correct.
+        let bits_63_52 = ((val >> 52) & 0xFFF) as i32;
+        let sign_ext_bits_63_52: i32 = if lower32 & 0x80000000 != 0 { 0xFFF } else { 0 };
+        if bits_63_52 != sign_ext_bits_63_52 {
             result.push(emit_alloc_instr(
                 Instruction::Lu52iD {
                     rd,
                     rj: rd,
-                    imm12: hi52,
+                    imm12: bits_63_52,
                 },
                 vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
             ));
-            let bits_51_32 = ((val >> 32) & 0xFFFFF) as u32;
-            if bits_51_32 != 0 {
-                let temp = Gpr::T0;
-                let hi_51_32 = ((val >> 32) & 0xFFFFF) as i32;
-                result.push(emit_alloc_instr(
-                    Instruction::Lu12iW { rd: temp, imm20: hi_51_32 },
-                    vec![],
-                    vec![PhysicalReg::new(RegClass::Gpr, temp.encoding())],
-                ));
-                result.push(emit_alloc_instr(
-                    Instruction::SlliD { rd: temp, rj: temp, imm8: 32 },
-                    vec![PhysicalReg::new(RegClass::Gpr, temp.encoding())],
-                    vec![PhysicalReg::new(RegClass::Gpr, temp.encoding())],
-                ));
-                result.push(emit_alloc_instr(
-                    Instruction::SlliD { rd, rj: rd, imm8: 32 },
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                ));
-                result.push(emit_alloc_instr(
-                    Instruction::SrliD { rd, rj: rd, imm8: 32 },
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                ));
-                result.push(emit_alloc_instr(
-                    Instruction::Or { rd, rj: rd, rk: temp },
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding()), PhysicalReg::new(RegClass::Gpr, temp.encoding())],
-                    vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
-                ));
-            }
         }
     }
 
@@ -3308,7 +3382,7 @@ impl Backend for LoongArch64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        stack_slot_isel::allocate_registers(func)
+        reg_alloc_isel::allocate_registers(func)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
@@ -3323,6 +3397,7 @@ impl Backend for LoongArch64Backend {
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
         const R_LARCH_B26: &str = "R_LARCH_B26";
+        const R_LARCH_64: &str = "R_LARCH_64";
 
         // ── LoongArch64 Linux static executable ──
         //
@@ -3356,7 +3431,6 @@ impl Backend for LoongArch64Backend {
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
         // BL <main> — placeholder, will be patched
-        // BL encoding: I26 format, opcode = 0x15
         start_stub.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
 
         // addi.d $a7, $r0, 93 (sys_exit = 93)
@@ -3379,17 +3453,8 @@ impl Backend for LoongArch64Backend {
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            // BL offset = (target - pc) / 4, where both are relative to start of all_code
-            // BL is at offset 0 within all_code, target is at main_offset
             let bl_offset = (main_offset as i64) / 4;
-            // Mask to 26 bits (signed)
-            let imm26 = (bl_offset as u32) & 0x03FFFFFF;
-            // Read existing BL word, patch imm26 field
-            let existing =
-                u32::from_le_bytes([start_stub[0], start_stub[1], start_stub[2], start_stub[3]]);
-            // BL encoding: opcode[31:26] = 0x15, imm26 in [25:0] via I26 format
-            // I26 format: hi10[25:16] | lo16[9:0]
-            // Actually, simpler: just re-encode the whole BL instruction
+            // Re-encode the whole BL instruction
             let patched_word =
                 u32::from_le_bytes(Instruction::Bl { offs26: bl_offset as i32 }.encode());
             start_stub[0..4].copy_from_slice(&patched_word.to_le_bytes());
@@ -3405,25 +3470,36 @@ impl Backend for LoongArch64Backend {
             }
         }
 
-        // ── Patch BL relocations ──
+        // ── Compute code virtual-address base ──
+        // Must match the layout in build_loongarch64_elf_2seg.
+        const ELF_BASE_ADDR: u64 = 0x120000000;
+        const ELF_PAGE_SIZE: u64 = 0x10000;
+        const ELF_HEADER_SIZE: u64 = 64;
+        const ELF_PHDR_SIZE: u64 = 56;
+        const ELF_NUM_PHDRS: u64 = 2;
+        let phdr_end = ELF_HEADER_SIZE + ELF_NUM_PHDRS * ELF_PHDR_SIZE;
+        let text_offset = ((phdr_end + ELF_PAGE_SIZE - 1) / ELF_PAGE_SIZE) * ELF_PAGE_SIZE;
+        let code_vaddr_base = ELF_BASE_ADDR + text_offset;
+
+        // ── Patch relocations ──
         let mut func_code_offset: usize = start_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
-                if abs_offset + 4 > all_code.len() {
-                    continue; // skip invalid relocations
-                }
 
                 if reloc.reloc_type == R_LARCH_B26 {
                     // R_LARCH_B26: patch BL instruction's offs26 field.
                     // BL target = PC + SignExtend(offs26) * 4
                     // So: offs26 = (target_addr - bl_addr) / 4
+                    if abs_offset + 4 > all_code.len() {
+                        continue; // skip invalid relocations
+                    }
                     if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±128MB (26-bit signed * 4)
-                        if offset_words < -(1 << 25) || offset_words >= (1 << 25) {
+                        if offset_words < -(1i64 << 25) || offset_words >= (1i64 << 25) {
                             eprintln!(
                                 "warning: BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
@@ -3437,6 +3513,21 @@ impl Backend for LoongArch64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     }
+                } else if reloc.reloc_type == R_LARCH_64 {
+                    // R_LARCH_64: patch the 4-instruction load-immediate sequence
+                    // (lu12i.w + ori + lu32i.d + lu52i.d = 16 bytes) with an
+                    // absolute 64-bit address.
+                    if abs_offset + 16 > all_code.len() {
+                        eprintln!(
+                            "warning: R_LARCH_64 relocation at offset {} overflows code (len {})",
+                            abs_offset, all_code.len()
+                        );
+                        continue;
+                    }
+                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                        let vaddr = code_vaddr_base + target_offset as u64;
+                        patch_load_imm_64(&mut all_code, abs_offset, vaddr);
+                    }
                 }
             }
             let func_size: usize = func
@@ -3449,7 +3540,7 @@ impl Backend for LoongArch64Backend {
         }
 
         // ── Build ELF with 2 LOAD segments ──
-        Ok(build_loongarch64_elf_2seg(&all_code, 0x120000000))
+        Ok(build_loongarch64_elf_2seg(&all_code, ELF_BASE_ADDR))
     }
 
     fn return_stub(&self) -> Vec<u8> {
@@ -3960,7 +4051,7 @@ mod tests {
 
     /// Helper: build a minimal IR function with a single instruction.
     fn make_ir_func(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
-        use crate::ir::{IRBlock, IRValue};
+        use crate::ir::IRBlock;
         use std::collections::HashSet;
         IRFunction {
             name: name.to_string(),
@@ -3988,6 +4079,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(10),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4017,6 +4109,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(5),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4045,6 +4138,7 @@ mod tests {
                 op: UnaryOpKind::Neg,
                 dst: IRValue::Register(0),
                 operand: IRValue::Register(1),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4073,6 +4167,7 @@ mod tests {
                 op: UnaryOpKind::Not,
                 dst: IRValue::Register(0),
                 operand: IRValue::Register(1),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4102,6 +4197,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Register(2),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4130,6 +4226,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(100000),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4159,6 +4256,7 @@ mod tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Register(1),
                 rhs: IRValue::Immediate(3),
+                ty: None,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4198,6 +4296,1036 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    // ── ELF emission tests ────────────────────────────────────────────
+
+    // ── Bump allocator tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_alloc_emits_addi_d_from_sp() {
+        // Alloc should compute dst = $sp + offset, emitting addi.d
+        let func = make_ir_func(
+            "alloc_test",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 32,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // The Alloc should produce an instruction that reads $sp
+        let has_sp_read = result.blocks[0].instructions.iter().any(|i| {
+            i.reads.iter().any(|r| r.class == RegClass::Gpr && r.index == Gpr::Sp.encoding())
+                && (i.opcode.contains("addi.d") || i.opcode.contains("add.d") || i.opcode == "Alloc")
+        });
+        assert!(
+            has_sp_read,
+            "expected addi.d/add.d from $sp or Alloc for stack allocation, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_alloc_increases_frame_size() {
+        // An Alloc of 32 bytes should increase the frame_size beyond the baseline (16)
+        let func = make_ir_func(
+            "alloc_frame",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 32,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // Baseline frame = 16 (ra+fp save), Alloc(32) rounds to 32 => total 48, aligned to 48
+        assert!(
+            result.frame_size >= 48,
+            "expected frame_size >= 48 with 32-byte alloc, got {}",
+            result.frame_size
+        );
+    }
+
+    #[test]
+    fn test_alloc_zero_offset_uses_sp_directly() {
+        // First Alloc gets offset 0 from $sp; should emit addi.d dst, $sp, 0
+        let func = make_ir_func(
+            "alloc_zero_off",
+            vec![IRInstr::Alloc {
+                dst: IRValue::Register(0),
+                size: 16,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // There should be an instruction reading $sp (the alloc offset computation)
+        let has_sp_read = result.blocks[0].instructions.iter().any(|i| {
+            i.reads.iter().any(|r| r.class == RegClass::Gpr && r.index == Gpr::Sp.encoding())
+        });
+        assert!(
+            has_sp_read,
+            "expected instruction reading $sp for alloc at offset 0, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Function calling with 4+ arguments tests ─────────────────────
+
+    #[test]
+    fn test_call_with_four_args_emits_bl() {
+        // Call with 4 args should emit bl and create a relocation
+        let func = make_ir_func(
+            "call_4args",
+            vec![IRInstr::Call {
+                dst: None,
+                func: "target".to_string(),
+                args: vec![
+                    IRValue::Register(0),
+                    IRValue::Register(1),
+                    IRValue::Register(2),
+                    IRValue::Register(3),
+                ],
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // Should contain a "Call" instruction in the stack_slot_isel output
+        let has_call = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Call");
+        assert!(
+            has_call,
+            "expected Call instruction for function call, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+        // Verify relocation was created for the call
+        assert!(
+            !result.relocations.is_empty(),
+            "expected relocation for call instruction"
+        );
+        let reloc = &result.relocations[0];
+        assert_eq!(reloc.symbol, "target");
+        assert_eq!(reloc.reloc_type, "R_LARCH_B26");
+    }
+
+    #[test]
+    fn test_call_with_six_args_all_arg_regs() {
+        // Call with 6 args should use a0–a5 (6 of 8 arg registers)
+        let func = make_ir_func(
+            "call_6args",
+            vec![IRInstr::Call {
+                dst: None,
+                func: "target".to_string(),
+                args: vec![
+                    IRValue::Register(0),
+                    IRValue::Register(1),
+                    IRValue::Register(2),
+                    IRValue::Register(3),
+                    IRValue::Register(4),
+                    IRValue::Register(5),
+                ],
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        // Should contain a Call instruction
+        let has_call = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Call");
+        assert!(
+            has_call,
+            "expected Call for function call with 6 args, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+        // Verify relocation was created
+        assert!(
+            !result.relocations.is_empty(),
+            "expected relocation for call instruction"
+        );
+        assert_eq!(result.relocations[0].symbol, "target");
+    }
+
+    #[test]
+    fn test_call_return_value() {
+        // Call with dst should produce a Call instruction and relocation
+        let func = make_ir_func(
+            "call_ret",
+            vec![IRInstr::Call {
+                dst: Some(IRValue::Register(0)),
+                func: "get_value".to_string(),
+                args: vec![],
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_call = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Call");
+        assert!(
+            has_call,
+            "expected Call for function call with return value, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Conditional branch encoding and offset calculation tests ──────
+
+    #[test]
+    fn test_encode_bne() {
+        // BNE $a0, $a1, 8
+        let bytes = Instruction::Bne {
+            rj: Gpr::A0,
+            rd: Gpr::A1,
+            offs16: 8,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x17u32 << 26) | (8u32 << 10) | (4u32 << 5) | 5u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_blt() {
+        // BLT $t0, $t1, -4
+        let bytes = Instruction::Blt {
+            rj: Gpr::T0,
+            rd: Gpr::T1,
+            offs16: -4,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let imm16 = ((-4i32) as u32) & 0xFFFF;
+        let expected = (0x18u32 << 26) | (imm16 << 10) | (12u32 << 5) | 13u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_bge() {
+        // BGE $a0, $a1, 32
+        let bytes = Instruction::Bge {
+            rj: Gpr::A0,
+            rd: Gpr::A1,
+            offs16: 32,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x19u32 << 26) | (32u32 << 10) | (4u32 << 5) | 5u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_bltu() {
+        // BLTU $a2, $a3, 16
+        let bytes = Instruction::Bltu {
+            rj: Gpr::A2,
+            rd: Gpr::A3,
+            offs16: 16,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x1Au32 << 26) | (16u32 << 10) | (6u32 << 5) | 7u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_bgeu() {
+        // BGEU $a0, $a1, 0
+        let bytes = Instruction::Bgeu {
+            rj: Gpr::A0,
+            rd: Gpr::A1,
+            offs16: 0,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x1Bu32 << 26) | (0u32 << 10) | (4u32 << 5) | 5u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_bnez() {
+        // BNEZ $a0, 0x20
+        let bytes = Instruction::Bnez {
+            rj: Gpr::A0,
+            offs21: 0x20,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        // 1RI21: opcode[31:26] | offs[15:0] at [25:10] | rj[9:5] | offs[20:16] at [4:0]
+        assert_eq!((word >> 26) & 0x3F, OPC_BNEZ);
+        assert_eq!((word >> 5) & 0x1F, 4u32); // rj = a0
+    }
+
+    #[test]
+    fn test_encode_branch_negative_offset() {
+        // BEQ $a0, $a1, -8 (backward branch)
+        let bytes = Instruction::Beq {
+            rj: Gpr::A0,
+            rd: Gpr::A1,
+            offs16: -8,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let imm16 = ((-8i32) as u32) & 0xFFFF;
+        let expected = (0x16u32 << 26) | (imm16 << 10) | (4u32 << 5) | 5u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_cond_branch_emits_bnez_and_b() {
+        // CondBranch should emit bnez + b pattern
+        let func = make_ir_func(
+            "cond_br",
+            vec![IRInstr::CondBranch {
+                cond: IRValue::Register(0),
+                true_target: "then".to_string(),
+                false_target: "else".to_string(),
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let opcodes: Vec<&str> = result.blocks[0]
+            .instructions
+            .iter()
+            .map(|i| i.opcode.as_str())
+            .collect();
+        let has_cond_br = opcodes.contains(&"CondBranch");
+        assert!(
+            has_cond_br,
+            "expected CondBranch in output, got opcodes: {:?}",
+            opcodes
+        );
+    }
+
+    // ── Load/store with various types and offsets tests ───────────────
+
+    #[test]
+    fn test_encode_ld_b() {
+        // LD.B $a0, $sp, 4
+        let bytes = Instruction::LdB {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 4,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A0u32 << 22) | (4u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_ld_h() {
+        // LD.H $a0, $sp, 8
+        let bytes = Instruction::LdH {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 8,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A1u32 << 22) | (8u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_ld_w() {
+        // LD.W $a0, $sp, 12
+        let bytes = Instruction::LdW {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 12,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A2u32 << 22) | (12u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_ld_bu() {
+        // LD.BU $a0, $sp, 4
+        let bytes = Instruction::LdBu {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 4,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A8u32 << 22) | (4u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_ld_hu() {
+        // LD.HU $a0, $sp, 8
+        let bytes = Instruction::LdHu {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 8,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A9u32 << 22) | (8u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_ld_wu() {
+        // LD.WU $a0, $sp, 12
+        let bytes = Instruction::LdWu {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 12,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0AAu32 << 22) | (12u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_st_b() {
+        // ST.B $a0, $sp, 4
+        let bytes = Instruction::StB {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 4,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A4u32 << 22) | (4u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_st_h() {
+        // ST.H $a0, $sp, 8
+        let bytes = Instruction::StH {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 8,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A5u32 << 22) | (8u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_st_w() {
+        // ST.W $a0, $sp, 12
+        let bytes = Instruction::StW {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: 12,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A6u32 << 22) | (12u32 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_encode_load_store_negative_offset() {
+        // LD.D $a0, $sp, -16
+        let bytes = Instruction::LdD {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: -16,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let imm12 = ((-16i32) as u32) & 0xFFF;
+        let expected = (0x0A3u32 << 22) | (imm12 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+
+        // ST.D $a0, $sp, -16
+        let bytes = Instruction::StD {
+            rd: Gpr::A0,
+            rj: Gpr::Sp,
+            imm12: -16,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        let expected = (0x0A7u32 << 22) | (imm12 << 10) | (3u32 << 5) | 4u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_isel_load_i8_emits_load() {
+        // Load with IRType::I8 should produce a Load instruction
+        let func = make_ir_func(
+            "load_i8",
+            vec![IRInstr::Load {
+                dst: IRValue::Register(0),
+                addr: IRValue::Register(1),
+                offset: 0,
+                ty: IRType::I8,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_load = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Load");
+        assert!(
+            has_load,
+            "expected Load for I8 load, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_load_u16_emits_load() {
+        // Load with IRType::U16 should produce a Load instruction
+        let func = make_ir_func(
+            "load_u16",
+            vec![IRInstr::Load {
+                dst: IRValue::Register(0),
+                addr: IRValue::Register(1),
+                offset: 0,
+                ty: IRType::U16,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_load = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Load");
+        assert!(
+            has_load,
+            "expected Load for U16 load, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_store_i32_emits_store() {
+        // Store with IRType::I32 should produce a Store instruction
+        let func = make_ir_func(
+            "store_i32",
+            vec![IRInstr::Store {
+                value: IRValue::Register(0),
+                addr: IRValue::Register(1),
+                offset: 0,
+                ty: IRType::I32,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_store = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Store");
+        assert!(
+            has_store,
+            "expected Store for I32 store, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_load_i64_emits_load() {
+        // Load with IRType::I64 should produce a Load instruction
+        let func = make_ir_func(
+            "load_i64",
+            vec![IRInstr::Load {
+                dst: IRValue::Register(0),
+                addr: IRValue::Register(1),
+                offset: 8,
+                ty: IRType::I64,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_load = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Load");
+        assert!(
+            has_load,
+            "expected Load for I64 load, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── 64-bit arithmetic operations tests ────────────────────────────
+
+    #[test]
+    fn test_encode_mul_d() {
+        // MUL.D $a0, $a1, $a2
+        let bytes = Instruction::MulD {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_MUL_D);
+        assert_eq!((word >> 10) & 0x1F, 6u32); // rk = a2
+        assert_eq!((word >> 5) & 0x1F, 5u32); // rj = a1
+        assert_eq!(word & 0x1F, 4u32); // rd = a0
+    }
+
+    #[test]
+    fn test_encode_div_d() {
+        // DIV.D $t0, $t1, $t2
+        let bytes = Instruction::DivD {
+            rd: Gpr::T0,
+            rj: Gpr::T1,
+            rk: Gpr::T2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_DIV_D);
+        assert_eq!((word >> 10) & 0x1F, 14u32); // rk = t2
+        assert_eq!((word >> 5) & 0x1F, 13u32); // rj = t1
+        assert_eq!(word & 0x1F, 12u32); // rd = t0
+    }
+
+    #[test]
+    fn test_encode_mod_d() {
+        // MOD.D $a0, $a1, $a2
+        let bytes = Instruction::ModD {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_MOD_D);
+    }
+
+    #[test]
+    fn test_encode_div_du() {
+        // DIV.DU $a0, $a1, $a2
+        let bytes = Instruction::DivDu {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_DIV_DU);
+    }
+
+    #[test]
+    fn test_encode_mod_du() {
+        // MOD.DU $a0, $a1, $a2
+        let bytes = Instruction::ModDu {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_MOD_DU);
+    }
+
+    #[test]
+    fn test_encode_sll_d() {
+        // SLL.D $a0, $a1, $a2
+        let bytes = Instruction::SllD {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_SLL_D);
+    }
+
+    #[test]
+    fn test_encode_srl_d() {
+        // SRL.D $a0, $a1, $a2
+        let bytes = Instruction::SrlD {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_SRL_D);
+    }
+
+    #[test]
+    fn test_encode_sra_d() {
+        // SRA.D $a0, $a1, $a2
+        let bytes = Instruction::SraD {
+            rd: Gpr::A0,
+            rj: Gpr::A1,
+            rk: Gpr::A2,
+        }
+        .encode();
+        let word = u32::from_le_bytes(bytes);
+        assert_eq!((word >> 15) & 0x1FFFF, OPC_SRA_D);
+    }
+
+    #[test]
+    fn test_isel_mul_emits_mul() {
+        // IRInstr::Mul should produce a Mul instruction
+        let func = make_ir_func(
+            "mul_test",
+            vec![IRInstr::Mul {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+                ty: None,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_mul = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Mul");
+        assert!(
+            has_mul,
+            "expected Mul for IR Mul, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_div_emits_div() {
+        // IRInstr::Div should produce a Div instruction
+        let func = make_ir_func(
+            "div_test",
+            vec![IRInstr::Div {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+                ty: None,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_div = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "Div");
+        assert!(
+            has_div,
+            "expected Div for IR Div, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_add_emits_add() {
+        // BinOp Add should produce an Add instruction
+        let func = make_ir_func(
+            "add_d_test",
+            vec![IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+                ty: None,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_add = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "BinOp" || i.opcode == "Add");
+        assert!(
+            has_add,
+            "expected Add/BinOp for BinOp Add, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_isel_sub_emits_sub() {
+        // BinOp Sub should produce a Sub instruction
+        let func = make_ir_func(
+            "sub_d_test",
+            vec![IRInstr::BinOp {
+                op: BinOpKind::Sub,
+                dst: IRValue::Register(0),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+                ty: None,
+            }],
+        );
+        let backend = LoongArch64Backend::new();
+        let result = backend.allocate_registers(&func).unwrap();
+        let has_sub = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| i.opcode == "BinOp" || i.opcode == "Sub");
+        assert!(
+            has_sub,
+            "expected Sub/BinOp for BinOp Sub, got opcodes: {:?}",
+            result.blocks[0]
+                .instructions
+                .iter()
+                .map(|i| &i.opcode)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── ELF emission tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_elf_header_endianness() {
+        let backend = LoongArch64Backend::new();
+        let prog = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "test".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "nop".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: Instruction::Nop.encode().to_vec(),
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 16,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 4,
+                relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
+            }],
+            total_code_size: 4,
+            total_data_size: 0,
+        };
+        let elf = backend.encode_program(&prog).unwrap();
+        // Check ELFCLASS64
+        assert_eq!(elf[4], 2, "expected ELFCLASS64");
+        // Check ELFDATA2LSB (little-endian)
+        assert_eq!(elf[5], 1, "expected ELFDATA2LSB for LoongArch64");
+    }
+
+    #[test]
+    fn test_elf_header_flags_lp64d() {
+        let backend = LoongArch64Backend::new();
+        let prog = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "test".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "nop".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: Instruction::Nop.encode().to_vec(),
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 16,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 4,
+                relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
+            }],
+            total_code_size: 4,
+            total_data_size: 0,
+        };
+        let elf = backend.encode_program(&prog).unwrap();
+        // Check e_flags at offset 48 (4 bytes)
+        let e_flags = u32::from_le_bytes([elf[48], elf[49], elf[50], elf[51]]);
+        assert_eq!(e_flags, 0x43, "expected EF_LARCH_ABI_LP64D (0x43)");
+    }
+
+    #[test]
+    fn test_elf_entry_point_points_to_start_stub() {
+        let backend = LoongArch64Backend::new();
+        let prog = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "main".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "nop".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: Instruction::Nop.encode().to_vec(),
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 16,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 4,
+                relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
+            }],
+            total_code_size: 4,
+            total_data_size: 0,
+        };
+        let elf = backend.encode_program(&prog).unwrap();
+        // e_entry at offset 24 (8 bytes)
+        let e_entry = u64::from_le_bytes([
+            elf[24], elf[25], elf[26], elf[27],
+            elf[28], elf[29], elf[30], elf[31],
+        ]);
+        // Entry should be base_addr + text_offset (0x120000000 + 0x10000 = 0x120010000)
+        assert_eq!(e_entry, 0x120010000, "entry point should point to _start stub");
+        // Verify the first instruction at the entry point is BL
+        let text_offset = 0x10000usize;
+        let first_word = u32::from_le_bytes([
+            elf[text_offset], elf[text_offset + 1], elf[text_offset + 2], elf[text_offset + 3],
+        ]);
+        let opcode = (first_word >> 26) & 0x3F;
+        assert_eq!(opcode, 0x15, "first instruction at entry should be BL (opcode 0x15)");
+    }
+
+    #[test]
+    fn test_patch_load_imm_64() {
+        // Verify that re-encoding a 4-instruction load-immediate sequence
+        // with a new 64-bit value produces the correct encoding.
+        let rd = Gpr::A0;
+        let target_addr: u64 = 0x120010ABC;
+
+        // Emit the full sequence with the target value directly
+        let mut code = Vec::new();
+        let hi20 = ((target_addr >> 12) & 0xFFFFF) as i32;
+        code.extend_from_slice(&Instruction::Lu12iW { rd, imm20: hi20 }.encode());
+        let lo12 = (target_addr & 0xFFF) as u32;
+        code.extend_from_slice(&Instruction::Ori { rd, rj: rd, imm12: lo12 }.encode());
+        let hi32 = ((target_addr >> 32) & 0xFFFFF) as i32;
+        code.extend_from_slice(&Instruction::Lu32iD { rd, imm20: hi32 }.encode());
+        let hi52 = ((target_addr >> 52) & 0xFFF) as i32;
+        code.extend_from_slice(&Instruction::Lu52iD { rd, rj: rd, imm12: hi52 }.encode());
+        assert_eq!(code.len(), 16);
+
+        // Verify by decoding the instructions
+        // Step 1: lu12i.w rd, bits[31:12]
+        let word0 = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        let expected_word0 = u32::from_le_bytes(Instruction::Lu12iW { rd, imm20: hi20 }.encode());
+        assert_eq!(word0, expected_word0, "lu12i.w encoding mismatch");
+
+        // Step 2: ori rd, rd, bits[11:0]
+        let word1 = u32::from_le_bytes([code[4], code[5], code[6], code[7]]);
+        let expected_word1 = u32::from_le_bytes(Instruction::Ori { rd, rj: rd, imm12: lo12 }.encode());
+        assert_eq!(word1, expected_word1, "ori encoding mismatch");
+
+        // Step 3: lu32i.d rd, bits[51:32]
+        let word2 = u32::from_le_bytes([code[8], code[9], code[10], code[11]]);
+        let expected_word2 = u32::from_le_bytes(Instruction::Lu32iD { rd, imm20: hi32 }.encode());
+        assert_eq!(word2, expected_word2, "lu32i.d encoding mismatch");
+
+        // Step 4: lu52i.d rd, rd, bits[63:52]
+        let word3 = u32::from_le_bytes([code[12], code[13], code[14], code[15]]);
+        let expected_word3 = u32::from_le_bytes(Instruction::Lu52iD { rd, rj: rd, imm12: hi52 }.encode());
+        assert_eq!(word3, expected_word3, "lu52i.d encoding mismatch");
+    }
+
+    #[test]
+    fn test_elf_program_headers() {
+        let backend = LoongArch64Backend::new();
+        let prog = AllocatedProgram {
+            functions: vec![AllocatedFunction {
+                name: "test".to_string(),
+                blocks: vec![AllocatedBlock {
+                    label: "entry".to_string(),
+                    instructions: vec![AllocatedInstruction {
+                        opcode: "nop".to_string(),
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: Instruction::Nop.encode().to_vec(),
+                    }],
+                    code_offset: 0,
+                }],
+                frame_size: 16,
+                callee_saved: vec![],
+                spill_slots: 0,
+                code_size: 4,
+                relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
+            }],
+            total_code_size: 4,
+            total_data_size: 0,
+        };
+        let elf = backend.encode_program(&prog).unwrap();
+
+        // e_phoff at offset 32
+        let e_phoff = u64::from_le_bytes([
+            elf[32], elf[33], elf[34], elf[35], elf[36], elf[37], elf[38], elf[39],
+        ]);
+        assert_eq!(e_phoff, 64, "program headers should start right after ELF header");
+
+        // e_phnum at offset 56
+        let e_phnum = u16::from_le_bytes([elf[56], elf[57]]);
+        assert_eq!(e_phnum, 2, "should have 2 program headers");
+
+        // First program header: LOAD RX (text)
+        let ph1_off = e_phoff as usize;
+        let p1_type = u32::from_le_bytes([elf[ph1_off], elf[ph1_off+1], elf[ph1_off+2], elf[ph1_off+3]]);
+        let p1_flags = u32::from_le_bytes([elf[ph1_off+4], elf[ph1_off+5], elf[ph1_off+6], elf[ph1_off+7]]);
+        assert_eq!(p1_type, 1, "first segment should be PT_LOAD");
+        assert_eq!(p1_flags, 5, "first segment should be PF_R | PF_X");
+
+        // Second program header: LOAD RW (data)
+        let ph2_off = ph1_off + 56;
+        let p2_type = u32::from_le_bytes([elf[ph2_off], elf[ph2_off+1], elf[ph2_off+2], elf[ph2_off+3]]);
+        let p2_flags = u32::from_le_bytes([elf[ph2_off+4], elf[ph2_off+5], elf[ph2_off+6], elf[ph2_off+7]]);
+        assert_eq!(p2_type, 1, "second segment should be PT_LOAD");
+        assert_eq!(p2_flags, 6, "second segment should be PF_R | PF_W");
+    }
 }
 pub mod disasm;
+pub mod reg_alloc_isel;
 pub mod stack_slot_isel;

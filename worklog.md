@@ -545,3 +545,240 @@ Stage Summary:
 - `emit_wasm()` bridges IR → Wasm32Backend → .wasm binary output
 - Pipeline now uses `emit_binary()` instead of `emit_elf()` for format-agnostic emission
 - _start function was already correctly wired in Wasm32Backend::encode_program (by prior Task 2-c)
+
+---
+Task ID: 3-a
+Agent: general-purpose
+Task: LoongArch64 encoding audit
+
+Work Log:
+- Full audit of all LoongArch64 instruction encodings against the ISA specification
+- Verified all 3R-format opcodes (ADD/SUB/SLT/SLTU/NOR/AND/OR/XOR/ORN/ANDN/shifts/rotates/mul/div): all correct
+- Verified all 2RI12-format opcodes (ADDI/SLTI/SLTUI/ANDI/ORI/XORI/loads/stores): all correct
+- Verified all 2RI16-format branch opcodes (BEQ/BNE/BLT/BGE/BLTU/BGEU/JIRL): all correct
+- Verified I26-format opcodes (B=0x14, BL=0x15): correct
+- Verified 1RI21-format opcodes (BEQZ=0x10, BNEZ=0x11): correct
+- Verified reg1i20-format opcodes (LU12I_W=0x0A, LU32I_D=0x0B): correct
+- Verified reg2i5/reg2i6 shift immediate opcodes: correct
+- Verified 2R-format opcodes (EXT_W_H, EXT_W_B, CLO_D): correct
+- Verified FP opcodes (FADD/FSUB/FMUL/FDIV/FMOV/FCMP/FLD/FST): correct
+- Verified _start stub and return_stub: correct (sys_exit=93, jirl $r0,$ra,0)
+
+Bugs found and fixed:
+1. **PCADDU12I/PCADDU18I wrong encoding format** (CRITICAL): Was using 1RI21 format
+   (6-bit opcode at bits[31:26], imm20 at bits[25:6]) instead of reg1i20 format
+   (7-bit opcode at bits[31:25], si20 at bits[24:5]). This produced opcode 0x38000000
+   instead of the correct 0x1C000000 for PCADDU12I $r0, 0. Fixed to use reg1i20.
+2. **UDiv/URem using signed division** (HIGH): BinOpKind::UDiv used Instruction::DivD
+   instead of DivDu, and URem used ModD instead of ModDu. This would produce wrong
+   results for large unsigned values. Fixed to use DivDu/ModDu.
+3. **load_imm_la64 broken 64-bit immediate loading** (HIGH): The function had a broken
+   workaround that avoided LU32I.D (commented "lu32i.d is actually pcaddi in QEMU").
+   The workaround used LU12I_W + SLLI.D 32 to set bits[51:32], but this places the
+   value at bits[63:44] (12 bits too high) due to LU12I.W shifting the immediate by 12.
+   Replaced with the correct 4-instruction sequence: LU12I.W + ORI + LU32I.D + LU52I.D,
+   with each upper-bit instruction emitted only when needed.
+4. **test_encode_sub_d wrong expected opcode** (MEDIUM): Test used 0x0031 (OPC_SLL_D)
+   instead of 0x0023 (OPC_SUB_D). Fixed.
+5. **test_encode_bl wrong expected layout** (MEDIUM): Test assumed linear offset layout
+   ((0x15<<26)|0x100) instead of I26 split format ((0x15<<26)|(0x100<<10)). Fixed.
+
+Non-critical issues noted but not fixed:
+- FmovGr2FprD/FmovFpr2GrD variant names are swapped relative to their semantics
+  (FmovGr2FprD actually does MOVFR2GR.D, i.e., FPR→GPR), but opcodes/operands correct
+- decode_loongarch64_instruction disassembler uses bits[6:0] as opcode (wrong for LA64)
+  but only affects debug output, not code generation
+
+---
+Task ID: 3-d
+Agent: general-purpose
+Task: Research and verify the LoongArch64 calling convention used in the VUMA backend
+
+Work Log:
+- Read loongarch64/mod.rs and loongarch64/stack_slot_isel.rs to analyze the full calling convention implementation
+- Verified register definitions are correct: Gpr enum matches LP64 ABI (a0-a7 = r4-r11, t0-t8 = r12-r20, fp = r22, s0-s8 = r23-r31)
+- Verified is_callee_saved() correctly identifies fp + s0-s8 (not ra — ra is handled separately in prologue/epilogue)
+- Verified Gpr::arg_register() correctly supports indices 0-7 (a0-a7)
+
+Bugs Found and Fixed:
+
+1. **Only 6 argument registers used instead of 8** (HIGH): In stack_slot_isel.rs, both the prologue
+   parameter storage and the Call instruction handler used hardcoded arrays of only 6 arg registers
+   [A0-A5], dropping parameters/arguments 6 and 7. The LP64 ABI specifies 8 arg registers (A0-A7).
+   Fixed by extending arrays to include A6 and A7.
+
+2. **No support for stack-passed arguments** (HIGH): Arguments beyond 8 (now correctly beyond 8
+   instead of beyond 6) were silently dropped. The LP64 ABI requires args 8+ to be passed on the
+   stack at $sp+0, $sp+8, etc. Fixed by:
+   - Adding outgoing_arg_size calculation (scan all Call instructions for max stack args)
+   - Including outgoing_arg_size in frame_size computation
+   - Storing stack-passed arguments at $sp+offset BEFORE loading register arguments (to avoid
+     clobbering)
+   - Loading stack-passed parameters from $fp+(i-8)*8 in prologue
+
+3. **Second return value not placed in $a1** (MEDIUM): The Return handler only placed the first
+   return value in $a0. The LP64 ABI uses $a0 and $a1 for return values. Fixed by adding handling
+   for the second return value (vals[1]) to be placed in S1 ($a1) in both stack_slot_isel.rs and
+   the old lower_ir_block code in mod.rs.
+
+4. **loongarch64_compute_frame_size missing outgoing arg area** (MEDIUM): The helper function in
+   mod.rs didn't account for stack-passed arguments. Added scanning for Call instructions and
+   including outgoing_arg_size in the frame size.
+
+5. **Old lower_ir_block Call handler silently dropped args 8+** (MEDIUM): Added stack-passed
+   argument support to the old code path in mod.rs for consistency.
+
+6. **Maskeqz/Masknez missing from mnemonic() and Display match arms** (FIXED): Pre-existing
+   issue where Instruction::Maskeqz and Instruction::Masknez were added to the enum and encode()
+   but not to the mnemonic() and fmt::Display implementations. Added missing match arms.
+
+Verified Correct (no changes needed):
+- Prologue correctly saves $ra and $fp, sets $fp = old $sp, decrements $sp by frame_size
+- Epilogue correctly restores $ra and $fp from $fp-relative offsets, restores $sp, returns via jirl
+- Stack alignment is 16-byte (frame_size rounded up to 16)
+- Callee-saved register handling is correct: stack-slot ISel only uses scratch registers (A0, A1, T0,
+  T1) which are all caller-saved, so only $ra and $fp need saving/restoring
+- BL instruction correctly saves return address to $ra and is patched via R_LARCH_B26 relocations
+
+---
+Task ID: 3-e
+Agent: sub-agent
+Task: LoongArch64 disasm.rs audit and fix
+
+Work Log:
+- Audited disasm.rs against mod.rs encoding constants and the LoongArch ISA specification
+- Found ALL 3R opcodes were wrong (except ADD.W=0x0020 and ADD.D=0x0021):
+  - SubW: 0x0030→0x0022, SubD: 0x0031→0x0023, Slt: 0x0040→0x0024, Sltu: 0x0041→0x0025
+  - And: 0x0080→0x0029, Or: 0x0081→0x002A, Xor: 0x0082→0x002B, Nor: 0x0083→0x0028
+  - Andn: 0x0084→0x002D, Orn: 0x0085→0x002C
+  - SllW: 0x0089→0x002E, SrlW: 0x008A→0x002F, SraW: 0x008B→0x0030
+  - SllD: 0x008C→0x0031, SrlD: 0x008D→0x0032, SraD: 0x008E→0x0033
+  - RotrW: 0x008F→0x0036, RotrD: 0x0090→0x0037
+  - MulW: 0x0098→0x0038, MulD: 0x0099→0x003B
+  - DivW: 0x009E→0x0040, ModW: 0x009F→0x0041, DivD: 0x00A0→0x0044, ModD: 0x00A1→0x0045
+- Found ALL FP 3R opcodes wrong (e.g., FaddS: 0x0100→0x0201, FaddD: 0x0101→0x0202, etc.)
+- Found shift immediate instructions decoded using wrong 2RI8 format instead of correct reg2i5/reg2i6 formats
+  - Replaced 2RI8 match block with reg2i5 (in 3R match, .W shifts) and reg2i6 (separate block, .D shifts)
+  - Fixed immediate extraction: reg2i5 uses 5-bit imm at bits[14:10], reg2i6 uses 6-bit imm at bits[15:10]
+- Found FP load/store 2RI12 opcodes wrong: FldS 0x0AB→0x0AC, FldD 0x0AC→0x0AE, FstD 0x0AE→0x0AF
+- Found 1RI21 opcodes wrong: BEQZ 0x1C→0x10, BNEZ 0x1D→0x11
+- Found 1RI21 offset extraction completely wrong: extracted from bits[25:21]+bits[20:5] instead of bits[25:10]+bits[4:0]
+- Found I26 offset extraction completely wrong: extracted from bits[25:16]+bits[15:0] instead of bits[25:10]+bits[9:0]
+- Found ALL 2R opcodes wrong: ExtWH 0x5A→0x016, ExtWB 0x5B→0x017, FmovS 0x4E→0x04525, FmovD 0x4F→0x04526, MovFR2GR.D 0x52→0x0452E, MovGR2FR.D 0x53→0x0452A
+- Found 4R FP compare opcodes wrong: FCmpS 0x0C4→0x0C1, FCmpD 0x0C5→0x0C2
+- Added sign_extend_26 function for I26 branch offsets
+- Added missing DivWu, ModWu, DivDu, ModDu instruction decodings
+- Added opcode constants (matching mod.rs) as named constants in disasm.rs for clarity
+- Moved 2R and 4R format checks before 3R to match longest-opcode-first convention
+- Added comprehensive tests for all instruction categories
+- Verified all opcodes match mod.rs using Python cross-check
+- Library compiles cleanly with `cargo check --lib` (no errors in disasm.rs)
+
+Stage Summary:
+- Fixed 50+ incorrect opcode values across all instruction formats
+- Fixed 2 critical branch offset extraction bugs (I26 and 1RI21)
+- Fixed shift immediate decoding from wrong 2RI8 format to correct reg2i5/reg2i6
+- All opcodes now match mod.rs encoder constants and LoongArch ISA specification
+
+---
+Task ID: 3-b
+Agent: sub-agent
+Task: LoongArch64 stack_slot_isel.rs audit and fix
+
+Work Log:
+- Read and audited the full stack_slot_isel.rs (1218 lines) for correctness
+- Checked stack slot allocation/access, function arg passing, prologue/epilogue,
+  call/return handling, alloc/free mapping, off-by-one errors, and 16-byte alignment
+
+Bugs Found and Fixed:
+
+1. **CRITICAL: Only 6 arg registers instead of 8** — The LoongArch64 LP64 ABI specifies
+   that the first 8 general-purpose arguments go in $a0-$a7, but the code only listed
+   $a0-$a5 (6 registers). This means params 6 and 7 would be silently dropped.
+   - Fixed both prologue param reception and Call arg setup to use all 8 registers.
+   - Also added stack-passed parameter reception for params 8+ in the prologue
+     (loaded from $fp + (i-8)*8 per the ABI).
+
+2. **CRITICAL: Select used hardcoded branch offset** — The Select instruction used
+   `beqz S2, +2` (skip 1 instruction), which only works when the subsequent store is
+   a single instruction. For large stack offsets, `encode_store_to_vreg` generates
+   multiple instructions, causing the branch to land in the middle of the store
+   sequence and corrupt data.
+   - Fixed by replacing the conditional branch approach with a branchless sequence
+     using LoongArch64's maskeqz/masknez instructions:
+     `maskeqz S0, S0, S2; masknez S1, S1, S2; or S0, S0, S1`
+
+3. **CRITICAL: Call didn't allocate stack space for >8 args** — When calling a function
+   with more than 8 arguments, args 8+ were stored at [sp + offset] without first
+   decrementing sp, which would overwrite the caller's own stack frame data.
+   - Fixed by adding proper stack space allocation before storing stack arguments
+     and deallocation after the call. Stack arg space is 16-byte aligned per ABI.
+
+4. **Added Maskeqz/Masknez instructions to the Instruction enum** — These LoongArch64
+   3R-format instructions (opcodes 0x0026 and 0x0027) were missing from the encoder.
+   - Added opcode constants OPC_MASKEQZ/OPC_MASKNEZ
+   - Added Instruction::Maskeqz and Instruction::Masknez variants
+   - Added encoding (using encode_3r), mnemonic, and Display implementations
+
+Audit Results (No Bugs Found):
+- Prologue/epilogue: Correct. $ra saved at fp-8, old $fp at fp-16, sp correctly
+  restored by adding frame_size back, return via jirl $r0, $ra, 0.
+- Stack layout: Vreg slots at fp-24, fp-32, etc. — correct, no off-by-one errors.
+- Alloc regions: Correctly placed below vreg area, addresses computed as fp+alloc_off.
+- Frame size: Properly 16-byte aligned using ((size + 15) & !15).
+- Branch patching: Correctly handles I26 (B/BL), 1RI21 (BEQZ/BNEZ), and 2RI16 formats.
+
+Files Modified:
+- src/codegen/src/loongarch64/stack_slot_isel.rs
+- src/codegen/src/loongarch64/mod.rs
+
+---
+Task ID: 3-g
+Agent: general-purpose
+Task: LoongArch64 ELF emission audit and bug fixes
+
+Work Log:
+- Read and analyzed the full LoongArch64 ELF emission pipeline:
+  - `build_loongarch64_elf_2seg()` generates a minimal ELF64 binary with 2 LOAD segments
+  - `encode_program()` builds the _start stub, concatenates function code, patches relocations
+  - `stack_slot_isel.rs` handles intra-function branch patching and records R_LARCH_B26/R_LARCH_64 relocations
+- Verified ELF header correctness:
+  - e_ident: ELFCLASS64 ✓, ELFDATA2LSB (little-endian) ✓, ELFOSABI_LINUX ✓
+  - e_machine = 258 (EM_LOONGARCH) ✓
+  - e_flags = 0x43 (EF_LARCH_ABI_LP64D double-float ABI) ✓
+  - e_entry points to base_addr + text_offset (0x120010000) ✓
+  - e_type = ET_EXEC (2) ✓
+- Verified program headers:
+  - PH1: PT_LOAD, PF_R|PF_X (text segment) ✓
+  - PH2: PT_LOAD, PF_R|PF_W (data segment) ✓
+  - Alignment: p_offset % p_align == p_vaddr % p_align ✓
+- Verified _start stub:
+  - BL main → addi.d $a7, $r0, 93 → syscall 0x0 ✓
+  - exit syscall number 93 is correct for LoongArch64 Linux ✓
+  - BL offset calculation for main is correct ✓
+- Verified R_LARCH_B26 relocation:
+  - BL offset = (target - pc) / 4 in words ✓
+  - Range check: ±128MB (26-bit signed) ✓
+  - Re-encodes full BL instruction ✓
+
+Bugs Found and Fixed:
+1. **GetAddress R_LARCH_64 relocation offset underflow**: The code computed `imm_offset = byte_offset + code.len() - 16`, but `encode_load_imm(S0, 0)` only generates 8 bytes for value 0 (not 16), causing usize underflow. Fixed by using `encode_load_imm_full_64(S0, 0)` which always emits 4 instructions (16 bytes) and computing offset before emitting code.
+2. **R_LARCH_64 relocation not handled in encode_program**: GetAddress recorded R_LARCH_64 relocations that were never patched. Added R_LARCH_64 handling that patches the 4-instruction lu12i.w+ori+lu32i.d+lu52i.d sequence with the target function's virtual address.
+3. **Dead code in encode_program**: Removed unused `imm26` and `existing` variables from the _start BL patching code.
+4. **Missing Gpr::from_encoding**: Added `from_encoding()` method to Gpr enum to support extracting register from existing instructions during relocation patching.
+
+New Functions Added:
+- `encode_load_imm_full_64()` in stack_slot_isel.rs: Always emits 4-instruction sequence (16 bytes) for 64-bit immediate loading, ensuring space for R_LARCH_64 patching.
+- `patch_load_imm_64()` in mod.rs: Patches a 4-instruction load-immediate sequence with a new 64-bit value, used by R_LARCH_64 relocation handling.
+- `Gpr::from_encoding()` in mod.rs: Converts 5-bit encoding back to Gpr variant.
+
+New Tests Added:
+- `test_elf_header_endianness`: Verifies ELFCLASS64 and ELFDATA2LSB
+- `test_elf_header_flags_lp64d`: Verifies e_flags = 0x43 (LP64D ABI)
+- `test_elf_entry_point_points_to_start_stub`: Verifies e_entry = 0x120010000 and first instruction is BL
+- `test_patch_load_imm_64`: Verifies patch_load_imm_64 correctly re-encodes all 4 instructions
+- `test_elf_program_headers`: Verifies 2 PT_LOAD segments with correct flags
+
+Files Modified:
+- src/codegen/src/loongarch64/mod.rs
+- src/codegen/src/loongarch64/stack_slot_isel.rs

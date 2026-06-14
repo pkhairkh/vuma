@@ -1,0 +1,502 @@
+   501→   501→   501→// 2RI12-format FP Load/Store Opcodes (bits[31:22])
+   502→   502→   502→// ===========================================================================
+   503→   503→   503→
+   504→   504→   504→const OPC_FLD_S: u32 = 0x0AC;
+   505→   505→   505→const OPC_FLD_D: u32 = 0x0AE;
+   506→   506→   506→const OPC_FST_S: u32 = 0x0AD;
+   507→   507→   507→const OPC_FST_D: u32 = 0x0AF;
+   508→   508→   508→
+   509→   509→   509→// ===========================================================================
+   510→   510→   510→// 2R-format FP GPR<->FPR Move Opcodes (bits[31:10])
+   511→   511→   511→// ===========================================================================
+   512→   512→   512→
+   513→   513→   513→const OPC_MOVFR2GR_D: u32 = 0x00452E;
+   514→   514→   514→const OPC_MOVGR2FR_D: u32 = 0x00452A;
+   515→   515→   515→
+   516→   516→   516→// ===========================================================================
+   517→   517→   517→// 2RI12-format Opcodes (bits[31:22])
+   518→   518→   518→// ===========================================================================
+   519→   519→   519→
+   520→   520→   520→const OPC_ADDI_W: u32 = 0x00A;
+   521→   521→   521→const OPC_ADDI_D: u32 = 0x00B;
+   522→   522→   522→const OPC_SLTI: u32 = 0x008;
+   523→   523→   523→const OPC_SLTUI: u32 = 0x009;
+   524→   524→   524→const OPC_ANDI: u32 = 0x00D;
+   525→   525→   525→const OPC_ORI: u32 = 0x00E;
+   526→   526→   526→const OPC_XORI: u32 = 0x00F;
+   527→   527→   527→const OPC_LD_B: u32 = 0x0A0;
+   528→   528→   528→const OPC_LD_H: u32 = 0x0A1;
+   529→   529→   529→const OPC_LD_W: u32 = 0x0A2;
+   530→   530→   530→const OPC_LD_D: u32 = 0x0A3;
+   531→   531→   531→const OPC_ST_B: u32 = 0x0A4;
+   532→   532→   532→const OPC_ST_H: u32 = 0x0A5;
+   533→   533→   533→const OPC_ST_W: u32 = 0x0A6;
+   534→   534→   534→const OPC_ST_D: u32 = 0x0A7;
+   535→   535→   535→const OPC_LD_BU: u32 = 0x0A8;
+   536→   536→   536→const OPC_LD_HU: u32 = 0x0A9;
+   537→   537→   537→const OPC_LD_WU: u32 = 0x0AA;
+   538→   538→   538→
+   539→   539→   539→// ===========================================================================
+   540→   540→   540→// 2RI16-format Opcodes (bits[31:26])
+   541→   541→   541→// ===========================================================================
+   542→   542→   542→
+   543→   543→   543→const OPC_BEQ: u32 = 0x16;
+   544→   544→   544→const OPC_BNE: u32 = 0x17;
+   545→   545→   545→const OPC_BLT: u32 = 0x18;
+   546→   546→   546→const OPC_BGE: u32 = 0x19;
+   547→   547→   547→const OPC_BLTU: u32 = 0x1A;
+   548→   548→   548→const OPC_BGEU: u32 = 0x1B;
+   549→   549→   549→const OPC_JIRL: u32 = 0x13;
+   550→   550→   550→const OPC_LU12I_W: u32 = 0x0A; // reg1i20 format, 7-bit opcode at bits 31:25
+   551→   551→   551→const OPC_LU32I_D: u32 = 0x0B; // reg1i20 format, 7-bit opcode at bits 31:25
+   552→   552→   552→const OPC_LU52I_D: u32 = 0x0C; // 2RI12 format, 10-bit opcode at bits 31:22
+   553→   553→   553→
+   554→   554→   554→// ===========================================================================
+   555→   555→   555→// I26-format Opcodes (bits[31:26])
+   556→   556→   556→// ===========================================================================
+   557→   557→   557→
+   558→   558→   558→const OPC_B: u32 = 0x14;
+   559→   559→   559→const OPC_BL: u32 = 0x15;
+   560→   560→   560→
+   561→   561→   561→// ===========================================================================
+   562→   562→   562→// 2RI14-format Opcodes (bits[31:24])
+   563→   563→   563→// ===========================================================================
+   564→   564→   564→
+   565→   565→   565→const OPC_LL_W: u32 = 0x20;
+   566→   566→   566→const OPC_SC_W: u32 = 0x21;
+   567→   567→   567→const OPC_LL_D: u32 = 0x22;
+   568→   568→   568→const OPC_SC_D: u32 = 0x23;
+   569→   569→   569→
+   570→   570→   570→// ===========================================================================
+   571→   571→   571→// 1RI21-format Opcodes (bits[31:26])
+   572→   572→   572→// ===========================================================================
+   573→   573→   573→
+   574→   574→   574→const OPC_BEQZ: u32 = 0x10;
+   575→   575→   575→const OPC_BNEZ: u32 = 0x11;
+   576→   576→   576→const OPC_PCADDU12I: u32 = 0x0E;
+   577→   577→   577→const OPC_PCADDU18I: u32 = 0x0F;
+   578→   578→   578→
+   579→   579→   579→// ===========================================================================
+   580→   580→   580→// 2R-format Opcodes (bits[31:10])
+   581→   581→   581→// ===========================================================================
+   582→   582→   582→
+   583→   583→   583→const OPC_EXT_W_H: u32 = 0x0000016;
+   584→   584→   584→const OPC_EXT_W_B: u32 = 0x0000017;
+   585→   585→   585→/// CLO.D (count leading ones, doubleword): opcode 0x0000008 in 2R format.
+   586→   586→   586→const OPC_CLO_D: u32 = 0x0000008;
+   587→   587→   587→
+   588→   588→   588→#[allow(dead_code)]
+   589→   589→   589→const OPC_REVB_2H: u32 = 0x000000C;
+   590→   590→   590→#[allow(dead_code)]
+   591→   591→   591→const OPC_REVB_4H: u32 = 0x000000D;
+   592→   592→   592→#[allow(dead_code)]
+   593→   593→   593→const OPC_REVB_2W: u32 = 0x000000E;
+   594→   594→   594→#[allow(dead_code)]
+   595→   595→   595→const OPC_BITREV_4B: u32 = 0x0000012;
+   596→   596→   596→#[allow(dead_code)]
+   597→   597→   597→const OPC_BITREV_8B: u32 = 0x0000013;
+   598→   598→   598→#[allow(dead_code)]
+   599→   599→   599→const OPC_CPBYTE: u32 = 0x0000057;
+   600→   600→   600→
+   601→   601→   601→// 2R: special opcodes for move/clover
+   602→   602→   602→#[allow(dead_code)]
+   603→   603→   603→const OPC_MOVCF2GR: u32 = 0x0000055;
+   604→   604→   604→#[allow(dead_code)]
+   605→   605→   605→const OPC_MOVGR2CF: u32 = 0x0000054;
+   606→   606→   606→
+   607→   607→   607→// ===========================================================================
+   608→   608→   608→// 4R-format Opcodes (bits[31:20])
+   609→   609→   609→// ===========================================================================
+   610→   610→   610→
+   611→   611→   611→#[allow(dead_code)]
+   612→   612→   612→const OPC_BYTEREV_D: u32 = 0x009;
+   613→   613→   613→#[allow(dead_code)]
+   614→   614→   614→const OPC_BYTEREV_W: u32 = 0x00A;
+   615→   615→   615→#[allow(dead_code)]
+   616→   616→   616→const OPC_BYTEREV_H: u32 = 0x00B;
+   617→   617→   617→
+   618→   618→   618→// ===========================================================================
+   619→   619→   619→// reg2i5-format Opcodes (bits[31:15], 17-bit) — .W shift immediates
+   620→   620→   620→// ===========================================================================
+   621→   621→   621→
+   622→   622→   622→const OPC_SLLI_W: u32 = 0x0081;
+   623→   623→   623→const OPC_SRLI_W: u32 = 0x0089;
+   624→   624→   624→const OPC_SRAI_W: u32 = 0x0091;
+   625→   625→   625→#[allow(dead_code)]
+   626→   626→   626→const OPC_ROTRI_W: u32 = 0x0099;
+   627→   627→   627→
+   628→   628→   628→// ===========================================================================
+   629→   629→   629→// reg2i6-format Opcodes (bits[31:16], 16-bit) — .D shift immediates
+   630→   630→   630→// ===========================================================================
+   631→   631→   631→
+   632→   632→   632→const OPC_SLLI_D: u32 = 0x0041;
+   633→   633→   633→const OPC_SRLI_D: u32 = 0x0045;
+   634→   634→   634→const OPC_SRAI_D: u32 = 0x0049;
+   635→   635→   635→#[allow(dead_code)]
+   636→   636→   636→const OPC_ROTRI_D: u32 = 0x004D;
+   637→   637→   637→
+   638→   638→   638→// ===========================================================================
+   639→   639→   639→// Instruction Enum
+   640→   640→   640→// ===========================================================================
+   641→   641→   641→
+   642→   642→   642→/// LoongArch64 instruction representations for code generation.
+   643→   643→   643→///
+   644→   644→   644→/// Covers key arithmetic, logical, shift, load/store, branch, move, and FP
+   645→   645→   645→/// instructions. Each variant captures the operands needed for encoding and
+   646→   646→   646→/// disassembly. The `encode()` method produces a 4-byte little-endian machine
+   647→   647→   647→/// code word.
+   648→   648→   648→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   649→   649→   649→pub enum Instruction {
+   650→   650→   650→    // ── Arithmetic (3R) ──────────────────────────────────────────────
+   651→   651→   651→    /// Add Word: `add.w rd, rj, rk`
+   652→   652→   652→    AddW { rd: Gpr, rj: Gpr, rk: Gpr },
+   653→   653→   653→    /// Add Doubleword: `add.d rd, rj, rk`
+   654→   654→   654→    AddD { rd: Gpr, rj: Gpr, rk: Gpr },
+   655→   655→   655→    /// Subtract Word: `sub.w rd, rj, rk`
+   656→   656→   656→    SubW { rd: Gpr, rj: Gpr, rk: Gpr },
+   657→   657→   657→    /// Subtract Doubleword: `sub.d rd, rj, rk`
+   658→   658→   658→    SubD { rd: Gpr, rj: Gpr, rk: Gpr },
+   659→   659→   659→    /// Set Less Than (signed): `slt rd, rj, rk`
+   660→   660→   660→    Slt { rd: Gpr, rj: Gpr, rk: Gpr },
+   661→   661→   661→    /// Set Less Than (unsigned): `sltu rd, rj, rk`
+   662→   662→   662→    Sltu { rd: Gpr, rj: Gpr, rk: Gpr },
+   663→   663→   663→    /// Multiply Word: `mul.w rd, rj, rk`
+   664→   664→   664→    MulW { rd: Gpr, rj: Gpr, rk: Gpr },
+   665→   665→   665→    /// Multiply Doubleword: `mul.d rd, rj, rk`
+   666→   666→   666→    MulD { rd: Gpr, rj: Gpr, rk: Gpr },
+   667→   667→   667→    /// Divide Word (signed): `div.w rd, rj, rk`
+   668→   668→   668→    DivW { rd: Gpr, rj: Gpr, rk: Gpr },
+   669→   669→   669→    /// Modulo Word (signed): `mod.w rd, rj, rk`
+   670→   670→   670→    ModW { rd: Gpr, rj: Gpr, rk: Gpr },
+   671→   671→   671→    /// Divide Word (unsigned): `div.wu rd, rj, rk`
+   672→   672→   672→    DivWu { rd: Gpr, rj: Gpr, rk: Gpr },
+   673→   673→   673→    /// Modulo Word (unsigned): `mod.wu rd, rj, rk`
+   674→   674→   674→    ModWu { rd: Gpr, rj: Gpr, rk: Gpr },
+   675→   675→   675→    /// Divide Doubleword (signed): `div.d rd, rj, rk`
+   676→   676→   676→    DivD { rd: Gpr, rj: Gpr, rk: Gpr },
+   677→   677→   677→    /// Modulo Doubleword (signed): `mod.d rd, rj, rk`
+   678→   678→   678→    ModD { rd: Gpr, rj: Gpr, rk: Gpr },
+   679→   679→   679→    /// Divide Doubleword (unsigned): `div.du rd, rj, rk`
+   680→   680→   680→    DivDu { rd: Gpr, rj: Gpr, rk: Gpr },
+   681→   681→   681→    /// Modulo Doubleword (unsigned): `mod.du rd, rj, rk`
+   682→   682→   682→    ModDu { rd: Gpr, rj: Gpr, rk: Gpr },
+   683→   683→   683→
+   684→   684→   684→    // ── Logical (3R) ────────────────────────────────────────────────
+   685→   685→   685→    /// AND: `and rd, rj, rk`
+   686→   686→   686→    And { rd: Gpr, rj: Gpr, rk: Gpr },
+   687→   687→   687→    /// OR: `or rd, rj, rk`
+   688→   688→   688→    Or { rd: Gpr, rj: Gpr, rk: Gpr },
+   689→   689→   689→    /// XOR: `xor rd, rj, rk`
+   690→   690→   690→    Xor { rd: Gpr, rj: Gpr, rk: Gpr },
+   691→   691→   691→    /// NOR: `nor rd, rj, rk`
+   692→   692→   692→    Nor { rd: Gpr, rj: Gpr, rk: Gpr },
+   693→   693→   693→    /// AND NOT: `andn rd, rj, rk`
+   694→   694→   694→    Andn { rd: Gpr, rj: Gpr, rk: Gpr },
+   695→   695→   695→    /// OR NOT: `orn rd, rj, rk`
+   696→   696→   696→    Orn { rd: Gpr, rj: Gpr, rk: Gpr },
+   697→   697→   697→
+   698→   698→   698→    // ── Shift (3R) ──────────────────────────────────────────────────
+   699→   699→   699→    /// Shift Left Logical Word: `sll.w rd, rj, rk`
+   700→   700→   700→    SllW { rd: Gpr, rj: Gpr, rk: Gpr },
+   701→   701→   701→    /// Shift Right Logical Word: `srl.w rd, rj, rk`
+   702→   702→   702→    SrlW { rd: Gpr, rj: Gpr, rk: Gpr },
+   703→   703→   703→    /// Shift Right Arithmetic Word: `sra.w rd, rj, rk`
+   704→   704→   704→    SraW { rd: Gpr, rj: Gpr, rk: Gpr },
+   705→   705→   705→    /// Shift Left Logical Doubleword: `sll.d rd, rj, rk`
+   706→   706→   706→    SllD { rd: Gpr, rj: Gpr, rk: Gpr },
+   707→   707→   707→    /// Shift Right Logical Doubleword: `srl.d rd, rj, rk`
+   708→   708→   708→    SrlD { rd: Gpr, rj: Gpr, rk: Gpr },
+   709→   709→   709→    /// Shift Right Arithmetic Doubleword: `sra.d rd, rj, rk`
+   710→   710→   710→    SraD { rd: Gpr, rj: Gpr, rk: Gpr },
+   711→   711→   711→    /// Rotate Right Word: `rotr.w rd, rj, rk`
+   712→   712→   712→    RotrW { rd: Gpr, rj: Gpr, rk: Gpr },
+   713→   713→   713→    /// Rotate Right Doubleword: `rotr.d rd, rj, rk`
+   714→   714→   714→    RotrD { rd: Gpr, rj: Gpr, rk: Gpr },
+   715→   715→   715→
+   716→   716→   716→    // ── Shift Immediate (2RI8) ──────────────────────────────────────
+   717→   717→   717→    /// Shift Left Logical Immediate Word: `slli.w rd, rj, ui8`
+   718→   718→   718→    SlliW { rd: Gpr, rj: Gpr, imm8: u32 },
+   719→   719→   719→    /// Shift Right Logical Immediate Word: `srli.w rd, rj, ui8`
+   720→   720→   720→    SrliW { rd: Gpr, rj: Gpr, imm8: u32 },
+   721→   721→   721→    /// Shift Right Arithmetic Immediate Word: `srai.w rd, rj, ui8`
+   722→   722→   722→    SraiW { rd: Gpr, rj: Gpr, imm8: u32 },
+   723→   723→   723→    /// Shift Left Logical Immediate Doubleword: `slli.d rd, rj, ui8`
+   724→   724→   724→    SlliD { rd: Gpr, rj: Gpr, imm8: u32 },
+   725→   725→   725→    /// Shift Right Logical Immediate Doubleword: `srli.d rd, rj, ui8`
+   726→   726→   726→    SrliD { rd: Gpr, rj: Gpr, imm8: u32 },
+   727→   727→   727→    /// Shift Right Arithmetic Immediate Doubleword: `srai.d rd, rj, ui8`
+   728→   728→   728→    SraiD { rd: Gpr, rj: Gpr, imm8: u32 },
+   729→   729→   729→
+   730→   730→   730→    // ── Immediate Arithmetic (2RI12) ────────────────────────────────
+   731→   731→   731→    /// Add Immediate Word: `addi.w rd, rj, si12`
+   732→   732→   732→    AddiW { rd: Gpr, rj: Gpr, imm12: i32 },
+   733→   733→   733→    /// Add Immediate Doubleword: `addi.d rd, rj, si12`
+   734→   734→   734→    AddiD { rd: Gpr, rj: Gpr, imm12: i32 },
+   735→   735→   735→    /// Set Less Than Immediate (signed): `slti rd, rj, si12`
+   736→   736→   736→    Slti { rd: Gpr, rj: Gpr, imm12: i32 },
+   737→   737→   737→    /// Set Less Than Immediate (unsigned): `sltui rd, rj, si12`
+   738→   738→   738→    Sltui { rd: Gpr, rj: Gpr, imm12: i32 },
+   739→   739→   739→    /// AND Immediate: `andi rd, rj, ui12`
+   740→   740→   740→    Andi { rd: Gpr, rj: Gpr, imm12: u32 },
+   741→   741→   741→    /// OR Immediate: `ori rd, rj, ui12`
+   742→   742→   742→    Ori { rd: Gpr, rj: Gpr, imm12: u32 },
+   743→   743→   743→    /// XOR Immediate: `xori rd, rj, ui12`
+   744→   744→   744→    Xori { rd: Gpr, rj: Gpr, imm12: u32 },
+   745→   745→   745→
+   746→   746→   746→    // ── Load (2RI12) ────────────────────────────────────────────────
+   747→   747→   747→    /// Load Byte (sign-extended): `ld.b rd, rj, si12`
+   748→   748→   748→    LdB { rd: Gpr, rj: Gpr, imm12: i32 },
+   749→   749→   749→    /// Load Halfword (sign-extended): `ld.h rd, rj, si12`
+   750→   750→   750→    LdH { rd: Gpr, rj: Gpr, imm12: i32 },
+   751→   751→   751→    /// Load Word (sign-extended): `ld.w rd, rj, si12`
+   752→   752→   752→    LdW { rd: Gpr, rj: Gpr, imm12: i32 },
+   753→   753→   753→    /// Load Doubleword: `ld.d rd, rj, si12`
+   754→   754→   754→    LdD { rd: Gpr, rj: Gpr, imm12: i32 },
+   755→   755→   755→    /// Load Byte (zero-extended): `ld.bu rd, rj, si12`
+   756→   756→   756→    LdBu { rd: Gpr, rj: Gpr, imm12: i32 },
+   757→   757→   757→    /// Load Halfword (zero-extended): `ld.hu rd, rj, si12`
+   758→   758→   758→    LdHu { rd: Gpr, rj: Gpr, imm12: i32 },
+   759→   759→   759→    /// Load Word (zero-extended): `ld.wu rd, rj, si12`
+   760→   760→   760→    LdWu { rd: Gpr, rj: Gpr, imm12: i32 },
+   761→   761→   761→
+   762→   762→   762→    // ── Store (2RI12) ───────────────────────────────────────────────
+   763→   763→   763→    /// Store Byte: `st.b rd, rj, si12`
+   764→   764→   764→    StB { rd: Gpr, rj: Gpr, imm12: i32 },
+   765→   765→   765→    /// Store Halfword: `st.h rd, rj, si12`
+   766→   766→   766→    StH { rd: Gpr, rj: Gpr, imm12: i32 },
+   767→   767→   767→    /// Store Word: `st.w rd, rj, si12`
+   768→   768→   768→    StW { rd: Gpr, rj: Gpr, imm12: i32 },
+   769→   769→   769→    /// Store Doubleword: `st.d rd, rj, si12`
+   770→   770→   770→    StD { rd: Gpr, rj: Gpr, imm12: i32 },
+   771→   771→   771→
+   772→   772→   772→    // ── Branch (2RI16) ──────────────────────────────────────────────
+   773→   773→   773→    /// Branch if Equal: `beq rj, rd, offs16`
+   774→   774→   774→    Beq { rj: Gpr, rd: Gpr, offs16: i32 },
+   775→   775→   775→    /// Branch if Not Equal: `bne rj, rd, offs16`
+   776→   776→   776→    Bne { rj: Gpr, rd: Gpr, offs16: i32 },
+   777→   777→   777→    /// Branch if Less Than (signed): `blt rj, rd, offs16`
+   778→   778→   778→    Blt { rj: Gpr, rd: Gpr, offs16: i32 },
+   779→   779→   779→    /// Branch if Greater or Equal (signed): `bge rj, rd, offs16`
+   780→   780→   780→    Bge { rj: Gpr, rd: Gpr, offs16: i32 },
+   781→   781→   781→    /// Branch if Less Than (unsigned): `bltu rj, rd, offs16`
+   782→   782→   782→    Bltu { rj: Gpr, rd: Gpr, offs16: i32 },
+   783→   783→   783→    /// Branch if Greater or Equal (unsigned): `bgeu rj, rd, offs16`
+   784→   784→   784→    Bgeu { rj: Gpr, rd: Gpr, offs16: i32 },
+   785→   785→   785→    /// Jump Indirect and Return Link: `jirl rd, rj, offs16`
+   786→   786→   786→    Jirl { rd: Gpr, rj: Gpr, offs16: i32 },
+   787→   787→   787→
+   788→   788→   788→    // ── Unconditional Branch (I26) ──────────────────────────────────
+   789→   789→   789→    /// Branch: `b offs26`
+   790→   790→   790→    B { offs26: i32 },
+   791→   791→   791→    /// Branch and Link: `bl offs26`
+   792→   792→   792→    Bl { offs26: i32 },
+   793→   793→   793→
+   794→   794→   794→    // ── Branch on Zero/NonZero (1RI21) ──────────────────────────────
+   795→   795→   795→    /// Branch if Equal Zero: `beqz rj, offs21`
+   796→   796→   796→    Beqz { rj: Gpr, offs21: i32 },
+   797→   797→   797→    /// Branch if Not Equal Zero: `bnez rj, offs21`
+   798→   798→   798→    Bnez { rj: Gpr, offs21: i32 },
+   799→   799→   799→
+   800→   800→   800→    // ── Upper Immediate (2RI16 / 1RI21) ─────────────────────────────
+   801→   801→   801→    /// Load Upper 12-bit Immediate Word: `lu12i.w rd, si20`
+   802→   802→   802→    Lu12iW { rd: Gpr, imm20: i32 },
+   803→   803→   803→    /// Load Upper 32-bit Immediate Doubleword (high): `lu32i.d rd, si20`
+   804→   804→   804→    Lu32iD { rd: Gpr, imm20: i32 },
+   805→   805→   805→    /// Load Upper 52-bit Immediate Doubleword: `lu52i.d rd, si12`
+   806→   806→   806→    Lu52iD { rd: Gpr, rj: Gpr, imm12: i32 },
+   807→   807→   807→    /// PC-add Upper: `pcaddu12i rd, si20`
+   808→   808→   808→    Pcaddu12i { rd: Gpr, imm20: i32 },
+   809→   809→   809→    /// PC-add Upper (18-bit): `pcaddu18i rd, si20`
+   810→   810→   810→    Pcaddu18i { rd: Gpr, imm20: i32 },
+   811→   811→   811→
+   812→   812→   812→    // ── Atomic (2RI14) ──────────────────────────────────────────────
+   813→   813→   813→    /// Load-Linked Word: `ll.w rd, rj, si14`
+   814→   814→   814→    LlW { rd: Gpr, rj: Gpr, imm14: i32 },
+   815→   815→   815→    /// Store-Conditional Word: `sc.w rd, rj, si14`
+   816→   816→   816→    ScW { rd: Gpr, rj: Gpr, imm14: i32 },
+   817→   817→   817→    /// Load-Linked Doubleword: `ll.d rd, rj, si14`
+   818→   818→   818→    LlD { rd: Gpr, rj: Gpr, imm14: i32 },
+   819→   819→   819→    /// Store-Conditional Doubleword: `sc.d rd, rj, si14`
+   820→   820→   820→    ScD { rd: Gpr, rj: Gpr, imm14: i32 },
+   821→   821→   821→
+   822→   822→   822→    // ── Move (2R) ───────────────────────────────────────────────────
+   823→   823→   823→    /// Sign-extend Halfword to Word: `ext.w.h rd, rj`
+   824→   824→   824→    ExtWH { rd: Gpr, rj: Gpr },
+   825→   825→   825→    /// Sign-extend Byte to Word: `ext.w.b rd, rj`
+   826→   826→   826→    ExtWB { rd: Gpr, rj: Gpr },
+   827→   827→   827→    /// Count Leading Ones, Doubleword: `clo.d rd, rj`
+   828→   828→   828→    CloD { rd: Gpr, rj: Gpr },
+   829→   829→   829→
+   830→   830→   830→    // ── FP Load/Store (2RI12) ───────────────────────────────────────
+   831→   831→   831→    /// Load Float Word to FP: `fld.s fd, rj, si12`
+   832→   832→   832→    FldS { fd: Fpr, rj: Gpr, imm12: i32 },
+   833→   833→   833→    /// Load Double to FP: `fld.d fd, rj, si12`
+   834→   834→   834→    FldD { fd: Fpr, rj: Gpr, imm12: i32 },
+   835→   835→   835→    /// Store Float Word: `fst.s fd, rj, si12`
+   836→   836→   836→    FstS { fd: Fpr, rj: Gpr, imm12: i32 },
+   837→   837→   837→    /// Store Double: `fst.d fd, rj, si12`
+   838→   838→   838→    FstD { fd: Fpr, rj: Gpr, imm12: i32 },
+   839→   839→   839→
+   840→   840→   840→    // ── FP Move (2R) ────────────────────────────────────────────────
+   841→   841→   841→    /// Move FP to GR Doubleword: `movfr2gr.d rd, fj`
+   842→   842→   842→    FmovGr2FprD { rd: Gpr, fj: Fpr },
+   843→   843→   843→    /// Move GR to FP Doubleword: `movgr2fr.d fd, rj`
+   844→   844→   844→    FmovFpr2GrD { fd: Fpr, rj: Gpr },
+   845→   845→   845→
+   846→   846→   846→    // ── FP Arithmetic (3R) ──────────────────────────────────────────
+   847→   847→   847→    /// FP Add Single: `fadd.s fd, fj, fk`
+   848→   848→   848→    FaddS { fd: Fpr, fj: Fpr, fk: Fpr },
+   849→   849→   849→    /// FP Add Double: `fadd.d fd, fj, fk`
+   850→   850→   850→    FaddD { fd: Fpr, fj: Fpr, fk: Fpr },
+   851→   851→   851→    /// FP Subtract Single: `fsub.s fd, fj, fk`
+   852→   852→   852→    FsubS { fd: Fpr, fj: Fpr, fk: Fpr },
+   853→   853→   853→    /// FP Subtract Double: `fsub.d fd, fj, fk`
+   854→   854→   854→    FsubD { fd: Fpr, fj: Fpr, fk: Fpr },
+   855→   855→   855→    /// FP Multiply Single: `fmul.s fd, fj, fk`
+   856→   856→   856→    FmulS { fd: Fpr, fj: Fpr, fk: Fpr },
+   857→   857→   857→    /// FP Multiply Double: `fmul.d fd, fj, fk`
+   858→   858→   858→    FmulD { fd: Fpr, fj: Fpr, fk: Fpr },
+   859→   859→   859→    /// FP Divide Single: `fdiv.s fd, fj, fk`
+   860→   860→   860→    FdivS { fd: Fpr, fj: Fpr, fk: Fpr },
+   861→   861→   861→    /// FP Divide Double: `fdiv.d fd, fj, fk`
+   862→   862→   862→    FdivD { fd: Fpr, fj: Fpr, fk: Fpr },
+   863→   863→   863→
+   864→   864→   864→    // ── FP Move (2R) ───────────────────────────────────────────────
+   865→   865→   865→    /// FP Move Single: `fmov.s fd, fj`
+   866→   866→   866→    FmovS { fd: Fpr, fj: Fpr },
+   867→   867→   867→    /// FP Move Double: `fmov.d fd, fj`
+   868→   868→   868→    FmovD { fd: Fpr, fj: Fpr },
+   869→   869→   869→
+   870→   870→   870→    // ── FP Compare (4R-like) ────────────────────────────────────────
+   871→   871→   871→    /// FP Compare Single: `fcmp.cond.s cd, fj, fk`
+   872→   872→   872→    FCmpS { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
+   873→   873→   873→    /// FP Compare Double: `fcmp.cond.d cd, fj, fk`
+   874→   874→   874→    FCmpD { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
+   875→   875→   875→
+   876→   876→   876→    // ── No-op / Break ───────────────────────────────────────────────
+   877→   877→   877→    /// No-operation (pseudo: `and $r0, $r0, $r0`)
+   878→   878→   878→    Nop,
+   879→   879→   879→    /// System Call: `syscall 0x0`
+   880→   880→   880→    Syscall,
+   881→   881→   881→    /// Break: `break 0x0`
+   882→   882→   882→    Break,
+   883→   883→   883→}
+   884→   884→   884→
+   885→   885→   885→impl Instruction {
+   886→   886→   886→    /// Encode this instruction into a 4-byte little-endian machine code word.
+   887→   887→   887→    ///
+   888→   888→   888→    /// Encoding follows the LoongArch ISA Specification.
+   889→   889→   889→    pub fn encode(&self) -> [u8; 4] {
+   890→   890→   890→        match self {
+   891→   891→   891→            // ── Arithmetic (3R) ────────────────────────────────────
+   892→   892→   892→            Instruction::AddW { rd, rj, rk } => {
+   893→   893→   893→                encode_3r(OPC_ADD_W, rk.encoding(), rj.encoding(), rd.encoding())
+   894→   894→   894→            }
+   895→   895→   895→            Instruction::AddD { rd, rj, rk } => {
+   896→   896→   896→                encode_3r(OPC_ADD_D, rk.encoding(), rj.encoding(), rd.encoding())
+   897→   897→   897→            }
+   898→   898→   898→            Instruction::SubW { rd, rj, rk } => {
+   899→   899→   899→                encode_3r(OPC_SUB_W, rk.encoding(), rj.encoding(), rd.encoding())
+   900→   900→   900→            }
+   901→   901→   901→            Instruction::SubD { rd, rj, rk } => {
+   902→   902→   902→                encode_3r(OPC_SUB_D, rk.encoding(), rj.encoding(), rd.encoding())
+   903→   903→   903→            }
+   904→   904→   904→            Instruction::Slt { rd, rj, rk } => {
+   905→   905→   905→                encode_3r(OPC_SLT, rk.encoding(), rj.encoding(), rd.encoding())
+   906→   906→   906→            }
+   907→   907→   907→            Instruction::Sltu { rd, rj, rk } => {
+   908→   908→   908→                encode_3r(OPC_SLTU, rk.encoding(), rj.encoding(), rd.encoding())
+   909→   909→   909→            }
+   910→   910→   910→            Instruction::MulW { rd, rj, rk } => {
+   911→   911→   911→                encode_3r(OPC_MUL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   912→   912→   912→            }
+   913→   913→   913→            Instruction::MulD { rd, rj, rk } => {
+   914→   914→   914→                encode_3r(OPC_MUL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   915→   915→   915→            }
+   916→   916→   916→            Instruction::DivW { rd, rj, rk } => {
+   917→   917→   917→                encode_3r(OPC_DIV_W, rk.encoding(), rj.encoding(), rd.encoding())
+   918→   918→   918→            }
+   919→   919→   919→            Instruction::ModW { rd, rj, rk } => {
+   920→   920→   920→                encode_3r(OPC_MOD_W, rk.encoding(), rj.encoding(), rd.encoding())
+   921→   921→   921→            }
+   922→   922→   922→            Instruction::DivWu { rd, rj, rk } => {
+   923→   923→   923→                encode_3r(OPC_DIV_WU, rk.encoding(), rj.encoding(), rd.encoding())
+   924→   924→   924→            }
+   925→   925→   925→            Instruction::ModWu { rd, rj, rk } => {
+   926→   926→   926→                encode_3r(OPC_MOD_WU, rk.encoding(), rj.encoding(), rd.encoding())
+   927→   927→   927→            }
+   928→   928→   928→            Instruction::DivD { rd, rj, rk } => {
+   929→   929→   929→                encode_3r(OPC_DIV_D, rk.encoding(), rj.encoding(), rd.encoding())
+   930→   930→   930→            }
+   931→   931→   931→            Instruction::ModD { rd, rj, rk } => {
+   932→   932→   932→                encode_3r(OPC_MOD_D, rk.encoding(), rj.encoding(), rd.encoding())
+   933→   933→   933→            }
+   934→   934→   934→            Instruction::DivDu { rd, rj, rk } => {
+   935→   935→   935→                encode_3r(OPC_DIV_DU, rk.encoding(), rj.encoding(), rd.encoding())
+   936→   936→   936→            }
+   937→   937→   937→            Instruction::ModDu { rd, rj, rk } => {
+   938→   938→   938→                encode_3r(OPC_MOD_DU, rk.encoding(), rj.encoding(), rd.encoding())
+   939→   939→   939→            }
+   940→   940→   940→
+   941→   941→   941→            // ── Logical (3R) ──────────────────────────────────────
+   942→   942→   942→            Instruction::And { rd, rj, rk } => {
+   943→   943→   943→                encode_3r(OPC_AND, rk.encoding(), rj.encoding(), rd.encoding())
+   944→   944→   944→            }
+   945→   945→   945→            Instruction::Or { rd, rj, rk } => {
+   946→   946→   946→                encode_3r(OPC_OR, rk.encoding(), rj.encoding(), rd.encoding())
+   947→   947→   947→            }
+   948→   948→   948→            Instruction::Xor { rd, rj, rk } => {
+   949→   949→   949→                encode_3r(OPC_XOR, rk.encoding(), rj.encoding(), rd.encoding())
+   950→   950→   950→            }
+   951→   951→   951→            Instruction::Nor { rd, rj, rk } => {
+   952→   952→   952→                encode_3r(OPC_NOR, rk.encoding(), rj.encoding(), rd.encoding())
+   953→   953→   953→            }
+   954→   954→   954→            Instruction::Andn { rd, rj, rk } => {
+   955→   955→   955→                encode_3r(OPC_ANDN, rk.encoding(), rj.encoding(), rd.encoding())
+   956→   956→   956→            }
+   957→   957→   957→            Instruction::Orn { rd, rj, rk } => {
+   958→   958→   958→                encode_3r(OPC_ORN, rk.encoding(), rj.encoding(), rd.encoding())
+   959→   959→   959→            }
+   960→   960→   960→
+   961→   961→   961→            // ── Shift (3R) ────────────────────────────────────────
+   962→   962→   962→            Instruction::SllW { rd, rj, rk } => {
+   963→   963→   963→                encode_3r(OPC_SLL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   964→   964→   964→            }
+   965→   965→   965→            Instruction::SrlW { rd, rj, rk } => {
+   966→   966→   966→                encode_3r(OPC_SRL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   967→   967→   967→            }
+   968→   968→   968→            Instruction::SraW { rd, rj, rk } => {
+   969→   969→   969→                encode_3r(OPC_SRA_W, rk.encoding(), rj.encoding(), rd.encoding())
+   970→   970→   970→            }
+   971→   971→   971→            Instruction::SllD { rd, rj, rk } => {
+   972→   972→   972→                encode_3r(OPC_SLL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   973→   973→   973→            }
+   974→   974→   974→            Instruction::SrlD { rd, rj, rk } => {
+   975→   975→   975→                encode_3r(OPC_SRL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   976→   976→   976→            }
+   977→   977→   977→            Instruction::SraD { rd, rj, rk } => {
+   978→   978→   978→                encode_3r(OPC_SRA_D, rk.encoding(), rj.encoding(), rd.encoding())
+   979→   979→   979→            }
+   980→   980→   980→            Instruction::RotrW { rd, rj, rk } => {
+   981→   981→   981→                encode_3r(OPC_ROTR_W, rk.encoding(), rj.encoding(), rd.encoding())
+   982→   982→   982→            }
+   983→   983→   983→            Instruction::RotrD { rd, rj, rk } => {
+   984→   984→   984→                encode_3r(OPC_ROTR_D, rk.encoding(), rj.encoding(), rd.encoding())
+   985→   985→   985→            }
+   986→   986→   986→
+   987→   987→   987→            // ── Shift Immediate (reg2i5 / reg2i6) ───────────────────────
+   988→   988→   988→            Instruction::SlliW { rd, rj, imm8 } => {
+   989→   989→   989→                encode_reg2i5(OPC_SLLI_W, *imm8, rj.encoding(), rd.encoding())
+   990→   990→   990→            }
+   991→   991→   991→            Instruction::SrliW { rd, rj, imm8 } => {
+   992→   992→   992→                encode_reg2i5(OPC_SRLI_W, *imm8, rj.encoding(), rd.encoding())
+   993→   993→   993→            }
+   994→   994→   994→            Instruction::SraiW { rd, rj, imm8 } => {
+   995→   995→   995→                encode_reg2i5(OPC_SRAI_W, *imm8, rj.encoding(), rd.encoding())
+   996→   996→   996→            }
+   997→   997→   997→            Instruction::SlliD { rd, rj, imm8 } => {
+   998→   998→   998→                encode_reg2i6(OPC_SLLI_D, *imm8, rj.encoding(), rd.encoding())
+   999→   999→   999→            }
+  1000→  1000→  1000→            Instruction::SrliD { rd, rj, imm8 } => {
+
+[showing lines 501-1000 of 2002; use offset=1001 with limit to continue reading]

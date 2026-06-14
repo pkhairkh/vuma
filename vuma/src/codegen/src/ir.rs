@@ -2024,6 +2024,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -2041,6 +2042,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         };
         assert_eq!(instr.defined_regs(), vec![2]);
         assert_eq!(instr.used_regs(), vec![0, 1]);
