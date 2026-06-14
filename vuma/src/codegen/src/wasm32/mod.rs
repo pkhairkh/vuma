@@ -1444,12 +1444,10 @@ impl LoweringContext {
     }
 
     /// Push a value onto the Wasm stack from an IRValue.
-    fn push_value(&mut self, val: &IRValue, type_hint: Option<&IRType>) {
+    fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
         match val {
             IRValue::Immediate(v) => {
-                let ty = type_hint
-                    .and_then(WasmType::from_ir_type)
-                    .unwrap_or(WasmType::I32);
+                let ty = type_hint.copied().unwrap_or(WasmType::I32);
                 match ty {
                     WasmType::I32 => self.emit(WasmInstr::I32Const(*v as i32)),
                     WasmType::I64 => self.emit(WasmInstr::I64Const(*v)),
@@ -1609,11 +1607,12 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
 /// Lower a single IR instruction.
 fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), BackendError> {
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
-            let ty = wasm_type_for_binop(op, lhs, rhs);
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            let wasm_op = match ty {
+        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+            let wasm_ty = wasm_type_for_binop(op, lhs, rhs);
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            let mut skip_emit = false;
+            let wasm_op = match wasm_ty {
                 WasmType::I32 => match op {
                     BinOpKind::Add => WasmInstr::I32Add,
                     BinOpKind::Sub => WasmInstr::I32Sub,
@@ -1628,7 +1627,38 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::Shl => WasmInstr::I32Shl,
                     BinOpKind::ShrL => WasmInstr::I32ShrU,
                     BinOpKind::ShrA => WasmInstr::I32ShrS,
-                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I32ShrS, // placeholder
+                    BinOpKind::Ror | BinOpKind::Rol => {
+                        skip_emit = true;
+                        let lhs_local = ctx.num_locals;
+                        ctx.num_locals += 1;
+                        ctx.locals.push((1, WasmType::I32));
+                        let rhs_local = ctx.num_locals;
+                        ctx.num_locals += 1;
+                        ctx.locals.push((1, WasmType::I32));
+                        ctx.emit(WasmInstr::LocalSet(rhs_local));
+                        ctx.emit(WasmInstr::LocalSet(lhs_local));
+                        if *op == BinOpKind::Ror {
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I32ShrU);
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::I32Const(32));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I32Sub);
+                            ctx.emit(WasmInstr::I32Shl);
+                        } else {
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I32Shl);
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::I32Const(32));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I32Sub);
+                            ctx.emit(WasmInstr::I32ShrU);
+                        }
+                        ctx.emit(WasmInstr::I32Or);
+                        WasmInstr::Nop
+                    }
                     BinOpKind::SLt => WasmInstr::I32LtS,
                     BinOpKind::SLe => WasmInstr::I32LeS,
                     BinOpKind::SGt => WasmInstr::I32GtS,
@@ -1654,7 +1684,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::Shl => WasmInstr::I64Shl,
                     BinOpKind::ShrL => WasmInstr::I64ShrU,
                     BinOpKind::ShrA => WasmInstr::I64ShrS,
-                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I64ShrS, // placeholder
+                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I64ShrS, // TODO: implement i64 rotate
                     BinOpKind::SLt => WasmInstr::I64LtS,
                     BinOpKind::SLe => WasmInstr::I64LeS,
                     BinOpKind::SGt => WasmInstr::I64GtS,
@@ -1693,9 +1723,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     _ => WasmInstr::I32Add, // fallback for unsupported float ops
                 },
             };
-            ctx.emit(wasm_op);
+            if !skip_emit {
+                ctx.emit(wasm_op);
+            }
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, ty);
+                ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
@@ -1713,11 +1745,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     // integer negation is lowered as (0 - x).
                     match ty {
                         WasmType::F32 => {
-                            ctx.push_value(operand, Some(&IRType::F32));
+                            ctx.push_value(operand, Some(&WasmType::F32));
                             ctx.emit(WasmInstr::F32Neg);
                         }
                         WasmType::F64 => {
-                            ctx.push_value(operand, Some(&IRType::F64));
+                            ctx.push_value(operand, Some(&WasmType::F64));
                             ctx.emit(WasmInstr::F64Neg);
                         }
                         _ => {
@@ -1778,7 +1810,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Load { dst, addr, offset: _, ty: _ } => {
-            ctx.push_value(addr, Some(&IRType::I32));
+            ctx.push_value(addr, Some(&WasmType::I32));
             ctx.emit(WasmInstr::I32Load {
                 align: 2,
                 offset: 0,
@@ -1791,7 +1823,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Store { value, addr, offset: _, ty: _ } => {
-            ctx.push_value(addr, Some(&IRType::I32));
+            ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, None);
             ctx.emit(WasmInstr::I32Store {
                 align: 2,
@@ -1882,8 +1914,8 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Offset { dst, base, offset } => {
-            ctx.push_value(base, Some(&IRType::I32));
-            ctx.push_value(offset, Some(&IRType::I32));
+            ctx.push_value(base, Some(&WasmType::I32));
+            ctx.push_value(offset, Some(&WasmType::I32));
             ctx.emit(WasmInstr::I32Add);
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);

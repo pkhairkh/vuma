@@ -2530,14 +2530,9 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
     } else if uval & 0xFFFF == 0 && (uval >> 32) == 0 {
         code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((uval >> 16) & 0xFFFF) as i16 as i32 }.encode());
         // If the high 16 bits have bit 15 set, LIS sign-extends to 64-bit all-1s.
-        // Clear upper 32 bits with CLRLDI.
+        // Clear upper 32 bits with rlwinm rd,rd,0,0,31 (equivalent to clrldi rd,rd,32)
         if ((uval >> 16) & 0xFFFF) >= 0x8000 {
-            // RLDICL rd, rd, 0, 32: CLRLDI — clear upper 32 bits
-            // MB=32: mb[0:4]=0, mb5=1
-            let rldicl_word: u32 = (30u32<<26)
-                | (rd.encoding()<<21) | (rd.encoding()<<16)
-                | (0<<11) | ((32 & 0x1F)<<6) | (0<<5) | (((32 >> 5) & 1)<<4) | (0<<2) | 0;
-            code.extend_from_slice(&encode_word(rldicl_word));
+            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
         }
     } else if uval >> 32 == 0 {
         let hi16 = ((uval >> 16) & 0xFFFF) as u32;
@@ -2545,30 +2540,22 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
         code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi16 as i16 as i32 }.encode());
         if lo16 != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo16 }.encode()); }
         // LIS sign-extends: if bit 31 of the 32-bit value is set, the upper 32 bits
-        // of the 64-bit register are all 1s. Clear them with CLRLDI rd, rd, 32
-        // (= RLDICL rd, rd, 0, 32) which zero-extends to 64 bits.
+        // of the 64-bit register are all 1s. Clear them with rlwinm rd,rd,0,0,31
+        // (equivalent to clrldi rd,rd,32) which zero-extends to 64 bits.
         if hi16 >= 0x8000 {
-            // RLDICL rd, rd, 0, 32: CLRLDI — clear upper 32 bits
-            // MB=32: mb[0:4]=0, mb5=1
-            let rldicl_word: u32 = (30u32<<26)
-                | (rd.encoding()<<21)  // RS
-                | (rd.encoding()<<16)  // RA (destination)
-                | (0<<11)              // SH[0:4] = 0
-                | ((32 & 0x1F)<<6)     // MB[0:4] = 0
-                | (0<<5)               // SH5 = 0
-                | (((32 >> 5) & 1)<<4) // MB5 = 1
-                | (0<<2)               // XO = 00
-                | 0;                   // Rc = 0
-            code.extend_from_slice(&encode_word(rldicl_word));
+            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
         }
     } else {
         let hi32 = (uval >> 32) as u32;
         let lo32 = (uval & 0xFFFF_FFFF) as u32;
         code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((hi32 >> 16) & 0xFFFF) as i16 as i32 }.encode());
         if hi32 & 0xFFFF != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: hi32 & 0xFFFF }.encode()); }
-        let sh: u32 = 32; let me: u32 = 31;
-        let sldi_word: u32 = (30u32<<26)|(rd.encoding()<<21)|(rd.encoding()<<16)|((sh&0x1F)<<11)|((me&0x1F)<<6)|(((sh>>5)&1)<<5)|(((me>>5)&1)<<4)|(2u32<<1);
-        code.extend_from_slice(&encode_word(sldi_word));
+        // SLDI rd, rd, 32 = RLDICR rd, rd, 32, 31 (shift left by 32 bits)
+        // Use rlwinm-based approach: SLDI is correct for upper-32 ops,
+        // but the MD-form encoding was buggy. Use SLW + clear instead:
+        // Load 32 into R12, then sld rd, rd, r12
+        code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 32 }.encode());
+        code.extend_from_slice(&Instruction::Sld { ra: rd, rs: rd, rb: Gpr::R12 }.encode());
         if (lo32 >> 16) & 0xFFFF != 0 {
             let oris_word: u32 = (25u32<<26)|(rd.encoding()<<21)|(rd.encoding()<<16)|((lo32>>16)&0xFFFF);
             code.extend_from_slice(&encode_word(oris_word));
@@ -2878,47 +2865,121 @@ impl Backend for PPC64Backend {
             label_offsets.insert(block.label.clone(), current_byte_offset);
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
-                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
                         let mut code = Vec::new();
                         match op {
                             BinOpKind::Ror | BinOpKind::Rol => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
-                                if *op == BinOpKind::Ror {
-                                    code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
-                                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 64 }.encode());
-                                    code.extend_from_slice(&Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode());
+                                if is_32bit {
+                                    // 32-bit rotation: use rlwinm which clears upper 32 bits
+                                    // rlwinm operates on the low 32 bits and zero-extends the result
+                                    // ROR(n, r) = ROTL32(n, 32-r)
+                                    // ROL(n, r) = ROTL32(n, r)
+                                    if *op == BinOpKind::Ror {
+                                        // neg r5, r5; addi r5, r5, 32 -> r5 = 32 - amount
+                                        code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
+                                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 32 }.encode());
+                                    }
+                                    // rlwinm needs immediate shift, but we have register shift.
+                                    // Use rlwnm (register-based rotate left word then AND mask)
+                                    // rlwnm r3, r4, r5, 0, 31 — rotates low 32 bits of r4 left by r5[0:4],
+                                    // then masks bits 0-31, clearing upper 32 bits.
+                                    // Encoding: M-form, primary opcode 23
+                                    // rlwnm RA, RS, RB, MB, ME: opcode=23, RS[6:10], RA[11:15], RB[16:20], MB[21:25], ME[26:30], Rc[31]
+                                    let rlwnm_word: u32 = (23u32 << 26)
+                                        | (Gpr::R4.encoding() << 21)
+                                        | (Gpr::R3.encoding() << 16)
+                                        | (Gpr::R5.encoding() << 11)
+                                        | (0u32 << 6)    // MB = 0
+                                        | (31u32 << 1)   // ME = 31
+                                        | 0u32;          // Rc = 0
+                                    code.extend_from_slice(&encode_word(rlwnm_word));
                                 } else {
+                                    // 64-bit rotation: use rldcl
+                                    if *op == BinOpKind::Ror {
+                                        code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
+                                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 64 }.encode());
+                                    }
+                                    // rldcl with mb=0 — but encoding only uses 5-bit mb field.
+                                    // For mb=0 this is fine (only lower 5 bits matter, mb5=0).
                                     code.extend_from_slice(&Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode());
                                 }
                             }
                             BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
-                                match op {
-                                    BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
-                                    BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
-                                    BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Srad { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
-                                    _ => unreachable!(),
+                                if is_32bit {
+                                    match op {
+                                        // SLW/SRW clear upper 32 bits automatically
+                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Slw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Sraw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        _ => unreachable!(),
+                                    }
+                                } else {
+                                    match op {
+                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Srad { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        _ => unreachable!(),
+                                    }
                                 }
                             }
                             BinOpKind::SRem | BinOpKind::URem => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                                code.extend_from_slice(&Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
-                                code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                if is_32bit {
+                                    code.extend_from_slice(&Instruction::Divw { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                    code.extend_from_slice(&Instruction::Mullw { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                    code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                }
                                 code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
+                                if is_32bit {
+                                    // Mask to 32 bits
+                                    code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                }
                             }
                             _ => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
                                 match op {
-                                    BinOpKind::Add => { code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
-                                    BinOpKind::Sub => { code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode()); }
-                                    BinOpKind::Mul => { code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
-                                    BinOpKind::SDiv | BinOpKind::UDiv => { code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
+                                    BinOpKind::Add => {
+                                        if is_32bit {
+                                            // Add and mask to 32 bits
+                                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                        } else {
+                                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        }
+                                    }
+                                    BinOpKind::Sub => {
+                                        if is_32bit {
+                                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
+                                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                        } else {
+                                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
+                                        }
+                                    }
+                                    BinOpKind::Mul => {
+                                        if is_32bit {
+                                            code.extend_from_slice(&Instruction::Mullw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        } else {
+                                            code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        }
+                                    }
+                                    BinOpKind::SDiv | BinOpKind::UDiv => {
+                                        if is_32bit {
+                                            code.extend_from_slice(&Instruction::Divw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        } else {
+                                            code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        }
+                                    }
                                     BinOpKind::And => { code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
                                     BinOpKind::Or => { code.extend_from_slice(&Instruction::Or { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
                                     BinOpKind::Xor => { code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
@@ -3385,17 +3446,9 @@ impl Backend for PPC64Backend {
         );
         // sldi r12, r12, 32 (= rldicr r12, r12, 32, 31)
         // MD-form: primary=30, rS, rA, SH[0:4], ME[0:4], SH[5], ME[5], xo=2, Rc=0
-        let sldi32_sh: u32 = 32;
-        let sldi32_me: u32 = 63 - sldi32_sh; // = 31
-        let sldi32_word: u32 = (30u32 << 26)
-            | (Gpr::R12.encoding() << 21)
-            | (Gpr::R12.encoding() << 16)
-            | ((sldi32_sh & 0x1F) << 11)
-            | ((sldi32_me & 0x1F) << 6)
-            | (((sldi32_sh >> 5) & 1) << 5)
-            | (((sldi32_me >> 5) & 1) << 4)
-            | (2u32 << 1);
-        code.extend_from_slice(&encode_word(sldi32_word));
+        // sldi r12, r12, 32 — use R11 as temp for shift amount
+        code.extend_from_slice(&Instruction::Li { rt: Gpr::R11, simm: 32 }.encode());
+        code.extend_from_slice(&Instruction::Sld { ra: Gpr::R12, rs: Gpr::R12, rb: Gpr::R11 }.encode());
         // oris r12, r12, hi16(lo32) -- oris = primary=25
         let oris_word: u32 = (25u32 << 26)
             | (Gpr::R12.encoding() << 21)

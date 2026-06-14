@@ -356,8 +356,25 @@ fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
 /// Encode a 2RI8 format instruction.
 ///
 /// Format: `opcode[31:22] | I8[21:14] | rj[9:5] | rd[4:0]`
+#[allow(dead_code)]
 fn encode_2ri8(opcode: u32, imm8: u32, rj: u32, rd: u32) -> [u8; 4] {
     let word = ((opcode & 0x3FF) << 22) | ((imm8 & 0xFF) << 14) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+    word.to_le_bytes()
+}
+
+/// Encode a reg2i5 format instruction (17-bit opcode).
+///
+/// Format: `opcode[31:15] | I5[14:10] | rj[9:5] | rd[4:0]`
+fn encode_reg2i5(opcode: u32, imm5: u32, rj: u32, rd: u32) -> [u8; 4] {
+    let word = ((opcode & 0x1FFFF) << 15) | ((imm5 & 0x1F) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+    word.to_le_bytes()
+}
+
+/// Encode a reg2i6 format instruction (16-bit opcode).
+///
+/// Format: `opcode[31:16] | I6[15:10] | rj[9:5] | rd[4:0]`
+fn encode_reg2i6(opcode: u32, imm6: u32, rj: u32, rd: u32) -> [u8; 4] {
+    let word = ((opcode & 0xFFFF) << 16) | ((imm6 & 0x3F) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
     word.to_le_bytes()
 }
 
@@ -396,10 +413,11 @@ fn encode_2ri16(opcode: u32, imm16: u32, rj: u32, rd: u32) -> [u8; 4] {
 /// The lower 16 bits of the offset go in the higher position (bits[25:10]),
 /// and the upper 5 bits go in the lower position (bits[9:5]).
 fn encode_1ri21(opcode: u32, imm21: u32, rj: u32) -> [u8; 4] {
+    // reg1i21 format: opcode[31:26] | imm_hi[25:10] | rj[9:5] | imm_lo[4:0]
     let word = ((opcode & 0x3F) << 26)
-        | ((imm21 & 0xFFFF) << 10)
-        | ((imm21 >> 16) & 0x1F) << 5
-        | (rj & 0x1F);
+        | ((imm21 >> 5) & 0xFFFF) << 10  // imm[20:5] at bits 25:10
+        | ((rj & 0x1F) << 5)             // rj at bits 9:5
+        | (imm21 & 0x1F);                // imm[4:0] at bits 4:0
     word.to_le_bytes()
 }
 
@@ -423,73 +441,73 @@ fn encode_i26(opcode: u32, imm26: u32) -> [u8; 4] {
 
 const OPC_ADD_W: u32 = 0x0020;
 const OPC_ADD_D: u32 = 0x0021;
-const OPC_SUB_W: u32 = 0x0030;
-const OPC_SUB_D: u32 = 0x0031;
-const OPC_SLT: u32 = 0x0040;
-const OPC_SLTU: u32 = 0x0041;
-const OPC_MUL_W: u32 = 0x0098;
-const OPC_MUL_D: u32 = 0x0099;
-const OPC_DIV_W: u32 = 0x009E;
-const OPC_MOD_W: u32 = 0x009F;
-const OPC_DIV_D: u32 = 0x00A0;
-const OPC_MOD_D: u32 = 0x00A1;
-const OPC_AND: u32 = 0x0080;
-const OPC_OR: u32 = 0x0081;
-const OPC_XOR: u32 = 0x0082;
-const OPC_NOR: u32 = 0x0083;
-const OPC_ANDN: u32 = 0x0084;
-const OPC_ORN: u32 = 0x0085;
-const OPC_SLL_W: u32 = 0x0089;
-const OPC_SRL_W: u32 = 0x008A;
-const OPC_SRA_W: u32 = 0x008B;
-const OPC_SLL_D: u32 = 0x008C;
-const OPC_SRL_D: u32 = 0x008D;
-const OPC_SRA_D: u32 = 0x008E;
-const OPC_ROTR_W: u32 = 0x008F;
-const OPC_ROTR_D: u32 = 0x0090;
+const OPC_SUB_W: u32 = 0x0022;
+const OPC_SUB_D: u32 = 0x0023;
+const OPC_SLT: u32 = 0x0024;
+const OPC_SLTU: u32 = 0x0025;
+const OPC_NOR: u32 = 0x0028;
+const OPC_AND: u32 = 0x0029;
+const OPC_OR: u32 = 0x002A;
+const OPC_XOR: u32 = 0x002B;
+const OPC_ORN: u32 = 0x002C;
+const OPC_ANDN: u32 = 0x002D;
+const OPC_SLL_W: u32 = 0x002E;
+const OPC_SRL_W: u32 = 0x002F;
+const OPC_SRA_W: u32 = 0x0030;
+const OPC_SLL_D: u32 = 0x0031;
+const OPC_SRL_D: u32 = 0x0032;
+const OPC_SRA_D: u32 = 0x0033;
+const OPC_ROTR_W: u32 = 0x0036;
+const OPC_ROTR_D: u32 = 0x0037;
+const OPC_MUL_W: u32 = 0x0038;
+const OPC_MUL_D: u32 = 0x003B;
+const OPC_DIV_W: u32 = 0x0040;
+const OPC_MOD_W: u32 = 0x0041;
+const OPC_DIV_D: u32 = 0x0044;
+const OPC_MOD_D: u32 = 0x0045;
 
 // ===========================================================================
 // 3R-format FP Arithmetic Opcodes (bits[31:15])
 // ===========================================================================
 
-const OPC_FADD_S: u32 = 0x0100;
-const OPC_FADD_D: u32 = 0x0101;
-const OPC_FSUB_S: u32 = 0x0102;
-const OPC_FSUB_D: u32 = 0x0103;
-const OPC_FMUL_S: u32 = 0x0104;
-const OPC_FMUL_D: u32 = 0x0105;
-const OPC_FDIV_S: u32 = 0x0106;
-const OPC_FDIV_D: u32 = 0x0107;
+const OPC_FADD_S: u32 = 0x0201;
+const OPC_FADD_D: u32 = 0x0202;
+const OPC_FSUB_S: u32 = 0x0205;
+const OPC_FSUB_D: u32 = 0x0206;
+const OPC_FMUL_S: u32 = 0x0209;
+const OPC_FMUL_D: u32 = 0x020A;
+const OPC_FDIV_S: u32 = 0x020D;
+const OPC_FDIV_D: u32 = 0x020E;
 
 // ===========================================================================
 // 2R-format FP Move Opcodes (bits[31:10])
 // ===========================================================================
 
-const OPC_FMOV_S: u32 = 0x000004E;
-const OPC_FMOV_D: u32 = 0x000004F;
+const OPC_FMOV_S: u32 = 0x004525;
+const OPC_FMOV_D: u32 = 0x004526;
 
 // ===========================================================================
 // 4R-format FP Compare Opcodes (bits[31:20])
 // ===========================================================================
 
-const OPC_FCMP_S: u32 = 0x0C4;
-const OPC_FCMP_D: u32 = 0x0C5;
+const OPC_FCMP_S: u32 = 0x0C1;
+const OPC_FCMP_D: u32 = 0x0C2;
 
 // ===========================================================================
 // 2RI12-format FP Load/Store Opcodes (bits[31:22])
 // ===========================================================================
 
-const OPC_FLD_S: u32 = 0x0AB;
-const OPC_FLD_D: u32 = 0x0AC;
+const OPC_FLD_S: u32 = 0x0AC;
+const OPC_FLD_D: u32 = 0x0AE;
 const OPC_FST_S: u32 = 0x0AD;
-const OPC_FST_D: u32 = 0x0AE;
+const OPC_FST_D: u32 = 0x0AF;
 
 // ===========================================================================
 // 2R-format FP GPR<->FPR Move Opcodes (bits[31:10])
 // ===========================================================================
 
-const OPC_MOVFR2GR_D: u32 = 0x0000052;
-const OPC_MOVGR2FR_D: u32 = 0x0000053;
+const OPC_MOVFR2GR_D: u32 = 0x00452E;
+const OPC_MOVGR2FR_D: u32 = 0x00452A;
 
 // ===========================================================================
 // 2RI12-format Opcodes (bits[31:22])
@@ -525,9 +543,9 @@ const OPC_BGE: u32 = 0x19;
 const OPC_BLTU: u32 = 0x1A;
 const OPC_BGEU: u32 = 0x1B;
 const OPC_JIRL: u32 = 0x13;
-const OPC_LU12I_W: u32 = 0x05;
-const OPC_LU32I_D: u32 = 0x06; // Note: same encoding as pcaddi in LoongArch
-const OPC_LU52I_D: u32 = 0x0C;
+const OPC_LU12I_W: u32 = 0x0A; // reg1i20 format, 7-bit opcode at bits 31:25
+const OPC_LU32I_D: u32 = 0x0B; // reg1i20 format, 7-bit opcode at bits 31:25
+const OPC_LU52I_D: u32 = 0x0C; // 2RI12 format, 10-bit opcode at bits 31:22
 
 // ===========================================================================
 // I26-format Opcodes (bits[31:26])
@@ -549,8 +567,8 @@ const OPC_SC_D: u32 = 0x23;
 // 1RI21-format Opcodes (bits[31:26])
 // ===========================================================================
 
-const OPC_BEQZ: u32 = 0x1C;
-const OPC_BNEZ: u32 = 0x1D;
+const OPC_BEQZ: u32 = 0x10;
+const OPC_BNEZ: u32 = 0x11;
 const OPC_PCADDU12I: u32 = 0x0E;
 const OPC_PCADDU18I: u32 = 0x0F;
 
@@ -558,21 +576,21 @@ const OPC_PCADDU18I: u32 = 0x0F;
 // 2R-format Opcodes (bits[31:10])
 // ===========================================================================
 
-const OPC_EXT_W_H: u32 = 0x000005A;
-const OPC_EXT_W_B: u32 = 0x000005B;
-/// CLO.D (count leading ones, doubleword): opcode 0x00000014 in 2R format.
-const OPC_CLO_D: u32 = 0x00000014;
+const OPC_EXT_W_H: u32 = 0x0000016;
+const OPC_EXT_W_B: u32 = 0x0000017;
+/// CLO.D (count leading ones, doubleword): opcode 0x0000008 in 2R format.
+const OPC_CLO_D: u32 = 0x0000008;
 
 #[allow(dead_code)]
-const OPC_REVB_2H: u32 = 0x0000060;
+const OPC_REVB_2H: u32 = 0x000000C;
 #[allow(dead_code)]
-const OPC_REVB_4H: u32 = 0x0000061;
+const OPC_REVB_4H: u32 = 0x000000D;
 #[allow(dead_code)]
-const OPC_REVB_2W: u32 = 0x0000062;
+const OPC_REVB_2W: u32 = 0x000000E;
 #[allow(dead_code)]
-const OPC_BITREV_4B: u32 = 0x0000064;
+const OPC_BITREV_4B: u32 = 0x0000012;
 #[allow(dead_code)]
-const OPC_BITREV_8B: u32 = 0x0000065;
+const OPC_BITREV_8B: u32 = 0x0000013;
 #[allow(dead_code)]
 const OPC_CPBYTE: u32 = 0x0000057;
 
@@ -594,19 +612,24 @@ const OPC_BYTEREV_W: u32 = 0x00A;
 const OPC_BYTEREV_H: u32 = 0x00B;
 
 // ===========================================================================
-// 2RI8-format Opcodes (bits[31:22])
+// reg2i5-format Opcodes (bits[31:15], 17-bit) — .W shift immediates
 // ===========================================================================
 
-const OPC_SLLI_W: u32 = 0x008;
-const OPC_SRLI_W: u32 = 0x009;
-const OPC_SRAI_W: u32 = 0x00A;
-const OPC_SLLI_D: u32 = 0x00B;
-const OPC_SRLI_D: u32 = 0x00C;
-const OPC_SRAI_D: u32 = 0x00D;
+const OPC_SLLI_W: u32 = 0x0081;
+const OPC_SRLI_W: u32 = 0x0089;
+const OPC_SRAI_W: u32 = 0x0091;
 #[allow(dead_code)]
-const OPC_ROTRI_W: u32 = 0x00E;
+const OPC_ROTRI_W: u32 = 0x0099;
+
+// ===========================================================================
+// reg2i6-format Opcodes (bits[31:16], 16-bit) — .D shift immediates
+// ===========================================================================
+
+const OPC_SLLI_D: u32 = 0x0041;
+const OPC_SRLI_D: u32 = 0x0045;
+const OPC_SRAI_D: u32 = 0x0049;
 #[allow(dead_code)]
-const OPC_ROTRI_D: u32 = 0x00F;
+const OPC_ROTRI_D: u32 = 0x004D;
 
 // ===========================================================================
 // Instruction Enum
@@ -937,24 +960,24 @@ impl Instruction {
                 encode_3r(OPC_ROTR_D, rk.encoding(), rj.encoding(), rd.encoding())
             }
 
-            // ── Shift Immediate (2RI8) ────────────────────────────
+            // ── Shift Immediate (reg2i5 / reg2i6) ───────────────────────
             Instruction::SlliW { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SLLI_W, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i5(OPC_SLLI_W, *imm8, rj.encoding(), rd.encoding())
             }
             Instruction::SrliW { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SRLI_W, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i5(OPC_SRLI_W, *imm8, rj.encoding(), rd.encoding())
             }
             Instruction::SraiW { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SRAI_W, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i5(OPC_SRAI_W, *imm8, rj.encoding(), rd.encoding())
             }
             Instruction::SlliD { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SLLI_D, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i6(OPC_SLLI_D, *imm8, rj.encoding(), rd.encoding())
             }
             Instruction::SrliD { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SRLI_D, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i6(OPC_SRLI_D, *imm8, rj.encoding(), rd.encoding())
             }
             Instruction::SraiD { rd, rj, imm8 } => {
-                encode_2ri8(OPC_SRAI_D, *imm8, rj.encoding(), rd.encoding())
+                encode_reg2i6(OPC_SRAI_D, *imm8, rj.encoding(), rd.encoding())
             }
 
             // ── Immediate Arithmetic (2RI12) ──────────────────────
@@ -1120,18 +1143,16 @@ impl Instruction {
 
             // ── Upper Immediate ────────────────────────────────────
             Instruction::Lu12iW { rd, imm20 } => {
-                // lu12i.w is encoded with: opcode[31:26] | si20[25:6] | 0[5] | rd[4:0]
-                // The 20-bit si20 is placed in bits[25:6], bit[5] is unused (0).
-                let word = ((OPC_LU12I_W & 0x3F) << 26)
-                    | (((*imm20 as u32) & 0xFFFFF) << 6)
+                // lu12i.w is reg1i20 format: opcode[31:25] | si20[24:5] | rd[4:0]
+                let word = ((OPC_LU12I_W & 0x7F) << 25)
+                    | (((*imm20 as u32) & 0xFFFFF) << 5)
                     | (rd.encoding() & 0x1F);
                 word.to_le_bytes()
             }
             Instruction::Lu32iD { rd, imm20 } => {
-                // lu32i.d is encoded with: opcode[31:26] | si20[25:6] | 0[5] | rd[4:0]
-                // The 20-bit si20 is placed in bits[25:6], bit[5] is unused (0).
-                let word = ((OPC_LU32I_D & 0x3F) << 26)
-                    | (((*imm20 as u32) & 0xFFFFF) << 6)
+                // lu32i.d is reg1i20 format: opcode[31:25] | si20[24:5] | rd[4:0]
+                let word = ((OPC_LU32I_D & 0x7F) << 25)
+                    | (((*imm20 as u32) & 0xFFFFF) << 5)
                     | (rd.encoding() & 0x1F);
                 word.to_le_bytes()
             }
