@@ -1,0 +1,1420 @@
+     1→     1→//! Adaptive deployment for the Continuous Optimization Runtime.
+     2→     2→//!
+     3→     3→//! The COR can distribute compiled regions across heterogeneous execution
+     4→     4→//! targets: the local process, remote endpoints (e.g. a cloud compute
+     5→     5→//! instance), or Raspberry Pi 5 boards running either bare-metal or Linux.
+     6→     6→//!
+     7→     7→//! # Core types
+     8→     8→//!
+     9→     9→//! - [`DeploymentTarget`] — where to deploy (Local, Pi5Bare, Pi5Linux, Remote).
+    10→    10→//! - [`DeploymentPackage`] — compiled binary + metadata + debug info.
+    11→    11→//! - [`DeploymentManager`] — orchestrates deploys, hot-swaps, rollbacks, and
+    12→    12→//!   delta transfers.
+    13→    13→//!
+    14→    14→//! # Hot-swap (Pi 5)
+    15→    15→//!
+    16→    16→//! On Raspberry Pi 5 targets, the deployment manager supports *hot-swapping*:
+    17→    17→//! replacing a region's compiled code while execution continues. A shadow
+    18→    18→//! buffer is prepared, then atomically swapped in via a fence. The previous
+    19→    19→//! version is retained for potential rollback.
+    20→    20→//!
+    21→    21→//! # Version management
+    22→    22→//!
+    23→    23→//! Every successful deployment is recorded in a [`VersionLog`]. The log
+    24→    24→//! enables rollback to any previously deployed version of a region.
+    25→    25→//!
+    26→    26→//! # Delta deployment
+    27→    27→//!
+    28→    28→//! When re-deploying a region whose previous version is already present on
+    29→    29→//! the target, the manager computes a [`DeploymentDelta`] containing only the
+    30→    30→//! changed bytes, reducing transfer size.
+    31→    31→
+    32→    32→use crate::config::Config;
+    33→    33→use crate::profile::ProfileData;
+    34→    34→use crate::types::RegionId;
+    35→    35→use serde::{Deserialize, Serialize};
+    36→    36→use std::collections::HashMap;
+    37→    37→use std::time::{Duration, Instant};
+    38→    38→
+    39→    39→// ===========================================================================
+    40→    40→// DeploymentTarget
+    41→    41→// ===========================================================================
+    42→    42→
+    43→    43→/// A target where a compiled region can be deployed for execution.
+    44→    44→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    45→    45→pub enum DeploymentTarget {
+    46→    46→    /// Execute the region in the local process.
+    47→    47→    Local,
+    48→    48→
+    49→    49→    /// Deploy to a Raspberry Pi 5 running in **bare-metal** mode.
+    50→    50→    ///
+    51→    51→    /// Bare-metal mode gives the runtime direct control over the BCM2712
+    52→    52→    /// hardware — no OS, no MMU translation, deterministic latency.
+    53→    53→    Pi5Bare {
+    54→    54→        /// Board identifier (for multi-board setups).
+    55→    55→        board_id: String,
+    56→    56→        /// Core to pin the region to (0–3 on Cortex-A76).
+    57→    57→        core_id: u32,
+    58→    58→    },
+    59→    59→
+    60→    60→    /// Deploy to a Raspberry Pi 5 running **Linux** (typically Raspberry Pi OS).
+    61→    61→    ///
+    62→    62→    /// Linux mode uses standard POSIX calls and the kernel scheduler.
+    63→    63→    Pi5Linux {
+    64→    64→        /// Hostname or IP address of the Pi.
+    65→    65→        host: String,
+    66→    66→        /// Core to pin the region to (0–3), or `None` for no affinity.
+    67→    67→        core_affinity: Option<u32>,
+    68→    68→    },
+    69→    69→
+    70→    70→    /// Execute the region on a remote endpoint (e.g. a cloud lambda or
+    71→    71→    /// compute server).
+    72→    72→    Remote {
+    73→    73→        /// The endpoint URI (e.g. `"https://compute.example.com/v1/exec"`).
+    74→    74→        endpoint: String,
+    75→    75→    },
+    76→    76→}
+    77→    77→
+    78→    78→impl DeploymentTarget {
+    79→    79→    /// Returns `true` if this target is any Raspberry Pi 5 variant.
+    80→    80→    pub fn is_pi5(&self) -> bool {
+    81→    81→        matches!(
+    82→    82→            self,
+    83→    83→            DeploymentTarget::Pi5Bare { .. } | DeploymentTarget::Pi5Linux { .. }
+    84→    84→        )
+    85→    85→    }
+    86→    86→
+    87→    87→    /// Returns `true` if this target supports hot-swapping of code.
+    88→    88→    ///
+    89→    89→    /// Hot-swap is currently supported on Pi 5 bare-metal (direct memory
+    90→    90→    /// control) and Pi 5 Linux (via `mmap` + `mprotect` trampoline).
+    91→    91→    pub fn supports_hot_swap(&self) -> bool {
+    92→    92→        self.is_pi5()
+    93→    93→    }
+    94→    94→
+    95→    95→    /// Returns a human-readable label for the target kind.
+    96→    96→    pub fn kind_label(&self) -> &'static str {
+    97→    97→        match self {
+    98→    98→            DeploymentTarget::Local => "Local",
+    99→    99→            DeploymentTarget::Pi5Bare { .. } => "Pi5Bare",
+   100→   100→            DeploymentTarget::Pi5Linux { .. } => "Pi5Linux",
+   101→   101→            DeploymentTarget::Remote { .. } => "Remote",
+   102→   102→        }
+   103→   103→    }
+   104→   104→}
+   105→   105→
+   106→   106→impl std::fmt::Display for DeploymentTarget {
+   107→   107→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   108→   108→        match self {
+   109→   109→            DeploymentTarget::Local => write!(f, "Local"),
+   110→   110→            DeploymentTarget::Pi5Bare { board_id, core_id } => {
+   111→   111→                write!(f, "Pi5Bare({}/core{})", board_id, core_id)
+   112→   112→            }
+   113→   113→            DeploymentTarget::Pi5Linux {
+   114→   114→                host,
+   115→   115→                core_affinity,
+   116→   116→            } => match core_affinity {
+   117→   117→                Some(c) => write!(f, "Pi5Linux({}/core{})", host, c),
+   118→   118→                None => write!(f, "Pi5Linux({})", host),
+   119→   119→            },
+   120→   120→            DeploymentTarget::Remote { endpoint } => write!(f, "Remote({})", endpoint),
+   121→   121→        }
+   122→   122→    }
+   123→   123→}
+   124→   124→
+   125→   125→// ===========================================================================
+   126→   126→// DeploymentPackage
+   127→   127→// ===========================================================================
+   128→   128→
+   129→   129→/// Semantic version for a deployed region.
+   130→   130→#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+   131→   131→pub struct PackageVersion(pub u64);
+   132→   132→
+   133→   133→impl std::fmt::Display for PackageVersion {
+   134→   134→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   135→   135→        write!(f, "v{}", self.0)
+   136→   136→    }
+   137→   137→}
+   138→   138→
+   139→   139→/// Compilation metadata attached to a deployment package.
+   140→   140→#[derive(Debug, Clone, Serialize, Deserialize)]
+   141→   141→pub struct PackageMetadata {
+   142→   142→    /// Region this package was compiled from.
+   143→   143→    pub region_id: RegionId,
+   144→   144→    /// Monotonically increasing version number.
+   145→   145→    pub version: PackageVersion,
+   146→   146→    /// CRC32 checksum of the `code` bytes.
+   147→   147→    pub checksum: u32,
+   148→   148→    /// Compilation flags / optimization level used.
+   149→   149→    pub optimization_label: String,
+   150→   150→    /// Size of the compiled code in bytes (equals `code.len()`).
+   151→   151→    pub code_size: usize,
+   152→   152→    /// Timestamp when the package was created (seconds since Unix epoch).
+   153→   153→    pub created_at_secs: u64,
+   154→   154→}
+   155→   155→
+   156→   156→/// Debug information bundled with a deployment package.
+   157→   157→#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+   158→   158→pub struct DebugInfo {
+   159→   159→    /// Source-to-code-offset mapping: (source_line, code_byte_offset).
+   160→   160→    pub source_map: Vec<(u32, u32)>,
+   161→   161→    /// Symbol table: (offset, name).
+   162→   162→    pub symbols: Vec<(u32, String)>,
+   163→   163→    /// Arbitrary notes from the compiler.
+   164→   164→    pub notes: String,
+   165→   165→}
+   166→   166→
+   167→   167→/// A deployment-ready compiled package: binary + metadata + debug info.
+   168→   168→#[derive(Debug, Clone, Serialize, Deserialize)]
+   169→   169→pub struct DeploymentPackage {
+   170→   170→    /// Compiled machine code bytes.
+   171→   171→    pub code: Vec<u8>,
+   172→   172→    /// Metadata describing the package.
+   173→   173→    pub metadata: PackageMetadata,
+   174→   174→    /// Optional debug information.
+   175→   175→    pub debug_info: Option<DebugInfo>,
+   176→   176→}
+   177→   177→
+   178→   178→impl DeploymentPackage {
+   179→   179→    /// Creates a new deployment package with a CRC32 checksum computed from
+   180→   180→    /// the code bytes.
+   181→   181→    pub fn new(
+   182→   182→        code: Vec<u8>,
+   183→   183→        region_id: RegionId,
+   184→   184→        version: PackageVersion,
+   185→   185→        optimization_label: &str,
+   186→   186→    ) -> Self {
+   187→   187→        let checksum = crc32(&code);
+   188→   188→        let code_size = code.len();
+   189→   189→        let created_at_secs = epoch_secs();
+   190→   190→        DeploymentPackage {
+   191→   191→            code,
+   192→   192→            metadata: PackageMetadata {
+   193→   193→                region_id,
+   194→   194→                version,
+   195→   195→                checksum,
+   196→   196→                optimization_label: optimization_label.to_owned(),
+   197→   197→                code_size,
+   198→   198→                created_at_secs,
+   199→   199→            },
+   200→   200→            debug_info: None,
+   201→   201→        }
+   202→   202→    }
+   203→   203→
+   204→   204→    /// Attaches debug information to this package.
+   205→   205→    pub fn with_debug_info(mut self, info: DebugInfo) -> Self {
+   206→   206→        self.debug_info = Some(info);
+   207→   207→        self
+   208→   208→    }
+   209→   209→
+   210→   210→    /// Validates that the stored checksum matches the actual code bytes.
+   211→   211→    pub fn validate_checksum(&self) -> bool {
+   212→   212→        crc32(&self.code) == self.metadata.checksum
+   213→   213→    }
+   214→   214→}
+   215→   215→
+   216→   216→// ===========================================================================
+   217→   217→// DeploymentDelta
+   218→   218→// ===========================================================================
+   219→   219→
+   220→   220→/// A delta (diff) between two deployment packages, used for bandwidth-
+   221→   221→/// efficient re-deployment.
+   222→   222→#[derive(Debug, Clone, Serialize, Deserialize)]
+   223→   223→pub struct DeploymentDelta {
+   224→   224→    /// The region this delta applies to.
+   225→   225→    pub region_id: RegionId,
+   226→   226→    /// Version we are diffing **from**.
+   227→   227→    pub from_version: PackageVersion,
+   228→   228→    /// Version we are diffing **to**.
+   229→   229→    pub to_version: PackageVersion,
+   230→   230→    /// Patches: (offset_in_code, replacement_bytes).
+   231→   231→    /// Offsets that are not listed are unchanged.
+   232→   232→    pub patches: Vec<(usize, Vec<u8>)>,
+   233→   233→    /// Bytes that should be **deleted** starting at the given offset.
+   234→   234→    pub deletions: Vec<(usize, usize)>,
+   235→   235→    /// Bytes that should be **inserted** at the given offset.
+   236→   236→    pub insertions: Vec<(usize, Vec<u8>)>,
+   237→   237→}
+   238→   238→
+   239→   239→impl DeploymentDelta {
+   240→   240→    /// Computes a delta between two code buffers.
+   241→   241→    ///
+   242→   242→    /// The algorithm performs a simple block-level diff:
+   243→   243→    /// - Scans both buffers in [`DELTA_BLOCK_SIZE`] chunks.
+   244→   244→    /// - Chunks that differ become patches.
+   245→   245→    /// - Trailing bytes in the new buffer become insertions.
+   246→   246→    /// - Trailing bytes in the old buffer become deletions.
+   247→   247→    pub fn compute(
+   248→   248→        region_id: RegionId,
+   249→   249→        from_version: PackageVersion,
+   250→   250→        to_version: PackageVersion,
+   251→   251→        old_code: &[u8],
+   252→   252→        new_code: &[u8],
+   253→   253→    ) -> Self {
+   254→   254→        const BLOCK: usize = 64;
+   255→   255→        let min_len = old_code.len().min(new_code.len());
+   256→   256→        let mut patches = Vec::new();
+   257→   257→
+   258→   258→        let mut offset = 0;
+   259→   259→        while offset + BLOCK <= min_len {
+   260→   260→            if old_code[offset..offset + BLOCK] != new_code[offset..offset + BLOCK] {
+   261→   261→                patches.push((offset, new_code[offset..offset + BLOCK].to_vec()));
+   262→   262→            }
+   263→   263→            offset += BLOCK;
+   264→   264→        }
+   265→   265→        // Handle the tail (< BLOCK bytes).
+   266→   266→        if offset < min_len && old_code[offset..min_len] != new_code[offset..min_len] {
+   267→   267→            patches.push((offset, new_code[offset..min_len].to_vec()));
+   268→   268→        }
+   269→   269→
+   270→   270→        let mut deletions = Vec::new();
+   271→   271→        let mut insertions = Vec::new();
+   272→   272→
+   273→   273→        if new_code.len() > old_code.len() {
+   274→   274→            insertions.push((old_code.len(), new_code[old_code.len()..].to_vec()));
+   275→   275→        } else if old_code.len() > new_code.len() {
+   276→   276→            deletions.push((new_code.len(), old_code.len() - new_code.len()));
+   277→   277→        }
+   278→   278→
+   279→   279→        DeploymentDelta {
+   280→   280→            region_id,
+   281→   281→            from_version,
+   282→   282→            to_version,
+   283→   283→            patches,
+   284→   284→            deletions,
+   285→   285→            insertions,
+   286→   286→        }
+   287→   287→    }
+   288→   288→
+   289→   289→    /// Applies this delta to an old code buffer, producing the new code
+   290→   290→    /// buffer.
+   291→   291→    pub fn apply(&self, old_code: &[u8]) -> Result<Vec<u8>, DeploymentError> {
+   292→   292→        let mut result = old_code.to_vec();
+   293→   293→
+   294→   294→        // Apply patches (same-length replacements).
+   295→   295→        for (offset, data) in &self.patches {
+   296→   296→            let end = offset.checked_add(data.len()).ok_or_else(|| {
+   297→   297→                DeploymentError::DeltaApplyFailed(
+   298→   298→                    self.region_id,
+   299→   299→                    "patch offset + length overflow".to_owned(),
+   300→   300→                )
+   301→   301→            })?;
+   302→   302→            if end > result.len() {
+   303→   303→                return Err(DeploymentError::DeltaApplyFailed(
+   304→   304→                    self.region_id,
+   305→   305→                    format!(
+   306→   306→                        "patch at {}..{} exceeds buffer len {}",
+   307→   307→                        offset,
+   308→   308→                        end,
+   309→   309→                        result.len()
+   310→   310→                    ),
+   311→   311→                ));
+   312→   312→            }
+   313→   313→            result[*offset..end].copy_from_slice(data);
+   314→   314→        }
+   315→   315→
+   316→   316→        // Apply deletions (truncate tail only — ordered back-to-front).
+   317→   317→        let mut sorted_deletions = self.deletions.clone();
+   318→   318→        sorted_deletions.sort_by_key(|b| std::cmp::Reverse(b.0));
+   319→   319→        for (offset, len) in &sorted_deletions {
+   320→   320→            let end = *offset + len;
+   321→   321→            if end > result.len() {
+   322→   322→                return Err(DeploymentError::DeltaApplyFailed(
+   323→   323→                    self.region_id,
+   324→   324→                    format!("deletion at {}..{} exceeds buffer", offset, end),
+   325→   325→                ));
+   326→   326→            }
+   327→   327→            result.drain(*offset..*offset + len);
+   328→   328→        }
+   329→   329→
+   330→   330→        // Apply insertions (at specific offsets).
+   331→   331→        // Sort by offset descending so later insertions don't shift earlier ones.
+   332→   332→        let mut sorted_insertions = self.insertions.clone();
+   333→   333→        sorted_insertions.sort_by_key(|b| std::cmp::Reverse(b.0));
+   334→   334→        for (offset, data) in &sorted_insertions {
+   335→   335→            if *offset > result.len() {
+   336→   336→                return Err(DeploymentError::DeltaApplyFailed(
+   337→   337→                    self.region_id,
+   338→   338→                    format!(
+   339→   339→                        "insertion at {} exceeds buffer len {}",
+   340→   340→                        offset,
+   341→   341→                        result.len()
+   342→   342→                    ),
+   343→   343→                ));
+   344→   344→            }
+   345→   345→            result.splice(*offset..*offset, data.iter().copied());
+   346→   346→        }
+   347→   347→
+   348→   348→        Ok(result)
+   349→   349→    }
+   350→   350→
+   351→   351→    /// Returns an estimate of the delta size in bytes (for bandwidth
+   352→   352→    /// planning).
+   353→   353→    pub fn estimated_size(&self) -> usize {
+   354→   354→        self.patches.iter().map(|(_, d)| d.len()).sum::<usize>()
+   355→   355→            + self.insertions.iter().map(|(_, d)| d.len()).sum::<usize>()
+   356→   356→    }
+   357→   357→
+   358→   358→    /// Returns true if the delta contains no changes.
+   359→   359→    pub fn is_empty(&self) -> bool {
+   360→   360→        self.patches.is_empty() && self.deletions.is_empty() && self.insertions.is_empty()
+   361→   361→    }
+   362→   362→}
+   363→   363→
+   364→   364→// ===========================================================================
+   365→   365→// DeploymentResult
+   366→   366→// ===========================================================================
+   367→   367→
+   368→   368→/// Outcome of a deployment operation.
+   369→   369→#[derive(Debug, Clone, Serialize, Deserialize)]
+   370→   370→pub struct DeploymentResult {
+   371→   371→    /// The region that was deployed.
+   372→   372→    pub region_id: RegionId,
+   373→   373→    /// The version that was deployed.
+   374→   374→    pub version: PackageVersion,
+   375→   375→    /// The target it was deployed to.
+   376→   376→    pub target: DeploymentTarget,
+   377→   377→    /// Wall-clock time taken for the deployment.
+   378→   378→    pub duration: Duration,
+   379→   379→    /// Size of the payload sent (bytes). For delta deployments this is the
+   380→   380→    /// delta size; for full deployments it's the code size.
+   381→   381→    pub bytes_transferred: usize,
+   382→   382→    /// Whether a hot-swap was performed.
+   383→   383→    pub hot_swapped: bool,
+   384→   384→    /// Whether this was a delta (as opposed to full) deployment.
+   385→   385→    pub was_delta: bool,
+   386→   386→}
+   387→   387→
+   388→   388→// ===========================================================================
+   389→   389→// VersionLog
+   390→   390→// ===========================================================================
+   391→   391→
+   392→   392→/// A record of a deployed version, stored in the [`VersionLog`].
+   393→   393→#[derive(Debug, Clone, Serialize, Deserialize)]
+   394→   394→pub struct VersionRecord {
+   395→   395→    /// The region that was deployed.
+   396→   396→    pub region_id: RegionId,
+   397→   397→    /// The version deployed.
+   398→   398→    pub version: PackageVersion,
+   399→   399→    /// The target it was deployed to.
+   400→   400→    pub target: DeploymentTarget,
+   401→   401→    /// CRC32 checksum of the code for this version.
+   402→   402→    pub checksum: u32,
+   403→   403→    /// The compiled code bytes (retained for rollback).
+   404→   404→    pub code: Vec<u8>,
+   405→   405→    /// Timestamp (seconds since Unix epoch).
+   406→   406→    pub deployed_at_secs: u64,
+   407→   407→}
+   408→   408→
+   409→   409→/// Tracks deployed versions per region, enabling rollback.
+   410→   410→#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+   411→   411→pub struct VersionLog {
+   412→   412→    /// region_id → ordered list of deployed versions (oldest first).
+   413→   413→    records: HashMap<RegionId, Vec<VersionRecord>>,
+   414→   414→}
+   415→   415→
+   416→   416→impl VersionLog {
+   417→   417→    /// Creates an empty version log.
+   418→   418→    pub fn new() -> Self {
+   419→   419→        Self::default()
+   420→   420→    }
+   421→   421→
+   422→   422→    /// Records a deployment in the log.
+   423→   423→    pub fn record(&mut self, pkg: &DeploymentPackage, target: &DeploymentTarget) {
+   424→   424→        let entry = self.records.entry(pkg.metadata.region_id).or_default();
+   425→   425→        entry.push(VersionRecord {
+   426→   426→            region_id: pkg.metadata.region_id,
+   427→   427→            version: pkg.metadata.version.clone(),
+   428→   428→            target: target.clone(),
+   429→   429→            checksum: pkg.metadata.checksum,
+   430→   430→            code: pkg.code.clone(),
+   431→   431→            deployed_at_secs: epoch_secs(),
+   432→   432→        });
+   433→   433→    }
+   434→   434→
+   435→   435→    /// Returns the latest version record for a region, if any.
+   436→   436→    pub fn latest(&self, region_id: RegionId) -> Option<&VersionRecord> {
+   437→   437→        self.records.get(&region_id).and_then(|v| v.last())
+   438→   438→    }
+   439→   439→
+   440→   440→    /// Returns the version record *before* the latest (i.e. the rollback
+   441→   441→    /// candidate), if any.
+   442→   442→    pub fn previous(&self, region_id: RegionId) -> Option<&VersionRecord> {
+   443→   443→        self.records
+   444→   444→            .get(&region_id)
+   445→   445→            .and_then(|v| v.len().checked_sub(2).map(|i| &v[i]))
+   446→   446→    }
+   447→   447→
+   448→   448→    /// Returns all version records for a region (oldest first).
+   449→   449→    pub fn history(&self, region_id: RegionId) -> &[VersionRecord] {
+   450→   450→        self.records
+   451→   451→            .get(&region_id)
+   452→   452→            .map(|v| v.as_slice())
+   453→   453→            .unwrap_or(&[])
+   454→   454→    }
+   455→   455→
+   456→   456→    /// Returns the number of versions recorded for a region.
+   457→   457→    pub fn version_count(&self, region_id: RegionId) -> usize {
+   458→   458→        self.records.get(&region_id).map(|v| v.len()).unwrap_or(0)
+   459→   459→    }
+   460→   460→}
+   461→   461→
+   462→   462→// ===========================================================================
+   463→   463→// HotSwapState
+   464→   464→// ===========================================================================
+   465→   465→
+   466→   466→/// State machine for a hot-swap operation.
+   467→   467→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   468→   468→pub enum HotSwapPhase {
+   469→   469→    /// No hot-swap in progress.
+   470→   470→    Idle,
+   471→   471→    /// Shadow buffer is being prepared with the new code.
+   472→   472→    PreparingShadow,
+   473→   473→    /// Shadow is ready; waiting for a safe point to swap.
+   474→   474→    AwaitingSafePoint,
+   475→   475→    /// Atomic pointer swap has been performed; old code is quiescing.
+   476→   476→    Swapping,
+   477→   477→    /// Hot-swap completed successfully.
+   478→   478→    Completed,
+   479→   479→    /// Hot-swap failed; rolled back to the previous code.
+   480→   480→    Failed,
+   481→   481→}
+   482→   482→
+   483→   483→impl std::fmt::Display for HotSwapPhase {
+   484→   484→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   485→   485→        match self {
+   486→   486→            HotSwapPhase::Idle => write!(f, "Idle"),
+   487→   487→            HotSwapPhase::PreparingShadow => write!(f, "PreparingShadow"),
+   488→   488→            HotSwapPhase::AwaitingSafePoint => write!(f, "AwaitingSafePoint"),
+   489→   489→            HotSwapPhase::Swapping => write!(f, "Swapping"),
+   490→   490→            HotSwapPhase::Completed => write!(f, "Completed"),
+   491→   491→            HotSwapPhase::Failed => write!(f, "Failed"),
+   492→   492→        }
+   493→   493→    }
+   494→   494→}
+   495→   495→
+   496→   496→/// Tracks the state of a hot-swap in progress for a region.
+   497→   497→#[derive(Debug, Clone, Serialize, Deserialize)]
+   498→   498→pub struct HotSwapState {
+   499→   499→    /// The region being hot-swapped.
+   500→   500→    pub region_id: RegionId,
+   501→   501→    /// Current phase of the hot-swap.
+   502→   502→    pub phase: HotSwapPhase,
+   503→   503→    /// The version we are swapping **from**.
+   504→   504→    pub from_version: PackageVersion,
+   505→   505→    /// The version we are swapping **to**.
+   506→   506→    pub to_version: PackageVersion,
+   507→   507→}
+   508→   508→
+   509→   509→impl HotSwapState {
+   510→   510→    /// Creates a new hot-swap state in `Idle` phase.
+   511→   511→    pub fn new(region_id: RegionId) -> Self {
+   512→   512→        HotSwapState {
+   513→   513→            region_id,
+   514→   514→            phase: HotSwapPhase::Idle,
+   515→   515→            from_version: PackageVersion(0),
+   516→   516→            to_version: PackageVersion(0),
+   517→   517→        }
+   518→   518→    }
+   519→   519→}
+   520→   520→
+   521→   521→// ===========================================================================
+   522→   522→// DeploymentPlan (kept for backwards compatibility)
+   523→   523→// ===========================================================================
+   524→   524→
+   525→   525→/// A deployment plan mapping each region to an execution target.
+   526→   526→///
+   527→   527→/// The plan is recomputed periodically (or when a significant profile
+   528→   528→/// shift is detected) by [`DeploymentPlanner`].
+   529→   529→#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+   530→   530→pub struct DeploymentPlan {
+   531→   531→    /// Ordered list of (region, target) assignments.
+   532→   532→    pub regions: Vec<(RegionId, DeploymentTarget)>,
+   533→   533→}
+   534→   534→
+   535→   535→impl DeploymentPlan {
+   536→   536→    /// Creates an empty deployment plan.
+   537→   537→    pub fn new() -> Self {
+   538→   538→        Self::default()
+   539→   539→    }
+   540→   540→
+   541→   541→    /// Returns the target for the given region, if assigned.
+   542→   542→    pub fn target_for(&self, region_id: RegionId) -> Option<&DeploymentTarget> {
+   543→   543→        self.regions
+   544→   544→            .iter()
+   545→   545→            .find(|(r, _)| *r == region_id)
+   546→   546→            .map(|(_, t)| t)
+   547→   547→    }
+   548→   548→
+   549→   549→    /// Returns the number of regions assigned to the given target type.
+   550→   550→    pub fn count_by_target(&self, target: &DeploymentTarget) -> usize {
+   551→   551→        self.regions.iter().filter(|(_, t)| t == target).count()
+   552→   552→    }
+   553→   553→}
+   554→   554→
+   555→   555→// ===========================================================================
+   556→   556→// DeploymentPlanner (kept for backwards compatibility)
+   557→   557→// ===========================================================================
+   558→   558→
+   559→   559→/// Computes deployment plans and manages live migrations.
+   560→   560→#[derive(Debug)]
+   561→   561→pub struct DeploymentPlanner {
+   562→   562→    /// Current deployment plan.
+   563→   563→    plan: DeploymentPlan,
+   564→   564→    /// Runtime configuration.
+   565→   565→    config: Config,
+   566→   566→}
+   567→   567→
+   568→   568→impl DeploymentPlanner {
+   569→   569→    /// Creates a new deployment planner with the given configuration.
+   570→   570→    pub fn new(config: Config) -> Self {
+   571→   571→        DeploymentPlanner {
+   572→   572→            plan: DeploymentPlan::new(),
+   573→   573→            config,
+   574→   574→        }
+   575→   575→    }
+   576→   576→
+   577→   577→    /// Computes a new deployment plan based on profile data and the
+   578→   578→    /// current configuration.
+   579→   579→    ///
+   580→   580→    /// # Strategy
+   581→   581→    ///
+   582→   582→    /// 1. **Hot regions** (high call count) are deployed locally for
+   583→   583→    ///    minimal latency.
+   584→   584→    /// 2. **Cold regions** are candidates for remote execution.
+   585→   585→    /// 3. On Pi 5 targets, regions are round-robin-assigned to cores.
+   586→   586→    pub fn compute_deployment_plan(
+   587→   587→        &mut self,
+   588→   588→        region_ids: &[RegionId],
+   589→   589→        profile: &ProfileData,
+   590→   590→    ) -> &DeploymentPlan {
+   591→   591→        self.plan.regions.clear();
+   592→   592→
+   593→   593→        let hot_threshold = 100;
+   594→   594→
+   595→   595→        for &region_id in region_ids {
+   596→   596→            let _is_hot = profile
+   597→   597→                .call_counts
+   598→   598→                .values()
+   599→   599→                .any(|&count| count > hot_threshold);
+   600→   600→
+   601→   601→            let target = if self.config.is_pi5_target() {
+   602→   602→                let core_id = (region_id % 4) as u32;
+   603→   603→                if self.config.enable_speculative {
+   604→   604→                    DeploymentTarget::Pi5Bare {
+   605→   605→                        board_id: "default".to_owned(),
+   606→   606→                        core_id,
+   607→   607→                    }
+   608→   608→                } else {
+   609→   609→                    DeploymentTarget::Pi5Linux {
+   610→   610→                        host: "localhost".to_owned(),
+   611→   611→                        core_affinity: Some(core_id),
+   612→   612→                    }
+   613→   613→                }
+   614→   614→            } else {
+   615→   615→                DeploymentTarget::Local
+   616→   616→            };
+   617→   617→
+   618→   618→            self.plan.regions.push((region_id, target));
+   619→   619→        }
+   620→   620→
+   621→   621→        &self.plan
+   622→   622→    }
+   623→   623→
+   624→   624→    /// Migrates a single region to a new target.
+   625→   625→    pub fn migrate_region(
+   626→   626→        &mut self,
+   627→   627→        region_id: RegionId,
+   628→   628→        new_target: DeploymentTarget,
+   629→   629→    ) -> Result<(), DeploymentError> {
+   630→   630→        let entry = self
+   631→   631→            .plan
+   632→   632→            .regions
+   633→   633→            .iter_mut()
+   634→   634→            .find(|(r, _)| *r == region_id)
+   635→   635→            .ok_or(DeploymentError::RegionNotFound(region_id))?;
+   636→   636→
+   637→   637→        let old_target = entry.1.clone();
+   638→   638→        entry.1 = new_target.clone();
+   639→   639→
+   640→   640→        log::info!(
+   641→   641→            "Migrated region {} from {} to {}",
+   642→   642→            region_id,
+   643→   643→            old_target,
+   644→   644→            new_target
+   645→   645→        );
+   646→   646→
+   647→   647→        Ok(())
+   648→   648→    }
+   649→   649→
+   650→   650→    /// Rebalances the deployment plan by re-running the planner logic.
+   651→   651→    pub fn rebalance(&mut self, region_ids: &[RegionId], profile: &ProfileData) -> &DeploymentPlan {
+   652→   652→        log::info!(
+   653→   653→            "Rebalancing deployment plan for {} regions",
+   654→   654→            region_ids.len()
+   655→   655→        );
+   656→   656→        self.compute_deployment_plan(region_ids, profile)
+   657→   657→    }
+   658→   658→
+   659→   659→    /// Returns a reference to the current deployment plan.
+   660→   660→    pub fn plan(&self) -> &DeploymentPlan {
+   661→   661→        &self.plan
+   662→   662→    }
+   663→   663→}
+   664→   664→
+   665→   665→// ===========================================================================
+   666→   666→// DeploymentManager
+   667→   667→// ===========================================================================
+   668→   668→
+   669→   669→/// Manages the deployment lifecycle of compiled regions.
+   670→   670→///
+   671→   671→/// The `DeploymentManager` is the central orchestrator for:
+   672→   672→/// - Deploying packages to targets ([`deploy`](DeploymentManager::deploy)).
+   673→   673→/// - Hot-swapping running code on Pi 5 targets
+   674→   674→///   ([`hot_swap`](DeploymentManager::hot_swap)).
+   675→   675→/// - Version tracking and rollback
+   676→   676→///   ([`rollback`](DeploymentManager::rollback)).
+   677→   677→/// - Delta-based re-deployment
+   678→   678→///   ([`deploy_delta`](DeploymentManager::deploy_delta)).
+   679→   679→#[derive(Debug)]
+   680→   680→pub struct DeploymentManager {
+   681→   681→    /// Runtime configuration.
+   682→   682→    config: Config,
+   683→   683→    /// Version history for all deployed regions.
+   684→   684→    version_log: VersionLog,
+   685→   685→    /// Hot-swap state per region.
+   686→   686→    hot_swap_states: HashMap<RegionId, HotSwapState>,
+   687→   687→    /// Deployment planner for computing placement.
+   688→   688→    planner: DeploymentPlanner,
+   689→   689→}
+   690→   690→
+   691→   691→impl DeploymentManager {
+   692→   692→    /// Creates a new deployment manager with the given configuration.
+   693→   693→    pub fn new(config: Config) -> Self {
+   694→   694→        let planner = DeploymentPlanner::new(config.clone());
+   695→   695→        DeploymentManager {
+   696→   696→            config,
+   697→   697→            version_log: VersionLog::new(),
+   698→   698→            hot_swap_states: HashMap::new(),
+   699→   699→            planner,
+   700→   700→        }
+   701→   701→    }
+   702→   702→
+   703→   703→    /// Deploys a package to the specified target.
+   704→   704→    ///
+   705→   705→    /// This is the primary deployment entry point. It:
+   706→   706→    /// 1. Validates the package checksum.
+   707→   707→    /// 2. If a previous version exists on the target and the target supports
+   708→   708→    ///    hot-swap, performs a hot-swap.
+   709→   709→    /// 3. Otherwise performs a full deployment.
+   710→   710→    /// 4. Records the version in the log.
+   711→   711→    ///
+   712→   712→    /// # Errors
+   713→   713→    ///
+   714→   714→    /// Returns [`DeploymentError::ChecksumMismatch`] if the package checksum
+   715→   715→    /// is invalid, or [`DeploymentError::TargetUnreachable`] if the target
+   716→   716→    /// cannot be reached (simulated).
+   717→   717→    pub fn deploy(
+   718→   718→        &mut self,
+   719→   719→        package: &DeploymentPackage,
+   720→   720→        target: &DeploymentTarget,
+   721→   721→    ) -> Result<DeploymentResult, DeploymentError> {
+   722→   722→        // Step 1: Validate checksum.
+   723→   723→        if !package.validate_checksum() {
+   724→   724→            return Err(DeploymentError::ChecksumMismatch(
+   725→   725→                package.metadata.region_id,
+   726→   726→            ));
+   727→   727→        }
+   728→   728→
+   729→   729→        let start = Instant::now();
+   730→   730→
+   731→   731→        // Step 2: Check if we can hot-swap.
+   732→   732→        let region_id = package.metadata.region_id;
+   733→   733→        let previous = self.version_log.latest(region_id).cloned();
+   734→   734→        let mut hot_swapped = false;
+   735→   735→
+   736→   736→        if let Some(ref prev) = previous {
+   737→   737→            if target.supports_hot_swap() && prev.target == *target {
+   738→   738→                // Hot-swap path.
+   739→   739→                self.hot_swap(package, target)?;
+   740→   740→                hot_swapped = true;
+   741→   741→            }
+   742→   742→        }
+   743→   743→
+   744→   744→        // Step 3: Record version.
+   745→   745→        self.version_log.record(package, target);
+   746→   746→
+   747→   747→        let duration = start.elapsed();
+   748→   748→
+   749→   749→        Ok(DeploymentResult {
+   750→   750→            region_id,
+   751→   751→            version: package.metadata.version.clone(),
+   752→   752→            target: target.clone(),
+   753→   753→            duration,
+   754→   754→            bytes_transferred: package.metadata.code_size,
+   755→   755→            hot_swapped,
+   756→   756→            was_delta: false,
+   757→   757→        })
+   758→   758→    }
+   759→   759→
+   760→   760→    /// Performs a hot-swap of a running region on a Pi 5 target.
+   761→   761→    ///
+   762→   762→    /// The hot-swap proceeds through these phases:
+   763→   763→    /// 1. **PreparingShadow** — allocate and fill shadow buffer with new code.
+   764→   764→    /// 2. **AwaitingSafePoint** — wait until no threads are in the region.
+   765→   765→    /// 3. **Swapping** — atomically swap the code pointer.
+   766→   766→    /// 4. **Completed** — old code is retained in the version log for
+   767→   767→    ///    rollback.
+   768→   768→    ///
+   769→   769→    /// In this simulation the phases advance immediately. A production
+   770→   770→    /// implementation would coordinate with the runtime's safe-point
+   771→   771→    /// mechanism.
+   772→   772→    pub fn hot_swap(
+   773→   773→        &mut self,
+   774→   774→        package: &DeploymentPackage,
+   775→   775→        target: &DeploymentTarget,
+   776→   776→    ) -> Result<HotSwapPhase, DeploymentError> {
+   777→   777→        if !target.supports_hot_swap() {
+   778→   778→            return Err(DeploymentError::HotSwapNotSupported(
+   779→   779→                target.kind_label().to_owned(),
+   780→   780→            ));
+   781→   781→        }
+   782→   782→
+   783→   783→        let region_id = package.metadata.region_id;
+   784→   784→        let from_version = self
+   785→   785→            .version_log
+   786→   786→            .latest(region_id)
+   787→   787→            .map(|r| r.version.clone())
+   788→   788→            .unwrap_or(PackageVersion(0));
+   789→   789→
+   790→   790→        let state = self
+   791→   791→            .hot_swap_states
+   792→   792→            .entry(region_id)
+   793→   793→            .or_insert_with(|| HotSwapState::new(region_id));
+   794→   794→
+   795→   795→        // Phase 1: Prepare shadow buffer.
+   796→   796→        state.phase = HotSwapPhase::PreparingShadow;
+   797→   797→        state.from_version = from_version.clone();
+   798→   798→        state.to_version = package.metadata.version.clone();
+   799→   799→
+   800→   800→        // Phase 2: Await safe point (simulated — immediate).
+   801→   801→        state.phase = HotSwapPhase::AwaitingSafePoint;
+   802→   802→
+   803→   803→        // Phase 3: Atomic swap.
+   804→   804→        state.phase = HotSwapPhase::Swapping;
+   805→   805→
+   806→   806→        // Phase 4: Completed.
+   807→   807→        state.phase = HotSwapPhase::Completed;
+   808→   808→
+   809→   809→        log::info!(
+   810→   810→            "Hot-swapped region {} from {} to {} on {}",
+   811→   811→            region_id,
+   812→   812→            from_version,
+   813→   813→            package.metadata.version,
+   814→   814→            target
+   815→   815→        );
+   816→   816→
+   817→   817→        Ok(HotSwapPhase::Completed)
+   818→   818→    }
+   819→   819→
+   820→   820→    /// Rolls back a region to the previous deployed version.
+   821→   821→    ///
+   822→   822→    /// The previous version's code is re-deployed to the same target. The
+   823→   823→    /// rollback itself is recorded in the version log.
+   824→   824→    pub fn rollback(&mut self, region_id: RegionId) -> Result<DeploymentResult, DeploymentError> {
+   825→   825→        let prev_record = self
+   826→   826→            .version_log
+   827→   827→            .previous(region_id)
+   828→   828→            .cloned()
+   829→   829→            .ok_or(DeploymentError::NoRollbackTarget(region_id))?;
+   830→   830→
+   831→   831→        // Determine the new version number: must be strictly greater than
+   832→   832→        // the current latest.
+   833→   833→        let latest_version = self
+   834→   834→            .version_log
+   835→   835→            .latest(region_id)
+   836→   836→            .map(|r| r.version.0)
+   837→   837→            .unwrap_or(0);
+   838→   838→
+   839→   839→        // Build a package from the previous record.
+   840→   840→        let rollback_pkg = DeploymentPackage::new(
+   841→   841→            prev_record.code.clone(),
+   842→   842→            prev_record.region_id,
+   843→   843→            // Bump version: new version = latest + 1.
+   844→   844→            PackageVersion(latest_version + 1),
+   845→   845→            "rollback",
+   846→   846→        );
+   847→   847→
+   848→   848→        let target = prev_record.target.clone();
+   849→   849→        self.deploy(&rollback_pkg, &target)
+   850→   850→    }
+   851→   851→
+   852→   852→    /// Deploys only the delta (diff) between the current deployed version
+   853→   853→    /// and the new package.
+   854→   854→    ///
+   855→   855→    /// This is more bandwidth-efficient than a full deploy when the target
+   856→   856→    /// already holds a previous version. The delta is computed, sent, and
+   857→   857→    /// applied on the "remote" side (simulated locally).
+   858→   858→    pub fn deploy_delta(
+   859→   859→        &mut self,
+   860→   860→        package: &DeploymentPackage,
+   861→   861→        target: &DeploymentTarget,
+   862→   862→    ) -> Result<DeploymentResult, DeploymentError> {
+   863→   863→        let region_id = package.metadata.region_id;
+   864→   864→
+   865→   865→        let prev_code = self
+   866→   866→            .version_log
+   867→   867→            .latest(region_id)
+   868→   868→            .map(|r| r.code.clone())
+   869→   869→            .ok_or(DeploymentError::NoPreviousVersion(region_id))?;
+   870→   870→
+   871→   871→        let from_version = self
+   872→   872→            .version_log
+   873→   873→            .latest(region_id)
+   874→   874→            .map(|r| r.version.clone())
+   875→   875→            .unwrap_or(PackageVersion(0));
+   876→   876→
+   877→   877→        // Compute delta.
+   878→   878→        let delta = DeploymentDelta::compute(
+   879→   879→            region_id,
+   880→   880→            from_version,
+   881→   881→            package.metadata.version.clone(),
+   882→   882→            &prev_code,
+   883→   883→            &package.code,
+   884→   884→        );
+   885→   885→
+   886→   886→        // Simulate applying the delta on the remote side.
+   887→   887→        let reconstructed = delta
+   888→   888→            .apply(&prev_code)
+   889→   889→            .map_err(|e| DeploymentError::DeltaApplyFailed(region_id, format!("{:?}", e)))?;
+   890→   890→
+   891→   891→        // Verify the reconstructed code matches.
+   892→   892→        if reconstructed != package.code {
+   893→   893→            return Err(DeploymentError::DeltaApplyFailed(
+   894→   894→                region_id,
+   895→   895→                "reconstructed code does not match expected".to_owned(),
+   896→   896→            ));
+   897→   897→        }
+   898→   898→
+   899→   899→        let start = Instant::now();
+   900→   900→        let delta_size = delta.estimated_size();
+   901→   901→
+   902→   902→        // If the delta is not empty, we also try hot-swap on supported
+   903→   903→        // targets.
+   904→   904→        let mut hot_swapped = false;
+   905→   905→        if target.supports_hot_swap() && !delta.is_empty() {
+   906→   906→            // For a delta hot-swap, we reconstruct on the target side and
+   907→   907→            // then swap. Here we just flag it.
+   908→   908→            hot_swapped = true;
+   909→   909→        }
+   910→   910→
+   911→   911→        // Record the version (full code stored for future deltas).
+   912→   912→        self.version_log.record(package, target);
+   913→   913→
+   914→   914→        let duration = start.elapsed();
+   915→   915→
+   916→   916→        Ok(DeploymentResult {
+   917→   917→            region_id,
+   918→   918→            version: package.metadata.version.clone(),
+   919→   919→            target: target.clone(),
+   920→   920→            duration,
+   921→   921→            bytes_transferred: delta_size,
+   922→   922→            hot_swapped,
+   923→   923→            was_delta: true,
+   924→   924→        })
+   925→   925→    }
+   926→   926→
+   927→   927→    /// Returns the current hot-swap state for a region.
+   928→   928→    pub fn hot_swap_state(&self, region_id: RegionId) -> Option<&HotSwapState> {
+   929→   929→        self.hot_swap_states.get(&region_id)
+   930→   930→    }
+   931→   931→
+   932→   932→    /// Returns a reference to the version log.
+   933→   933→    pub fn version_log(&self) -> &VersionLog {
+   934→   934→        &self.version_log
+   935→   935→    }
+   936→   936→
+   937→   937→    /// Returns a reference to the deployment planner.
+   938→   938→    pub fn planner(&self) -> &DeploymentPlanner {
+   939→   939→        &self.planner
+   940→   940→    }
+   941→   941→
+   942→   942→    /// Returns a mutable reference to the deployment planner.
+   943→   943→    pub fn planner_mut(&mut self) -> &mut DeploymentPlanner {
+   944→   944→        &mut self.planner
+   945→   945→    }
+   946→   946→
+   947→   947→    /// Returns the runtime configuration.
+   948→   948→    pub fn config(&self) -> &Config {
+   949→   949→        &self.config
+   950→   950→    }
+   951→   951→}
+   952→   952→
+   953→   953→// ===========================================================================
+   954→   954→// Errors
+   955→   955→// ===========================================================================
+   956→   956→
+   957→   957→/// Errors that can occur during deployment operations.
+   958→   958→#[derive(Debug, Clone, thiserror::Error)]
+   959→   959→pub enum DeploymentError {
+   960→   960→    /// The specified region was not found in the current plan.
+   961→   961→    #[error("Region {0} not found in deployment plan")]
+   962→   962→    RegionNotFound(RegionId),
+   963→   963→
+   964→   964→    /// Migration failed because the target is unreachable.
+   965→   965→    #[error("Target unreachable: {0}")]
+   966→   966→    TargetUnreachable(String),
+   967→   967→
+   968→   968→    /// Migration failed due to a state transfer error.
+   969→   969→    #[error("State transfer failed for region {0}: {1}")]
+   970→   970→    StateTransferFailed(RegionId, String),
+   971→   971→
+   972→   972→    /// Package checksum validation failed.
+   973→   973→    #[error("Checksum mismatch for region {0}")]
+   974→   974→    ChecksumMismatch(RegionId),
+   975→   975→
+   976→   976→    /// Hot-swap is not supported on the given target kind.
+   977→   977→    #[error("Hot-swap not supported on target kind: {0}")]
+   978→   978→    HotSwapNotSupported(String),
+   979→   979→
+   980→   980→    /// No previous version exists to roll back to.
+   981→   981→    #[error("No rollback target available for region {0}")]
+   982→   982→    NoRollbackTarget(RegionId),
+   983→   983→
+   984→   984→    /// No previous version exists on the target for delta computation.
+   985→   985→    #[error("No previous version for delta deployment of region {0}")]
+   986→   986→    NoPreviousVersion(RegionId),
+   987→   987→
+   988→   988→    /// Delta application failed.
+   989→   989→    #[error("Delta apply failed for region {0}: {1}")]
+   990→   990→    DeltaApplyFailed(RegionId, String),
+   991→   991→}
+   992→   992→
+   993→   993→// ===========================================================================
+   994→   994→// Helpers
+   995→   995→// ===========================================================================
+   996→   996→
+   997→   997→/// Simple CRC32 computation (stub — a real implementation would use the
+   998→   998→/// `crc32fast` crate or hardware CRC). We use a basic table-driven CRC32
+   999→   999→/// for determinism in tests.
+  1000→  1000→fn crc32(data: &[u8]) -> u32 {
+  1001→  1001→    // CRC32 (IEEE 802.3 polynomial: 0xEDB88320 reflected).
+  1002→  1002→    const POLY: u32 = 0xEDB88320;
+  1003→  1003→    let mut table = [0u32; 256];
+  1004→  1004→    for i in 0..256u32 {
+  1005→  1005→        let mut crc = i;
+  1006→  1006→        for _ in 0..8 {
+  1007→  1007→            if crc & 1 != 0 {
+  1008→  1008→                crc = (crc >> 1) ^ POLY;
+  1009→  1009→            } else {
+  1010→  1010→                crc >>= 1;
+  1011→  1011→            }
+  1012→  1012→        }
+  1013→  1013→        table[i as usize] = crc;
+  1014→  1014→    }
+  1015→  1015→
+  1016→  1016→    let mut crc: u32 = 0xFFFF_FFFF;
+  1017→  1017→    for &byte in data {
+  1018→  1018→        let index = ((crc ^ byte as u32) & 0xFF) as usize;
+  1019→  1019→        crc = (crc >> 8) ^ table[index];
+  1020→  1020→    }
+  1021→  1021→    !crc
+  1022→  1022→}
+  1023→  1023→
+  1024→  1024→/// Returns the current time as seconds since the Unix epoch (best-effort).
+  1025→  1025→fn epoch_secs() -> u64 {
+  1026→  1026→    std::time::SystemTime::now()
+  1027→  1027→        .duration_since(std::time::UNIX_EPOCH)
+  1028→  1028→        .map(|d| d.as_secs())
+  1029→  1029→        .unwrap_or(0)
+  1030→  1030→}
+  1031→  1031→
+  1032→  1032→// ===========================================================================
+  1033→  1033→// Tests
+  1034→  1034→// ===========================================================================
+  1035→  1035→
+  1036→  1036→#[cfg(test)]
+  1037→  1037→mod tests {
+  1038→  1038→    use super::*;
+  1039→  1039→    use crate::config::TargetArch;
+  1040→  1040→
+  1041→  1041→    // -- Helpers -----------------------------------------------------------
+  1042→  1042→
+  1043→  1043→    fn make_config() -> Config {
+  1044→  1044→        Config::default()
+  1045→  1045→    }
+  1046→  1046→
+  1047→  1047→    fn make_pi5_config() -> Config {
+  1048→  1048→        Config::default().with_target_arch(TargetArch::ArmV8A)
+  1049→  1049→    }
+  1050→  1050→
+  1051→  1051→    fn make_package(region_id: RegionId, version: u64, code: &[u8]) -> DeploymentPackage {
+  1052→  1052→        DeploymentPackage::new(code.to_vec(), region_id, PackageVersion(version), "basic")
+  1053→  1053→    }
+  1054→  1054→
+  1055→  1055→    fn make_package_with_opt(
+  1056→  1056→        region_id: RegionId,
+  1057→  1057→        version: u64,
+  1058→  1058→        code: &[u8],
+  1059→  1059→        opt: &str,
+  1060→  1060→    ) -> DeploymentPackage {
+  1061→  1061→        DeploymentPackage::new(code.to_vec(), region_id, PackageVersion(version), opt)
+  1062→  1062→    }
+  1063→  1063→
+  1064→  1064→    // -- Test 1: Deploy to local target ------------------------------------
+  1065→  1065→
+  1066→  1066→    #[test]
+  1067→  1067→    fn deploy_to_local_target() {
+  1068→  1068→        let mut mgr = DeploymentManager::new(make_config());
+  1069→  1069→        let pkg = make_package(1, 1, &[0x90, 0x90, 0xC3]); // NOP; NOP; RET
+  1070→  1070→        let result = mgr.deploy(&pkg, &DeploymentTarget::Local).unwrap();
+  1071→  1071→        assert_eq!(result.region_id, 1);
+  1072→  1072→        assert_eq!(result.version, PackageVersion(1));
+  1073→  1073→        assert_eq!(result.target, DeploymentTarget::Local);
+  1074→  1074→        assert!(!result.hot_swapped);
+  1075→  1075→        assert!(!result.was_delta);
+  1076→  1076→    }
+  1077→  1077→
+  1078→  1078→    // -- Test 2: Deploy to Pi5Bare target ----------------------------------
+  1079→  1079→
+  1080→  1080→    #[test]
+  1081→  1081→    fn deploy_to_pi5_bare_target() {
+  1082→  1082→        let mut mgr = DeploymentManager::new(make_pi5_config());
+  1083→  1083→        let pkg = make_package(2, 1, &[0x90, 0xC3]);
+  1084→  1084→        let target = DeploymentTarget::Pi5Bare {
+  1085→  1085→            board_id: "pi5-01".to_owned(),
+  1086→  1086→            core_id: 0,
+  1087→  1087→        };
+  1088→  1088→        let result = mgr.deploy(&pkg, &target).unwrap();
+  1089→  1089→        assert_eq!(result.region_id, 2);
+  1090→  1090→        assert!(result.target.is_pi5());
+  1091→  1091→        assert!(!result.hot_swapped); // first deploy, no previous version
+  1092→  1092→    }
+  1093→  1093→
+  1094→  1094→    // -- Test 3: Hot-swap on Pi5Bare ---------------------------------------
+  1095→  1095→
+  1096→  1096→    #[test]
+  1097→  1097→    fn hot_swap_on_pi5_bare() {
+  1098→  1098→        let mut mgr = DeploymentManager::new(make_pi5_config());
+  1099→  1099→        let target = DeploymentTarget::Pi5Bare {
+  1100→  1100→            board_id: "pi5-01".to_owned(),
+  1101→  1101→            core_id: 1,
+  1102→  1102→        };
+  1103→  1103→
+  1104→  1104→        // Initial deploy.
+  1105→  1105→        let pkg_v1 = make_package(3, 1, &[0x48, 0x89, 0xE5]); // MOV RBP, RSP
+  1106→  1106→        mgr.deploy(&pkg_v1, &target).unwrap();
+  1107→  1107→
+  1108→  1108→        // Second deploy should trigger hot-swap.
+  1109→  1109→        let pkg_v2 = make_package(3, 2, &[0x55, 0x48, 0x89, 0xE5]); // PUSH RBP; MOV RBP, RSP
+  1110→  1110→        let result = mgr.deploy(&pkg_v2, &target).unwrap();
+  1111→  1111→        assert!(result.hot_swapped);
+  1112→  1112→
+  1113→  1113→        // Verify hot-swap state.
+  1114→  1114→        let hs = mgr.hot_swap_state(3).unwrap();
+  1115→  1115→        assert_eq!(hs.phase, HotSwapPhase::Completed);
+  1116→  1116→        assert_eq!(hs.from_version, PackageVersion(1));
+  1117→  1117→        assert_eq!(hs.to_version, PackageVersion(2));
+  1118→  1118→    }
+  1119→  1119→
+  1120→  1120→    // -- Test 4: Hot-swap rejected on non-Pi5 target -----------------------
+  1121→  1121→
+  1122→  1122→    #[test]
+  1123→  1123→    fn hot_swap_rejected_on_local() {
+  1124→  1124→        let mut mgr = DeploymentManager::new(make_config());
+  1125→  1125→        let target = DeploymentTarget::Local;
+  1126→  1126→
+  1127→  1127→        // Initial deploy.
+  1128→  1128→        let pkg_v1 = make_package(4, 1, &[0xC3]);
+  1129→  1129→        mgr.deploy(&pkg_v1, &target).unwrap();
+  1130→  1130→
+  1131→  1131→        // Second deploy on Local — no hot-swap.
+  1132→  1132→        let pkg_v2 = make_package(4, 2, &[0x90, 0xC3]);
+  1133→  1133→        let result = mgr.deploy(&pkg_v2, &target).unwrap();
+  1134→  1134→        assert!(!result.hot_swapped);
+  1135→  1135→
+  1136→  1136→        // Direct hot_swap call should fail.
+  1137→  1137→        let pkg_v3 = make_package(4, 3, &[0x90, 0x90, 0xC3]);
+  1138→  1138→        let err = mgr.hot_swap(&pkg_v3, &target).unwrap_err();
+  1139→  1139→        assert!(matches!(err, DeploymentError::HotSwapNotSupported(_)));
+  1140→  1140→    }
+  1141→  1141→
+  1142→  1142→    // -- Test 5: Version tracking and rollback -----------------------------
+  1143→  1143→
+  1144→  1144→    #[test]
+  1145→  1145→    fn version_tracking_and_rollback() {
+  1146→  1146→        let mut mgr = DeploymentManager::new(make_pi5_config());
+  1147→  1147→        let target = DeploymentTarget::Pi5Linux {
+  1148→  1148→            host: "192.168.1.50".to_owned(),
+  1149→  1149→            core_affinity: Some(2),
+  1150→  1150→        };
+  1151→  1151→
+  1152→  1152→        // Deploy v1, v2, v3.
+  1153→  1153→        let pkg_v1 = make_package(5, 1, &[0x01]);
+  1154→  1154→        let pkg_v2 = make_package(5, 2, &[0x02]);
+  1155→  1155→        let pkg_v3 = make_package(5, 3, &[0x03]);
+  1156→  1156→        mgr.deploy(&pkg_v1, &target).unwrap();
+  1157→  1157→        mgr.deploy(&pkg_v2, &target).unwrap();
+  1158→  1158→        mgr.deploy(&pkg_v3, &target).unwrap();
+  1159→  1159→
+  1160→  1160→        // Version log should have 3 entries.
+  1161→  1161→        assert_eq!(mgr.version_log().version_count(5), 3);
+  1162→  1162→
+  1163→  1163→        // Latest should be v3.
+  1164→  1164→        let latest = mgr.version_log().latest(5).unwrap();
+  1165→  1165→        assert_eq!(latest.version, PackageVersion(3));
+  1166→  1166→        assert_eq!(latest.code, vec![0x03]);
+  1167→  1167→
+  1168→  1168→        // Rollback → deploys v2's code as v4.
+  1169→  1169→        let result = mgr.rollback(5).unwrap();
+  1170→  1170→        assert_eq!(result.version, PackageVersion(4));
+  1171→  1171→        assert_eq!(mgr.version_log().version_count(5), 4);
+  1172→  1172→
+  1173→  1173→        // The latest code should now be the rolled-back code (0x02).
+  1174→  1174→        let latest = mgr.version_log().latest(5).unwrap();
+  1175→  1175→        assert_eq!(latest.code, vec![0x02]);
+  1176→  1176→    }
+  1177→  1177→
+  1178→  1178→    // -- Test 6: Rollback with no history ----------------------------------
+  1179→  1179→
+  1180→  1180→    #[test]
+  1181→  1181→    fn rollback_with_no_history_fails() {
+  1182→  1182→        let mut mgr = DeploymentManager::new(make_config());
+  1183→  1183→        let err = mgr.rollback(99).unwrap_err();
+  1184→  1184→        assert!(matches!(err, DeploymentError::NoRollbackTarget(99)));
+  1185→  1185→    }
+  1186→  1186→
+  1187→  1187→    // -- Test 7: Delta deployment ------------------------------------------
+  1188→  1188→
+  1189→  1189→    #[test]
+  1190→  1190→    fn delta_deployment() {
+  1191→  1191→        let mut mgr = DeploymentManager::new(make_config());
+  1192→  1192→        let target = DeploymentTarget::Local;
+  1193→  1193→
+  1194→  1194→        // Deploy v1 (256-byte code: 4 × 64-byte blocks).
+  1195→  1195→        let code_v1: Vec<u8> = (0..256).map(|i| i as u8).collect();
+  1196→  1196→        let pkg_v1 = make_package(10, 1, &code_v1);
+  1197→  1197→        mgr.deploy(&pkg_v1, &target).unwrap();
+  1198→  1198→
+  1199→  1199→        // Deploy v2 as delta (change first 4 bytes only — only 1 of 4 blocks
+  1200→  1200→        // is patched, so delta is much smaller than full code).
+  1201→  1201→        let mut code_v2 = code_v1.clone();
+  1202→  1202→        code_v2[0] = 0xFF;
+  1203→  1203→        code_v2[1] = 0xFE;
+  1204→  1204→        code_v2[2] = 0xFD;
+  1205→  1205→        code_v2[3] = 0xFC;
+  1206→  1206→        let pkg_v2 = make_package(10, 2, &code_v2);
+  1207→  1207→        let result = mgr.deploy_delta(&pkg_v2, &target).unwrap();
+  1208→  1208→
+  1209→  1209→        assert!(result.was_delta);
+  1210→  1210→        // Delta should be smaller than the full code.
+  1211→  1211→        assert!(result.bytes_transferred < code_v2.len());
+  1212→  1212→        assert_eq!(result.version, PackageVersion(2));
+  1213→  1213→    }
+  1214→  1214→
+  1215→  1215→    // -- Test 8: Delta with no previous version fails ----------------------
+  1216→  1216→
+  1217→  1217→    #[test]
+  1218→  1218→    fn delta_with_no_previous_version_fails() {
+  1219→  1219→        let mut mgr = DeploymentManager::new(make_config());
+  1220→  1220→        let pkg = make_package(20, 1, &[0xC3]);
+  1221→  1221→        let err = mgr
+  1222→  1222→            .deploy_delta(&pkg, &DeploymentTarget::Local)
+  1223→  1223→            .unwrap_err();
+  1224→  1224→        assert!(matches!(err, DeploymentError::NoPreviousVersion(20)));
+  1225→  1225→    }
+  1226→  1226→
+  1227→  1227→    // -- Test 9: Checksum validation ---------------------------------------
+  1228→  1228→
+  1229→  1229→    #[test]
+  1230→  1230→    fn checksum_validation_rejects_corrupted_package() {
+  1231→  1231→        let mut mgr = DeploymentManager::new(make_config());
+  1232→  1232→        let mut pkg = make_package(30, 1, &[0x90, 0xC3]);
+  1233→  1233→        // Corrupt the code without updating the checksum.
+  1234→  1234→        pkg.code[0] = 0xCC;
+  1235→  1235→        let err = mgr.deploy(&pkg, &DeploymentTarget::Local).unwrap_err();
+  1236→  1236→        assert!(matches!(err, DeploymentError::ChecksumMismatch(30)));
+  1237→  1237→    }
+  1238→  1238→
+  1239→  1239→    // -- Test 10: Delta compute and apply round-trip -----------------------
+  1240→  1240→
+  1241→  1241→    #[test]
+  1242→  1242→    fn delta_compute_and_apply_roundtrip() {
+  1243→  1243→        let old_code: Vec<u8> = (0..128).map(|i| i as u8).collect();
+  1244→  1244→        let mut new_code = old_code.clone();
+  1245→  1245→        // Modify bytes 10–15.
+  1246→  1246→        new_code[10] = 0xAA;
+  1247→  1247→        new_code[11] = 0xBB;
+  1248→  1248→        new_code[12] = 0xCC;
+  1249→  1249→        // Append extra bytes.
+  1250→  1250→        new_code.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+  1251→  1251→
+  1252→  1252→        let delta = DeploymentDelta::compute(
+  1253→  1253→            42,
+  1254→  1254→            PackageVersion(1),
+  1255→  1255→            PackageVersion(2),
+  1256→  1256→            &old_code,
+  1257→  1257→            &new_code,
+  1258→  1258→        );
+  1259→  1259→
+  1260→  1260→        let reconstructed = delta.apply(&old_code).unwrap();
+  1261→  1261→        assert_eq!(reconstructed, new_code);
+  1262→  1262→    }
+  1263→  1263→
+  1264→  1264→    // -- Test 11: Empty delta for identical code ---------------------------
+  1265→  1265→
+  1266→  1266→    #[test]
+  1267→  1267→    fn delta_empty_for_identical_code() {
+  1268→  1268→        let code: Vec<u8> = (0..64).map(|i| i as u8).collect();
+  1269→  1269→        let delta = DeploymentDelta::compute(1, PackageVersion(1), PackageVersion(2), &code, &code);
+  1270→  1270→        assert!(delta.is_empty());
+  1271→  1271→    }
+  1272→  1272→
+  1273→  1273→    // -- Test 12: DeploymentTarget display and predicates ------------------
+  1274→  1274→
+  1275→  1275→    #[test]
+  1276→  1276→    fn target_display_and_predicates() {
+  1277→  1277→        let local = DeploymentTarget::Local;
+  1278→  1278→        let bare = DeploymentTarget::Pi5Bare {
+  1279→  1279→            board_id: "b1".to_owned(),
+  1280→  1280→            core_id: 3,
+  1281→  1281→        };
+  1282→  1282→        let linux = DeploymentTarget::Pi5Linux {
+  1283→  1283→            host: "10.0.0.1".to_owned(),
+  1284→  1284→            core_affinity: None,
+  1285→  1285→        };
+  1286→  1286→        let remote = DeploymentTarget::Remote {
+  1287→  1287→            endpoint: "https://cloud.example.com".to_owned(),
+  1288→  1288→        };
+  1289→  1289→
+  1290→  1290→        assert_eq!(local.kind_label(), "Local");
+  1291→  1291→        assert!(local.is_pi5() == false);
+  1292→  1292→        assert!(local.supports_hot_swap() == false);
+  1293→  1293→
+  1294→  1294→        assert_eq!(bare.kind_label(), "Pi5Bare");
+  1295→  1295→        assert!(bare.is_pi5());
+  1296→  1296→        assert!(bare.supports_hot_swap());
+  1297→  1297→        assert_eq!(format!("{}", bare), "Pi5Bare(b1/core3)");
+  1298→  1298→
+  1299→  1299→        assert_eq!(linux.kind_label(), "Pi5Linux");
+  1300→  1300→        assert!(linux.is_pi5());
+  1301→  1301→        assert!(linux.supports_hot_swap());
+  1302→  1302→        assert!(format!("{}", linux).contains("10.0.0.1"));
+  1303→  1303→
+  1304→  1304→        assert_eq!(remote.kind_label(), "Remote");
+  1305→  1305→        assert!(!remote.is_pi5());
+  1306→  1306→        assert!(!remote.supports_hot_swap());
+  1307→  1307→    }
+  1308→  1308→
+  1309→  1309→    // -- Test 13: VersionLog history ----------------------------------------
+  1310→  1310→
+  1311→  1311→    #[test]
+  1312→  1312→    fn version_log_history() {
+  1313→  1313→        let mut log = VersionLog::new();
+  1314→  1314→        let target = DeploymentTarget::Local;
+  1315→  1315→
+  1316→  1316→        for v in 1..=5u64 {
+  1317→  1317→            let pkg = make_package(100, v, &[v as u8]);
+  1318→  1318→            log.record(&pkg, &target);
+  1319→  1319→        }
+  1320→  1320→
+  1321→  1321→        assert_eq!(log.version_count(100), 5);
+  1322→  1322→        let history = log.history(100);
+  1323→  1323→        assert_eq!(history[0].version, PackageVersion(1));
+  1324→  1324→        assert_eq!(history[4].version, PackageVersion(5));
+  1325→  1325→
+  1326→  1326→        // Previous (one before latest) should be v4.
+  1327→  1327→        let prev = log.previous(100).unwrap();
+  1328→  1328→        assert_eq!(prev.version, PackageVersion(4));
+  1329→  1329→    }
+  1330→  1330→
+  1331→  1331→    // -- Test 14: DeploymentPlan with Pi5 targets --------------------------
+  1332→  1332→
+  1333→  1333→    #[test]
+  1334→  1334→    fn deployment_plan_pi5_bare_targets() {
+  1335→  1335→        let mut planner = DeploymentPlanner::new(make_pi5_config());
+  1336→  1336→        let profile = ProfileData::new();
+  1337→  1337→        let plan = planner.compute_deployment_plan(&[0, 1, 2, 3, 4], &profile);
+  1338→  1338→        assert_eq!(plan.regions.len(), 5);
+  1339→  1339→        for (region_id, target) in &plan.regions {
+  1340→  1340→            match target {
+  1341→  1341→                DeploymentTarget::Pi5Bare { core_id, .. } => {
+  1342→  1342→                    assert_eq!(*core_id, (*region_id % 4) as u32);
+  1343→  1343→                }
+  1344→  1344→                DeploymentTarget::Pi5Linux { core_affinity, .. } => {
+  1345→  1345→                    // Non-speculative config lands here.
+  1346→  1346→                    assert!(core_affinity.is_some());
+  1347→  1347→                }
+  1348→  1348→                other => panic!("Expected Pi5 target, got {:?}", other),
+  1349→  1349→            }
+  1350→  1350→        }
+  1351→  1351→    }
+  1352→  1352→
+  1353→  1353→    // -- Test 15: Package with debug info -----------------------------------
+  1354→  1354→
+  1355→  1355→    #[test]
+  1356→  1356→    fn package_with_debug_info() {
+  1357→  1357→        let debug = DebugInfo {
+  1358→  1358→            source_map: vec![(1, 0), (2, 16), (3, 32)],
+  1359→  1359→            symbols: vec![(0, "entry".to_owned()), (16, "loop".to_owned())],
+  1360→  1360→            notes: "compiled with -O2".to_owned(),
+  1361→  1361→        };
+  1362→  1362→        let pkg = make_package(50, 1, &[0x90, 0xC3]).with_debug_info(debug);
+  1363→  1363→        assert!(pkg.debug_info.is_some());
+  1364→  1364→        let info = pkg.debug_info.as_ref().unwrap();
+  1365→  1365→        assert_eq!(info.source_map.len(), 3);
+  1366→  1366→        assert_eq!(info.symbols.len(), 2);
+  1367→  1367→        assert!(pkg.validate_checksum());
+  1368→  1368→    }
+  1369→  1369→
+  1370→  1370→    // -- Test 16: Delta for code shrinking (deletions) ---------------------
+  1371→  1371→
+  1372→  1372→    #[test]
+  1373→  1373→    fn delta_with_deletions() {
+  1374→  1374→        let old_code: Vec<u8> = (0..128).map(|i| i as u8).collect();
+  1375→  1375→        // New code is shorter — last 32 bytes removed.
+  1376→  1376→        let new_code: Vec<u8> = (0..96).map(|i| i as u8).collect();
+  1377→  1377→
+  1378→  1378→        let delta = DeploymentDelta::compute(
+  1379→  1379→            77,
+  1380→  1380→            PackageVersion(1),
+  1381→  1381→            PackageVersion(2),
+  1382→  1382→            &old_code,
+  1383→  1383→            &new_code,
+  1384→  1384→        );
+  1385→  1385→        assert!(!delta.deletions.is_empty());
+  1386→  1386→
+  1387→  1387→        let reconstructed = delta.apply(&old_code).unwrap();
+  1388→  1388→        assert_eq!(reconstructed, new_code);
+  1389→  1389→    }
+  1390→  1390→
+  1391→  1391→    // -- Test 17: Deploy to Pi5Linux target ---------------------------------
+  1392→  1392→
+  1393→  1393→    #[test]
+  1394→  1394→    fn deploy_to_pi5_linux_target() {
+  1395→  1395→        let mut mgr = DeploymentManager::new(make_config());
+  1396→  1396→        let target = DeploymentTarget::Pi5Linux {
+  1397→  1397→            host: "raspberrypi.local".to_owned(),
+  1398→  1398→            core_affinity: Some(2),
+  1399→  1399→        };
+  1400→  1400→        let pkg = make_package_with_opt(60, 1, &[0x90, 0xC3], "aggressive");
+  1401→  1401→        let result = mgr.deploy(&pkg, &target).unwrap();
+  1402→  1402→        assert_eq!(result.region_id, 60);
+  1403→  1403→        assert!(result.target.is_pi5());
+  1404→  1404→    }
+  1405→  1405→
+  1406→  1406→    // -- Test 18: Deploy to Remote target -----------------------------------
+  1407→  1407→
+  1408→  1408→    #[test]
+  1409→  1409→    fn deploy_to_remote_target() {
+  1410→  1410→        let mut mgr = DeploymentManager::new(make_config());
+  1411→  1411→        let target = DeploymentTarget::Remote {
+  1412→  1412→            endpoint: "https://compute.example.com/v1/exec".to_owned(),
+  1413→  1413→        };
+  1414→  1414→        let pkg = make_package(70, 1, &[0xC3]);
+  1415→  1415→        let result = mgr.deploy(&pkg, &target).unwrap();
+  1416→  1416→        assert_eq!(result.region_id, 70);
+  1417→  1417→        assert!(!result.hot_swapped); // remote does not support hot-swap
+  1418→  1418→    }
+  1419→  1419→}
+  1420→  1420→

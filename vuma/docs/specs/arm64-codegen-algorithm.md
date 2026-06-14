@@ -1,14 +1,14 @@
 # ARM64 Code Generation Algorithm: SCG to Machine Code
 
 **VUMA Project — Specification Document**
-**Target: Raspberry Pi 5 (Broadcom BCM2712, Cortex-A76 quad-core)**
+**Target: AArch64 (Broadcom BCM2712, Cortex-A76 quad-core)**
 **Task ID: W1-28**
 
 ---
 
 ## 1. SCG Node to ARM64 Instruction Mapping
 
-The Semantic Computation Graph (SCG) is the intermediate representation produced by VUMA's front-end compiler passes. Each SCG node represents a discrete semantic operation — allocation, deallocation, memory access, type casting, computation, or control flow — that must be translated into one or more ARM64 (AArch64) machine instructions. This section defines the complete mapping from every SCG node type to its ARM64 instruction sequence, targeting the Cortex-A76 microarchitecture found in the Raspberry Pi 5's BCM2712 SoC.
+The Semantic Computation Graph (SCG) is the intermediate representation produced by VUMA's front-end compiler passes. Each SCG node represents a discrete semantic operation — allocation, deallocation, memory access, type casting, computation, or control flow — that must be translated into one or more ARM64 (AArch64) machine instructions. This section defines the complete mapping from every SCG node type to its ARM64 instruction sequence, targeting the Cortex-A76 microarchitecture found in the AArch64's BCM2712 SoC.
 
 ### AllocationNode
 
@@ -269,7 +269,7 @@ ret
 
 ## 2. Function Calling Convention (AAPCS64)
 
-The ARM64 procedure call standard (AAPCS64) defines the contract between callers and callees that VUMA's code generator must honor on every function boundary. The Raspberry Pi 5 runs Linux in AArch64 mode, and its system libraries, the C runtime, and the kernel all adhere to AAPCS64. Any deviation would result in undefined behavior, silent data corruption, or crashes. This section details the full calling convention as implemented by the VUMA code generator, including VUMA-specific extensions for passing Bounds Descriptor (BD) metadata used by the Inline Validation Engine (IVE).
+The ARM64 procedure call standard (AAPCS64) defines the contract between callers and callees that VUMA's code generator must honor on every function boundary. The AArch64 runs Linux in AArch64 mode, and its system libraries, the C runtime, and the kernel all adhere to AAPCS64. Any deviation would result in undefined behavior, silent data corruption, or crashes. This section details the full calling convention as implemented by the VUMA code generator, including VUMA-specific extensions for passing Bounds Descriptor (BD) metadata used by the Inline Validation Engine (IVE).
 
 ### Argument Passing
 
@@ -412,7 +412,7 @@ add  x16, x16, :got_lo12:function_name
 br   x17
 ```
 
-**x18: Platform Register.** On some operating systems, x18 is reserved as a platform register (e.g., for the shadow call stack on Android). The VUMA code generator treats x18 as reserved and does not allocate it for general use. On bare-metal Pi 5 targets, x18 may be repurposed as a per-CPU data pointer if the VUMA runtime requires it:
+**x18: Platform Register.** On some operating systems, x18 is reserved as a platform register (e.g., for the shadow call stack on Android). The VUMA code generator treats x18 as reserved and does not allocate it for general use. On bare-metal AArch64 targets, x18 may be repurposed as a per-CPU data pointer if the VUMA runtime requires it:
 
 ```asm
 ; Optional: x18 as per-CPU data pointer (bare metal only)
@@ -490,7 +490,7 @@ The Cortex-A76 has a 4-wide out-of-order execution engine with a 128-entry reord
 
 ## 4. Memory Barrier Insertion
 
-The ARM64 memory model is weakly ordered, meaning that the processor may reorder memory operations in ways that are not visible to a single thread but can cause observable inconsistencies in multi-threaded programs. The Cortex-A76 in the Raspberry Pi 5 implements the ARMv8.2-A architecture, which permits store-load reordering and store-store reordering between different addresses. This means that without explicit barriers, a store followed by a load to a different address may appear to execute in the opposite order to another core. The VUMA compiler's SyncEdge annotations in the SCG provide the information needed to insert the correct barriers and atomic operations. This section defines the barrier insertion algorithm for each SyncEdge variant.
+The ARM64 memory model is weakly ordered, meaning that the processor may reorder memory operations in ways that are not visible to a single thread but can cause observable inconsistencies in multi-threaded programs. The Cortex-A76 in the AArch64 implements the ARMv8.2-A architecture, which permits store-load reordering and store-store reordering between different addresses. This means that without explicit barriers, a store followed by a load to a different address may appear to execute in the opposite order to another core. The VUMA compiler's SyncEdge annotations in the SCG provide the information needed to insert the correct barriers and atomic operations. This section defines the barrier insertion algorithm for each SyncEdge variant.
 
 ### SyncEdge with HappensBefore
 
@@ -582,9 +582,9 @@ This pass ensures that the minimum necessary set of barriers is inserted, avoidi
 
 ---
 
-## 5. ELF Object Format for Pi 5 Linux
+## 5. ELF Object Format for AArch64 Linux
 
-The VUMA code generator produces ELF (Executable and Linkable Format) object files that are consumed by the system linker (`ld`) to produce the final executable or shared library. For the Raspberry Pi 5 running a 64-bit Linux kernel, the object files must conform to the AArch64 ELF specification. This section defines the ELF header fields, section layout, and relocation types that the VUMA code generator must emit.
+The VUMA code generator produces ELF (Executable and Linkable Format) object files that are consumed by the system linker (`ld`) to produce the final executable or shared library. For the AArch64 running a 64-bit Linux kernel, the object files must conform to the AArch64 ELF specification. This section defines the ELF header fields, section layout, and relocation types that the VUMA code generator must emit.
 
 ### ELF Header
 
@@ -710,13 +710,13 @@ The VUMA code generator's relocation pass emits relocation entries for every sym
 
 ---
 
-## 6. Bare Metal Startup for Pi 5
+## 6. Bare Metal Startup for AArch64
 
-When VUMA targets bare metal execution on the Raspberry Pi 5 (no operating system, no Linux kernel), the code generator must produce a self-contained binary that handles all hardware initialization from the moment the BCM2712 SoC releases the CPU from reset. The bare metal startup sequence sets up the execution environment — stack, BSS, MMU, and exception vectors — before transferring control to the VUMA runtime's `main` function. This section describes the complete startup protocol, linker script, and multi-core management.
+When VUMA targets bare metal execution on the AArch64 (no operating system, no Linux kernel), the code generator must produce a self-contained binary that handles all hardware initialization from the moment the BCM2712 SoC releases the CPU from reset. The bare metal startup sequence sets up the execution environment — stack, BSS, MMU, and exception vectors — before transferring control to the VUMA runtime's `main` function. This section describes the complete startup protocol, linker script, and multi-core management.
 
 ### Entry Point and Boot Protocol
 
-The Raspberry Pi 5's VideoCore GPU loads the kernel image (typically named `kernel8.img` for 64-bit mode) into memory at physical address `0x80000` and starts core 0 executing at that address. Cores 1, 2, and 3 are held in a WFE (Wait For Event) loop by the GPU firmware until explicitly released by software. The VUMA bare metal binary must begin with the `_start` symbol at this address:
+The AArch64's VideoCore GPU loads the kernel image (typically named `kernel8.img` for 64-bit mode) into memory at physical address `0x80000` and starts core 0 executing at that address. Cores 1, 2, and 3 are held in a WFE (Wait For Event) loop by the GPU firmware until explicitly released by software. The VUMA bare metal binary must begin with the `_start` symbol at this address:
 
 ```asm
 .section .text.boot
@@ -772,7 +772,7 @@ sev                         ; send event to wake WFE-waiting cores
 
 ### Stack Setup
 
-The stack grows downward from a high address. The `_stack_top` symbol is defined in the linker script at the top of RAM, below the GPU reserved region. The Raspberry Pi 5 has up to 8 GB of RAM (depending on model), with the GPU firmware typically reserving the first 64-128 MB. The VUMA linker script places the stack at a safe offset from the top of usable RAM:
+The stack grows downward from a high address. The `_stack_top` symbol is defined in the linker script at the top of RAM, below the GPU reserved region. The AArch64 has up to 8 GB of RAM (depending on model), with the GPU firmware typically reserving the first 64-128 MB. The VUMA linker script places the stack at a safe offset from the top of usable RAM:
 
 ```asm
 ; Stack for core 0: 64 KB

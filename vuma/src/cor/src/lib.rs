@@ -21,7 +21,7 @@
 //!   runtime behaviour, with automatic deoptimization when assumptions are
 //!   invalidated.
 //! - **[`deployment`]** – Adaptive deployment across heterogeneous targets
-//!   (local, remote, Pi 5 cores). Migrates regions at runtime to rebalance
+//!   (local, remote). Migrates regions at runtime to rebalance
 //!   load.
 //! - **[`config`]** – Runtime configuration (optimization level, time
 //!   budgets, target architecture, etc.).

@@ -12,7 +12,7 @@
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Quick Start](#quick-start)
-4. [Building for Pi 5](#building-for-pi-5)
+4. [Building for AArch64](#building-for-aarch64)
 5. [Running Tests](#running-tests)
 6. [Project Structure](#project-structure)
 7. [Key Concepts](#key-concepts)
@@ -72,8 +72,7 @@ VUMA implements a six-layer architecture where data flows from human intent thro
 │    Nodes (ops, allocs, effects) · Edges (data flow, deps) · Regions │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    Layer 4 — Execution                               │
-│    COR Runtime (always-compiled, PGO, JIT) · ARM64 Codegen ·        │
-│    Pi 5 Platform (GPIO, UART, SMP, Cortex-A76)                      │
+│    COR Runtime (always-compiled, PGO, JIT) · Multi-ISA Codegen      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -84,7 +83,7 @@ Source Text → Lexer → Parser → AST → SCG Lowering → Raw SCG
     → BD Inference (RepD + CapD + RelD fixpoint) → Annotated SCG
     → MSG Builder → VUMA Verification (5 invariants) → Verified SCG
     → ARM64 Codegen (IR → regalloc → emit) → Machine Code
-    → COR Runtime → Pi 5 Execution → Profile Feedback → re-optimize
+    → COR Runtime → Execution → Profile Feedback → re-optimize
 ```
 
 ### Crate Dependency Graph
@@ -96,7 +95,7 @@ Source Text → Lexer → Parser → AST → SCG Lowering → Raw SCG
            ┌─────────────┼──────────────────┐
            ▼             ▼                  ▼
     ┌────────────┐ ┌──────────┐      ┌──────────┐
-    │ projection │ │   pi5    │      │  codegen  │
+    │ projection │ │   std    │      │  codegen  │
     └─────┬──────┘ └────┬─────┘      └─────┬────┘
           │              │                   │
           ▼              ▼                   ▼
@@ -123,8 +122,8 @@ Source Text → Lexer → Parser → AST → SCG Lowering → Raw SCG
 
 - **Rust** — nightly toolchain (pinned in `rust-toolchain.toml`)
 - **Make** or **Just** — build orchestration
-- **QEMU** (optional) — Pi 5 emulation for testing
-- **aarch64 cross-toolchain** (optional) — Pi 5 bare-metal builds
+- **QEMU** (optional) — emulation for testing
+- **aarch64 cross-toolchain** (optional) — AArch64 bare-metal builds
 
 ### Setup
 
@@ -169,63 +168,9 @@ The verifier will check all five invariants against the SCG derived from your pr
 
 ---
 
-## Building for Pi 5
+## Building for AArch64
 
-VUMA's primary target is the **Raspberry Pi 5** (BCM2712, 4× Cortex-A76, 4–8 GB LPDDR4X). The Pi 5 crate (`vuma-pi5`) compiles for bare-metal `aarch64-unknown-none`.
-
-### Install Cross-Compilation Toolchain
-
-```bash
-# Add the bare-metal target
-rustup target add aarch64-unknown-none
-
-# Install the cross-toolchain (Debian/Ubuntu)
-sudo apt install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-
-# Or for bare-metal:
-sudo apt install gcc-aarch64-none-elf binutils-aarch64-none-elf
-```
-
-### Build the Kernel Image
-
-```bash
-# Cross-compile for bare-metal (release mode)
-make pi5
-
-# Build the raw kernel8.img
-make pi5-image
-
-# Flash to SD card (default: /mnt/sd-boot)
-make pi5-flash SD=/path/to/sd-boot
-
-# Or run in QEMU
-make pi5-run
-```
-
-### Debug via QEMU + GDB
-
-```bash
-# Terminal 1: Launch QEMU with GDB stub
-make pi5-debug
-
-# Terminal 2: Connect GDB
-aarch64-none-elf-gdb target/remote
-(gdb) target remote :1234
-(gdb) break _start
-(gdb) continue
-```
-
-### Pi 5 Crate Contents
-
-| Module     | Purpose                                           |
-|------------|---------------------------------------------------|
-| `boot`     | ARM64 exception vectors, `_start`, FDT parsing    |
-| `platform` | BCM2712 memory map, board identification          |
-| `uart`     | PL011 UART0 + Mini UART (UART1), ring buffer ISR  |
-| `gpio`     | Memory-mapped GPIO pin mux and pull control       |
-| `timer`    | ARM generic timer, virtual timer, C API           |
-| `mmio`     | 32/64-bit volatile access, ARM64 barriers, MmioDevice trait |
-| `smp`      | Multicore boot, IPI, Spinlock with RAII guard     |
+VUMA supports multi-ISA code generation including **AArch64** (ARM64). The codegen crate can produce ARM64 machine code for deployment on AArch64 targets.
 
 ---
 
@@ -255,9 +200,6 @@ cargo test -p vuma-core
 
 # ARM64 code generation
 cargo test -p vuma-codegen
-
-# Pi 5 platform
-cargo test -p vuma-pi5
 
 # Standard library
 cargo test -p vuma-std
@@ -324,7 +266,7 @@ make lint && make test
 ```
 vuma/
 ├── Cargo.toml              # Workspace root (12 crate members)
-├── Makefile                # Build/test/Pi 5 targets
+├── Makefile                # Build/test targets
 ├── justfile                # Just command runner shortcuts
 ├── rust-toolchain.toml     # Pinned nightly toolchain
 ├── src/
@@ -353,12 +295,8 @@ vuma/
 │   │                       # bidirectional, diff
 │   ├── parser/             # Parser / Frontend
 │   │   └── src/            # lexer, parser, ast, to_scg, error
-│   ├── codegen/            # ARM64 Code Generation
+│   ├── codegen/            # Multi-ISA Code Generation
 │   │   └── src/            # arm64, ir, scg_to_ir, regalloc, emit
-│   ├── pi5/                # Raspberry Pi 5 Platform
-│   │   ├── build.rs        # Bare-metal build script
-│   │   ├── link.ld         # ARM64 linker script
-│   │   └── src/            # boot, platform, uart, gpio, timer, mmio, smp
 │   ├── proof/              # Formal Proof System
 │   │   └── src/            # proof, checker, rules, tactics,
 │   │                       # counterexample, 5 invariant proof modules
@@ -409,7 +347,7 @@ The IVE is the reasoning core. It reads the SCG, infers Behavioral Descriptors, 
 
 ### COR — Continuous Optimization Runtime
 
-The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. It performs incremental compilation, profile-guided optimization (using Pi 5 PMU counters), speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets.
+The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. It performs incremental compilation, profile-guided optimization (using PMU counters), speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets.
 
 ---
 
@@ -420,11 +358,11 @@ The COR maintains an always-compiled invariant: every reachable SCG region is ke
 | `hello_memory.vuma`       | 40    | Basic allocate/write/read/free                    |
 | `doubly_linked_list.vuma` | 89    | Sentinel node pattern, derivation chains          |
 | `arena_allocator.vuma`    | 78    | Arena allocation with region semantics            |
-| `gpio_blink.vuma`         | 68    | Pi 5 GPIO hardware access                        |
+| `gpio_blink.vuma`         | 68    | GPIO hardware access                           |
 | `lock_free_queue.vuma`    | 99    | Lock-free SPSC queue with atomics                |
 | `channel_demo.vuma`       | 237   | Channel-based concurrency                        |
 | `memory_arena.vuma`       | 197   | Region-based allocation                          |
-| `pi5_sensor.vuma`         | 188   | Pi 5 MMIO sensor reading                        |
+| `aarch64_sensor.vuma`     | 188   | AArch64 MMIO sensor reading                   |
 | `sorted_map.vuma`         | 192   | Sorted map with BD-verified operations           |
 | `thread_pool.vuma`        | 209   | Thread pool with work stealing                   |
 
@@ -452,7 +390,7 @@ The COR maintains an always-compiled invariant: every reachable SCG region is ke
 | `reld-formal-spec.md`                | 600   | Relational descriptor kinds              |
 | `vuma-invariants-spec.md`            | 742   | Five VUMA invariants                     |
 | `msg-construction-spec.md`           | 850   | MSG construction algorithm               |
-| `pi5-memory-model-spec.md`           | 809   | Pi 5 memory model                        |
+| `aarch64-memory-model-spec.md`      | 809   | AArch64 memory model                   |
 | `security-model-spec.md`             | 606   | Security model and threat categories     |
 | `bd-inference-algorithm.md`          | 1027  | BD inference fixpoint algorithm          |
 | `vuma-verification-algorithm.md`     | 1098  | VUMA verification algorithm              |
@@ -499,4 +437,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Worklog
 
-- **2026-03-05 — Task 5-9:** Created comprehensive README.md with overview, architecture, quick start, Pi 5 build instructions, test instructions, project structure, key concepts, examples, documentation index, and contributing link. ~300 lines.
+- **2026-03-05 — Task 5-9:** Created comprehensive README.md with overview, architecture, quick start, AArch64 build instructions, test instructions, project structure, key concepts, examples, documentation index, and contributing link.

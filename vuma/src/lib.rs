@@ -16,7 +16,6 @@
 //! | `vuma-core`     | Memory State Graph (MSG) and SCG → MSG           |
 //! | `vuma-codegen`  | IR lowering, register allocation, ARM64 codegen   |
 //! | `vuma-projection` | Textual/visual/conversational projections       |
-//! | `vuma-pi5`      | Raspberry Pi 5 bare-metal runtime               |
 //! | `vuma-proof`    | Proof generation and checking                    |
 //! | `vuma-cor`      | Coordination runtime                             |
 //! | `vuma-std`      | Standard library                                 |

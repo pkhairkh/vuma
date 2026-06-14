@@ -90,7 +90,7 @@ pub struct SCGNode {
     /// Whether this node uses SIMD / vectorized instructions.
     pub is_vectorized: bool,
     /// Cache-line alignment requirement in bytes (0 = default, 64 = 64-byte
-    /// aligned for Pi 5 L1 cache lines).
+    /// aligned for L1 cache lines).
     pub alignment: usize,
     /// Whether prefetch instructions have been inserted for this node.
     pub has_prefetch: bool,

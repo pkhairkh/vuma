@@ -22,7 +22,6 @@
 //! | [`Integration`]| Cross-crate pipelines (parse -> SCG -> verify, etc.).        |
 //! | [`Verification`]| IVE invariant checks, proof generation, counterexamples.    |
 //! | [`Codegen`]    | ARM64 code emission, register allocation, ELF generation.    |
-//! | [`Pi5`]        | Raspberry Pi 5 target-specific tests (MMIO, UART, GPIO).    |
 //!
 //! # Helper Macros
 //!
@@ -33,7 +32,6 @@
 //! - [`vuma_integration_test!`] — integration test category
 //! - [`vuma_verification_test!`] — verification test category
 //! - [`vuma_codegen_test!`] — codegen test category
-//! - [`vuma_pi5_test!`] — Pi5 target test category
 //!
 //! # Quick Start
 //!
@@ -92,19 +90,16 @@ pub enum TestCategory {
     Verification,
     /// Codegen tests: ARM64 code emission, register allocation, ELF generation.
     Codegen,
-    /// Pi5 tests: Raspberry Pi 5 target-specific (MMIO, UART, GPIO, SMP).
-    Pi5,
 }
 
 impl TestCategory {
     /// Returns all test categories in canonical order.
-    pub fn all() -> &'static [TestCategory; 5] {
+    pub fn all() -> &'static [TestCategory; 4] {
         &[
             TestCategory::Unit,
             TestCategory::Integration,
             TestCategory::Verification,
             TestCategory::Codegen,
-            TestCategory::Pi5,
         ]
     }
 
@@ -115,7 +110,6 @@ impl TestCategory {
             TestCategory::Integration => "integration",
             TestCategory::Verification => "verification",
             TestCategory::Codegen => "codegen",
-            TestCategory::Pi5 => "pi5",
         }
     }
 }
@@ -219,29 +213,6 @@ macro_rules! vuma_codegen_test {
         #[test]
         fn $name() {
             let _category = $crate::framework::TestCategory::Codegen;
-            $($body)*
-        }
-    };
-}
-
-/// Declare a VUMA Pi5 target test.
-///
-/// Annotates the test with the `Pi5` category for registry tracking
-/// and applies the standard `#[test]` attribute.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// vuma_pi5_test!(test_uart_output {
-///     // Pi5-specific test
-/// });
-/// ```
-#[macro_export]
-macro_rules! vuma_pi5_test {
-    ($name:ident { $($body:tt)* }) => {
-        #[test]
-        fn $name() {
-            let _category = $crate::framework::TestCategory::Pi5;
             $($body)*
         }
     };
@@ -2030,15 +2001,14 @@ mod tests {
         assert_eq!(TestCategory::Integration.label(), "integration");
         assert_eq!(TestCategory::Verification.label(), "verification");
         assert_eq!(TestCategory::Codegen.label(), "codegen");
-        assert_eq!(TestCategory::Pi5.label(), "pi5");
     }
 
     // -----------------------------------------------------------------------
     // Test 8: test category enumeration
     // -----------------------------------------------------------------------
     #[test]
-    fn test_category_all_has_five() {
-        assert_eq!(TestCategory::all().len(), 5);
+    fn test_category_all_has_four() {
+        assert_eq!(TestCategory::all().len(), 4);
     }
 
     // -----------------------------------------------------------------------

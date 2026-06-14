@@ -1,6 +1,6 @@
 # VUMA pinned toolchain — nightly required for:
 #   - inline assembly enhancements (naked_asm, etc.)
-#   - unstable features used in Pi 5 bare-metal crate
+#   - unstable features used in bare-metal crate
 #   - advanced const generics and trait system features
 [toolchain]
 channel = "nightly-2026-03-01"

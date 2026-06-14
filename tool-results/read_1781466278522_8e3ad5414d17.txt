@@ -1,0 +1,1368 @@
+     1→     1→//! Profile-guided optimization engine for the Continuous Optimization Runtime.
+     2→     2→//!
+     3→     3→//! This module defines the [`OptimizationEngine`] and the [`OptimizationPass`]
+     4→     4→//! trait, along with four concrete passes that apply profile-guided
+     5→     5→//! transformations to the Semantic Computation Graph (SCG):
+     6→     6→//!
+     7→     7→//! - [`HotPathInlining`] — inlines frequently-called function nodes.
+     8→     8→//! - [`ColdPathOutline`] — moves rarely-executed code to separate out-of-line
+     9→     9→//!   functions, improving instruction-cache utilisation on hot paths.
+    10→    10→//! - [`LoopOptimization`] — unrolls hot loops and, where possible, emits
+    11→    11→//!   SIMD/vectorized instructions.
+    12→    12→//! - [`MemoryOptimization`] — inserts prefetch hints and aligns data to
+    13→    13→//!   cache-line boundaries, targeting the Raspberry Pi 5 L1/L2 hierarchy.
+    14→    14→//!
+    15→    15→//! The top-level function [`apply_optimizations`] runs all registered passes
+    16→    16→//! over the SCG and returns an [`OptimizationResult`] summarising what was
+    17→    17→//! done.
+    18→    18→
+    19→    19→use crate::config::{Config, TargetArch};
+    20→    20→use crate::profile::ProfileData;
+    21→    21→use crate::types::{EdgeId, NodeId, NodeKind, SCG};
+    22→    22→use std::collections::HashMap;
+    23→    23→
+    24→    24→// ---------------------------------------------------------------------------
+    25→    25→// ProfileReport — digest of profile data for the optimiser
+    26→    26→// ---------------------------------------------------------------------------
+    27→    27→
+    28→    28→/// A summarised profile report consumed by optimisation passes.
+    29→    29→///
+    30→    30→/// `ProfileReport` is constructed from the raw [`ProfileData`] and provides
+    31→    31→/// pre-classified hot/cold node lists, loop back-edge frequencies, and
+    32→    32→/// allocation hotspots so that each pass does not have to recompute these
+    33→    33→/// from scratch.
+    34→    34→#[derive(Debug, Clone)]
+    35→    35→pub struct ProfileReport {
+    36→    36→    /// Nodes sorted by call count, descending (hottest first).
+    37→    37→    pub hot_nodes: Vec<(NodeId, u64)>,
+    38→    38→    /// Nodes whose call count is below the cold threshold.
+    39→    39→    pub cold_nodes: Vec<(NodeId, u64)>,
+    40→    40→    /// Loop back-edges and their traversal counts.
+    41→    41→    /// Each entry is `(edge_id, source_node, target_node, weight)`.
+    42→    42→    pub loop_back_edges: Vec<(EdgeId, NodeId, NodeId, u64)>,
+    43→    43→    /// Allocation hotspots by region class.
+    44→    44→    pub allocation_hotspots: Vec<(String, u64)>,
+    45→    45→    /// Total number of profile samples recorded.
+    46→    46→    pub total_samples: u64,
+    47→    47→}
+    48→    48→
+    49→    49→impl ProfileReport {
+    50→    50→    /// Hotness threshold: nodes called more than this are "hot".
+    51→    51→    const HOT_THRESHOLD: u64 = 100;
+    52→    52→    /// Coldness threshold: nodes called fewer than this are "cold".
+    53→    53→    const COLD_THRESHOLD: u64 = 5;
+    54→    54→
+    55→    55→    /// Builds a `ProfileReport` from raw [`ProfileData`].
+    56→    56→    ///
+    57→    57→    /// The constructor sorts nodes into hot/cold buckets and identifies loop
+    58→    58→    /// back-edges (edges whose `weight` significantly exceeds the average
+    59→    59→    /// edge weight in the SCG).
+    60→    60→    pub fn from_profile_data(profile: &ProfileData, scg: &SCG) -> Self {
+    61→    61→        let mut all_nodes: Vec<(NodeId, u64)> =
+    62→    62→            profile.call_counts.iter().map(|(&n, &c)| (n, c)).collect();
+    63→    63→        all_nodes.sort_by_key(|b| std::cmp::Reverse(b.1));
+    64→    64→
+    65→    65→        let hot_nodes: Vec<(NodeId, u64)> = all_nodes
+    66→    66→            .iter()
+    67→    67→            .filter(|(_, c)| *c > Self::HOT_THRESHOLD)
+    68→    68→            .cloned()
+    69→    69→            .collect();
+    70→    70→
+    71→    71→        let cold_nodes: Vec<(NodeId, u64)> = all_nodes
+    72→    72→            .iter()
+    73→    73→            .filter(|(_, c)| *c < Self::COLD_THRESHOLD)
+    74→    74→            .cloned()
+    75→    75→            .collect();
+    76→    76→
+    77→    77→        // Identify loop back-edges: edges where source > target (simple
+    78→    78→        // heuristic) or where the weight is at least 10× the median.
+    79→    79→        let avg_weight = if scg.edges.is_empty() {
+    80→    80→            1
+    81→    81→        } else {
+    82→    82→            let total: u64 = scg.edges.values().map(|e| e.weight).sum();
+    83→    83→            total / scg.edges.len().max(1) as u64
+    84→    84→        };
+    85→    85→
+    86→    86→        let loop_back_edges: Vec<(EdgeId, NodeId, NodeId, u64)> = scg
+    87→    87→            .edges
+    88→    88→            .values()
+    89→    89→            .filter(|e| e.weight > avg_weight * 10 || e.target <= e.source)
+    90→    90→            .map(|e| (e.id, e.source, e.target, e.weight))
+    91→    91→            .collect();
+    92→    92→
+    93→    93→        let allocation_hotspots: Vec<(String, u64)> = profile
+    94→    94→            .allocation_stats
+    95→    95→            .by_region_class
+    96→    96→            .iter()
+    97→    97→            .filter(|(_, count)| **count > 50)
+    98→    98→            .map(|(k, &v)| (k.clone(), v))
+    99→    99→            .collect();
+   100→   100→
+   101→   101→        let total_samples: u64 = profile.call_counts.values().sum();
+   102→   102→
+   103→   103→        ProfileReport {
+   104→   104→            hot_nodes,
+   105→   105→            cold_nodes,
+   106→   106→            loop_back_edges,
+   107→   107→            allocation_hotspots,
+   108→   108→            total_samples,
+   109→   109→        }
+   110→   110→    }
+   111→   111→
+   112→   112→    /// Returns `true` if the given node is classified as hot.
+   113→   113→    pub fn is_hot(&self, node_id: NodeId) -> bool {
+   114→   114→        self.hot_nodes.iter().any(|(n, _)| *n == node_id)
+   115→   115→    }
+   116→   116→
+   117→   117→    /// Returns `true` if the given node is classified as cold.
+   118→   118→    pub fn is_cold(&self, node_id: NodeId) -> bool {
+   119→   119→        self.cold_nodes.iter().any(|(n, _)| *n == node_id)
+   120→   120→    }
+   121→   121→
+   122→   122→    /// Returns the call count for the given node, or 0 if not profiled.
+   123→   123→    pub fn call_count(&self, node_id: NodeId) -> u64 {
+   124→   124→        self.hot_nodes
+   125→   125→            .iter()
+   126→   126→            .chain(self.cold_nodes.iter())
+   127→   127→            .find(|(n, _)| *n == node_id)
+   128→   128→            .map(|(_, c)| *c)
+   129→   129→            .unwrap_or(0)
+   130→   130→    }
+   131→   131→}
+   132→   132→
+   133→   133→// ---------------------------------------------------------------------------
+   134→   134→// Transformation record
+   135→   135→// ---------------------------------------------------------------------------
+   136→   136→
+   137→   137→/// The kind of optimisation transformation applied to a node.
+   138→   138→#[derive(Debug, Clone, PartialEq, Eq)]
+   139→   139→pub enum TransformationKind {
+   140→   140→    /// The node was inlined at its call site(s).
+   141→   141→    Inlined,
+   142→   142→    /// The node was outlined to a separate cold function.
+   143→   143→    Outlined,
+   144→   144→    /// A loop was unrolled by the given factor.
+   145→   145→    LoopUnrolled {
+   146→   146→        /// Unroll factor applied.
+   147→   147→        factor: u32,
+   148→   148→    },
+   149→   149→    /// A loop was vectorized using SIMD instructions.
+   150→   150→    LoopVectorized,
+   151→   151→    /// A prefetch instruction was inserted before a memory access.
+   152→   152→    PrefetchInserted,
+   153→   153→    /// Data was aligned to a cache-line boundary.
+   154→   154→    CacheLineAligned {
+   155→   155→        /// Alignment in bytes.
+   156→   156→        alignment: usize,
+   157→   157→    },
+   158→   158→}
+   159→   159→
+   160→   160→impl std::fmt::Display for TransformationKind {
+   161→   161→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   162→   162→        match self {
+   163→   163→            TransformationKind::Inlined => write!(f, "Inlined"),
+   164→   164→            TransformationKind::Outlined => write!(f, "Outlined"),
+   165→   165→            TransformationKind::LoopUnrolled { factor } => {
+   166→   166→                write!(f, "LoopUnrolled(×{})", factor)
+   167→   167→            }
+   168→   168→            TransformationKind::LoopVectorized => write!(f, "LoopVectorized"),
+   169→   169→            TransformationKind::PrefetchInserted => write!(f, "PrefetchInserted"),
+   170→   170→            TransformationKind::CacheLineAligned { alignment } => {
+   171→   171→                write!(f, "CacheLineAligned({}B)", alignment)
+   172→   172→            }
+   173→   173→        }
+   174→   174→    }
+   175→   175→}
+   176→   176→
+   177→   177→/// A record of a single optimisation applied to a specific node.
+   178→   178→#[derive(Debug, Clone)]
+   179→   179→pub struct Transformation {
+   180→   180→    /// The kind of transformation.
+   181→   181→    pub kind: TransformationKind,
+   182→   182→    /// The node that was transformed.
+   183→   183→    pub target_node: NodeId,
+   184→   184→    /// Human-readable explanation of why the transformation was applied.
+   185→   185→    pub description: String,
+   186→   186→}
+   187→   187→
+   188→   188→// ---------------------------------------------------------------------------
+   189→   189→// PassResult — output of a single optimisation pass
+   190→   190→// ---------------------------------------------------------------------------
+   191→   191→
+   192→   192→/// The result of running one [`OptimizationPass`].
+   193→   193→#[derive(Debug, Clone)]
+   194→   194→pub struct PassResult {
+   195→   195→    /// Name of the pass that produced this result.
+   196→   196→    pub pass_name: String,
+   197→   197→    /// Individual transformations applied.
+   198→   198→    pub transformations: Vec<Transformation>,
+   199→   199→    /// Estimated speedup factor (1.0 = no improvement).
+   200→   200→    pub estimated_speedup: f64,
+   201→   201→}
+   202→   202→
+   203→   203→impl PassResult {
+   204→   204→    /// Creates an empty result for the given pass name.
+   205→   205→    pub fn empty(pass_name: &str) -> Self {
+   206→   206→        PassResult {
+   207→   207→            pass_name: pass_name.to_owned(),
+   208→   208→            transformations: Vec::new(),
+   209→   209→            estimated_speedup: 1.0,
+   210→   210→        }
+   211→   211→    }
+   212→   212→
+   213→   213→    /// Returns the number of transformations applied.
+   214→   214→    pub fn count(&self) -> usize {
+   215→   215→        self.transformations.len()
+   216→   216→    }
+   217→   217→}
+   218→   218→
+   219→   219→// ---------------------------------------------------------------------------
+   220→   220→// OptimizationResult — aggregate output of all passes
+   221→   221→// ---------------------------------------------------------------------------
+   222→   222→
+   223→   223→/// The aggregate result of applying all optimisation passes.
+   224→   224→#[derive(Debug, Clone)]
+   225→   225→pub struct OptimizationResult {
+   226→   226→    /// Per-pass results, in execution order.
+   227→   227→    pub pass_results: Vec<PassResult>,
+   228→   228→    /// Total number of transformations across all passes.
+   229→   229→    pub total_transformations: usize,
+   230→   230→    /// Combined estimated speedup factor (1.0 = no improvement).
+   231→   231→    pub estimated_speedup: f64,
+   232→   232→}
+   233→   233→
+   234→   234→impl OptimizationResult {
+   235→   235→    /// Creates a result from the list of per-pass results.
+   236→   236→    pub fn from_pass_results(pass_results: Vec<PassResult>) -> Self {
+   237→   237→        let total_transformations: usize = pass_results.iter().map(|r| r.count()).sum();
+   238→   238→        // Combine speedups multiplicatively (a simplification).
+   239→   239→        let estimated_speedup: f64 = pass_results
+   240→   240→            .iter()
+   241→   241→            .fold(1.0, |acc, r| acc * r.estimated_speedup);
+   242→   242→
+   243→   243→        OptimizationResult {
+   244→   244→            pass_results,
+   245→   245→            total_transformations,
+   246→   246→            estimated_speedup,
+   247→   247→        }
+   248→   248→    }
+   249→   249→
+   250→   250→    /// Returns an empty result (no passes run, no transformations).
+   251→   251→    pub fn empty() -> Self {
+   252→   252→        OptimizationResult {
+   253→   253→            pass_results: Vec::new(),
+   254→   254→            total_transformations: 0,
+   255→   255→            estimated_speedup: 1.0,
+   256→   256→        }
+   257→   257→    }
+   258→   258→}
+   259→   259→
+   260→   260→// ---------------------------------------------------------------------------
+   261→   261→// OptimizationPass trait
+   262→   262→// ---------------------------------------------------------------------------
+   263→   263→
+   264→   264→/// A single optimisation pass that can be applied to the SCG.
+   265→   265→///
+   266→   266→/// Implementations inspect the profile report, identify optimisation
+   267→   267→/// opportunities, and mutate the SCG accordingly. Each pass returns a
+   268→   268→/// [`PassResult`] describing what was done.
+   269→   269→pub trait OptimizationPass {
+   270→   270→    /// Human-readable name of the pass (used in logging and results).
+   271→   271→    fn name(&self) -> &str;
+   272→   272→
+   273→   273→    /// Apply the pass to the SCG, guided by the profile report.
+   274→   274→    ///
+   275→   275→    /// Returns a [`PassResult`] describing transformations applied and an
+   276→   276→    /// estimated speedup factor.
+   277→   277→    fn apply(&self, scg: &mut SCG, profile: &ProfileReport) -> PassResult;
+   278→   278→}
+   279→   279→
+   280→   280→// ---------------------------------------------------------------------------
+   281→   281→// HotPathInlining
+   282→   282→// ---------------------------------------------------------------------------
+   283→   283→
+   284→   284→/// Inlines hot call sites into their callers.
+   285→   285→///
+   286→   286→/// When a [`Call`](NodeKind::Call) node is identified as hot by the profile
+   287→   287→/// report and its compiled code is small enough (below `max_inline_size`),
+   288→   288→/// this pass marks the node as inlined, eliminating the call overhead and
+   289→   289→/// enabling further intra-procedural optimisations.
+   290→   290→pub struct HotPathInlining {
+   291→   291→    /// Maximum code size (in bytes) of a callee that is safe to inline.
+   292→   292→    /// Larger functions are not inlined to avoid code bloat.
+   293→   293→    pub max_inline_size: usize,
+   294→   294→}
+   295→   295→
+   296→   296→impl HotPathInlining {
+   297→   297→    /// Default maximum inline size: 256 bytes (roughly 64 AArch64 instructions).
+   298→   298→    pub const DEFAULT_MAX_INLINE_SIZE: usize = 256;
+   299→   299→
+   300→   300→    /// Creates a new `HotPathInlining` pass with default settings.
+   301→   301→    pub fn new() -> Self {
+   302→   302→        HotPathInlining {
+   303→   303→            max_inline_size: Self::DEFAULT_MAX_INLINE_SIZE,
+   304→   304→        }
+   305→   305→    }
+   306→   306→
+   307→   307→    /// Creates a new `HotPathInlining` pass with a custom max inline size.
+   308→   308→    pub fn with_max_inline_size(mut self, size: usize) -> Self {
+   309→   309→        self.max_inline_size = size;
+   310→   310→        self
+   311→   311→    }
+   312→   312→}
+   313→   313→
+   314→   314→impl Default for HotPathInlining {
+   315→   315→    fn default() -> Self {
+   316→   316→        Self::new()
+   317→   317→    }
+   318→   318→}
+   319→   319→
+   320→   320→impl OptimizationPass for HotPathInlining {
+   321→   321→    fn name(&self) -> &str {
+   322→   322→        "HotPathInlining"
+   323→   323→    }
+   324→   324→
+   325→   325→    fn apply(&self, scg: &mut SCG, profile: &ProfileReport) -> PassResult {
+   326→   326→        let mut result = PassResult::empty(self.name());
+   327→   327→
+   328→   328→        for &(node_id, call_count) in &profile.hot_nodes {
+   329→   329→            let node = match scg.get_node_mut(node_id) {
+   330→   330→                Some(n) => n,
+   331→   331→                None => continue,
+   332→   332→            };
+   333→   333→
+   334→   334→            // Only inline Call nodes that haven't already been inlined.
+   335→   335→            if node.kind != NodeKind::Call || node.is_inlined {
+   336→   336→                continue;
+   337→   337→            }
+   338→   338→
+   339→   339→            // Only inline if the callee is small enough.
+   340→   340→            if node.code_size > self.max_inline_size {
+   341→   341→                log::debug!(
+   342→   342→                    "HotPathInlining: skipping node {} — code_size {} exceeds limit {}",
+   343→   343→                    node_id,
+   344→   344→                    node.code_size,
+   345→   345→                    self.max_inline_size,
+   346→   346→                );
+   347→   347→                continue;
+   348→   348→            }
+   349→   349→
+   350→   350→            let saved_call_overhead = call_count as f64 * 5.0; // ~5 cycles per call
+   351→   351→            result.estimated_speedup += saved_call_overhead / profile.total_samples.max(1) as f64;
+   352→   352→
+   353→   353→            node.is_inlined = true;
+   354→   354→            result.transformations.push(Transformation {
+   355→   355→                kind: TransformationKind::Inlined,
+   356→   356→                target_node: node_id,
+   357→   357→                description: format!(
+   358→   358→                    "Inlined hot call node (called {}×, code_size={}B)",
+   359→   359→                    call_count, node.code_size,
+   360→   360→                ),
+   361→   361→            });
+   362→   362→        }
+   363→   363→
+   364→   364→        // Ensure speedup is at least 1.0 (no regression).
+   365→   365→        result.estimated_speedup = result.estimated_speedup.max(1.0);
+   366→   366→
+   367→   367→        log::info!(
+   368→   368→            "HotPathInlining: {} transformations, estimated speedup {:.3}×",
+   369→   369→            result.count(),
+   370→   370→            result.estimated_speedup,
+   371→   371→        );
+   372→   372→
+   373→   373→        result
+   374→   374→    }
+   375→   375→}
+   376→   376→
+   377→   377→// ---------------------------------------------------------------------------
+   378→   378→// ColdPathOutline
+   379→   379→// ---------------------------------------------------------------------------
+   380→   380→
+   381→   381→/// Moves cold code to separate out-of-line functions.
+   382→   382→///
+   383→   383→/// When a node is classified as cold by the profile report and resides on
+   384→   384→/// a path that also contains hot nodes, outlining it shrinks the hot path
+   385→   385→/// and improves instruction-cache utilisation.
+   386→   386→pub struct ColdPathOutline {
+   387→   387→    /// Whether to also outline nodes that share an edge with a hot node
+   388→   388→    /// even if they are not directly cold themselves (rarely-taken branches).
+   389→   389→    pub outline_adjacent_to_hot: bool,
+   390→   390→}
+   391→   391→
+   392→   392→impl ColdPathOutline {
+   393→   393→    /// Creates a new `ColdPathOutline` pass with default settings.
+   394→   394→    pub fn new() -> Self {
+   395→   395→        ColdPathOutline {
+   396→   396→            outline_adjacent_to_hot: true,
+   397→   397→        }
+   398→   398→    }
+   399→   399→}
+   400→   400→
+   401→   401→impl Default for ColdPathOutline {
+   402→   402→    fn default() -> Self {
+   403→   403→        Self::new()
+   404→   404→    }
+   405→   405→}
+   406→   406→
+   407→   407→impl OptimizationPass for ColdPathOutline {
+   408→   408→    fn name(&self) -> &str {
+   409→   409→        "ColdPathOutline"
+   410→   410→    }
+   411→   411→
+   412→   412→    fn apply(&self, scg: &mut SCG, profile: &ProfileReport) -> PassResult {
+   413→   413→        let mut result = PassResult::empty(self.name());
+   414→   414→
+   415→   415→        // Collect node IDs to outline (we cannot borrow scg mutably while
+   416→   416→        // iterating over profile.cold_nodes which may reference nodes not
+   417→   417→        // in the graph, so we collect first and mutate second).
+   418→   418→        let mut to_outline: Vec<(NodeId, String)> = Vec::new();
+   419→   419→
+   420→   420→        for &(node_id, call_count) in &profile.cold_nodes {
+   421→   421→            let node = match scg.get_node(node_id) {
+   422→   422→                Some(n) => n,
+   423→   423→                None => continue,
+   424→   424→            };
+   425→   425→
+   426→   426→            // Only outline nodes that are on the same path as hot nodes.
+   427→   427→            let adjacent_to_hot = if self.outline_adjacent_to_hot {
+   428→   428→                node.incoming_edges
+   429→   429→                    .iter()
+   430→   430→                    .chain(node.outgoing_edges.iter())
+   431→   431→                    .any(|&eid| {
+   432→   432→                        scg.get_edge(eid)
+   433→   433→                            .is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
+   434→   434→                    })
+   435→   435→            } else {
+   436→   436→                false
+   437→   437→            };
+   438→   438→
+   439→   439→            if !adjacent_to_hot && !profile.is_hot(node_id) {
+   440→   440→                // Cold node not adjacent to any hot node — less benefit.
+   441→   441→                continue;
+   442→   442→            }
+   443→   443→
+   444→   444→            to_outline.push((
+   445→   445→                node_id,
+   446→   446→                format!(
+   447→   447→                    "Outlined cold node (called {}×, adjacent to hot path)",
+   448→   448→                    call_count,
+   449→   449→                ),
+   450→   450→            ));
+   451→   451→        }
+   452→   452→
+   453→   453→        // Also outline Branch nodes on cold paths adjacent to hot nodes.
+   454→   454→        if self.outline_adjacent_to_hot {
+   455→   455→            for &node_id in scg.nodes.keys() {
+   456→   456→                let node = match scg.get_node(node_id) {
+   457→   457→                    Some(n) => n,
+   458→   458→                    None => continue,
+   459→   459→                };
+   460→   460→                if node.kind != NodeKind::Branch || node.is_outlined {
+   461→   461→                    continue;
+   462→   462→                }
+   463→   463→                // Check if this branch is adjacent to a hot node but is itself cold.
+   464→   464→                let adjacent_hot = node
+   465→   465→                    .incoming_edges
+   466→   466→                    .iter()
+   467→   467→                    .chain(node.outgoing_edges.iter())
+   468→   468→                    .any(|&eid| {
+   469→   469→                        scg.get_edge(eid)
+   470→   470→                            .is_some_and(|e| profile.is_hot(e.source) || profile.is_hot(e.target))
+   471→   471→                    });
+   472→   472→                if adjacent_hot && profile.is_cold(node_id) {
+   473→   473→                    to_outline.push((
+   474→   474→                        node_id,
+   475→   475→                        "Outlined cold branch adjacent to hot path".to_owned(),
+   476→   476→                    ));
+   477→   477→                }
+   478→   478→            }
+   479→   479→        }
+   480→   480→
+   481→   481→        for (node_id, description) in to_outline {
+   482→   482→            if let Some(node) = scg.get_node_mut(node_id) {
+   483→   483→                node.is_outlined = true;
+   484→   484→                result.transformations.push(Transformation {
+   485→   485→                    kind: TransformationKind::Outlined,
+   486→   486→                    target_node: node_id,
+   487→   487→                    description,
+   488→   488→                });
+   489→   489→            }
+   490→   490→        }
+   491→   491→
+   492→   492→        // Estimated speedup: each outlined node frees icache space.
+   493→   493→        // Rough model: 2% per outlined node, capped at 20%.
+   494→   494→        let outline_benefit = (result.count() as f64 * 0.02).min(0.20);
+   495→   495→        result.estimated_speedup = 1.0 + outline_benefit;
+   496→   496→
+   497→   497→        log::info!(
+   498→   498→            "ColdPathOutline: {} transformations, estimated speedup {:.3}×",
+   499→   499→            result.count(),
+   500→   500→            result.estimated_speedup,
+   501→   501→        );
+   502→   502→
+   503→   503→        result
+   504→   504→    }
+   505→   505→}
+   506→   506→
+   507→   507→// ---------------------------------------------------------------------------
+   508→   508→// LoopOptimization
+   509→   509→// ---------------------------------------------------------------------------
+   510→   510→
+   511→   511→/// Unrolls hot loops and, where profitable, vectorises them.
+   512→   512→///
+   513→   513→/// Loop unrolling reduces branch overhead and exposes instruction-level
+   514→   514→/// parallelism. Vectorization replaces scalar loop bodies with SIMD
+   515→   515→/// operations, which is especially effective on the Cortex-A76 (Pi 5)
+   516→   516→/// with its 128-bit NEON unit.
+   517→   517→pub struct LoopOptimization {
+   518→   518→    /// Minimum trip count (from profile) to consider a loop "hot" enough
+   519→   519→    /// for unrolling.
+   520→   520→    pub min_trip_count: u64,
+   521→   521→    /// Maximum unroll factor to apply.
+   522→   522→    pub max_unroll_factor: u32,
+   523→   523→    /// Whether to attempt vectorisation.
+   524→   524→    pub enable_vectorization: bool,
+   525→   525→}
+   526→   526→
+   527→   527→impl LoopOptimization {
+   528→   528→    /// Creates a new `LoopOptimization` pass with default settings.
+   529→   529→    pub fn new() -> Self {
+   530→   530→        LoopOptimization {
+   531→   531→            min_trip_count: 100,
+   532→   532→            max_unroll_factor: 8,
+   533→   533→            enable_vectorization: true,
+   534→   534→        }
+   535→   535→    }
+   536→   536→
+   537→   537→    /// Creates a pass with a custom minimum trip count.
+   538→   538→    pub fn with_min_trip_count(mut self, count: u64) -> Self {
+   539→   539→        self.min_trip_count = count;
+   540→   540→        self
+   541→   541→    }
+   542→   542→
+   543→   543→    /// Determines the best unroll factor for a loop with the given trip
+   544→   544→    /// count. Chooses the largest power-of-two ≤ `max_unroll_factor` that
+   545→   545→    /// does not exceed the trip count.
+   546→   546→    fn best_unroll_factor(&self, trip_count: u64) -> u32 {
+   547→   547→        let mut factor: u32 = 1;
+   548→   548→        let mut candidate = 2;
+   549→   549→        while candidate <= self.max_unroll_factor && (candidate as u64) <= trip_count {
+   550→   550→            factor = candidate;
+   551→   551→            candidate *= 2;
+   552→   552→        }
+   553→   553→        factor
+   554→   554→    }
+   555→   555→
+   556→   556→    /// Heuristic: determines whether a loop body is vectorizable.
+   557→   557→    ///
+   558→   558→    /// In the full implementation this would analyse data dependencies,
+   559→   559→    /// stride patterns, and type widths. For now we use a simple heuristic:
+   560→   560→    /// a loop is vectorizable if it has a Memory node among its successors
+   561→   561→    /// and is not already vectorized.
+   562→   562→    fn is_vectorizable(&self, scg: &SCG, loop_node_id: NodeId) -> bool {
+   563→   563→        let loop_node = match scg.get_node(loop_node_id) {
+   564→   564→            Some(n) => n,
+   565→   565→            None => return false,
+   566→   566→        };
+   567→   567→        if loop_node.is_vectorized {
+   568→   568→            return false;
+   569→   569→        }
+   570→   570→        // Check if any successor reachable through outgoing edges is a
+   571→   571→        // Memory node (indicating a load/store pattern).
+   572→   572→        let mut has_memory = false;
+   573→   573→        for &eid in &loop_node.outgoing_edges {
+   574→   574→            if let Some(edge) = scg.get_edge(eid) {
+   575→   575→                if let Some(target) = scg.get_node(edge.target) {
+   576→   576→                    if target.kind == NodeKind::Memory {
+   577→   577→                        has_memory = true;
+   578→   578→                        break;
+   579→   579→                    }
+   580→   580→                }
+   581→   581→            }
+   582→   582→        }
+   583→   583→        has_memory
+   584→   584→    }
+   585→   585→}
+   586→   586→
+   587→   587→impl Default for LoopOptimization {
+   588→   588→    fn default() -> Self {
+   589→   589→        Self::new()
+   590→   590→    }
+   591→   591→}
+   592→   592→
+   593→   593→impl OptimizationPass for LoopOptimization {
+   594→   594→    fn name(&self) -> &str {
+   595→   595→        "LoopOptimization"
+   596→   596→    }
+   597→   597→
+   598→   598→    fn apply(&self, scg: &mut SCG, profile: &ProfileReport) -> PassResult {
+   599→   599→        let mut result = PassResult::empty(self.name());
+   600→   600→
+   601→   601→        // Build a map from loop-header node ID to estimated trip count
+   602→   602→        // derived from back-edge weights.
+   603→   603→        let mut loop_trip_counts: HashMap<NodeId, u64> = HashMap::new();
+   604→   604→        for &(_eid, _src, target, weight) in &profile.loop_back_edges {
+   605→   605→            let entry = loop_trip_counts.entry(target).or_insert(0);
+   606→   606→            *entry = (*entry).max(weight);
+   607→   607→        }
+   608→   608→
+   609→   609→        // Also consider Loop-kind nodes that are hot in the profile.
+   610→   610→        for &(node_id, call_count) in &profile.hot_nodes {
+   611→   611→            let node = match scg.get_node(node_id) {
+   612→   612→                Some(n) => n,
+   613→   613→                None => continue,
+   614→   614→            };
+   615→   615→            if node.kind == NodeKind::Loop || node.kind == NodeKind::LoopHeader {
+   616→   616→                let entry = loop_trip_counts.entry(node_id).or_insert(0);
+   617→   617→                *entry = (*entry).max(call_count);
+   618→   618→            }
+   619→   619→        }
+   620→   620→
+   621→   621→        // Apply unrolling and vectorisation.
+   622→   622→        let loop_nodes: Vec<NodeId> = loop_trip_counts.keys().cloned().collect();
+   623→   623→        for loop_node_id in loop_nodes {
+   624→   624→            let trip_count = loop_trip_counts[&loop_node_id];
+   625→   625→            if trip_count < self.min_trip_count {
+   626→   626→                continue;
+   627→   627→            }
+   628→   628→
+   629→   629→            let node = match scg.get_node_mut(loop_node_id) {
+   630→   630→                Some(n) => n,
+   631→   631→                None => continue,
+   632→   632→            };
+   633→   633→
+   634→   634→            if node.kind != NodeKind::Loop && node.kind != NodeKind::LoopHeader {
+   635→   635→                continue;
+   636→   636→            }
+   637→   637→
+   638→   638→            // Unroll.
+   639→   639→            let factor = self.best_unroll_factor(trip_count);
+   640→   640→            if factor > 1 && node.unroll_factor < factor {
+   641→   641→                let old_factor = node.unroll_factor;
+   642→   642→                node.unroll_factor = factor;
+   643→   643→                result.transformations.push(Transformation {
+   644→   644→                    kind: TransformationKind::LoopUnrolled { factor },
+   645→   645→                    target_node: loop_node_id,
+   646→   646→                    description: format!(
+   647→   647→                        "Unrolled loop (trip={}, factor {}→{})",
+   648→   648→                        trip_count, old_factor, factor,
+   649→   649→                    ),
+   650→   650→                });
+   651→   651→            }
+   652→   652→
+   653→   653→            // Vectorise (requires mutable borrow again, but we already
+   654→   654→            // released the first one — we need to reborrow).
+   655→   655→            if self.enable_vectorization && self.is_vectorizable(scg, loop_node_id) {
+   656→   656→                let node = scg.get_node_mut(loop_node_id).unwrap();
+   657→   657→                if !node.is_vectorized {
+   658→   658→                    node.is_vectorized = true;
+   659→   659→                    result.transformations.push(Transformation {
+   660→   660→                        kind: TransformationKind::LoopVectorized,
+   661→   661→                        target_node: loop_node_id,
+   662→   662→                        description: format!("Vectorized loop (trip={}, NEON/SIMD)", trip_count,),
+   663→   663→                    });
+   664→   664→                }
+   665→   665→            }
+   666→   666→        }
+   667→   667→
+   668→   668→        // Speedup model: unrolling gives ~factor/2 improvement up to 2×;
+   669→   669→        // vectorisation gives ~4× for memory-bound loops.
+   670→   670→        let unroll_speedup: f64 = result
+   671→   671→            .transformations
+   672→   672→            .iter()
+   673→   673→            .filter(|t| matches!(t.kind, TransformationKind::LoopUnrolled { .. }))
+   674→   674→            .map(|t| {
+   675→   675→                if let TransformationKind::LoopUnrolled { factor } = t.kind {
+   676→   676→                    (factor as f64 / 2.0).min(2.0)
+   677→   677→                } else {
+   678→   678→                    1.0
+   679→   679→                }
+   680→   680→            })
+   681→   681→            .product::<f64>()
+   682→   682→            .max(1.0);
+   683→   683→
+   684→   684→        let vec_count = result
+   685→   685→            .transformations
+   686→   686→            .iter()
+   687→   687→            .filter(|t| matches!(t.kind, TransformationKind::LoopVectorized))
+   688→   688→            .count();
+   689→   689→
+   690→   690→        // Each vectorised loop adds ~4× speedup for that loop body.
+   691→   691→        let vec_speedup = if vec_count > 0 {
+   692→   692→            1.0 + vec_count as f64 * 0.3
+   693→   693→        } else {
+   694→   694→            1.0
+   695→   695→        };
+   696→   696→
+   697→   697→        result.estimated_speedup = (unroll_speedup * vec_speedup).max(1.0);
+   698→   698→
+   699→   699→        log::info!(
+   700→   700→            "LoopOptimization: {} transformations, estimated speedup {:.3}×",
+   701→   701→            result.count(),
+   702→   702→            result.estimated_speedup,
+   703→   703→        );
+   704→   704→
+   705→   705→        result
+   706→   706→    }
+   707→   707→}
+   708→   708→
+   709→   709→// ---------------------------------------------------------------------------
+   710→   710→// MemoryOptimization
+   711→   711→// ---------------------------------------------------------------------------
+   712→   712→
+   713→   713→/// Inserts prefetch hints and aligns data to cache-line boundaries.
+   714→   714→///
+   715→   715→/// On the Raspberry Pi 5 (BCM2712, Cortex-A76):
+   716→   716→///
+   717→   717→/// - **L1 data cache**: 64 KB per core, 64-byte cache lines, 4-way set
+   718→   718→///   associative.
+   719→   719→/// - **L2 cache**: 512 KB shared (per core pair), 64-byte cache lines.
+   720→   720→///
+   721→   721→/// This pass:
+   722→   722→///
+   723→   723→/// 1. Marks [`Memory`](NodeKind::Memory) nodes on hot paths with prefetch
+   724→   724→///    instructions so data is loaded into L1 before it is needed.
+   725→   725→/// 2. Aligns memory accesses to 64-byte boundaries to avoid cross-cache-line
+   726→   726→///    loads that waste bandwidth.
+   727→   727→pub struct MemoryOptimization {
+   728→   728→    /// Cache-line size in bytes. Default: 64 (Pi 5 / Cortex-A76).
+   729→   729→    pub cache_line_size: usize,
+   730→   730→    /// L1 data cache size in bytes. Default: 65_536 (64 KB).
+   731→   731→    pub l1d_size: usize,
+   732→   732→    /// L2 cache size in bytes. Default: 524_288 (512 KB).
+   733→   733→    pub l2_size: usize,
+   734→   734→    /// Whether to target the Pi 5 specifically.
+   735→   735→    pub target_pi5: bool,
+   736→   736→}
+   737→   737→
+   738→   738→impl MemoryOptimization {
+   739→   739→    /// Creates a new `MemoryOptimization` pass targeting the given architecture.
+   740→   740→    pub fn new(target_arch: TargetArch) -> Self {
+   741→   741→        let target_pi5 = matches!(target_arch, TargetArch::ArmV8A);
+   742→   742→        MemoryOptimization {
+   743→   743→            cache_line_size: 64,
+   744→   744→            l1d_size: 65_536,
+   745→   745→            l2_size: 524_288,
+   746→   746→            target_pi5,
+   747→   747→        }
+   748→   748→    }
+   749→   749→
+   750→   750→    /// Creates a pass with default Pi 5 parameters.
+   751→   751→    pub fn for_pi5() -> Self {
+   752→   752→        Self::new(TargetArch::ArmV8A)
+   753→   753→    }
+   754→   754→
+   755→   755→    /// Creates a pass with default x86-64 parameters.
+   756→   756→    pub fn for_x86_64() -> Self {
+   757→   757→        let mut pass = Self::new(TargetArch::X86_64);
+   758→   758→        pass.l2_size = 1_048_576; // 1 MB typical L2
+   759→   759→        pass
+   760→   760→    }
+   761→   761→}
+   762→   762→
+   763→   763→impl OptimizationPass for MemoryOptimization {
+   764→   764→    fn name(&self) -> &str {
+   765→   765→        "MemoryOptimization"
+   766→   766→    }
+   767→   767→
+   768→   768→    fn apply(&self, scg: &mut SCG, profile: &ProfileReport) -> PassResult {
+   769→   769→        let mut result = PassResult::empty(self.name());
+   770→   770→
+   771→   771→        // Collect (node_id, is_hot) for Memory nodes.
+   772→   772→        let memory_nodes: Vec<(NodeId, bool)> = scg
+   773→   773→            .nodes
+   774→   774→            .iter()
+   775→   775→            .filter(|(_, n)| n.kind == NodeKind::Memory)
+   776→   776→            .map(|(&id, _)| (id, profile.is_hot(id)))
+   777→   777→            .collect();
+   778→   778→
+   779→   779→        for (node_id, is_hot) in memory_nodes {
+   780→   780→            let node = match scg.get_node_mut(node_id) {
+   781→   781→                Some(n) => n,
+   782→   782→                None => continue,
+   783→   783→            };
+   784→   784→
+   785→   785→            // Insert prefetch for hot memory accesses.
+   786→   786→            if is_hot && !node.has_prefetch {
+   787→   787→                node.has_prefetch = true;
+   788→   788→                result.transformations.push(Transformation {
+   789→   789→                    kind: TransformationKind::PrefetchInserted,
+   790→   790→                    target_node: node_id,
+   791→   791→                    description: format!(
+   792→   792→                        "Prefetch inserted for hot memory node (cache-line {}B, L1D {}KB)",
+   793→   793→                        self.cache_line_size,
+   794→   794→                        self.l1d_size / 1024,
+   795→   795→                    ),
+   796→   796→                });
+   797→   797→            }
+   798→   798→
+   799→   799→            // Align to cache-line boundary on Pi 5 or for hot paths.
+   800→   800→            if (self.target_pi5 || is_hot) && node.alignment < self.cache_line_size {
+   801→   801→                let old_alignment = node.alignment;
+   802→   802→                node.alignment = self.cache_line_size;
+   803→   803→                result.transformations.push(Transformation {
+   804→   804→                    kind: TransformationKind::CacheLineAligned {
+   805→   805→                        alignment: self.cache_line_size,
+   806→   806→                    },
+   807→   807→                    target_node: node_id,
+   808→   808→                    description: format!(
+   809→   809→                        "Aligned memory node {}→{}B (Pi 5 L1/L2 cache-line)",
+   810→   810→                        old_alignment, self.cache_line_size,
+   811→   811→                    ),
+   812→   812→                });
+   813→   813→            }
+   814→   814→        }
+   815→   815→
+   816→   816→        // Speedup model: prefetch reduces latency ~20% per access;
+   817→   817→        // alignment avoids cross-line penalties ~10%.
+   818→   818→        let prefetch_count = result
+   819→   819→            .transformations
+   820→   820→            .iter()
+   821→   821→            .filter(|t| matches!(t.kind, TransformationKind::PrefetchInserted))
+   822→   822→            .count();
+   823→   823→        let align_count = result
+   824→   824→            .transformations
+   825→   825→            .iter()
+   826→   826→            .filter(|t| matches!(t.kind, TransformationKind::CacheLineAligned { .. }))
+   827→   827→            .count();
+   828→   828→
+   829→   829→        let prefetch_benefit = (prefetch_count as f64 * 0.05).min(0.30);
+   830→   830→        let align_benefit = (align_count as f64 * 0.02).min(0.15);
+   831→   831→        result.estimated_speedup = 1.0 + prefetch_benefit + align_benefit;
+   832→   832→
+   833→   833→        log::info!(
+   834→   834→            "MemoryOptimization: {} transformations, estimated speedup {:.3}×",
+   835→   835→            result.count(),
+   836→   836→            result.estimated_speedup,
+   837→   837→        );
+   838→   838→
+   839→   839→        result
+   840→   840→    }
+   841→   841→}
+   842→   842→
+   843→   843→// ---------------------------------------------------------------------------
+   844→   844→// OptimizationEngine
+   845→   845→// ---------------------------------------------------------------------------
+   846→   846→
+   847→   847→/// Applies a sequence of profile-guided optimisation passes to the SCG.
+   848→   848→///
+   849→   849→/// The engine holds a collection of [`OptimizationPass`] implementations and
+   850→   850→/// a [`Config`]. Calling [`OptimizationEngine::run`] executes each pass in
+   851→   851→/// order and returns an aggregate [`OptimizationResult`].
+   852→   852→pub struct OptimizationEngine {
+   853→   853→    passes: Vec<Box<dyn OptimizationPass>>,
+   854→   854→    config: Config,
+   855→   855→}
+   856→   856→
+   857→   857→impl std::fmt::Debug for OptimizationEngine {
+   858→   858→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   859→   859→        f.debug_struct("OptimizationEngine")
+   860→   860→            .field("pass_count", &self.passes.len())
+   861→   861→            .field(
+   862→   862→                "pass_names",
+   863→   863→                &self.passes.iter().map(|p| p.name()).collect::<Vec<_>>(),
+   864→   864→            )
+   865→   865→            .field("config", &self.config)
+   866→   866→            .finish()
+   867→   867→    }
+   868→   868→}
+   869→   869→
+   870→   870→impl OptimizationEngine {
+   871→   871→    /// Creates a new optimisation engine with the default set of passes
+   872→   872→    /// appropriate for the given configuration.
+   873→   873→    pub fn new(config: Config) -> Self {
+   874→   874→        let mut engine = OptimizationEngine {
+   875→   875→            passes: Vec::new(),
+   876→   876→            config,
+   877→   877→        };
+   878→   878→        engine.register_default_passes();
+   879→   879→        engine
+   880→   880→    }
+   881→   881→
+   882→   882→    /// Creates an engine with no passes registered (for custom setups).
+   883→   883→    pub fn empty(config: Config) -> Self {
+   884→   884→        OptimizationEngine {
+   885→   885→            passes: Vec::new(),
+   886→   886→            config,
+   887→   887→        }
+   888→   888→    }
+   889→   889→
+   890→   890→    /// Registers the default set of passes based on the current config.
+   891→   891→    fn register_default_passes(&mut self) {
+   892→   892→        self.passes.push(Box::new(HotPathInlining::new()));
+   893→   893→
+   894→   894→        self.passes.push(Box::new(ColdPathOutline::new()));
+   895→   895→
+   896→   896→        self.passes.push(Box::new(LoopOptimization::new()));
+   897→   897→
+   898→   898→        self.passes
+   899→   899→            .push(Box::new(MemoryOptimization::new(self.config.target_arch)));
+   900→   900→    }
+   901→   901→
+   902→   902→    /// Adds a custom optimisation pass.
+   903→   903→    pub fn add_pass(&mut self, pass: Box<dyn OptimizationPass>) {
+   904→   904→        self.passes.push(pass);
+   905→   905→    }
+   906→   906→
+   907→   907→    /// Removes all registered passes.
+   908→   908→    pub fn clear_passes(&mut self) {
+   909→   909→        self.passes.clear();
+   910→   910→    }
+   911→   911→
+   912→   912→    /// Returns the number of registered passes.
+   913→   913→    pub fn pass_count(&self) -> usize {
+   914→   914→        self.passes.len()
+   915→   915→    }
+   916→   916→
+   917→   917→    /// Runs all registered passes over the SCG and returns the aggregate
+   918→   918→    /// result.
+   919→   919→    pub fn run(&self, scg: &mut SCG, profile: &ProfileReport) -> OptimizationResult {
+   920→   920→        let mut pass_results = Vec::with_capacity(self.passes.len());
+   921→   921→
+   922→   922→        for pass in &self.passes {
+   923→   923→            log::debug!("OptimizationEngine: running pass '{}'", pass.name());
+   924→   924→            let result = pass.apply(scg, profile);
+   925→   925→            pass_results.push(result);
+   926→   926→        }
+   927→   927→
+   928→   928→        OptimizationResult::from_pass_results(pass_results)
+   929→   929→    }
+   930→   930→}
+   931→   931→
+   932→   932→// ---------------------------------------------------------------------------
+   933→   933→// apply_optimizations — top-level convenience function
+   934→   934→// ---------------------------------------------------------------------------
+   935→   935→
+   936→   936→/// Applies all default optimisation passes to the SCG, guided by the
+   937→   937→/// profile report.
+   938→   938→///
+   939→   939→/// This is the main entry point for the optimisation pipeline. It creates
+   940→   940→/// an [`OptimizationEngine`] with the default passes for the given
+   941→   941→/// configuration and runs them over the SCG.
+   942→   942→///
+   943→   943→/// # Arguments
+   944→   944→///
+   945→   945→/// * `scg` – The Semantic Computation Graph to optimise (mutated in place).
+   946→   946→/// * `profile` – The profile report guiding optimisation decisions.
+   947→   947→///
+   948→   948→/// # Returns
+   949→   949→///
+   950→   950→/// An [`OptimizationResult`] summarising all transformations.
+   951→   951→pub fn apply_optimizations(scg: &mut SCG, profile: &ProfileReport) -> OptimizationResult {
+   952→   952→    apply_optimizations_with_config(scg, profile, &Config::default())
+   953→   953→}
+   954→   954→
+   955→   955→/// Applies all default optimisation passes with the given configuration.
+   956→   956→pub fn apply_optimizations_with_config(
+   957→   957→    scg: &mut SCG,
+   958→   958→    profile: &ProfileReport,
+   959→   959→    config: &Config,
+   960→   960→) -> OptimizationResult {
+   961→   961→    let engine = OptimizationEngine::new(config.clone());
+   962→   962→    engine.run(scg, profile)
+   963→   963→}
+   964→   964→
+   965→   965→// ===========================================================================
+   966→   966→// Tests
+   967→   967→// ===========================================================================
+   968→   968→
+   969→   969→#[cfg(test)]
+   970→   970→mod tests {
+   971→   971→    use super::*;
+   972→   972→    use crate::profile::ProfileData;
+   973→   973→    use crate::types::{SCGEdge, SCGNode};
+   974→   974→
+   975→   975→    // -- Helpers ------------------------------------------------------------
+   976→   976→
+   977→   977→    /// Builds a small SCG with a mix of node kinds and edges.
+   978→   978→    fn build_test_scg() -> SCG {
+   979→   979→        let mut scg = SCG::new();
+   980→   980→
+   981→   981→        // Entry node
+   982→   982→        let mut entry = SCGNode::new(1, NodeKind::Entry);
+   983→   983→        entry.code_size = 32;
+   984→   984→        scg.insert_node(entry);
+   985→   985→
+   986→   986→        // Hot call node
+   987→   987→        let mut call_a = SCGNode::new(10, NodeKind::Call);
+   988→   988→        call_a.code_size = 64;
+   989→   989→        call_a.outgoing_edges.push(100);
+   990→   990→        scg.insert_node(call_a);
+   991→   991→
+   992→   992→        // Another hot call node (too large to inline by default)
+   993→   993→        let mut call_b = SCGNode::new(11, NodeKind::Call);
+   994→   994→        call_b.code_size = 512; // > DEFAULT_MAX_INLINE_SIZE
+   995→   995→        scg.insert_node(call_b);
+   996→   996→
+   997→   997→        // Hot loop node
+   998→   998→        let mut loop_node = SCGNode::new(20, NodeKind::Loop);
+   999→   999→        loop_node.code_size = 128;
+  1000→  1000→        loop_node.outgoing_edges.push(200); // forward edge to memory body
+  1001→  1001→        scg.insert_node(loop_node);
+  1002→  1002→
+  1003→  1003→        // Memory node inside the loop
+  1004→  1004→        let mut mem_node = SCGNode::new(30, NodeKind::Memory);
+  1005→  1005→        mem_node.code_size = 64;
+  1006→  1006→        mem_node.incoming_edges.push(200);
+  1007→  1007→        scg.insert_node(mem_node);
+  1008→  1008→
+  1009→  1009→        // Cold branch node
+  1010→  1010→        let mut cold_branch = SCGNode::new(40, NodeKind::Branch);
+  1011→  1011→        cold_branch.code_size = 32;
+  1012→  1012→        cold_branch.incoming_edges.push(100);
+  1013→  1013→        scg.insert_node(cold_branch);
+  1014→  1014→
+  1015→  1015→        // Cold compute node
+  1016→  1016→        let mut cold_compute = SCGNode::new(50, NodeKind::Compute);
+  1017→  1017→        cold_compute.code_size = 16;
+  1018→  1018→        scg.insert_node(cold_compute);
+  1019→  1019→
+  1020→  1020→        // Edges
+  1021→  1021→        scg.insert_edge(SCGEdge::new(100, 10, 40)); // call → cold branch
+  1022→  1022→        scg.insert_edge(SCGEdge::new(200, 20, 30)); // loop → memory (forward)
+  1023→  1023→        scg.insert_edge(SCGEdge {
+  1024→  1024→            id: 201,
+  1025→  1025→            source: 30,
+  1026→  1026→            target: 20,
+  1027→  1027→            weight: 5000,
+  1028→  1028→        }); // memory → loop (back-edge)
+  1029→  1029→        scg.insert_edge(SCGEdge::new(300, 1, 10)); // entry → call
+  1030→  1030→
+  1031→  1031→        scg
+  1032→  1032→    }
+  1033→  1033→
+  1034→  1034→    /// Builds a ProfileData that will classify nodes 10, 20, 30 as hot,
+  1035→  1035→    /// nodes 40, 50 as cold.
+  1036→  1036→    fn build_test_profile_data() -> ProfileData {
+  1037→  1037→        let mut profile = ProfileData::new();
+  1038→  1038→        // Hot nodes
+  1039→  1039→        for _ in 0..500 {
+  1040→  1040→            profile.record_access(10);
+  1041→  1041→        }
+  1042→  1042→        for _ in 0..300 {
+  1043→  1043→            profile.record_access(20);
+  1044→  1044→        }
+  1045→  1045→        for _ in 0..200 {
+  1046→  1046→            profile.record_access(30);
+  1047→  1047→        }
+  1048→  1048→        // Cold nodes
+  1049→  1049→        profile.record_access(40);
+  1050→  1050→        profile.record_access(50);
+  1051→  1051→        profile
+  1052→  1052→    }
+  1053→  1053→
+  1054→  1054→    fn build_test_profile_report(scg: &SCG, profile_data: &ProfileData) -> ProfileReport {
+  1055→  1055→        ProfileReport::from_profile_data(profile_data, scg)
+  1056→  1056→    }
+  1057→  1057→
+  1058→  1058→    // -- Test 1: HotPathInlining inlines hot Call nodes ---------------------
+  1059→  1059→
+  1060→  1060→    #[test]
+  1061→  1061→    fn hot_path_inlining_inlines_hot_calls() {
+  1062→  1062→        let mut scg = build_test_scg();
+  1063→  1063→        let profile_data = build_test_profile_data();
+  1064→  1064→        let report = build_test_profile_report(&scg, &profile_data);
+  1065→  1065→
+  1066→  1066→        let pass = HotPathInlining::new();
+  1067→  1067→        let result = pass.apply(&mut scg, &report);
+  1068→  1068→
+  1069→  1069→        // Node 10 is a hot Call with code_size=64 < 256 → should be inlined.
+  1070→  1070→        assert!(
+  1071→  1071→            scg.get_node(10).unwrap().is_inlined,
+  1072→  1072→            "hot Call node 10 should be inlined"
+  1073→  1073→        );
+  1074→  1074→        // Node 11 is a hot Call with code_size=512 > 256 → should NOT be inlined.
+  1075→  1075→        assert!(
+  1076→  1076→            !scg.get_node(11).unwrap().is_inlined,
+  1077→  1077→            "large Call node 11 should NOT be inlined"
+  1078→  1078→        );
+  1079→  1079→        assert!(result.count() >= 1);
+  1080→  1080→        assert!(result.transformations.iter().any(|t| t.target_node == 10));
+  1081→  1081→    }
+  1082→  1082→
+  1083→  1083→    // -- Test 2: HotPathInlining respects max_inline_size -------------------
+  1084→  1084→
+  1085→  1085→    #[test]
+  1086→  1086→    fn hot_path_inlining_respects_size_limit() {
+  1087→  1087→        let mut scg = SCG::new();
+  1088→  1088→        let mut call_node = SCGNode::new(1, NodeKind::Call);
+  1089→  1089→        call_node.code_size = 128;
+  1090→  1090→        scg.insert_node(call_node);
+  1091→  1091→
+  1092→  1092→        let mut profile_data = ProfileData::new();
+  1093→  1093→        for _ in 0..200 {
+  1094→  1094→            profile_data.record_access(1);
+  1095→  1095→        }
+  1096→  1096→        let report = ProfileReport::from_profile_data(&profile_data, &scg);
+  1097→  1097→
+  1098→  1098→        // With max_inline_size = 64, the node should NOT be inlined.
+  1099→  1099→        let pass = HotPathInlining::new().with_max_inline_size(64);
+  1100→  1100→        let result = pass.apply(&mut scg, &report);
+  1101→  1101→        assert!(!scg.get_node(1).unwrap().is_inlined);
+  1102→  1102→        assert_eq!(result.count(), 0);
+  1103→  1103→    }
+  1104→  1104→
+  1105→  1105→    // -- Test 3: ColdPathOutline outlines cold nodes adjacent to hot -------
+  1106→  1106→
+  1107→  1107→    #[test]
+  1108→  1108→    fn cold_path_outline_outlines_cold_adjacent_to_hot() {
+  1109→  1109→        let mut scg = build_test_scg();
+  1110→  1110→        let profile_data = build_test_profile_data();
+  1111→  1111→        let report = build_test_profile_report(&scg, &profile_data);
+  1112→  1112→
+  1113→  1113→        let pass = ColdPathOutline::new();
+  1114→  1114→        let result = pass.apply(&mut scg, &report);
+  1115→  1115→
+  1116→  1116→        // Node 40 is a cold Branch with an incoming edge from hot node 10.
+  1117→  1117→        // It should be outlined.
+  1118→  1118→        assert!(
+  1119→  1119→            scg.get_node(40).unwrap().is_outlined,
+  1120→  1120→            "cold branch node 40 adjacent to hot path should be outlined"
+  1121→  1121→        );
+  1122→  1122→        assert!(result.count() >= 1);
+  1123→  1123→    }
+  1124→  1124→
+  1125→  1125→    // -- Test 4: ColdPathOutline skips isolated cold nodes ------------------
+  1126→  1126→
+  1127→  1127→    #[test]
+  1128→  1128→    fn cold_path_outline_skips_isolated_cold() {
+  1129→  1129→        let mut scg = SCG::new();
+  1130→  1130→        // A cold compute node with no edges to any hot node.
+  1131→  1131→        let cold = SCGNode::new(99, NodeKind::Compute);
+  1132→  1132→        scg.insert_node(cold);
+  1133→  1133→
+  1134→  1134→        let mut profile_data = ProfileData::new();
+  1135→  1135→        profile_data.record_access(99); // only 1 access → cold
+  1136→  1136→
+  1137→  1137→        let report = ProfileReport::from_profile_data(&profile_data, &scg);
+  1138→  1138→
+  1139→  1139→        let pass = ColdPathOutline::new();
+  1140→  1140→        let result = pass.apply(&mut scg, &report);
+  1141→  1141→
+  1142→  1142→        // Node 99 is cold but not adjacent to any hot node → should NOT be outlined.
+  1143→  1143→        assert!(!scg.get_node(99).unwrap().is_outlined);
+  1144→  1144→        assert_eq!(result.count(), 0);
+  1145→  1145→    }
+  1146→  1146→
+  1147→  1147→    // -- Test 5: LoopOptimization unrolls hot loops -------------------------
+  1148→  1148→
+  1149→  1149→    #[test]
+  1150→  1150→    fn loop_optimization_unrolls_hot_loops() {
+  1151→  1151→        let mut scg = build_test_scg();
+  1152→  1152→        let profile_data = build_test_profile_data();
+  1153→  1153→        let report = build_test_profile_report(&scg, &profile_data);
+  1154→  1154→
+  1155→  1155→        let pass = LoopOptimization::new().with_min_trip_count(50);
+  1156→  1156→        let result = pass.apply(&mut scg, &report);
+  1157→  1157→
+  1158→  1158→        // Node 20 is a Loop node with back-edge weight 5000 → should be unrolled.
+  1159→  1159→        let loop_node = scg.get_node(20).unwrap();
+  1160→  1160→        assert!(
+  1161→  1161→            loop_node.unroll_factor > 1,
+  1162→  1162→            "hot loop node 20 should be unrolled (factor={})",
+  1163→  1163→            loop_node.unroll_factor
+  1164→  1164→        );
+  1165→  1165→        assert!(result
+  1166→  1166→            .transformations
+  1167→  1167→            .iter()
+  1168→  1168→            .any(|t| { matches!(t.kind, TransformationKind::LoopUnrolled { .. }) }));
+  1169→  1169→    }
+  1170→  1170→
+  1171→  1171→    // -- Test 6: LoopOptimization vectorizes loops with Memory successors ---
+  1172→  1172→
+  1173→  1173→    #[test]
+  1174→  1174→    fn loop_optimization_vectorizes_memory_loops() {
+  1175→  1175→        let mut scg = build_test_scg();
+  1176→  1176→        let profile_data = build_test_profile_data();
+  1177→  1177→        let report = build_test_profile_report(&scg, &profile_data);
+  1178→  1178→
+  1179→  1179→        let pass = LoopOptimization {
+  1180→  1180→            min_trip_count: 50,
+  1181→  1181→            max_unroll_factor: 8,
+  1182→  1182→            enable_vectorization: true,
+  1183→  1183→        };
+  1184→  1184→        let result = pass.apply(&mut scg, &report);
+  1185→  1185→
+  1186→  1186→        // Node 20 (Loop) has an outgoing edge to node 30 (Memory) → should
+  1187→  1187→        // be vectorized.
+  1188→  1188→        let loop_node = scg.get_node(20).unwrap();
+  1189→  1189→        assert!(
+  1190→  1190→            loop_node.is_vectorized,
+  1191→  1191→            "loop with Memory successor should be vectorized"
+  1192→  1192→        );
+  1193→  1193→        assert!(result
+  1194→  1194→            .transformations
+  1195→  1195→            .iter()
+  1196→  1196→            .any(|t| { matches!(t.kind, TransformationKind::LoopVectorized) }));
+  1197→  1197→    }
+  1198→  1198→
+  1199→  1199→    // -- Test 7: MemoryOptimization aligns and prefetches -------------------
+  1200→  1200→
+  1201→  1201→    #[test]
+  1202→  1202→    fn memory_optimization_applies_prefetch_and_alignment() {
+  1203→  1203→        let mut scg = build_test_scg();
+  1204→  1204→        let profile_data = build_test_profile_data();
+  1205→  1205→        let report = build_test_profile_report(&scg, &profile_data);
+  1206→  1206→
+  1207→  1207→        let pass = MemoryOptimization::for_pi5();
+  1208→  1208→        let result = pass.apply(&mut scg, &report);
+  1209→  1209→
+  1210→  1210→        // Node 30 is a hot Memory node → should get prefetch and alignment.
+  1211→  1211→        let mem_node = scg.get_node(30).unwrap();
+  1212→  1212→        assert!(
+  1213→  1213→            mem_node.has_prefetch,
+  1214→  1214→            "hot memory node 30 should have prefetch"
+  1215→  1215→        );
+  1216→  1216→        assert_eq!(
+  1217→  1217→            mem_node.alignment, 64,
+  1218→  1218→            "memory node 30 should be 64-byte aligned for Pi 5"
+  1219→  1219→        );
+  1220→  1220→
+  1221→  1221→        // Check transformation kinds.
+  1222→  1222→        assert!(result
+  1223→  1223→            .transformations
+  1224→  1224→            .iter()
+  1225→  1225→            .any(|t| { matches!(t.kind, TransformationKind::PrefetchInserted) }));
+  1226→  1226→        assert!(result.transformations.iter().any(|t| {
+  1227→  1227→            matches!(
+  1228→  1228→                t.kind,
+  1229→  1229→                TransformationKind::CacheLineAligned { alignment: 64 }
+  1230→  1230→            )
+  1231→  1231→        }));
+  1232→  1232→    }
+  1233→  1233→
+  1234→  1234→    // -- Test 8: apply_optimizations runs all passes end-to-end -------------
+  1235→  1235→
+  1236→  1236→    #[test]
+  1237→  1237→    fn apply_optimizations_end_to_end() {
+  1238→  1238→        let mut scg = build_test_scg();
+  1239→  1239→        let profile_data = build_test_profile_data();
+  1240→  1240→        let report = build_test_profile_report(&scg, &profile_data);
+  1241→  1241→
+  1242→  1242→        let result = apply_optimizations(&mut scg, &report);
+  1243→  1243→
+  1244→  1244→        // At least one transformation should have been applied.
+  1245→  1245→        assert!(
+  1246→  1246→            result.total_transformations > 0,
+  1247→  1247→            "end-to-end should produce at least one transformation"
+  1248→  1248→        );
+  1249→  1249→        // Speedup should be > 1.0 (we did *something*).
+  1250→  1250→        assert!(
+  1251→  1251→            result.estimated_speedup > 1.0,
+  1252→  1252→            "estimated speedup should exceed 1.0, got {}",
+  1253→  1253→            result.estimated_speedup
+  1254→  1254→        );
+  1255→  1255→        // We expect 4 pass results (one per default pass).
+  1256→  1256→        assert_eq!(
+  1257→  1257→            result.pass_results.len(),
+  1258→  1258→            4,
+  1259→  1259→            "should have results from 4 default passes"
+  1260→  1260→        );
+  1261→  1261→
+  1262→  1262→        // Verify individual nodes were actually modified.
+  1263→  1263→        assert!(
+  1264→  1264→            scg.get_node(10).unwrap().is_inlined,
+  1265→  1265→            "node 10 should be inlined"
+  1266→  1266→        );
+  1267→  1267→        assert!(
+  1268→  1268→            scg.get_node(40).unwrap().is_outlined,
+  1269→  1269→            "node 40 should be outlined"
+  1270→  1270→        );
+  1271→  1271→        assert!(
+  1272→  1272→            scg.get_node(20).unwrap().unroll_factor > 1,
+  1273→  1273→            "node 20 should be unrolled"
+  1274→  1274→        );
+  1275→  1275→        assert!(
+  1276→  1276→            scg.get_node(30).unwrap().has_prefetch,
+  1277→  1277→            "node 30 should have prefetch"
+  1278→  1278→        );
+  1279→  1279→    }
+  1280→  1280→
+  1281→  1281→    // -- Test 9: OptimizationEngine with no passes produces empty result ----
+  1282→  1282→
+  1283→  1283→    #[test]
+  1284→  1284→    fn empty_engine_produces_empty_result() {
+  1285→  1285→        let mut scg = build_test_scg();
+  1286→  1286→        let profile_data = build_test_profile_data();
+  1287→  1287→        let report = build_test_profile_report(&scg, &profile_data);
+  1288→  1288→
+  1289→  1289→        let engine = OptimizationEngine::empty(Config::default());
+  1290→  1290→        let result = engine.run(&mut scg, &report);
+  1291→  1291→
+  1292→  1292→        assert_eq!(result.total_transformations, 0);
+  1293→  1293→        assert_eq!(result.estimated_speedup, 1.0);
+  1294→  1294→        assert!(result.pass_results.is_empty());
+  1295→  1295→    }
+  1296→  1296→
+  1297→  1297→    // -- Test 10: ProfileReport correctly classifies hot and cold nodes ----
+  1298→  1298→
+  1299→  1299→    #[test]
+  1300→  1300→    fn profile_report_classifies_hot_and_cold() {
+  1301→  1301→        let scg = build_test_scg();
+  1302→  1302→        let profile_data = build_test_profile_data();
+  1303→  1303→        let report = ProfileReport::from_profile_data(&profile_data, &scg);
+  1304→  1304→
+  1305→  1305→        // Hot nodes: 10, 20, 30 (all > 100 calls)
+  1306→  1306→        assert!(report.is_hot(10));
+  1307→  1307→        assert!(report.is_hot(20));
+  1308→  1308→        assert!(report.is_hot(30));
+  1309→  1309→
+  1310→  1310→        // Cold nodes: 40, 50 (both < 5 calls)
+  1311→  1311→        assert!(report.is_cold(40));
+  1312→  1312→        assert!(report.is_cold(50));
+  1313→  1313→
+  1314→  1314→        // Call count lookup
+  1315→  1315→        assert_eq!(report.call_count(10), 500);
+  1316→  1316→        assert_eq!(report.call_count(999), 0); // unknown node
+  1317→  1317→    }
+  1318→  1318→
+  1319→  1319→    // -- Test 11: Custom pass can be added to the engine --------------------
+  1320→  1320→
+  1321→  1321→    #[test]
+  1322→  1322→    fn custom_pass_in_engine() {
+  1323→  1323→        /// A no-op pass for testing.
+  1324→  1324→        struct NoopPass;
+  1325→  1325→        impl OptimizationPass for NoopPass {
+  1326→  1326→            fn name(&self) -> &str {
+  1327→  1327→                "NoopPass"
+  1328→  1328→            }
+  1329→  1329→            fn apply(&self, _scg: &mut SCG, _profile: &ProfileReport) -> PassResult {
+  1330→  1330→                PassResult::empty("NoopPass")
+  1331→  1331→            }
+  1332→  1332→        }
+  1333→  1333→
+  1334→  1334→        let mut scg = SCG::new();
+  1335→  1335→        let profile_data = ProfileData::new();
+  1336→  1336→        let report = ProfileReport::from_profile_data(&profile_data, &scg);
+  1337→  1337→
+  1338→  1338→        let mut engine = OptimizationEngine::empty(Config::default());
+  1339→  1339→        engine.add_pass(Box::new(NoopPass));
+  1340→  1340→        assert_eq!(engine.pass_count(), 1);
+  1341→  1341→
+  1342→  1342→        let result = engine.run(&mut scg, &report);
+  1343→  1343→        assert_eq!(result.pass_results.len(), 1);
+  1344→  1344→        assert_eq!(result.pass_results[0].pass_name, "NoopPass");
+  1345→  1345→    }
+  1346→  1346→
+  1347→  1347→    // -- Test 12: LoopOptimization skips cold loops -------------------------
+  1348→  1348→
+  1349→  1349→    #[test]
+  1350→  1350→    fn loop_optimization_skips_cold_loops() {
+  1351→  1351→        let mut scg = SCG::new();
+  1352→  1352→        let mut loop_node = SCGNode::new(1, NodeKind::Loop);
+  1353→  1353→        loop_node.code_size = 64;
+  1354→  1354→        scg.insert_node(loop_node);
+  1355→  1355→
+  1356→  1356→        let mut profile_data = ProfileData::new();
+  1357→  1357→        profile_data.record_access(1); // Only 1 call — cold.
+  1358→  1358→
+  1359→  1359→        let report = ProfileReport::from_profile_data(&profile_data, &scg);
+  1360→  1360→        let pass = LoopOptimization::new();
+  1361→  1361→        let result = pass.apply(&mut scg, &report);
+  1362→  1362→
+  1363→  1363→        // Loop with 1 trip < 100 threshold → should NOT be unrolled.
+  1364→  1364→        assert_eq!(scg.get_node(1).unwrap().unroll_factor, 1);
+  1365→  1365→        assert_eq!(result.count(), 0);
+  1366→  1366→    }
+  1367→  1367→}
+  1368→  1368→

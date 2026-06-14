@@ -10,7 +10,7 @@
 
 This document provides a comprehensive reference for each instruction set architecture that VUMA should target as a multi-architecture compiler. For each ISA, we detail register files, calling conventions, instruction encoding, ELF types, base addresses, key instructions for basic codegen, relevance domains, implementation complexity, and toolchain/ecosystem readiness.
 
-VUMA's existing codegen (`src/codegen/`) currently targets only **AArch64** (ARM64/ARMv8-A) for the Raspberry Pi 5. The information below is intended to guide the design of a retargetable codegen backend that shares the IR layer (`ir.rs`) and register allocation framework (`regalloc.rs`) while adding per-ISA instruction selection, encoding, and emission modules.
+VUMA's existing codegen (`src/codegen/`) currently targets only **AArch64** (ARM64/ARMv8-A) for the AArch64. The information below is intended to guide the design of a retargetable codegen backend that shares the IR layer (`ir.rs`) and register allocation framework (`regalloc.rs`) while adding per-ISA instruction selection, encoding, and emission modules.
 
 ---
 
@@ -143,7 +143,7 @@ Variable-length encoding is the primary difficulty. The ModR/M + SIB + displacem
 | ELF class | `ELFCLASS64` |
 | ELF data | `ELFDATA2LSB` |
 | Typical base address (Linux) | `0x400000` |
-| Typical base address (bare-metal Pi 5) | `0x80000` |
+| Typical base address (bare-metal AArch64) | `0x80000` |
 | Typical page size | 4 KB (16 KB on Apple M-series) |
 
 **VUMA note:** Already implemented in `src/codegen/src/emit.rs` with `EM_AARCH64` constant and both Linux and bare-metal base addresses.

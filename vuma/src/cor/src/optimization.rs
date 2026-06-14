@@ -10,7 +10,7 @@
 //! - [`LoopOptimization`] — unrolls hot loops and, where possible, emits
 //!   SIMD/vectorized instructions.
 //! - [`MemoryOptimization`] — inserts prefetch hints and aligns data to
-//!   cache-line boundaries, targeting the Raspberry Pi 5 L1/L2 hierarchy.
+//!   cache-line boundaries, targeting the L1/L2 cache hierarchy.
 //!
 //! The top-level function [`apply_optimizations`] runs all registered passes
 //! over the SCG and returns an [`OptimizationResult`] summarising what was
@@ -512,8 +512,8 @@ impl OptimizationPass for ColdPathOutline {
 ///
 /// Loop unrolling reduces branch overhead and exposes instruction-level
 /// parallelism. Vectorization replaces scalar loop bodies with SIMD
-/// operations, which is especially effective on the Cortex-A76 (Pi 5)
-/// with its 128-bit NEON unit.
+/// operations, which is especially effective on NEON-capable
+/// AArch64 targets.
 pub struct LoopOptimization {
     /// Minimum trip count (from profile) to consider a loop "hot" enough
     /// for unrolling.
@@ -712,12 +712,6 @@ impl OptimizationPass for LoopOptimization {
 
 /// Inserts prefetch hints and aligns data to cache-line boundaries.
 ///
-/// On the Raspberry Pi 5 (BCM2712, Cortex-A76):
-///
-/// - **L1 data cache**: 64 KB per core, 64-byte cache lines, 4-way set
-///   associative.
-/// - **L2 cache**: 512 KB shared (per core pair), 64-byte cache lines.
-///
 /// This pass:
 ///
 /// 1. Marks [`Memory`](NodeKind::Memory) nodes on hot paths with prefetch
@@ -725,31 +719,23 @@ impl OptimizationPass for LoopOptimization {
 /// 2. Aligns memory accesses to 64-byte boundaries to avoid cross-cache-line
 ///    loads that waste bandwidth.
 pub struct MemoryOptimization {
-    /// Cache-line size in bytes. Default: 64 (Pi 5 / Cortex-A76).
+    /// Cache-line size in bytes. Default: 64.
     pub cache_line_size: usize,
     /// L1 data cache size in bytes. Default: 65_536 (64 KB).
     pub l1d_size: usize,
     /// L2 cache size in bytes. Default: 524_288 (512 KB).
     pub l2_size: usize,
-    /// Whether to target the Pi 5 specifically.
-    pub target_pi5: bool,
 }
 
 impl MemoryOptimization {
     /// Creates a new `MemoryOptimization` pass targeting the given architecture.
     pub fn new(target_arch: TargetArch) -> Self {
-        let target_pi5 = matches!(target_arch, TargetArch::ArmV8A);
+        let _ = target_arch; // architecture-specific tuning not yet applied
         MemoryOptimization {
             cache_line_size: 64,
             l1d_size: 65_536,
             l2_size: 524_288,
-            target_pi5,
         }
-    }
-
-    /// Creates a pass with default Pi 5 parameters.
-    pub fn for_pi5() -> Self {
-        Self::new(TargetArch::ArmV8A)
     }
 
     /// Creates a pass with default x86-64 parameters.
@@ -796,8 +782,8 @@ impl OptimizationPass for MemoryOptimization {
                 });
             }
 
-            // Align to cache-line boundary on Pi 5 or for hot paths.
-            if (self.target_pi5 || is_hot) && node.alignment < self.cache_line_size {
+            // Align to cache-line boundary for hot paths.
+            if is_hot && node.alignment < self.cache_line_size {
                 let old_alignment = node.alignment;
                 node.alignment = self.cache_line_size;
                 result.transformations.push(Transformation {
@@ -806,7 +792,7 @@ impl OptimizationPass for MemoryOptimization {
                     },
                     target_node: node_id,
                     description: format!(
-                        "Aligned memory node {}→{}B (Pi 5 L1/L2 cache-line)",
+                        "Aligned memory node {}→{}B (cache-line)",
                         old_alignment, self.cache_line_size,
                     ),
                 });
@@ -1204,7 +1190,7 @@ mod tests {
         let profile_data = build_test_profile_data();
         let report = build_test_profile_report(&scg, &profile_data);
 
-        let pass = MemoryOptimization::for_pi5();
+        let pass = MemoryOptimization::new(TargetArch::ArmV8A);
         let result = pass.apply(&mut scg, &report);
 
         // Node 30 is a hot Memory node → should get prefetch and alignment.
@@ -1215,7 +1201,7 @@ mod tests {
         );
         assert_eq!(
             mem_node.alignment, 64,
-            "memory node 30 should be 64-byte aligned for Pi 5"
+            "memory node 30 should be 64-byte aligned"
         );
 
         // Check transformation kinds.

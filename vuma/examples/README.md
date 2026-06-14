@@ -42,9 +42,9 @@ Implements a bump allocator (arena) where all sub-allocations are freed at once.
 
 ---
 
-### 4. [gpio_blink.vuma](gpio_blink.vuma) — Raspberry Pi 5 hardware access
+### 4. [gpio_blink.vuma](gpio_blink.vuma) — Hardware access
 
-Blinks an LED on a Raspberry Pi 5 by directly accessing GPIO registers. Uses `map_device()` to map hardware addresses into the program's address space. IVE verifies all register accesses stay within the mapped region.
+Blinks an LED by directly accessing GPIO registers. Uses `map_device()` to map hardware addresses into the program's address space. IVE verifies all register accesses stay within the mapped region.
 
 **Features demonstrated:** `map_device()`, hardware register access, `const` addresses, volatile semantics, embedded/bare-metal programming
 
@@ -74,15 +74,7 @@ A fixed-size thread pool with a shared mutex-protected task queue and condvar si
 
 ---
 
-### 8. [pi5_sensor.vuma](pi5_sensor.vuma) — Pi 5 GPIO sensor reader with UART output
-
-A complete embedded sensor pipeline for the Raspberry Pi 5: reads analog data from an MCP3008 ADC via SPI, formats the readings, and transmits them over PL011 UART. Uses three `map_device()` calls for GPIO, SPI, and UART peripherals. IVE verifies all register accesses stay within their mapped regions and that the formatting buffer never overflows.
-
-**Features demonstrated:** Multiple `map_device()` regions, SPI protocol, UART serial output, ADC sensor reading, buffer formatting, real Pi 5 BCM2712 addresses
-
----
-
-### 9. [memory_arena.vuma](memory_arena.vuma) — Typed arena with nested scopes
+### 8. [memory_arena.vuma](memory_arena.vuma) — Typed arena with nested scopes
 
 An advanced arena allocator that extends the basic bump allocator with type-aware allocation, nested scopes with independent rollback, and O(1) reset. Nested scopes enable partial deallocation for speculative parsing or per-iteration cleanup. IVE tracks derivation chains across scope boundaries and proves all pointers are invalidated after reset — catching entire categories of use-after-reset bugs.
 
@@ -90,7 +82,7 @@ An advanced arena allocator that extends the basic bump allocator with type-awar
 
 ---
 
-### 10. [channel_demo.vuma](channel_demo.vuma) — MPSC channel demonstration
+### 9. [channel_demo.vuma](channel_demo.vuma) — MPSC channel demonstration
 
 A bounded multi-producer single-consumer (MPSC) channel with sender cloning, CAS-based slot claiming, and backpressure. Two producer threads send messages concurrently while a single consumer receives them. IVE verifies no data races between concurrent senders (CAS ensures exclusive slot ownership), no message loss (every slot is read exactly once), and complete cleanup when all senders drop and the receiver closes.
 
@@ -107,11 +99,8 @@ vuma compile examples/hello_memory.vuma
 # Compile with verbose IVE output
 vuma compile --ive-verbose examples/doubly_linked_list.vuma
 
-# Run on bare metal (Raspberry Pi 5)
-vuma flash --target rpi5 examples/gpio_blink.vuma
-
-# Compile sensor example for Pi 5 hardware
-vuma compile --target rpi5 examples/pi5_sensor.vuma
+# Run on bare metal
+vuma flash --target bare examples/gpio_blink.vuma
 ```
 
 ## Learning Path
@@ -132,7 +121,6 @@ vuma compile --target rpi5 examples/pi5_sensor.vuma
 
 ### Embedded / Hardware
 9. Start with **gpio_blink.vuma** for basic hardware access patterns
-10. Advance to **pi5_sensor.vuma** for multi-peripheral sensor pipelines
 
 ## IVE Verification Summary
 
@@ -147,7 +135,6 @@ Every example in this directory passes all 5 IVE invariants:
 | lock_free_queue | ✓ | ✓ | ✓ | ✓ | ✓ |
 | sorted_map | ✓ | ✓ | ✓ | ✓ | ✓ |
 | thread_pool | ✓ | ✓ | ✓ | ✓ | ✓ |
-| pi5_sensor | ✓ | ✓ | ✓ | ✓ | ✓ |
 | memory_arena | ✓ | ✓ | ✓ | ✓ | ✓ |
 | channel_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
 

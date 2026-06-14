@@ -76,7 +76,7 @@ unified results (`invariant_aggregator.rs`).
 traditional compile-link-run pipeline. The COR maintains the SCG in an
 always-compiled state: edits trigger incremental recompilation of affected
 subgraphs, eliminating the concept of "build time." The COR performs
-profile-guided optimization by collecting runtime profile data (including Pi 5
+profile-guided optimization by collecting runtime profile data (including
 hardware PMU counters for cycle count, instruction count, cache misses, and
 branch misses) and feeding it back to the IVE for optimization decisions. It
 supports speculative optimization (pre-optimizing likely execution paths with
@@ -459,13 +459,13 @@ arguments, v0–v7 for floating-point/SIMD arguments), which registers are
 caller-saved (x0–x18, excluding SP and XZR) vs. callee-saved (x19–x28), stack
 frame layout with 16-byte stack alignment, and return value conventions (x0 for
 scalar returns, x8 for indirect result locations). VUMA codegen must comply with
-AAPCS64 to interoperate with C libraries and the operating system on Pi 5. The
+AAPCS64 to interoperate with C libraries and the operating system. The
 register classification is implemented in `vuma_codegen::arm64::Register` with
 methods `is_callee_saved()`, `is_caller_saved()`, `arg_register(index)`, and
 `arg_index()`. The codegen's register allocator (`vuma_codegen::regalloc`) must
 respect AAPCS64 calling conventions when allocating registers for function calls.
 
-**See also:** Cortex-A76, BCM2712, Register
+**See also:** Cortex-A76, Register
 
 ---
 
@@ -499,7 +499,7 @@ ensures that all explicit memory accesses before the DSB complete before any
 instruction after the DSB is executed. DSB is required when the CPU must wait
 for memory operations to be truly complete (for example, after writing to a
 device register before reading a status register). In VUMA, DSB is used in
-device-driver code for Pi 5 peripherals and in memory-mapped I/O scenarios where
+device-driver code and in memory-mapped I/O scenarios where
 the IVE must model device-visible memory ordering. The DSB instruction is
 represented as `Instruction::DSB { option: BarrierOption }` in the codegen and
 accepts the same barrier options as DMB (`SY`, `ISH`, `OSH`, and their load/store
@@ -507,7 +507,7 @@ variants). The DSB is modeled as a full memory fence in the MSG's synchronizatio
 model, creating happens-before edges between all preceding and subsequent memory
 operations.
 
-**See also:** DMB, ISB, BCM2712
+**See also:** DMB, ISB
 
 ---
 
@@ -521,8 +521,7 @@ instruction cache or memory after the ISB completes. ISB is required after
 writing to system registers (such as the SCTLR, TLB entries, or branch predictor
 settings) to ensure the change takes effect before subsequent instructions
 execute. In VUMA, ISB is relevant for context-switching code and low-level
-system programming on Pi 5, particularly in the exception vector table handlers
-defined in `src/pi5/src/boot.rs`. The ISB instruction is represented as
+system programming. The ISB instruction is represented as
 `Instruction::ISB` (no operands) in the codegen. The IVE models ISB as a
 full execution barrier that also implies DSB semantics, ensuring all prior
 memory and system register writes are visible before subsequent instructions
@@ -580,7 +579,7 @@ status register (Rs), value register (Rt), and base address register (Rn).
 atomically compares the value at a memory address with an expected value and,
 if they match, replaces it with a new value. CAS is the single-instruction
 equivalent of the LDXR/STXR loop pair, providing better performance on
-ARMv8.1-capable processors like the Cortex-A76 in the Pi 5. CAS variants
+ARMv8.1-capable processors. CAS variants
 include acquire (`CASA`), release (`CASL`), and acquire-release (`CASAL`)
 ordering semantics. In VUMA, the codegen prefers CAS over LDXR/STXR when the
 target supports ARMv8.1-LSE, falling back to LDXR/STXR otherwise. The CAS
@@ -597,8 +596,7 @@ available in the ARM64 instruction set.
 
 **Pronunciation:** /ˈkɔːtɛks eɪ sɛvənti-sɪks/
 
-The ARM-compatible 64-bit CPU core used in the Raspberry Pi 5's BCM2712 SoC.
-The Cortex-A76 is an out-of-order, superscalar processor implementing the
+An ARM-compatible 64-bit out-of-order, superscalar CPU core implementing the
 ARMv8.2-A architecture. It features a 4-wide decode pipeline, branch prediction,
 and a deep reorder buffer that allows significant instruction-level parallelism.
 For VUMA, the Cortex-A76's memory model (weakly ordered with multi-copy atomicity)
@@ -612,24 +610,18 @@ pointer (SP), and the zero register (XZR).
 
 ---
 
-## Raspberry Pi 5 Terms
+## Hardware Terms
 
 ### BCM2712
 
 **Pronunciation:** /biː-siː-ɛm tuː-θɜːtiːn/ (spell out)
 
-The system-on-chip (SoC) at the heart of the Raspberry Pi 5. The BCM2712
-contains a quad-core ARM Cortex-A76 processor clocked at 2.4 GHz, a VideoCore
-VII GPU, and a comprehensive set of peripherals including PCIe 2.0, USB 3.0,
-Gigabit Ethernet, and the Pi 5's extended GPIO. The BCM2712 is the primary
-hardware target for VUMA codegen and verification: all ARM64 assembly output
-must execute correctly on this SoC, and the IVE must model its memory model,
-cache hierarchy, and peripheral address map. The bare-metal boot code for the
-BCM2712 is implemented in `src/pi5/src/boot.rs`, which sets up the exception
-vector table, stack, BSS section, UART initialization, and FDT parsing before
-transferring control to the user's `main()` function. The linker script
-`src/pi5/link.ld` defines the memory layout with RAM at `0x80000` and an MMIO
-window for peripheral access.
+A system-on-chip (SoC) containing a quad-core ARM Cortex-A76 processor clocked
+at 2.4 GHz, a VideoCore VII GPU, and a comprehensive set of peripherals
+including PCIe 2.0, USB 3.0, Gigabit Ethernet, and extended GPIO. The BCM2712
+is a supported hardware target for VUMA codegen and verification: ARM64
+assembly output must execute correctly on this SoC, and the IVE must model its
+memory model, cache hierarchy, and peripheral address map.
 
 **See also:** Cortex-A76, GPIO, UART
 
@@ -639,17 +631,13 @@ window for peripheral access.
 
 **Pronunciation:** /dʒiː-piː-aɪ-oʊ/ (spell out)
 
-**General-Purpose Input/Output** — The configurable digital pins on the
-Raspberry Pi 5 that can be used for a wide variety of hardware interfacing
-tasks. The Pi 5 exposes a 40-pin GPIO header, with pins supporting digital I/O,
-PWM, I2C, SPI, and UART protocols. In VUMA, GPIO access is performed through
-memory-mapped I/O: the BCM2712 maps GPIO registers into the physical address
-space (starting at 0x7E200000 for the legacy view or the corresponding mapped
-address in the ARM physical map). The IVE must model these as device memory
-with specific ordering requirements (DSB after writes, DMB before reads). The
-GPIO driver is implemented in `src/pi5/src/gpio.rs` with functions for pin
-mode selection, digital read/write, and pull-up/pull-down configuration. All
-GPIO register accesses are annotated with `// VUMA-VERIFIED` or `// IVE-TODO`.
+**General-Purpose Input/Output** — Configurable digital pins that can be used
+for a wide variety of hardware interfacing tasks. A typical board exposes a
+40-pin GPIO header, with pins supporting digital I/O, PWM, I2C, SPI, and UART
+protocols. In VUMA, GPIO access is performed through memory-mapped I/O: the SoC
+maps GPIO registers into the physical address space. The IVE must model these
+as device memory with specific ordering requirements (DSB after writes, DMB
+before reads).
 
 **See also:** BCM2712, UART, DMB
 
@@ -660,17 +648,11 @@ GPIO register accesses are annotated with `// VUMA-VERIFIED` or `// IVE-TODO`.
 **Pronunciation:** /juː-ɑːrt/ (rhymes with "part")
 
 **Universal Asynchronous Receiver-Transmitter** — The serial communication
-peripheral used on the Raspberry Pi 5 for console I/O and debug output. The
-BCM2712 includes a PL011 UART (the primary UART for Bluetooth on the Pi 5) and
-a mini UART (used for the serial console). In VUMA, UART output is the first
-I/O capability implemented, providing a way to print verification results and
-program output before more complex drivers (USB, Ethernet) are available. UART
-registers are memory-mapped and accessed with device memory ordering semantics.
-The UART driver is implemented in `src/pi5/src/uart.rs` with initialization at
-configurable baud rates (default 115200), character output, and string output.
-The boot sequence (`src/pi5/src/boot.rs`) initializes the UART before
-transferring control to the user's `main()` function, enabling early diagnostic
-output during bare-metal development.
+peripheral used for console I/O and debug output. In VUMA, UART output is the
+first I/O capability implemented, providing a way to print verification results
+and program output before more complex drivers (USB, Ethernet) are available.
+UART registers are memory-mapped and accessed with device memory ordering
+semantics.
 
 **See also:** BCM2712, GPIO
 

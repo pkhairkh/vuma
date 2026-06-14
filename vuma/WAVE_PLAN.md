@@ -197,7 +197,7 @@ CRATE ASSIGNMENTS:
 - W1-S5: vuma-parser
 - W1-S6: vuma-codegen
 - W1-S7: vuma-cor
-- W1-S8: vuma-std, vuma-proof, vuma-projection, vuma-pi5, vuma-tests, vuma-core
+- W1-S8: vuma-std, vuma-proof, vuma-projection, (removed), vuma-tests, vuma-core
 
 HARSH RULES:
 - If ANY error remains after your changes, you have FAILED.
@@ -240,7 +240,7 @@ CRATE ASSIGNMENTS:
 - W2-S2: vuma-scg (2 warnings)
 - W2-S3: vuma-codegen (5 warnings)
 - W2-S4: vuma-parser (1 warning)
-- W2-S5: vuma-pi5 (6 warnings — Rust 2024 static_mut_refs)
+- W2-S5: (removed) (6 warnings — Rust 2024 static_mut_refs)
 - W2-S6: vuma-proof (3 warnings)
 - W2-S7: vuma-std (11 warnings)
 
@@ -1533,7 +1533,7 @@ CRATE ASSIGNMENTS:
 - W21-S6: vuma-cor
 - W21-S7: vuma-core
 - W21-S8: vuma-std
-- W21-S9: vuma-pi5
+- W21-S9: (removed)
 - W21-S10: vuma-proof
 - W21-S11: vuma-projection
 - W21-S12: vuma-tests
@@ -1676,36 +1676,36 @@ HARSH RULES:
 
 ---
 
-## Wave 24: Pi5 Platform Abstraction
+## Wave 24: Platform Abstraction
 
 **Dependencies**: W3
 **Estimated subagents**: 8
 
 ### Subagent Tasks:
 
-**W24-S1 through W24-S8: Pi5 platform abstraction for multi-ISA testing**
+**W24-S1 through W24-S8: Platform abstraction for multi-ISA testing**
 
 ```
-You are making vuma-pi5 testable on any architecture, not just ARM64.
+You are making (removed) testable on any architecture, not just ARM64.
 
 SUBAGENT ASSIGNMENTS:
-- W24-S1: Create Pi5Backend trait (mmio_read, mmio_write, barrier_dmb, barrier_dsb, timer_read)
-- W24-S2: RealPi5Backend (ARM64 only, inline asm)
-- W24-S3: MockPi5Backend (x86_64 + any, simulated state)
-- W24-S4: Refactor uart.rs to use Pi5Backend
-- W24-S5: Refactor gpio.rs to use Pi5Backend
+- W24-S1: Create PlatformBackend trait (mmio_read, mmio_write, barrier_dmb, barrier_dsb, timer_read)
+- W24-S2: RealPlatformBackend (ARM64 only, inline asm)
+- W24-S3: MockPlatformBackend (x86_64 + any, simulated state)
+- W24-S4: Refactor uart.rs to use PlatformBackend
+- W24-S5: Refactor gpio.rs to use PlatformBackend
 - W24-S6: Full MMIO emulator (simulated PL011 UART, RP1 GPIO, BCM2712 timer)
-- W24-S7: Pi5 driver tests against emulator on x86_64 (30+ tests)
-- W24-S8: Pi5 integration: compile Pi5 program with ARM64 backend → verify ARM64 ELF
+- W24-S7: Platform driver tests against emulator on x86_64 (30+ tests)
+- W24-S8: Platform integration: compile platform program with ARM64 backend → verify ARM64 ELF
 
 HARSH RULES:
-- If Pi5 tests can't run on x86_64, you have FAILED.
+- If Platform tests can't run on x86_64, you have FAILED.
 - If ARM64-only functionality is broken, you have FAILED.
-- cargo test -p vuma-pi5 must pass on x86_64.
+- cargo test -p (removed) must pass on x86_64.
 ```
 
 ### Success Criteria:
-- vuma-pi5 fully testable on x86_64
+- (removed) fully testable on x86_64
 - All ARM64 functionality preserved
 
 ---
@@ -1730,7 +1730,7 @@ CRATE ASSIGNMENTS:
 - W25-S5: vuma-codegen (backend errors — must say WHICH ISA failed and WHAT went wrong)
 - W25-S6: vuma-cor (runtime errors — mmap, mprotect, execution failures)
 - W25-S7: vuma-core (pipeline errors — must propagate ISA context)
-- W25-S8: vuma-std, vuma-pi5, vuma-proof, vuma-projection
+- W25-S8: vuma-std, (removed), vuma-proof, vuma-projection
 
 AUDIT CRITERIA:
 1. No unwrap() in non-test code
@@ -1766,7 +1766,7 @@ You are auditing memory safety across all 8 backends.
 CRATE ASSIGNMENTS:
 - W26-S1: vuma-codegen (unsafe in 8 backend encode/decode + ELF emission)
 - W26-S2: vuma-cor (unsafe in mmap/mprotect/transmute/execute for ALL ISA execution paths)
-- W26-S3: vuma-pi5 (unsafe in MMIO, UART, GPIO)
+- W26-S3: (removed) (unsafe in MMIO, UART, GPIO)
 - W26-S4: vuma-std (unsafe in alloc, collections)
 - W26-S5: vuma-core (unsafe in pipeline, security)
 - W26-S6: Remaining crates (check for unsafe)
@@ -1861,7 +1861,7 @@ SUBAGENT ASSIGNMENTS:
 - W28-S6: vuma-codegen docs (CRITICAL — document Backend trait, all 8 ISAs, TargetDesc)
 - W28-S7: vuma-cor docs
 - W28-S8: vuma-core docs
-- W28-S9: vuma-std + vuma-pi5 docs
+- W28-S9: vuma-std + (removed) docs
 - W28-S10: vuma-proof + vuma-projection + vuma-tests docs
 
 FOR EACH CRATE:
@@ -2058,7 +2058,7 @@ HARSH RULES:
 
 | ISA | Complexity | Market | Execution | Priority |
 |-----|-----------|--------|-----------|----------|
-| AArch64 | 4/10 ✅ | Mobile, Pi 5, Apple Silicon, Graviton | QEMU | Done |
+| AArch64 | 4/10 ✅ | Mobile, Apple Silicon, Graviton | QEMU | Done |
 | RISC-V64 | 3/10 | Fastest growing, embedded, China | QEMU | Wave 6 |
 | Wasm32 | 2/10 | Browsers, edge, serverless | wasmtime | Wave 7 |
 | LoongArch64 | 3/10 | China domestic | QEMU | Wave 8 |

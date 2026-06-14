@@ -3,13 +3,13 @@
 ## 2026-03-05 — Task 5-8: End-to-End Test Suite
 
 ### Summary
-Created a comprehensive end-to-end test suite with three new test modules totaling 30 tests across Pi 5 hardware (mock), ARM64 codegen, and full compilation pipeline. Each test exercises a real workflow: parse VUMA source → build SCG → verify invariants → compile to ARM64 machine code/ELF.
+Created a comprehensive end-to-end test suite with three new test modules totaling 30 tests across AArch64 hardware (mock), ARM64 codegen, and full compilation pipeline. Each test exercises a real workflow: parse VUMA source → build SCG → verify invariants → compile to ARM64 machine code/ELF.
 
 ### Changes Made
 
-#### `/home/z/my-project/vuma/src/tests/src/pi5_hardware.rs` (new file, ~700 lines)
+#### `/home/z/my-project/vuma/src/tests/src/(removed)_hardware.rs` (new file, ~700 lines)
 
-Pi 5 hardware tests exercising GPIO, UART, system timer, and SMP subsystems through the VUMA pipeline. Hardware interactions are simulated via the codegen emitter producing ARM64 machine code for MMIO-style operations.
+AArch64 hardware tests exercising GPIO, UART, system timer, and SMP subsystems through the VUMA pipeline. Hardware interactions are simulated via the codegen emitter producing ARM64 machine code for MMIO-style operations.
 
 **Helper Infrastructure:**
 1. `PERIPHERAL_BASE`, `GPIO_OFFSET`, `UART_OFFSET`, `TIMER_OFFSET` — BCM2712 address constants
@@ -63,17 +63,17 @@ Full compilation pipeline tests: VUMA Source → Parser → AST → SCG → IVE 
 
 #### `/home/z/my-project/vuma/src/tests/src/lib.rs` (updated)
 
-- Added `pub mod pi5_hardware;`, `pub mod codegen;`, `pub mod full_pipeline;` module declarations
-- Updated doc comment test categories table: Codegen → `codegen`, Pi5 → `pi5_hardware`, added Pipeline → `full_pipeline`
+- Added `pub mod (removed)_hardware;`, `pub mod codegen;`, `pub mod full_pipeline;` module declarations
+- Updated doc comment test categories table: Codegen → `codegen`, AArch64 → `(removed)_hardware`, added Pipeline → `full_pipeline`
 
 ### Compilation Status
 - All 6 directly-used crates compile with 0 errors: `vuma-scg`, `vuma-ive`, `vuma-bd`, `vuma-proof`, `vuma-codegen`, `vuma-core`
-- `pi5_hardware.rs`, `codegen.rs`, `full_pipeline.rs`: 0 errors, only unused-import warnings (caused by cascading from pre-existing `framework.rs` compilation errors)
+- `(removed)_hardware.rs`, `codegen.rs`, `full_pipeline.rs`: 0 errors, only unused-import warnings (caused by cascading from pre-existing `framework.rs` compilation errors)
 - Pre-existing errors in `framework.rs` (duplicate macro definitions, private parser type imports) and `vuma-parser` block full `vuma-tests` compilation but are unrelated to this task
 
 ### Key Design Decisions
-- **Two-tier SCG approach**: Each Pi 5 hardware test uses both (1) VUMA source parsing through the framework's `build_scg_from_source()` for SCG construction + IVE verification, and (2) codegen-level SCG builders for ARM64 code emission. This exercises both the high-level parser→SCG pipeline and the low-level codegen pipeline.
-- **Codegen SCG builders as test fixtures**: The `build_gpio_set_output_scg()`, `build_uart_transmit_scg()`, etc. functions produce codegen `Scg` values that model real Pi 5 MMIO operations with BCM2712 address constants, enabling end-to-end ARM64 code generation tests without requiring actual hardware.
+- **Two-tier SCG approach**: Each AArch64 hardware test uses both (1) VUMA source parsing through the framework's `build_scg_from_source()` for SCG construction + IVE verification, and (2) codegen-level SCG builders for ARM64 code emission. This exercises both the high-level parser→SCG pipeline and the low-level codegen pipeline.
+- **Codegen SCG builders as test fixtures**: The `build_gpio_set_output_scg()`, `build_uart_transmit_scg()`, etc. functions produce codegen `Scg` values that model real AArch64 MMIO operations with BCM2712 address constants, enabling end-to-end ARM64 code generation tests without requiring actual hardware.
 - **ARM64 instruction encoding verification**: Test 10 in `codegen.rs` directly encodes 10+ ARM64 instructions and verifies they produce non-zero, distinct machine code words, catching regressions in the instruction encoder.
 - **Pipeline stage tracking**: Test 7 in `full_pipeline.rs` verifies every stage outcome individually (Parse=Passed, AstToScg=Passed, ScgBridge=Passed, ScgValidation=Passed, IveVerification=Passed, Codegen=Skipped), ensuring the framework's stage-tracking infrastructure works correctly.
 - **Verification level parameterization**: Test 10 in `full_pipeline.rs` runs IVE verification at Quick, Normal, and Exhaustive levels, validating that the verification level API works correctly across all three settings.
@@ -214,7 +214,7 @@ Created a comprehensive benchmark suite at `src/tests/src/benchmarks.rs` with 8 
 
 **Benchmark 6: C-Equivalent Comparison** (`bench_c_comparison`)
 - 2 benchmarks: VUMA full pipeline (SCG→MSG→verify) + C baseline placeholder
-- C baseline is a placeholder slot; on Pi 5 would invoke `gcc -O2 -march=armv8.2-a`
+- C baseline is a placeholder slot; on AArch64 would invoke `gcc -O2 -march=armv8.2-a`
 
 **Benchmark 7: Memory Usage** (`bench_memory_usage`)
 - 15 snapshots: 3 sizes × 5 measurement points (baseline, after_scg, after_msg, after_verify, after_drop)
@@ -279,10 +279,10 @@ Created a comprehensive benchmark suite at `src/tests/src/benchmarks.rs` with 8 
 - Pre-existing errors in `vuma-parser` (unresolved imports, type mismatches) and `framework.rs` (duplicate macro definitions) block full `vuma-tests` compilation but are unrelated to this task
 
 ### Key Design Decisions
-- **Wall-clock timing via `std::time::Instant`**: Per benchmark-design.md §7.2, the ARM64 PMU cycle counter (`cntvct_el0`) would be preferred on Pi 5, but `Instant` provides cross-platform compatibility for development-time benchmarking and can be swapped for PMU access when running on target hardware.
+- **Wall-clock timing via `std::time::Instant`**: Per benchmark-design.md §7.2, the ARM64 PMU cycle counter (`cntvct_el0`) would be preferred on AArch64, but `Instant` provides cross-platform compatibility for development-time benchmarking and can be swapped for PMU access when running on target hardware.
 - **RefCell for incremental verification benchmark**: `InvariantAggregator::verify_incremental(&mut self, ...)` requires `&mut self`, but the benchmark harness captures the aggregator in an `Fn` closure. Using `RefCell<InvariantAggregator>` enables interior mutability without changing the harness signature.
 - **`build_rich_scg` produces well-formed MSGs**: The rich SCG builder creates ControlFlow edges between write→read access nodes, which `scg_to_msg` converts to SyncEdges with HappensBefore ordering. This ensures the MSG construction benchmarks exercise the full conversion pipeline including derivation chains, access events, and synchronization edges.
-- **C-equivalent comparison as placeholder slot**: On Pi 5, this would shell out to `gcc -O2 -march=armv8.2-a`. In the test suite, we record a baseline slot for comparison, enabling the benchmark harness to produce comparative tables when running on target hardware.
+- **C-equivalent comparison as placeholder slot**: On AArch64, this would shell out to `gcc -O2 -march=armv8.2-a`. In the test suite, we record a baseline slot for comparison, enabling the benchmark harness to produce comparative tables when running on target hardware.
 - **CV > 5% unreliability flag**: Per benchmark-design.md §7.3, any benchmark with coefficient of variation exceeding 5% is flagged in the `BenchmarkStats::Display` output and counted in the suite summary, ensuring noisy results are surfaced immediately.
 
 ## 2026-03-05 — Task 4-9: Parser Error Recovery Enhancement
@@ -516,14 +516,14 @@ Enhanced `src/std/src/collections.rs` and `src/std/src/alloc.rs` with new collec
 - **VumaString backed by `Vec<u8>`**: The backing `Vec<u8>` inherits all BD tracking from the enhanced Vec type, giving the string BD statistics for free. UTF-8 validity is enforced at construction boundaries (`from()`, `from_utf8()`).
 - **Iterator CapD annotations**: Each iterator carries a `capd: CapD` field describing its access mode — `Read+Iterate` for shared iterators, `Read+Write+Iterate` for mutable/owning iterators. This enables the VUMA verifier to track capability flow through iteration patterns.
 
-## 2026-03-05 — Task 3-11: Pi 5 UART Driver Enhancement
+## 2026-03-05 — Task 3-11: AArch64 UART Driver Enhancement
 
 ### Summary
-Enhanced `src/pi5/src/uart.rs` with a full-featured PL011 UART driver for the Raspberry Pi 5 (BCM2712). Added `MiniUart` (UART1) auxiliary driver, `UartBuffer` ring buffer for interrupt-driven I/O, free-standing convenience API, interrupt management, and 16 tests. Updated `platform.rs` with correct Pi 5 UART offsets (UART0 at 0x10A0000, AUX at 0x10A8000).
+Enhanced `src/(removed)/src/uart.rs` with a full-featured PL011 UART driver for the AArch64 (BCM2712). Added `MiniUart` (UART1) auxiliary driver, `UartBuffer` ring buffer for interrupt-driven I/O, free-standing convenience API, interrupt management, and 16 tests. Updated `platform.rs` with correct AArch64 UART offsets (UART0 at 0x10A0000, AUX at 0x10A8000).
 
 ### Changes Made
 
-#### `/home/z/my-project/vuma/src/pi5/src/uart.rs` (full rewrite, 199→1107 lines)
+#### `/home/z/my-project/vuma/src/(removed)/src/uart.rs` (full rewrite, 199→1107 lines)
 
 **New Constants:**
 1. `UART0_BASE` — Default base address for UART0 (PL011) computed from `PERIPHERAL_BASE + UART_BASE_OFFSET`
@@ -555,7 +555,7 @@ Enhanced `src/pi5/src/uart.rs` with a full-featured PL011 UART driver for the Ra
 17. `rx_buffer()` / `tx_buffer()` — unsafe accessors with explicit `unsafe` blocks for `deny(unsafe_op_in_unsafe_fn)`
 
 **Enhanced `Uart` struct:**
-18. `uart0()` — const constructor with default Pi 5 base address
+18. `uart0()` — const constructor with default AArch64 base address
 19. `init(baud_rate)` — enhanced with IFLS configuration and `compute_baud_dividers()` helper
 20. `write_byte(byte)` — retained, blocking TX
 21. `write_str(s)` — retained, newline expansion
@@ -609,12 +609,12 @@ Enhanced `src/pi5/src/uart.rs` with a full-featured PL011 UART driver for the Ra
 17. `control_register_bits_non_overlapping`
 18. `default_baud_rate_is_115200`
 
-#### `/home/z/my-project/vuma/src/pi5/src/platform.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/platform.rs`
 
-- `UART_BASE_OFFSET`: `0x0010_1000` → `0x010A_0000` (Pi 5 BCM2712 physical address 0x10A0000)
+- `UART_BASE_OFFSET`: `0x0010_1000` → `0x010A_0000` (AArch64 BCM2712 physical address 0x10A0000)
 - Added `AUX_BASE_OFFSET: u64 = 0x010A_8000` (mini UART / UART1)
-- Added `Pi5Platform::aux_base()` method returning `peripheral_base() + AUX_BASE_OFFSET`
-- Updated `Pi5Platform::uart_base()` doc comment
+- Added `Aarch64Platform::aux_base()` method returning `peripheral_base() + AUX_BASE_OFFSET`
+- Updated `Aarch64Platform::uart_base()` doc comment
 
 ### Compilation Status
 - Zero errors in uart.rs and platform.rs (verified via `cargo check`).
@@ -628,19 +628,19 @@ Enhanced `src/pi5/src/uart.rs` with a full-featured PL011 UART driver for the Ra
 - **ISR handlers drain FIFO even on buffer overflow**: Prevents overrun errors by continuing to read the hardware FIFO even when the software buffer is full, discarding excess bytes.
 - **Mini UART baud counter**: Uses `(UART_CLOCK / (8 * baud_rate)) - 1` formula specific to the BCM auxiliary UART.
 
-## 2026-03-05 — Task 3-14: Pi 5 MMIO Subsystem Enhancement
+## 2026-03-05 — Task 3-14: AArch64 MMIO Subsystem Enhancement
 
 ### Summary
-Enhanced `src/pi5/src/mmio.rs` with Pi 5 memory map constants, `u64` address type, named 32/64-bit volatile accessors, ARM64 memory barriers (`dmb`, `dsb`, `isb`), and a `MmioDevice` trait with mock-based tests. Cascading type changes propagated to platform.rs, uart.rs, gpio.rs, smp.rs, and lib.rs to use `u64` addresses throughout.
+Enhanced `src/(removed)/src/mmio.rs` with AArch64 memory map constants, `u64` address type, named 32/64-bit volatile accessors, ARM64 memory barriers (`dmb`, `dsb`, `isb`), and a `MmioDevice` trait with mock-based tests. Cascading type changes propagated to platform.rs, uart.rs, gpio.rs, smp.rs, and lib.rs to use `u64` addresses throughout.
 
 ### Changes Made
 
-#### `/home/z/my-project/vuma/src/pi5/src/mmio.rs` (full rewrite)
+#### `/home/z/my-project/vuma/src/(removed)/src/mmio.rs` (full rewrite)
 
 **Address type:**
-1. `Address` changed from `usize` to `u64` — supports the full Pi 5 64-bit physical address space including ARM local at `0x7C00_0000_0000`.
+1. `Address` changed from `usize` to `u64` — supports the full AArch64 64-bit physical address space including ARM local at `0x7C00_0000_0000`.
 
-**Pi 5 Memory Map Constants:**
+**AArch64 Memory Map Constants:**
 2. `BCM2712_PERIPHERAL_START/END` — `0x10_0000`–`0x1F_FFFF`
 3. `RP1_IO_START/END` — `0x1F_0001_0000`–`0x1F_0001_FFFF`
 4. `ARM_LOCAL_START/END` — `0x7C00_0000_0000`–`0x7CFF_FFFF_FFFF`
@@ -675,32 +675,32 @@ Enhanced `src/pi5/src/mmio.rs` with Pi 5 memory map constants, `u64` address typ
 9. `address_type_is_u64`
 10. `mock_device_64bit_write_then_32bit_read`
 
-#### `/home/z/my-project/vuma/src/pi5/src/platform.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/platform.rs`
 
 - `RAM_BASE`, `PERIPHERAL_BASE`, `PERIPHERAL_BASE_HIGH`, `DEFAULT_RAM_SIZE`: `usize` → `u64`
 - Added: `BCM2712_PERIPHERAL_START/END`, `RP1_IO_START/END`, `ARM_LOCAL_START/END`, `MAX_RAM_SIZE`
 - All peripheral offset constants: `usize` → `u64`
 - `Platform` trait: `peripheral_base()`, `ram_size()`: `usize` → `u64`
-- `Pi5Platform`: `ram_size` field: `usize` → `u64`; all `*_base()` methods: `usize` → `u64`
+- `Aarch64Platform`: `ram_size` field: `usize` → `u64`; all `*_base()` methods: `usize` → `u64`
 
-#### `/home/z/my-project/vuma/src/pi5/src/uart.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/uart.rs`
 
 - `UART0_BASE`, `AUX_BASE`: `usize` → `u64` (removed `as usize` casts)
 - All PL011 register offset constants (`DR`, `FR`, `CR`, etc.): `usize` → `u64`
 - All Mini UART register offset constants (`AUX_ENABLES`, `AUX_MU_IO`, etc.): `usize` → `u64`
 - Test assertions updated to use `u64` expected values
 
-#### `/home/z/my-project/vuma/src/pi5/src/gpio.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/gpio.rs`
 
 - All GPIO register offset constants (`GPFSEL0`–`GPFSEL5`, `GPSET0/1`, `GPCLR0/1`, `GPLEV0/1`, `GPEDS0/1`, `GPPUPPDN0`–`GPPUPPDN3`): `usize` → `u64`
 - Arithmetic in `set_function()` and `set_pull()`: added `as u64` cast for `reg_index * 4`
 
-#### `/home/z/my-project/vuma/src/pi5/src/smp.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/smp.rs`
 
 - `LOCAL_PERIPH_BASE`, all mailbox/stride/doorbell constants: `usize` → `u64`
 - All address arithmetic: added `as u64` casts for core-ID multiplications
 
-#### `/home/z/my-project/vuma/src/pi5/src/lib.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/lib.rs`
 
 - Updated module doc table for mmio
 - Added `MmioDevice` to crate-level re-exports
@@ -717,14 +717,14 @@ Enhanced `src/pi5/src/mmio.rs` with Pi 5 memory map constants, `u64` address typ
 - **MockMmioDevice for testing**: Uses `UnsafeCell<[u32; 16]>` with volatile read/write to simulate hardware registers, enabling 10 pure-unit tests without hardware access.
 - **MmioDevice trait default impl**: Delegates to module-level volatile accessors, making it easy to implement for real hardware while allowing test overrides.
 
-## 2026-03-05 — Task 3-12: Pi 5 Timer and SMP Enhancement
+## 2026-03-05 — Task 3-12: AArch64 Timer and SMP Enhancement
 
 ### Summary
-Enhanced `src/pi5/src/timer.rs` and `src/pi5/src/smp.rs` for the Raspberry Pi 5 (BCM2712, 4× Cortex-A76). Timer module now supports both physical (CNTPCT_EL0) and virtual (CNTVCT_EL0) counters, virtual timer interrupt control (CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTV_CVAL_EL0), and free-standing C-style API functions. SMP module now provides `smp_init`, `smp_get_core_id`, `smp_send_ipi`, a `Spinlock` with RAII guard, and core-start tracking. 22 tests across both modules (10 timer + 12 SMP).
+Enhanced `src/(removed)/src/timer.rs` and `src/(removed)/src/smp.rs` for the AArch64 (BCM2712, 4× Cortex-A76). Timer module now supports both physical (CNTPCT_EL0) and virtual (CNTVCT_EL0) counters, virtual timer interrupt control (CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTV_CVAL_EL0), and free-standing C-style API functions. SMP module now provides `smp_init`, `smp_get_core_id`, `smp_send_ipi`, a `Spinlock` with RAII guard, and core-start tracking. 22 tests across both modules (10 timer + 12 SMP).
 
 ### Changes Made
 
-#### `/home/z/my-project/vuma/src/pi5/src/timer.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/timer.rs`
 
 **New System-Register Helpers (private):**
 1. `read_cntpct()` — Read physical counter (CNTPCT_EL0)
@@ -745,7 +745,7 @@ Enhanced `src/pi5/src/timer.rs` and `src/pi5/src/smp.rs` for the Raspberry Pi 5 
 
 **Tests (10 total):** timer_is_default_constructible, timer_new_is_const, ticks_to_us_round_trip_identity, ticks_to_ms_one_second, ticks_to_ns_one_second, us_to_ticks_round_trip, virtual_timer_ctl_constants_non_overlapping, boot_ticks_initially_zero_before_init, initialized_flag_starts_false, free_standing_api_compiles
 
-#### `/home/z/my-project/vuma/src/pi5/src/smp.rs`
+#### `/home/z/my-project/vuma/src/(removed)/src/smp.rs`
 
 **New Constants:** `IPI_DOORBELL_BASE: u64 = 0x40`, `IPI_DOORBELL_STRIDE: u64 = 0x04`
 
@@ -762,7 +762,7 @@ Enhanced `src/pi5/src/timer.rs` and `src/pi5/src/smp.rs` for the Raspberry Pi 5 
 **Tests (12 total):** core_id_from_raw_valid, core_id_from_raw_invalid, core_id_ordering, all_cores_count, core_id_as_u32, core_0_starts_started, started_cores_mask_includes_core_0, spinlock_new_is_unlocked, spinlock_lock_and_unlock, spinlock_try_lock_succeeds_when_unlocked, spinlock_try_lock_fails_when_locked, spinlock_is_const_constructible
 
 ### Compilation Status
-- timer.rs and smp.rs compile with zero errors (verified via `cargo check -p vuma-pi5`).
+- timer.rs and smp.rs compile with zero errors (verified via `cargo check (removed)`).
 - Pre-existing compilation errors in gpio.rs, uart.rs, mmio.rs, boot.rs are unrelated.
 
 ### Key Design Decisions
@@ -1124,7 +1124,7 @@ Enhanced `src/projection/src/conversational.rs` with full natural-language expla
 ## 2026-03-04 — Task 3-27: Std I/O Implementation
 
 ### Summary
-Enhanced `src/std/src/io.rs` with real VUMA I/O implementations featuring BD-tracked buffers, capability-based access control, and dual-platform support (Linux + bare-metal Pi 5).
+Enhanced `src/std/src/io.rs` with real VUMA I/O implementations featuring BD-tracked buffers, capability-based access control, and dual-platform support (Linux + bare-metal AArch64).
 
 ### Changes Made
 
@@ -1146,11 +1146,11 @@ Enhanced `src/std/src/io.rs` with real VUMA I/O implementations featuring BD-tra
 
 7. **`VumaBufWriter<W: VumaWriter>`** — Buffered writer with 8 KiB default capacity. Implements `VumaWriter`. Auto-flushes when buffer overflows, writes large payloads directly. Methods: `new()`, `with_capacity()`, `get_ref()`, `get_mut()`, `into_inner()`, `buffered()`, `flush()`.
 
-8. **`VumaStdin`** — Standard input implementing `VumaReader`. Dual-platform: Linux (fd 0) and bare-metal Pi 5 (UART MMIO at `0xFE201000`). Bare-metal mode reads from PL011 UART data register, checks flag register for RXFE. `new_bare_metal(mmio_base)` constructor.
+8. **`VumaStdin`** — Standard input implementing `VumaReader`. Dual-platform: Linux (fd 0) and bare-metal AArch64 (UART MMIO at `0xFE201000`). Bare-metal mode reads from PL011 UART data register, checks flag register for RXFE. `new_bare_metal(mmio_base)` constructor.
 
-9. **`VumaStdout`** — Standard output implementing `VumaWriter`. Dual-platform: Linux (fd 1) and bare-metal Pi 5 (UART TX via MMIO). Bare-metal mode writes byte-by-byte to PL011 data register, polls TXFF bit. `new_bare_metal(mmio_base)` constructor.
+9. **`VumaStdout`** — Standard output implementing `VumaWriter`. Dual-platform: Linux (fd 1) and bare-metal AArch64 (UART TX via MMIO). Bare-metal mode writes byte-by-byte to PL011 data register, polls TXFF bit. `new_bare_metal(mmio_base)` constructor.
 
-10. **`VumaFile`** — File I/O implementing both `VumaReader` and `VumaWriter`. Dual-platform: Linux (OS file descriptors) and bare-metal Pi 5 (eMMC2 MMIO at `0xFE340000` for SD card block I/O). Adds `seek()`, `close()`, `open_bare_metal()`. All errors use `VumaIoError` with proper CapD tracking.
+10. **`VumaFile`** — File I/O implementing both `VumaReader` and `VumaWriter`. Dual-platform: Linux (OS file descriptors) and bare-metal AArch64 (eMMC2 MMIO at `0xFE340000` for SD card block I/O). Adds `seek()`, `close()`, `open_bare_metal()`. All errors use `VumaIoError` with proper CapD tracking.
 
 **Preserved Backward Compatibility:**
 - Original `File`, `Stdin`, `Stdout`, `Stderr` types remain unchanged.
@@ -1189,7 +1189,7 @@ Updated re-exports to include all new types:
 
 ### Key Design Decisions
 - **BD tracking on errors**: Every `VumaIoError` carries the `CapD` of the resource at the point of failure, enabling precise BD tracing.
-- **Dual-platform architecture**: All new types support both Linux and bare-metal Pi 5 via `bare_metal: bool` flag, with documented MMIO addresses for BCM2711 UART (`0xFE201000`) and eMMC2 (`0xFE340000`).
+- **Dual-platform architecture**: All new types support both Linux and bare-metal AArch64 via `bare_metal: bool` flag, with documented MMIO addresses for BCM2711 UART (`0xFE201000`) and eMMC2 (`0xFE340000`).
 - **Trait-based abstraction**: `VumaReader`/`VumaWriter` enable generic buffered I/O (`VumaBufReader`/`VumaBufWriter`) while maintaining BD annotations through the trait requirements.
 - **Backward compatibility**: Legacy `File`/`Stdin`/`Stdout`/`Stderr` preserved with original API; new code should use `VumaFile`/`VumaStdin`/`VumaStdout`.
 
@@ -1278,7 +1278,7 @@ Updated 3 match arms for new `NodeKind` and `EdgeKind` variants:
 ## 2026-03-05 — Task 4-20: CI/CD and Build System Enhancement
 
 ### Summary
-Comprehensive enhancement of the VUMA build system: expanded Makefile with all required targets, full GitHub Actions CI workflow with 9 jobs (fmt, clippy, per-crate test matrix, workspace test, docs, aarch64 cross-compile, Pi 5 bare-metal, release build, CI gate), convenient justfile developer commands, nightly toolchain pin, and aarch64 cross-compilation Cargo config.
+Comprehensive enhancement of the VUMA build system: expanded Makefile with all required targets, full GitHub Actions CI workflow with 9 jobs (fmt, clippy, per-crate test matrix, workspace test, docs, aarch64 cross-compile, AArch64 bare-metal, release build, CI gate), convenient justfile developer commands, nightly toolchain pin, and aarch64 cross-compilation Cargo config.
 
 ### Changes Made
 
@@ -1292,14 +1292,14 @@ Comprehensive enhancement of the VUMA build system: expanded Makefile with all r
 5. `doc` / `doc-open` / `doc-private` — Documentation build with variants
 6. `fmt` / `fmt-check` — Auto-format and CI-friendly format check
 7. `clippy` / `clippy-fix` / `lint` — Lint with Clippy, auto-fix, and combined lint
-8. `pi5` / `pi5-image` / `pi5-flash` / `pi5-debug` / `pi5-run` / `pi5-bare` — Pi 5 bare-metal targets
-9. `clean` / `clean-pi5` / `clean-doc` — Granular clean targets
+8. `(removed)` / `(removed)-image` / `(removed)-flash` / `(removed)-debug` / `(removed)-run` / `(removed)-bare` — AArch64 bare-metal targets
+9. `clean` / `clean-(removed)` / `clean-doc` — Granular clean targets
 10. `install` / `build-release` — Release build and PREFIX-based install
 11. `setup` / `toolchain` — Toolchain and component installation
 12. `verify-examples` — List example programs
 13. `help` — Self-documenting help target (parses `## ` comments)
 
-**Variables:** `CARGO`, `RUSTUP`, `PI5_*`, `SD`, `PREFIX`, `FEATURES`
+**Variables:** `CARGO`, `RUSTUP`, `CROSS_*`, `SD`, `PREFIX`, `FEATURES`
 
 #### `/home/z/my-project/vuma/.github/workflows/ci.yml` (full rewrite, 85→174 lines)
 
@@ -1310,7 +1310,7 @@ Comprehensive enhancement of the VUMA build system: expanded Makefile with all r
 4. `test-workspace` — Full workspace integration test
 5. `docs` — Build documentation + artifact upload
 6. `cross-aarch64` — Cross-compile for aarch64-unknown-linux-gnu (debug + release)
-7. `pi5-bare` — Pi 5 bare-metal build (aarch64-unknown-none) + kernel8.img + artifact upload
+7. `(removed)-bare` — AArch64 bare-metal build (aarch64-unknown-none) + kernel8.img + artifact upload
 8. `build-release` — Native release build + artifact upload
 9. `ci-pass` — CI gate job requiring all others to pass
 
@@ -1318,7 +1318,7 @@ Comprehensive enhancement of the VUMA build system: expanded Makefile with all r
 
 #### `/home/z/my-project/vuma/justfile` (full rewrite, 13→132 lines)
 
-**Recipes:** `build`, `release`, `check`, `check-fast`, `test`, `test-verbose`, `test-crate`, `test-doc`, `test-filter`, `bench`, `bench-crate`, `doc`, `doc-open`, `doc-private`, `fmt`, `fmt-check`, `clippy`, `clippy-fix`, `lint`, `pi5`, `pi5-image`, `pi5-flash`, `pi5-debug`, `pi5-run`, `cross-aarch64`, `cross-aarch64-release`, `toolchain`, `setup`, `update-toolchain`, `toolchain-info`, `clean`, `clean-pi5`, `clean-doc`, `install`, `verify-examples`, `members`, `tree`, `watch`, `watch-check`
+**Recipes:** `build`, `release`, `check`, `check-fast`, `test`, `test-verbose`, `test-crate`, `test-doc`, `test-filter`, `bench`, `bench-crate`, `doc`, `doc-open`, `doc-private`, `fmt`, `fmt-check`, `clippy`, `clippy-fix`, `lint`, `(removed)`, `(removed)-image`, `(removed)-flash`, `(removed)-debug`, `(removed)-run`, `cross-aarch64`, `cross-aarch64-release`, `toolchain`, `setup`, `update-toolchain`, `toolchain-info`, `clean`, `clean-(removed)`, `clean-doc`, `install`, `verify-examples`, `members`, `tree`, `watch`, `watch-check`
 
 **Features:** Parameterized recipes (`crate=`, `sd=`, `prefix=`), `just --list` default, `cargo watch` integration.
 
@@ -1340,9 +1340,9 @@ Comprehensive enhancement of the VUMA build system: expanded Makefile with all r
 - `[net]` — offline=false
 
 ### Key Design Decisions
-- **Nightly toolchain pin**: Required for inline assembly, naked functions, and unstable features used in the Pi 5 bare-metal crate. Pinned to `nightly-2026-03-01` for reproducibility.
+- **Nightly toolchain pin**: Required for inline assembly, naked functions, and unstable features used in the AArch64 bare-metal crate. Pinned to `nightly-2026-03-01` for reproducibility.
 - **Native cross-linker instead of `cross`**: CI uses `gcc-aarch64-linux-gnu` directly rather than the `cross` tool, avoiding Docker dependency and CI time overhead. Works because the workspace has no C dependencies requiring sysroot.
 - **Per-crate test matrix**: CI tests each crate independently for faster failure isolation, with a separate full-workspace test job for integration coverage.
 - **CI gate job**: `ci-pass` depends on all other jobs, providing a single required status check for branch protection rules.
-- **Bare-metal rustflags**: Linker script path (`-Tsrc/pi5/link.ld`), `--gc-sections` for minimal binary, `nodefaultlibs` for freestanding environment.
-- **Fat LTO + panic=abort in release**: Maximizes performance and minimizes binary size for the Pi 5 target.
+- **Bare-metal rustflags**: Linker script path (`-Tlink.ld`), `--gc-sections` for minimal binary, `nodefaultlibs` for freestanding environment.
+- **Fat LTO + panic=abort in release**: Maximizes performance and minimizes binary size for the AArch64 target.

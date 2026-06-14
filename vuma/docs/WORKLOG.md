@@ -7,17 +7,17 @@
 - **`docs/architecture.md`** — Complete rewrite with 8 major sections (each 200+ words):
   - **Section 1: System Overview** — 6-layer architecture (SCG, IVE, Projections, COR, BD, VUMA) with detailed descriptions of each layer, layer interaction diagram (ASCII), and 5 architectural principles (SCG primacy, verification over restriction, inference over annotation, continuous optimization, bare-metal first)
   - **Section 2: Data Flow Diagram** — Full text-based data flow from source to execution with three feedback loops (verification feedback, profile feedback, deployment feedback), 6-stage pipeline description (lexing/parsing, AST-to-SCG lowering, BD inference, VUMA verification, code generation, execution/feedback)
-  - **Section 3: Crate Dependency Graph** — Complete workspace layout with all 12 crates and their file-level contents, ASCII dependency graph, 7 key dependency rules (SCG as foundation, BD/proof orthogonality, IVE as orchestrator, VUMA extension, codegen/COR execution layer, Pi 5 platform, projection/parser human interface)
-  - **Section 4: Key Data Structures and Their Relationships** — 5 subsections: SCG (core types, node payloads, edge kinds, operations), BD (RepD/CapD/RelD with design decisions, composition/compatibility), MSG (region/derivation/access/sync, SCG-to-MSG conversion, incremental MSG), Proof (derivation tree, tiered confidence, counterexample), Data Structure Relationships (flow diagram showing SCG → BD → Annotated SCG → MSG → Verification → Proof → Verified SCG → Codegen → ARM64 → COR → Pi 5)
+  - **Section 3: Crate Dependency Graph** — Complete workspace layout with all 12 crates and their file-level contents, ASCII dependency graph, 7 key dependency rules (SCG as foundation, BD/proof orthogonality, IVE as orchestrator, VUMA extension, codegen/COR execution layer, platform, projection/parser human interface)
+  - **Section 4: Key Data Structures and Their Relationships** — 5 subsections: SCG (core types, node payloads, edge kinds, operations), BD (RepD/CapD/RelD with design decisions, composition/compatibility), MSG (region/derivation/access/sync, SCG-to-MSG conversion, incremental MSG), Proof (derivation tree, tiered confidence, counterexample), Data Structure Relationships (flow diagram showing SCG → BD → Annotated SCG → MSG → Verification → Proof → Verified SCG → Codegen → ARM64 → COR)
   - **Section 5: Verification Pipeline** — Pipeline architecture diagram, the five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup) with detailed algorithm descriptions, verification result aggregation (VerificationSummary, AggregatedResult, DiagnosticsReport, InvariantDelta, VerificationDebt), incremental verification (MSGDelta, compute_delta, apply_delta)
-  - **Section 6: Code Generation Pipeline for Pi 5** — Three-phase pipeline (SCG → IR → regalloc → emission), IR types (IrFunction, IrBasicBlock, IrInstruction, IrTerminator, IrValue), node-to-IR mapping, register allocation (linear-scan, AAPCS64), ARM64 machine code emission (instruction encoding, ELF generation), Pi 5 bare-metal boot sequence (_start, boot_main, linker script, FDT parsing)
-  - **Section 7: Runtime Optimization Pipeline** — COR architecture diagram, profile-guided optimization (ProfileCollector, Pi5PmuCounters, HotPath, collect_profile, CacheOptimize/BranchLayout suggestions), speculative optimization (SpeculativeExecutor 3-phase lifecycle: identify/apply/validate-and-rollback, BranchPredictionTable, SpeculativeInlining, SpeculativeCodeMotion, Snapshot-based rollback), SCG transformation passes (PassManager, DCE, constant folding, inlining, CSE, VerificationPass), deployment and hot-swap (DeploymentManager, 6-phase state machine, delta deployment, version tracking)
-  - **Section 8: Security Model Overview** — 5 security layers (memory safety via VUMA invariants, capability security via CapD, information flow via RelD, region security via SCG regions, platform security via Pi 5), threat model (6 categories: memory corruption, information disclosure, privilege escalation, resource exhaustion, concurrent access violations, supply chain attacks), verification confidence and debt (VerificationLevel tier, VerificationDebt priority tracking)
+  - **Section 6: Code Generation Pipeline** — Three-phase pipeline (SCG → IR → regalloc → emission), IR types (IrFunction, IrBasicBlock, IrInstruction, IrTerminator, IrValue), node-to-IR mapping, register allocation (linear-scan, AAPCS64), ARM64 machine code emission (instruction encoding, ELF generation), bare-metal boot sequence (_start, boot_main, linker script, FDT parsing)
+  - **Section 7: Runtime Optimization Pipeline** — COR architecture diagram, profile-guided optimization (ProfileCollector, PmuCounters, HotPath, collect_profile, CacheOptimize/BranchLayout suggestions), speculative optimization (SpeculativeExecutor 3-phase lifecycle: identify/apply/validate-and-rollback, BranchPredictionTable, SpeculativeInlining, SpeculativeCodeMotion, Snapshot-based rollback), SCG transformation passes (PassManager, DCE, constant folding, inlining, CSE, VerificationPass), deployment and hot-swap (DeploymentManager, 6-phase state machine, delta deployment, version tracking)
+  - **Section 8: Security Model Overview** — 5 security layers (memory safety via VUMA invariants, capability security via CapD, information flow via RelD, region security via SCG regions, platform security), threat model (6 categories: memory corruption, information disclosure, privilege escalation, resource exhaustion, concurrent access violations, supply chain attacks), verification confidence and debt (VerificationLevel tier, VerificationDebt priority tracking)
 
 - **`docs/ROADMAP.md`** — Complete rewrite with 5 phases:
-  - **Phase 1: Foundation (COMPLETED)** — 4 milestones (SCG core, MSG construction, IVE core, ARM64 codegen/Pi 5 boot), comprehensive deliverables listing all 12 crates with their implemented functionality, Phase 1 achievement summary
+  - **Phase 1: Foundation (COMPLETED)** — 4 milestones (SCG core, MSG construction, IVE core, ARM64 codegen/boot), comprehensive deliverables listing all 12 crates with their implemented functionality, Phase 1 achievement summary
   - **Phase 2: Core Implementation (CURRENT)** — 6 milestones (exclusivity/interpretation verification, cleanup/full pipeline, BD inference completeness, verified data structures, ARM64 codegen expansion, PGO), 6 deliverables with detailed descriptions, Phase 2 success criteria (7 items)
-  - **Phase 3: Hardening & Optimization (NEXT)** — 5 milestones (ARM64 atomics, concurrent verification, COR integration, Pi 5 peripherals, lock-free Pi 5 demo), 5 deliverables, Phase 3 success criteria (11 items)
+  - **Phase 3: Hardening & Optimization (NEXT)** — 5 milestones (ARM64 atomics, concurrent verification, COR integration, peripherals, lock-free demo), 5 deliverables, Phase 3 success criteria (11 items)
   - **Phase 4: Language Server & Tooling (PLANNED)** — 5 milestones (projections, outcome spaces, parser/LSP, standard library, ecosystem), 4 deliverables, Phase 4 success criteria (11 items)
   - **Phase 5: Self-Hosting Compiler (PLANNED)** — 5 milestones (compiler core in VUMA, self-verification, self-compilation, self-hosting, performance parity), 5 deliverables, Phase 5 success criteria (5 items)
   - Plus: dependency graph, risk mitigation table (7 risks), success criteria summary table
@@ -38,7 +38,7 @@
 ### Files Modified
 
 - **`docs/CONTRIBUTING.md`** — Complete rewrite with 7 major sections and table of contents:
-  - Section 1: How to Build the Project — prerequisites table (stable toolchain per rust-toolchain.toml, not nightly), workspace crate table (12 crates with paths and purposes), Make/just commands, Pi 5 cross-compilation (userspace + bare-metal with link.ld/build.rs/kernel8.img pipeline), QEMU setup, formatting/linting (rustfmt.toml max_width=100, clippy.toml cognitive-complexity-threshold=50)
+  - Section 1: How to Build the Project — prerequisites table (stable toolchain per rust-toolchain.toml, not nightly), workspace crate table (12 crates with paths and purposes), Make/just commands, cross-compilation (userspace + bare-metal with link.ld/build.rs/kernel8.img pipeline), QEMU setup, formatting/linting (rustfmt.toml max_width=100, clippy.toml cognitive-complexity-threshold=50)
   - Section 2: How to Run Tests — unit tests (per-crate, specific test), integration tests (vuma-tests crate), verification tests (IVE with --test-threads=1), codegen tests, proof tests, benchmarks, full CI check command
   - Section 3: How to Add New SCG Node Types — 8-step process: define payload struct → register NodeType variant → add NodePayload variant → re-export → update graph construction → add IVE verification → add codegen → add tests at all levels; example with BarrierNode
   - Section 4: How to Add New Verification Passes — 9-step process: define invariant in InvariantKind → write formal spec in docs/specs/ → implement verification module → register module → integrate into aggregator → add proof support → update VUMA core → add tests/examples → update documentation
@@ -58,7 +58,7 @@
   - Project Core Terms: SCG, IVE, COR, BD, RepD, CapD, RelD, VUMA, MSG, Projection, Outcome Space, Verification Debt, Verification Confidence (13 entries, all 50+ words with implementation details)
   - Verification Invariant Terms: Liveness, Exclusivity, Interpretation, Origin, Cleanup (5 entries with verifier module paths, algorithms, and violation types)
   - ARM64 Terms: AAPCS64, DMB, DSB, ISB, LDXR, STXR, CAS, Cortex-A76 (8 entries with codegen Instruction enum references)
-  - Raspberry Pi 5 Terms: BCM2712, GPIO, UART (3 entries with driver module paths)
+  - Hardware Terms: BCM2712, GPIO, UART (3 entries with driver module paths)
   - Type Theory Terms: Nominal Types, Structural Types, Behavioral Types, Capability Calculi (4 entries)
   - Additional Project Terms: Derivation Chain, Region (SCG), VUMA-VERIFIED, IVE-TODO, Invariant Aggregator, Proof Object (6 entries, including 2 new entries not in original)
   - All entries 50+ words with pronunciation, detailed definitions referencing actual code paths, and cross-references
@@ -69,7 +69,7 @@
 - `rust-toolchain.toml` — stable channel, components, targets
 - `rustfmt.toml` — max_width=100, tab_spaces=4, edition=2021
 - `clippy.toml` — cognitive-complexity-threshold=50
-- `Makefile` — build/test/pi5/bench targets
+- `Makefile` — build/test/bench targets
 - `justfile` — build/test/clean shortcuts
 - `src/scg/src/lib.rs` — SCG crate overview, node types, re-exports
 - `src/scg/src/node.rs` — NodeType enum, NodePayload, all node structs
@@ -94,14 +94,14 @@
   - Section 7: Concurrency — sync blocks (happens-before ordering), channels (send/recv with ownership transfer), locks (lock/unlock with CapD integration), atomics (AtomicU64 with Acquire/Release/AcqRel/SeqCst ordering)
   - Section 8: Memory Safety — the five LIVE invariants (Liveness, Exclusivity, Interpretation, Origin, Cleanup), verification pipeline (parsing → SCG → BD inference → invariant verification → debt tracking), verification annotations (#bd, proof hints, safe blocks), verification results (Proven, ProbablySafe, Violated)
   - Section 9: Standard Library Overview — memory management, data structures, concurrency primitives, I/O, type operations, Option type
-  - Section 10: Pi 5 Platform-Specific Features — device memory mapping, GPIO register layout, ARM64 code generation, bare-metal execution, const addresses
+  - Section 10: Platform-Specific Features — device memory mapping, GPIO register layout, ARM64 code generation, bare-metal execution, const addresses
   - Section 11: Appendix — complete keyword reference table (40+ keywords), operator precedence table (12 levels)
   - All sections include 200+ words with code examples drawn from actual VUMA example programs and source code
 
 ### Source Files Read
 - `examples/hello_memory.vuma` — Basic allocate/write/read/free pattern
 - `examples/doubly_linked_list.vuma` — Doubly-linked list with sentinel node pattern
-- `examples/gpio_blink.vuma` — Pi 5 GPIO hardware access
+- `examples/gpio_blink.vuma` — GPIO hardware access
 - `examples/arena_allocator.vuma` — Arena allocator with derivation chains
 - `examples/lock_free_queue.vuma` — Lock-free SPSC queue with atomics
 - `src/parser/src/ast.rs` — Full AST type definitions (Program, Item, Stmt, Expr, Type, etc.)
@@ -118,7 +118,7 @@
 
 ### Files Modified
 - **`src/cor/src/deployment.rs`** â Major enhancement of the deployment subsystem
-  - **`DeploymentTarget`** â Expanded from 3 to 4 variants: `Local`, `Pi5Bare { board_id, core_id }`, `Pi5Linux { host, core_affinity }`, `Remote { endpoint }`; predicates `is_pi5()`, `supports_hot_swap()`, `kind_label()`
+  - **`DeploymentTarget`** â Expanded from 3 to 4 variants: `Local`, `BareMetal { board_id, core_id }`, `Linux { host, core_affinity }`, `Remote { endpoint }`; predicates `is_bare_metal()`, `supports_hot_swap()`, `kind_label()`
   - **`DeploymentPackage`** â Compiled binary + metadata + debug info; constructors `new()`, `with_debug_info()`, `validate_checksum()`
   - **`PackageVersion(u64)`** â Monotonic version wrapper with Ord, Display
   - **`PackageMetadata`** â Region ID, version, CRC32 checksum, optimization label, code size, timestamp
@@ -212,10 +212,10 @@
 - All 6 VUMA primitive types implement the `HasBD` trait with `as_bd() -> BD`.
 - Each type's BD is fully derivable from its fields and the pointee/element BD.
 
-## 2026-03-05 — Task 3-13: Pi 5 Bare Metal Boot Code
+## 2026-03-05 — Task 3-13: Bare Metal Boot Code
 
 ### Files Created
-- **`src/pi5/src/boot.rs`** — Bare-metal boot code for Raspberry Pi 5 (BCM2712)
+- **`boot.rs`** *(removed)* — Bare-metal boot code (BCM2712)
   - **ARM64 exception vector table** (`exception_vector_table`) — Full 16-entry vector table in naked assembly:
     - Current EL with SP0: sync, irq, fiq, serror
     - Current EL with SPx: sync, irq, fiq, serror
@@ -230,7 +230,7 @@
     5. Zeros BSS section (8-byte stores from `__bss_start` to `__bss_end`)
     6. Installs exception vector table via `VBAR_EL1`
     7. Restores DTB pointer and jumps to `boot_main`
-  - **`kernel_entry`** — `KERNEL_ENTRY = 0x80000`, the Pi 5 bootloader load address
+  - **`kernel_entry`** — `KERNEL_ENTRY = 0x80000`, the bootloader load address
   - **FDT parsing** — `FdtHeader` struct with `from_raw()`, `from_bytes()`, `is_valid()`:
     - Parses all 10 u32 fields from the 40-byte DTB header
     - Correct mapping: words[0]=magic, [1]=totalsize, [2]=off_dt_struct, [3]=off_dt_strings, [5]=version, [8]=size_dt_strings, [9]=size_dt_struct
@@ -256,7 +256,7 @@
     7. `zero_bss_clears_memory` — 64-byte buffer zeroed in place
 
 ### Files Modified
-- **`src/pi5/src/lib.rs`** — Added `pub mod boot;` and module overview table entry for `boot`
+- **`lib.rs`** *(removed)* — Added `pub mod boot;` and module overview table entry for `boot`
 
 ## 2026-03-05 — Task 3-18: COR Speculative Executor Enhancement
 
@@ -300,10 +300,10 @@
 
 ### Files Modified
 - **`src/cor/src/profile.rs`** — Major enhancement of the profile-guided optimization subsystem
-  - **`Pi5PmuCounters`** — Pi 5 hardware performance counter snapshot (cycle count, instruction count, cache misses, branch misses) with computed `ipc()`, `cache_miss_rate()`, `branch_miss_rate()`
-  - **`ProfileSample`** — Single profiling sample: `timestamp_ns`, `node_id`, `execution_time_ns`, optional `Pi5PmuCounters`; constructors `new()` and `with_pmu()`
+  - **`PmuCounters`** — Hardware performance counter snapshot (cycle count, instruction count, cache misses, branch misses) with computed `ipc()`, `cache_miss_rate()`, `branch_miss_rate()`
+  - **`ProfileSample`** — Single profiling sample: `timestamp_ns`, `node_id`, `execution_time_ns`, optional `PmuCounters`; constructors `new()` and `with_pmu()`
   - **`HotPath`** — Sequence of nodes accounting for >80% of execution time, with `total_time_ns`, `cumulative_fraction`, `is_dominant()` predicate
-  - **`ProfileData`** — Enhanced with `edge_frequencies: HashMap<EdgeId, u64>`, `node_time_ns: HashMap<NodeId, u64>`, `node_pmu: HashMap<NodeId, Pi5PmuCounters>`; new methods: `record_access_timed()`, `record_edge()`, `record_pmu()`, `ingest_samples()`, `compute_hot_paths()`, `cold_spots()`, `total_execution_time_ns()`; updated `suggest_optimizations()` to emit `CacheOptimize` and `BranchLayout` suggestions from PMU data
+  - **`ProfileData`** — Enhanced with `edge_frequencies: HashMap<EdgeId, u64>`, `node_time_ns: HashMap<NodeId, u64>`, `node_pmu: HashMap<NodeId, PmuCounters>`; new methods: `record_access_timed()`, `record_edge()`, `record_pmu()`, `ingest_samples()`, `compute_hot_paths()`, `cold_spots()`, `total_execution_time_ns()`; updated `suggest_optimizations()` to emit `CacheOptimize` and `BranchLayout` suggestions from PMU data
   - **`ProfileCollector`** — Thread-safe (`Mutex<ProfileData>` + `AtomicU64` sample counter) runtime collector with `record_access()`, `record_access_timed()`, `record_edge()`, `record_sample()`, `record_pmu()`, `make_sample()`, `make_sample_with_pmu()`, `snapshot()`, `reset()`
   - **`ProfileReport`** — Full analysis output with `total_samples`, `total_execution_time_ns`, `hot_spots: Vec<NodeHotSpot>`, `cold_spots: Vec<NodeId>`, `hot_paths: Vec<HotPath>`, `aggregate_pmu`, `node_pmu`, `recommendations`
   - **`NodeHotSpot`** — Per-node execution stats: `node_id`, `call_count`, `total_time_ns`, `time_fraction`
@@ -318,7 +318,7 @@
     6. `hot_path_dominance_threshold`
     7. `profile_collector_thread_safe`
     8. `collect_profile_produces_report`
-    9. `pi5_pmu_counters_ipc_and_rates`
+    9. `pmu_counters_ipc_and_rates`
     10. `edge_frequencies_recorded`
     11. `ingest_samples_accumulates_pmu`
 
@@ -363,10 +363,10 @@
 13. `test_computation_node_passthrough_derivation` — Computation passthrough
 14. `test_gpu_deployment_produces_device_region` — DeploymentTarget::Gpu → RegionStatus::Device
 
-## 2026-03-05 — Task 3-15: Pi 5 Link Script and Build System
+## 2026-03-05 — Task 3-15: Link Script and Build System
 
 ### Files Created
-- **`src/pi5/link.ld`** — ARM64 linker script for Raspberry Pi 5 bare-metal
+- **`link.ld`** *(removed)* — ARM64 linker script for bare-metal
   - `ENTRY(_start)` matching the `_start` naked function in `boot.rs`
   - RAM region: `0x80000`, 8 MiB (kernel load address per VideoCore convention)
   - MMIO region: `0x100000`, 1 MiB (memory-mapped I/O window)
@@ -376,21 +376,21 @@
   - Exports: `__bss_start`, `__bss_end`, `__stack_core0..3`, `__stack_start/end`, `__kernel_end`
   - Discards `.comment`, `.note.*`, `.eh_frame*`, `.ARM.exidx*`
 
-- **`src/pi5/build.rs`** — Cargo build script for bare-metal `aarch64-unknown-none`
+- **`build.rs`** *(removed)* — Cargo build script for bare-metal `aarch64-unknown-none`
   - Only activates when `TARGET = aarch64-unknown-none` (no-op for hosted builds)
   - Sets `cargo:rerun-if-changed=link.ld`
   - Passes `-Tlink.ld`, `-nostartfiles`, `-static`, `-no-pie`
   - Generates `kernel8.map` linker map file
 
 ### Files Modified
-- **`Makefile`** — Added Pi 5 bare-metal build infrastructure
-  - `make pi5` — cross-compile `vuma-pi5` for `aarch64-unknown-none`
-  - `make pi5-image` — ELF → raw binary (`kernel8.img`) via `aarch64-none-elf-objcopy`
-  - `make pi5-flash` — copy `kernel8.img` to SD card (`SD=/mnt/sd-boot` overridable)
-  - `make pi5-debug` — launch QEMU with `-s -S` for GDB debug on `:1234`
-  - Variables: `PI5_TARGET`, `PI5_CROSS`, `PI5_OBJCOPY`, `PI5_ELF`, `PI5_IMG`, `SD`, `QEMU`
+- **`Makefile`** — Added bare-metal build infrastructure
+  - `make bare-metal` — cross-compile for `aarch64-unknown-none` *(removed)*
+  - `make bare-metal-image` — ELF → raw binary (`kernel8.img`) via `aarch64-none-elf-objcopy`
+  - `make bare-metal-flash` — copy `kernel8.img` to SD card (`SD=/mnt/sd-boot` overridable)
+  - `make bare-metal-debug` — launch QEMU with `-s -S` for GDB debug on `:1234`
+  - Variables: `BARE_TARGET`, `CROSS`, `OBJCOPY`, `ELF`, `IMG`, `SD`, `QEMU`
 
-- **`src/pi5/Cargo.toml`** — Bare-metal compatibility
+- **`Cargo.toml`** *(removed)* — Bare-metal compatibility
   - Added `build = "build.rs"`
   - `serde`: `default-features = false` for `no_std` compatibility
   - `log`: `default-features = false` for `no_std` compatibility

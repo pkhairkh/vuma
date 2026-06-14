@@ -28,9 +28,9 @@ up your development environment, make changes, and get them merged.
 | `rustup` | Latest | Rust toolchain management |
 | `cargo` | Included with Rust | Build system |
 | Git | 2.30+ | Version control |
-| QEMU (aarch64) | 7.0+ | ARM64 emulation for testing without Pi 5 hardware |
+| QEMU (aarch64) | 7.0+ | ARM64 emulation for testing |
 | `aarch64-none-elf-` toolchain | Latest | Bare-metal cross-compilation (objcopy, ld) |
-| Raspberry Pi 5 | Any RAM config | Physical target (optional but recommended) |
+| ARM64 hardware | Any | Physical target (optional but recommended) |
 
 ### 1.2 Install the Rust Toolchain
 
@@ -75,7 +75,6 @@ The workspace consists of the following crates:
 | `vuma-projection` | `src/projection/` | Projection system (textual, visual, conversational) |
 | `vuma-parser` | `src/parser/` | SCG parser and projection parser |
 | `vuma-codegen` | `src/codegen/` | ARM64 code generation |
-| `vuma-pi5` | `src/pi5/` | Pi 5 platform abstraction (bare-metal boot, UART, GPIO) |
 | `vuma-std` | `src/std/` | VUMA standard library |
 | `vuma-proof` | `src/proof/` | Proof infrastructure and formal methods |
 | `vuma-tests` | `src/tests/` | Integration tests |
@@ -100,11 +99,11 @@ just test
 just clean
 ```
 
-### 1.5 Pi 5 Cross-Compilation
+### 1.5 Cross-Compilation
 
 #### Userspace (Linux ARM64)
 
-If you are developing on an x86_64 host and targeting the Pi 5 with Linux:
+If you are developing on an x86_64 host and targeting ARM64 with Linux:
 
 ```bash
 # The target is already configured in rust-toolchain.toml
@@ -118,24 +117,23 @@ cargo build --target aarch64-unknown-linux-gnu
 
 #### Bare-Metal (aarch64-unknown-none)
 
-For bare-metal Pi 5 targets (no OS), the project provides a complete build pipeline:
+For bare-metal ARM64 targets (no OS), the project provides a complete build pipeline:
 
 ```bash
 # Build the bare-metal kernel
-make pi5
+make bare-metal
 
 # Build kernel8.img from the ELF binary (requires aarch64-none-elf-objcopy)
-make pi5-image
+make bare-metal-image
 
 # Flash kernel8.img to an SD card boot partition
-make pi5-flash SD=/mnt/sd-boot
+make bare-metal-flash SD=/mnt/sd-boot
 
 # Launch a QEMU debug session with GDB stub on :1234
-make pi5-debug
+make bare-metal-debug
 ```
 
-The bare-metal build uses `src/pi5/link.ld` as the linker script and
-`src/pi5/build.rs` as the Cargo build script. The linker script defines
+The bare-metal build uses a linker script and build script. The linker script defines
 the memory layout (RAM at `0x80000`, 8 MiB; MMIO window at `0x100000`, 1 MiB),
 section ordering (`.text.boot` → `.text` → `.rodata` → `.data` → `.bss`),
 and per-core stacks (64 KiB × 4 cores).
@@ -151,7 +149,7 @@ sudo apt install qemu-system-arm
 qemu-aarch64 -L /usr/aarch64-linux-gnu target/aarch64-unknown-linux-gnu/debug/vuma-test
 
 # Run the bare-metal kernel in QEMU (uses raspi3b as closest model)
-make pi5-debug
+make bare-metal-debug
 ```
 
 ### 1.7 Formatting and Linting
@@ -192,7 +190,6 @@ cargo test -p vuma-bd
 cargo test -p vuma-vuma
 cargo test -p vuma-proof
 cargo test -p vuma-cor
-cargo test -p vuma-pi5
 ```
 
 Run a specific test by name:
@@ -459,7 +456,7 @@ The specification must include:
 - **Counterexample format**: When verification fails, what information is reported?
 - **Relationship to existing invariants**: Is the new invariant independent of,
   implied by, or does it imply any existing invariant?
-- **Interaction with ARM64 memory model**: How does the Pi 5's weakly-ordered
+- **Interaction with ARM64 memory model**: How does the weakly-ordered
   memory model affect this invariant?
 
 ### 4.3 Step 3: Implement the Verification Module

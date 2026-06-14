@@ -1,7 +1,7 @@
 //! # ARM64 Code Emission
 //!
 //! Lowers IR to ARM64 machine code and produces ELF binaries or raw binaries
-//! suitable for the Raspberry Pi 5 (Cortex-A76, ARMv8.2-A).
+//! suitable for the AArch64 (Cortex-A76, ARMv8.2-A).
 //!
 //! ## Pipeline
 //!
@@ -17,8 +17,8 @@
 //! ## Output Formats
 //!
 //! - **ELF**: Full ELF64 binary with program headers, section headers, symbol
-//!   table, and string table.  Suitable for Linux on Pi 5.
-//! - **Raw**: Flat binary image for bare-metal Pi 5 (loaded at 0x80000).
+//!   table, and string table.  Suitable for Linux on AArch64.
+//! - **Raw**: Flat binary image for bare-metal AArch64 (loaded at 0x80000).
 //! - **Obj**: Relocatable ELF object file (`ET_REL`) for linking.
 //!
 //! ## ELF Layout (executable)
@@ -170,7 +170,7 @@ const STT_NOTYPE: u8 = 0;
 /// Default base address for Linux LOAD segment.
 const BASE_ADDR_LINUX: u64 = 0x400000;
 
-/// Default base address for bare-metal Pi 5 (kernel load address).
+/// Default base address for bare-metal AArch64 (kernel load address).
 const BASE_ADDR_BARE: u64 = 0x80000;
 
 /// Special section index: undefined/missing section.
@@ -355,9 +355,9 @@ impl std::fmt::Display for OutputFormat {
 /// Target platform for code emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Target {
-    /// Linux on AArch64 (Pi 5).
+    /// Linux on AArch64.
     Linux,
-    /// Bare-metal Raspberry Pi 5 (ARMv8.2-A).
+    /// Bare-metal AArch64 (ARMv8.2-A).
     BareMetal,
 }
 
@@ -377,7 +377,7 @@ impl std::fmt::Display for Target {
 pub struct EmitConfig {
     /// Output format (ELF, raw binary, or object file).
     pub format: OutputFormat,
-    /// Target platform (Linux or bare-metal Pi 5).
+    /// Target platform (Linux or bare-metal AArch64).
     pub target: Target,
     /// Target backend / ISA architecture.
     pub backend: BackendKind,
@@ -3906,10 +3906,10 @@ pub fn emit_elf(
     Ok(elf)
 }
 
-/// Emit a flat raw binary for bare-metal Pi 5 execution.
+/// Emit a flat raw binary for bare-metal AArch64 execution.
 ///
 /// The output is the concatenated machine code for all functions, suitable for
-/// loading at address `0x80000` on the Raspberry Pi 5.
+/// loading at address `0x80000` on the AArch64.
 pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>> {
     let mut emitter = Emitter::new();
     let mut text_section: Vec<u8> = Vec::new();
@@ -5338,7 +5338,7 @@ mod tests {
 //   symbol table (function names with addresses),
 //   and section-header string table.
 // - Added emit_raw() top-level function producing flat binary images for
-//   bare-metal Pi 5.
+//   bare-metal AArch64.
 // - Added CallRelocation struct and relocation resolution: inter-function BL
 //   instructions are recorded during emission and patched after all function
 //   addresses are known.

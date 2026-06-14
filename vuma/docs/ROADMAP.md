@@ -9,7 +9,7 @@
 
 ## Overview
 
-The VUMA project implements a six-layer AI-native programming language framework: (1) Semantic Computation Graph (SCG), (2) Inference and Verification Engine (IVE), (3) Projection System, (4) Continuous Optimization Runtime (COR), (5) Behavioral Descriptors (BD), and (6) Verified-Unsafe Memory Access (VUMA). The project targets the Raspberry Pi 5 (BCM2712, quad Cortex-A76) as its primary hardware platform.
+The VUMA project implements a six-layer AI-native programming language framework: (1) Semantic Computation Graph (SCG), (2) Inference and Verification Engine (IVE), (3) Projection System, (4) Continuous Optimization Runtime (COR), (5) Behavioral Descriptors (BD), and (6) Verified-Unsafe Memory Access (VUMA). The project targets ARM64 (including BCM2712/Cortex-A76) as its primary hardware platform.
 
 The implementation follows a bottom-up strategy organized into five phases, each building on the output of previous phases. Phase 1 establishes foundational data structures and the minimal pipeline. Phase 2 (current) implements core verification and inference. Phase 3 hardens the system and optimizes performance. Phase 4 adds language server and tooling support. Phase 5 achieves self-hosting compiler status. Each phase has specific milestones and deliverables that are objectively verifiable.
 
@@ -17,7 +17,7 @@ The implementation follows a bottom-up strategy organized into five phases, each
 
 ## Phase 1: Foundation (COMPLETED)
 
-**Goal:** Establish the core data structures, memory model, minimal ARM64 codegen, and the basic verification pipeline. At the end of Phase 1, the project can build a simple SCG, verify basic memory invariants, and emit ARM64 assembly that runs on QEMU or Pi 5 hardware.
+**Goal:** Establish the core data structures, memory model, minimal ARM64 codegen, and the basic verification pipeline. At the end of Phase 1, the project can build a simple SCG, verify basic memory invariants, and emit ARM64 assembly that runs on QEMU or target hardware.
 
 **Status:** ✅ Complete
 
@@ -28,7 +28,7 @@ The implementation follows a bottom-up strategy organized into five phases, each
 | M1.1 | SCG core types, construction, serialization, and property tests | ✅ Complete |
 | M1.2 | MSG construction from SCG, derivation chain tracking | ✅ Complete |
 | M1.3 | IVE liveness and origin verification passes | ✅ Complete |
-| M1.4 | ARM64 core instruction encoding and Pi 5 boot | ✅ Complete |
+| M1.4 | ARM64 core instruction encoding and bare-metal boot | ✅ Complete |
 
 ### Deliverables
 
@@ -42,9 +42,7 @@ The implementation follows a bottom-up strategy organized into five phases, each
 
 **Codegen Crate (`src/codegen/`).** Implemented with `arm64` module (instruction definitions, register/condition enums, binary encoding), `ir` module (functions, blocks, instructions, terminators, values), `scg_to_ir` translation, `regalloc` (linear-scan register allocator), and `emit` (ARM64 code emitter and ELF generation).
 
-**COR Crate (`src/cor/`).** Implemented with `CORuntime` orchestrator, `ProfileCollector` (thread-safe, Pi 5 PMU counters), `SpeculativeExecutor` (branch prediction, speculative inlining, code motion, snapshot-based rollback), `OptimizationEngine` (DCE, folding, inlining, loop unrolling), `DeploymentManager` (hot-swap via 6-phase state machine, delta deployment with block-level binary diffing, version tracking with rollback), and `Config` (optimization level, time budgets, target architecture).
-
-**Pi 5 Crate (`src/pi5/`).** Implemented with bare-metal boot code (exception vectors, `_start` entry, FDT parsing, `boot_main`), linker script (`link.ld` with per-core stacks, MMIO window), build script (`build.rs` for `aarch64-unknown-none`), UART driver, GPIO driver, timer driver, MMIO primitives, and SMP (multicore boot).
+**COR Crate (`src/cor/`).** Implemented with `CORuntime` orchestrator, `ProfileCollector` (thread-safe, hardware PMU counters), `SpeculativeExecutor` (branch prediction, speculative inlining, code motion, snapshot-based rollback), `OptimizationEngine` (DCE, folding, inlining, loop unrolling), `DeploymentManager` (hot-swap via 6-phase state machine, delta deployment with block-level binary diffing, version tracking with rollback), and `Config` (optimization level, time budgets, target architecture).
 
 **Std Crate (`src/std/`).** Implemented with primitives (`Ptr`, `RegionPtr`, `Slice`, `VumaResult`, `VumaOption`, `Range`, `HasBD` trait), alloc, collections, sync, and io modules.
 
@@ -54,13 +52,13 @@ The implementation follows a bottom-up strategy organized into five phases, each
 
 ### Phase 1 Achievement Summary
 
-Phase 1 established the complete architectural foundation of the VUMA framework. All 12 workspace crates are implemented with core functionality. The system can: construct SCGs programmatically and from parsed text; infer Behavioral Descriptors; construct MSGs from SCGs; verify all five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup); generate ARM64 machine code; and boot on Pi 5 hardware with UART output. The Makefile provides `make pi5`, `make pi5-image`, `make pi5-flash`, and `make pi5-debug` targets for the full development cycle.
+Phase 1 established the complete architectural foundation of the VUMA framework. All workspace crates are implemented with core functionality. The system can: construct SCGs programmatically and from parsed text; infer Behavioral Descriptors; construct MSGs from SCGs; verify all five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup); and generate ARM64 machine code.
 
 ---
 
 ## Phase 2: Core Implementation (CURRENT)
 
-**Goal:** Complete the verification engine, strengthen BD inference, expand the ARM64 codegen to handle complex programs, and demonstrate non-trivial verified programs running on Pi 5 hardware. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, and the framework can verify a doubly-linked list with no `unsafe` blocks.
+**Goal:** Complete the verification engine, strengthen BD inference, expand the ARM64 codegen to handle complex programs, and demonstrate non-trivial verified programs running on target hardware. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, and the framework can verify a doubly-linked list with no `unsafe` blocks.
 
 **Status:** 🔄 In Progress
 
@@ -87,7 +85,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 
 **2.5 — ARM64 Codegen Expansion.** Expand the ARM64 codegen to handle all SCG node types and complex control flow (nested loops, recursive functions, multi-way branches). Improve the register allocator to handle at least 32 virtual registers with intelligent spilling. Implement function calling conventions (AAPCS64) with proper stack alignment and callee-saved register preservation. Add snapshot tests for instruction encoding and integration tests for the full lowering pipeline.
 
-**2.6 — Profile-Guided Optimization.** Complete the profile collection and analysis pipeline with Pi 5 PMU counter integration. Implement hot path identification, aggressive optimization for hot paths, and size optimization for cold paths. Target ≥15% improvement over unoptimized codegen on benchmark programs. ✅ Already implemented — the `ProfileCollector`, `Pi5PmuCounters`, `collect_profile` analysis, and `ProfileReport` with `CacheOptimize`/`BranchLayout` recommendations are complete.
+**2.6 — Profile-Guided Optimization.** Complete the profile collection and analysis pipeline with hardware PMU counter integration. Implement hot path identification, aggressive optimization for hot paths, and size optimization for cold paths. Target ≥15% improvement over unoptimized codegen on benchmark programs. ✅ Already implemented — the `ProfileCollector`, `PmuCounters`, `collect_profile` analysis, and `ProfileReport` with `CacheOptimize`/`BranchLayout` recommendations are complete.
 
 ### Phase 2 Success Criteria
 
@@ -103,7 +101,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 
 ## Phase 3: Hardening & Optimization (NEXT)
 
-**Goal:** Add concurrency support, expand ARM64 codegen to include atomics and barriers, implement the full Continuous Optimization Runtime, and achieve comprehensive Pi 5 peripheral support. At the end of Phase 3, the IVE can verify multi-threaded programs and the codegen can produce efficient ARM64 code for concurrent algorithms running on bare-metal Pi 5.
+**Goal:** Add concurrency support, expand ARM64 codegen to include atomics and barriers, implement the full Continuous Optimization Runtime, and achieve comprehensive peripheral support. At the end of Phase 3, the IVE can verify multi-threaded programs and the codegen can produce efficient ARM64 code for concurrent algorithms running on bare metal.
 
 **Status:** 📋 Planned
 
@@ -114,20 +112,20 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 | M3.1 | ARM64 atomic instructions (LDXR, STXR, CAS, barriers) with correct encoding | Sprint 9 |
 | M3.2 | Concurrent exclusivity verification with happens-before analysis | Sprint 10 |
 | M3.3 | COR integration: incremental compilation, PGO, speculative optimization | Sprint 11 |
-| M3.4 | Pi 5 full peripheral support (GPIO, UART, I2C, SPI, DMA, interrupts) | Sprint 12 |
-| M3.5 | Lock-free data structure verified and running on bare-metal Pi 5 | Sprint 12 |
+| M3.4 | Full peripheral support (GPIO, UART, I2C, SPI, DMA, interrupts) | Sprint 12 |
+| M3.5 | Lock-free data structure verified and running on bare metal | Sprint 12 |
 
 ### Deliverables
 
-**3.1 — ARM64 Atomics and Concurrency Primitives.** Implement atomic instructions (LDXR, STXR, CAS, LDADD, STADD with all sizes and ordering variants), barrier instructions (DMB, DSB, ISB with all option variants), exclusive access modeling for the IVE (LDXR/STXR exclusive monitors for exclusivity verification), lock-free data structure codegen (atomic counter, spinlock, MCS lock lowering), thread management (spawn/join lowering via Pi 5 bare-metal scheduler stubs), AAPCS64 compliance verification, concurrent SCG node codegen (`ForkNode`, `JoinNode`, `SyncNode`, `ChannelSendNode`, `ChannelRecvNode`), and concurrency codegen tests (spinlock, producer-consumer, dining philosophers).
+**3.1 — ARM64 Atomics and Concurrency Primitives.** Implement atomic instructions (LDXR, STXR, CAS, LDADD, STADD with all sizes and ordering variants), barrier instructions (DMB, DSB, ISB with all option variants), exclusive access modeling for the IVE (LDXR/STXR exclusive monitors for exclusivity verification), lock-free data structure codegen (atomic counter, spinlock, MCS lock lowering), thread management (spawn/join lowering via bare-metal scheduler stubs), AAPCS64 compliance verification, concurrent SCG node codegen (`ForkNode`, `JoinNode`, `SyncNode`, `ChannelSendNode`, `ChannelRecvNode`), and concurrency codegen tests (spinlock, producer-consumer, dining philosophers).
 
 **3.2 — Concurrent Verification.** Extend the exclusivity pass to handle LDXR/STXR, locks, and channel-based synchronization. Implement happens-before analysis that builds a happens-before graph from synchronization operations (locks, barriers, channel sends/receives). Implement thread-local MSG that partitions the MSG by thread and verifies per-thread invariants before cross-thread analysis. Implement deadlock detection that identifies circular lock acquisition orders. Implement liveness verification for concurrent programs (every lock eventually released, every channel send eventually received). Create concurrent verification test suite covering at least 10 scenarios (races, deadlocks, livelocks).
 
 **3.3 — COR Integration.** Integrate incremental compilation that recompiles only affected SCG subgraphs when edits occur (target: <500ms for single-function edits). Complete profile data collection with runtime execution counters. Implement profile-guided optimization with hot path identification and aggressive optimization. Implement speculative optimization with transparent fallback on mis-speculation. Implement SCG transformation verification that proves each optimization pass preserves semantics (verified by IVE). Add COR integration tests verifying that optimized programs produce the same results as unoptimized programs.
 
-**3.4 — Pi 5 Full Peripheral Support.** Implement BCM2712 memory map (peripheral base addresses, register layouts, access permissions). Complete GPIO driver with memory-mapped register access and capability descriptors. Complete UART driver (PL011 and mini UART with interrupt support). Implement interrupt controller (GIC-400 or BCM2712 equivalent) with interrupt routing. Implement timer driver (ARM generic timer and BCM2712 system timer). Implement DMA controller with cache coherency management. Implement PCIe driver (BCM2712 PCIe 2.0 root complex for NVMe and network). Create platform integration test (boot, initialize all peripherals, run concurrent workload, verify via UART).
+**3.4 — Full Peripheral Support.** Implement memory map (peripheral base addresses, register layouts, access permissions). Complete GPIO driver with memory-mapped register access and capability descriptors. Complete UART driver (PL011 and mini UART with interrupt support). Implement interrupt controller with interrupt routing. Implement timer driver (ARM generic timer and system timer). Implement DMA controller with cache coherency management. Implement PCIe driver for NVMe and network. Create platform integration test (boot, initialize all peripherals, run concurrent workload, verify via UART).
 
-**3.5 — Lock-Free Pi 5 Demonstration.** Implement a lock-free data structure (e.g., Michael-Scott queue) verified by the concurrent IVE. Lower it to ARM64 code with atomic instructions. Deploy it on bare-metal Pi 5 hardware. Verify correctness via UART output. This is the "concurrent Pi 5" milestone: the first non-trivial concurrent program verified by the IVE and running on real hardware.
+**3.5 — Lock-Free Demonstration.** Implement a lock-free data structure (e.g., Michael-Scott queue) verified by the concurrent IVE. Lower it to ARM64 code with atomic instructions. Deploy it on bare-metal hardware. Verify correctness via UART output. This is the concurrent milestone: the first non-trivial concurrent program verified by the IVE and running on real hardware.
 
 ### Phase 3 Success Criteria
 
@@ -142,8 +140,8 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 - All optimization passes verified to preserve semantics by the IVE
 - GPIO can toggle an LED (blink test)
 - UART produces reliable console output at 115200 baud
-- Full boot sequence completes in under 2 seconds on Pi 5 hardware
-- Lock-free data structure running on bare-metal Pi 5 with concurrent IVE verification
+- Full boot sequence completes in under 2 seconds on target hardware
+- Lock-free data structure running on bare metal with concurrent IVE verification
 
 ---
 
@@ -171,7 +169,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 
 **4.3 — Parser and Language Server.** Implement a full lexer that tokenizes VUMA textual syntax (keywords, identifiers, operators, literals, BD annotations). Implement a recursive-descent parser that produces SCG from the token stream, handling expressions, control flow, function definitions, and BD annotations. Implement error recovery that produces helpful messages with suggestions, not just "unexpected token". Implement incremental parsing that re-parses only changed portions of text, maintaining the SCG-to-text mapping. Implement a Language Server Protocol (LSP) server that provides: go-to-definition (jump from usage to SCG node), find-all-references, hover information (BD details, verification status), diagnostics (verification violations, counterexamples), code actions (suggested fixes for violations), and document symbols. Target parse speed under 10ms for 1000-node programs and incremental re-parse under 100ms for single-statement edits.
 
-**4.4 — Standard Library and Ecosystem.** Complete `vuma_std::mem` (allocation, deallocation, copy, fill, zero — all VUMA-VERIFIED). Complete `vuma_std::collections` (Vec, LinkedList, HashMap, BTreeMap — all VUMA-VERIFIED, no unsafe). Complete `vuma_std::sync` (Mutex, RwLock, Channel, AtomicU32, AtomicU64 — all VUMA-VERIFIED). Complete `vuma_std::io` (Read, Write, BufRead traits with UART and Pi 5 peripheral implementations). Complete `vuma_std::fmt` (Display, Debug formatting with UART output backend). Complete `vuma_std::pi5` (Pi 5 platform abstractions). Complete `vuma_std::bd` (BD construction helpers, RepD/CapD/RelD builders, BD annotation macros). Create ecosystem examples: HTTP server, key-value store, sensor reader, real-time signal processor — all running on Pi 5.
+**4.4 — Standard Library and Ecosystem.** Complete `vuma_std::mem` (allocation, deallocation, copy, fill, zero — all VUMA-VERIFIED). Complete `vuma_std::collections` (Vec, LinkedList, HashMap, BTreeMap — all VUMA-VERIFIED, no unsafe). Complete `vuma_std::sync` (Mutex, RwLock, Channel, AtomicU32, AtomicU64 — all VUMA-VERIFIED). Complete `vuma_std::io` (Read, Write, BufRead traits with UART and peripheral implementations). Complete `vuma_std::fmt` (Display, Debug formatting with UART output backend). Complete `vuma_std::bd` (BD construction helpers, RepD/CapD/RelD builders, BD annotation macros). Create ecosystem examples: HTTP server, key-value store, sensor reader, real-time signal processor.
 
 ### Phase 4 Success Criteria
 
@@ -186,7 +184,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 - LSP provides go-to-definition, diagnostics, and code actions
 - All stdlib functions are VUMA-VERIFIED (no IVE-TODO items in stdlib)
 - LinkedList implementation requires no `unsafe` blocks
-- At least 4 ecosystem examples run on Pi 5 hardware
+- At least 4 ecosystem examples run on target hardware
 
 ---
 
@@ -203,7 +201,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 | M5.1 | VUMA compiler core written in VUMA textual syntax | TBD |
 | M5.2 | Self-verification: VUMA compiler verified by its own IVE | TBD |
 | M5.3 | Self-compilation: VUMA compiler compiled by its own codegen | TBD |
-| M5.4 | Self-hosting: VUMA compiler running on its own COR on Pi 5 | TBD |
+| M5.4 | Self-hosting: VUMA compiler running on its own COR | TBD |
 | M5.5 | Performance parity: self-hosted compiler within 2× of Rust-compiled version | TBD |
 
 ### Deliverables
@@ -214,16 +212,16 @@ Phase 1 established the complete architectural foundation of the VUMA framework.
 
 **5.3 — Self-Compilation.** Use the VUMA codegen to compile the VUMA compiler itself. The resulting ARM64 binary should produce the same output as the Rust-compiled version. This requires: (1) the codegen must handle all SCG node types used by the compiler, (2) the register allocator must handle the compiler's large functions, and (3) the linker script must accommodate the compiler's larger binary size. Success means: the self-compiled binary passes all the same tests as the Rust-compiled binary.
 
-**5.4 — Self-Hosting.** Run the self-compiled VUMA compiler on the COR on Pi 5 hardware. The compiler reads VUMA source files, constructs SCGs, infers BDs, verifies invariants, generates ARM64 code, and writes the output — all running on the COR on Pi 5. This is the "VUMA runs VUMA" milestone: the system is fully self-hosting. Success means: the self-hosted compiler can compile a non-trivial test program (e.g., a doubly-linked list) from VUMA source to ARM64 binary, verify it, and run it on Pi 5.
+**5.4 — Self-Hosting.** Run the self-compiled VUMA compiler on the COR. The compiler reads VUMA source files, constructs SCGs, infers BDs, verifies invariants, generates ARM64 code, and writes the output — all running on the COR. This is the "VUMA runs VUMA" milestone: the system is fully self-hosting. Success means: the self-hosted compiler can compile a non-trivial test program (e.g., a doubly-linked list) from VUMA source to ARM64 binary, verify it, and run it.
 
-**5.5 — Performance Parity.** Optimize the self-hosted compiler to achieve within 2× of the Rust-compiled version's performance. This requires: (1) profile-guided optimization of the compiler's hot paths (parsing, inference, verification), (2) speculative optimization of the IVE's fixpoint iteration, and (3) careful memory management to avoid the overhead that a garbage collector would impose. Success means: compilation of a 10,000-node program completes in under 10 seconds on Pi 5.
+**5.5 — Performance Parity.** Optimize the self-hosted compiler to achieve within 2× of the Rust-compiled version's performance. This requires: (1) profile-guided optimization of the compiler's hot paths (parsing, inference, verification), (2) speculative optimization of the IVE's fixpoint iteration, and (3) careful memory management to avoid the overhead that a garbage collector would impose. Success means: compilation of a 10,000-node program completes in under 10 seconds.
 
 ### Phase 5 Success Criteria
 
 - VUMA compiler core is written entirely in VUMA textual syntax
 - All five VUMA invariants verified for the compiler itself
 - Self-compiled binary passes all tests that the Rust-compiled binary passes
-- Self-hosted compiler can compile and verify a non-trivial test program on Pi 5
+- Self-hosted compiler can compile and verify a non-trivial test program
 - Self-hosted compiler achieves within 2× of Rust-compiled performance
 
 ---
@@ -236,7 +234,7 @@ Phase 1 (COMPLETED) ──┬── Phase 2 (CURRENT) ──── Phase 3 (NEXT
                        │                          │                     │            │
   SCG Foundation ──────┤                 Concurrency &     LSP & Projections   Self-hosting
   MSG Construction ────┤                 Optimization      Parser & Stdlib       compiler
-  IVE Core ────────────┤                 Pi 5 Peripherals  Ecosystem
+  IVE Core ────────────┤                 Peripherals          Ecosystem
   ARM64 Codegen ───────┘
   BD Types
   COR Framework
@@ -253,9 +251,9 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
 | IVE verification too slow for large programs | Blocks Phase 3+ | Invest early in incremental verification (Phase 2); profile and optimize hot paths continuously; use verification debt to prioritize |
-| ARM64 instruction encoding bugs | Blocks all Pi 5 execution | Snapshot tests verified against ARM ARM; QEMU testing before hardware; per-instruction encoding verification |
+| ARM64 instruction encoding bugs | Blocks all ARM64 execution | Snapshot tests verified against ARM ARM; QEMU testing before hardware; per-instruction encoding verification |
 | BD inference incompleteness | Blocks Phase 2+ | Subsumption test against Rust type system; fallback to explicit annotations; iterative refinement via profile feedback |
-| Pi 5 hardware availability | Blocks Phase 3 peripheral testing | QEMU-based testing as primary; hardware testing as validation; raspi3b model as closest QEMU approximation |
+| Target hardware availability | Blocks Phase 3 peripheral testing | QEMU-based testing as primary; hardware testing as validation |
 | Concurrent verification undecidability | Blocks Phase 3 | Limit to finite-state abstraction; use tiered verification confidence; accept partial verification with explicit debt |
 | Self-hosting complexity | Blocks Phase 5 | Incremental approach: self-verify subsystem by subsystem; use Rust-compiled compiler to verify each step |
 | LSP performance | Blocks Phase 4 adoption | Incremental parsing and verification; cache verification results; use worker threads for IVE analysis |
@@ -266,11 +264,11 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 
 | Phase | Milestone Name | Key Metric | Status |
 |-------|---------------|------------|--------|
-| Phase 1 | Hello VUMA | Pi 5 boots and prints "VUMA OK" with IVE-verified ARM64 code | ✅ Complete |
+| Phase 1 | Hello VUMA | ARM64 boots and prints "VUMA OK" with IVE-verified code | ✅ Complete |
 | Phase 2 | Verified Data Structures | Doubly-linked list verified by IVE with no `unsafe` blocks | 🔄 In Progress |
-| Phase 3 | Concurrent Pi 5 | Lock-free data structure on bare-metal Pi 5 with concurrent IVE verification | 📋 Planned |
+| Phase 3 | Concurrency | Lock-free data structure on bare metal with concurrent IVE verification | 📋 Planned |
 | Phase 4 | VUMA IDE | LSP with diagnostics, go-to-definition, code actions on VUMA programs | 📋 Planned |
-| Phase 5 | Self-Hosting | VUMA compiler verifies and compiles itself on Pi 5 | 📋 Planned |
+| Phase 5 | Self-Hosting | VUMA compiler verifies and compiles itself | 📋 Planned |
 
 ---
 

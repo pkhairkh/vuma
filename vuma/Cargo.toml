@@ -15,7 +15,6 @@ members = [
     "src/projection",
     "src/parser",
     "src/codegen",
-    "src/pi5",
     "src/std",
     "src/proof",
     "src/tests",

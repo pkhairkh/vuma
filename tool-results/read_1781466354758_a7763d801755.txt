@@ -1,0 +1,2002 @@
+     1→//! Security Model — lattice-based information-flow control, taint tracking,
+     2→//! capability-to-hardware mapping, declassification, and boundary enforcement.
+     3→//!
+     4→//! This module implements the VUMA Security Model as specified in
+     5→//! `VUMA-SPEC-SEC-001` (security-model-spec.md). The central invariant is the
+     6→//! **no-downgrade rule**: data may flow from a lower security level to an equal
+     7→//! or higher level, but *never* downward without explicit declassification.
+     8→//!
+     9→//! # Architecture
+    10→//!
+    11→//! | Concept               | Type                     | Description                                    |
+    12→//! |-----------------------|--------------------------|------------------------------------------------|
+    13→//! | **Security Level**    | [`SecurityLevel`]        | 5-level lattice: Public…TopSecret              |
+    14→//! | **Flow Policy**       | [`FlowPolicy`]           | FreeFlow / NoDowngrade / NoFlow                |
+    15→//! | **Taint Label**       | [`TaintLabel`]           | Lightweight taint label (source set)           |
+    16→//! | **Taint**             | [`TaintStatus`]          | Source-tracking with sanitization              |
+    17→//! | **Taint Tracker**     | [`TaintTracker`]         | Propagate taint through derivation chains      |
+    18→//! | **Security Relation** | [`SecurityRel`]          | Per-value security metadata (part of RelD)     |
+    19→//! | **Boundary**          | [`SecurityBoundary`]     | Region-pair boundary with crossing rules       |
+    20→//! | **Declassification**  | [`DeclassificationRecord`]| Audit-trail for every downgrade event         |
+    21→//! | **HW Mapping**        | [`Arm64SecurityMapping`] | CapD → PAC/BTI/MTE for ARM64                  |
+    22→//! | **Verifier**          | [`SecurityVerifier`]     | Whole-program invariant checker                |
+    23→
+    24→use crate::derivation::{Derivation, DerivationId};
+    25→use crate::program_point::{NodeId, ProgramPoint};
+    26→use crate::region::RegionId;
+    27→use hashbrown::{HashMap, HashSet};
+    28→use serde::{Deserialize, Serialize};
+    29→use std::fmt;
+    30→
+    31→// ---------------------------------------------------------------------------
+    32→// Security Level Lattice
+    33→// ---------------------------------------------------------------------------
+    34→
+    35→/// The five security levels in VUMA's mandatory access control lattice.
+    36→///
+    37→/// The ordering is total: `Public < Internal < Confidential < Secret < TopSecret`.
+    38→///
+    39→/// The pair `(L, ≤)` forms a lattice with:
+    40→/// - **Join** (lub) = `max(l1, l2)` — the more restrictive level.
+    41→/// - **Meet** (glb) = `min(l1, l2)` — the less restrictive level.
+    42→/// - **Top** = `TopSecret`, **Bottom** = `Public`.
+    43→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+    44→pub enum SecurityLevel {
+    45→    /// Bottom element — unrestricted, openly observable.
+    46→    Public = 0,
+    47→    /// Internal to the organisation / process — not for external release.
+    48→    Internal = 1,
+    49→    /// Confidential — restricted to authorised personnel.
+    50→    Confidential = 2,
+    51→    /// Secret — highly restricted, significant damage if disclosed.
+    52→    Secret = 3,
+    53→    /// Top element — exceptionally grave damage if disclosed.
+    54→    TopSecret = 4,
+    55→}
+    56→
+    57→impl SecurityLevel {
+    58→    /// All levels in ascending order.
+    59→    pub const ALL: [SecurityLevel; 5] = [
+    60→        SecurityLevel::Public,
+    61→        SecurityLevel::Internal,
+    62→        SecurityLevel::Confidential,
+    63→        SecurityLevel::Secret,
+    64→        SecurityLevel::TopSecret,
+    65→    ];
+    66→
+    67→    /// The bottom element of the lattice.
+    68→    pub const BOTTOM: SecurityLevel = SecurityLevel::Public;
+    69→
+    70→    /// The top element of the lattice.
+    71→    pub const TOP: SecurityLevel = SecurityLevel::TopSecret;
+    72→
+    73→    /// **Join** (least upper bound) — returns the more restrictive of two levels.
+    74→    ///
+    75→    /// ```
+    76→    /// use vuma_core::security::SecurityLevel;
+    77→    /// assert_eq!(SecurityLevel::Public.join(SecurityLevel::Secret), SecurityLevel::Secret);
+    78→    /// ```
+    79→    pub fn join(self, other: SecurityLevel) -> SecurityLevel {
+    80→        self.max(other)
+    81→    }
+    82→
+    83→    /// **Meet** (greatest lower bound) — returns the less restrictive of two levels.
+    84→    ///
+    85→    /// ```
+    86→    /// use vuma_core::security::SecurityLevel;
+    87→    /// assert_eq!(SecurityLevel::Confidential.meet(SecurityLevel::Secret), SecurityLevel::Confidential);
+    88→    /// ```
+    89→    pub fn meet(self, other: SecurityLevel) -> SecurityLevel {
+    90→        self.min(other)
+    91→    }
+    92→
+    93→    /// Returns `true` if information may flow from `self` to `target`
+    94→    /// (i.e. `self ≤ target`).
+    95→    pub fn can_flow_to(self, target: SecurityLevel) -> bool {
+    96→        self <= target
+    97→    }
+    98→
+    99→    /// Numeric rank (0..4) useful for array indexing.
+   100→    pub fn rank(self) -> u8 {
+   101→        self as u8
+   102→    }
+   103→}
+   104→
+   105→impl fmt::Display for SecurityLevel {
+   106→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   107→        match self {
+   108→            SecurityLevel::Public => write!(f, "Public"),
+   109→            SecurityLevel::Internal => write!(f, "Internal"),
+   110→            SecurityLevel::Confidential => write!(f, "Confidential"),
+   111→            SecurityLevel::Secret => write!(f, "Secret"),
+   112→            SecurityLevel::TopSecret => write!(f, "TopSecret"),
+   113→        }
+   114→    }
+   115→}
+   116→
+   117→// ---------------------------------------------------------------------------
+   118→// Flow Policy
+   119→// ---------------------------------------------------------------------------
+   120→
+   121→/// The permissible information-flow direction for a value.
+   122→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   123→pub enum FlowPolicy {
+   124→    /// Unrestricted movement in any direction.
+   125→    FreeFlow,
+   126→    /// Enforces the no-write-down rule (default for most data).
+   127→    NoDowngrade,
+   128→    /// Data is statically unmovable across certain boundaries
+   129→    /// (e.g. cryptographic key material).
+   130→    NoFlow,
+   131→}
+   132→
+   133→impl fmt::Display for FlowPolicy {
+   134→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   135→        match self {
+   136→            FlowPolicy::FreeFlow => write!(f, "FreeFlow"),
+   137→            FlowPolicy::NoDowngrade => write!(f, "NoDowngrade"),
+   138→            FlowPolicy::NoFlow => write!(f, "NoFlow"),
+   139→        }
+   140→    }
+   141→}
+   142→
+   143→// ---------------------------------------------------------------------------
+   144→// Taint Tracking
+   145→// ---------------------------------------------------------------------------
+   146→
+   147→/// A source of taint — untrusted origin that data may come from.
+   148→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   149→pub enum TaintSource {
+   150→    /// User input (stdin, CLI args, env vars, GUI events).
+   151→    UserInput,
+   152→    /// Data received from any network socket.
+   153→    Network,
+   154→    /// Data read from filesystem paths writable by untrusted principals.
+   155→    UntrustedFile,
+   156→}
+   157→
+   158→impl fmt::Display for TaintSource {
+   159→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   160→        match self {
+   161→            TaintSource::UserInput => write!(f, "UserInput"),
+   162→            TaintSource::Network => write!(f, "Network"),
+   163→            TaintSource::UntrustedFile => write!(f, "UntrustedFile"),
+   164→        }
+   165→    }
+   166→}
+   167→
+   168→/// The taint status of a value.
+   169→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   170→pub enum TaintStatus {
+   171→    /// Value is not tainted.
+   172→    Clean,
+   173→    /// Value is tainted with the given set of sources.
+   174→    Tainted {
+   175→        /// The set of taint sources this value carries.
+   176→        sources: HashSet<TaintSource>,
+   177→        /// Whether the taint is sanitizable (can be removed via verified
+   178→        /// sanitization).
+   179→        sanitizable: bool,
+   180→    },
+   181→}
+   182→
+   183→impl TaintStatus {
+   184→    /// Create a clean (non-tainted) status.
+   185→    pub fn clean() -> Self {
+   186→        TaintStatus::Clean
+   187→    }
+   188→
+   189→    /// Create a tainted status from a single source.
+   190→    pub fn tainted(source: TaintSource, sanitizable: bool) -> Self {
+   191→        TaintStatus::Tainted {
+   192→            sources: [source].into_iter().collect(),
+   193→            sanitizable,
+   194→        }
+   195→    }
+   196→
+   197→    /// Create a tainted status from multiple sources.
+   198→    pub fn tainted_multi(sources: HashSet<TaintSource>, sanitizable: bool) -> Self {
+   199→        TaintStatus::Tainted {
+   200→            sources,
+   201→            sanitizable,
+   202→        }
+   203→    }
+   204→
+   205→    /// Returns `true` if the value is tainted.
+   206→    pub fn is_tainted(&self) -> bool {
+   207→        matches!(self, TaintStatus::Tainted { .. })
+   208→    }
+   209→
+   210→    /// Returns the taint sources, or an empty set if clean.
+   211→    pub fn sources(&self) -> HashSet<TaintSource> {
+   212→        match self {
+   213→            TaintStatus::Clean => HashSet::new(),
+   214→            TaintStatus::Tainted { sources, .. } => sources.clone(),
+   215→        }
+   216→    }
+   217→
+   218→    /// Propagate taint: union the sources of two taint statuses.
+   219→    ///
+   220→    /// If either is tainted, the result is tainted with the union of sources.
+   221→    /// The result is sanitizable only if both inputs are sanitizable.
+   222→    pub fn propagate(&self, other: &TaintStatus) -> TaintStatus {
+   223→        match (self, other) {
+   224→            (TaintStatus::Clean, TaintStatus::Clean) => TaintStatus::Clean,
+   225→            (
+   226→                TaintStatus::Clean,
+   227→                TaintStatus::Tainted {
+   228→                    sources,
+   229→                    sanitizable,
+   230→                },
+   231→            )
+   232→            | (
+   233→                TaintStatus::Tainted {
+   234→                    sources,
+   235→                    sanitizable,
+   236→                },
+   237→                TaintStatus::Clean,
+   238→            ) => TaintStatus::Tainted {
+   239→                sources: sources.clone(),
+   240→                sanitizable: *sanitizable,
+   241→            },
+   242→            (
+   243→                TaintStatus::Tainted {
+   244→                    sources: s1,
+   245→                    sanitizable: san1,
+   246→                },
+   247→                TaintStatus::Tainted {
+   248→                    sources: s2,
+   249→                    sanitizable: san2,
+   250→                },
+   251→            ) => TaintStatus::Tainted {
+   252→                sources: s1.union(s2).copied().collect(),
+   253→                sanitizable: *san1 && *san2,
+   254→            },
+   255→        }
+   256→    }
+   257→
+   258→    /// Sanitize the value: remove taint if sanitizable.
+   259→    ///
+   260→    /// Returns `Ok(Clean)` if the taint was sanitizable, or `Err(self)` if not.
+   261→    pub fn sanitize(self) -> Result<TaintStatus, TaintStatus> {
+   262→        match self {
+   263→            TaintStatus::Clean => Ok(TaintStatus::Clean),
+   264→            TaintStatus::Tainted {
+   265→                sanitizable: true, ..
+   266→            } => Ok(TaintStatus::Clean),
+   267→            t @ TaintStatus::Tainted {
+   268→                sanitizable: false, ..
+   269→            } => Err(t),
+   270→        }
+   271→    }
+   272→
+   273→    /// Effective security level adjustment for tainted data.
+   274→    /// Tainted data is treated at the join of its explicit level and `Internal`.
+   275→    pub fn effective_level(&self, explicit: SecurityLevel) -> SecurityLevel {
+   276→        match self {
+   277→            TaintStatus::Clean => explicit,
+   278→            TaintStatus::Tainted { .. } => explicit.join(SecurityLevel::Internal),
+   279→        }
+   280→    }
+   281→}
+   282→
+   283→impl fmt::Display for TaintStatus {
+   284→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   285→        match self {
+   286→            TaintStatus::Clean => write!(f, "Clean"),
+   287→            TaintStatus::Tainted {
+   288→                sources,
+   289→                sanitizable,
+   290→            } => {
+   291→                let srcs: Vec<_> = sources.iter().map(|s| s.to_string()).collect();
+   292→                write!(
+   293→                    f,
+   294→                    "Tainted({}{})",
+   295→                    srcs.join(","),
+   296→                    if *sanitizable { "" } else { ";unsanitizable" }
+   297→                )
+   298→            }
+   299→        }
+   300→    }
+   301→}
+   302→
+   303→// ---------------------------------------------------------------------------
+   304→// Taint Label
+   305→// ---------------------------------------------------------------------------
+   306→
+   307→/// A lightweight taint label — the set of taint sources attached to a value.
+   308→///
+   309→/// Unlike [`TaintStatus`], which also tracks sanitizability, `TaintLabel`
+   310→/// is the minimal information needed for taint propagation along data-flow
+   311→/// edges. It is the label that flows through the SCG's DataFlow edges
+   312→/// during the IVE's fixed-point taint computation.
+   313→///
+   314→/// A `TaintLabel` is essentially a set of [`TaintSource`] values. The empty
+   315→/// set represents "Clean" (no taint). Taint propagation is set union.
+   316→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   317→pub struct TaintLabel {
+   318→    /// The set of taint sources. Empty means clean.
+   319→    sources: HashSet<TaintSource>,
+   320→}
+   321→
+   322→impl TaintLabel {
+   323→    /// Create a clean (empty) label.
+   324→    pub fn clean() -> Self {
+   325→        TaintLabel {
+   326→            sources: HashSet::new(),
+   327→        }
+   328→    }
+   329→
+   330→    /// Create a label from a single source.
+   331→    pub fn from_source(source: TaintSource) -> Self {
+   332→        TaintLabel {
+   333→            sources: [source].into_iter().collect(),
+   334→        }
+   335→    }
+   336→
+   337→    /// Create a label from multiple sources.
+   338→    pub fn from_sources(sources: HashSet<TaintSource>) -> Self {
+   339→        TaintLabel { sources }
+   340→    }
+   341→
+   342→    /// Returns `true` if the label is clean (no taint sources).
+   343→    pub fn is_clean(&self) -> bool {
+   344→        self.sources.is_empty()
+   345→    }
+   346→
+   347→    /// Returns `true` if the label is tainted (has at least one source).
+   348→    pub fn is_tainted(&self) -> bool {
+   349→        !self.sources.is_empty()
+   350→    }
+   351→
+   352→    /// Returns the set of taint sources.
+   353→    pub fn sources(&self) -> &HashSet<TaintSource> {
+   354→        &self.sources
+   355→    }
+   356→
+   357→    /// Propagate (join) two labels: the result carries the union of sources.
+   358→    ///
+   359→    /// This is the lattice join operation for taint labels.
+   360→    pub fn join(&self, other: &TaintLabel) -> TaintLabel {
+   361→        TaintLabel {
+   362→            sources: self.sources.union(&other.sources).copied().collect(),
+   363→        }
+   364→    }
+   365→
+   366→    /// Check if this label contains a specific source.
+   367→    pub fn contains(&self, source: &TaintSource) -> bool {
+   368→        self.sources.contains(source)
+   369→    }
+   370→
+   371→    /// Convert to a `TaintStatus` with the given sanitizability.
+   372→    pub fn to_status(&self, sanitizable: bool) -> TaintStatus {
+   373→        if self.sources.is_empty() {
+   374→            TaintStatus::Clean
+   375→        } else {
+   376→            TaintStatus::Tainted {
+   377→                sources: self.sources.clone(),
+   378→                sanitizable,
+   379→            }
+   380→        }
+   381→    }
+   382→}
+   383→
+   384→impl fmt::Display for TaintLabel {
+   385→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   386→        if self.sources.is_empty() {
+   387→            write!(f, "Clean")
+   388→        } else {
+   389→            let srcs: Vec<_> = self.sources.iter().map(|s| s.to_string()).collect();
+   390→            write!(f, "Tainted({})", srcs.join(","))
+   391→        }
+   392→    }
+   393→}
+   394→
+   395→impl Default for TaintLabel {
+   396→    fn default() -> Self {
+   397→        Self::clean()
+   398→    }
+   399→}
+   400→
+   401→// ---------------------------------------------------------------------------
+   402→// TaintTracker
+   403→// ---------------------------------------------------------------------------
+   404→
+   405→/// A taint tracker that propagates taint labels through a graph of value
+   406→/// nodes connected by derivation chains.
+   407→///
+   408→/// The tracker maintains a map from [`NodeId`] to [`TaintLabel`] and
+   409→/// supports incremental propagation: when a new edge is added, only the
+   410→/// affected downstream nodes are updated.
+   411→///
+   412→/// # Fixed-Point Propagation
+   413→///
+   414→/// The `propagate` method performs a fixed-point computation: it iterates
+   415→/// over all edges, joining source labels into destination labels, until no
+   416→/// labels change. This is equivalent to the IVE's taint propagation over
+   417→/// the SCG's DataFlow edges.
+   418→#[derive(Debug, Clone, Default)]
+   419→pub struct TaintTracker {
+   420→    /// Taint labels indexed by node ID.
+   421→    labels: HashMap<NodeId, TaintLabel>,
+   422→    /// Data-flow edges: (source, destination).
+   423→    edges: Vec<(NodeId, NodeId)>,
+   424→}
+   425→
+   426→impl TaintTracker {
+   427→    /// Create a new, empty taint tracker.
+   428→    pub fn new() -> Self {
+   429→        Self::default()
+   430→    }
+   431→
+   432→    /// Set the taint label for a node.
+   433→    pub fn set_label(&mut self, node: NodeId, label: TaintLabel) {
+   434→        self.labels.insert(node, label);
+   435→    }
+   436→
+   437→    /// Get the taint label for a node (Clean if not set).
+   438→    pub fn get_label(&self, node: NodeId) -> TaintLabel {
+   439→        self.labels.get(&node).cloned().unwrap_or_default()
+   440→    }
+   441→
+   442→    /// Add a data-flow edge from `src` to `dst`.
+   443→    pub fn add_edge(&mut self, src: NodeId, dst: NodeId) {
+   444→        self.edges.push((src, dst));
+   445→    }
+   446→
+   447→    /// Propagate taint labels along all edges until a fixed point is reached.
+   448→    ///
+   449→    /// Returns the number of iterations performed.
+   450→    pub fn propagate(&mut self) -> usize {
+   451→        let mut iterations = 0;
+   452→        loop {
+   453→            let mut changed = false;
+   454→            for &(src, dst) in &self.edges {
+   455→                let src_label = self.get_label(src);
+   456→                let dst_label = self.get_label(dst);
+   457→                let joined = src_label.join(&dst_label);
+   458→                if joined != dst_label {
+   459→                    self.labels.insert(dst, joined);
+   460→                    changed = true;
+   461→                }
+   462→            }
+   463→            iterations += 1;
+   464→            if !changed {
+   465→                break;
+   466→            }
+   467→        }
+   468→        iterations
+   469→    }
+   470→
+   471→    /// Propagate taint through a derivation chain.
+   472→    ///
+   473→    /// Given a chain of derivations and a taint map, walks the chain from
+   474→    /// root to leaf, joining all taint labels.
+   475→    pub fn propagate_chain(
+   476→        derivation: &Derivation,
+   477→        taint_map: &HashMap<DerivationId, TaintLabel>,
+   478→        lookup: impl Fn(DerivationId) -> Option<Derivation>,
+   479→    ) -> TaintLabel {
+   480→        let chain = derivation.trace(lookup);
+   481→        let mut accumulated = TaintLabel::clean();
+   482→        for d in &chain {
+   483→            if let Some(label) = taint_map.get(&d.id) {
+   484→                accumulated = accumulated.join(label);
+   485→            }
+   486→        }
+   487→        accumulated
+   488→    }
+   489→
+   490→    /// Returns the number of nodes with taint labels.
+   491→    pub fn node_count(&self) -> usize {
+   492→        self.labels.len()
+   493→    }
+   494→
+   495→    /// Returns the number of edges.
+   496→    pub fn edge_count(&self) -> usize {
+   497→        self.edges.len()
+   498→    }
+   499→
+   500→    /// Returns all tainted nodes (nodes with non-empty taint labels).
+   501→    pub fn tainted_nodes(&self) -> Vec<(NodeId, TaintLabel)> {
+   502→        self.labels
+   503→            .iter()
+   504→            .filter(|(_, label)| label.is_tainted())
+   505→            .map(|(&id, label)| (id, label.clone()))
+   506→            .collect()
+   507→    }
+   508→}
+   509→
+   510→// ---------------------------------------------------------------------------
+   511→// Capability (VUMA-level, mirrors bd::capd::Capability)
+   512→// ---------------------------------------------------------------------------
+   513→
+   514→/// VUMA capability bits used for the security model.
+   515→///
+   516→/// This is the subset of the full capability set that is relevant to
+   517→/// security-level and hardware-mapping decisions. The full set lives in
+   518→/// `bd::capd::Capability`; we duplicate the relevant variants here to keep
+   519→/// the security module self-contained and avoid a cross-crate dependency.
+   520→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   521→pub enum SecurityCapability {
+   522→    /// Permission to observe the value's content.
+   523→    Read,
+   524→    /// Permission to modify the value's content.
+   525→    Write,
+   526→    /// Permission to transmit the value over a network channel.
+   527→    Send,
+   528→    /// Permission to call the value as code.
+   529→    Execute,
+   530→    /// Permission to derive a pointer to the value.
+   531→    DerivePtr,
+   532→}
+   533→
+   534→impl fmt::Display for SecurityCapability {
+   535→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   536→        match self {
+   537→            SecurityCapability::Read => write!(f, "Read"),
+   538→            SecurityCapability::Write => write!(f, "Write"),
+   539→            SecurityCapability::Send => write!(f, "Send"),
+   540→            SecurityCapability::Execute => write!(f, "Execute"),
+   541→            SecurityCapability::DerivePtr => write!(f, "DerivePtr"),
+   542→        }
+   543→    }
+   544→}
+   545→
+   546→// ---------------------------------------------------------------------------
+   547→// Security Relation (part of RelD)
+   548→// ---------------------------------------------------------------------------
+   549→
+   550→/// The security metadata carried by every value as part of its Relational
+   551→/// Descriptor (RelD).
+   552→///
+   553→/// This is the core data structure of the security model. It records the
+   554→/// security classification, flow policy, taint status, and (if applicable)
+   555→/// the provenance of any declassification that has been applied.
+   556→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   557→pub struct SecurityRel {
+   558→    /// The security classification of this value.
+   559→    pub level: SecurityLevel,
+   560→    /// The flow policy governing information flow.
+   561→    pub flow: FlowPolicy,
+   562→    /// The taint status (taint sources, sanitizability).
+   563→    pub taint: TaintStatus,
+   564→    /// If this value has been declassified, records the audit trail.
+   565→    pub declassification: Option<DeclassificationRecord>,
+   566→}
+   567→
+   568→impl SecurityRel {
+   569→    /// Create a default SecurityRel at the given level with NoDowngrade flow
+   570→    /// and Clean taint.
+   571→    pub fn at(level: SecurityLevel) -> Self {
+   572→        Self {
+   573→            level,
+   574→            flow: FlowPolicy::NoDowngrade,
+   575→            taint: TaintStatus::Clean,
+   576→            declassification: None,
+   577→        }
+   578→    }
+   579→
+   580→    /// Create a SecurityRel for untrusted (tainted) input.
+   581→    ///
+   582→    /// Tainted data is created at the given explicit level with `NoDowngrade`
+   583→    /// flow. The effective level is the join of the explicit level and
+   584→    /// `Internal`.
+   585→    pub fn for_untrusted(level: SecurityLevel, source: TaintSource) -> Self {
+   586→        Self {
+   587→            level,
+   588→            flow: FlowPolicy::NoDowngrade,
+   589→            taint: TaintStatus::tainted(source, true),
+   590→            declassification: None,
+   591→        }
+   592→    }
+   593→
+   594→    /// Create a SecurityRel for cryptographic key material (NoFlow).
+   595→    pub fn for_key_material(level: SecurityLevel) -> Self {
+   596→        Self {
+   597→            level,
+   598→            flow: FlowPolicy::NoFlow,
+   599→            taint: TaintStatus::Clean,
+   600→            declassification: None,
+   601→        }
+   602→    }
+   603→
+   604→    /// The effective security level, accounting for taint.
+   605→    ///
+   606→    /// Tainted data is treated at the join of its explicit level and Internal.
+   607→    pub fn effective_level(&self) -> SecurityLevel {
+   608→        self.taint.effective_level(self.level)
+   609→    }
+   610→
+   611→    /// Check whether information can flow from `self` to `target`.
+   612→    ///
+   613→    /// Returns `Ok(())` if the flow is permitted, or a `SecurityViolation`
+   614→    /// describing why it is not.
+   615→    pub fn check_flow_to(&self, target: &SecurityRel) -> Result<(), SecurityViolation> {
+   616→        // NoFlow values cannot flow at all.
+   617→        if self.flow == FlowPolicy::NoFlow {
+   618→            return Err(SecurityViolation::NoFlowViolation {
+   619→                src_level: self.level,
+   620→                dst_level: target.level,
+   621→            });
+   622→        }
+   623→
+   624→        // Check the no-downgrade rule using effective levels.
+   625→        let src_eff = self.effective_level();
+   626→        let dst_eff = target.effective_level();
+   627→
+   628→        if !src_eff.can_flow_to(dst_eff) {
+   629→            // Allow if the target has a declassification gate that covers
+   630→            // this exact downgrade — but that check is done by the
+   631→            // SecurityVerifier at the boundary level, not here.
+   632→            return Err(SecurityViolation::InformationLeak {
+   633→                src_level: src_eff,
+   634→                dst_level: dst_eff,
+   635→            });
+   636→        }
+   637→
+   638→        // NoDowngrade policy on the source blocks any downward flow
+   639→        // even if the target level would otherwise allow it.
+   640→        if self.flow == FlowPolicy::NoDowngrade && self.level > target.level {
+   641→            return Err(SecurityViolation::DowngradeBlocked {
+   642→                src_level: self.level,
+   643→                dst_level: target.level,
+   644→            });
+   645→        }
+   646→
+   647→        Ok(())
+   648→    }
+   649→
+   650→    /// Join two SecurityRels — used when combining values (e.g. arithmetic).
+   651→    ///
+   652→    /// The result has the join of the levels, the most restrictive flow policy,
+   653→    /// and the union of taint sources.
+   654→    pub fn join(&self, other: &SecurityRel) -> SecurityRel {
+   655→        SecurityRel {
+   656→            level: self.level.join(other.level),
+   657→            flow: self.flow.more_restrictive(other.flow),
+   658→            taint: self.taint.propagate(&other.taint),
+   659→            declassification: None,
+   660→        }
+   661→    }
+   662→}
+   663→
+   664→impl fmt::Display for SecurityRel {
+   665→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   666→        write!(f, "SecurityRel({} {} {}", self.level, self.flow, self.taint)?;
+   667→        if let Some(ref dec) = self.declassification {
+   668→            write!(f, " declassified_by={}", dec.gate_function)?;
+   669→        }
+   670→        write!(f, ")")
+   671→    }
+   672→}
+   673→
+   674→// ---------------------------------------------------------------------------
+   675→// Flow Policy helpers
+   676→// ---------------------------------------------------------------------------
+   677→
+   678→impl FlowPolicy {
+   679→    /// Returns the more restrictive of two flow policies.
+   680→    ///
+   681→    /// Ordering: `NoFlow > NoDowngrade > FreeFlow`.
+   682→    pub fn more_restrictive(self, other: FlowPolicy) -> FlowPolicy {
+   683→        match (self, other) {
+   684→            (FlowPolicy::NoFlow, _) | (_, FlowPolicy::NoFlow) => FlowPolicy::NoFlow,
+   685→            (FlowPolicy::NoDowngrade, _) | (_, FlowPolicy::NoDowngrade) => FlowPolicy::NoDowngrade,
+   686→            (FlowPolicy::FreeFlow, FlowPolicy::FreeFlow) => FlowPolicy::FreeFlow,
+   687→        }
+   688→    }
+   689→}
+   690→
+   691→// ---------------------------------------------------------------------------
+   692→// Security Violations
+   693→// ---------------------------------------------------------------------------
+   694→
+   695→/// A violation of the security model detected during verification.
+   696→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   697→pub enum SecurityViolation {
+   698→    /// Information would leak from a higher level to a lower level.
+   699→    InformationLeak {
+   700→        src_level: SecurityLevel,
+   701→        dst_level: SecurityLevel,
+   702→    },
+   703→    /// A NoDowngrade policy prevents the flow.
+   704→    DowngradeBlocked {
+   705→        src_level: SecurityLevel,
+   706→        dst_level: SecurityLevel,
+   707→    },
+   708→    /// A NoFlow value attempted to cross a boundary.
+   709→    NoFlowViolation {
+   710→        src_level: SecurityLevel,
+   711→        dst_level: SecurityLevel,
+   712→    },
+   713→    /// Tainted data reached a sink that requires clean data.
+   714→    TaintedDataAtSink {
+   715→        sources: HashSet<TaintSource>,
+   716→        sink: String,
+   717→    },
+   718→    /// A boundary crossing was attempted without the required capabilities.
+   719→    MissingCapabilityForCrossing {
+   720→        capability: SecurityCapability,
+   721→        boundary_id: BoundaryId,
+   722→    },
+   723→    /// A declassification was attempted without a valid proof.
+   724→    DeclassificationWithoutProof {
+   725→        from_level: SecurityLevel,
+   726→        to_level: SecurityLevel,
+   727→    },
+   728→    /// Capability monotonicity violated — a capability was added.
+   729→    CapabilityMonotonicityViolation { added: SecurityCapability },
+   730→    /// An untrusted source value carries the Execute capability.
+   731→    ExecuteOnUntrusted { source: TaintSource },
+   732→    /// Implicit flow across a boundary.
+   733→    ImplicitFlowAcrossBoundary {
+   734→        condition_level: SecurityLevel,
+   735→        target_level: SecurityLevel,
+   736→    },
+   737→}
+   738→
+   739→impl fmt::Display for SecurityViolation {
+   740→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   741→        match self {
+   742→            SecurityViolation::InformationLeak {
+   743→                src_level,
+   744→                dst_level,
+   745→            } => {
+   746→                write!(f, "information leak: {} → {}", src_level, dst_level)
+   747→            }
+   748→            SecurityViolation::DowngradeBlocked {
+   749→                src_level,
+   750→                dst_level,
+   751→            } => {
+   752→                write!(f, "downgrade blocked: {} → {}", src_level, dst_level)
+   753→            }
+   754→            SecurityViolation::NoFlowViolation {
+   755→                src_level,
+   756→                dst_level,
+   757→            } => {
+   758→                write!(f, "NoFlow violation: {} → {}", src_level, dst_level)
+   759→            }
+   760→            SecurityViolation::TaintedDataAtSink { sources, sink } => {
+   761→                let srcs: Vec<_> = sources.iter().map(|s| s.to_string()).collect();
+   762→                write!(f, "tainted data ({}) at sink '{}'", srcs.join(","), sink)
+   763→            }
+   764→            SecurityViolation::MissingCapabilityForCrossing {
+   765→                capability,
+   766→                boundary_id,
+   767→            } => {
+   768→                write!(
+   769→                    f,
+   770→                    "missing {} for crossing boundary {}",
+   771→                    capability, boundary_id
+   772→                )
+   773→            }
+   774→            SecurityViolation::DeclassificationWithoutProof {
+   775→                from_level,
+   776→                to_level,
+   777→            } => {
+   778→                write!(
+   779→                    f,
+   780→                    "declassification without proof: {} → {}",
+   781→                    from_level, to_level
+   782→                )
+   783→            }
+   784→            SecurityViolation::CapabilityMonotonicityViolation { added } => {
+   785→                write!(f, "capability monotonicity violated: {} added", added)
+   786→            }
+   787→            SecurityViolation::ExecuteOnUntrusted { source } => {
+   788→                write!(f, "Execute capability on untrusted source: {}", source)
+   789→            }
+   790→            SecurityViolation::ImplicitFlowAcrossBoundary {
+   791→                condition_level,
+   792→                target_level,
+   793→            } => {
+   794→                write!(
+   795→                    f,
+   796→                    "implicit flow across boundary: condition at {} influences {}",
+   797→                    condition_level, target_level
+   798→                )
+   799→            }
+   800→        }
+   801→    }
+   802→}
+   803→
+   804→// ---------------------------------------------------------------------------
+   805→// Declassification
+   806→// ---------------------------------------------------------------------------
+   807→
+   808→/// Opaque identifier for a declassification gate function.
+   809→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   810→pub struct GateFunctionId(pub u64);
+   811→
+   812→impl fmt::Display for GateFunctionId {
+   813→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   814→        write!(f, "gate#{}", self.0)
+   815→    }
+   816→}
+   817→
+   818→/// A proof that a declassification is safe.
+   819→///
+   820→/// A declassification is only valid if:
+   821→/// 1. It is performed through a verified gate function.
+   822→/// 2. The gate function has been verified to produce output safe at the
+   823→///    target level (output independence, no side channels, completeness).
+   824→/// 3. The gate is the designated gate for the boundary being crossed.
+   825→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   826→pub struct DeclassificationProof {
+   827→    /// The gate function that performs the declassification.
+   828→    pub gate: GateFunctionId,
+   829→    /// The source security level being declassified from.
+   830→    pub from_level: SecurityLevel,
+   831→    /// The target security level being declassified to.
+   832→    pub to_level: SecurityLevel,
+   833→    /// Whether the gate function has been verified for output independence.
+   834→    pub output_independence_verified: bool,
+   835→    /// Whether the gate function has been verified for no side channels.
+   836→    pub no_side_channels_verified: bool,
+   837→    /// Whether the gate function has been verified for completeness.
+   838→    pub completeness_verified: bool,
+   839→    /// The boundary this declassification applies to (if any).
+   840→    pub boundary_id: Option<BoundaryId>,
+   841→}
+   842→
+   843→impl DeclassificationProof {
+   844→    /// Create a new declassification proof.
+   845→    pub fn new(gate: GateFunctionId, from: SecurityLevel, to: SecurityLevel) -> Self {
+   846→        Self {
+   847→            gate,
+   848→            from_level: from,
+   849→            to_level: to,
+   850→            output_independence_verified: false,
+   851→            no_side_channels_verified: false,
+   852→            completeness_verified: false,
+   853→            boundary_id: None,
+   854→        }
+   855→    }
+   856→
+   857→    /// Returns `true` if all proof obligations are satisfied.
+   858→    pub fn is_valid(&self) -> bool {
+   859→        self.output_independence_verified
+   860→            && self.no_side_channels_verified
+   861→            && self.completeness_verified
+   862→            && self.from_level > self.to_level
+   863→    }
+   864→
+   865→    /// Mark all proof obligations as verified.
+   866→    pub fn verify_all(&mut self) {
+   867→        self.output_independence_verified = true;
+   868→        self.no_side_channels_verified = true;
+   869→        self.completeness_verified = true;
+   870→    }
+   871→}
+   872→
+   873→/// An audit-trail record for a declassification event.
+   874→///
+   875→/// Every declassification is logged at runtime, enabling post-incident
+   876→/// analysis of information leaks.
+   877→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   878→pub struct DeclassificationRecord {
+   879→    /// The gate function that performed the declassification.
+   880→    pub gate_function: GateFunctionId,
+   881→    /// The original security level.
+   882→    pub from_level: SecurityLevel,
+   883→    /// The new (lower) security level.
+   884→    pub to_level: SecurityLevel,
+   885→    /// Where in the source code the declassification occurred.
+   886→    pub source_location: ProgramPoint,
+   887→    /// The proof that was validated before declassification.
+   888→    pub proof: DeclassificationProof,
+   889→}
+   890→
+   891→// ---------------------------------------------------------------------------
+   892→// Security Boundary
+   893→// ---------------------------------------------------------------------------
+   894→
+   895→/// Opaque identifier for a security boundary.
+   896→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   897→pub struct BoundaryId(pub u64);
+   898→
+   899→impl fmt::Display for BoundaryId {
+   900→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   901→        write!(f, "boundary#{}", self.0)
+   902→    }
+   903→}
+   904→
+   905→/// A security boundary between two adjacent SCG regions.
+   906→///
+   907→/// A boundary `B = (R_high, R_low)` enforces that data and control flow
+   908→/// crossing from the higher-level region to the lower-level region must
+   909→/// satisfy the information-flow rule or go through a declassification gate.
+   910→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   911→pub struct SecurityBoundary {
+   912→    /// Unique identifier.
+   913→    pub id: BoundaryId,
+   914→    /// The region with the higher security level.
+   915→    pub region_high: RegionId,
+   916→    /// The region with the lower security level.
+   917→    pub region_low: RegionId,
+   918→    /// The security level of the high region.
+   919→    pub level_high: SecurityLevel,
+   920→    /// The security level of the low region.
+   921→    pub level_low: SecurityLevel,
+   922→    /// Capabilities required for data to cross this boundary.
+   923→    pub cross_permissions: HashSet<SecurityCapability>,
+   924→    /// The declassification gate for this boundary, if any.
+   925→    pub declassification_gate: Option<GateFunctionId>,
+   926→}
+   927→
+   928→impl SecurityBoundary {
+   929→    /// Create a new security boundary.
+   930→    ///
+   931→    /// # Panics
+   932→    ///
+   933→    /// In debug builds, panics if `level_high <= level_low`.
+   934→    pub fn new(
+   935→        id: BoundaryId,
+   936→        region_high: RegionId,
+   937→        region_low: RegionId,
+   938→        level_high: SecurityLevel,
+   939→        level_low: SecurityLevel,
+   940→    ) -> Self {
+   941→        debug_assert!(
+   942→            level_high > level_low,
+   943→            "SecurityBoundary requires level_high > level_low"
+   944→        );
+   945→        Self {
+   946→            id,
+   947→            region_high,
+   948→            region_low,
+   949→            level_high,
+   950→            level_low,
+   951→            cross_permissions: HashSet::new(),
+   952→            declassification_gate: None,
+   953→        }
+   954→    }
+   955→
+   956→    /// Check whether a read from `src_region` to `dst_region` is permitted.
+   957→    ///
+   958→    /// - High→Low: level must be ≤ level_low, or declassification gate required.
+   959→    /// - Low→High: always permitted (information flows upward).
+   960→    pub fn check_read_across(
+   961→        &self,
+   962→        src_region: RegionId,
+   963→        value_level: SecurityLevel,
+   964→    ) -> Result<(), SecurityViolation> {
+   965→        if src_region == self.region_high {
+   966→            // High → Low read: information flows downward
+   967→            if value_level.can_flow_to(self.level_low) || self.declassification_gate.is_some() {
+   968→                Ok(())
+   969→            } else {
+   970→                Err(SecurityViolation::InformationLeak {
+   971→                    src_level: value_level,
+   972→                    dst_level: self.level_low,
+   973→                })
+   974→            }
+   975→        } else {
+   976→            // Low → High: always permitted
+   977→            Ok(())
+   978→        }
+   979→    }
+   980→
+   981→    /// Check whether a write from `src_region` to `dst_region` is permitted.
+   982→    ///
+   983→    /// - High→Low: integrity concern — data is being written into low region.
+   984→    /// - Low→High: integrity concern — untrusted data injected into high region.
+   985→    pub fn check_write_across(
+   986→        &self,
+   987→        src_region: RegionId,
+   988→        value_level: SecurityLevel,
+   989→    ) -> Result<(), SecurityViolation> {
+   990→        if src_region == self.region_high {
+   991→            // High → Low write
+   992→            if value_level.can_flow_to(self.level_low) {
+   993→                Ok(())
+   994→            } else {
+   995→                Err(SecurityViolation::InformationLeak {
+   996→                    src_level: value_level,
+   997→                    dst_level: self.level_low,
+   998→                })
+   999→            }
+  1000→        } else {
+  1001→            // Low → High write: potential integrity violation
+  1002→            // In VUMA this is flagged unless the target CapD includes Write
+  1003→            // and the source value has been validated. For the model-level
+  1004→            // check we just verify the level is appropriate.
+  1005→            Ok(())
+  1006→        }
+  1007→    }
+  1008→
+  1009→    /// Check whether a control-flow crossing requires specific capabilities.
+  1010→    pub fn check_control_flow_across(
+  1011→        &self,
+  1012→        caller_caps: &HashSet<SecurityCapability>,
+  1013→    ) -> Result<(), SecurityViolation> {
+  1014→        for cap in &self.cross_permissions {
+  1015→            if !caller_caps.contains(cap) {
+  1016→                return Err(SecurityViolation::MissingCapabilityForCrossing {
+  1017→                    capability: *cap,
+  1018→                    boundary_id: self.id,
+  1019→                });
+  1020→            }
+  1021→        }
+  1022→        Ok(())
+  1023→    }
+  1024→}
+  1025→
+  1026→// ---------------------------------------------------------------------------
+  1027→// ARM64 Security Mapping
+  1028→// ---------------------------------------------------------------------------
+  1029→
+  1030→/// ARM64 PAC key identifiers.
+  1031→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1032→pub enum PacKey {
+  1033→    /// APIAKey — for instruction addresses (function pointers).
+  1034→    ApiA,
+  1035→    /// APDAKey — for data addresses.
+  1036→    ApdA,
+  1037→}
+  1038→
+  1039→/// ARM64 MTE operating mode.
+  1040→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1041→pub enum MteMode {
+  1042→    /// Synchronous tag checks (precise faults, used in dev/test).
+  1043→    Synchronous,
+  1044→    /// Asynchronous tag checks (imprecise faults, used in production).
+  1045→    Asynchronous,
+  1046→}
+  1047→
+  1048→/// ARM64 BTI landing pad type.
+  1049→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1050→pub enum BtiType {
+  1051→    /// `bti c` — permits indirect calls.
+  1052→    Call,
+  1053→    /// `bti j` — permits indirect jumps.
+  1054→    Jump,
+  1055→    /// `bti jc` — permits both calls and jumps.
+  1056→    CallAndJump,
+  1057→}
+  1058→
+  1059→/// The mapping from VUMA CapD capabilities to ARM64 hardware security
+  1060→/// features for ARM64 platforms (ARMv8.2-A+).
+  1061→///
+  1062→/// | VUMA Concept              | ARM64 Feature | Mapping                                  |
+  1063→/// |---------------------------|---------------|------------------------------------------|
+  1064→/// | DerivePtr capability      | PAC           | Pointer creation → sign; deref → verify  |
+  1065→/// | Execute capability        | BTI           | Function entries → BTI landing pads      |
+  1066→/// | Bounds invariant          | MTE           | Allocation tags prevent spatial overflow  |
+  1067→/// | Liveness invariant        | MTE           | Deallocation retagging prevents UAF      |
+  1068→/// | Capability monotonicity   | PAC + BTI     | Can't forge pointers or redirect exec    |
+  1069→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  1070→pub struct Arm64SecurityMapping {
+  1071→    /// The PAC key used for instruction (code) pointer signing.
+  1072→    pub pac_instruction_key: PacKey,
+  1073→    /// The PAC key used for data pointer signing.
+  1074→    pub pac_data_key: PacKey,
+  1075→    /// The MTE mode (synchronous for dev, asynchronous for prod).
+  1076→    pub mte_mode: MteMode,
+  1077→    /// Whether PAC is enabled.
+  1078→    pub pac_enabled: bool,
+  1079→    /// Whether BTI is enabled.
+  1080→    pub bti_enabled: bool,
+  1081→    /// Whether MTE is enabled.
+  1082→    pub mte_enabled: bool,
+  1083→}
+  1084→
+  1085→impl Arm64SecurityMapping {
+  1086→    /// Default mapping with all features enabled in development mode.
+  1087→    pub fn default_development() -> Self {
+  1088→        Self {
+  1089→            pac_instruction_key: PacKey::ApiA,
+  1090→            pac_data_key: PacKey::ApdA,
+  1091→            mte_mode: MteMode::Synchronous,
+  1092→            pac_enabled: true,
+  1093→            bti_enabled: true,
+  1094→            mte_enabled: true,
+  1095→        }
+  1096→    }
+  1097→
+  1098→    /// Default mapping in production mode (async MTE for performance).
+  1099→    pub fn default_production() -> Self {
+  1100→        Self {
+  1101→            pac_instruction_key: PacKey::ApiA,
+  1102→            pac_data_key: PacKey::ApdA,
+  1103→            mte_mode: MteMode::Asynchronous,
+  1104→            pac_enabled: true,
+  1105→            bti_enabled: true,
+  1106→            mte_enabled: true,
+  1107→        }
+  1108→    }
+  1109→
+  1110→    /// Mapping with all hardware features disabled (testing / emulation).
+  1111→    pub fn disabled() -> Self {
+  1112→        Self {
+  1113→            pac_instruction_key: PacKey::ApiA,
+  1114→            pac_data_key: PacKey::ApdA,
+  1115→            mte_mode: MteMode::Synchronous,
+  1116→            pac_enabled: false,
+  1117→            bti_enabled: false,
+  1118→            mte_enabled: false,
+  1119→        }
+  1120→    }
+  1121→
+  1122→    /// Map a capability to the corresponding ARM64 feature.
+  1123→    ///
+  1124→    /// Returns the hardware feature(s) that enforce the given VUMA capability.
+  1125→    pub fn capability_to_hw(&self, cap: SecurityCapability) -> Vec<Arm64Feature> {
+  1126→        match cap {
+  1127→            SecurityCapability::DerivePtr => {
+  1128→                if self.pac_enabled {
+  1129→                    vec![Arm64Feature::Pac]
+  1130→                } else {
+  1131→                    vec![]
+  1132→                }
+  1133→            }
+  1134→            SecurityCapability::Execute => {
+  1135→                if self.bti_enabled {
+  1136→                    vec![Arm64Feature::Bti]
+  1137→                } else {
+  1138→                    vec![]
+  1139→                }
+  1140→            }
+  1141→            SecurityCapability::Read | SecurityCapability::Write => {
+  1142→                if self.mte_enabled {
+  1143→                    vec![Arm64Feature::Mte]
+  1144→                } else {
+  1145→                    vec![]
+  1146→                }
+  1147→            }
+  1148→            SecurityCapability::Send => {
+  1149→                // Send is enforced at the software level; PAC+BTI provide
+  1150→                // defense-in-depth against bypass.
+  1151→                let mut features = vec![];
+  1152→                if self.pac_enabled {
+  1153→                    features.push(Arm64Feature::Pac);
+  1154→                }
+  1155→                if self.bti_enabled {
+  1156→                    features.push(Arm64Feature::Bti);
+  1157→                }
+  1158→                features
+  1159→            }
+  1160→        }
+  1161→    }
+  1162→
+  1163→    /// Map a capability set to the full set of ARM64 features required.
+  1164→    pub fn capabilities_to_hw(&self, caps: &HashSet<SecurityCapability>) -> HashSet<Arm64Feature> {
+  1165→        caps.iter()
+  1166→            .flat_map(|c| self.capability_to_hw(*c))
+  1167→            .collect()
+  1168→    }
+  1169→
+  1170→    /// Generate the PAC signing pseudocode for pointer creation.
+  1171→    pub fn emit_pac_sign(&self, has_derive_ptr: bool) -> &'static str {
+  1172→        if self.pac_enabled && has_derive_ptr {
+  1173→            "let signed_ptr = pac_sign(ptr, context=fp);"
+  1174→        } else if !has_derive_ptr {
+  1175→            "compile_error!(\"missing DerivePtr capability\");"
+  1176→        } else {
+  1177→            "// PAC disabled; no signing"
+  1178→        }
+  1179→    }
+  1180→
+  1181→    /// Generate the PAC verification pseudocode for pointer dereference.
+  1182→    pub fn emit_pac_verify(&self) -> &'static str {
+  1183→        if self.pac_enabled {
+  1184→            "let verified_ptr = pac_verify(ptr, context=fp);"
+  1185→        } else {
+  1186→            "// PAC disabled; no verification"
+  1187→        }
+  1188→    }
+  1189→
+  1190→    /// Generate the BTI landing pad pseudocode for a function entry.
+  1191→    pub fn emit_bti_landing_pad(&self, has_execute: bool) -> &'static str {
+  1192→        if self.bti_enabled && has_execute {
+  1193→            "bti c  // permit indirect calls"
+  1194→        } else if self.bti_enabled {
+  1195→            "bti j  // permit indirect jumps only"
+  1196→        } else {
+  1197→            "// BTI disabled; no landing pad"
+  1198→        }
+  1199→    }
+  1200→
+  1201→    /// Generate the MTE allocation pseudocode.
+  1202→    pub fn emit_mte_alloc(&self) -> &'static str {
+  1203→        if self.mte_enabled {
+  1204→            "let tag = random_4bit_tag(); let ptr = mte_alloc(size, tag);"
+  1205→        } else {
+  1206→            "// MTE disabled; plain allocation"
+  1207→        }
+  1208→    }
+  1209→
+  1210→    /// Generate the MTE deallocation pseudocode.
+  1211→    pub fn emit_mte_dealloc(&self) -> &'static str {
+  1212→        if self.mte_enabled {
+  1213→            "mte_retag(ptr, random_4bit_tag());"
+  1214→        } else {
+  1215→            "// MTE disabled; plain deallocation"
+  1216→        }
+  1217→    }
+  1218→}
+  1219→
+  1220→/// ARM64 hardware security features.
+  1221→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+  1222→pub enum Arm64Feature {
+  1223→    /// Pointer Authentication Codes.
+  1224→    Pac,
+  1225→    /// Branch Target Identification.
+  1226→    Bti,
+  1227→    /// Memory Tagging Extension.
+  1228→    Mte,
+  1229→}
+  1230→
+  1231→impl fmt::Display for Arm64Feature {
+  1232→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1233→        match self {
+  1234→            Arm64Feature::Pac => write!(f, "PAC"),
+  1235→            Arm64Feature::Bti => write!(f, "BTI"),
+  1236→            Arm64Feature::Mte => write!(f, "MTE"),
+  1237→        }
+  1238→    }
+  1239→}
+  1240→
+  1241→// ---------------------------------------------------------------------------
+  1242→// Taint Tracking Through Derivation Chains
+  1243→// ---------------------------------------------------------------------------
+  1244→
+  1245→/// Taint propagation along a derivation chain.
+  1246→///
+  1247→/// Given a derivation and a lookup function, this walks the chain from the
+  1248→/// current derivation back to the root region, propagating taint forward.
+  1249→/// If any derivation in the chain carries taint, the result is tainted with
+  1250→/// the union of all sources.
+  1251→pub fn propagate_taint_through_chain<F>(
+  1252→    derivation: &Derivation,
+  1253→    taint_map: &HashMap<DerivationId, TaintStatus>,
+  1254→    lookup: F,
+  1255→) -> TaintStatus
+  1256→where
+  1257→    F: Fn(DerivationId) -> Option<Derivation>,
+  1258→{
+  1259→    let chain = derivation.trace(lookup);
+  1260→    let mut accumulated = TaintStatus::Clean;
+  1261→
+  1262→    for d in &chain {
+  1263→        if let Some(taint) = taint_map.get(&d.id) {
+  1264→            accumulated = accumulated.propagate(taint);
+  1265→        }
+  1266→    }
+  1267→
+  1268→    accumulated
+  1269→}
+  1270→
+  1271→// ---------------------------------------------------------------------------
+  1272→// Security Verifier
+  1273→// ---------------------------------------------------------------------------
+  1274→
+  1275→/// Result of a security verification pass.
+  1276→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  1277→pub struct VerificationResult {
+  1278→    /// Total number of checks performed.
+  1279→    pub total_checks: usize,
+  1280→    /// Number of checks that passed.
+  1281→    pub passed: usize,
+  1282→    /// Violations detected.
+  1283→    pub violations: Vec<SecurityViolation>,
+  1284→}
+  1285→
+  1286→impl Default for VerificationResult {
+  1287→    fn default() -> Self {
+  1288→        Self::new()
+  1289→    }
+  1290→}
+  1291→
+  1292→impl VerificationResult {
+  1293→    /// Create an empty result.
+  1294→    pub fn new() -> Self {
+  1295→        Self {
+  1296→            total_checks: 0,
+  1297→            passed: 0,
+  1298→            violations: Vec::new(),
+  1299→        }
+  1300→    }
+  1301→
+  1302→    /// Record a passing check.
+  1303→    pub fn pass(&mut self) {
+  1304→        self.total_checks += 1;
+  1305→        self.passed += 1;
+  1306→    }
+  1307→
+  1308→    /// Record a failing check with the given violation.
+  1309→    pub fn fail(&mut self, violation: SecurityViolation) {
+  1310→        self.total_checks += 1;
+  1311→        self.violations.push(violation);
+  1312→    }
+  1313→
+  1314→    /// Returns `true` if all checks passed (no violations).
+  1315→    pub fn all_passed(&self) -> bool {
+  1316→        self.violations.is_empty()
+  1317→    }
+  1318→}
+  1319→
+  1320→impl fmt::Display for VerificationResult {
+  1321→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1322→        write!(
+  1323→            f,
+  1324→            "VerificationResult({}/{} passed, {} violations)",
+  1325→            self.passed,
+  1326→            self.total_checks,
+  1327→            self.violations.len()
+  1328→        )
+  1329→    }
+  1330→}
+  1331→
+  1332→/// A value node in the security graph, carrying its SecurityRel and
+  1333→/// associated region.
+  1334→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  1335→pub struct SecNode {
+  1336→    /// Unique node identifier.
+  1337→    pub id: NodeId,
+  1338→    /// The security metadata for this value.
+  1339→    pub security: SecurityRel,
+  1340→    /// The region this value belongs to.
+  1341→    pub region: Option<RegionId>,
+  1342→    /// The capabilities held on this value.
+  1343→    pub capabilities: HashSet<SecurityCapability>,
+  1344→    /// The taint sources (mirrored from SecurityRel for quick lookup).
+  1345→    pub taint_sources: HashSet<TaintSource>,
+  1346→}
+  1347→
+  1348→/// A data-flow edge in the security graph.
+  1349→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  1350→pub struct SecEdge {
+  1351→    /// Source node.
+  1352→    pub from: NodeId,
+  1353→    /// Destination node.
+  1354→    pub to: NodeId,
+  1355→    /// Whether this is an implicit (control-flow) edge.
+  1356→    pub implicit: bool,
+  1357→    /// The boundary this edge crosses, if any.
+  1358→    pub boundary: Option<BoundaryId>,
+  1359→}
+  1360→
+  1361→/// The **Security Verifier** — checks all security invariants over a
+  1362→/// collection of security-annotated nodes, edges, and boundaries.
+  1363→///
+  1364→/// The verifier enforces:
+  1365→/// - The no-downgrade information-flow rule (level check).
+  1366→/// - Taint-at-sink checks.
+  1367→/// - Boundary crossing rules (B1–B3 from the spec).
+  1368→/// - Capability monotonicity.
+  1369→/// - Execute-on-untrusted prevention.
+  1370→/// - Declassification proof requirements.
+  1371→#[derive(Debug, Clone, Default)]
+  1372→pub struct SecurityVerifier {
+  1373→    /// Security-annotated nodes.
+  1374→    pub nodes: HashMap<NodeId, SecNode>,
+  1375→    /// Data-flow edges.
+  1376→    pub edges: Vec<SecEdge>,
+  1377→    /// Security boundaries.
+  1378→    pub boundaries: HashMap<BoundaryId, SecurityBoundary>,
+  1379→    /// Valid declassification proofs.
+  1380→    pub declassification_proofs: HashMap<GateFunctionId, DeclassificationProof>,
+  1381→}
+  1382→
+  1383→impl SecurityVerifier {
+  1384→    /// Create a new, empty verifier.
+  1385→    pub fn new() -> Self {
+  1386→        Self::default()
+  1387→    }
+  1388→
+  1389→    /// Add a node to the verifier.
+  1390→    pub fn add_node(&mut self, node: SecNode) {
+  1391→        self.nodes.insert(node.id, node);
+  1392→    }
+  1393→
+  1394→    /// Add a data-flow edge.
+  1395→    pub fn add_edge(&mut self, edge: SecEdge) {
+  1396→        self.edges.push(edge);
+  1397→    }
+  1398→
+  1399→    /// Add a security boundary.
+  1400→    pub fn add_boundary(&mut self, boundary: SecurityBoundary) {
+  1401→        self.boundaries.insert(boundary.id, boundary);
+  1402→    }
+  1403→
+  1404→    /// Register a valid declassification proof.
+  1405→    pub fn register_declassification_proof(&mut self, proof: DeclassificationProof) {
+  1406→        self.declassification_proofs.insert(proof.gate, proof);
+  1407→    }
+  1408→
+  1409→    /// Run all security checks and return the aggregated result.
+  1410→    pub fn verify(&self) -> VerificationResult {
+  1411→        let mut result = VerificationResult::new();
+  1412→
+  1413→        // 1. Check all data-flow edges for information-flow violations.
+  1414→        self.check_information_flow(&mut result);
+  1415→
+  1416→        // 2. Check tainted data at sinks.
+  1417→        self.check_taint_at_sinks(&mut result);
+  1418→
+  1419→        // 3. Check boundary crossing rules.
+  1420→        self.check_boundary_crossings(&mut result);
+  1421→
+  1422→        // 4. Check capability monotonicity.
+  1423→        self.check_capability_monotonicity(&mut result);
+  1424→
+  1425→        // 5. Check Execute on untrusted sources.
+  1426→        self.check_execute_on_untrusted(&mut result);
+  1427→
+  1428→        // 6. Check declassification proofs for any declassified values.
+  1429→        self.check_declassification_proofs(&mut result);
+  1430→
+  1431→        result
+  1432→    }
+  1433→
+  1434→    /// Check the no-downgrade information-flow rule on all edges.
+  1435→    fn check_information_flow(&self, result: &mut VerificationResult) {
+  1436→        for edge in &self.edges {
+  1437→            let from_node = match self.nodes.get(&edge.from) {
+  1438→                Some(n) => n,
+  1439→                None => continue,
+  1440→            };
+  1441→            let to_node = match self.nodes.get(&edge.to) {
+  1442→                Some(n) => n,
+  1443→                None => continue,
+  1444→            };
+  1445→
+  1446→            match from_node.security.check_flow_to(&to_node.security) {
+  1447→                Ok(()) => result.pass(),
+  1448→                Err(v) => result.fail(v),
+  1449→            }
+  1450→        }
+  1451→    }
+  1452→
+  1453→    /// Check that tainted data does not reach clean-only sinks.
+  1454→    ///
+  1455→    /// Sinks are nodes whose `SecurityRel` is Clean and whose capabilities
+  1456→    /// do not include `Send` (indicating they are security-critical consumers
+  1457→    /// like system calls, database writes, eval).
+  1458→    fn check_taint_at_sinks(&self, result: &mut VerificationResult) {
+  1459→        for edge in &self.edges {
+  1460→            let from_node = match self.nodes.get(&edge.from) {
+  1461→                Some(n) => n,
+  1462→                None => continue,
+  1463→            };
+  1464→            let to_node = match self.nodes.get(&edge.to) {
+  1465→                Some(n) => n,
+  1466→                None => continue,
+  1467→            };
+  1468→
+  1469→            if from_node.security.taint.is_tainted() && !to_node.security.taint.is_tainted() {
+  1470→                // Tainted data flowing to a clean node — this is a potential
+  1471→                // taint-at-sink violation. We flag it as a taint propagation
+  1472→                // warning if the destination is a sink (no Send capability).
+  1473→                if !to_node.capabilities.contains(&SecurityCapability::Send) {
+  1474→                    result.fail(SecurityViolation::TaintedDataAtSink {
+  1475→                        sources: from_node.security.taint.sources(),
+  1476→                        sink: format!("node {}", to_node.id),
+  1477→                    });
+  1478→                } else {
+  1479→                    result.pass();
+  1480→                }
+  1481→            } else {
+  1482→                result.pass();
+  1483→            }
+  1484→        }
+  1485→    }
+  1486→
+  1487→    /// Check boundary crossing rules (B1–B3).
+  1488→    fn check_boundary_crossings(&self, result: &mut VerificationResult) {
+  1489→        for edge in &self.edges {
+  1490→            let Some(boundary_id) = edge.boundary else {
+  1491→                continue;
+  1492→            };
+  1493→            let Some(boundary) = self.boundaries.get(&boundary_id) else {
+  1494→                continue;
+  1495→            };
+  1496→            let from_node = match self.nodes.get(&edge.from) {
+  1497→                Some(n) => n,
+  1498→                None => continue,
+  1499→            };
+  1500→            let to_node = match self.nodes.get(&edge.to) {
+  1501→                Some(n) => n,
+  1502→                None => continue,
+  1503→            };
+  1504→
+  1505→            // Determine direction.
+  1506→            let from_region = from_node.region;
+  1507→            let to_region = to_node.region;
+  1508→
+  1509→            // Only check if the edge actually crosses the boundary.
+  1510→            let crosses_high_to_low =
+  1511→                from_region == Some(boundary.region_high) && to_region == Some(boundary.region_low);
+  1512→            let crosses_low_to_high =
+  1513→                from_region == Some(boundary.region_low) && to_region == Some(boundary.region_high);
+  1514→
+  1515→            if !crosses_high_to_low && !crosses_low_to_high {
+  1516→                result.pass();
+  1517→                continue;
+  1518→            }
+  1519→
+  1520→            if edge.implicit {
+  1521→                // Implicit flow across boundary.
+  1522→                if from_node.security.effective_level() > boundary.level_low {
+  1523→                    result.fail(SecurityViolation::ImplicitFlowAcrossBoundary {
+  1524→                        condition_level: from_node.security.effective_level(),
+  1525→                        target_level: boundary.level_low,
+  1526→                    });
+  1527→                    continue;
+  1528→                }
+  1529→            }
+  1530→
+  1531→            if crosses_high_to_low {
+  1532→                // B1: Read-across (High → Low).
+  1533→                match boundary
+  1534→                    .check_read_across(boundary.region_high, from_node.security.effective_level())
+  1535→                {
+  1536→                    Ok(()) => result.pass(),
+  1537→                    Err(v) => result.fail(v),
+  1538→                }
+  1539→            } else {
+  1540→                // Low → High: check control-flow capabilities (B3).
+  1541→                match boundary.check_control_flow_across(&from_node.capabilities) {
+  1542→                    Ok(()) => result.pass(),
+  1543→                    Err(v) => result.fail(v),
+  1544→                }
+  1545→            }
+  1546→        }
+  1547→    }
+  1548→
+  1549→    /// Check that capabilities only decrease over time (monotonicity).
+  1550→    ///
+  1551→    /// This is a structural check: along each edge, the destination's
+  1552→    /// capabilities must be a subset of the source's capabilities.
+  1553→    fn check_capability_monotonicity(&self, result: &mut VerificationResult) {
+  1554→        for edge in &self.edges {
+  1555→            let from_node = match self.nodes.get(&edge.from) {
+  1556→                Some(n) => n,
+  1557→                None => continue,
+  1558→            };
+  1559→            let to_node = match self.nodes.get(&edge.to) {
+  1560→                Some(n) => n,
+  1561→                None => continue,
+  1562→            };
+  1563→
+  1564→            // Check that to_node's capabilities are a subset of from_node's.
+  1565→            let added: Vec<_> = to_node
+  1566→                .capabilities
+  1567→                .difference(&from_node.capabilities)
+  1568→                .copied()
+  1569→                .collect();
+  1570→
+  1571→            if added.is_empty() {
+  1572→                result.pass();
+  1573→            } else {
+  1574→                for cap in added {
+  1575→                    result.fail(SecurityViolation::CapabilityMonotonicityViolation { added: cap });
+  1576→                }
+  1577→            }
+  1578→        }
+  1579→    }
+  1580→
+  1581→    /// Check that no value from an untrusted source carries Execute.
+  1582→    fn check_execute_on_untrusted(&self, result: &mut VerificationResult) {
+  1583→        for node in self.nodes.values() {
+  1584→            if node.capabilities.contains(&SecurityCapability::Execute)
+  1585→                && node.security.taint.is_tainted()
+  1586→            {
+  1587→                for source in node.security.taint.sources() {
+  1588→                    result.fail(SecurityViolation::ExecuteOnUntrusted { source });
+  1589→                }
+  1590→            } else {
+  1591→                result.pass();
+  1592→            }
+  1593→        }
+  1594→    }
+  1595→
+  1596→    /// Check that declassified values have valid proofs.
+  1597→    fn check_declassification_proofs(&self, result: &mut VerificationResult) {
+  1598→        for node in self.nodes.values() {
+  1599→            if let Some(ref dec) = node.security.declassification {
+  1600→                // The gate must have a registered, valid proof.
+  1601→                if let Some(proof) = self.declassification_proofs.get(&dec.gate_function) {
+  1602→                    if proof.is_valid() {
+  1603→                        result.pass();
+  1604→                    } else {
+  1605→                        result.fail(SecurityViolation::DeclassificationWithoutProof {
+  1606→                            from_level: dec.from_level,
+  1607→                            to_level: dec.to_level,
+  1608→                        });
+  1609→                    }
+  1610→                } else {
+  1611→                    result.fail(SecurityViolation::DeclassificationWithoutProof {
+  1612→                        from_level: dec.from_level,
+  1613→                        to_level: dec.to_level,
+  1614→                    });
+  1615→                }
+  1616→            }
+  1617→        }
+  1618→    }
+  1619→}
+  1620→
+  1621→// ---------------------------------------------------------------------------
+  1622→// Tests
+  1623→// ---------------------------------------------------------------------------
+  1624→
+  1625→#[cfg(test)]
+  1626→mod tests {
+  1627→    use super::*;
+  1628→
+  1629→    // Helper to make a ProgramPoint for testing.
+  1630→    fn pp(line: u32) -> ProgramPoint {
+  1631→        ProgramPoint::new("test.vu", line, 1)
+  1632→    }
+  1633→
+  1634→    // ── Lattice tests ──────────────────────────────────────────────────
+  1635→
+  1636→    #[test]
+  1637→    fn lattice_ordering() {
+  1638→        assert!(SecurityLevel::Public < SecurityLevel::Internal);
+  1639→        assert!(SecurityLevel::Internal < SecurityLevel::Confidential);
+  1640→        assert!(SecurityLevel::Confidential < SecurityLevel::Secret);
+  1641→        assert!(SecurityLevel::Secret < SecurityLevel::TopSecret);
+  1642→    }
+  1643→
+  1644→    #[test]
+  1645→    fn lattice_join_and_meet() {
+  1646→        assert_eq!(
+  1647→            SecurityLevel::Public.join(SecurityLevel::Secret),
+  1648→            SecurityLevel::Secret
+  1649→        );
+  1650→        assert_eq!(
+  1651→            SecurityLevel::Confidential.meet(SecurityLevel::Secret),
+  1652→            SecurityLevel::Confidential
+  1653→        );
+  1654→        // Idempotence
+  1655→        assert_eq!(
+  1656→            SecurityLevel::Secret.join(SecurityLevel::Secret),
+  1657→            SecurityLevel::Secret
+  1658→        );
+  1659→        assert_eq!(
+  1660→            SecurityLevel::Secret.meet(SecurityLevel::Secret),
+  1661→            SecurityLevel::Secret
+  1662→        );
+  1663→    }
+  1664→
+  1665→    #[test]
+  1666→    fn lattice_commutativity_and_associativity() {
+  1667→        let a = SecurityLevel::Public;
+  1668→        let b = SecurityLevel::Confidential;
+  1669→        let c = SecurityLevel::TopSecret;
+  1670→
+  1671→        // Commutativity
+  1672→        assert_eq!(a.join(b), b.join(a));
+  1673→        assert_eq!(a.meet(b), b.meet(a));
+  1674→
+  1675→        // Associativity
+  1676→        assert_eq!(a.join(b).join(c), a.join(b.join(c)));
+  1677→        assert_eq!(a.meet(b).meet(c), a.meet(b.meet(c)));
+  1678→    }
+  1679→
+  1680→    #[test]
+  1681→    fn lattice_absorption() {
+  1682→        let a = SecurityLevel::Confidential;
+  1683→        let b = SecurityLevel::Secret;
+  1684→        assert_eq!(a.join(a.meet(b)), a);
+  1685→        assert_eq!(a.meet(a.join(b)), a);
+  1686→    }
+  1687→
+  1688→    #[test]
+  1689→    fn can_flow_to_respects_lattice() {
+  1690→        assert!(SecurityLevel::Public.can_flow_to(SecurityLevel::Secret));
+  1691→        assert!(SecurityLevel::Secret.can_flow_to(SecurityLevel::Secret));
+  1692→        assert!(!SecurityLevel::Secret.can_flow_to(SecurityLevel::Public));
+  1693→    }
+  1694→
+  1695→    #[test]
+  1696→    fn top_and_bottom() {
+  1697→        assert_eq!(SecurityLevel::BOTTOM, SecurityLevel::Public);
+  1698→        assert_eq!(SecurityLevel::TOP, SecurityLevel::TopSecret);
+  1699→    }
+  1700→
+  1701→    // ── Taint tracking tests ───────────────────────────────────────────
+  1702→
+  1703→    #[test]
+  1704→    fn taint_propagation_unions_sources() {
+  1705→        let t1 = TaintStatus::tainted(TaintSource::UserInput, true);
+  1706→        let t2 = TaintStatus::tainted(TaintSource::Network, true);
+  1707→        let combined = t1.propagate(&t2);
+  1708→        match combined {
+  1709→            TaintStatus::Tainted {
+  1710→                sources,
+  1711→                sanitizable,
+  1712→            } => {
+  1713→                assert!(sources.contains(&TaintSource::UserInput));
+  1714→                assert!(sources.contains(&TaintSource::Network));
+  1715→                assert!(sanitizable); // both sanitizable
+  1716→            }
+  1717→            TaintStatus::Clean => panic!("expected Tainted"),
+  1718→        }
+  1719→    }
+  1720→
+  1721→    #[test]
+  1722→    fn taint_sanitization_succeeds_when_sanitizable() {
+  1723→        let tainted = TaintStatus::tainted(TaintSource::UserInput, true);
+  1724→        let result = tainted.sanitize();
+  1725→        assert!(result.is_ok());
+  1726→        assert_eq!(result.unwrap(), TaintStatus::Clean);
+  1727→    }
+  1728→
+  1729→    #[test]
+  1730→    fn taint_sanitization_fails_when_not_sanitizable() {
+  1731→        let tainted = TaintStatus::tainted(TaintSource::Network, false);
+  1732→        let result = tainted.sanitize();
+  1733→        assert!(result.is_err());
+  1734→    }
+  1735→
+  1736→    #[test]
+  1737→    fn taint_effective_level_boosts_to_internal() {
+  1738→        let tainted = TaintStatus::tainted(TaintSource::UserInput, true);
+  1739→        // Public + Internal = Internal
+  1740→        assert_eq!(
+  1741→            tainted.effective_level(SecurityLevel::Public),
+  1742→            SecurityLevel::Internal
+  1743→        );
+  1744→        // Secret + Internal = Secret (Secret is already higher)
+  1745→        assert_eq!(
+  1746→            tainted.effective_level(SecurityLevel::Secret),
+  1747→            SecurityLevel::Secret
+  1748→        );
+  1749→        // Clean data stays at its level
+  1750→        assert_eq!(
+  1751→            TaintStatus::Clean.effective_level(SecurityLevel::Public),
+  1752→            SecurityLevel::Public
+  1753→        );
+  1754→    }
+  1755→
+  1756→    // ── SecurityRel tests ──────────────────────────────────────────────
+  1757→
+  1758→    #[test]
+  1759→    fn security_rel_flow_check_allows_upward() {
+  1760→        let src = SecurityRel::at(SecurityLevel::Public);
+  1761→        let dst = SecurityRel::at(SecurityLevel::Secret);
+  1762→        assert!(src.check_flow_to(&dst).is_ok());
+  1763→    }
+  1764→
+  1765→    #[test]
+  1766→    fn security_rel_flow_check_blocks_downward() {
+  1767→        let src = SecurityRel::at(SecurityLevel::Secret);
+  1768→        let dst = SecurityRel::at(SecurityLevel::Public);
+  1769→        assert!(src.check_flow_to(&dst).is_err());
+  1770→    }
+  1771→
+  1772→    #[test]
+  1773→    fn security_rel_no_flow_blocks_everything() {
+  1774→        let key = SecurityRel::for_key_material(SecurityLevel::Secret);
+  1775→        let dst = SecurityRel::at(SecurityLevel::TopSecret);
+  1776→        assert!(key.check_flow_to(&dst).is_err());
+  1777→    }
+  1778→
+  1779→    #[test]
+  1780→    fn security_rel_join_combines_levels() {
+  1781→        let a = SecurityRel::at(SecurityLevel::Public);
+  1782→        let b = SecurityRel::at(SecurityLevel::Secret);
+  1783→        let joined = a.join(&b);
+  1784→        assert_eq!(joined.level, SecurityLevel::Secret);
+  1785→    }
+  1786→
+  1787→    // ── Flow Policy tests ──────────────────────────────────────────────
+  1788→
+  1789→    #[test]
+  1790→    fn flow_policy_ordering() {
+  1791→        assert_eq!(
+  1792→            FlowPolicy::FreeFlow.more_restrictive(FlowPolicy::NoDowngrade),
+  1793→            FlowPolicy::NoDowngrade
+  1794→        );
+  1795→        assert_eq!(
+  1796→            FlowPolicy::NoDowngrade.more_restrictive(FlowPolicy::NoFlow),
+  1797→            FlowPolicy::NoFlow
+  1798→        );
+  1799→        assert_eq!(
+  1800→            FlowPolicy::FreeFlow.more_restrictive(FlowPolicy::NoFlow),
+  1801→            FlowPolicy::NoFlow
+  1802→        );
+  1803→    }
+  1804→
+  1805→    // ── Boundary tests ─────────────────────────────────────────────────
+  1806→
+  1807→    #[test]
+  1808→    fn boundary_allows_upward_read() {
+  1809→        let boundary = SecurityBoundary::new(
+  1810→            BoundaryId(1),
+  1811→            RegionId(10),
+  1812→            RegionId(20),
+  1813→            SecurityLevel::Secret,
+  1814→            SecurityLevel::Public,
+  1815→        );
+  1816→        // Low → High: always permitted
+  1817→        assert!(boundary
+  1818→            .check_read_across(RegionId(20), SecurityLevel::Public)
+  1819→            .is_ok());
+  1820→    }
+  1821→
+  1822→    #[test]
+  1823→    fn boundary_blocks_downward_read_without_gate() {
+  1824→        let boundary = SecurityBoundary::new(
+  1825→            BoundaryId(1),
+  1826→            RegionId(10),
+  1827→            RegionId(20),
+  1828→            SecurityLevel::Secret,
+  1829→            SecurityLevel::Public,
+  1830→        );
+  1831→        // High → Low: Secret cannot flow to Public
+  1832→        assert!(boundary
+  1833→            .check_read_across(RegionId(10), SecurityLevel::Secret)
+  1834→            .is_err());
+  1835→    }
+  1836→
+  1837→    #[test]
+  1838→    fn boundary_allows_downward_read_with_gate() {
+  1839→        let mut boundary = SecurityBoundary::new(
+  1840→            BoundaryId(1),
+  1841→            RegionId(10),
+  1842→            RegionId(20),
+  1843→            SecurityLevel::Secret,
+  1844→            SecurityLevel::Public,
+  1845→        );
+  1846→        boundary.declassification_gate = Some(GateFunctionId(42));
+  1847→        // High → Low: with gate, declassification is possible
+  1848→        assert!(boundary
+  1849→            .check_read_across(RegionId(10), SecurityLevel::Secret)
+  1850→            .is_ok());
+  1851→    }
+  1852→
+  1853→    #[test]
+  1854→    fn boundary_control_flow_requires_capabilities() {
+  1855→        let mut boundary = SecurityBoundary::new(
+  1856→            BoundaryId(1),
+  1857→            RegionId(10),
+  1858→            RegionId(20),
+  1859→            SecurityLevel::Secret,
+  1860→            SecurityLevel::Public,
+  1861→        );
+  1862→        boundary.cross_permissions = [SecurityCapability::Read, SecurityCapability::Execute]
+  1863→            .into_iter()
+  1864→            .collect();
+  1865→
+  1866→        // Missing Execute
+  1867→        let caps: HashSet<SecurityCapability> = [SecurityCapability::Read].into_iter().collect();
+  1868→        assert!(boundary.check_control_flow_across(&caps).is_err());
+  1869→
+  1870→        // All present
+  1871→        let caps: HashSet<SecurityCapability> =
+  1872→            [SecurityCapability::Read, SecurityCapability::Execute]
+  1873→                .into_iter()
+  1874→                .collect();
+  1875→        assert!(boundary.check_control_flow_across(&caps).is_ok());
+  1876→    }
+  1877→
+  1878→    // ── Declassification tests ─────────────────────────────────────────
+  1879→
+  1880→    #[test]
+  1881→    fn declassification_proof_requires_all_verifications() {
+  1882→        let mut proof = DeclassificationProof::new(
+  1883→            GateFunctionId(1),
+  1884→            SecurityLevel::Secret,
+  1885→            SecurityLevel::Public,
+  1886→        );
+  1887→        assert!(!proof.is_valid()); // nothing verified yet
+  1888→
+  1889→        proof.output_independence_verified = true;
+  1890→        assert!(!proof.is_valid()); // still missing others
+  1891→
+  1892→        proof.no_side_channels_verified = true;
+  1893→        assert!(!proof.is_valid()); // still missing completeness
+  1894→
+  1895→        proof.completeness_verified = true;
+  1896→        assert!(proof.is_valid()); // all verified
+  1897→    }
+  1898→
+  1899→    #[test]
+  1900→    fn declassification_proof_verify_all() {
+  1901→        let mut proof = DeclassificationProof::new(
+  1902→            GateFunctionId(1),
+  1903→            SecurityLevel::Secret,
+  1904→            SecurityLevel::Public,
+  1905→        );
+  1906→        proof.verify_all();
+  1907→        assert!(proof.is_valid());
+  1908→    }
+  1909→
+  1910→    // ── ARM64 mapping tests ────────────────────────────────────────────
+  1911→
+  1912→    #[test]
+  1913→    fn arm64_mapping_capability_to_hw() {
+  1914→        let mapping = Arm64SecurityMapping::default_development();
+  1915→
+  1916→        assert!(mapping
+  1917→            .capability_to_hw(SecurityCapability::DerivePtr)
+  1918→            .contains(&Arm64Feature::Pac));
+  1919→        assert!(mapping
+  1920→            .capability_to_hw(SecurityCapability::Execute)
+  1921→            .contains(&Arm64Feature::Bti));
+  1922→        assert!(mapping
+  1923→            .capability_to_hw(SecurityCapability::Read)
+  1924→            .contains(&Arm64Feature::Mte));
+  1925→        assert!(mapping
+  1926→            .capability_to_hw(SecurityCapability::Write)
+  1927→            .contains(&Arm64Feature::Mte));
+  1928→    }
+  1929→
+  1930→    #[test]
+  1931→    fn arm64_mapping_disabled_returns_empty() {
+  1932→        let mapping = Arm64SecurityMapping::disabled();
+  1933→        assert!(mapping
+  1934→            .capability_to_hw(SecurityCapability::DerivePtr)
+  1935→            .is_empty());
+  1936→        assert!(mapping
+  1937→            .capability_to_hw(SecurityCapability::Execute)
+  1938→            .is_empty());
+  1939→    }
+  1940→
+  1941→    #[test]
+  1942→    fn arm64_pac_sign_pseudocode() {
+  1943→        let mapping = Arm64SecurityMapping::default_development();
+  1944→        assert!(mapping.emit_pac_sign(true).contains("pac_sign"));
+  1945→        assert!(mapping.emit_pac_sign(false).contains("missing DerivePtr"));
+  1946→    }
+  1947→
+  1948→    #[test]
+  1949→    fn arm64_bti_landing_pad() {
+  1950→        let mapping = Arm64SecurityMapping::default_development();
+  1951→        assert!(mapping.emit_bti_landing_pad(true).contains("bti c"));
+  1952→        assert!(mapping.emit_bti_landing_pad(false).contains("bti j"));
+  1953→    }
+  1954→
+  1955→    #[test]
+  1956→    fn arm64_mte_mode_difference() {
+  1957→        let dev = Arm64SecurityMapping::default_development();
+  1958→        let prod = Arm64SecurityMapping::default_production();
+  1959→        assert_eq!(dev.mte_mode, MteMode::Synchronous);
+  1960→        assert_eq!(prod.mte_mode, MteMode::Asynchronous);
+  1961→    }
+  1962→
+  1963→    // ── Security Verifier tests ────────────────────────────────────────
+  1964→
+  1965→    fn make_sec_node(
+  1966→        id: u64,
+  1967→        level: SecurityLevel,
+  1968→        region: Option<RegionId>,
+  1969→        caps: Vec<SecurityCapability>,
+  1970→        taint: TaintStatus,
+  1971→    ) -> SecNode {
+  1972→        SecNode {
+  1973→            id: NodeId(id),
+  1974→            security: SecurityRel {
+  1975→                level,
+  1976→                flow: FlowPolicy::NoDowngrade,
+  1977→                taint,
+  1978→                declassification: None,
+  1979→            },
+  1980→            region,
+  1981→            capabilities: caps.into_iter().collect(),
+  1982→            taint_sources: HashSet::new(),
+  1983→        }
+  1984→    }
+  1985→
+  1986→    #[test]
+  1987→    fn verifier_passes_clean_upward_flow() {
+  1988→        let mut v = SecurityVerifier::new();
+  1989→        v.add_node(make_sec_node(
+  1990→            1,
+  1991→            SecurityLevel::Public,
+  1992→            None,
+  1993→            vec![SecurityCapability::Read, SecurityCapability::Write],
+  1994→            TaintStatus::Clean,
+  1995→        ));
+  1996→        v.add_node(make_sec_node(
+  1997→            2,
+  1998→            SecurityLevel::Secret,
+  1999→            None,
+  2000→            vec![SecurityCapability::Read],
+
+[showing lines 1-2000 of 2549; use offset=2001 with limit to continue reading]

@@ -2,7 +2,7 @@
 
 > Version 0.1 — Last updated 2026-03-04
 
-This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language designed for the Raspberry Pi 5 platform. VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
+This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language designed for the AArch64 platform. VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
 
 ---
 
@@ -17,7 +17,7 @@ This document is the definitive reference for the VUMA programming language, a m
 7. [Concurrency](#7-concurrency)
 8. [Memory Safety](#8-memory-safety)
 9. [Standard Library Overview](#9-standard-library-overview)
-10. [Pi 5 Platform-Specific Features](#10-pi-5-platform-specific-features)
+10. [AArch64 Platform-Specific Features](#10-pi-5-platform-specific-features)
 11. [Appendix: Keyword and Operator Quick Reference](#11-appendix-keyword-and-operator-quick-reference)
 
 ---
@@ -852,7 +852,7 @@ The IVE produces one of three verdicts for each invariant:
 
 ## 9. Standard Library Overview
 
-VUMA's standard library is designed for bare-metal and embedded systems programming on the Raspberry Pi 5. It provides essential data structures, memory management, I/O, and concurrency primitives — all written in VUMA and verified by the IVE. The standard library is organized into modules that can be imported as needed.
+VUMA's standard library is designed for bare-metal and embedded systems programming on the AArch64. It provides essential data structures, memory management, I/O, and concurrency primitives — all written in VUMA and verified by the IVE. The standard library is organized into modules that can be imported as needed.
 
 ### Memory Management
 
@@ -933,20 +933,20 @@ match result {
 
 ---
 
-## 10. Pi 5 Platform-Specific Features
+## 10. AArch64 Platform-Specific Features
 
-VUMA is designed as a first-class systems programming language for the Raspberry Pi 5. Its memory model, code generation, and verification engine are all tailored to the ARM64 (AArch64) architecture and the Pi 5's specific hardware layout. This section describes the platform-specific features that make VUMA uniquely suited for Pi 5 development.
+VUMA is designed as a first-class systems programming language for the AArch64. Its memory model, code generation, and verification engine are all tailored to the ARM64 (AArch64) architecture and the AArch64's specific hardware layout. This section describes the platform-specific features that make VUMA uniquely suited for AArch64 development.
 
 ### Device Memory Mapping
 
-The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On the Pi 5, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
+The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On the AArch64, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
 
 - They never need to be freed (hardware is always present)
 - They have volatile semantics (reads and writes have side effects)
 - They have a known size for bounds checking
 
 ```vuma
-const GPIO_BASE: Address = 0x7e200000;  // Pi 5 GPIO base (BCM address)
+const GPIO_BASE: Address = 0x7e200000;  // AArch64 GPIO base (BCM address)
 
 fn gpio_set_output(pin: u32) {
     gpio = map_device(GPIO_BASE, 4096);
@@ -967,7 +967,7 @@ fn gpio_clear(pin: u32) {
 
 ### GPIO Register Layout
 
-The Pi 5 GPIO peripheral is memory-mapped at BCM address `0x7e200000`. The key register offsets are:
+The AArch64 GPIO peripheral is memory-mapped at BCM address `0x7e200000`. The key register offsets are:
 
 | Register | Offset | Purpose |
 |---|---|---|
@@ -982,7 +982,7 @@ Each pin uses 3 bits in the function select register: `000` = input, `001` = out
 
 ### ARM64 Code Generation
 
-VUMA compiles to native ARM64 machine code. The code generator targets the Cortex-A76 (Pi 5's SoC) and produces optimized instruction sequences for:
+VUMA compiles to native ARM64 machine code. The code generator targets the Cortex-A76 (AArch64's SoC) and produces optimized instruction sequences for:
 - Pointer arithmetic using register-offset addressing
 - Atomic operations using `LDXR`/`STXR` (exclusive access) and `LDA`/`STL` (acquire/release)
 - Volatile device access using explicit load/store instructions (no optimization)
@@ -990,14 +990,14 @@ VUMA compiles to native ARM64 machine code. The code generator targets the Corte
 
 ### Bare-Metal Execution
 
-VUMA programs can run bare-metal on the Pi 5 without an operating system. The runtime provides:
+VUMA programs can run bare-metal on the AArch64 without an operating system. The runtime provides:
 - **Startup code:** Sets up the stack pointer, clears BSS, calls `main()`
 - **Memory allocator:** Simple bump allocator for the `allocate()` primitive
-- **Delay loops:** `delay_ms()` uses the Pi 5's system timer at `0x7e003000`
-- **UART output:** `print()` writes to the Pi 5's AUX UART for console output
+- **Delay loops:** `delay_ms()` uses the AArch64's system timer at `0x7e003000`
+- **UART output:** `print()` writes to the AArch64's AUX UART for console output
 
 ```vuma
-// Complete bare-metal LED blink program for Pi 5
+// Complete bare-metal LED blink program for AArch64
 const GPIO_BASE: Address = 0x7e200000;
 
 fn main() -> i32 {

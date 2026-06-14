@@ -1,22 +1,15 @@
 //! Adaptive deployment for the Continuous Optimization Runtime.
 //!
 //! The COR can distribute compiled regions across heterogeneous execution
-//! targets: the local process, remote endpoints (e.g. a cloud compute
-//! instance), or Raspberry Pi 5 boards running either bare-metal or Linux.
+//! targets: the local process or remote endpoints (e.g. a cloud compute
+//! instance).
 //!
 //! # Core types
 //!
-//! - [`DeploymentTarget`] — where to deploy (Local, Pi5Bare, Pi5Linux, Remote).
+//! - [`DeploymentTarget`] — where to deploy (Local, Remote).
 //! - [`DeploymentPackage`] — compiled binary + metadata + debug info.
 //! - [`DeploymentManager`] — orchestrates deploys, hot-swaps, rollbacks, and
 //!   delta transfers.
-//!
-//! # Hot-swap (Pi 5)
-//!
-//! On Raspberry Pi 5 targets, the deployment manager supports *hot-swapping*:
-//! replacing a region's compiled code while execution continues. A shadow
-//! buffer is prepared, then atomically swapped in via a fence. The previous
-//! version is retained for potential rollback.
 //!
 //! # Version management
 //!
@@ -46,27 +39,6 @@ pub enum DeploymentTarget {
     /// Execute the region in the local process.
     Local,
 
-    /// Deploy to a Raspberry Pi 5 running in **bare-metal** mode.
-    ///
-    /// Bare-metal mode gives the runtime direct control over the BCM2712
-    /// hardware — no OS, no MMU translation, deterministic latency.
-    Pi5Bare {
-        /// Board identifier (for multi-board setups).
-        board_id: String,
-        /// Core to pin the region to (0–3 on Cortex-A76).
-        core_id: u32,
-    },
-
-    /// Deploy to a Raspberry Pi 5 running **Linux** (typically Raspberry Pi OS).
-    ///
-    /// Linux mode uses standard POSIX calls and the kernel scheduler.
-    Pi5Linux {
-        /// Hostname or IP address of the Pi.
-        host: String,
-        /// Core to pin the region to (0–3), or `None` for no affinity.
-        core_affinity: Option<u32>,
-    },
-
     /// Execute the region on a remote endpoint (e.g. a cloud lambda or
     /// compute server).
     Remote {
@@ -76,28 +48,18 @@ pub enum DeploymentTarget {
 }
 
 impl DeploymentTarget {
-    /// Returns `true` if this target is any Raspberry Pi 5 variant.
-    pub fn is_pi5(&self) -> bool {
-        matches!(
-            self,
-            DeploymentTarget::Pi5Bare { .. } | DeploymentTarget::Pi5Linux { .. }
-        )
-    }
-
     /// Returns `true` if this target supports hot-swapping of code.
     ///
-    /// Hot-swap is currently supported on Pi 5 bare-metal (direct memory
-    /// control) and Pi 5 Linux (via `mmap` + `mprotect` trampoline).
+    /// Currently, no deployment target supports hot-swapping. This method
+    /// is retained for forward compatibility.
     pub fn supports_hot_swap(&self) -> bool {
-        self.is_pi5()
+        false
     }
 
     /// Returns a human-readable label for the target kind.
     pub fn kind_label(&self) -> &'static str {
         match self {
             DeploymentTarget::Local => "Local",
-            DeploymentTarget::Pi5Bare { .. } => "Pi5Bare",
-            DeploymentTarget::Pi5Linux { .. } => "Pi5Linux",
             DeploymentTarget::Remote { .. } => "Remote",
         }
     }
@@ -107,16 +69,6 @@ impl std::fmt::Display for DeploymentTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeploymentTarget::Local => write!(f, "Local"),
-            DeploymentTarget::Pi5Bare { board_id, core_id } => {
-                write!(f, "Pi5Bare({}/core{})", board_id, core_id)
-            }
-            DeploymentTarget::Pi5Linux {
-                host,
-                core_affinity,
-            } => match core_affinity {
-                Some(c) => write!(f, "Pi5Linux({}/core{})", host, c),
-                None => write!(f, "Pi5Linux({})", host),
-            },
             DeploymentTarget::Remote { endpoint } => write!(f, "Remote({})", endpoint),
         }
     }
@@ -582,7 +534,6 @@ impl DeploymentPlanner {
     /// 1. **Hot regions** (high call count) are deployed locally for
     ///    minimal latency.
     /// 2. **Cold regions** are candidates for remote execution.
-    /// 3. On Pi 5 targets, regions are round-robin-assigned to cores.
     pub fn compute_deployment_plan(
         &mut self,
         region_ids: &[RegionId],
@@ -598,22 +549,7 @@ impl DeploymentPlanner {
                 .values()
                 .any(|&count| count > hot_threshold);
 
-            let target = if self.config.is_pi5_target() {
-                let core_id = (region_id % 4) as u32;
-                if self.config.enable_speculative {
-                    DeploymentTarget::Pi5Bare {
-                        board_id: "default".to_owned(),
-                        core_id,
-                    }
-                } else {
-                    DeploymentTarget::Pi5Linux {
-                        host: "localhost".to_owned(),
-                        core_affinity: Some(core_id),
-                    }
-                }
-            } else {
-                DeploymentTarget::Local
-            };
+            let target = DeploymentTarget::Local;
 
             self.plan.regions.push((region_id, target));
         }
@@ -670,7 +606,7 @@ impl DeploymentPlanner {
 ///
 /// The `DeploymentManager` is the central orchestrator for:
 /// - Deploying packages to targets ([`deploy`](DeploymentManager::deploy)).
-/// - Hot-swapping running code on Pi 5 targets
+/// - Hot-swapping running code
 ///   ([`hot_swap`](DeploymentManager::hot_swap)).
 /// - Version tracking and rollback
 ///   ([`rollback`](DeploymentManager::rollback)).
@@ -757,7 +693,7 @@ impl DeploymentManager {
         })
     }
 
-    /// Performs a hot-swap of a running region on a Pi 5 target.
+    /// Performs a hot-swap of a running region.
     ///
     /// The hot-swap proceeds through these phases:
     /// 1. **PreparingShadow** — allocate and fill shadow buffer with new code.
@@ -1036,7 +972,6 @@ fn epoch_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TargetArch;
 
     // -- Helpers -----------------------------------------------------------
 
@@ -1044,21 +979,8 @@ mod tests {
         Config::default()
     }
 
-    fn make_pi5_config() -> Config {
-        Config::default().with_target_arch(TargetArch::ArmV8A)
-    }
-
     fn make_package(region_id: RegionId, version: u64, code: &[u8]) -> DeploymentPackage {
         DeploymentPackage::new(code.to_vec(), region_id, PackageVersion(version), "basic")
-    }
-
-    fn make_package_with_opt(
-        region_id: RegionId,
-        version: u64,
-        code: &[u8],
-        opt: &str,
-    ) -> DeploymentPackage {
-        DeploymentPackage::new(code.to_vec(), region_id, PackageVersion(version), opt)
     }
 
     // -- Test 1: Deploy to local target ------------------------------------
@@ -1075,49 +997,7 @@ mod tests {
         assert!(!result.was_delta);
     }
 
-    // -- Test 2: Deploy to Pi5Bare target ----------------------------------
-
-    #[test]
-    fn deploy_to_pi5_bare_target() {
-        let mut mgr = DeploymentManager::new(make_pi5_config());
-        let pkg = make_package(2, 1, &[0x90, 0xC3]);
-        let target = DeploymentTarget::Pi5Bare {
-            board_id: "pi5-01".to_owned(),
-            core_id: 0,
-        };
-        let result = mgr.deploy(&pkg, &target).unwrap();
-        assert_eq!(result.region_id, 2);
-        assert!(result.target.is_pi5());
-        assert!(!result.hot_swapped); // first deploy, no previous version
-    }
-
-    // -- Test 3: Hot-swap on Pi5Bare ---------------------------------------
-
-    #[test]
-    fn hot_swap_on_pi5_bare() {
-        let mut mgr = DeploymentManager::new(make_pi5_config());
-        let target = DeploymentTarget::Pi5Bare {
-            board_id: "pi5-01".to_owned(),
-            core_id: 1,
-        };
-
-        // Initial deploy.
-        let pkg_v1 = make_package(3, 1, &[0x48, 0x89, 0xE5]); // MOV RBP, RSP
-        mgr.deploy(&pkg_v1, &target).unwrap();
-
-        // Second deploy should trigger hot-swap.
-        let pkg_v2 = make_package(3, 2, &[0x55, 0x48, 0x89, 0xE5]); // PUSH RBP; MOV RBP, RSP
-        let result = mgr.deploy(&pkg_v2, &target).unwrap();
-        assert!(result.hot_swapped);
-
-        // Verify hot-swap state.
-        let hs = mgr.hot_swap_state(3).unwrap();
-        assert_eq!(hs.phase, HotSwapPhase::Completed);
-        assert_eq!(hs.from_version, PackageVersion(1));
-        assert_eq!(hs.to_version, PackageVersion(2));
-    }
-
-    // -- Test 4: Hot-swap rejected on non-Pi5 target -----------------------
+    // -- Test 2: Hot-swap rejected on local target -------------------------
 
     #[test]
     fn hot_swap_rejected_on_local() {
@@ -1139,14 +1019,13 @@ mod tests {
         assert!(matches!(err, DeploymentError::HotSwapNotSupported(_)));
     }
 
-    // -- Test 5: Version tracking and rollback -----------------------------
+    // -- Test 3: Version tracking and rollback -----------------------------
 
     #[test]
     fn version_tracking_and_rollback() {
-        let mut mgr = DeploymentManager::new(make_pi5_config());
-        let target = DeploymentTarget::Pi5Linux {
-            host: "192.168.1.50".to_owned(),
-            core_affinity: Some(2),
+        let mut mgr = DeploymentManager::new(make_config());
+        let target = DeploymentTarget::Remote {
+            endpoint: "https://192.168.1.50".to_owned(),
         };
 
         // Deploy v1, v2, v3.
@@ -1175,7 +1054,7 @@ mod tests {
         assert_eq!(latest.code, vec![0x02]);
     }
 
-    // -- Test 6: Rollback with no history ----------------------------------
+    // -- Test 4: Rollback with no history ----------------------------------
 
     #[test]
     fn rollback_with_no_history_fails() {
@@ -1184,7 +1063,7 @@ mod tests {
         assert!(matches!(err, DeploymentError::NoRollbackTarget(99)));
     }
 
-    // -- Test 7: Delta deployment ------------------------------------------
+    // -- Test 5: Delta deployment ------------------------------------------
 
     #[test]
     fn delta_deployment() {
@@ -1212,7 +1091,7 @@ mod tests {
         assert_eq!(result.version, PackageVersion(2));
     }
 
-    // -- Test 8: Delta with no previous version fails ----------------------
+    // -- Test 6: Delta with no previous version fails ----------------------
 
     #[test]
     fn delta_with_no_previous_version_fails() {
@@ -1224,7 +1103,7 @@ mod tests {
         assert!(matches!(err, DeploymentError::NoPreviousVersion(20)));
     }
 
-    // -- Test 9: Checksum validation ---------------------------------------
+    // -- Test 7: Checksum validation ---------------------------------------
 
     #[test]
     fn checksum_validation_rejects_corrupted_package() {
@@ -1236,7 +1115,7 @@ mod tests {
         assert!(matches!(err, DeploymentError::ChecksumMismatch(30)));
     }
 
-    // -- Test 10: Delta compute and apply round-trip -----------------------
+    // -- Test 8: Delta compute and apply round-trip -----------------------
 
     #[test]
     fn delta_compute_and_apply_roundtrip() {
@@ -1261,7 +1140,7 @@ mod tests {
         assert_eq!(reconstructed, new_code);
     }
 
-    // -- Test 11: Empty delta for identical code ---------------------------
+    // -- Test 9: Empty delta for identical code ---------------------------
 
     #[test]
     fn delta_empty_for_identical_code() {
@@ -1270,43 +1149,23 @@ mod tests {
         assert!(delta.is_empty());
     }
 
-    // -- Test 12: DeploymentTarget display and predicates ------------------
+    // -- Test 10: DeploymentTarget display and predicates ------------------
 
     #[test]
     fn target_display_and_predicates() {
         let local = DeploymentTarget::Local;
-        let bare = DeploymentTarget::Pi5Bare {
-            board_id: "b1".to_owned(),
-            core_id: 3,
-        };
-        let linux = DeploymentTarget::Pi5Linux {
-            host: "10.0.0.1".to_owned(),
-            core_affinity: None,
-        };
         let remote = DeploymentTarget::Remote {
             endpoint: "https://cloud.example.com".to_owned(),
         };
 
         assert_eq!(local.kind_label(), "Local");
-        assert!(local.is_pi5() == false);
         assert!(local.supports_hot_swap() == false);
 
-        assert_eq!(bare.kind_label(), "Pi5Bare");
-        assert!(bare.is_pi5());
-        assert!(bare.supports_hot_swap());
-        assert_eq!(format!("{}", bare), "Pi5Bare(b1/core3)");
-
-        assert_eq!(linux.kind_label(), "Pi5Linux");
-        assert!(linux.is_pi5());
-        assert!(linux.supports_hot_swap());
-        assert!(format!("{}", linux).contains("10.0.0.1"));
-
         assert_eq!(remote.kind_label(), "Remote");
-        assert!(!remote.is_pi5());
         assert!(!remote.supports_hot_swap());
     }
 
-    // -- Test 13: VersionLog history ----------------------------------------
+    // -- Test 11: VersionLog history ----------------------------------------
 
     #[test]
     fn version_log_history() {
@@ -1328,29 +1187,24 @@ mod tests {
         assert_eq!(prev.version, PackageVersion(4));
     }
 
-    // -- Test 14: DeploymentPlan with Pi5 targets --------------------------
+    // -- Test 12: DeploymentPlan with remote targets -----------------------
 
     #[test]
-    fn deployment_plan_pi5_bare_targets() {
-        let mut planner = DeploymentPlanner::new(make_pi5_config());
+    fn deployment_plan_remote_targets() {
+        let mut planner = DeploymentPlanner::new(make_config());
         let profile = ProfileData::new();
         let plan = planner.compute_deployment_plan(&[0, 1, 2, 3, 4], &profile);
         assert_eq!(plan.regions.len(), 5);
         for (region_id, target) in &plan.regions {
             match target {
-                DeploymentTarget::Pi5Bare { core_id, .. } => {
-                    assert_eq!(*core_id, (*region_id % 4) as u32);
-                }
-                DeploymentTarget::Pi5Linux { core_affinity, .. } => {
-                    // Non-speculative config lands here.
-                    assert!(core_affinity.is_some());
-                }
-                other => panic!("Expected Pi5 target, got {:?}", other),
+                DeploymentTarget::Remote { .. } => {}
+                DeploymentTarget::Local => {}
+                other => panic!("Expected Local or Remote target, got {:?}", other),
             }
         }
     }
 
-    // -- Test 15: Package with debug info -----------------------------------
+    // -- Test 13: Package with debug info -----------------------------------
 
     #[test]
     fn package_with_debug_info() {
@@ -1367,7 +1221,7 @@ mod tests {
         assert!(pkg.validate_checksum());
     }
 
-    // -- Test 16: Delta for code shrinking (deletions) ---------------------
+    // -- Test 14: Delta for code shrinking (deletions) ---------------------
 
     #[test]
     fn delta_with_deletions() {
@@ -1388,22 +1242,7 @@ mod tests {
         assert_eq!(reconstructed, new_code);
     }
 
-    // -- Test 17: Deploy to Pi5Linux target ---------------------------------
-
-    #[test]
-    fn deploy_to_pi5_linux_target() {
-        let mut mgr = DeploymentManager::new(make_config());
-        let target = DeploymentTarget::Pi5Linux {
-            host: "raspberrypi.local".to_owned(),
-            core_affinity: Some(2),
-        };
-        let pkg = make_package_with_opt(60, 1, &[0x90, 0xC3], "aggressive");
-        let result = mgr.deploy(&pkg, &target).unwrap();
-        assert_eq!(result.region_id, 60);
-        assert!(result.target.is_pi5());
-    }
-
-    // -- Test 18: Deploy to Remote target -----------------------------------
+    // -- Test 15: Deploy to Remote target -----------------------------------
 
     #[test]
     fn deploy_to_remote_target() {
@@ -1411,9 +1250,9 @@ mod tests {
         let target = DeploymentTarget::Remote {
             endpoint: "https://compute.example.com/v1/exec".to_owned(),
         };
-        let pkg = make_package(70, 1, &[0xC3]);
+        let pkg = make_package(60, 1, &[0x90, 0xC3]);
         let result = mgr.deploy(&pkg, &target).unwrap();
-        assert_eq!(result.region_id, 70);
+        assert_eq!(result.region_id, 60);
         assert!(!result.hot_swapped); // remote does not support hot-swap
     }
 }

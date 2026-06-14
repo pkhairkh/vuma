@@ -75,20 +75,14 @@ use vuma_scg::{
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
 )]
 pub enum CompileTarget {
-    /// Bare-metal Raspberry Pi 5 (ARMv8.2-A, loaded at 0x80000).
-    Pi5Bare,
-    /// Linux user-space on Raspberry Pi 5 (AArch64).
-    #[default]
-    Pi5Linux,
     /// Generic Linux user-space on AArch64.
+    #[default]
     Linux,
 }
 
 impl fmt::Display for CompileTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompileTarget::Pi5Bare => write!(f, "pi5-bare"),
-            CompileTarget::Pi5Linux => write!(f, "pi5-linux"),
             CompileTarget::Linux => write!(f, "linux"),
         }
     }
@@ -168,24 +162,6 @@ pub struct CompileConfig {
 }
 
 impl CompileConfig {
-    /// Bare-metal Pi 5 defaults.
-    pub fn pi5_bare() -> Self {
-        Self {
-            target: CompileTarget::Pi5Bare,
-            entry_name: "_start".to_string(),
-            ..Self::default()
-        }
-    }
-
-    /// Linux hosted defaults.
-    pub fn pi5_linux() -> Self {
-        Self {
-            target: CompileTarget::Pi5Linux,
-            entry_name: "main".to_string(),
-            ..Self::default()
-        }
-    }
-
     /// Fast-compilation debug configuration.
     pub fn debug() -> Self {
         Self {
@@ -208,8 +184,7 @@ impl CompileConfig {
     /// Returns the emit config for this compile config.
     fn emit_config(&self) -> EmitConfig {
         match self.target {
-            CompileTarget::Pi5Bare => EmitConfig::bare_metal_elf(),
-            CompileTarget::Pi5Linux | CompileTarget::Linux => EmitConfig::linux_elf(),
+            CompileTarget::Linux => EmitConfig::linux_elf(),
         }
     }
 }
@@ -217,7 +192,7 @@ impl CompileConfig {
 impl Default for CompileConfig {
     fn default() -> Self {
         Self {
-            target: CompileTarget::Pi5Linux,
+            target: CompileTarget::Linux,
             opt_level: OptLevel::O2,
             verification_level: VerificationLevel::Normal,
             entry_name: "main".to_string(),
@@ -2306,21 +2281,6 @@ mod tests {
         );
     }
 
-    /// Test 7: Compile for bare-metal Pi 5.
-    #[test]
-    fn test_compile_pi5_bare() {
-        let source = r#"
-            fn main() {
-            }
-        "#;
-        let config = CompileConfig::pi5_bare();
-        let result = compile(source, &config);
-        assert!(result.is_ok(), "Bare-metal compilation should succeed");
-        let output = result.unwrap();
-        // The ELF should start with the ELF magic bytes.
-        assert_eq!(&output.binary[0..4], &[0x7f, b'E', b'L', b'F']);
-    }
-
     /// Test 8: Source fingerprint detects changes.
     #[test]
     fn test_source_fingerprint() {
@@ -2381,7 +2341,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = CompileConfig::default();
-        assert_eq!(config.target, CompileTarget::Pi5Linux);
+        assert_eq!(config.target, CompileTarget::Linux);
         assert_eq!(config.opt_level, OptLevel::O2);
         assert_eq!(config.verification_level, VerificationLevel::Normal);
         assert_eq!(config.entry_name, "main");

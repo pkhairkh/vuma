@@ -27,7 +27,7 @@ The VUMA benchmark suite is organized into five distinct categories, each design
 
 Each category is designed to be independently runnable and reproducible. A benchmark harness script (`vuma-bench`) will orchestrate execution across all four language configurations (VUMA verified, C with `-O2`, Rust safe, Rust unsafe), collect raw cycle counts, compute statistical aggregates, and emit both machine-readable JSON and human-readable Markdown tables. The harness will also enforce environmental controls: CPU frequency scaling disabled, isolated CPU cores via `taskset`, transparent hugepages configured consistently, and no other user-space workloads running during measurement windows.
 
-The rationale for five categories rather than the traditional two (micro vs macro) is that VUMA introduces a novel axis -- verification time -- that no existing benchmark suite accounts for. Traditional benchmarks assume compilation cost is a one-time developer inconvenience; VUMA's IVE makes verification a measurable, repeatable cost that directly affects iteration speed and CI pipeline duration. By elevating verification time to a first-class benchmark category, we ensure that IVE performance regressions are caught as aggressively as runtime regressions. Additionally, separating concurrency from data structures acknowledges that Pi 5's four Cortex-A76 cores introduce NUMA-like caching effects that would confound results if mixed with single-threaded collection benchmarks.
+The rationale for five categories rather than the traditional two (micro vs macro) is that VUMA introduces a novel axis -- verification time -- that no existing benchmark suite accounts for. Traditional benchmarks assume compilation cost is a one-time developer inconvenience; VUMA's IVE makes verification a measurable, repeatable cost that directly affects iteration speed and CI pipeline duration. By elevating verification time to a first-class benchmark category, we ensure that IVE performance regressions are caught as aggressively as runtime regressions. Additionally, separating concurrency from data structures acknowledges that AArch64's four Cortex-A76 cores introduce NUMA-like caching effects that would confound results if mixed with single-threaded collection benchmarks.
 
 ---
 
@@ -251,7 +251,7 @@ Data structure benchmarks exercise VUMA's core value proposition: safe, verified
 
 ## 4. Concurrency Benchmarks
 
-Concurrency benchmarks exercise VUMA's IVE concurrent memory model verification on the Raspberry Pi 5's four Cortex-A76 cores. These benchmarks are designed to stress both the runtime performance of synchronization primitives and the IVE's ability to prove data-race freedom at compile time. Each benchmark pins threads to specific cores using `pthread_setaffinity_np` (or the VUMA equivalent) to eliminate scheduler noise. All benchmarks are run with the Pi 5's CPU governor set to `performance` mode to eliminate frequency scaling variance.
+Concurrency benchmarks exercise VUMA's IVE concurrent memory model verification on the AArch64's four Cortex-A76 cores. These benchmarks are designed to stress both the runtime performance of synchronization primitives and the IVE's ability to prove data-race freedom at compile time. Each benchmark pins threads to specific cores using `pthread_setaffinity_np` (or the VUMA equivalent) to eliminate scheduler noise. All benchmarks are run with the AArch64's CPU governor set to `performance` mode to eliminate frequency scaling variance.
 
 ### 4.1 parallel_sum
 
@@ -380,7 +380,7 @@ Real-world benchmarks measure end-to-end application performance, including I/O,
 
 ### 5.3 gpio_control
 
-**Purpose:** Toggle Raspberry Pi 5 GPIO pins at maximum frequency using memory-mapped I/O. This benchmark is Pi 5-specific and measures the raw latency of MMIO operations, which is critical for real-time embedded applications. VUMA's IVE can verify that GPIO register accesses follow the correct sequence (set function select before writing data).
+**Purpose:** Toggle AArch64 GPIO pins at maximum frequency using memory-mapped I/O. This benchmark is AArch64-specific and measures the raw latency of MMIO operations, which is critical for real-time embedded applications. VUMA's IVE can verify that GPIO register accesses follow the correct sequence (set function select before writing data).
 
 **Parameters:**
 - GPIO: GPIO pin 18 (GPIO_GEN1, physical pin 12)
@@ -432,7 +432,7 @@ Real-world benchmarks measure end-to-end application performance, including I/O,
 
 Verification time benchmarks measure how long IVE takes to prove program correctness at compile time. This is the novel cost axis that VUMA introduces: unlike C and Rust, where compilation is a fixed cost regardless of program correctness, VUMA's IVE must construct a formal proof that the program satisfies its safety invariants. These benchmarks quantify the "price of verification" and help the VUMA team identify scalability bottlenecks in IVE's proof engine.
 
-All verification times are measured on the Pi 5 itself (not cross-compiled), using `time vuma build --release` with IVE enabled. The measurement includes parsing, type checking, IVE proof construction, and LLVM codegen. For comparison, we also measure `gcc -O2` and `cargo build --release` compilation times for equivalent C and Rust programs.
+All verification times are measured on the AArch64 itself (not cross-compiled), using `time vuma build --release` with IVE enabled. The measurement includes parsing, type checking, IVE proof construction, and LLVM codegen. For comparison, we also measure `gcc -O2` and `cargo build --release` compilation times for equivalent C and Rust programs.
 
 ### 6.1 trivial_program
 
@@ -513,11 +513,11 @@ All verification times are measured on the Pi 5 itself (not cross-compiled), usi
 
 ## 7. Measurement Methodology
 
-Rigorous measurement methodology is essential for producing benchmark results that are reproducible, defensible, and free of confounding factors. The VUMA benchmark suite adopts the following methodology, which is designed for the Raspberry Pi 5's specific hardware characteristics (Cortex-A76, 4 cores, 8 GB LPDDR4X-4267 RAM, 512 KB L2 cache per core, shared 2 MB L3 cache).
+Rigorous measurement methodology is essential for producing benchmark results that are reproducible, defensible, and free of confounding factors. The VUMA benchmark suite adopts the following methodology, which is designed for the AArch64's specific hardware characteristics (Cortex-A76, 4 cores, 8 GB LPDDR4X-4267 RAM, 512 KB L2 cache per core, shared 2 MB L3 cache).
 
 ### 7.1 Hardware Configuration
 
-- **Platform:** Raspberry Pi 5 (BCM2712, Quad-core ARM Cortex-A76 @ 2.4 GHz)
+- **Platform:** AArch64 (BCM2712, Quad-core ARM Cortex-A76 @ 2.4 GHz)
 - **RAM:** 8 GB LPDDR4X-4267
 - **OS:** Raspberry Pi OS Lite (64-bit, Linux kernel 6.6+)
 - **CPU governor:** Set to `performance` mode (`cpufreq-set -g performance`) to eliminate dynamic frequency scaling
@@ -641,7 +641,7 @@ Benchmarks should be executed in the following order to minimize thermal throttl
 4. Concurrency benchmarks (highest thermal load, run last)
 5. Real-world benchmarks (mixed characteristics, run individually)
 
-Between each benchmark category, a 30-second cool-down period is enforced to allow the Pi 5's thermal management to return to baseline.
+Between each benchmark category, a 30-second cool-down period is enforced to allow the AArch64's thermal management to return to baseline.
 
 ## Appendix B: Results Template
 
@@ -670,7 +670,7 @@ Between each benchmark category, a 30-second cool-down period is enforced to all
     "rust_unsafe": { "mean_cycles": 0, "stddev_cycles": 0, "median_cycles": 0, "p95_cycles": 0, "min_cycles": 0, "peak_rss_bytes": 0, "binary_size_bytes": 0 }
   },
   "environment": {
-    "platform": "rpi5",
+    "platform": "aarch64",
     "cpu": "cortex-a76",
     "cores": 4,
     "ram_gb": 8,

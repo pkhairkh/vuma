@@ -15,7 +15,7 @@
 3. [Crate Dependency Graph](#3-crate-dependency-graph)  
 4. [Key Data Structures and Their Relationships](#4-key-data-structures-and-their-relationships)  
 5. [Verification Pipeline](#5-verification-pipeline)  
-6. [Code Generation Pipeline for Pi 5](#6-code-generation-pipeline-for-pi-5)  
+6. [Code Generation Pipeline](#6-code-generation-pipeline)  
 7. [Runtime Optimization Pipeline](#7-runtime-optimization-pipeline)  
 8. [Security Model Overview](#8-security-model-overview)  
 
@@ -35,7 +35,7 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 
 **Layer 3 — Projections.** The human interface. The Projection System renders the SCG into multiple views: textual (code-like syntax with role-specific formatting), visual (dataflow diagrams, call graphs, memory layout views as SVG/HTML), and conversational (natural-language descriptions for AI agents). Bidirectional editing allows modifications in any projection to write back through validation, producing SCG modifications that are verified before application.
 
-**Layer 4 — COR (Continuous Optimization Runtime).** The always-on execution engine. COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. It performs incremental compilation, profile-guided optimization, speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets (local, remote, Pi 5 cores). Runtime profile data feeds back to the IVE for continuous re-optimization.
+**Layer 4 — COR (Continuous Optimization Runtime).** The always-on execution engine. COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. It performs incremental compilation, profile-guided optimization, speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets (local, remote). Runtime profile data feeds back to the IVE for continuous re-optimization.
 
 **Layer 5 — BD (Behavioral Descriptors).** The type replacement. A BD is the triple (RepD, CapD, RelD) that replaces traditional nominal types. RepD describes memory layout (size, alignment, field offsets, multiple simultaneous interpretations). CapD describes permitted operations (read, write, execute, serialize, send, persist, derive-pointer) with context-dependent capability sets. RelD describes relationships (temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, security-level flow). BDs are inferred, not declared; the IVE derives them from SCG structure.
 
@@ -82,10 +82,10 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 ├────────────────────────────────────────────────────────────────────────┤
 │           Execution Layer (Layer 4 + Platform)                         │
 │   ┌───────────────┐  ┌───────────────┐  ┌──────────────────────────┐│
-│   │ COR Runtime   │  │ ARM64         │  │ Pi 5 Platform            ││
+│   │ COR Runtime   │  │ ARM64         │  │ Platform                  ││
 │   │ (always-      │  │ Codegen       │  │ (GPIO, UART, I2C, SPI,  ││
-│   │  compiled,   │  │ (register     │  │  DMA, multicore          ││
-│   │  PGO, JIT)   │  │  alloc,       │  │  Cortex-A76)             ││
+│   │  compiled,   │  │ (register     │  │  DMA, multicore)         ││
+│   │  PGO, JIT)   │  │  alloc,       │  │                          ││
 │   │              │  │  insn sel)    │  │                          ││
 │   └───────────────┘  └───────────────┘  └──────────────────────────┘│
 └────────────────────────────────────────────────────────────────────────┘
@@ -93,7 +93,7 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 
 ### Architectural Principles
 
-The architecture is governed by five principles. **SCG primacy**: the SCG is the single source of truth; all other representations are projections. **Verification over restriction**: instead of rejecting programs that cannot be statically proven safe, VUMA verifies them and provides precise diagnostics when violations are found. **Inference over annotation**: Behavioral Descriptors are derived from program structure, not manually declared; the programmer specifies intent, the IVE infers types. **Continuous optimization**: the COR treats execution as a continuous cycle of compile-profile-optimize-recompile, not a one-shot compilation. **Bare-metal first**: the Pi 5 is not an afterthought or a porting target; it is the primary platform, and every design decision accounts for its constraints (4× Cortex-A76, BCM2712 peripherals, 4–8 GB LPDDR4X, no MMU in bare-metal mode).
+The architecture is governed by five principles. **SCG primacy**: the SCG is the single source of truth; all other representations are projections. **Verification over restriction**: instead of rejecting programs that cannot be statically proven safe, VUMA verifies them and provides precise diagnostics when violations are found. **Inference over annotation**: Behavioral Descriptors are derived from program structure, not manually declared; the programmer specifies intent, the IVE infers types. **Continuous optimization**: the COR treats execution as a continuous cycle of compile-profile-optimize-recompile, not a one-shot compilation. **Bare-metal first**: the target hardware is not an afterthought or a porting target; it is the primary platform, and every design decision accounts for its constraints (ARM64 architecture, peripheral support, no MMU in bare-metal mode).
 
 ---
 
@@ -166,7 +166,7 @@ A VUMA program travels through a multi-stage pipeline from human intent to hardw
                                                                        │
                                                                       ▼
                                                           ┌──────────────────────────┐
-                                                          │  COR Runtime on Pi 5     │◀──┐
+                                                          │  COR Runtime           │◀──┐
                                                           │  (execute + profile)     │   │
                                                           └──────────────────────────┘   │
                                                                                          │
@@ -183,9 +183,9 @@ The data flow is not purely top-down. Three critical feedback loops ensure conti
 
 **Verification Feedback Loop.** When the VUMA verification engine detects a violation (e.g., a use-after-free or a data race), it produces a `Counterexample` containing the exact execution path to the violation. This counterexample flows back to the Projection System, which renders it as a human-readable diagnostic with source locations, affected nodes, and suggested fixes. The programmer interacts with the projection to modify the SCG, which re-enters the pipeline. This loop is synchronous — the programmer sees the violation immediately and can fix it before proceeding.
 
-**Profile Feedback Loop.** During execution, the COR collects profile data (edge traversal frequencies, node execution times, Pi 5 PMU counters including cache misses and branch mispredictions) and feeds it back to the IVE. The IVE uses this data to refine BDs (e.g., discovering that a value is only read in practice, allowing CapD narrowing), re-prioritize verification (e.g., verifying hot paths more aggressively), and drive profile-guided optimization (e.g., inlining, code layout, branch prediction hints). This loop is asynchronous — it operates continuously in the background without interrupting execution.
+**Profile Feedback Loop.** During execution, the COR collects profile data (edge traversal frequencies, node execution times, hardware PMU counters including cache misses and branch mispredictions) and feeds it back to the IVE. The IVE uses this data to refine BDs (e.g., discovering that a value is only read in practice, allowing CapD narrowing), re-prioritize verification (e.g., verifying hot paths more aggressively), and drive profile-guided optimization (e.g., inlining, code layout, branch prediction hints). This loop is asynchronous — it operates continuously in the background without interrupting execution.
 
-**Deployment Feedback Loop.** The COR Deployment Manager monitors execution across heterogeneous targets (local CPU, Pi 5 cores, remote endpoints) and migrates SCG regions at runtime to rebalance load. When a region becomes hot on one target, the deployment manager may migrate it to a more suitable target (e.g., moving a DMA-heavy region to a Pi 5 core with dedicated DMA channels). This loop integrates with the profile feedback loop — migration decisions are informed by profile data.
+**Deployment Feedback Loop.** The COR Deployment Manager monitors execution across heterogeneous targets (local CPU, remote endpoints) and migrates SCG regions at runtime to rebalance load. When a region becomes hot on one target, the deployment manager may migrate it to a more suitable target (e.g., moving a DMA-heavy region to a core with dedicated DMA channels). This loop integrates with the profile feedback loop — migration decisions are informed by profile data.
 
 ### Stage-by-Stage Description
 
@@ -197,9 +197,9 @@ The data flow is not purely top-down. Three critical feedback loops ensure conti
 
 **Stage 4 — VUMA Verification.** Once BDs are attached, the MSG Builder constructs a Memory State Graph from the annotated SCG via the `scg_to_msg` conversion pipeline. This conversion performs a topological walk of SCG nodes, mapping `AllocationNode → Region` with monotonic address allocation, `AccessNode → Derivation + Access` with proper kind and size, `DeallocationNode → Region status Freed`, and `CastNode → DerivationKind::Cast` derivation chains. Control flow edges between Access nodes produce `SyncEdge` with HappensBefore ordering. The VUMA Verification Engine then checks the five global invariants against the MSG: liveness (every access targets allocated memory), exclusivity (no conflicting concurrent accesses), interpretation (every access uses a valid RepD), origin (every address traces to a valid allocation), and cleanup (every region is eventually freed or explicitly leaked). The Proof Engine generates formal proofs for verified invariants and counterexamples for violations.
 
-**Stage 5 — Code Generation.** The verified SCG is handed to the ARM64 code generator through a three-phase pipeline: SCG → IR lowering, register allocation, and machine code emission. Because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The COR sets up the runtime environment: allocating stack space, configuring the memory allocator, setting up the profile-guided optimization feedback loop with Pi 5 PMU instrumentation, and preparing the hardware (GPIO, UART, I2C, SPI, DMA, interrupt controllers) for execution.
+**Stage 5 — Code Generation.** The verified SCG is handed to the ARM64 code generator through a three-phase pipeline: SCG → IR lowering, register allocation, and machine code emission. Because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The COR sets up the runtime environment: allocating stack space, configuring the memory allocator, setting up the profile-guided optimization feedback loop with hardware PMU instrumentation, and preparing the hardware (GPIO, UART, I2C, SPI, DMA, interrupt controllers) for execution.
 
-**Stage 6 — Execution and Feedback.** The ARM64 machine code runs on the Pi 5 under the COR. The COR collects profile data through `ProfileCollector` — a thread-safe collector that records node execution times, edge traversal frequencies, allocation statistics, and Pi 5 PMU counter snapshots (cycle count, instruction count, cache misses, branch misses). The `collect_profile` analysis entry point computes hot spots, cold spots, hot paths, and PMU aggregates, producing recommendations for optimization. This feedback loop is continuous — the system is always learning from its own execution and improving accordingly through speculative optimization, profile-guided inlining, and adaptive code layout.
+**Stage 6 — Execution and Feedback.** The ARM64 machine code runs under the COR. The COR collects profile data through `ProfileCollector` — a thread-safe collector that records node execution times, edge traversal frequencies, allocation statistics, and hardware PMU counter snapshots (cycle count, instruction count, cache misses, branch misses). The `collect_profile` analysis entry point computes hot spots, cold spots, hot paths, and PMU aggregates, producing recommendations for optimization. This feedback loop is continuous — the system is always learning from its own execution and improving accordingly through speculative optimization, profile-guided inlining, and adaptive code layout.
 
 ---
 
@@ -212,7 +212,7 @@ The VUMA project is organized as a Cargo workspace with twelve crates. The depen
 ```
 vuma/
 ├── Cargo.toml                    (workspace root — shared dependencies)
-├── Makefile                      (build targets: dev, release, pi5, pi5-image, pi5-flash, pi5-debug)
+├── Makefile                      (build targets: dev, release, bare-metal)
 ├── src/
 │   ├── scg/                      (Layer 1 — Semantic Computation Graph)
 │   │   ├── Cargo.toml
@@ -288,7 +288,7 @@ vuma/
 │   │   └── src/
 │   │       ├── lib.rs            (crate root, re-exports)
 │   │       ├── runtime.rs        (CORuntime: central orchestrator)
-│   │       ├── profile.rs        (ProfileData, ProfileCollector, Pi5PmuCounters, HotPath analysis)
+│   │       ├── profile.rs        (ProfileData, ProfileCollector, PmuCounters, HotPath analysis)
 │   │       ├── speculative.rs    (SpeculativeExecutor, BranchPredictionTable, SpeculativeInlining)
 │   │       ├── optimization.rs   (OptimizationEngine, DCE, constant folding, inlining, loop unrolling)
 │   │       ├── deployment.rs     (DeploymentManager, HotSwap, Delta deployment, version tracking)
@@ -325,20 +325,6 @@ vuma/
 │   │       ├── regalloc.rs       (Linear-scan register allocator for aarch64)
 │   │       └── emit.rs           (ARM64 code emitter and ELF generation)
 │   │
-│   ├── pi5/                      (Platform — Raspberry Pi 5)
-│   │   ├── Cargo.toml            (build = "build.rs", no_std compatible)
-│   │   ├── build.rs              (Cargo build script for bare-metal aarch64-unknown-none)
-│   │   ├── link.ld               (ARM64 linker script: entry, sections, per-core stacks)
-│   │   └── src/
-│   │       ├── lib.rs            (crate root)
-│   │       ├── boot.rs           (exception vectors, _start, boot_main, FDT parsing)
-│   │       ├── platform.rs       (BCM2712 memory map, board identification)
-│   │       ├── uart.rs           (PL011 UART driver)
-│   │       ├── gpio.rs           (Memory-mapped GPIO)
-│   │       ├── timer.rs          (ARM generic timer, BCM2712 system timer)
-│   │       ├── mmio.rs           (MMIO register access primitives)
-│   │       └── smp.rs            (Multicore boot and inter-core communication)
-│   │
 │   ├── proof/                    (Formal Proofs)
 │   │   ├── Cargo.toml
 │   │   └── src/
@@ -362,7 +348,7 @@ vuma/
 │   │       ├── alloc.rs          (Allocation, deallocation, copy, fill, zero — VUMA-VERIFIED)
 │   │       ├── collections.rs    (Vec, LinkedList, HashMap, BTreeMap — VUMA-VERIFIED)
 │   │       ├── sync.rs           (Mutex, RwLock, Channel, AtomicU32, AtomicU64 — VUMA-VERIFIED)
-│   │       └── io.rs             (Read, Write, BufRead traits with UART and Pi 5 backends)
+│   │       └── io.rs             (Read, Write, BufRead traits with UART backends)
 │   │
 │   └── tests/                    (Integration Tests)
 │       ├── Cargo.toml
@@ -389,7 +375,6 @@ vuma/
         ├── reld-formal-spec.md
         ├── vuma-invariants-spec.md
         ├── msg-construction-spec.md
-        ├── pi5-memory-model-spec.md
         ├── security-model-spec.md
         ├── bd-inference-algorithm.md
         ├── vuma-verification-algorithm.md
@@ -411,15 +396,15 @@ vuma/
           │                    │                            │
           ▼                    ▼                            ▼
    ┌────────────┐      ┌───────────┐               ┌───────────┐
-   │ projection │      │   pi5     │               │  codegen   │
+   │ projection │      │   cor     │               │  codegen   │
    └─────┬──────┘      └─────┬─────┘               └──────┬────┘
          │                   │                            │
          │                   │           ┌────────────────┤
          │                   ▼           │                │
          │            ┌───────────┐     ▼                │
-         │            │   cor     │ ┌───────────┐       │
-         │            └─────┬─────┘ │  vuma      │       │
-         │                  │       └─────┬──────┘       │
+         │            │           │ ┌───────────┐       │
+         │            │           │ │  vuma      │       │
+         │            └─────┬─────┘ └─────┬──────┘       │
          │                  │             │              │
          │         ┌────────┼─────────────┤              │
          │         │        │             │              │
@@ -458,9 +443,9 @@ vuma/
 
 5. **`codegen` and `cor` are the execution layer.** They depend on `scg` and on the verification crates (`vuma`, `ive`) because they need the verified, annotated SCG to generate correct code. They do not depend on `projection` or `parser` — execution is independent of input format and presentation. `codegen` provides the three-phase pipeline (SCG → IR → register allocation → emission), while `cor` adds continuous optimization (profiling, speculative optimization, deployment management).
 
-6. **`pi5` is the platform layer.** It depends on `cor` and `codegen` to integrate Pi 5–specific runtime services (GPIO, UART, multicore boot, interrupt handling, DMA) with the code generation pipeline. It is the only crate that contains target-specific code, bare-metal boot sequences, and the ARM64 linker script. The `build.rs` script activates only when targeting `aarch64-unknown-none`, and the crate uses `no_std`-compatible dependencies.
+6. **The platform layer** depends on `cor` and `codegen` to integrate target-specific runtime services (GPIO, UART, multicore boot, interrupt handling, DMA) with the code generation pipeline. It contains target-specific code, bare-metal boot sequences, and the ARM64 linker script.
 
-7. **`projection` and `parser` are the human interface.** They depend on `scg` and `ive` but not on `vuma`, `cor`, `codegen`, or `pi5`. This ensures that the projection system can render verification results without depending on the execution layer, and that the parser can produce SCGs without depending on verification.
+7. **`projection` and `parser` are the human interface.** They depend on `scg` and `ive` but not on `vuma`, `cor`, or `codegen`. This ensures that the projection system can render verification results without depending on the execution layer, and that the parser can produce SCGs without depending on verification.
 
 ---
 
@@ -717,7 +702,7 @@ The Proof structure represents a formal verification result — either a proof t
                    ▼
              ┌───────────┐
              │ Verified  │
-             │    SCG    │ ──▶ Codegen ──▶ ARM64 ──▶ COR ──▶ Pi 5
+             │    SCG    │ ──▶ Codegen ──▶ ARM64 ──▶ COR
              └───────────┘
 ```
 
@@ -808,9 +793,9 @@ The `msg_incremental` module supports incremental verification via `MSGDelta`. W
 
 ---
 
-## 6. Code Generation Pipeline for Pi 5
+## 6. Code Generation Pipeline
 
-The code generation pipeline translates a verified SCG into ARM64 machine code that runs on the Raspberry Pi 5. The pipeline consists of three phases: SCG-to-IR lowering, register allocation, and machine code emission. Each phase produces a well-defined intermediate artifact that can be inspected, cached, and incrementally updated. The pipeline is designed to produce zero-overhead code — because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers.
+The code generation pipeline translates a verified SCG into ARM64 machine code. The pipeline consists of three phases: SCG-to-IR lowering, register allocation, and machine code emission. Each phase produces a well-defined intermediate artifact that can be inspected, cached, and incrementally updated. The pipeline is designed to produce zero-overhead code — because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers.
 
 ### Three-Phase Pipeline
 
@@ -891,9 +876,9 @@ The `arm64` module defines `Arm64Instruction` with all core integer instructions
 
 The `emit` module generates ARM64 machine code from the register-allocated IR and produces an ELF binary with proper section layout (`.text.boot`, `.text`, `.rodata`, `.data`, `.bss`) and debug information mapping SCG nodes to code offsets. The emitted binary includes `DebugInfo` with source-to-offset mapping, symbol table, and compiler notes for COR integration.
 
-### Pi 5 Bare-Metal Boot Sequence
+### Bare-Metal Boot Sequence
 
-The Pi 5 platform module provides a complete bare-metal boot sequence. The `_start` entry point (in `.text.boot`) saves the DTB pointer, reads the core ID from `MPIDR_EL1.Aff0`, parks secondary cores in a `WFE` loop, sets up the stack for core 0 above `__bss_end`, zeros the BSS section, installs the exception vector table via `VBAR_EL1`, and jumps to `boot_main`. The `boot_main` function initializes UART at 115200 baud, parses the FDT header, constructs `BootInfo`, and calls the user's `main()` function. The linker script (`link.ld`) defines the memory layout: kernel loaded at `0x80000`, per-core 64 KiB stacks, MMIO window at `0x100000`, and exports `__bss_start`, `__bss_end`, `__stack_core0..3` symbols for boot code consumption.
+The platform module provides a complete bare-metal boot sequence. The `_start` entry point (in `.text.boot`) saves the DTB pointer, reads the core ID from `MPIDR_EL1.Aff0`, parks secondary cores in a `WFE` loop, sets up the stack for core 0 above `__bss_end`, zeros the BSS section, installs the exception vector table via `VBAR_EL1`, and jumps to `boot_main`. The `boot_main` function initializes UART at 115200 baud, parses the FDT header, constructs `BootInfo`, and calls the user's `main()` function. The linker script defines the memory layout with kernel, per-core stacks, MMIO window, and exports symbols for boot code consumption.
 
 ---
 
@@ -935,7 +920,7 @@ The Continuous Optimization Runtime (COR) is the always-on execution engine that
 
 ### Profile-Guided Optimization
 
-The `ProfileCollector` is a thread-safe runtime collector (backed by `Mutex<ProfileData>` + `AtomicU64` sample counter) that records node execution times, edge traversal frequencies, allocation statistics, and Pi 5 PMU counter snapshots. The `Pi5PmuCounters` struct captures cycle count, instruction count, cache misses, and branch misses, with computed metrics: `ipc()` (instructions per cycle), `cache_miss_rate()`, and `branch_miss_rate()`. The `collect_profile` analysis entry point ingests `ProfileSample` records, computes hot spots (`NodeHotSpot` with per-node call count, total time, time fraction), cold spots, hot paths (`HotPath` with cumulative time fraction and dominance threshold), and PMU aggregates. It produces a `ProfileReport` with recommendations including `CacheOptimize` and `BranchLayout` suggestions derived from PMU data.
+The `ProfileCollector` is a thread-safe runtime collector (backed by `Mutex<ProfileData>` + `AtomicU64` sample counter) that records node execution times, edge traversal frequencies, allocation statistics, and hardware PMU counter snapshots. The `PmuCounters` struct captures cycle count, instruction count, cache misses, and branch misses, with computed metrics: `ipc()` (instructions per cycle), `cache_miss_rate()`, and `branch_miss_rate()`. The `collect_profile` analysis entry point ingests `ProfileSample` records, computes hot spots (`NodeHotSpot` with per-node call count, total time, time fraction), cold spots, hot paths (`HotPath` with cumulative time fraction and dominance threshold), and PMU aggregates. It produces a `ProfileReport` with recommendations including `CacheOptimize` and `BranchLayout` suggestions derived from PMU data.
 
 Profile-guided optimization improves benchmark performance by at least 15% over unoptimized codegen through: (1) aggressive inlining of hot call sites, (2) code layout optimization for hot paths (sequential instruction cache utilization), (3) branch prediction hints for frequently taken branches, and (4) cold path outlining for rarely executed code.
 
@@ -949,7 +934,7 @@ The `PassManager` in the SCG module orchestrates verification-aware optimization
 
 ### Deployment and Hot-Swap
 
-The `DeploymentManager` handles adaptive deployment across heterogeneous targets. `DeploymentTarget` variants include `Local`, `Pi5Bare { board_id, core_id }`, `Pi5Linux { host, core_affinity }`, and `Remote { endpoint }`. The manager supports: **Hot-swap deployment** via a 6-phase state machine (Idle → PreparingShadow → AwaitingSafePoint → Swapping → Completed → Failed) that replaces running code without stopping execution; **Delta deployment** via `DeploymentDelta` with block-level binary diffing (`compute()`, `apply()`, `estimated_size()`); **Version tracking** via `VersionLog` with per-region version history and rollback support; and **Package management** via `DeploymentPackage` with CRC32 checksums, debug info, and monotonic version numbers. Deployment results include timing, bytes transferred, and whether the deployment was a hot-swap or delta.
+The `DeploymentManager` handles adaptive deployment across heterogeneous targets. `DeploymentTarget` variants include `Local`, `BareMetal { board_id, core_id }`, `Linux { host, core_affinity }`, and `Remote { endpoint }`. The manager supports: **Hot-swap deployment** via a 6-phase state machine (Idle → PreparingShadow → AwaitingSafePoint → Swapping → Completed → Failed) that replaces running code without stopping execution; **Delta deployment** via `DeploymentDelta` with block-level binary diffing (`compute()`, `apply()`, `estimated_size()`); **Version tracking** via `VersionLog` with per-region version history and rollback support; and **Package management** via `DeploymentPackage` with CRC32 checksums, debug info, and monotonic version numbers. Deployment results include timing, bytes transferred, and whether the deployment was a hot-swap or delta.
 
 ---
 
@@ -967,7 +952,7 @@ VUMA's security model is built on the principle that security properties should 
 
 **Layer 4 — Region Security (SCG Regions).** SCG regions provide coarse-grained security boundaries. A `Security` region encloses a set of nodes that operate at a particular security level. Crossing a region boundary requires capability downgrade: values entering a lower-security region have their CapD intersected with the region's allowed capabilities. This is enforced by the IVE during verification — no code generation proceeds if a region boundary violation is detected. Regions can be nested (a Secret region inside a Confidential region inside a Public region), and the containment hierarchy is verified to be a proper lattice (no cycles, consistent ordering).
 
-**Layer 5 — Platform Security (Pi 5).** The Pi 5 platform module provides hardware-level security through the BCM2712's memory protection features. The `DeploymentTarget::Pi5Bare` variant includes `board_id` and `core_id` fields that bind compiled code to specific hardware. The bare-metal boot sequence installs exception vectors that trap unauthorized access attempts. The MMIO module provides memory-mapped register access with capability descriptors that prevent unauthorized peripheral access. The DMA controller driver includes cache coherency management that prevents DMA-based attacks on main memory.
+**Layer 5 — Platform Security.** The platform module provides hardware-level security through memory protection features. The `DeploymentTarget::BareMetal` variant includes `board_id` and `core_id` fields that bind compiled code to specific hardware. The bare-metal boot sequence installs exception vectors that trap unauthorized access attempts. The MMIO module provides memory-mapped register access with capability descriptors that prevent unauthorized peripheral access. The DMA controller driver includes cache coherency management that prevents DMA-based attacks on main memory.
 
 ### Threat Model
 

@@ -22,7 +22,6 @@
 //! | Integration    | `framework`         | Cross-crate pipelines (parse -> SCG -> verify) |
 //! | Verification   | `trivial`, `dlist`  | IVE invariant checks, proofs                   |
 //! | Codegen        | `codegen`           | ARM64 code emission, ELF generation            |
-//! | Pi5            | `pi5_hardware`      | Raspberry Pi 5 target tests (GPIO/UART/timer)  |
 //! | Pipeline       | `full_pipeline`     | Full compile() pipeline end-to-end             |
 //! | Benchmark      | `benchmarks`        | Performance benchmarks (8 categories)           |
 //!
@@ -52,7 +51,6 @@
 //! - [`vuma_integration_test!`] — integration test category
 //! - [`vuma_verification_test!`] — verification test category
 //! - [`vuma_codegen_test!`] — codegen test category
-//! - [`vuma_pi5_test!`] — Pi5 target test category
 
 #[cfg(test)]
 pub mod bd_inference;
@@ -72,8 +70,6 @@ pub mod framework;
 pub mod full_pipeline;
 #[cfg(test)]
 pub mod graph;
-#[cfg(test)]
-pub mod pi5_hardware;
 #[cfg(test)]
 pub mod sha256d;
 #[cfg(test)]

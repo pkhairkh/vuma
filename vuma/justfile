@@ -6,14 +6,12 @@
 #   just build        — compile the workspace
 #   just test         — run all tests
 #   just lint         — fmt check + clippy
-#   just pi5          — build Pi 5 bare-metal image
 # ============================================================================
 
 # -- Variables ---------------------------------------------------------------
 
 prefix := "/usr/local"
 crate  := ""
-sd     := "/mnt/sd-boot"
 
 # -- Default: list available recipes -----------------------------------------
 
@@ -116,31 +114,6 @@ clippy-fix:
 lint: fmt-check clippy
 
 # ============================================================================
-# Pi 5 Bare-Metal
-# ============================================================================
-
-# Cross-compile vuma-pi5 for bare-metal aarch64
-pi5:
-    cargo build --target aarch64-unknown-none --release -p vuma-pi5
-
-# Build kernel8.img from ELF binary
-pi5-image: pi5
-    aarch64-none-elf-objcopy -O binary target/aarch64-unknown-none/release/vuma-pi5 src/pi5/kernel8.img
-
-# Flash kernel8.img to SD card: just pi5-flash sd=/mnt/sd-boot
-pi5-flash sd=sd: pi5-image
-    cp src/pi5/kernel8.img {{sd }}/kernel8.img
-    @echo "Flashed kernel8.img to {{sd }}"
-
-# Launch QEMU debug session (GDB on :1234)
-pi5-debug: pi5-image
-    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img -s -S
-
-# Run Pi 5 image in QEMU (no debug stub)
-pi5-run: pi5-image
-    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img
-
-# ============================================================================
 # x86_64 and RISC-V QEMU targets
 # ============================================================================
 
@@ -195,10 +168,6 @@ toolchain-info:
 # Remove all build artifacts
 clean:
     cargo clean
-
-# Remove Pi 5 build artifacts only
-clean-pi5:
-    cargo clean --target aarch64-unknown-none
 
 # Remove generated documentation
 clean-doc:

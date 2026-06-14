@@ -18,7 +18,7 @@
 //! | **Security Relation** | [`SecurityRel`]          | Per-value security metadata (part of RelD)     |
 //! | **Boundary**          | [`SecurityBoundary`]     | Region-pair boundary with crossing rules       |
 //! | **Declassification**  | [`DeclassificationRecord`]| Audit-trail for every downgrade event         |
-//! | **HW Mapping**        | [`Arm64SecurityMapping`] | CapD → PAC/BTI/MTE for Pi 5                   |
+//! | **HW Mapping**        | [`Arm64SecurityMapping`] | CapD → PAC/BTI/MTE for ARM64                  |
 //! | **Verifier**          | [`SecurityVerifier`]     | Whole-program invariant checker                |
 
 use crate::derivation::{Derivation, DerivationId};
@@ -1024,7 +1024,7 @@ impl SecurityBoundary {
 }
 
 // ---------------------------------------------------------------------------
-// ARM64 Security Mapping (Pi 5)
+// ARM64 Security Mapping
 // ---------------------------------------------------------------------------
 
 /// ARM64 PAC key identifiers.
@@ -1057,7 +1057,7 @@ pub enum BtiType {
 }
 
 /// The mapping from VUMA CapD capabilities to ARM64 hardware security
-/// features for the Raspberry Pi 5 (BCM2712, Cortex-A76, ARMv8.2-A).
+/// features for ARM64 platforms (ARMv8.2-A+).
 ///
 /// | VUMA Concept              | ARM64 Feature | Mapping                                  |
 /// |---------------------------|---------------|------------------------------------------|
@@ -1083,8 +1083,8 @@ pub struct Arm64SecurityMapping {
 }
 
 impl Arm64SecurityMapping {
-    /// Default mapping for Pi 5 with all features enabled in development mode.
-    pub fn pi5_development() -> Self {
+    /// Default mapping with all features enabled in development mode.
+    pub fn default_development() -> Self {
         Self {
             pac_instruction_key: PacKey::ApiA,
             pac_data_key: PacKey::ApdA,
@@ -1095,8 +1095,8 @@ impl Arm64SecurityMapping {
         }
     }
 
-    /// Mapping for Pi 5 in production mode (async MTE for performance).
-    pub fn pi5_production() -> Self {
+    /// Default mapping in production mode (async MTE for performance).
+    pub fn default_production() -> Self {
         Self {
             pac_instruction_key: PacKey::ApiA,
             pac_data_key: PacKey::ApdA,
@@ -1911,7 +1911,7 @@ mod tests {
 
     #[test]
     fn arm64_mapping_capability_to_hw() {
-        let mapping = Arm64SecurityMapping::pi5_development();
+        let mapping = Arm64SecurityMapping::default_development();
 
         assert!(mapping
             .capability_to_hw(SecurityCapability::DerivePtr)
@@ -1940,22 +1940,22 @@ mod tests {
 
     #[test]
     fn arm64_pac_sign_pseudocode() {
-        let mapping = Arm64SecurityMapping::pi5_development();
+        let mapping = Arm64SecurityMapping::default_development();
         assert!(mapping.emit_pac_sign(true).contains("pac_sign"));
         assert!(mapping.emit_pac_sign(false).contains("missing DerivePtr"));
     }
 
     #[test]
     fn arm64_bti_landing_pad() {
-        let mapping = Arm64SecurityMapping::pi5_development();
+        let mapping = Arm64SecurityMapping::default_development();
         assert!(mapping.emit_bti_landing_pad(true).contains("bti c"));
         assert!(mapping.emit_bti_landing_pad(false).contains("bti j"));
     }
 
     #[test]
     fn arm64_mte_mode_difference() {
-        let dev = Arm64SecurityMapping::pi5_development();
-        let prod = Arm64SecurityMapping::pi5_production();
+        let dev = Arm64SecurityMapping::default_development();
+        let prod = Arm64SecurityMapping::default_production();
         assert_eq!(dev.mte_mode, MteMode::Synchronous);
         assert_eq!(prod.mte_mode, MteMode::Asynchronous);
     }
@@ -2383,7 +2383,7 @@ mod tests {
 
     #[test]
     fn arm64_capabilities_to_hw_set() {
-        let mapping = Arm64SecurityMapping::pi5_development();
+        let mapping = Arm64SecurityMapping::default_development();
         let caps: HashSet<SecurityCapability> = [
             SecurityCapability::DerivePtr,
             SecurityCapability::Execute,

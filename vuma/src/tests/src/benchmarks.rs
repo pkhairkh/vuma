@@ -15,7 +15,7 @@
 //! | 3 | MSG Construction          | [`msg_construction_bench`]  | SCG → MSG conversion via `vuma_core::scg_to_msg`   |
 //! | 4 | IVE Verification          | [`ive_verification_bench`]  | Each invariant (liveness, exclusivity, …) separately|
 //! | 5 | ARM64 Codegen             | [`codegen_bench`]           | SCG → IR → ARM64 pipeline end-to-end               |
-//! | 6 | C-Equivalent Comparison   | [`c_comparison_bench`]      | VUMA output vs hand-written C on Pi 5              |
+//! | 6 | C-Equivalent Comparison   | [`c_comparison_bench`]      | VUMA output vs hand-written C on AArch64              |
 //! | 7 | Memory Usage              | [`memory_usage_bench`]      | Peak allocation during compilation                  |
 //! | 8 | End-to-End Pipeline       | [`e2e_pipeline_bench`]      | Full parse → verify → codegen pipeline              |
 //!
@@ -23,7 +23,7 @@
 //!
 //! - **Warmup**: 10 iterations (results discarded).
 //! - **Measurement**: 100 iterations (all recorded).
-//! - **Timer**: `std::time::Instant` (wall-clock); on Pi 5 the ARM64 PMU
+//! - **Timer**: `std::time::Instant` (wall-clock); on AArch64 the ARM64 PMU
 //!   cycle counter (`cntvct_el0`) would be preferred, but `Instant`
 //!   suffices for development-time benchmarking on any host.
 //! - **Result**: [`BenchmarkResult`] carries `mean_ns`, `median_ns`,
@@ -967,7 +967,7 @@ pub fn codegen_bench() -> Vec<BenchmarkResult> {
 /// Simulated benchmark comparing VUMA pipeline throughput against a
 /// hand-written C equivalent.
 ///
-/// On the Raspberry Pi 5, this would invoke `gcc -O2 -march=armv8.2-a` to
+/// On the AArch64, this would invoke `gcc -O2 -march=armv8.2-a` to
 /// compile an equivalent C program and measure compilation + execution time.
 /// In the test suite, we measure VUMA's pipeline and record a placeholder
 /// baseline for the C comparison.

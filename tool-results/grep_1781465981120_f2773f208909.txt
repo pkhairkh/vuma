@@ -1,0 +1,252 @@
+/home/z/my-project/vuma/Cargo.toml:18:    "src/pi5",
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:1:# Task: Fix Pi5 spin_wait and Add UART Output to Exception Handlers
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:3:## Task ID: pi5-spin-wait-exception-fix
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:7:Fixed the Pi5 `spin_wait` to have an exit condition and added UART diagnostic output to exception handlers in the VUMA compiler project.
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:11:### 1. `src/pi5/src/smp.rs` — Fix spin_wait with exit condition
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:29:### 2. `src/pi5/src/exception.rs` — Add UART diagnostic output to exception handlers
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:59:### 3. `src/pi5/src/uart.rs` — Expose mock MMIO for cross-module tests
+/home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md:66:Checking vuma-pi5 v0.1.0 (/home/z/my-project/vuma/src/pi5)
+/home/z/my-project/vuma/src/std/src/io.rs:734:/// Must match `vuma_pi5::platform::PERIPHERAL_BASE`.
+/home/z/my-project/vuma/src/std/src/io.rs:738:/// Must match `vuma_pi5::platform::PERIPHERAL_BASE_HIGH`.
+/home/z/my-project/vuma/src/std/src/io.rs:743:/// Must match `vuma_pi5::platform::UART_BASE_OFFSET`.
+/home/z/my-project/vuma/src/vuma/src/security.rs:1087:    pub fn pi5_development() -> Self {
+/home/z/my-project/vuma/src/vuma/src/security.rs:1099:    pub fn pi5_production() -> Self {
+/home/z/my-project/vuma/src/vuma/src/security.rs:1914:        let mapping = Arm64SecurityMapping::pi5_development();
+/home/z/my-project/vuma/src/vuma/src/security.rs:1943:        let mapping = Arm64SecurityMapping::pi5_development();
+/home/z/my-project/vuma/src/vuma/src/security.rs:1950:        let mapping = Arm64SecurityMapping::pi5_development();
+/home/z/my-project/vuma/src/vuma/src/security.rs:1957:        let dev = Arm64SecurityMapping::pi5_development();
+/home/z/my-project/vuma/src/vuma/src/security.rs:1958:        let prod = Arm64SecurityMapping::pi5_production();
+/home/z/my-project/vuma/src/vuma/src/security.rs:2386:        let mapping = Arm64SecurityMapping::pi5_development();
+/home/z/my-project/vuma/src/pipeline.rs:79:    Pi5Bare,
+/home/z/my-project/vuma/src/pipeline.rs:82:    Pi5Linux,
+/home/z/my-project/vuma/src/pipeline.rs:90:            CompileTarget::Pi5Bare => write!(f, "pi5-bare"),
+/home/z/my-project/vuma/src/pipeline.rs:91:            CompileTarget::Pi5Linux => write!(f, "pi5-linux"),
+/home/z/my-project/vuma/src/pipeline.rs:172:    pub fn pi5_bare() -> Self {
+/home/z/my-project/vuma/src/pipeline.rs:174:            target: CompileTarget::Pi5Bare,
+/home/z/my-project/vuma/src/pipeline.rs:181:    pub fn pi5_linux() -> Self {
+/home/z/my-project/vuma/src/pipeline.rs:183:            target: CompileTarget::Pi5Linux,
+/home/z/my-project/vuma/src/pipeline.rs:211:            CompileTarget::Pi5Bare => EmitConfig::bare_metal_elf(),
+/home/z/my-project/vuma/src/pipeline.rs:212:            CompileTarget::Pi5Linux | CompileTarget::Linux => EmitConfig::linux_elf(),
+/home/z/my-project/vuma/src/pipeline.rs:220:            target: CompileTarget::Pi5Linux,
+/home/z/my-project/vuma/src/pipeline.rs:2311:    fn test_compile_pi5_bare() {
+/home/z/my-project/vuma/src/pipeline.rs:2316:        let config = CompileConfig::pi5_bare();
+/home/z/my-project/vuma/src/pipeline.rs:2384:        assert_eq!(config.target, CompileTarget::Pi5Linux);
+/home/z/my-project/vuma/README.md:99:    │ projection │ │   pi5    │      │  codegen  │
+/home/z/my-project/vuma/README.md:174:VUMA's primary target is the **Raspberry Pi 5** (BCM2712, 4× Cortex-A76, 4–8 GB LPDDR4X). The Pi 5 crate (`vuma-pi5`) compiles for bare-metal `aarch64-unknown-none`.
+/home/z/my-project/vuma/README.md:193:make pi5
+/home/z/my-project/vuma/README.md:196:make pi5-image
+/home/z/my-project/vuma/README.md:199:make pi5-flash SD=/path/to/sd-boot
+/home/z/my-project/vuma/README.md:202:make pi5-run
+/home/z/my-project/vuma/README.md:209:make pi5-debug
+/home/z/my-project/vuma/README.md:260:cargo test -p vuma-pi5
+/home/z/my-project/vuma/README.md:358:│   ├── pi5/                # Raspberry Pi 5 Platform
+/home/z/my-project/vuma/README.md:427:| `pi5_sensor.vuma`         | 188   | Pi 5 MMIO sensor reading                        |
+/home/z/my-project/vuma/README.md:455:| `pi5-memory-model-spec.md`           | 809   | Pi 5 memory model                        |
+/home/z/my-project/vuma/src/lib.rs:19://! | `vuma-pi5`      | Raspberry Pi 5 bare-metal runtime               |
+/home/z/my-project/vuma/justfile:9:#   just pi5          — build Pi 5 bare-metal image
+/home/z/my-project/vuma/justfile:122:# Cross-compile vuma-pi5 for bare-metal aarch64
+/home/z/my-project/vuma/justfile:123:pi5:
+/home/z/my-project/vuma/justfile:124:    cargo build --target aarch64-unknown-none --release -p vuma-pi5
+/home/z/my-project/vuma/justfile:127:pi5-image: pi5
+/home/z/my-project/vuma/justfile:128:    aarch64-none-elf-objcopy -O binary target/aarch64-unknown-none/release/vuma-pi5 src/pi5/kernel8.img
+/home/z/my-project/vuma/justfile:130:# Flash kernel8.img to SD card: just pi5-flash sd=/mnt/sd-boot
+/home/z/my-project/vuma/justfile:131:pi5-flash sd=sd: pi5-image
+/home/z/my-project/vuma/justfile:132:    cp src/pi5/kernel8.img {{sd }}/kernel8.img
+/home/z/my-project/vuma/justfile:136:pi5-debug: pi5-image
+/home/z/my-project/vuma/justfile:137:    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img -s -S
+/home/z/my-project/vuma/justfile:140:pi5-run: pi5-image
+/home/z/my-project/vuma/justfile:141:    qemu-system-aarch64 -M raspi4b -serial stdio -kernel src/pi5/kernel8.img
+/home/z/my-project/vuma/justfile:200:clean-pi5:
+/home/z/my-project/vuma/src/main.rs:148:        #[arg(long, value_enum, default_value = "pi5-linux")]
+/home/z/my-project/vuma/src/main.rs:208:    #[value(name = "pi5-bare")]
+/home/z/my-project/vuma/src/main.rs:209:    Pi5Bare,
+/home/z/my-project/vuma/src/main.rs:210:    #[value(name = "pi5-linux")]
+/home/z/my-project/vuma/src/main.rs:211:    Pi5Linux,
+/home/z/my-project/vuma/src/main.rs:219:            TargetArg::Pi5Bare => CompileTarget::Pi5Bare,
+/home/z/my-project/vuma/src/main.rs:220:            TargetArg::Pi5Linux => CompileTarget::Pi5Linux,
+/home/z/my-project/vuma/src/main.rs:322:    let config = make_config(cli, CompileTarget::Pi5Linux);
+/home/z/my-project/vuma/src/main.rs:393:    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+/home/z/my-project/vuma/src/main.rs:1232:    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+/home/z/my-project/vuma/src/main.rs:1412:                assert_eq!(target, &TargetArg::Pi5Linux);
+/home/z/my-project/vuma/src/main.rs:1418:    /// Test 2: `vuma build hello.vuma -o out.o --target pi5-bare` parses correctly.
+/home/z/my-project/vuma/src/main.rs:1428:            "pi5-bare",
+/home/z/my-project/vuma/src/main.rs:1439:                assert_eq!(target, &TargetArg::Pi5Bare);
+/home/z/my-project/vuma/src/main.rs:1666:            CompileTarget::from(TargetArg::Pi5Bare),
+/home/z/my-project/vuma/src/main.rs:1667:            CompileTarget::Pi5Bare
+/home/z/my-project/vuma/src/main.rs:1670:            CompileTarget::from(TargetArg::Pi5Linux),
+/home/z/my-project/vuma/src/main.rs:1671:            CompileTarget::Pi5Linux
+/home/z/my-project/vuma/docs/GLOSSARY.md:525:defined in `src/pi5/src/boot.rs`. The ISB instruction is represented as
+/home/z/my-project/vuma/docs/GLOSSARY.md:628:BCM2712 is implemented in `src/pi5/src/boot.rs`, which sets up the exception
+/home/z/my-project/vuma/docs/GLOSSARY.md:631:`src/pi5/link.ld` defines the memory layout with RAM at `0x80000` and an MMIO
+/home/z/my-project/vuma/docs/GLOSSARY.md:650:GPIO driver is implemented in `src/pi5/src/gpio.rs` with functions for pin
+/home/z/my-project/vuma/docs/GLOSSARY.md:669:The UART driver is implemented in `src/pi5/src/uart.rs` with initialization at
+/home/z/my-project/vuma/docs/GLOSSARY.md:671:The boot sequence (`src/pi5/src/boot.rs`) initializes the UART before
+/home/z/my-project/vuma/docs/AUDIT.md:39:| `vuma-pi5` | `src/pi5/` | 7 |
+/home/z/my-project/vuma/docs/AUDIT.md:61:| `examples/pi5_sensor.vuma` | Pi 5 sensor reading |
+/home/z/my-project/vuma/docs/AUDIT.md:77:| `vuma-pi5` | PASS | 6 warnings (mutable static references) |
+/home/z/my-project/vuma/docs/AUDIT.md:101:The VUMA project is a substantial codebase with ~117K lines of Rust across 12 workspace crates, 1,772 test functions, 102 public modules, and 26 documentation files. The architecture follows a layered design (SCG -> BD -> IVE -> VUMA -> Codegen/COR -> Pi5) with formal specifications for each component.
+/home/z/my-project/vuma/docs/AUDIT.md:120:   - PASS: vuma-scg, vuma-ive, vuma-bd, vuma-cor, vuma-projection, vuma-codegen, vuma-std, vuma-proof, vuma-pi5
+/home/z/my-project/vuma/docs/ROADMAP.md:47:**Pi 5 Crate (`src/pi5/`).** Implemented with bare-metal boot code (exception vectors, `_start` entry, FDT parsing, `boot_main`), linker script (`link.ld` with per-core stacks, MMIO window), build script (`build.rs` for `aarch64-unknown-none`), UART driver, GPIO driver, timer driver, MMIO primitives, and SMP (multicore boot).
+/home/z/my-project/vuma/docs/ROADMAP.md:57:Phase 1 established the complete architectural foundation of the VUMA framework. All 12 workspace crates are implemented with core functionality. The system can: construct SCGs programmatically and from parsed text; infer Behavioral Descriptors; construct MSGs from SCGs; verify all five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup); generate ARM64 machine code; and boot on Pi 5 hardware with UART output. The Makefile provides `make pi5`, `make pi5-image`, `make pi5-flash`, and `make pi5-debug` targets for the full development cycle.
+/home/z/my-project/vuma/docs/ROADMAP.md:90:**2.6 — Profile-Guided Optimization.** Complete the profile collection and analysis pipeline with Pi 5 PMU counter integration. Implement hot path identification, aggressive optimization for hot paths, and size optimization for cold paths. Target ≥15% improvement over unoptimized codegen on benchmark programs. ✅ Already implemented — the `ProfileCollector`, `Pi5PmuCounters`, `collect_profile` analysis, and `ProfileReport` with `CacheOptimize`/`BranchLayout` recommendations are complete.
+/home/z/my-project/vuma/docs/ROADMAP.md:174:**4.4 — Standard Library and Ecosystem.** Complete `vuma_std::mem` (allocation, deallocation, copy, fill, zero — all VUMA-VERIFIED). Complete `vuma_std::collections` (Vec, LinkedList, HashMap, BTreeMap — all VUMA-VERIFIED, no unsafe). Complete `vuma_std::sync` (Mutex, RwLock, Channel, AtomicU32, AtomicU64 — all VUMA-VERIFIED). Complete `vuma_std::io` (Read, Write, BufRead traits with UART and Pi 5 peripheral implementations). Complete `vuma_std::fmt` (Display, Debug formatting with UART output backend). Complete `vuma_std::pi5` (Pi 5 platform abstractions). Complete `vuma_std::bd` (BD construction helpers, RepD/CapD/RelD builders, BD annotation macros). Create ecosystem examples: HTTP server, key-value store, sensor reader, real-time signal processor — all running on Pi 5.
+/home/z/my-project/vuma/src/cor/src/optimization.rs:735:    pub target_pi5: bool,
+/home/z/my-project/vuma/src/cor/src/optimization.rs:741:        let target_pi5 = matches!(target_arch, TargetArch::ArmV8A);
+/home/z/my-project/vuma/src/cor/src/optimization.rs:746:            target_pi5,
+/home/z/my-project/vuma/src/cor/src/optimization.rs:751:    pub fn for_pi5() -> Self {
+/home/z/my-project/vuma/src/cor/src/optimization.rs:800:            if (self.target_pi5 || is_hot) && node.alignment < self.cache_line_size {
+/home/z/my-project/vuma/src/cor/src/optimization.rs:1207:        let pass = MemoryOptimization::for_pi5();
+/home/z/my-project/vuma/docs/architecture.md:215:├── Makefile                      (build targets: dev, release, pi5, pi5-image, pi5-flash, pi5-debug)
+/home/z/my-project/vuma/docs/architecture.md:291:│   │       ├── profile.rs        (ProfileData, ProfileCollector, Pi5PmuCounters, HotPath analysis)
+/home/z/my-project/vuma/docs/architecture.md:328:│   ├── pi5/                      (Platform — Raspberry Pi 5)
+/home/z/my-project/vuma/docs/architecture.md:392:        ├── pi5-memory-model-spec.md
+/home/z/my-project/vuma/docs/architecture.md:414:   │ projection │      │   pi5     │               │  codegen   │
+/home/z/my-project/vuma/docs/architecture.md:461:6. **`pi5` is the platform layer.** It depends on `cor` and `codegen` to integrate Pi 5–specific runtime services (GPIO, UART, multicore boot, interrupt handling, DMA) with the code generation pipeline. It is the only crate that contains target-specific code, bare-metal boot sequences, and the ARM64 linker script. The `build.rs` script activates only when targeting `aarch64-unknown-none`, and the crate uses `no_std`-compatible dependencies.
+/home/z/my-project/vuma/docs/architecture.md:463:7. **`projection` and `parser` are the human interface.** They depend on `scg` and `ive` but not on `vuma`, `cor`, `codegen`, or `pi5`. This ensures that the projection system can render verification results without depending on the execution layer, and that the parser can produce SCGs without depending on verification.
+/home/z/my-project/vuma/docs/architecture.md:938:The `ProfileCollector` is a thread-safe runtime collector (backed by `Mutex<ProfileData>` + `AtomicU64` sample counter) that records node execution times, edge traversal frequencies, allocation statistics, and Pi 5 PMU counter snapshots. The `Pi5PmuCounters` struct captures cycle count, instruction count, cache misses, and branch misses, with computed metrics: `ipc()` (instructions per cycle), `cache_miss_rate()`, and `branch_miss_rate()`. The `collect_profile` analysis entry point ingests `ProfileSample` records, computes hot spots (`NodeHotSpot` with per-node call count, total time, time fraction), cold spots, hot paths (`HotPath` with cumulative time fraction and dominance threshold), and PMU aggregates. It produces a `ProfileReport` with recommendations including `CacheOptimize` and `BranchLayout` suggestions derived from PMU data.
+/home/z/my-project/vuma/docs/architecture.md:952:The `DeploymentManager` handles adaptive deployment across heterogeneous targets. `DeploymentTarget` variants include `Local`, `Pi5Bare { board_id, core_id }`, `Pi5Linux { host, core_affinity }`, and `Remote { endpoint }`. The manager supports: **Hot-swap deployment** via a 6-phase state machine (Idle → PreparingShadow → AwaitingSafePoint → Swapping → Completed → Failed) that replaces running code without stopping execution; **Delta deployment** via `DeploymentDelta` with block-level binary diffing (`compute()`, `apply()`, `estimated_size()`); **Version tracking** via `VersionLog` with per-region version history and rollback support; and **Package management** via `DeploymentPackage` with CRC32 checksums, debug info, and monotonic version numbers. Deployment results include timing, bytes transferred, and whether the deployment was a hot-swap or delta.
+/home/z/my-project/vuma/docs/architecture.md:970:**Layer 5 — Platform Security (Pi 5).** The Pi 5 platform module provides hardware-level security through the BCM2712's memory protection features. The `DeploymentTarget::Pi5Bare` variant includes `board_id` and `core_id` fields that bind compiled code to specific hardware. The bare-metal boot sequence installs exception vectors that trap unauthorized access attempts. The MMIO module provides memory-mapped register access with capability descriptors that prevent unauthorized peripheral access. The DMA controller driver includes cache coherency management that prevents DMA-based attacks on main memory.
+/home/z/my-project/vuma/src/cor/src/profile.rs:80:pub struct Pi5PmuCounters {
+/home/z/my-project/vuma/src/cor/src/profile.rs:91:impl Pi5PmuCounters {
+/home/z/my-project/vuma/src/cor/src/profile.rs:204:    pub pmu: Option<Pi5PmuCounters>,
+/home/z/my-project/vuma/src/cor/src/profile.rs:224:        pmu: Pi5PmuCounters,
+/home/z/my-project/vuma/src/cor/src/profile.rs:299:    pub node_pmu: HashMap<NodeId, Pi5PmuCounters>,
+/home/z/my-project/vuma/src/cor/src/profile.rs:344:    pub fn record_pmu(&mut self, node_id: NodeId, pmu: &Pi5PmuCounters) {
+/home/z/my-project/vuma/src/cor/src/profile.rs:585:    pub fn record_pmu(&self, node_id: NodeId, pmu: &Pi5PmuCounters) {
+/home/z/my-project/vuma/src/cor/src/profile.rs:603:        pmu: Pi5PmuCounters,
+/home/z/my-project/vuma/src/cor/src/profile.rs:655:    pub aggregate_pmu: Pi5PmuCounters,
+/home/z/my-project/vuma/src/cor/src/profile.rs:657:    pub node_pmu: HashMap<NodeId, Pi5PmuCounters>,
+/home/z/my-project/vuma/src/cor/src/profile.rs:728:    let mut aggregate_pmu = Pi5PmuCounters::new();
+/home/z/my-project/vuma/src/cor/src/profile.rs:847:        let pmu = Pi5PmuCounters {
+/home/z/my-project/vuma/src/cor/src/profile.rs:937:    fn pi5_pmu_counters_ipc_and_rates() {
+/home/z/my-project/vuma/src/cor/src/profile.rs:938:        let pmu = Pi5PmuCounters {
+/home/z/my-project/vuma/src/cor/src/profile.rs:950:        let zero_pmu = Pi5PmuCounters::new();
+/home/z/my-project/vuma/src/cor/src/profile.rs:969:        let pmu1 = Pi5PmuCounters {
+/home/z/my-project/vuma/src/cor/src/profile.rs:975:        let pmu2 = Pi5PmuCounters {
+/home/z/my-project/vuma/examples/README.md:77:### 8. [pi5_sensor.vuma](pi5_sensor.vuma) — Pi 5 GPIO sensor reader with UART output
+/home/z/my-project/vuma/examples/README.md:111:vuma flash --target rpi5 examples/gpio_blink.vuma
+/home/z/my-project/vuma/examples/README.md:114:vuma compile --target rpi5 examples/pi5_sensor.vuma
+/home/z/my-project/vuma/examples/README.md:135:10. Advance to **pi5_sensor.vuma** for multi-peripheral sensor pipelines
+/home/z/my-project/vuma/examples/README.md:150:| pi5_sensor | ✓ | ✓ | ✓ | ✓ | ✓ |
+/home/z/my-project/vuma/src/cor/src/deployment.rs:9://! - [`DeploymentTarget`] — where to deploy (Local, Pi5Bare, Pi5Linux, Remote).
+/home/z/my-project/vuma/src/cor/src/deployment.rs:53:    Pi5Bare {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:63:    Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:80:    pub fn is_pi5(&self) -> bool {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:83:            DeploymentTarget::Pi5Bare { .. } | DeploymentTarget::Pi5Linux { .. }
+/home/z/my-project/vuma/src/cor/src/deployment.rs:92:        self.is_pi5()
+/home/z/my-project/vuma/src/cor/src/deployment.rs:99:            DeploymentTarget::Pi5Bare { .. } => "Pi5Bare",
+/home/z/my-project/vuma/src/cor/src/deployment.rs:100:            DeploymentTarget::Pi5Linux { .. } => "Pi5Linux",
+/home/z/my-project/vuma/src/cor/src/deployment.rs:110:            DeploymentTarget::Pi5Bare { board_id, core_id } => {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:111:                write!(f, "Pi5Bare({}/core{})", board_id, core_id)
+/home/z/my-project/vuma/src/cor/src/deployment.rs:113:            DeploymentTarget::Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:117:                Some(c) => write!(f, "Pi5Linux({}/core{})", host, c),
+/home/z/my-project/vuma/src/cor/src/deployment.rs:118:                None => write!(f, "Pi5Linux({})", host),
+/home/z/my-project/vuma/src/cor/src/deployment.rs:601:            let target = if self.config.is_pi5_target() {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:604:                    DeploymentTarget::Pi5Bare {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:609:                    DeploymentTarget::Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1047:    fn make_pi5_config() -> Config {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1078:    // -- Test 2: Deploy to Pi5Bare target ----------------------------------
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1081:    fn deploy_to_pi5_bare_target() {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1082:        let mut mgr = DeploymentManager::new(make_pi5_config());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1084:        let target = DeploymentTarget::Pi5Bare {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1085:            board_id: "pi5-01".to_owned(),
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1090:        assert!(result.target.is_pi5());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1094:    // -- Test 3: Hot-swap on Pi5Bare ---------------------------------------
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1097:    fn hot_swap_on_pi5_bare() {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1098:        let mut mgr = DeploymentManager::new(make_pi5_config());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1099:        let target = DeploymentTarget::Pi5Bare {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1100:            board_id: "pi5-01".to_owned(),
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1120:    // -- Test 4: Hot-swap rejected on non-Pi5 target -----------------------
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1146:        let mut mgr = DeploymentManager::new(make_pi5_config());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1147:        let target = DeploymentTarget::Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1278:        let bare = DeploymentTarget::Pi5Bare {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1282:        let linux = DeploymentTarget::Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1291:        assert!(local.is_pi5() == false);
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1294:        assert_eq!(bare.kind_label(), "Pi5Bare");
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1295:        assert!(bare.is_pi5());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1297:        assert_eq!(format!("{}", bare), "Pi5Bare(b1/core3)");
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1299:        assert_eq!(linux.kind_label(), "Pi5Linux");
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1300:        assert!(linux.is_pi5());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1305:        assert!(!remote.is_pi5());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1331:    // -- Test 14: DeploymentPlan with Pi5 targets --------------------------
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1334:    fn deployment_plan_pi5_bare_targets() {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1335:        let mut planner = DeploymentPlanner::new(make_pi5_config());
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1341:                DeploymentTarget::Pi5Bare { core_id, .. } => {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1344:                DeploymentTarget::Pi5Linux { core_affinity, .. } => {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1348:                other => panic!("Expected Pi5 target, got {:?}", other),
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1391:    // -- Test 17: Deploy to Pi5Linux target ---------------------------------
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1394:    fn deploy_to_pi5_linux_target() {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1396:        let target = DeploymentTarget::Pi5Linux {
+/home/z/my-project/vuma/src/cor/src/deployment.rs:1403:        assert!(result.target.is_pi5());
+/home/z/my-project/vuma/src/cor/src/config.rs:133:    pub fn is_pi5_target(&self) -> bool {
+/home/z/my-project/vuma/src/cor/src/config.rs:156:        assert!(cfg.is_pi5_target());
+/home/z/my-project/vuma/WORKLOG.md:10:#### `/home/z/my-project/vuma/src/tests/src/pi5_hardware.rs` (new file, ~700 lines)
+/home/z/my-project/vuma/WORKLOG.md:66:- Added `pub mod pi5_hardware;`, `pub mod codegen;`, `pub mod full_pipeline;` module declarations
+/home/z/my-project/vuma/WORKLOG.md:67:- Updated doc comment test categories table: Codegen → `codegen`, Pi5 → `pi5_hardware`, added Pipeline → `full_pipeline`
+/home/z/my-project/vuma/WORKLOG.md:71:- `pi5_hardware.rs`, `codegen.rs`, `full_pipeline.rs`: 0 errors, only unused-import warnings (caused by cascading from pre-existing `framework.rs` compilation errors)
+/home/z/my-project/vuma/WORKLOG.md:522:Enhanced `src/pi5/src/uart.rs` with a full-featured PL011 UART driver for the Raspberry Pi 5 (BCM2712). Added `MiniUart` (UART1) auxiliary driver, `UartBuffer` ring buffer for interrupt-driven I/O, free-standing convenience API, interrupt management, and 16 tests. Updated `platform.rs` with correct Pi 5 UART offsets (UART0 at 0x10A0000, AUX at 0x10A8000).
+/home/z/my-project/vuma/WORKLOG.md:526:#### `/home/z/my-project/vuma/src/pi5/src/uart.rs` (full rewrite, 199→1107 lines)
+/home/z/my-project/vuma/WORKLOG.md:612:#### `/home/z/my-project/vuma/src/pi5/src/platform.rs`
+/home/z/my-project/vuma/WORKLOG.md:616:- Added `Pi5Platform::aux_base()` method returning `peripheral_base() + AUX_BASE_OFFSET`
+/home/z/my-project/vuma/WORKLOG.md:617:- Updated `Pi5Platform::uart_base()` doc comment
+/home/z/my-project/vuma/WORKLOG.md:634:Enhanced `src/pi5/src/mmio.rs` with Pi 5 memory map constants, `u64` address type, named 32/64-bit volatile accessors, ARM64 memory barriers (`dmb`, `dsb`, `isb`), and a `MmioDevice` trait with mock-based tests. Cascading type changes propagated to platform.rs, uart.rs, gpio.rs, smp.rs, and lib.rs to use `u64` addresses throughout.
+/home/z/my-project/vuma/WORKLOG.md:638:#### `/home/z/my-project/vuma/src/pi5/src/mmio.rs` (full rewrite)
+/home/z/my-project/vuma/WORKLOG.md:678:#### `/home/z/my-project/vuma/src/pi5/src/platform.rs`
+/home/z/my-project/vuma/WORKLOG.md:684:- `Pi5Platform`: `ram_size` field: `usize` → `u64`; all `*_base()` methods: `usize` → `u64`
+/home/z/my-project/vuma/WORKLOG.md:686:#### `/home/z/my-project/vuma/src/pi5/src/uart.rs`
+/home/z/my-project/vuma/WORKLOG.md:693:#### `/home/z/my-project/vuma/src/pi5/src/gpio.rs`
+/home/z/my-project/vuma/WORKLOG.md:698:#### `/home/z/my-project/vuma/src/pi5/src/smp.rs`
+/home/z/my-project/vuma/WORKLOG.md:703:#### `/home/z/my-project/vuma/src/pi5/src/lib.rs`
+/home/z/my-project/vuma/WORKLOG.md:723:Enhanced `src/pi5/src/timer.rs` and `src/pi5/src/smp.rs` for the Raspberry Pi 5 (BCM2712, 4× Cortex-A76). Timer module now supports both physical (CNTPCT_EL0) and virtual (CNTVCT_EL0) counters, virtual timer interrupt control (CNTV_CTL_EL0, CNTV_TVAL_EL0, CNTV_CVAL_EL0), and free-standing C-style API functions. SMP module now provides `smp_init`, `smp_get_core_id`, `smp_send_ipi`, a `Spinlock` with RAII guard, and core-start tracking. 22 tests across both modules (10 timer + 12 SMP).
+/home/z/my-project/vuma/WORKLOG.md:727:#### `/home/z/my-project/vuma/src/pi5/src/timer.rs`
+/home/z/my-project/vuma/WORKLOG.md:748:#### `/home/z/my-project/vuma/src/pi5/src/smp.rs`
+/home/z/my-project/vuma/WORKLOG.md:765:- timer.rs and smp.rs compile with zero errors (verified via `cargo check -p vuma-pi5`).
+/home/z/my-project/vuma/WORKLOG.md:1295:8. `pi5` / `pi5-image` / `pi5-flash` / `pi5-debug` / `pi5-run` / `pi5-bare` — Pi 5 bare-metal targets
+/home/z/my-project/vuma/WORKLOG.md:1296:9. `clean` / `clean-pi5` / `clean-doc` — Granular clean targets
+/home/z/my-project/vuma/WORKLOG.md:1302:**Variables:** `CARGO`, `RUSTUP`, `PI5_*`, `SD`, `PREFIX`, `FEATURES`
+/home/z/my-project/vuma/WORKLOG.md:1313:7. `pi5-bare` — Pi 5 bare-metal build (aarch64-unknown-none) + kernel8.img + artifact upload
+/home/z/my-project/vuma/WORKLOG.md:1321:**Recipes:** `build`, `release`, `check`, `check-fast`, `test`, `test-verbose`, `test-crate`, `test-doc`, `test-filter`, `bench`, `bench-crate`, `doc`, `doc-open`, `doc-private`, `fmt`, `fmt-check`, `clippy`, `clippy-fix`, `lint`, `pi5`, `pi5-image`, `pi5-flash`, `pi5-debug`, `pi5-run`, `cross-aarch64`, `cross-aarch64-release`, `toolchain`, `setup`, `update-toolchain`, `toolchain-info`, `clean`, `clean-pi5`, `clean-doc`, `install`, `verify-examples`, `members`, `tree`, `watch`, `watch-check`
+/home/z/my-project/vuma/WORKLOG.md:1347:- **Bare-metal rustflags**: Linker script path (`-Tsrc/pi5/link.ld`), `--gc-sections` for minimal binary, `nodefaultlibs` for freestanding environment.
+/home/z/my-project/vuma/CHANGELOG.md:34:- **Pi 5 Memory Model Specification** (`docs/specs/pi5-memory-model-spec.md`, 809 lines) — BCM2712 address map, MMIO register access, DMA controller, cache coherency protocol, and ARM local register space.
+/home/z/my-project/vuma/CHANGELOG.md:70:- **`vuma-pi5`** (`src/pi5/`, ~6,120 lines) — Raspberry Pi 5 Platform: bare-metal boot (exception vectors, _start, FDT parsing), linker script, build script, UART driver (PL011 + Mini UART), GPIO, timer, MMIO primitives, and SMP (multicore boot, Spinlock).
+/home/z/my-project/vuma/CHANGELOG.md:120:- **Boot code** (`src/pi5/src/boot.rs`, 746 lines) — ARM64 exception vector table (16 entries), `_start` naked function (core ID check, BSS zeroing, stack setup, FDT parsing), `boot_main` high-level entry. 7 tests.
+/home/z/my-project/vuma/CHANGELOG.md:122:- **Linker script** (`src/pi5/link.ld`, 101 lines) — ARM64 linker script: ENTRY(_start), RAM region at 0x80000, MMIO window, section ordering, per-core stacks, symbol exports.
+/home/z/my-project/vuma/CHANGELOG.md:124:- **Build script** (`src/pi5/build.rs`, 47 lines) — Cargo build script for bare-metal aarch64-unknown-none: passes -Tlink.ld, -nostartfiles, -static, -no-pie.
+/home/z/my-project/vuma/CHANGELOG.md:126:- **UART driver** (`src/pi5/src/uart.rs`, 1700 lines) — PL011 UART0 driver, MiniUart (UART1), UartBuffer ring buffer, ISR handlers, free-standing C API. 16 tests.
+/home/z/my-project/vuma/CHANGELOG.md:128:- **GPIO driver** (`src/pi5/src/gpio.rs`, 1571 lines) — Memory-mapped GPIO pin function and pull control with BCM2712 register layout.
+/home/z/my-project/vuma/CHANGELOG.md:130:- **Timer driver** (`src/pi5/src/timer.rs`, 484 lines) — ARM generic timer (physical + virtual), virtual timer interrupt control, free-standing C API. 10 tests.
+/home/z/my-project/vuma/CHANGELOG.md:132:- **MMIO subsystem** (`src/pi5/src/mmio.rs`, 541 lines) — Pi 5 memory map constants, u64 address type, named 32/64-bit volatile accessors, ARM64 memory barriers (dmb, dsb, isb), MmioDevice trait. 10 tests.
+/home/z/my-project/vuma/CHANGELOG.md:134:- **SMP support** (`src/pi5/src/smp.rs`, 525 lines) — Multicore boot, IPI doorbell, Spinlock with RAII guard, core-start tracking. 12 tests.
+/home/z/my-project/vuma/CHANGELOG.md:138:- `make pi5` — Cross-compile for bare-metal aarch64
+/home/z/my-project/vuma/CHANGELOG.md:139:- `make pi5-image` — Build kernel8.img from ELF
+/home/z/my-project/vuma/CHANGELOG.md:140:- `make pi5-flash` — Flash to SD card boot partition
+/home/z/my-project/vuma/CHANGELOG.md:141:- `make pi5-debug` — Launch QEMU with GDB stub
+/home/z/my-project/vuma/CHANGELOG.md:142:- `make pi5-run` — Run in QEMU without debug
+/home/z/my-project/vuma/CHANGELOG.md:170:- **Pi5PmuCounters** (`src/cor/src/profile.rs`, 978 lines) — Hardware performance counter snapshot: cycle count, instruction count, cache misses, branch misses, IPC, miss rates. Thread-safe ProfileCollector. collect_profile analysis entry point with HotPath identification. 11 tests.
+/home/z/my-project/vuma/CHANGELOG.md:180:- `examples/pi5_sensor.vuma` (188 lines) — Pi 5 MMIO sensor reading
+/home/z/my-project/vuma/WAVE_PLAN.md:200:- W1-S8: vuma-std, vuma-proof, vuma-projection, vuma-pi5, vuma-tests, vuma-core
+/home/z/my-project/vuma/WAVE_PLAN.md:243:- W2-S5: vuma-pi5 (6 warnings — Rust 2024 static_mut_refs)
+/home/z/my-project/vuma/WAVE_PLAN.md:1536:- W21-S9: vuma-pi5
+/home/z/my-project/vuma/WAVE_PLAN.md:1679:## Wave 24: Pi5 Platform Abstraction
+/home/z/my-project/vuma/WAVE_PLAN.md:1686:**W24-S1 through W24-S8: Pi5 platform abstraction for multi-ISA testing**
+/home/z/my-project/vuma/WAVE_PLAN.md:1689:You are making vuma-pi5 testable on any architecture, not just ARM64.
+/home/z/my-project/vuma/WAVE_PLAN.md:1692:- W24-S1: Create Pi5Backend trait (mmio_read, mmio_write, barrier_dmb, barrier_dsb, timer_read)
+/home/z/my-project/vuma/WAVE_PLAN.md:1693:- W24-S2: RealPi5Backend (ARM64 only, inline asm)
+/home/z/my-project/vuma/WAVE_PLAN.md:1694:- W24-S3: MockPi5Backend (x86_64 + any, simulated state)
+/home/z/my-project/vuma/WAVE_PLAN.md:1695:- W24-S4: Refactor uart.rs to use Pi5Backend
+/home/z/my-project/vuma/WAVE_PLAN.md:1696:- W24-S5: Refactor gpio.rs to use Pi5Backend
+/home/z/my-project/vuma/WAVE_PLAN.md:1698:- W24-S7: Pi5 driver tests against emulator on x86_64 (30+ tests)
+/home/z/my-project/vuma/WAVE_PLAN.md:1699:- W24-S8: Pi5 integration: compile Pi5 program with ARM64 backend → verify ARM64 ELF
+/home/z/my-project/vuma/WAVE_PLAN.md:1702:- If Pi5 tests can't run on x86_64, you have FAILED.
+/home/z/my-project/vuma/WAVE_PLAN.md:1704:- cargo test -p vuma-pi5 must pass on x86_64.
+/home/z/my-project/vuma/WAVE_PLAN.md:1708:- vuma-pi5 fully testable on x86_64
+/home/z/my-project/vuma/WAVE_PLAN.md:1733:- W25-S8: vuma-std, vuma-pi5, vuma-proof, vuma-projection
+/home/z/my-project/vuma/WAVE_PLAN.md:1769:- W26-S3: vuma-pi5 (unsafe in MMIO, UART, GPIO)
+/home/z/my-project/vuma/WAVE_PLAN.md:1864:- W28-S9: vuma-std + vuma-pi5 docs
+/home/z/my-project/vuma/worklog.md:10:Updated the VUMA Pi5 bare-metal crate to properly target the BCM2712 SoC
+/home/z/my-project/vuma/worklog.md:19:| src/pi5/src/gic.rs | NEW: GIC-400 interrupt controller driver with BCM2712 constants, 9 tests | +430 |
+/home/z/my-project/vuma/worklog.md:20:| src/pi5/src/exception.rs | NEW: ExceptionContext, ExceptionType, handler functions, install_handlers(), 7 tests | +380 |
+/home/z/my-project/vuma/worklog.md:21:| src/pi5/src/boot.rs | Replaced spin-loop exception handlers with proper save/call/restore/ERET assembly | ~200 |
+/home/z/my-project/vuma/worklog.md:22:| src/pi5/src/lib.rs | Added `pub mod gic;`, `pub mod exception;` and re-exports | +5 |
+
+[Showing results with pagination = limit: 250]

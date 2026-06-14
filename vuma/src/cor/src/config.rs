@@ -18,14 +18,14 @@ pub enum TargetArch {
     X86_64,
     /// AArch64 – 64-bit ARM, common in cloud instances (Graviton, etc.).
     AArch64,
-    /// ARMv8-A – 32-bit/64-bit ARM with v8-A extensions, used on Raspberry Pi 5
-    /// and similar embedded-class boards.
+    /// ARMv8-A – 32-bit/64-bit ARM with v8-A extensions, used on
+    /// embedded-class AArch64 boards.
     ArmV8A,
 }
 
 impl Default for TargetArch {
     fn default() -> Self {
-        // Most development happens on x86-64; production may target AArch64 or Pi 5.
+        // Most development happens on x86-64; production may target AArch64.
         #[cfg(target_arch = "x86_64")]
         return TargetArch::X86_64;
 
@@ -128,11 +128,6 @@ impl Config {
         self.target_arch = arch;
         self
     }
-
-    /// Returns `true` if the runtime should target a Raspberry Pi 5 board.
-    pub fn is_pi5_target(&self) -> bool {
-        matches!(self.target_arch, TargetArch::ArmV8A)
-    }
 }
 
 #[cfg(test)]
@@ -153,7 +148,7 @@ mod tests {
             .with_speculative(false)
             .with_target_arch(TargetArch::ArmV8A);
 
-        assert!(cfg.is_pi5_target());
+        assert!(matches!(cfg.target_arch, TargetArch::ArmV8A));
         assert!(!cfg.enable_speculative);
         assert_eq!(cfg.optimization_level, OptimizationLevel::Aggressive);
     }

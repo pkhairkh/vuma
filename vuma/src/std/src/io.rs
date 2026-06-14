@@ -15,9 +15,9 @@
 //!
 //! ## Standard Streams (Vuma-prefixed)
 //!
-//! - **VumaStdin**: Standard input (from UART on bare-metal Pi 5; fd 0 on Linux).
-//! - **VumaStdout**: Standard output (to UART on bare-metal Pi 5; fd 1 on Linux).
-//! - **VumaStderr**: Standard error (to UART on bare-metal Pi 5; fd 2 on Linux).
+//! - **VumaStdin**: Standard input (from UART on bare-metal ARM64; fd 0 on Linux).
+//! - **VumaStdout**: Standard output (to UART on bare-metal ARM64; fd 1 on Linux).
+//! - **VumaStderr**: Standard error (to UART on bare-metal ARM64; fd 2 on Linux).
 //!
 //! ## File I/O
 //!
@@ -77,7 +77,7 @@ pub enum VumaIoErrorKind {
     InvalidInput,
     /// A platform-specific or bare-metal MMIO error occurred.
     MmioError,
-    /// A UART communication error occurred (bare-metal Pi 5).
+    /// A UART communication error occurred (bare-metal ARM64).
     UartError,
     /// A generic / unknown I/O error.
     Other,
@@ -414,7 +414,7 @@ const BUF_READER_CAP: usize = 8192;
 ///
 /// `VumaBufReader<R>` wraps an inner `VumaReader` and maintains an internal
 /// buffer, amortizing the cost of individual read calls. This is especially
-/// important on bare-metal Pi 5 where each UART read is a MMIO operation.
+/// important on bare-metal ARM64 where each UART read is a MMIO operation.
 ///
 /// ## BD Annotations
 ///
@@ -575,7 +575,7 @@ const BUF_WRITER_CAP: usize = 8192;
 ///
 /// `VumaBufWriter<W>` wraps an inner `VumaWriter` and maintains an internal
 /// buffer, batching multiple small writes into fewer flush operations. This
-/// is especially important on bare-metal Pi 5 where each UART write is a
+/// is especially important on bare-metal ARM64 where each UART write is a
 /// costly MMIO operation.
 ///
 /// ## BD Annotations
@@ -709,8 +709,8 @@ impl<W: VumaWriter> VumaWriter for VumaBufWriter<W> {
 /// VUMA-verified standard input.
 ///
 /// On **Linux**, `VumaStdin` reads from file descriptor 0 (`stdin`).
-/// On **bare-metal Pi 5**, `VumaStdin` reads from the UART RX register
-/// via MMIO (BCM2712 UART).
+/// On **bare-metal ARM64**, `VumaStdin` reads from the UART RX register
+/// via MMIO.
 ///
 /// ## BD Annotations
 ///
@@ -720,27 +720,24 @@ pub struct VumaStdin {
     /// Platform file descriptor (0 on Linux; unused on bare-metal).
     /// Used by os-linux syscall path.
     pub fd: i32,
-    /// Whether we are running on bare-metal (Pi 5).
+    /// Whether we are running on bare-metal (ARM64).
     bare_metal: bool,
-    /// MMIO base address for UART RX (Pi 5 bare-metal).
-    /// BCM2712 PL011 UART (computed from PERIPHERAL_BASE + UART_BASE_OFFSET).
+    /// MMIO base address for UART RX (ARM64 bare-metal).
+    /// PL011 UART (computed from PERIPHERAL_BASE + UART_BASE_OFFSET).
     mmio_base: u64,
     /// Internal ring buffer for UART reads (bare-metal only).
-    #[allow(dead_code)] // bare-metal ring buffer, used on Pi 5 target
+    #[allow(dead_code)] // bare-metal ring buffer, used on ARM64 bare-metal target
     rx_buf: Vec<u8>,
 }
 
 /// BCM2712 peripheral base address (low-peripheral mode).
-/// Must match `vuma_pi5::platform::PERIPHERAL_BASE`.
 const BCM2712_PERIPHERAL_BASE: u64 = 0x1C00_0000;
 
 /// BCM2712 peripheral base address (high-peripheral mode).
-/// Must match `vuma_pi5::platform::PERIPHERAL_BASE_HIGH`.
-#[allow(dead_code)] // bare-metal constant, used on Pi 5 target
+#[allow(dead_code)] // bare-metal constant, used on ARM64 bare-metal target
 const BCM2712_PERIPHERAL_BASE_HIGH: u64 = 0x7C00_0000;
 
 /// PL011 UART offset from the peripheral base on BCM2712.
-/// Must match `vuma_pi5::platform::UART_BASE_OFFSET`.
 const BCM2712_UART_BASE_OFFSET: u64 = 0x010A_0000;
 
 /// Default MMIO base address for BCM2712 PL011 UART.
@@ -751,7 +748,7 @@ const UART_PL011_BASE: u64 = BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET;
 impl VumaStdin {
     /// Create a new `VumaStdin` for the current platform.
     ///
-    /// On bare-metal Pi 5, this initializes the UART RX buffer.
+    /// On bare-metal ARM64, this initializes the UART RX buffer.
     /// On Linux, this wraps fd 0.
     // VUMA-VERIFIED: stdin always has Read capability
     pub fn new() -> Self {
@@ -763,7 +760,7 @@ impl VumaStdin {
         }
     }
 
-    /// Create a new `VumaStdin` for bare-metal Pi 5 with a custom MMIO base.
+    /// Create a new `VumaStdin` for bare-metal ARM64 with a custom MMIO base.
     // VUMA-VERIFIED: bare-metal constructor initializes UART properly
     pub fn new_bare_metal(mmio_base: u64) -> Self {
         Self {
@@ -774,12 +771,12 @@ impl VumaStdin {
         }
     }
 
-    /// Read a single byte from UART (bare-metal Pi 5).
+    /// Read a single byte from UART (bare-metal ARM64).
     ///
     /// This performs a MMIO read from the UART data register. On the BCM2712,
     /// the PL011 UART data register is at offset `0x00` from the base.
     ///
-    /// **Real MMIO addresses (BCM2712 Pi 5):**
+    /// **Real MMIO addresses (BCM2712):**
     /// - UART data register (DR): `mmio_base + 0x00` (read/write)
     /// - UART flag register (FR): `mmio_base + 0x18` (read-only)
     ///   - Bit 4 (RXFE): RX FIFO empty
@@ -803,7 +800,7 @@ impl VumaStdin {
         }
     }
 
-    /// Check if UART RX has data available (bare-metal Pi 5).
+    /// Check if UART RX has data available (bare-metal ARM64).
     ///
     /// Reads the UART flag register at offset `0x18` to check RXFE bit.
     // VUMA-VERIFIED: UART status check is safe; uses volatile read
@@ -948,8 +945,8 @@ impl StdRead for VumaStdin {
 /// VUMA-verified standard output.
 ///
 /// On **Linux**, `VumaStdout` writes to file descriptor 1 (`stdout`).
-/// On **bare-metal Pi 5**, `VumaStdout` writes to the UART TX register
-/// via MMIO (BCM2712 UART).
+/// On **bare-metal ARM64**, `VumaStdout` writes to the UART TX register
+/// via MMIO.
 ///
 /// ## BD Annotations
 ///
@@ -959,9 +956,9 @@ pub struct VumaStdout {
     /// Platform file descriptor (1 on Linux; unused on bare-metal).
     /// Used by os-linux syscall path.
     pub fd: i32,
-    /// Whether we are running on bare-metal (Pi 5).
+    /// Whether we are running on bare-metal (ARM64).
     bare_metal: bool,
-    /// MMIO base address for UART TX (Pi 5 bare-metal).
+    /// MMIO base address for UART TX (ARM64 bare-metal).
     mmio_base: u64,
 }
 
@@ -976,7 +973,7 @@ impl VumaStdout {
         }
     }
 
-    /// Create a new `VumaStdout` for bare-metal Pi 5 with a custom MMIO base.
+    /// Create a new `VumaStdout` for bare-metal ARM64 with a custom MMIO base.
     // VUMA-VERIFIED: bare-metal constructor initializes UART properly
     pub fn new_bare_metal(mmio_base: u64) -> Self {
         Self {
@@ -986,13 +983,13 @@ impl VumaStdout {
         }
     }
 
-    /// Write a single byte to UART (bare-metal Pi 5).
+    /// Write a single byte to UART (bare-metal ARM64).
     ///
     /// This performs a MMIO write to the UART data register. Before writing,
     /// it polls the UART flag register (offset `0x18`) to wait until the
     /// TXFF (transmit FIFO full) bit is clear.
     ///
-    /// **Real MMIO addresses (BCM2712 Pi 5):**
+    /// **Real MMIO addresses (BCM2712 ARM64):**
     /// - UART data register (DR): `mmio_base + 0x00` (write to transmit)
     /// - UART flag register (FR): `mmio_base + 0x18` (poll before write)
     ///   - Bit 5 (TXFF): TX FIFO full — must wait until clear before writing
@@ -1158,7 +1155,7 @@ impl StdWrite for VumaStdout {
 /// VUMA-verified standard error.
 ///
 /// On **Linux**, `VumaStderr` writes to file descriptor 2 (`stderr`).
-/// On **bare-metal Pi 5**, `VumaStderr` writes to the UART TX register
+/// On **bare-metal ARM64**, `VumaStderr` writes to the UART TX register
 /// via MMIO (BCM2712 UART), same as VumaStdout.
 ///
 /// ## BD Annotations
@@ -1169,9 +1166,9 @@ pub struct VumaStderr {
     /// Platform file descriptor (2 on Linux; unused on bare-metal).
     /// Used by os-linux syscall path.
     pub fd: i32,
-    /// Whether we are running on bare-metal (Pi 5).
+    /// Whether we are running on bare-metal (ARM64).
     bare_metal: bool,
-    /// MMIO base address for UART TX (Pi 5 bare-metal).
+    /// MMIO base address for UART TX (ARM64 bare-metal).
     mmio_base: u64,
 }
 
@@ -1186,7 +1183,7 @@ impl VumaStderr {
         }
     }
 
-    /// Create a new `VumaStderr` for bare-metal Pi 5 with a custom MMIO base.
+    /// Create a new `VumaStderr` for bare-metal ARM64 with a custom MMIO base.
     // VUMA-VERIFIED: bare-metal constructor initializes UART properly
     pub fn new_bare_metal(mmio_base: u64) -> Self {
         Self {
@@ -1196,11 +1193,11 @@ impl VumaStderr {
         }
     }
 
-    /// Write a single byte to UART (bare-metal Pi 5).
+    /// Write a single byte to UART (bare-metal ARM64).
     ///
     /// Same as VumaStdout::write_uart_byte — writes to the UART data register.
     ///
-    /// **Real MMIO addresses (BCM2712 Pi 5):**
+    /// **Real MMIO addresses (BCM2712 ARM64):**
     /// - UART data register (DR): `mmio_base + 0x00` (write to transmit)
     /// - UART flag register (FR): `mmio_base + 0x18` (poll TXFF before write)
     /// - Default PL011 base: computed from BCM2712_PERIPHERAL_BASE + BCM2712_UART_BASE_OFFSET
@@ -1359,7 +1356,7 @@ impl StdWrite for VumaStderr {
 /// VUMA-verified file handle with capability-based access control.
 ///
 /// On **Linux**, `VumaFile` uses OS-level file descriptors for I/O.
-/// On **bare-metal Pi 5**, `VumaFile` uses MMIO to access SD card or
+/// On **bare-metal ARM64**, `VumaFile` uses MMIO to access SD card or
 /// other block devices.
 ///
 /// Files are opened with a specific `FileMode` that determines which
@@ -1383,20 +1380,20 @@ pub struct VumaFile {
     pub position: u64,
     /// Whether the file is open.
     pub is_open: bool,
-    /// Whether we are running on bare-metal (Pi 5).
+    /// Whether we are running on bare-metal (ARM64).
     bare_metal: bool,
     /// MMIO base address for block device (bare-metal).
-    #[allow(dead_code)] // bare-metal MMIO base, used on Pi 5 target
+    #[allow(dead_code)] // bare-metal MMIO base, used on ARM64 target
     mmio_base: u64,
     /// Internal buffer for bare-metal block reads.
-    #[allow(dead_code)] // bare-metal block buffer, used on Pi 5 target
+    #[allow(dead_code)] // bare-metal block buffer, used on ARM64 target
     block_buf: Vec<u8>,
     /// Underlying OS file handle (Linux only; None on bare-metal).
     inner: Option<std::fs::File>,
 }
 
 /// Default MMIO base for the BCM2712 eMMC2 controller (SD card).
-#[allow(dead_code)] // bare-metal constant, used on Pi 5 target
+#[allow(dead_code)] // bare-metal constant, used on ARM64 target
 const EMMC2_BASE: u64 = BCM2712_PERIPHERAL_BASE + 0x0034_0000;
 
 /// Block size for bare-metal file I/O (512 bytes, standard SD sector).
@@ -1445,7 +1442,7 @@ impl VumaFile {
         })
     }
 
-    /// Open a file at the given path with the specified mode (bare-metal Pi 5).
+    /// Open a file at the given path with the specified mode (bare-metal ARM64).
     ///
     /// On bare-metal, this initializes the eMMC2 controller and prepares
     /// block-based I/O for reading/writing the SD card.

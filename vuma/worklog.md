@@ -7,8 +7,8 @@
 
 ### Summary
 
-Updated the VUMA Pi5 bare-metal crate to properly target the BCM2712 SoC
-(Raspberry Pi 5). Added a GIC-400 interrupt controller driver, real exception
+Updated the VUMA AArch64 bare-metal crate to properly target the BCM2712 SoC
+(AArch64). Added a GIC-400 interrupt controller driver, real exception
 handlers with context save/restore, correct QEMU targets, and fixed the UART
 base address in vuma-std.
 
@@ -16,17 +16,17 @@ base address in vuma-std.
 
 | File | Change | Lines |
 |------|--------|-------|
-| src/pi5/src/gic.rs | NEW: GIC-400 interrupt controller driver with BCM2712 constants, 9 tests | +430 |
-| src/pi5/src/exception.rs | NEW: ExceptionContext, ExceptionType, handler functions, install_handlers(), 7 tests | +380 |
-| src/pi5/src/boot.rs | Replaced spin-loop exception handlers with proper save/call/restore/ERET assembly | ~200 |
-| src/pi5/src/lib.rs | Added `pub mod gic;`, `pub mod exception;` and re-exports | +5 |
+| src/(removed)/src/gic.rs | NEW: GIC-400 interrupt controller driver with BCM2712 constants, 9 tests | +430 |
+| src/(removed)/src/exception.rs | NEW: ExceptionContext, ExceptionType, handler functions, install_handlers(), 7 tests | +380 |
+| src/(removed)/src/boot.rs | Replaced spin-loop exception handlers with proper save/call/restore/ERET assembly | ~200 |
+| src/(removed)/src/lib.rs | Added `pub mod gic;`, `pub mod exception;` and re-exports | +5 |
 | Makefile | Changed QEMU `-M raspi3b` to `-M raspi4b`; added `x86-64-run` and `riscv64-run` targets | +12 |
 | justfile | Changed QEMU `-M raspi3b` to `-M raspi4b`; added `x86-64-run` and `riscv64-run` targets | +12 |
 | src/std/src/io.rs | Replaced hardcoded `0xFE201000` UART base with BCM2712 platform constants computation | +12 |
 
 ### Part 1: GIC-400 Interrupt Controller Driver
 
-Created `src/pi5/src/gic.rs` with:
+Created `src/(removed)/src/gic.rs` with:
 
 - `Gic400` struct holding Distributor and CPU Interface base addresses
 - `init()` — full GIC-400 initialisation (disable, set priorities, route SPIs, enable)
@@ -43,7 +43,7 @@ Created `src/pi5/src/gic.rs` with:
 
 ### Part 2: Real Exception Handlers
 
-Created `src/pi5/src/exception.rs` with:
+Created `src/(removed)/src/exception.rs` with:
 
 - `ExceptionContext` struct (`#[repr(C)]`): x[0..30], spsr, elr, esr, far (280 bytes)
 - `ExceptionType` enum: Synchronous, Irq, Fiq, SError (with Display)
@@ -55,7 +55,7 @@ Created `src/pi5/src/exception.rs` with:
 - ESR parsing: `esr_ec()`, `esr_iss()`, `esr_cond()`, `is_data_abort()`, `is_instruction_abort()`
 - 7 tests: context size, default zeros, ESR EC extraction, ESR ISS extraction, ExceptionType display, abort helpers, new() vs default
 
-Updated `src/pi5/src/boot.rs`:
+Updated `src/(removed)/src/boot.rs`:
 
 - Replaced 16 spin-loop handler functions with 16 naked assembly handlers
 - Created `exception_entry!` Rust macro that generates save/call/restore/ERET assembly
@@ -66,7 +66,7 @@ Updated `src/pi5/src/boot.rs`:
 
 Updated Makefile and justfile:
 
-- Changed `-M raspi3b` → `-M raspi4b` in `pi5-debug` and `pi5-run` targets
+- Changed `-M raspi3b` → `-M raspi4b` in `aarch64-debug` and `aarch64-run` targets
 - Added `x86-64-run` target: `qemu-system-x86_64 -drive format=raw,file=...`
 - Added `riscv64-run` target: `qemu-system-riscv64 -machine virt -nographic -bios default -kernel ...`
 - Updated `.PHONY` declarations in Makefile
@@ -84,8 +84,8 @@ Updated `src/std/src/io.rs`:
 
 ### Build Verification
 
-- `cargo clippy -p vuma-pi5 -p vuma-std -- -D warnings`: **0 warnings**
-- `cargo test -p vuma-pi5` (gic + exception + mmio + platform + gpio): **76 tests pass**
+- `cargo clippy (removed) -p vuma-std -- -D warnings`: **0 warnings**
+- `cargo test (removed)` (gic + exception + mmio + platform + gpio): **76 tests pass**
 - `cargo test -p vuma-std`: **312 tests pass**
 
 ---
@@ -425,7 +425,7 @@ enhanced MMIO address comments. All 255 tests pass (39 io tests, including 8 new
 
 ### Bare-Metal UART Comments (MMIO Addresses)
 
-Enhanced comments on all UART methods showing real BCM2711 Pi 5 MMIO addresses:
+Enhanced comments on all UART methods showing real BCM2711 AArch64 MMIO addresses:
 - Data Register (DR): `mmio_base + 0x00`
 - Flag Register (FR): `mmio_base + 0x18` with bit layout (RXFE bit 4, TXFF bit 5, TXFE bit 7)
 - Control Register (CR): `mmio_base + 0x30`

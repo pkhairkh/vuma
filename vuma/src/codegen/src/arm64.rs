@@ -2,7 +2,7 @@
 //!
 //! Defines the ARM64 register set, condition codes, instruction
 //! representations, addressing modes, and the instruction selector that maps
-//! SCG/IR node types to ARM64 instructions for the Raspberry Pi 5
+//! SCG/IR node types to ARM64 instructions for the AArch64
 //! (Cortex-A76, ARMv8.2-A).
 //!
 //! ## Instruction Selection (SCG → ARM64)

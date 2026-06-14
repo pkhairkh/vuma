@@ -145,7 +145,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Target platform
-        #[arg(long, value_enum, default_value = "pi5-linux")]
+        #[arg(long, value_enum, default_value = "linux")]
         target: TargetArg,
     },
 
@@ -205,10 +205,6 @@ enum Commands {
 /// Target platform CLI argument for the `build` subcommand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum TargetArg {
-    #[value(name = "pi5-bare")]
-    Pi5Bare,
-    #[value(name = "pi5-linux")]
-    Pi5Linux,
     #[value(name = "linux")]
     Linux,
 }
@@ -216,8 +212,6 @@ enum TargetArg {
 impl From<TargetArg> for CompileTarget {
     fn from(val: TargetArg) -> Self {
         match val {
-            TargetArg::Pi5Bare => CompileTarget::Pi5Bare,
-            TargetArg::Pi5Linux => CompileTarget::Pi5Linux,
             TargetArg::Linux => CompileTarget::Linux,
         }
     }
@@ -319,7 +313,7 @@ fn cmd_build(
 /// `vuma run <file>` — Build + execute.
 fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
     let source = read_source(file)?;
-    let config = make_config(cli, CompileTarget::Pi5Linux);
+    let config = make_config(cli, CompileTarget::Linux);
     let result = compile(&source, &config).map_err(|errors| {
         print_errors(&errors);
         format!("compilation failed with {} error(s)", errors.len())
@@ -390,7 +384,7 @@ fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
 /// `vuma check <file>` — Parse + SCG + BD inference + IVE verification only.
 fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     let source = read_source(file)?;
-    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+    let mut config = make_config(cli, CompileTarget::Linux);
     // check mode: always run verification, don't skip
     if config.verification_level == VerificationLevel::None {
         config.verification_level = VerificationLevel::Normal;
@@ -1229,7 +1223,7 @@ fn cmd_disasm(file: &PathBuf, isa: IsaArg, base_addr_str: &str) -> Result<(), St
 /// `vuma verify <file>` — Run IVE 5-invariant verification.
 fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     let source = read_source(file)?;
-    let mut config = make_config(cli, CompileTarget::Pi5Linux);
+    let mut config = make_config(cli, CompileTarget::Linux);
     // Force exhaustive verification for the verify subcommand.
     config.verification_level = VerificationLevel::Exhaustive;
 
@@ -1409,13 +1403,13 @@ mod tests {
             } => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
-                assert_eq!(target, &TargetArg::Pi5Linux);
+                assert_eq!(target, &TargetArg::Linux);
             }
             _ => panic!("expected Build command"),
         }
     }
 
-    /// Test 2: `vuma build hello.vuma -o out.o --target pi5-bare` parses correctly.
+    /// Test 2: `vuma build hello.vuma -o out.o --target linux` parses correctly.
     #[test]
     fn test_build_with_options() {
         let cli = Cli::try_parse_from([
@@ -1425,7 +1419,7 @@ mod tests {
             "-o",
             "out.o",
             "--target",
-            "pi5-bare",
+            "linux",
         ])
         .unwrap();
         match cli.command {
@@ -1436,7 +1430,7 @@ mod tests {
             } => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
-                assert_eq!(target, &TargetArg::Pi5Bare);
+                assert_eq!(target, &TargetArg::Linux);
             }
             _ => panic!("expected Build command"),
         }
@@ -1662,14 +1656,6 @@ mod tests {
     /// Test 18: TargetArg conversion to pipeline CompileTarget.
     #[test]
     fn test_target_conversion() {
-        assert_eq!(
-            CompileTarget::from(TargetArg::Pi5Bare),
-            CompileTarget::Pi5Bare
-        );
-        assert_eq!(
-            CompileTarget::from(TargetArg::Pi5Linux),
-            CompileTarget::Pi5Linux
-        );
         assert_eq!(CompileTarget::from(TargetArg::Linux), CompileTarget::Linux);
     }
 

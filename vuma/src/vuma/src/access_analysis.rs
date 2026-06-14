@@ -2,7 +2,7 @@
 //!
 //! This module analyzes memory access patterns recorded in the Memory State
 //! Graph (MSG) to produce optimization hints for COR (Capability-Oriented
-//! Refinement), cache optimization, and DMA transfer planning on Raspberry Pi 5.
+//! Refinement), cache optimization, and DMA transfer planning on AArch64.
 //!
 //! # Core analyses
 //!
@@ -28,7 +28,7 @@ use hashbrown::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
-// Cache-line constant (Raspberry Pi 5 L1 data cache)
+// Cache-line constant (AArch64 L1 data cache)
 // ---------------------------------------------------------------------------
 
 /// Cache-line size assumed for false-sharing analysis (64 bytes on ARM Cortex-A76).
@@ -199,7 +199,7 @@ impl fmt::Display for StreamDirection {
 ///
 /// Streaming patterns are sequential or strided traversals where each address
 /// is visited at most once (or very few times). They are prime candidates for
-/// DMA transfers on the Raspberry Pi 5's DMA engine.
+/// DMA transfers on the AArch64's DMA engine.
 #[derive(Debug, Clone)]
 pub struct StreamingPattern {
     /// Region being streamed over.
@@ -673,7 +673,7 @@ pub fn compute_working_set(msg: &MSG) -> WorkingSetInfo {
 /// that proceed monotonically forward or backward through memory, with a
 /// consistent stride. These patterns are ideal candidates for:
 ///
-/// - **DMA transfers** on Raspberry Pi 5 (offload sequential copies to the
+/// - **DMA transfers** on AArch64 (offload sequential copies to the
 ///   DMA engine, freeing the CPU).
 /// - **Hardware prefetch** hints (arm `prfm` instruction).
 /// - **Cache policy** adjustment (streaming data can use non-temporal stores

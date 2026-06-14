@@ -150,7 +150,7 @@ that are used as map keys or in equality comparisons, also derive `PartialEq`,
 
 All error types in library crates (`vuma-scg`, `vuma-ive`, `vuma-bd`,
 `vuma-codegen`, `vuma-vuma`, `vuma-proof`, `vuma-cor`, `vuma-parser`,
-`vuma-projection`, `vuma-pi5`, `vuma-std`) must use **`thiserror`** for error
+`vuma-projection`, `vuma-std`) must use **`thiserror`** for error
 definitions. This ensures that error types are concrete, implement
 `std::error::Error`, and have useful `Display` implementations.
 
@@ -723,7 +723,7 @@ specification:
 | `perf` | Performance improvement | `perf(msg): use arena allocation for derivation chains` |
 | `chore` | Maintenance, CI, tooling | `chore(ci): update clippy lint configuration` |
 | `style` | Formatting only (no logic change) | `style: apply rustfmt` |
-| `build` | Build system changes | `build(pi5): add bare-metal linker script` |
+| `build` | Build system changes | `build(bare-metal): add linker script` |
 | `ci` | CI/CD configuration | `ci: add QEMU aarch64 test job` |
 
 ### 6.3 Scopes
@@ -740,7 +740,6 @@ Use the crate name as the scope. The valid scopes are:
 | `projection` | `vuma-projection` |
 | `parser` | `vuma-parser` |
 | `codegen` | `vuma-codegen` |
-| `pi5` | `vuma-pi5` |
 | `std` | `vuma-std` |
 | `proof` | `vuma-proof` |
 | `tests` | `vuma-tests` |

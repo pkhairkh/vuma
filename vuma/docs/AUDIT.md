@@ -36,7 +36,6 @@
 | `vuma-projection` | `src/projection/` | 5 |
 | `vuma-parser` | `src/parser/` | 5 |
 | `vuma-codegen` | `src/codegen/` | 5 |
-| `vuma-pi5` | `src/pi5/` | 7 |
 | `vuma-std` | `src/std/` | 5 |
 | `vuma-proof` | `src/proof/` | 10 |
 | `vuma-tests` | `src/tests/` | 7 |
@@ -53,12 +52,11 @@
 |---|---|
 | `examples/hello_memory.vuma` | Basic allocate/write/read/free |
 | `examples/doubly_linked_list.vuma` | Doubly-linked list with sentinel |
-| `examples/gpio_blink.vuma` | Pi 5 GPIO hardware access |
+| `examples/gpio_blink.vuma` | GPIO hardware access |
 | `examples/arena_allocator.vuma` | Arena allocator with derivations |
 | `examples/thread_pool.vuma` | Thread pool |
 | `examples/channel_demo.vuma` | Channel concurrency demo |
 | `examples/memory_arena.vuma` | Memory arena |
-| `examples/pi5_sensor.vuma` | Pi 5 sensor reading |
 | `examples/lock_free_queue.vuma` | Lock-free SPSC queue with atomics |
 | `examples/sorted_map.vuma` | Sorted map |
 
@@ -74,7 +72,6 @@
 | `vuma-codegen` | PASS | 5 warnings (4 fixable via `cargo fix`) |
 | `vuma-std` | PASS | 11 warnings |
 | `vuma-proof` | PASS | 3 warnings (2 fixable via `cargo fix`) |
-| `vuma-pi5` | PASS | 6 warnings (mutable static references) |
 | `vuma-parser` | FAIL | 7 errors (E0004: mismatched types) |
 | `vuma-core` | FAIL | Blocked by vuma-parser failure |
 | `vuma-tests` | FAIL | Blocked by vuma-parser failure |
@@ -98,7 +95,7 @@
 
 ## 7. Summary
 
-The VUMA project is a substantial codebase with ~117K lines of Rust across 12 workspace crates, 1,772 test functions, 102 public modules, and 26 documentation files. The architecture follows a layered design (SCG -> BD -> IVE -> VUMA -> Codegen/COR -> Pi5) with formal specifications for each component.
+The VUMA project is a substantial codebase with ~117K lines of Rust across 12 workspace crates, 1,772 test functions, 102 public modules, and 26 documentation files. The architecture follows a layered design (SCG -> BD -> IVE -> VUMA -> Codegen/COR) with formal specifications for each component.
 
 **Primary risk:** The `vuma-parser` crate has 7 compilation errors that cascade to block 3 other crates. Fixing the parser type mismatches should be the highest priority to restore full workspace compilation.
 
@@ -117,7 +114,7 @@ The VUMA project is a substantial codebase with ~117K lines of Rust across 12 wo
 6. Counted `pub mod` declarations in all `lib.rs` files (102 modules)
 7. Counted total project files excluding target/ and .git/ (175)
 8. Ran `cargo check` on each crate individually:
-   - PASS: vuma-scg, vuma-ive, vuma-bd, vuma-cor, vuma-projection, vuma-codegen, vuma-std, vuma-proof, vuma-pi5
+   - PASS: vuma-scg, vuma-ive, vuma-bd, vuma-cor, vuma-projection, vuma-codegen, vuma-std, vuma-proof
    - FAIL: vuma-parser (7x E0004), vuma-core (blocked), vuma-tests (blocked)
 9. Wrote this audit report to `docs/AUDIT.md`
 

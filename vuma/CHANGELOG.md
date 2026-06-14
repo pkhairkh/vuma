@@ -31,7 +31,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **MSG Construction Specification** (`docs/specs/msg-construction-spec.md`, 850 lines) — Memory State Graph construction algorithm from annotated SCGs: monotonic address allocation, derivation chain tracking, sync edge construction, and post-conversion verification.
 
-- **Pi 5 Memory Model Specification** (`docs/specs/pi5-memory-model-spec.md`, 809 lines) — BCM2712 address map, MMIO register access, DMA controller, cache coherency protocol, and ARM local register space.
+- **AArch64 Memory Model Specification** (`docs/specs/aarch64-memory-model-spec.md`, 809 lines) — Address map, MMIO register access, DMA controller, cache coherency protocol.
 
 - **Security Model Specification** (`docs/specs/security-model-spec.md`, 606 lines) — Five security layers (memory safety, capability security, information flow, region security, platform security), six threat categories, and verification confidence/debt tracking.
 
@@ -59,7 +59,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **`vuma-ive`** (`src/ive/`, ~12,500 lines) — Inference & Verification Engine: InferenceEngine (BD propagation), VerificationEngine (5 invariant checks), InvariantAggregator (unified VerificationSummary), individual verifiers (liveness, exclusivity, interpretation, origin, cleanup), BD constraint solver, verification debt tracking, and result types.
 
-- **`vuma-cor`** (`src/cor/`, ~6,244 lines) — Continuous Optimization Runtime: CORuntime orchestrator, ProfileCollector (thread-safe, Pi 5 PMU counters), SpeculativeExecutor (branch prediction, inlining, code motion, snapshot rollback), OptimizationEngine (DCE, folding, inlining, loop unrolling), DeploymentManager (hot-swap 6-phase FSM, delta deployment, version tracking), and Config.
+- **`vuma-cor`** (`src/cor/`, ~6,244 lines) — Continuous Optimization Runtime: CORuntime orchestrator, ProfileCollector (thread-safe, PMU counters), SpeculativeExecutor (branch prediction, inlining, code motion, snapshot rollback), OptimizationEngine (DCE, folding, inlining, loop unrolling), DeploymentManager (hot-swap 6-phase FSM, delta deployment, version tracking), and Config.
 
 - **`vuma-projection`** (`src/projection/`, ~8,090 lines) — Projection System: textual (SCG → code), visual (SCG → SVG/HTML), conversational (SCG → natural language), bidirectional editing (projection edits → SCG), and semantic diff.
 
@@ -67,7 +67,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **`vuma-codegen`** (`src/codegen/`, ~11,879 lines) — ARM64 Code Generation: Arm64Instruction enum with binary encoding, IR types, SCG→IR translation, linear-scan register allocator, and ELF emission.
 
-- **`vuma-pi5`** (`src/pi5/`, ~6,120 lines) — Raspberry Pi 5 Platform: bare-metal boot (exception vectors, _start, FDT parsing), linker script, build script, UART driver (PL011 + Mini UART), GPIO, timer, MMIO primitives, and SMP (multicore boot, Spinlock).
+- ***(removed)*** — Was AArch64 bare-metal Platform: bare-metal boot, linker script, build script, UART, GPIO, timer, MMIO, SMP.
 
 - **`vuma-proof`** (`src/proof/`, ~9,124 lines) — Formal Proof System: Proof/ProofStep/Goal/ProofStatus, checker, inference rules, automated tactics, counterexample generation, and per-invariant proof modules.
 
@@ -80,12 +80,12 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 - `examples/hello_memory.vuma` (40 lines) — Basic allocate/write/read/free
 - `examples/doubly_linked_list.vuma` (89 lines) — Sentinel node pattern
 - `examples/arena_allocator.vuma` (78 lines) — Arena allocation with derivation chains
-- `examples/gpio_blink.vuma` (68 lines) — Pi 5 GPIO hardware access
+- `examples/gpio_blink.vuma` (68 lines) — GPIO hardware access
 - `examples/lock_free_queue.vuma` (99 lines) — Lock-free SPSC queue with atomics
 
 ### Added — Build & CI
 
-- `Makefile` (233 lines) — Build/test/bench/doc/Pi 5 cross-compile/flash/debug targets
+- `Makefile` (233 lines) — Build/test/bench/doc/cross-compile targets
 - `justfile` (226 lines) — Just command runner shortcuts
 - `rust-toolchain.toml` (9 lines) — Pinned nightly toolchain
 - `rustfmt.toml` (3 lines) — Formatting configuration
@@ -103,9 +103,9 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 ---
 
-## Wave 2: Core Verification & Pi 5 Platform
+## Wave 2: Core Verification & AArch64 Platform
 
-*The second wave completed the five invariant verification passes, built the SCG→MSG conversion pipeline, and established the Pi 5 bare-metal platform with boot code, linker script, and hardware drivers.*
+*The second wave completed the five invariant verification passes, built the SCG→MSG conversion pipeline, and established the AArch64 bare-metal platform with boot code, linker script, and hardware drivers.*
 
 ### Added — Verification Pipeline
 
@@ -115,31 +115,31 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **Invariant aggregator** (`src/ive/src/invariant_aggregator.rs`, 1141 lines) — Unified verification pipeline running all five invariant checks and producing VerificationSummary.
 
-### Added — Pi 5 Bare-Metal Platform
+### Added — AArch64 Bare-Metal Platform *(removed)*
 
-- **Boot code** (`src/pi5/src/boot.rs`, 746 lines) — ARM64 exception vector table (16 entries), `_start` naked function (core ID check, BSS zeroing, stack setup, FDT parsing), `boot_main` high-level entry. 7 tests.
+- **Boot code** *(removed)* — ARM64 exception vector table (16 entries), `_start` naked function.
 
-- **Linker script** (`src/pi5/link.ld`, 101 lines) — ARM64 linker script: ENTRY(_start), RAM region at 0x80000, MMIO window, section ordering, per-core stacks, symbol exports.
+- **Linker script** *(removed)* — ARM64 linker script.
 
-- **Build script** (`src/pi5/build.rs`, 47 lines) — Cargo build script for bare-metal aarch64-unknown-none: passes -Tlink.ld, -nostartfiles, -static, -no-pie.
+- **Build script** *(removed)* — Cargo build script for bare-metal aarch64-unknown-none.
 
-- **UART driver** (`src/pi5/src/uart.rs`, 1700 lines) — PL011 UART0 driver, MiniUart (UART1), UartBuffer ring buffer, ISR handlers, free-standing C API. 16 tests.
+- **UART driver** *(removed)* — PL011 UART0 driver, MiniUart (UART1).
 
-- **GPIO driver** (`src/pi5/src/gpio.rs`, 1571 lines) — Memory-mapped GPIO pin function and pull control with BCM2712 register layout.
+- **GPIO driver** *(removed)* — Memory-mapped GPIO pin function and pull control.
 
-- **Timer driver** (`src/pi5/src/timer.rs`, 484 lines) — ARM generic timer (physical + virtual), virtual timer interrupt control, free-standing C API. 10 tests.
+- **Timer driver** *(removed)* — ARM generic timer (physical + virtual).
 
-- **MMIO subsystem** (`src/pi5/src/mmio.rs`, 541 lines) — Pi 5 memory map constants, u64 address type, named 32/64-bit volatile accessors, ARM64 memory barriers (dmb, dsb, isb), MmioDevice trait. 10 tests.
+- **MMIO subsystem** *(removed)* — Memory map constants, volatile accessors, ARM64 barriers.
 
-- **SMP support** (`src/pi5/src/smp.rs`, 525 lines) — Multicore boot, IPI doorbell, Spinlock with RAII guard, core-start tracking. 12 tests.
+- **SMP support** *(removed)* — Multicore boot, IPI doorbell, Spinlock.
 
-### Added — Makefile Pi 5 Targets
+### Added — Makefile AArch64 Targets *(removed)*
 
-- `make pi5` — Cross-compile for bare-metal aarch64
-- `make pi5-image` — Build kernel8.img from ELF
-- `make pi5-flash` — Flash to SD card boot partition
-- `make pi5-debug` — Launch QEMU with GDB stub
-- `make pi5-run` — Run in QEMU without debug
+- `cross-compile` *(removed)* — Cross-compile for bare-metal aarch64
+- `build-image` *(removed)* — Build kernel8.img from ELF
+- `flash` *(removed)* — Flash to SD card boot partition
+- `debug` *(removed)* — Launch QEMU with GDB stub
+- `run-qemu` *(removed)* — Run in QEMU without debug
 
 ---
 
@@ -167,7 +167,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 ### Added — COR Enhancements
 
-- **Pi5PmuCounters** (`src/cor/src/profile.rs`, 978 lines) — Hardware performance counter snapshot: cycle count, instruction count, cache misses, branch misses, IPC, miss rates. Thread-safe ProfileCollector. collect_profile analysis entry point with HotPath identification. 11 tests.
+- **PmuCounters** (`src/cor/src/profile.rs`, 978 lines) — Hardware performance counter snapshot: cycle count, instruction count, cache misses, branch misses, IPC, miss rates. Thread-safe ProfileCollector. collect_profile analysis entry point with HotPath identification. 11 tests.
 
 - **SpeculativeExecutor** (`src/cor/src/speculative.rs`, 1487 lines) — Three-phase lifecycle (identify/apply/validate-and-rollback), BranchPredictionTable, SpeculativeInlining, SpeculativeCodeMotion, Snapshot-based rollback. 19 tests.
 
@@ -177,7 +177,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - `examples/channel_demo.vuma` (237 lines) — Channel-based concurrency demo
 - `examples/memory_arena.vuma` (197 lines) — Region-based allocation
-- `examples/pi5_sensor.vuma` (188 lines) — Pi 5 MMIO sensor reading
+- `examples/aarch64_sensor.vuma` (188 lines) — AArch64 MMIO sensor reading
 - `examples/sorted_map.vuma` (192 lines) — Sorted map data structure
 - `examples/thread_pool.vuma` (209 lines) — Thread pool with work stealing
 
@@ -237,13 +237,13 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **Architecture Document** (`docs/architecture.md`, 994 lines) — Complete rewrite with 8 major sections: System Overview, Data Flow Diagram, Crate Dependency Graph, Key Data Structures, Verification Pipeline, Code Generation Pipeline, Runtime Optimization Pipeline, Security Model Overview.
 
-- **Language Reference** (`docs/language-reference.md`, 1101 lines) — Complete VUMA language reference with 11 sections: Lexical Structure, Types/BD, Memory Model, Pointer Operations, Control Flow, Functions, Concurrency, Memory Safety, Standard Library, Pi 5 Features, Appendix.
+- **Language Reference** (`docs/language-reference.md`, 1101 lines) — Complete VUMA language reference with 11 sections: Lexical Structure, Types/BD, Memory Model, Pointer Operations, Control Flow, Functions, Concurrency, Memory Safety, Standard Library, AArch64 Features, Appendix.
 
 - **CONTRIBUTING.md** (`docs/CONTRIBUTING.md`, 840 lines) — Complete rewrite: build, test, add nodes/verifications/instructions, code review process, PR template.
 
 - **CONVENTIONS.md** (`docs/CONVENTIONS.md`, 796 lines) — Complete rewrite: Rust style, error handling, testing, naming, documentation, git commit format.
 
-- **GLOSSARY.md** (`docs/GLOSSARY.md`, 893 lines) — Complete rewrite: 40+ terms across core, verification, ARM64, Pi 5, and type theory domains.
+- **GLOSSARY.md** (`docs/GLOSSARY.md`, 893 lines) — Complete rewrite: 40+ terms across core, verification, ARM64, and type theory domains.
 
 - **ROADMAP.md** (`docs/ROADMAP.md`, 277 lines) — 5-phase roadmap with milestones, deliverables, success criteria, dependency graph, and risk mitigation.
 
@@ -251,7 +251,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 - **MANIFEST.md** — Complete file inventory: all 166 project files with purposes and line counts, summary statistics by category, language, and crate size.
 
-- **README.md** — Project README: overview, architecture, quick start, Pi 5 build instructions, test instructions, project structure, key concepts, examples, documentation index, contributing link.
+- **README.md** — Project README: overview, architecture, quick start, AArch64 build instructions, test instructions, project structure, key concepts, examples, documentation index, contributing link.
 
 - **CHANGELOG.md** — This file: comprehensive changelog with entries for Waves 1–5.
 
@@ -276,14 +276,14 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 ### [0.1.0] — 2026-03-05
 
-This is the initial public release of the VUMA framework. It contains the complete architectural foundation: all 12 workspace crates, 15 formal specifications, 10 example programs, a comprehensive benchmark suite, and full documentation. The system can construct SCGs programmatically and from parsed text, infer Behavioral Descriptors, construct Memory State Graphs, verify all five VUMA invariants, generate ARM64 machine code, and boot on Raspberry Pi 5 hardware with UART output.
+This is the initial public release of the VUMA framework. It contains the complete architectural foundation: all 12 workspace crates, 15 formal specifications, 10 example programs, a comprehensive benchmark suite, and full documentation. The system can construct SCGs programmatically and from parsed text, infer Behavioral Descriptors, construct Memory State Graphs, verify all five VUMA invariants, generate ARM64 machine code, and boot on AArch64 hardware with UART output.
 
 **Known Limitations:**
 - Concurrent verification is limited to single-threaded programs (Phase 3 target)
 - ARM64 codegen does not yet support atomic instructions (Phase 3 target)
 - The COR is not yet integrated end-to-end (Phase 3 target)
 - The parser has known type mismatches in the AST→SCG lowering path
-- Some Pi 5 bare-metal modules use inline assembly that requires nightly Rust
+- Some AArch64 bare-metal modules used inline assembly that required nightly Rust *(removed)*
 
 **Next Steps (Phase 2):**
 - Complete BD inference subsumption of the Rust type system

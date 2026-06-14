@@ -15,7 +15,7 @@
 3. [Capability-Based Access Control](#3-capability-based-access-control)
 4. [Security Boundary Enforcement](#4-security-boundary-enforcement)
 5. [Attack Surface Reduction](#5-attack-surface-reduction)
-6. [Pi 5 Specific Security](#6-pi-5-specific-security)
+6. [AArch64 Specific Security](#6-pi-5-specific-security)
 
 ---
 
@@ -441,7 +441,7 @@ The bug classes eliminated above are those that VUMA removes by construction. Th
 
 1. **IVE bugs:** If the IVE itself has a bug that causes it to accept a program that violates an invariant, the security guarantees are void. Mitigation: the IVE is itself written in VUMA and verified, and its critical paths are kept small and well-tested. The IVE's proof obligations are documented and can be independently verified.
 
-2. **Hardware vulnerabilities:** Speculative execution side channels (Spectre, Meltdown), rowhammer, and other hardware-level attacks are not prevented by VUMA's software-level invariants. Mitigation: VUMA's Pi 5 backend uses ARM64 PAC, BTI, and MTE to provide hardware-level defenses (see Section 6).
+2. **Hardware vulnerabilities:** Speculative execution side channels (Spectre, Meltdown), rowhammer, and other hardware-level attacks are not prevented by VUMA's software-level invariants. Mitigation: VUMA's AArch64 backend uses ARM64 PAC, BTI, and MTE to provide hardware-level defenses (see Section 6).
 
 3. **Side channels:** Timing side channels, power analysis, and electromagnetic emanation are not prevented by VUMA's information-flow control, which operates at the logical level. Mitigation: VUMA's secret-aware code generation can insert timing-neutral operations to reduce timing side channels, but this is a best-effort mitigation, not a guarantee.
 
@@ -449,11 +449,11 @@ The bug classes eliminated above are those that VUMA removes by construction. Th
 
 ---
 
-## 6. Pi 5 Specific Security
+## 6. AArch64 Specific Security
 
 ### 6.1 Overview
 
-The Raspberry Pi 5 is built on the Broadcom BCM2712 SoC, which features a quad-core ARM Cortex-A76 processor implementing the ARMv8.2-A architecture. This architecture includes several hardware security features that VUMA leverages to provide defense-in-depth beyond its software-level invariants. Specifically, VUMA maps its capability model to three ARM64 hardware security mechanisms: Pointer Authentication (PAC), Branch Target Identification (BTI), and the Memory Tagging Extension (MTE). These mappings create a layered defense where software invariants are backed by hardware enforcement, so that even if the IVE has a bug, the hardware provides a fallback.
+The AArch64 is built on the Broadcom BCM2712 SoC, which features a quad-core ARM Cortex-A76 processor implementing the ARMv8.2-A architecture. This architecture includes several hardware security features that VUMA leverages to provide defense-in-depth beyond its software-level invariants. Specifically, VUMA maps its capability model to three ARM64 hardware security mechanisms: Pointer Authentication (PAC), Branch Target Identification (BTI), and the Memory Tagging Extension (MTE). These mappings create a layered defense where software invariants are backed by hardware enforcement, so that even if the IVE has a bug, the hardware provides a fallback.
 
 ### 6.2 ARM64 Pointer Authentication (PAC)
 
@@ -566,7 +566,7 @@ The performance overhead of the hardware security features is:
 - **BTI:** The BTI instruction is a single-cycle NOP on ARM Cortex-A76 when BTI is not enabled in the hardware, and a 1-cycle check when enabled. The overhead is negligible.
 - **MTE:** MTE tag checks add approximately 1-2 cycles per memory access. The allocation and deallocation overhead for tag assignment and retagging is approximately 10-20 cycles per operation. The total overhead is typically 2-5% for memory-intensive workloads.
 
-The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on the Pi 5, which is acceptable for the security benefits provided.
+The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on the AArch64, which is acceptable for the security benefits provided.
 
 ---
 

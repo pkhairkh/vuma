@@ -15,10 +15,8 @@
 //! * **Region-class granularity**: Allocation statistics are partitioned by
 //!   *region class* (a coarse grouping of compiled regions) so the optimizer
 //!   can make decisions without examining every individual region.
-//! * **Pi 5 PMU support**: Hardware performance counters (cycles, instructions,
-//!   cache misses, branch misses) are collected per sample when running on
-//!   Raspberry Pi 5, enabling micro-architectural optimisation.
 //!
+
 //! # Core types
 //!
 //! * [`ProfileCollector`] — thread-safe collector that accumulates profiling
@@ -26,7 +24,7 @@
 //! * [`ProfileData`] — execution counts per SCG node, edge traversal
 //!   frequencies, and hot-path information.
 //! * [`ProfileSample`] — a single profiling sample: timestamp, node id,
-//!   execution time in nanoseconds, and optional PMU counters.
+//!   execution time in nanoseconds.
 //! * [`HotPath`] — a sequence of nodes that collectively account for >80 %
 //!   of total execution time.
 //! * [`ProfileReport`] — a full analysis of profiling data including hot
@@ -56,71 +54,6 @@ use std::time::Instant;
 /// snapshot is preferable to a runtime crash.
 fn lock_profile<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-// ---------------------------------------------------------------------------
-// Pi 5 Hardware Performance Counters (PMU)
-// ---------------------------------------------------------------------------
-
-/// Raspberry Pi 5 hardware performance counter snapshot.
-///
-/// The Pi 5's Cortex-A76 cores expose PMU counters via the `cntvct_el0`
-/// virtual counter and the ARMv8.2-A PMU event system. This struct captures
-/// the four most useful events for optimisation guidance:
-///
-/// * **Cycle count** — total CPU cycles elapsed (via `PMCCNTR_EL0`).
-/// * **Instruction count** — instructions architecturally executed.
-/// * **Cache misses** — L1 data cache refills from main memory.
-/// * **Branch misses** — branches mispredicted at the branch-prediction unit.
-///
-/// On targets where PMU counters are unavailable (e.g. user-space without
-/// `perf_event_open` access), all fields default to zero and are simply
-/// ignored by the analysis pipeline.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Pi5PmuCounters {
-    /// Total CPU cycles elapsed during the sampled region.
-    pub cycle_count: u64,
-    /// Instructions architecturally executed.
-    pub instruction_count: u64,
-    /// L1 data-cache misses (refills from DRAM).
-    pub cache_misses: u64,
-    /// Branch mispredictions.
-    pub branch_misses: u64,
-}
-
-impl Pi5PmuCounters {
-    /// Creates a zeroed PMU counter snapshot.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Computes instructions-per-cycle (IPC). Returns 0.0 if cycle_count is 0.
-    pub fn ipc(&self) -> f64 {
-        if self.cycle_count == 0 {
-            0.0
-        } else {
-            self.instruction_count as f64 / self.cycle_count as f64
-        }
-    }
-
-    /// Computes cache miss rate (misses / instructions). Returns 0.0 if
-    /// instruction_count is 0.
-    pub fn cache_miss_rate(&self) -> f64 {
-        if self.instruction_count == 0 {
-            0.0
-        } else {
-            self.cache_misses as f64 / self.instruction_count as f64
-        }
-    }
-
-    /// Computes branch misprediction rate. Returns 0.0 if instruction_count is 0.
-    pub fn branch_miss_rate(&self) -> f64 {
-        if self.instruction_count == 0 {
-            0.0
-        } else {
-            self.branch_misses as f64 / self.instruction_count as f64
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +124,7 @@ impl AllocStats {
 /// A single profiling sample captured during execution.
 ///
 /// Each sample records the SCG node that was executing, how long it took,
-/// when it was captured, and (optionally) Pi 5 hardware PMU counter values.
+/// when it was captured.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileSample {
     /// Timestamp of the sample, measured as nanoseconds since profiling started.
@@ -200,34 +133,16 @@ pub struct ProfileSample {
     pub node_id: NodeId,
     /// Wall-clock execution time of the node in nanoseconds.
     pub execution_time_ns: u64,
-    /// Optional Pi 5 hardware performance counter snapshot.
-    pub pmu: Option<Pi5PmuCounters>,
 }
 
 impl ProfileSample {
     /// Creates a new profile sample with the given timestamp, node, and
-    /// execution time (no PMU counters).
+    /// execution time.
     pub fn new(timestamp_ns: u64, node_id: NodeId, execution_time_ns: u64) -> Self {
         Self {
             timestamp_ns,
             node_id,
             execution_time_ns,
-            pmu: None,
-        }
-    }
-
-    /// Creates a profile sample with PMU counters attached.
-    pub fn with_pmu(
-        timestamp_ns: u64,
-        node_id: NodeId,
-        execution_time_ns: u64,
-        pmu: Pi5PmuCounters,
-    ) -> Self {
-        Self {
-            timestamp_ns,
-            node_id,
-            execution_time_ns,
-            pmu: Some(pmu),
         }
     }
 }
@@ -295,9 +210,6 @@ pub struct ProfileData {
     /// Per-node cumulative execution time in nanoseconds.
     pub node_time_ns: HashMap<NodeId, u64>,
 
-    /// Aggregated Pi 5 PMU counters per node.
-    pub node_pmu: HashMap<NodeId, Pi5PmuCounters>,
-
     /// Allocation statistics.
     pub allocation_stats: AllocStats,
 
@@ -340,23 +252,11 @@ impl ProfileData {
         *freq += 1;
     }
 
-    /// Records PMU counter values for a node (accumulates into existing values).
-    pub fn record_pmu(&mut self, node_id: NodeId, pmu: &Pi5PmuCounters) {
-        let entry = self.node_pmu.entry(node_id).or_default();
-        entry.cycle_count += pmu.cycle_count;
-        entry.instruction_count += pmu.instruction_count;
-        entry.cache_misses += pmu.cache_misses;
-        entry.branch_misses += pmu.branch_misses;
-    }
-
     /// Ingests a batch of [`ProfileSample`] values, updating all internal
     /// counters.
     pub fn ingest_samples(&mut self, samples: &[ProfileSample]) {
         for sample in samples {
             self.record_access_timed(sample.node_id, sample.execution_time_ns);
-            if let Some(ref pmu) = sample.pmu {
-                self.record_pmu(sample.node_id, pmu);
-            }
         }
     }
 
@@ -471,36 +371,6 @@ impl ProfileData {
             }
         }
 
-        // Suggest cache optimisation for nodes with high cache miss rates.
-        for (&node_id, pmu) in &self.node_pmu {
-            if pmu.cache_miss_rate() > 0.05 {
-                suggestions.push(OptimizationSuggestion {
-                    kind: SuggestionKind::CacheOptimize,
-                    target_node: node_id,
-                    reason: format!(
-                        "Node {} has {:.1}% cache miss rate — consider data layout optimisation",
-                        node_id,
-                        pmu.cache_miss_rate() * 100.0
-                    ),
-                });
-            }
-        }
-
-        // Suggest branch prediction layout for high branch miss rates.
-        for (&node_id, pmu) in &self.node_pmu {
-            if pmu.branch_miss_rate() > 0.03 {
-                suggestions.push(OptimizationSuggestion {
-                    kind: SuggestionKind::BranchLayout,
-                    target_node: node_id,
-                    reason: format!(
-                        "Node {} has {:.1}% branch misprediction rate — consider branch layout hints",
-                        node_id,
-                        pmu.branch_miss_rate() * 100.0
-                    ),
-                });
-            }
-        }
-
         suggestions
     }
 }
@@ -575,16 +445,7 @@ impl ProfileCollector {
     pub fn record_sample(&self, sample: &ProfileSample) {
         let mut data = lock_profile(&self.data);
         data.record_access_timed(sample.node_id, sample.execution_time_ns);
-        if let Some(ref pmu) = sample.pmu {
-            data.record_pmu(sample.node_id, pmu);
-        }
         self.sample_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records PMU counter values for a node.
-    pub fn record_pmu(&self, node_id: NodeId, pmu: &Pi5PmuCounters) {
-        let mut data = lock_profile(&self.data);
-        data.record_pmu(node_id, pmu);
     }
 
     /// Creates a [`ProfileSample`] using the collector's internal clock as
@@ -592,18 +453,6 @@ impl ProfileCollector {
     pub fn make_sample(&self, node_id: NodeId, execution_time_ns: u64) -> ProfileSample {
         let timestamp_ns = self.epoch.elapsed().as_nanos() as u64;
         ProfileSample::new(timestamp_ns, node_id, execution_time_ns)
-    }
-
-    /// Creates a [`ProfileSample`] with PMU counters using the collector's
-    /// internal clock.
-    pub fn make_sample_with_pmu(
-        &self,
-        node_id: NodeId,
-        execution_time_ns: u64,
-        pmu: Pi5PmuCounters,
-    ) -> ProfileSample {
-        let timestamp_ns = self.epoch.elapsed().as_nanos() as u64;
-        ProfileSample::with_pmu(timestamp_ns, node_id, execution_time_ns, pmu)
     }
 
     /// Takes a snapshot of the current profile data.
@@ -651,10 +500,6 @@ pub struct ProfileReport {
     pub cold_spots: Vec<NodeId>,
     /// Hot paths (node sequences accounting for >80 % of execution time).
     pub hot_paths: Vec<HotPath>,
-    /// Aggregate Pi 5 PMU counters across all samples.
-    pub aggregate_pmu: Pi5PmuCounters,
-    /// Per-node PMU counter summaries.
-    pub node_pmu: HashMap<NodeId, Pi5PmuCounters>,
     /// Optimisation suggestions derived from the analysis.
     pub recommendations: Vec<OptimizationSuggestion>,
 }
@@ -685,8 +530,7 @@ pub struct NodeHotSpot {
 /// 2. Computes hot spots (nodes ranked by execution time).
 /// 3. Identifies cold spots (nodes with zero or negligible execution).
 /// 4. Computes hot paths (node sequences accounting for >80 % of time).
-/// 5. Aggregates PMU counter data.
-/// 6. Generates optimisation recommendations.
+/// 5. Generates optimisation recommendations.
 pub fn collect_profile(scg: &SCG, samples: &[ProfileSample]) -> ProfileReport {
     let mut profile_data = ProfileData::new();
     profile_data.ingest_samples(samples);
@@ -724,15 +568,6 @@ pub fn collect_profile(scg: &SCG, samples: &[ProfileSample]) -> ProfileReport {
     // --- Hot paths ---
     let hot_paths = profile_data.compute_hot_paths();
 
-    // --- Aggregate PMU ---
-    let mut aggregate_pmu = Pi5PmuCounters::new();
-    for pmu in profile_data.node_pmu.values() {
-        aggregate_pmu.cycle_count += pmu.cycle_count;
-        aggregate_pmu.instruction_count += pmu.instruction_count;
-        aggregate_pmu.cache_misses += pmu.cache_misses;
-        aggregate_pmu.branch_misses += pmu.branch_misses;
-    }
-
     // --- Recommendations ---
     let recommendations = profile_data.suggest_optimizations();
 
@@ -742,8 +577,6 @@ pub fn collect_profile(scg: &SCG, samples: &[ProfileSample]) -> ProfileReport {
         hot_spots,
         cold_spots,
         hot_paths,
-        aggregate_pmu,
-        node_pmu: profile_data.node_pmu.clone(),
         recommendations,
     }
 }
@@ -837,24 +670,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_sample_creation_and_pmu() {
+    fn profile_sample_creation() {
         let sample = ProfileSample::new(1000, 42, 500);
         assert_eq!(sample.timestamp_ns, 1000);
         assert_eq!(sample.node_id, 42);
         assert_eq!(sample.execution_time_ns, 500);
-        assert!(sample.pmu.is_none());
-
-        let pmu = Pi5PmuCounters {
-            cycle_count: 10000,
-            instruction_count: 8000,
-            cache_misses: 50,
-            branch_misses: 10,
-        };
-        let sample_with_pmu = ProfileSample::with_pmu(2000, 43, 600, pmu.clone());
-        assert!(sample_with_pmu.pmu.is_some());
-        let p = sample_with_pmu.pmu.unwrap();
-        assert_eq!(p.cycle_count, 10000);
-        assert_eq!(p.instruction_count, 8000);
     }
 
     #[test]
@@ -934,26 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn pi5_pmu_counters_ipc_and_rates() {
-        let pmu = Pi5PmuCounters {
-            cycle_count: 1000,
-            instruction_count: 500,
-            cache_misses: 25,
-            branch_misses: 10,
-        };
-
-        assert!((pmu.ipc() - 0.5).abs() < 0.001);
-        assert!((pmu.cache_miss_rate() - 0.05).abs() < 0.001);
-        assert!((pmu.branch_miss_rate() - 0.02).abs() < 0.001);
-
-        // Zero-cycle edge case
-        let zero_pmu = Pi5PmuCounters::new();
-        assert_eq!(zero_pmu.ipc(), 0.0);
-        assert_eq!(zero_pmu.cache_miss_rate(), 0.0);
-        assert_eq!(zero_pmu.branch_miss_rate(), 0.0);
-    }
-
-    #[test]
     fn edge_frequencies_recorded() {
         let mut profile = ProfileData::new();
         profile.record_edge(10);
@@ -964,33 +764,16 @@ mod tests {
     }
 
     #[test]
-    fn ingest_samples_accumulates_pmu() {
+    fn ingest_samples_accumulates_counts() {
         let mut profile = ProfileData::new();
-        let pmu1 = Pi5PmuCounters {
-            cycle_count: 100,
-            instruction_count: 80,
-            cache_misses: 5,
-            branch_misses: 2,
-        };
-        let pmu2 = Pi5PmuCounters {
-            cycle_count: 200,
-            instruction_count: 160,
-            cache_misses: 10,
-            branch_misses: 3,
-        };
         let samples = vec![
-            ProfileSample::with_pmu(100, 1, 500, pmu1),
-            ProfileSample::with_pmu(200, 1, 600, pmu2),
+            ProfileSample::new(100, 1, 500),
+            ProfileSample::new(200, 1, 600),
         ];
         profile.ingest_samples(&samples);
 
         assert_eq!(profile.call_counts[&1], 2);
         assert_eq!(profile.node_time_ns[&1], 1100);
-        let node_pmu = &profile.node_pmu[&1];
-        assert_eq!(node_pmu.cycle_count, 300);
-        assert_eq!(node_pmu.instruction_count, 240);
-        assert_eq!(node_pmu.cache_misses, 15);
-        assert_eq!(node_pmu.branch_misses, 5);
     }
 
     #[test]

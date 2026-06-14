@@ -26,7 +26,7 @@ Files in `target/` are excluded.
 |--------------------------|-------|--------------------------------------------------------------|
 | `Cargo.toml`             | 49    | Workspace root: 12 crate members, shared deps, release profile |
 | `Cargo.lock`             | —     | Lockfile for reproducible builds (auto-generated)            |
-| `Makefile`               | 233   | Build/test/bench/doc/Pi 5 cross-compile/flash/debug targets  |
+| `Makefile`               | 233   | Build/test/bench/doc/cross-compile targets  |
 | `justfile`               | 226   | Just command runner shortcuts (mirrors Makefile)             |
 | `rust-toolchain.toml`    | 9     | Pinned nightly toolchain, components, targets                |
 | `rustfmt.toml`           | 3     | Formatting: max_width=100, tab_spaces=4                      |
@@ -48,11 +48,11 @@ Files in `target/` are excluded.
 | File                     | Lines | Purpose                                                      |
 |--------------------------|-------|--------------------------------------------------------------|
 | `docs/architecture.md`   | 994   | Full architecture: 6-layer system, data flow, crate deps, data structures, verification/codegen/COR pipelines, security model |
-| `docs/language-reference.md` | 1101 | VUMA language reference: lexical structure, types/BD, memory model, pointers, control flow, concurrency, safety, Pi 5 features |
+| `docs/language-reference.md` | 1101 | VUMA language reference: lexical structure, types/BD, memory model, pointers, control flow, concurrency, safety, AArch64 features |
 | `docs/ROADMAP.md`        | 277   | 5-phase roadmap with milestones, deliverables, success criteria, risk mitigation |
 | `docs/CONTRIBUTING.md`   | 840   | Contributor guide: build, test, add nodes/verifications/instructions, code review, PR template |
 | `docs/CONVENTIONS.md`    | 796   | Coding conventions: style, error handling, testing, naming, docs, git commits |
-| `docs/GLOSSARY.md`       | 893   | Project glossary: 40+ terms across core, verification, ARM64, Pi 5, type theory |
+| `docs/GLOSSARY.md`       | 893   | Project glossary: 40+ terms across core, verification, ARM64, type theory |
 | `docs/WORKLOG.md`        | 405   | Detailed worklog for documentation tasks                      |
 
 ### 2.2 Formal Specifications (docs/specs/)
@@ -65,7 +65,7 @@ Files in `target/` are excluded.
 | `docs/specs/reld-formal-spec.md`         | 600   | RelD formal spec: relational descriptor kinds, composition, refinement ordering |
 | `docs/specs/vuma-invariants-spec.md`     | 742   | VUMA 5 invariants: liveness, exclusivity, interpretation, origin, cleanup |
 | `docs/specs/msg-construction-spec.md`    | 850   | MSG construction algorithm: SCG-to-MSG mapping, derivation chains, sync edges |
-| `docs/specs/pi5-memory-model-spec.md`    | 809   | Pi 5 memory model: BCM2712 address map, MMIO, DMA, cache coherency |
+| `docs/specs/aarch64-memory-model-spec.md`  | 809   | AArch64 memory model: address map, MMIO, DMA, cache coherency |
 | `docs/specs/security-model-spec.md`      | 606   | Security model: 5 layers, threat model, confidence/debt tracking |
 | `docs/specs/bd-inference-algorithm.md`   | 1027  | BD inference algorithm: RepD/CapD/RelD inference, fixpoint iteration |
 | `docs/specs/vuma-verification-algorithm.md` | 1098 | VUMA verification algorithm: 5 invariant checkers, proof obligations, counterexamples |
@@ -184,7 +184,7 @@ Files in `target/` are excluded.
 | `src/cor/Cargo.toml`             | 9     | Crate manifest: depends on scg, vuma, serde      |
 | `src/cor/src/lib.rs`             | 63    | Crate root: COR architecture overview, re-exports |
 | `src/cor/src/runtime.rs`         | 533   | CORuntime: central orchestrator for continuous opt |
-| `src/cor/src/profile.rs`         | 978   | ProfileCollector, Pi5PmuCounters, HotPath, collect_profile |
+| `src/cor/src/profile.rs`         | 978   | ProfileCollector, PmuCounters, HotPath, collect_profile |
 | `src/cor/src/speculative.rs`     | 1487  | SpeculativeExecutor, BranchPredictionTable, Snapshots |
 | `src/cor/src/optimization.rs`    | 1328  | OptimizationEngine, DCE, constant folding, inlining, loop unrolling |
 | `src/cor/src/deployment.rs`      | 1423  | DeploymentManager, HotSwap (6-phase FSM), delta deploy, version tracking |
@@ -235,25 +235,10 @@ Files in `target/` are excluded.
 
 **Codegen subtotal:** ~11,879 lines
 
-### 3.10 `src/pi5/` — Raspberry Pi 5 Platform
+### 3.10 `src/proof/` — Formal Proof System
 
-| File                              | Lines | Purpose                                          |
-|-----------------------------------|-------|--------------------------------------------------|
-| `src/pi5/Cargo.toml`             | 9     | Crate manifest: build=build.rs, no_std compatible |
-| `src/pi5/build.rs`               | 47    | Cargo build script for bare-metal aarch64-unknown-none |
-| `src/pi5/link.ld`                | 101   | ARM64 linker script: entry, sections, per-core stacks |
-| `src/pi5/src/lib.rs`             | 61    | Crate root: platform overview, re-exports        |
-| `src/pi5/src/boot.rs`            | 746   | Exception vectors, _start, boot_main, FDT parsing |
-| `src/pi5/src/platform.rs`        | 335   | BCM2712 memory map, Pi5Platform, board identification |
-| `src/pi5/src/uart.rs`            | 1700  | PL011 UART driver, MiniUart, ring buffer, ISR handlers |
-| `src/pi5/src/gpio.rs`            | 1571  | Memory-mapped GPIO: set_function, set_pull, pin mux |
-| `src/pi5/src/timer.rs`           | 484   | ARM generic timer, virtual timer, C-style API    |
-| `src/pi5/src/mmio.rs`            | 541   | MMIO register access, ARM64 barriers, MmioDevice trait |
-| `src/pi5/src/smp.rs`             | 525   | Multicore boot, IPI, Spinlock with RAII guard    |
+*(AArch64 bare-metal crate removed — no longer in workspace)*
 
-**Pi 5 subtotal:** ~6,120 lines
-
-### 3.11 `src/proof/` — Formal Proof System
 
 | File                              | Lines | Purpose                                          |
 |-----------------------------------|-------|--------------------------------------------------|
@@ -272,7 +257,7 @@ Files in `target/` are excluded.
 
 **Proof subtotal:** ~9,124 lines
 
-### 3.12 `src/std/` — Standard Library
+### 3.11 `src/std/` — Standard Library
 
 | File                              | Lines | Purpose                                          |
 |-----------------------------------|-------|--------------------------------------------------|
@@ -282,11 +267,11 @@ Files in `target/` are excluded.
 | `src/std/src/alloc.rs`           | 2472  | VumaAllocator, BumpAllocator, FreeListAllocator, MemoryStats |
 | `src/std/src/collections.rs`     | 2293  | Vec, HashMap, VumaString, LinkedList, RingBuffer, SipHash13 |
 | `src/std/src/sync.rs`            | 1722  | Mutex, RwLock, Channel, AtomicU32/64 — VUMA-VERIFIED |
-| `src/std/src/io.rs`              | 2007  | Read, Write, BufRead traits, UART and Pi 5 backends |
+| `src/std/src/io.rs`              | 2007  | Read, Write, BufRead traits, UART and AArch64 backends |
 
 **Std subtotal:** ~10,303 lines
 
-### 3.13 `src/tests/` — Integration Tests & Benchmarks
+### 3.12 `src/tests/` — Integration Tests & Benchmarks
 
 | File                              | Lines | Purpose                                          |
 |-----------------------------------|-------|--------------------------------------------------|
@@ -312,11 +297,11 @@ Files in `target/` are excluded.
 | `examples/hello_memory.vuma`      | 40    | Basic allocate/write/read/free pattern           |
 | `examples/doubly_linked_list.vuma`| 89    | Doubly-linked list with sentinel node pattern    |
 | `examples/arena_allocator.vuma`   | 78    | Arena allocator with derivation chains           |
-| `examples/gpio_blink.vuma`        | 68    | Pi 5 GPIO hardware blink                         |
+| `examples/gpio_blink.vuma`        | 68    | GPIO hardware blink                         |
 | `examples/lock_free_queue.vuma`   | 99    | Lock-free SPSC queue with atomics               |
 | `examples/channel_demo.vuma`      | 237   | Channel-based concurrency demo                   |
 | `examples/memory_arena.vuma`      | 197   | Memory arena with region-based allocation        |
-| `examples/pi5_sensor.vuma`        | 188   | Pi 5 sensor reading with MMIO                    |
+| `examples/aarch64_sensor.vuma`    | 188   | AArch64 sensor reading with MMIO                |
 | `examples/sorted_map.vuma`        | 192   | Sorted map data structure                         |
 | `examples/thread_pool.vuma`       | 209   | Thread pool with work stealing                   |
 
@@ -329,7 +314,7 @@ Files in `target/` are excluded.
 | File                              | Lines | Purpose                                          |
 |-----------------------------------|-------|--------------------------------------------------|
 | `.cargo/config.toml`              | 58    | Cargo build config: cross-compilation, target flags |
-| `.github/workflows/ci.yml`       | 217   | GitHub Actions CI: fmt, clippy, test, doc, Pi 5 cross-compile |
+| `.github/workflows/ci.yml`       | 217   | GitHub Actions CI: fmt, clippy, test, doc, cross-compile |
 
 **Build/CI subtotal:** ~275 lines
 
@@ -351,7 +336,7 @@ Files in `target/` are excluded.
 | Source: Projection     | 7     | ~8,090    |
 | Source: Parser         | 7     | ~9,461    |
 | Source: Codegen        | 7     | ~11,879   |
-| Source: Pi 5           | 11    | ~6,120    |
+| Source: AArch64 bare-metal | —     | *(removed)*    |
 | Source: Proof          | 13    | ~9,124    |
 | Source: Std            | 7     | ~10,303   |
 | Source: Tests          | 9     | ~3,962    |
@@ -385,7 +370,7 @@ Files in `target/` are excluded.
 | vuma-proof             | ~9,124  |
 | vuma-parser            | ~9,461  |
 | vuma-projection        | ~8,090  |
-| vuma-pi5               | ~6,120  |
+| *(removed)*            | *(removed)*  |
 | vuma-cor               | ~6,244  |
 | vuma-tests             | ~3,962  |
 
