@@ -8,10 +8,10 @@ use crate::arm32::Arm32Backend;
 use crate::ir::{IRFunction, IRInstr, IRType};
 use crate::loongarch64::LoongArch64Backend;
 use crate::mips64::Mips64Backend;
-use std::collections::HashMap;
 use crate::ppc64::PPC64Backend;
 use crate::riscv64::RiscV64Backend;
 use crate::x86_64::X86_64Backend;
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -1841,13 +1841,40 @@ impl Backend for AArch64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // ARM64 Linux executable layout:
-        // [_start stub (16 bytes)] [user functions] [runtime I/O functions]
-        let start_stub_size: usize = 16; // 4 ARM64 instructions
+        // ── ARM64 Linux static executable ──
+        //
+        // Layout:
+        //   _start:  BL main           ; call main (result in X0)
+        //            MOV X0, X0         ; (nop, keep result)
+        //            MOV X8, #93        ; sys_exit_group
+        //            SVC #0             ; syscall
+        //   <functions...>
+        //   <runtime: print_hex, print_int using SVC sys_write>
+        //
+        // The _start stub is 4 instructions = 16 bytes.
+        // After that come all user functions.
+        // After user functions come the runtime I/O functions.
 
-        // Compute function offsets (after _start stub)
+        const R_AARCH64_CALL26: &str = "R_AARCH64_CALL26";
+
+        // ── _start stub ──
+        // BL <main>      — offset 0, needs relocation
+        // NOP            — offset 4 (keep X0 as return value)
+        // MOV X8, #93    — offset 8 (sys_exit_group = 93 on AArch64 Linux)
+        // SVC #0         — offset 12
+
+        let start_stub_size: usize = 16; // 4 × 4-byte instructions
+
+        // ── Build runtime I/O code ──
+        // print_hex: X0 = value to print as 8 hex digits to stdout
+        //   Uses SVC #0 with X8=64 (sys_write), fd=1 (stdout)
+        //   Converts each nibble to hex char, writes to stack buffer, then sys_write.
+        let runtime_code = build_aarch64_runtime();
+
+        // ── Compute function offsets ──
+        // _start stub comes first, then user functions, then runtime.
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size;
+        let mut current_offset: usize = start_stub_size; // after _start
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -1858,110 +1885,52 @@ impl Backend for AArch64Backend {
             current_offset += func_size;
         }
 
-        // Runtime I/O functions: __vuma_write_stdout
-        let write_stdout_offset = current_offset;
-        for name in &["print_buf", "write_stdout", "__vuma_write_stdout"] {
-            func_offsets.insert(name.to_string(), write_stdout_offset);
-        }
-        // ARM64 write_stdout: mov x2,x1; mov x1,x0; mov x0,#1; mov x8,#64; svc#0; ret
-        let runtime_write_stdout: Vec<u8> = vec![
-            0xE2, 0x03, 0x01, 0xAA, // mov x2, x1
-            0xE1, 0x03, 0x00, 0xAA, // mov x1, x0
-            0x20, 0x00, 0x80, 0xD2, // mov x0, #1
-            0x08, 0x08, 0x80, 0xD2, // mov x8, #64
-            0x01, 0x00, 0x00, 0xD4, // svc #0
-            0xC0, 0x03, 0x5F, 0xD6, // ret
-        ];
-        current_offset += runtime_write_stdout.len();
+        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
+        let runtime_offsets_start = current_offset;
+        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
+        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
+        // Both print_hex and print_int start at same offset (single combined runtime)
+        // Actually, let's put them sequentially:
+        // We'll just embed the runtime as a single blob and not reference individual offsets
+        // since user code calls them via BL with relocation.
 
-        // __vuma_print_hex(ptr: x0, len: x1)
-        // Converts each byte to 2 hex chars and writes to stdout via sys_write.
-        let print_hex_offset = current_offset;
-        for name in &["print_hex", "__vuma_print_hex"] {
-            func_offsets.insert(name.to_string(), print_hex_offset);
-        }
-        let runtime_print_hex: Vec<u8> = {
-            let code: Vec<u32> = vec![
-                0xA9BD7BFD, // stp x29, x30, [sp, #-48]!
-                0x910003FD, // add x29, sp, #0
-                0xA90153F3, // stp x19, x20, [sp, #16]
-                0xA9025BF5, // stp x21, x22, [sp, #32]
-                0xAA0003F3, // mov x19, x0 (ptr)
-                0xAA0103F4, // mov x20, x1 (len)
-                0xD2800015, // mov x21, #0 (index)
-                // .Lhex_loop:
-                0xEB1402BF, // cmp x21, x20
-                0x540002AA, // b.ge .Lhex_done (imm19=21, skip 21 instr)
-                0x38756A69, // ldrb w9, [x19, x21] (register offset, UXTX)
-                0x53047D2A, // lsr w10, w9, #4 (high nibble)
-                0x1100C14B, // add w11, w10, #48 ('0'+nibble)
-                0x7100255F, // cmp w10, #9
-                0x5400004D, // b.le .Lhigh_ok (imm19=2, skip ADD)
-                0x11009D6B, // add w11, w11, #39 (adjust to 'a')
-                // .Lhigh_ok:
-                0x3900A3EB, // strb w11, [sp, #40]
-                0x12000D2A, // and w10, w9, #0xF (low nibble)
-                0x1100C14B, // add w11, w10, #48
-                0x7100255F, // cmp w10, #9
-                0x5400004D, // b.le .Llow_ok (imm19=2, skip ADD)
-                0x11009D6B, // add w11, w11, #39
-                // .Llow_ok:
-                0x3900A7EB, // strb w11, [sp, #41]
-                0xD2800020, // mov x0, #1 (fd=stdout)
-                0x9100A3E1, // add x1, sp, #40 (buf)
-                0xD2800042, // mov x2, #2 (len=2)
-                0xD2800808, // mov x8, #64 (sys_write)
-                0xD4000001, // svc #0
-                0x910006B5, // add x21, x21, #1
-                0x17FFFFEB, // b .Lhex_loop (imm26=-21, back to CMP)
-                // .Lhex_done:
-                0xD2800149, // mov x9, #10 ('\n')
-                0x3900A3E9, // strb w9, [sp, #40]
-                0xD2800020, // mov x0, #1
-                0x9100A3E1, // add x1, sp, #40
-                0xD2800022, // mov x2, #1
-                0xD2800808, // mov x8, #64
-                0xD4000001, // svc #0
-                0xA9425BF5, // ldp x21, x22, [sp, #32]
-                0xA94153F3, // ldp x19, x20, [sp, #16]
-                0xA8C37BFD, // ldp x29, x30, [sp], #48
-                0xD65F03C0, // ret
-            ];
-            let mut bytes = Vec::with_capacity(code.len() * 4);
-            for &word in &code {
-                bytes.extend_from_slice(&word.to_le_bytes());
-            }
-            bytes
-        };
-        current_offset += runtime_print_hex.len();
+        // ── Build _start stub bytes ──
+        let mut start_stub = Vec::with_capacity(start_stub_size);
 
-        // print_int: stub that returns 0
-        let print_int_offset = current_offset;
-        for name in &["print_int", "print", "__vuma_print_int"] {
-            func_offsets.insert(name.to_string(), print_int_offset);
-        }
-        let runtime_print_int: Vec<u8> = vec![
-            0x00, 0x00, 0x80, 0xD2, // mov x0, #0
-            0xC0, 0x03, 0x5F, 0xD6, // ret
-        ];
-        current_offset += runtime_print_int.len();
+        // BL <main> — placeholder, will be patched
+        // BL encoding: 1 0 0 1 0 1 imm26
+        start_stub.extend_from_slice(&0x94000000u32.to_le_bytes()); // BL #0
 
-        // Build _start stub: bl main; mov x8, #93; svc #0; ret
-        let mut start_stub = vec![0u8; start_stub_size];
-        if let Some(&main_offset) = func_offsets.get("main") {
-            let bl_offset = main_offset as i64; // from offset 0
-            let imm26 = (bl_offset >> 2) as u32 & 0x03FFFFFF;
-            let bl_instr = 0x94000000u32 | imm26;
-            start_stub[0..4].copy_from_slice(&bl_instr.to_le_bytes());
-        }
-        // mov x8, #93 (sys_exit)
-        start_stub[4..8].copy_from_slice(&0xD2800BA8u32.to_le_bytes());
-        // svc #0
-        start_stub[8..12].copy_from_slice(&0xD4000001u32.to_le_bytes());
-        // ret
-        start_stub[12..16].copy_from_slice(&0xD65F03C0u32.to_le_bytes());
+        // NOP (MOV X0, X0)
+        start_stub.extend_from_slice(&0xAA0003E0u32.to_le_bytes()); // MOV X0, X0
 
-        // Concatenate all code
+        // MOV X8, #93 (sys_exit_group)
+        // MOVZ X8, #93 = 0xD2800BA8
+        start_stub.extend_from_slice(&0xD2800BA8u32.to_le_bytes());
+
+        // SVC #0
+        start_stub.extend_from_slice(&0xD4000001u32.to_le_bytes());
+
+        // ── Patch _start BL to main ──
+        let main_key = func_offsets.keys()
+            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .cloned();
+        if let Some(ref key) = main_key {
+            let main_offset = func_offsets[key];
+            // BL offset = (target - pc) / 4, where pc = address of BL instruction
+            // BL is at offset 0 within all_code, but in the final binary it's at
+            // start_stub_size_into_elf = text_offset_in_elf.
+            // For the BL encoding, imm26 = (target - bl_addr) / 4
+            // bl_addr = 0 (relative to start of all_code = _start)
+            // target = main_offset (relative to start of all_code)
+            let bl_offset = (main_offset as i64) / 4;
+            // Mask to 26 bits (signed)
+            let imm26 = (bl_offset as u32) & 0x03FFFFFF;
+            let bl_word: u32 = 0x94000000 | imm26;
+            start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
+        }
+
+        // ── Concatenate all code ──
         let mut all_code = start_stub;
         for func in &program.functions {
             for block in &func.blocks {
@@ -1970,33 +1939,50 @@ impl Backend for AArch64Backend {
                 }
             }
         }
-        all_code.extend_from_slice(&runtime_write_stdout);
-        all_code.extend_from_slice(&runtime_print_hex);
-        all_code.extend_from_slice(&runtime_print_int);
 
-        // Patch relocations for user functions
+        // Append runtime I/O code
+        all_code.extend_from_slice(&runtime_code);
+
+        // ── Patch BL relocations ──
+        // Each function's relocations are relative to the start of that function's code.
+        // We need to adjust them by the _start stub size + preceding functions' sizes.
         let mut func_code_offset: usize = start_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
                 if abs_offset + 4 > all_code.len() {
-                    continue;
+                    continue; // skip invalid relocations
                 }
-                // ARM64 BL relocation: 26-bit signed offset in bits[25:0]
-                if reloc.reloc_type == "R_AARCH64_CALL26" {
+
+                if reloc.reloc_type == R_AARCH64_CALL26 {
+                    // R_AARCH64_CALL26: patch BL instruction's imm26 field.
+                    // BL target = PC + imm26*4, where PC = address of BL instruction.
+                    // So: imm26 = (target_addr - bl_addr) / 4
                     if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
-                        let current_bits = u32::from_le_bytes([
+                        let bl_addr = abs_offset as i64;
+                        let target_addr = target_offset as i64;
+                        let offset_words = (target_addr - bl_addr) / 4;
+                        // Check range: ±128MB (26-bit signed)
+                        if offset_words < -(1 << 25) || offset_words >= (1 << 25) {
+                            eprintln!(
+                                "warning: BL relocation to '{}' out of range: {} words",
+                                reloc.symbol, offset_words
+                            );
+                            continue;
+                        }
+                        let imm26 = (offset_words as u32) & 0x03FFFFFF;
+                        let existing = u32::from_le_bytes([
                             all_code[abs_offset],
                             all_code[abs_offset + 1],
                             all_code[abs_offset + 2],
                             all_code[abs_offset + 3],
                         ]);
-                        // BL offset = (target - source) >> 2
-                        let bl_offset = (target_offset as i64 - abs_offset as i64) >> 2;
-                        let imm26 = (bl_offset as u32) & 0x03FFFFFF;
-                        let patched = (current_bits & 0xFC000000) | imm26;
-                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                        let patched = (existing & !0x03FFFFFF) | imm26;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.to_le_bytes());
                     }
+                    // If the symbol is not found (e.g., external like __vuma_free),
+                    // leave the placeholder as-is — the program will crash if it's called.
                 }
             }
             let func_size: usize = func.blocks.iter()
@@ -2006,6 +1992,7 @@ impl Backend for AArch64Backend {
             func_code_offset += func_size;
         }
 
+        // ── Build ELF with 2 LOAD segments ──
         Ok(build_aarch64_elf_2seg(&all_code, 0x400000))
     }
 

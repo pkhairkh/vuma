@@ -1,0 +1,702 @@
+  1874→                        vec![
+  1875→                            PhysicalReg::new(RegClass::Gpr, scratch.encoding()),
+  1876→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1877→                        ],
+  1878→                        vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+  1879→                    ));
+  1880→                    result.push(emit_alloc_instr(
+  1881→                        Instruction::Subf {
+  1882→                            rt: d,
+  1883→                            ra: scratch,
+  1884→                            rb: l,
+  1885→                        },
+  1886→                        vec![
+  1887→                            PhysicalReg::new(RegClass::Gpr, scratch.encoding()),
+  1888→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1889→                        ],
+  1890→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1891→                    ));
+  1892→                }
+  1893→                BinOpKind::And => {
+  1894→                    result.push(emit_alloc_instr(
+  1895→                        Instruction::And {
+  1896→                            ra: d,
+  1897→                            rs: l,
+  1898→                            rb: r,
+  1899→                        },
+  1900→                        vec![
+  1901→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1902→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1903→                        ],
+  1904→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1905→                    ));
+  1906→                }
+  1907→                BinOpKind::Or => {
+  1908→                    result.push(emit_alloc_instr(
+  1909→                        Instruction::Or {
+  1910→                            ra: d,
+  1911→                            rs: l,
+  1912→                            rb: r,
+  1913→                        },
+  1914→                        vec![
+  1915→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1916→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1917→                        ],
+  1918→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1919→                    ));
+  1920→                }
+  1921→                BinOpKind::Xor => {
+  1922→                    result.push(emit_alloc_instr(
+  1923→                        Instruction::Xor {
+  1924→                            ra: d,
+  1925→                            rs: l,
+  1926→                            rb: r,
+  1927→                        },
+  1928→                        vec![
+  1929→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1930→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1931→                        ],
+  1932→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1933→                    ));
+  1934→                }
+  1935→                BinOpKind::Shl => {
+  1936→                    result.push(emit_alloc_instr(
+  1937→                        Instruction::Sld {
+  1938→                            ra: d,
+  1939→                            rs: l,
+  1940→                            rb: r,
+  1941→                        },
+  1942→                        vec![
+  1943→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1944→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1945→                        ],
+  1946→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1947→                    ));
+  1948→                }
+  1949→                BinOpKind::ShrL => {
+  1950→                    result.push(emit_alloc_instr(
+  1951→                        Instruction::Srd {
+  1952→                            ra: d,
+  1953→                            rs: l,
+  1954→                            rb: r,
+  1955→                        },
+  1956→                        vec![
+  1957→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1958→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1959→                        ],
+  1960→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1961→                    ));
+  1962→                }
+  1963→                BinOpKind::ShrA => {
+  1964→                    result.push(emit_alloc_instr(
+  1965→                        Instruction::Srad {
+  1966→                            ra: d,
+  1967→                            rs: l,
+  1968→                            rb: r,
+  1969→                        },
+  1970→                        vec![
+  1971→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1972→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1973→                        ],
+  1974→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1975→                    ));
+  1976→                }
+  1977→                BinOpKind::Ror | BinOpKind::Rol => {
+  1978→                    // PPC64 rotation placeholder - use Srad
+  1979→                    result.push(emit_alloc_instr(
+  1980→                        Instruction::Srad {
+  1981→                            ra: d,
+  1982→                            rs: l,
+  1983→                            rb: r,
+  1984→                        },
+  1985→                        vec![
+  1986→                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  1987→                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  1988→                        ],
+  1989→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  1990→                    ));
+  1991→                }
+  1992→                BinOpKind::SLt
+  1993→                | BinOpKind::SLe
+  1994→                | BinOpKind::SGt
+  1995→                | BinOpKind::SGe
+  1996→                | BinOpKind::ULt
+  1997→                | BinOpKind::ULe
+  1998→                | BinOpKind::UGt
+  1999→                | BinOpKind::UGe
+  2000→                | BinOpKind::Eq
+  2001→                | BinOpKind::Ne => {
+  2002→                    let kind = match op {
+  2003→                        BinOpKind::SLt => CmpKind::SLt,
+  2004→                        BinOpKind::SLe => CmpKind::SLe,
+  2005→                        BinOpKind::SGt => CmpKind::SGt,
+  2006→                        BinOpKind::SGe => CmpKind::SGe,
+  2007→                        BinOpKind::ULt => CmpKind::ULt,
+  2008→                        BinOpKind::ULe => CmpKind::ULe,
+  2009→                        BinOpKind::UGt => CmpKind::UGt,
+  2010→                        BinOpKind::UGe => CmpKind::UGe,
+  2011→                        BinOpKind::Eq => CmpKind::Eq,
+  2012→                        BinOpKind::Ne => CmpKind::Ne,
+  2013→                        _ => CmpKind::Eq,
+  2014→                    };
+  2015→                    result.extend(lower_cmp_ppc64(&kind, d, l, r));
+  2016→                }
+  2017→            }
+  2018→        }
+  2019→
+  2020→        IRInstr::Add { dst, lhs, rhs, .. } => {
+  2021→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2022→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2023→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2024→            result.push(emit_alloc_instr(
+  2025→                Instruction::Add {
+  2026→                    rt: d,
+  2027→                    ra: l,
+  2028→                    rb: r,
+  2029→                },
+  2030→                vec![
+  2031→                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  2032→                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  2033→                ],
+  2034→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2035→            ));
+  2036→        }
+  2037→
+  2038→        IRInstr::Sub { dst, lhs, rhs, .. } => {
+  2039→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2040→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2041→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2042→            result.push(emit_alloc_instr(
+  2043→                Instruction::Subf {
+  2044→                    rt: d,
+  2045→                    ra: r,
+  2046→                    rb: l,
+  2047→                },
+  2048→                vec![
+  2049→                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  2050→                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  2051→                ],
+  2052→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2053→            ));
+  2054→        }
+  2055→
+  2056→        IRInstr::Mul { dst, lhs, rhs, .. } => {
+  2057→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2058→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2059→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2060→            result.push(emit_alloc_instr(
+  2061→                Instruction::Mulld {
+  2062→                    rt: d,
+  2063→                    ra: l,
+  2064→                    rb: r,
+  2065→                },
+  2066→                vec![
+  2067→                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  2068→                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  2069→                ],
+  2070→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2071→            ));
+  2072→        }
+  2073→
+  2074→        IRInstr::Div { dst, lhs, rhs, .. } => {
+  2075→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2076→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2077→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2078→            result.push(emit_alloc_instr(
+  2079→                Instruction::Divd {
+  2080→                    rt: d,
+  2081→                    ra: l,
+  2082→                    rb: r,
+  2083→                },
+  2084→                vec![
+  2085→                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+  2086→                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+  2087→                ],
+  2088→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2089→            ));
+  2090→        }
+  2091→
+  2092→        IRInstr::UnaryOp { op, dst, operand, .. } => {
+  2093→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2094→            let s = resolve_gpr_ppc64(operand, vreg_map, Gpr::R0, &mut result);
+  2095→            match op {
+  2096→                UnaryOpKind::Neg => {
+  2097→                    result.push(emit_alloc_instr(
+  2098→                        Instruction::Neg { rt: d, ra: s },
+  2099→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2100→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2101→                    ));
+  2102→                }
+  2103→                UnaryOpKind::Not => {
+  2104→                    // nor d, s, r0 → d = ~(s | r0)
+  2105→                    // Note: R0 is NOT hardwired to zero on PPC64; we use nor d, s, s
+  2106→                    // which produces ~(s | s) = ~s, the correct bitwise complement.
+  2107→                    result.push(emit_alloc_instr(
+  2108→                        Instruction::Nor {
+  2109→                            ra: d,
+  2110→                            rs: s,
+  2111→                            rb: s,
+  2112→                        },
+  2113→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2114→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2115→                    ));
+  2116→                }
+  2117→                UnaryOpKind::Clz => {
+  2118→                    // cntlzd d, s — count leading zeros doubleword
+  2119→                    result.push(emit_alloc_instr(
+  2120→                        Instruction::Cntlzd { ra: d, rs: s },
+  2121→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2122→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2123→                    ));
+  2124→                }
+  2125→                UnaryOpKind::Ctz => {
+  2126→                    // ctz = 63 - cntlzd(x & -x)
+  2127→                    // Use scratch R11 for intermediate:
+  2128→                    //   subf r0, s, r0 → r0 = -s (use neg)
+  2129→                    //   and r0, s, r0 → r0 = s & -s (isolates lowest set bit)
+  2130→                    //   cntlzd d, r0   → d = leading zeros of isolated bit
+  2131→                    //   li r11, 63
+  2132→                    //   subf d, d, r11  → d = 63 - clz = ctz
+  2133→                    let scratch1 = Gpr::R0;
+  2134→                    let scratch2 = Gpr::R11;
+  2135→                    // neg scratch1, s
+  2136→                    result.push(emit_alloc_instr(
+  2137→                        Instruction::Neg {
+  2138→                            rt: scratch1,
+  2139→                            ra: s,
+  2140→                        },
+  2141→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2142→                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+  2143→                    ));
+  2144→                    // and scratch1, s, scratch1
+  2145→                    result.push(emit_alloc_instr(
+  2146→                        Instruction::And {
+  2147→                            ra: scratch1,
+  2148→                            rs: s,
+  2149→                            rb: scratch1,
+  2150→                        },
+  2151→                        vec![
+  2152→                            PhysicalReg::new(RegClass::Gpr, s.encoding()),
+  2153→                            PhysicalReg::new(RegClass::Gpr, scratch1.encoding()),
+  2154→                        ],
+  2155→                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+  2156→                    ));
+  2157→                    // cntlzd d, scratch1
+  2158→                    result.push(emit_alloc_instr(
+  2159→                        Instruction::Cntlzd {
+  2160→                            ra: d,
+  2161→                            rs: scratch1,
+  2162→                        },
+  2163→                        vec![PhysicalReg::new(RegClass::Gpr, scratch1.encoding())],
+  2164→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2165→                    ));
+  2166→                    // li scratch2, 63
+  2167→                    result.push(emit_alloc_instr(
+  2168→                        Instruction::Li {
+  2169→                            rt: scratch2,
+  2170→                            simm: 63,
+  2171→                        },
+  2172→                        vec![],
+  2173→                        vec![PhysicalReg::new(RegClass::Gpr, scratch2.encoding())],
+  2174→                    ));
+  2175→                    // subf d, d, scratch2  → d = 63 - clz
+  2176→                    result.push(emit_alloc_instr(
+  2177→                        Instruction::Subf {
+  2178→                            rt: d,
+  2179→                            ra: d,
+  2180→                            rb: scratch2,
+  2181→                        },
+  2182→                        vec![
+  2183→                            PhysicalReg::new(RegClass::Gpr, d.encoding()),
+  2184→                            PhysicalReg::new(RegClass::Gpr, scratch2.encoding()),
+  2185→                        ],
+  2186→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2187→                    ));
+  2188→                }
+  2189→                UnaryOpKind::Popcnt => {
+  2190→                    // popcntd d, s — population count doubleword
+  2191→                    result.push(emit_alloc_instr(
+  2192→                        Instruction::Popcntd { ra: d, rs: s },
+  2193→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2194→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2195→                    ));
+  2196→                }
+  2197→            }
+  2198→        }
+  2199→
+  2200→        IRInstr::Cmp {
+  2201→            kind,
+  2202→            dst,
+  2203→            lhs,
+  2204→            rhs, ty: _,
+  2205→        } => {
+  2206→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2207→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2208→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2209→            result.extend(lower_cmp_ppc64(kind, d, l, r));
+  2210→        }
+  2211→
+  2212→        IRInstr::Load { dst, addr, offset, ty } => {
+  2213→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2214→            let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R11, &mut result);
+  2215→            let off = *offset;
+  2216→            // Choose the correct load instruction based on the type width.
+  2217→            let load_inst = match ty {
+  2218→                IRType::I8 | IRType::U8 => Instruction::Lbz { rt: d, ra: a, d: off },
+  2219→                IRType::I16 | IRType::U16 => Instruction::Lhz { rt: d, ra: a, d: off },
+  2220→                IRType::I32 | IRType::U32 => Instruction::Lwz { rt: d, ra: a, d: off },
+  2221→                IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  2222→                    // LD uses DS-form which requires 4-byte aligned displacement.
+  2223→                    // For simplicity, if offset is not 4-byte aligned, add it to
+  2224→                    // the base register first.
+  2225→                    if off % 4 == 0 {
+  2226→                        Instruction::Ld { rt: d, ra: a, ds: off }
+  2227→                    } else {
+  2228→                        // addi scratch, a, off; ld d, 0(scratch)
+  2229→                        let scratch = if a != Gpr::R0 { Gpr::R0 } else { Gpr::R11 };
+  2230→                        result.push(emit_alloc_instr(
+  2231→                            Instruction::Addi { rt: scratch, ra: a, simm: off },
+  2232→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2233→                            vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+  2234→                        ));
+  2235→                        Instruction::Ld { rt: d, ra: scratch, ds: 0 }
+  2236→                    }
+  2237→                }
+  2238→                IRType::F32 => Instruction::Lfs { ft: Fpr::F0, ra: a, d: off },
+  2239→                IRType::F64 => Instruction::Lfd { ft: Fpr::F0, ra: a, d: off },
+  2240→                _ => Instruction::Ld { rt: d, ra: a, ds: off }, // fallback: 64-bit
+  2241→            };
+  2242→            result.push(emit_alloc_instr(
+  2243→                load_inst,
+  2244→                vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2245→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2246→            ));
+  2247→        }
+  2248→
+  2249→        IRInstr::Store { value, addr, offset, ty } => {
+  2250→            let v = resolve_gpr_ppc64(value, vreg_map, Gpr::R0, &mut result);
+  2251→            let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R11, &mut result);
+  2252→            let off = *offset;
+  2253→            // Choose the correct store instruction based on the type width.
+  2254→            let store_inst = match ty {
+  2255→                IRType::I8 | IRType::U8 => Instruction::Stb { rs: v, ra: a, d: off },
+  2256→                IRType::I16 | IRType::U16 => Instruction::Sth { rs: v, ra: a, d: off },
+  2257→                IRType::I32 | IRType::U32 => Instruction::Stw { rs: v, ra: a, d: off },
+  2258→                IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  2259→                    if off % 4 == 0 {
+  2260→                        Instruction::Std { rs: v, ra: a, ds: off }
+  2261→                    } else {
+  2262→                        let scratch = if a != Gpr::R0 { Gpr::R0 } else { Gpr::R11 };
+  2263→                        result.push(emit_alloc_instr(
+  2264→                            Instruction::Addi { rt: scratch, ra: a, simm: off },
+  2265→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2266→                            vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+  2267→                        ));
+  2268→                        Instruction::Std { rs: v, ra: scratch, ds: 0 }
+  2269→                    }
+  2270→                }
+  2271→                IRType::F32 => Instruction::Stfs { fs: Fpr::F0, ra: a, d: off },
+  2272→                IRType::F64 => Instruction::Stfd { fs: Fpr::F0, ra: a, d: off },
+  2273→                _ => Instruction::Std { rs: v, ra: a, ds: off }, // fallback: 64-bit
+  2274→            };
+  2275→            result.push(emit_alloc_instr(
+  2276→                store_inst,
+  2277→                vec![
+  2278→                    PhysicalReg::new(RegClass::Gpr, a.encoding()),
+  2279→                    PhysicalReg::new(RegClass::Gpr, v.encoding()),
+  2280→                ],
+  2281→                vec![],
+  2282→            ));
+  2283→        }
+  2284→
+  2285→        IRInstr::Alloc { dst, size } => {
+  2286→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2287→            // The prologue already allocated the full frame (computed by
+  2288→            // ppc64_compute_frame_size), so we must NOT emit another stdu.
+  2289→            // Instead, compute the address of this slot within the frame.
+  2290→            // alloc_offset starts at 32 (after the mandatory save area) and
+  2291→            // is advanced by the aligned size for each Alloc.
+  2292→            let aligned_size = (*size as i32 + 15) & !15; // 16-byte aligned
+  2293→            let slot_off = *alloc_offset;
+  2294→            *alloc_offset += aligned_size;
+  2295→            // addi dst, r1, slot_off
+  2296→            if slot_off == 0 {
+  2297→                // mr dst, r1
+  2298→                if d != Gpr::R1 {
+  2299→                    result.push(emit_alloc_instr(
+  2300→                        Instruction::Mr { ra: d, rs: Gpr::R1 },
+  2301→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2302→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2303→                    ));
+  2304→                }
+  2305→            } else {
+  2306→                result.push(emit_alloc_instr(
+  2307→                    Instruction::Addi { rt: d, ra: Gpr::R1, simm: slot_off },
+  2308→                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2309→                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2310→                ));
+  2311→            }
+  2312→        }
+  2313→
+  2314→        IRInstr::Ret { values } => {
+  2315→            if let Some(val) = values.first() {
+  2316→                let v = resolve_gpr_ppc64(val, vreg_map, Gpr::R0, &mut result);
+  2317→                if v != Gpr::R3 {
+  2318→                    result.push(emit_alloc_instr(
+  2319→                        Instruction::Mr { ra: Gpr::R3, rs: v },
+  2320→                        vec![PhysicalReg::new(RegClass::Gpr, v.encoding())],
+  2321→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+  2322→                    ));
+  2323→                }
+  2324→            }
+  2325→            // Do NOT emit BLR here — the epilogue will handle the return.
+  2326→            // The epilogue restores LR, deallocates the frame, and emits BLR.
+  2327→        }
+  2328→
+  2329→        IRInstr::Call { dst, func, args } => {
+  2330→            for (i, arg) in args.iter().enumerate() {
+  2331→                if let Some(arg_reg) = Gpr::arg_register(i) {
+  2332→                    let a = resolve_gpr_ppc64(arg, vreg_map, Gpr::R0, &mut result);
+  2333→                    if a != arg_reg {
+  2334→                        result.push(emit_alloc_instr(
+  2335→                            Instruction::Mr { ra: arg_reg, rs: a },
+  2336→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2337→                            vec![PhysicalReg::new(RegClass::Gpr, arg_reg.encoding())],
+  2338→                        ));
+  2339→                    }
+  2340→                }
+  2341→            }
+  2342→            // Record relocation for the BL instruction.
+  2343→            let bl_offset = (result.len() * 4) as u64; // byte offset within this batch
+  2344→            result.push(emit_alloc_instr(
+  2345→                Instruction::Bl { li: 0 },
+  2346→                vec![],
+  2347→                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+  2348→            ));
+  2349→            relocations.push(crate::backend::RelocationEntry {
+  2350→                offset: bl_offset,
+  2351→                symbol: func.clone(),
+  2352→                reloc_type: "R_PPC64_REL24".to_string(),
+  2353→            });
+  2354→            if let Some(d) = dst {
+  2355→                let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
+  2356→                if d_reg != Gpr::R3 {
+  2357→                    result.push(emit_alloc_instr(
+  2358→                        Instruction::Mr {
+  2359→                            ra: d_reg,
+  2360→                            rs: Gpr::R3,
+  2361→                        },
+  2362→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+  2363→                        vec![PhysicalReg::new(RegClass::Gpr, d_reg.encoding())],
+  2364→                    ));
+  2365→                }
+  2366→            }
+  2367→        }
+  2368→
+  2369→        IRInstr::Branch { target: _ } => {
+  2370→            result.push(emit_alloc_instr(Instruction::B { li: 0 }, vec![], vec![]));
+  2371→        }
+  2372→
+  2373→        IRInstr::CondBranch {
+  2374→            cond,
+  2375→            true_target: _,
+  2376→            false_target: _,
+  2377→        } => {
+  2378→            let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R0, &mut result);
+  2379→            // cmpi cr0, 0, c, 0; bne cr0, +2; b false_target
+  2380→            result.push(emit_alloc_instr(
+  2381→                Instruction::Cmpi {
+  2382→                    bf: CrField::CR0,
+  2383→                    l: 1,
+  2384→                    ra: c,
+  2385→                    simm: 0,
+  2386→                },
+  2387→                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+  2388→                vec![],
+  2389→            ));
+  2390→            result.push(emit_alloc_instr(
+  2391→                Instruction::Bc {
+  2392→                    bo: 12,
+  2393→                    bi: 2 + CrField::CR0.encoding() * 4,
+  2394→                    bd: 2,
+  2395→                },
+  2396→                vec![],
+  2397→                vec![],
+  2398→            ));
+  2399→            result.push(emit_alloc_instr(Instruction::B { li: 0 }, vec![], vec![]));
+  2400→        }
+  2401→
+  2402→        IRInstr::Cast { kind, dst, src, .. } => {
+  2403→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2404→            let s = resolve_gpr_ppc64(src, vreg_map, Gpr::R0, &mut result);
+  2405→            match kind {
+  2406→                CastKind::SExt => {
+  2407→                    // extsw d, s — sign-extend word to doubleword
+  2408→                    result.push(emit_alloc_instr(
+  2409→                        Instruction::Extsw { ra: d, rs: s },
+  2410→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2411→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2412→                    ));
+  2413→                }
+  2414→                CastKind::ZExt | CastKind::Trunc | CastKind::BitCast => {
+  2415→                    // Zero-extend, trunc, and bitcast are all just moves on PPC64
+  2416→                    // (zero-extension is free after load, trunc just uses lower bits)
+  2417→                    if d != s {
+  2418→                        result.push(emit_alloc_instr(
+  2419→                            Instruction::Mr { ra: d, rs: s },
+  2420→                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2421→                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2422→                        ));
+  2423→                    }
+  2424→                }
+  2425→            }
+  2426→        }
+  2427→
+  2428→        IRInstr::Select {
+  2429→            dst,
+  2430→            cond,
+  2431→            true_val,
+  2432→            false_val, ty: _,
+  2433→        } => {
+  2434→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2435→            let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R0, &mut result);
+  2436→            let tv = resolve_gpr_ppc64(true_val, vreg_map, Gpr::R11, &mut result);
+  2437→            // For false_val, we reuse R11 since cond is consumed by cmpi before false_val is used.
+  2438→            // However, if false_val is an immediate it needs a scratch reg. Use the dst register
+  2439→            // as scratch if it differs from R11/R12, otherwise use R11 (after cond is consumed).
+  2440→            let fv = resolve_gpr_ppc64(false_val, vreg_map, Gpr::R0, &mut result);
+  2441→            // mr d, fv; cmpi cr0, 0, c, 0; bne cr0, +8; mr d, tv
+  2442→            if fv != d {
+  2443→                result.push(emit_alloc_instr(
+  2444→                    Instruction::Mr { ra: d, rs: fv },
+  2445→                    vec![PhysicalReg::new(RegClass::Gpr, fv.encoding())],
+  2446→                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2447→                ));
+  2448→            }
+  2449→            result.push(emit_alloc_instr(
+  2450→                Instruction::Cmpi {
+  2451→                    bf: CrField::CR0,
+  2452→                    l: 1,
+  2453→                    ra: c,
+  2454→                    simm: 0,
+  2455→                },
+  2456→                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+  2457→                vec![],
+  2458→            ));
+  2459→            result.push(emit_alloc_instr(
+  2460→                Instruction::Bc {
+  2461→                    bo: 4,
+  2462→                    bi: 2 + CrField::CR0.encoding() * 4,
+  2463→                    bd: 2,
+  2464→                },
+  2465→                vec![],
+  2466→                vec![],
+  2467→            ));
+  2468→            result.push(emit_alloc_instr(
+  2469→                Instruction::Mr { ra: d, rs: tv },
+  2470→                vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+  2471→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2472→            ));
+  2473→        }
+  2474→
+  2475→        IRInstr::Offset { dst, base, offset } => {
+  2476→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2477→            let b = resolve_gpr_ppc64(base, vreg_map, Gpr::R0, &mut result);
+  2478→            let o = resolve_gpr_ppc64(offset, vreg_map, Gpr::R11, &mut result);
+  2479→            result.push(emit_alloc_instr(
+  2480→                Instruction::Add {
+  2481→                    rt: d,
+  2482→                    ra: b,
+  2483→                    rb: o,
+  2484→                },
+  2485→                vec![
+  2486→                    PhysicalReg::new(RegClass::Gpr, b.encoding()),
+  2487→                    PhysicalReg::new(RegClass::Gpr, o.encoding()),
+  2488→                ],
+  2489→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2490→            ));
+  2491→        }
+  2492→
+  2493→        IRInstr::GetAddress { dst, name: _ } => {
+  2494→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2495→            result.push(emit_alloc_instr(
+  2496→                Instruction::Li { rt: d, simm: 0 },
+  2497→                vec![],
+  2498→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2499→            ));
+  2500→        }
+  2501→
+  2502→        IRInstr::Free { ptr: _ } => {
+  2503→            // Free is not directly implementable as a single instruction;
+  2504→            // emit a trap to catch any accidental execution at runtime.
+  2505→            result.push(emit_alloc_instr(Instruction::Trap, vec![], vec![]));
+  2506→        }
+  2507→
+  2508→        IRInstr::Phi { .. } => {
+  2509→            // Phi nodes are eliminated by SSA deconstruction; emit NOP.
+  2510→            result.push(emit_alloc_instr(Instruction::Nop, vec![], vec![]));
+  2511→        }
+  2512→    }
+  2513→
+  2514→    (result, relocations)
+  2515→}
+  2516→
+  2517→impl Backend for PPC64Backend {
+  2518→    fn target_info(&self) -> &dyn TargetInfo {
+  2519→        &self.target_info
+  2520→    }
+  2521→
+  2522→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  2523→        let func_name = func.name.clone();
+  2524→        let frame_size = ppc64_compute_frame_size(func);
+  2525→
+  2526→        // Build a mapping from virtual register IDs to physical GPRs.
+  2527→        let mut vreg_map: std::collections::HashMap<u32, Gpr> = std::collections::HashMap::new();
+  2528→
+  2529→        // Scan instructions and build the register map.
+  2530→        let param_count = func.params.len();
+  2531→        for block in &func.blocks {
+  2532→            for instr in &block.instructions {
+  2533→                let arg_index = |vreg_id: u32| -> Option<usize> {
+  2534→                    if (vreg_id as usize) < param_count {
+  2535→                        Some(vreg_id as usize)
+  2536→                    } else {
+  2537→                        None
+  2538→                    }
+  2539→                };
+  2540→
+  2541→                let values: Vec<&IRValue> = match instr {
+  2542→                    IRInstr::BinOp { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2543→                    IRInstr::Add { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2544→                    IRInstr::Sub { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2545→                    IRInstr::Mul { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2546→                    IRInstr::Div { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2547→                    IRInstr::UnaryOp { dst, operand, .. } => vec![dst, operand],
+  2548→                    IRInstr::Load { dst, addr, .. } => vec![dst, addr],
+  2549→                    IRInstr::Store { value, addr, .. } => vec![value, addr],
+  2550→                    IRInstr::Alloc { dst, .. } => vec![dst],
+  2551→                    IRInstr::Cast { dst, src, .. } => vec![dst, src],
+  2552→                    IRInstr::Select {
+  2553→                        dst,
+  2554→                        cond,
+  2555→                        true_val,
+  2556→                        false_val, ty: _,
+  2557→                    } => vec![dst, cond, true_val, false_val],
+  2558→                    IRInstr::Offset { dst, base, offset } => vec![dst, base, offset],
+  2559→                    IRInstr::GetAddress { dst, .. } => vec![dst],
+  2560→                    _ => vec![],
+  2561→                };
+  2562→                for val in values {
+  2563→                    if let IRValue::Register(id) = val {
+  2564→                        map_vreg_to_gpr(*id, arg_index(*id), &mut vreg_map);
+  2565→                    }
+  2566→                }
+  2567→            }
+  2568→        }
+  2569→
+  2570→        // Determine which callee-saved registers are used.
+  2571→        let callee_saved: Vec<PhysicalReg> = vreg_map
+  2572→            .values()
+  2573→            .filter(|r| r.is_callee_saved())
+
+[showing lines 1874-2573 of 3589; use offset=2574 with limit to continue reading]

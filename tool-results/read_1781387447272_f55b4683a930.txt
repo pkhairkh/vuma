@@ -1,0 +1,502 @@
+     1→  2715→impl Backend for PPC64Backend {
+     2→  2716→    fn target_info(&self) -> &dyn TargetInfo {
+     3→  2717→        &self.target_info
+     4→  2718→    }
+     5→  2719→
+     6→  2720→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+     7→  2721→        let func_name = func.name.clone();
+     8→  2722→
+     9→  2723→        // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+    10→  2724→        let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    11→  2725→        for &id in func.vregs.keys() { all_vreg_ids.insert(id); }
+    12→  2726→        for param in &func.params {
+    13→  2727→            if let Some(id) = param.as_register() { all_vreg_ids.insert(id); }
+    14→  2728→        }
+    15→  2729→        for block in &func.blocks {
+    16→  2730→            for instr in &block.instructions {
+    17→  2731→                for id in instr.defined_regs() { all_vreg_ids.insert(id); }
+    18→  2732→                for id in instr.used_regs() { all_vreg_ids.insert(id); }
+    19→  2733→            }
+    20→  2734→        }
+    21→  2735→        for val in &func.results {
+    22→  2736→            if let Some(id) = val.as_register() { all_vreg_ids.insert(id); }
+    23→  2737→        }
+    24→  2738→
+    25→  2739→        let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    26→  2740→        let mut alloc_sizes: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+    27→  2741→        for block in &func.blocks {
+    28→  2742→            for instr in &block.instructions {
+    29→  2743→                if let IRInstr::Alloc { dst, size } = instr {
+    30→  2744→                    if let Some(id) = dst.as_register() {
+    31→  2745→                        stack_alloc_vregs.insert(id);
+    32→  2746→                        let aligned_size = ((*size as i32 + 15) & !15) as i32;
+    33→  2747→                        alloc_sizes.insert(id, aligned_size);
+    34→  2748→                    }
+    35→  2749→                }
+    36→  2750→            }
+    37→  2751→        }
+    38→  2752→
+    39→  2753→        // Stack Layout (relative to R31, which = R1 + frame_size):
+    40→  2754→        // [R31 + 8]  = saved LR
+    41→  2755→        // [R31]      = back chain
+    42→  2756→        // [R31 - 16] = saved R31
+    43→  2757→        // Then alloc regions, then vreg slots at [R31 - offset]
+    44→  2758→
+    45→  2759→        let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+    46→  2760→        let mut current_offset: i32 = 24; // after saved R31 at -16
+    47→  2761→
+    48→  2762→        let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
+    49→  2763→        alloc_vreg_ids.sort();
+    50→  2764→        for &id in &alloc_vreg_ids {
+    51→  2765→            let size = alloc_sizes[&id];
+    52→  2766→            current_offset += size;
+    53→  2767→            alloc_offsets.insert(id, current_offset);
+    54→  2768→        }
+    55→  2769→
+    56→  2770→        let mut vreg_stack_slots: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+    57→  2771→        let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+    58→  2772→        all_vreg_ids_sorted.sort();
+    59→  2773→        for &id in &all_vreg_ids_sorted {
+    60→  2774→            current_offset += 8;
+    61→  2775→            vreg_stack_slots.insert(id, current_offset);
+    62→  2776→        }
+    63→  2777→
+    64→  2778→        let frame_size = ((current_offset + 15) & !15) as usize;
+    65→  2779→        let fs = frame_size as i32;
+    66→  2780→
+    67→  2781→        // ── Phase 2: Emit prologue ──
+    68→  2782→        let mut instructions: Vec<AllocatedInstruction> = Vec::new();
+    69→  2783→        let mut relocations: Vec<crate::backend::RelocationEntry> = Vec::new();
+    70→  2784→
+    71→  2785→        // STDU R1, -frame_size(R1)
+    72→  2786→        instructions.push(AllocatedInstruction {
+    73→  2787→            opcode: "stdu".into(),
+    74→  2788→            reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+    75→  2789→            writes: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+    76→  2790→            encoded: Instruction::Stdu { rs: Gpr::R1, ra: Gpr::R1, ds: -fs }.encode().to_vec(),
+    77→  2791→        });
+    78→  2792→        // MFLR R0
+    79→  2793→        let mflr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (339 << 1);
+    80→  2794→        instructions.push(AllocatedInstruction {
+    81→  2795→            opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
+    82→  2796→            encoded: encode_word(mflr_word).to_vec(),
+    83→  2797→        });
+    84→  2798→        // STD R0, fs+8(R1) - save LR
+    85→  2799→        instructions.push(AllocatedInstruction {
+    86→  2800→            opcode: "std".into(),
+    87→  2801→            reads: vec![PhysicalReg::new(RegClass::Gpr, 0), PhysicalReg::new(RegClass::Gpr, 1)],
+    88→  2802→            writes: vec![],
+    89→  2803→            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 8 }.encode().to_vec(),
+    90→  2804→        });
+    91→  2805→        // STD R31, fs-16(R1) - save R31
+    92→  2806→        instructions.push(AllocatedInstruction {
+    93→  2807→            opcode: "std".into(),
+    94→  2808→            reads: vec![PhysicalReg::new(RegClass::Gpr, 31), PhysicalReg::new(RegClass::Gpr, 1)],
+    95→  2809→            writes: vec![],
+    96→  2810→            encoded: Instruction::Std { rs: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode().to_vec(),
+    97→  2811→        });
+    98→  2812→        // ADDI R31, R1, frame_size
+    99→  2813→        instructions.push(AllocatedInstruction {
+   100→  2814→            opcode: "addi".into(),
+   101→  2815→            reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+   102→  2816→            writes: vec![PhysicalReg::new(RegClass::Gpr, 31)],
+   103→  2817→            encoded: Instruction::Addi { rt: Gpr::R31, ra: Gpr::R1, simm: fs }.encode().to_vec(),
+   104→  2818→        });
+   105→  2819→
+   106→  2820→        // Store function params from R3-R10 to stack slots
+   107→  2821→        let arg_regs = [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8, Gpr::R9, Gpr::R10];
+   108→  2822→        for (i, param) in func.params.iter().enumerate() {
+   109→  2823→            if let Some(id) = param.as_register() {
+   110→  2824→                if i < 8 {
+   111→  2825→                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+   112→  2826→                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+   113→  2827→                    instructions.push(AllocatedInstruction {
+   114→  2828→                        opcode: "std".into(),
+   115→  2829→                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
+   116→  2830→                        writes: vec![], encoded: store_code,
+   117→  2831→                    });
+   118→  2832→                }
+   119→  2833→            }
+   120→  2834→        }
+   121→  2835→
+   122→  2836→        // ── Phase 3: Emit body ──
+   123→  2837→        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
+   124→  2838→        let mut label_offsets: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+   125→  2839→
+   126→  2840→        struct BranchFixup { instr_idx: usize, offset_in_encoded: usize, abs_byte_offset: u64, target_label: String, is_unconditional: bool, bc_bo: u32, bc_bi: u32 }
+   127→  2841→        let mut branch_fixups: Vec<BranchFixup> = Vec::new();
+   128→  2842→
+   129→  2843→        for block in &func.blocks {
+   130→  2844→            label_offsets.insert(block.label.clone(), current_byte_offset);
+   131→  2845→            for instr in &block.instructions {
+   132→  2846→                let encoded: Vec<u8> = match instr {
+   133→  2847→                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+   134→  2848→                        let dst_id = dst.as_register().unwrap_or(0);
+   135→  2849→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   136→  2850→                        let mut code = Vec::new();
+   137→  2851→                        match op {
+   138→  2852→                            BinOpKind::Ror | BinOpKind::Rol => {
+   139→  2853→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
+   140→  2854→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
+   141→  2855→                                if *op == BinOpKind::Ror {
+   142→  2856→                                    code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
+   143→  2857→                                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 64 }.encode());
+   144→  2858→                                    code.extend_from_slice(&Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode());
+   145→  2859→                                } else {
+   146→  2860→                                    code.extend_from_slice(&Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode());
+   147→  2861→                                }
+   148→  2862→                            }
+   149→  2863→                            BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => {
+   150→  2864→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
+   151→  2865→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
+   152→  2866→                                match op {
+   153→  2867→                                    BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   154→  2868→                                    BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   155→  2869→                                    BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Srad { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   156→  2870→                                    _ => unreachable!(),
+   157→  2871→                                }
+   158→  2872→                            }
+   159→  2873→                            BinOpKind::SRem | BinOpKind::URem => {
+   160→  2874→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   161→  2875→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   162→  2876→                                code.extend_from_slice(&Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   163→  2877→                                code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+   164→  2878→                                code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
+   165→  2879→                            }
+   166→  2880→                            _ => {
+   167→  2881→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   168→  2882→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   169→  2883→                                match op {
+   170→  2884→                                    BinOpKind::Add => { code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   171→  2885→                                    BinOpKind::Sub => { code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode()); }
+   172→  2886→                                    BinOpKind::Mul => { code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   173→  2887→                                    BinOpKind::SDiv | BinOpKind::UDiv => { code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   174→  2888→                                    BinOpKind::And => { code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   175→  2889→                                    BinOpKind::Or => { code.extend_from_slice(&Instruction::Or { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   176→  2890→                                    BinOpKind::Xor => { code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   177→  2891→                                    BinOpKind::Eq|BinOpKind::Ne|BinOpKind::SLt|BinOpKind::SLe|BinOpKind::SGt|BinOpKind::SGe|BinOpKind::ULt|BinOpKind::ULe|BinOpKind::UGt|BinOpKind::UGe => {
+   178→  2892→                                        let cmp_kind = match op {
+   179→  2893→                                            BinOpKind::Eq => CmpKind::Eq,
+   180→  2894→                                            BinOpKind::Ne => CmpKind::Ne,
+   181→  2895→                                            BinOpKind::SLt => CmpKind::SLt,
+   182→  2896→                                            BinOpKind::SLe => CmpKind::SLe,
+   183→  2897→                                            BinOpKind::SGt => CmpKind::SGt,
+   184→  2898→                                            BinOpKind::SGe => CmpKind::SGe,
+   185→  2899→                                            BinOpKind::ULt => CmpKind::ULt,
+   186→  2900→                                            BinOpKind::ULe => CmpKind::ULe,
+   187→  2901→                                            BinOpKind::UGt => CmpKind::UGt,
+   188→  2902→                                            BinOpKind::UGe => CmpKind::UGe,
+   189→  2903→                                            _ => CmpKind::Eq,
+   190→  2904→                                        };
+   191→  2905→                                        code.extend(ss_emit_cmp(&cmp_kind, Gpr::R3, Gpr::R3, Gpr::R4));
+   192→  2906→                                    }
+   193→  2907→                                    _ => { code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   194→  2908→                                }
+   195→  2909→                            }
+   196→  2910→                        }
+   197→  2911→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   198→  2912→                        code
+   199→  2913→                    }
+   200→  2914→                    IRInstr::Add { dst, lhs, rhs, .. } => {
+   201→  2915→                        let dst_id = dst.as_register().unwrap_or(0);
+   202→  2916→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   203→  2917→                        let mut code = Vec::new();
+   204→  2918→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   205→  2919→                        if let IRValue::Immediate(imm) = rhs {
+   206→  2920→                            let i = *imm as i32;
+   207→  2921→                            if (-32768..=32767).contains(&i) {
+   208→  2922→                                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R3, ra: Gpr::R3, simm: i }.encode());
+   209→  2923→                            } else {
+   210→  2924→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   211→  2925→                                code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   212→  2926→                            }
+   213→  2927→                        } else {
+   214→  2928→                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   215→  2929→                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   216→  2930→                        }
+   217→  2931→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   218→  2932→                        code
+   219→  2933→                    }
+   220→  2934→                    IRInstr::Sub { dst, lhs, rhs, .. } => {
+   221→  2935→                        let dst_id = dst.as_register().unwrap_or(0);
+   222→  2936→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   223→  2937→                        let mut code = Vec::new();
+   224→  2938→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   225→  2939→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   226→  2940→                        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
+   227→  2941→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   228→  2942→                        code
+   229→  2943→                    }
+   230→  2944→                    IRInstr::Mul { dst, lhs, rhs, .. } => {
+   231→  2945→                        let dst_id = dst.as_register().unwrap_or(0);
+   232→  2946→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   233→  2947→                        let mut code = Vec::new();
+   234→  2948→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   235→  2949→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   236→  2950→                        code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   237→  2951→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   238→  2952→                        code
+   239→  2953→                    }
+   240→  2954→                    IRInstr::Div { dst, lhs, rhs, .. } => {
+   241→  2955→                        let dst_id = dst.as_register().unwrap_or(0);
+   242→  2956→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   243→  2957→                        let mut code = Vec::new();
+   244→  2958→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   245→  2959→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   246→  2960→                        code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   247→  2961→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   248→  2962→                        code
+   249→  2963→                    }
+   250→  2964→                    IRInstr::UnaryOp { op, dst, operand, .. } => {
+   251→  2965→                        let dst_id = dst.as_register().unwrap_or(0);
+   252→  2966→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   253→  2967→                        let mut code = Vec::new();
+   254→  2968→                        code.extend(ss_load_value(operand, &vreg_stack_slots, Gpr::R3));
+   255→  2969→                        match op {
+   256→  2970→                            UnaryOpKind::Neg => { code.extend_from_slice(&Instruction::Neg { rt: Gpr::R3, ra: Gpr::R3 }.encode()); }
+   257→  2971→                            UnaryOpKind::Not => { code.extend_from_slice(&Instruction::Nor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R3 }.encode()); }
+   258→  2972→                            UnaryOpKind::Clz => { code.extend_from_slice(&Instruction::Cntlzd { ra: Gpr::R3, rs: Gpr::R3 }.encode()); }
+   259→  2973→                            UnaryOpKind::Ctz => {
+   260→  2974→                                code.extend_from_slice(&Instruction::Neg { rt: Gpr::R4, ra: Gpr::R3 }.encode());
+   261→  2975→                                code.extend_from_slice(&Instruction::And { ra: Gpr::R4, rs: Gpr::R3, rb: Gpr::R4 }.encode());
+   262→  2976→                                code.extend_from_slice(&Instruction::Cntlzd { ra: Gpr::R3, rs: Gpr::R4 }.encode());
+   263→  2977→                                let subfic_word: u32 = (8u32 << 26) | (3u32 << 21) | (3u32 << 16) | 63u32;
+   264→  2978→                                code.extend_from_slice(&encode_word(subfic_word));
+   265→  2979→                            }
+   266→  2980→                            UnaryOpKind::Popcnt => { code.extend_from_slice(&Instruction::Popcntd { ra: Gpr::R3, rs: Gpr::R3 }.encode()); }
+   267→  2981→                        }
+   268→  2982→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   269→  2983→                        code
+   270→  2984→                    }
+   271→  2985→                    IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+   272→  2986→                        let dst_id = dst.as_register().unwrap_or(0);
+   273→  2987→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   274→  2988→                        let mut code = Vec::new();
+   275→  2989→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   276→  2990→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   277→  2991→                        code.extend(ss_emit_cmp(kind, Gpr::R3, Gpr::R3, Gpr::R4));
+   278→  2992→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   279→  2993→                        code
+   280→  2994→                    }
+   281→  2995→                    IRInstr::Load { dst, addr, offset, ty } => {
+   282→  2996→                        let dst_id = dst.as_register().unwrap_or(0);
+   283→  2997→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   284→  2998→                        let mut code = Vec::new();
+   285→  2999→                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R5));
+   286→  3000→                        code.extend(ss_emit_typed_load(Gpr::R3, Gpr::R5, *offset, ty));
+   287→  3001→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   288→  3002→                        code
+   289→  3003→                    }
+   290→  3004→                    IRInstr::Store { value, addr, offset, ty } => {
+   291→  3005→                        let mut code = Vec::new();
+   292→  3006→                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R5));
+   293→  3007→                        code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R3));
+   294→  3008→                        code.extend(ss_emit_typed_store(Gpr::R3, Gpr::R5, *offset, ty));
+   295→  3009→                        code
+   296→  3010→                    }
+   297→  3011→                    IRInstr::Alloc { dst, .. } => {
+   298→  3012→                        let dst_id = dst.as_register().unwrap_or(0);
+   299→  3013→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   300→  3014→                        let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(0);
+   301→  3015→                        let mut code = Vec::new();
+   302→  3016→                        let neg_alloc = -alloc_off;
+   303→  3017→                        if neg_alloc >= -32768 && neg_alloc <= 32767 {
+   304→  3018→                            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R3, ra: Gpr::R31, simm: neg_alloc }.encode());
+   305→  3019→                        } else {
+   306→  3020→                            code.extend(ss_load_imm(Gpr::R3, alloc_off as i64));
+   307→  3021→                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R31 }.encode());
+   308→  3022→                        }
+   309→  3023→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   310→  3024→                        code
+   311→  3025→                    }
+   312→  3026→                    IRInstr::Free { .. } => {
+   313→  3027→                        let trap_word: u32 = (31u32 << 26) | (31u32 << 21) | (0u32 << 16) | (0u32 << 11) | (4 << 1);
+   314→  3028→                        encode_word(trap_word).to_vec()
+   315→  3029→                    }
+   316→  3030→                    IRInstr::Cast { kind, dst, src } => {
+   317→  3031→                        let dst_id = dst.as_register().unwrap_or(0);
+   318→  3032→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   319→  3033→                        let mut code = Vec::new();
+   320→  3034→                        code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R3));
+   321→  3035→                        if let CastKind::SExt = kind {
+   322→  3036→                            code.extend_from_slice(&Instruction::Extsw { ra: Gpr::R3, rs: Gpr::R3 }.encode());
+   323→  3037→                        }
+   324→  3038→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   325→  3039→                        code
+   326→  3040→                    }
+   327→  3041→                    IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+   328→  3042→                        let dst_id = dst.as_register().unwrap_or(0);
+   329→  3043→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   330→  3044→                        let mut code = Vec::new();
+   331→  3045→                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R3));
+   332→  3046→                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R4));
+   333→  3047→                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R5));
+   334→  3048→                        code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R5, simm: 0 }.encode());
+   335→  3049→                        code.extend_from_slice(&Instruction::Bc { bo: 12, bi: 2, bd: 2 }.encode());
+   336→  3050→                        code.extend_from_slice(&Instruction::Mr { ra: Gpr::R3, rs: Gpr::R4 }.encode());
+   337→  3051→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   338→  3052→                        code
+   339→  3053→                    }
+   340→  3054→                    IRInstr::Offset { dst, base, offset } => {
+   341→  3055→                        let dst_id = dst.as_register().unwrap_or(0);
+   342→  3056→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   343→  3057→                        let mut code = Vec::new();
+   344→  3058→                        code.extend(ss_load_value(base, &vreg_stack_slots, Gpr::R3));
+   345→  3059→                        if let IRValue::Immediate(imm) = offset {
+   346→  3060→                            let off = *imm as i32;
+   347→  3061→                            if (-32768..=32767).contains(&off) {
+   348→  3062→                                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R3, ra: Gpr::R3, simm: off }.encode());
+   349→  3063→                            } else {
+   350→  3064→                                code.extend(ss_load_value(offset, &vreg_stack_slots, Gpr::R4));
+   351→  3065→                                code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   352→  3066→                            }
+   353→  3067→                        } else {
+   354→  3068→                            code.extend(ss_load_value(offset, &vreg_stack_slots, Gpr::R4));
+   355→  3069→                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   356→  3070→                        }
+   357→  3071→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   358→  3072→                        code
+   359→  3073→                    }
+   360→  3074→                    IRInstr::GetAddress { dst, .. } => {
+   361→  3075→                        let dst_id = dst.as_register().unwrap_or(0);
+   362→  3076→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   363→  3077→                        let mut code = Vec::new();
+   364→  3078→                        code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
+   365→  3079→                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   366→  3080→                        code
+   367→  3081→                    }
+   368→  3082→                    IRInstr::Call { dst, func: target_func, args } => {
+   369→  3083→                        let mut code = Vec::new();
+   370→  3084→                        for (i, arg) in args.iter().enumerate() {
+   371→  3085→                            if i >= 8 { break; }
+   372→  3086→                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+   373→  3087→                        }
+   374→  3088→                        let bl_byte_offset = current_byte_offset + code.len() as u64;
+   375→  3089→                        code.extend_from_slice(&Instruction::Bl { li: 0 }.encode());
+   376→  3090→                        relocations.push(crate::backend::RelocationEntry {
+   377→  3091→                            offset: bl_byte_offset,
+   378→  3092→                            symbol: target_func.clone(),
+   379→  3093→                            reloc_type: "R_PPC64_REL24".to_string(),
+   380→  3094→                        });
+   381→  3095→                        if let Some(d) = dst {
+   382→  3096→                            let dst_id = d.as_register().unwrap_or(0);
+   383→  3097→                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   384→  3098→                            code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+   385→  3099→                        }
+   386→  3100→                        code
+   387→  3101→                    }
+   388→  3102→                    IRInstr::Ret { values } => {
+   389→  3103→                        let mut code = Vec::new();
+   390→  3104→                        if let Some(val) = values.first() {
+   391→  3105→                            code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R3));
+   392→  3106→                        }
+   393→  3107→                        // Epilogue
+   394→  3108→                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs + 8 }.encode());
+   395→  3109→                        let mtlr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (467 << 1);
+   396→  3110→                        code.extend_from_slice(&encode_word(mtlr_word));
+   397→  3111→                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode());
+   398→  3112→                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R1, ra: Gpr::R1, simm: fs }.encode());
+   399→  3113→                        code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+   400→  3114→                        code
+   401→  3115→                    }
+   402→  3116→                    IRInstr::Branch { target } => {
+   403→  3117→                        let instr_idx = instructions.len();
+   404→  3118→                        let b_abs_offset = current_byte_offset;
+   405→  3119→                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: 0, abs_byte_offset: b_abs_offset, target_label: target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+   406→  3120→                        Instruction::B { li: 0 }.encode().to_vec()
+   407→  3121→                    }
+   408→  3122→                    IRInstr::CondBranch { cond, true_target, false_target } => {
+   409→  3123→                        let mut code = Vec::new();
+   410→  3124→                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R3));
+   411→  3125→                        let instr_idx = instructions.len();
+   412→  3126→                        code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R3, simm: 0 }.encode());
+   413→  3127→                        let bne_offset = code.len();
+   414→  3128→                        let bne_abs = current_byte_offset + bne_offset as u64;
+   415→  3129→                        code.extend_from_slice(&Instruction::Bc { bo: 12, bi: 2, bd: 0 }.encode());
+   416→  3130→                        let b_offset = code.len();
+   417→  3131→                        let b_abs = current_byte_offset + b_offset as u64;
+   418→  3132→                        code.extend_from_slice(&Instruction::B { li: 0 }.encode());
+   419→  3133→                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: bne_offset, abs_byte_offset: bne_abs, target_label: true_target.clone(), is_unconditional: false, bc_bo: 12, bc_bi: 2 });
+   420→  3134→                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_offset, abs_byte_offset: b_abs, target_label: false_target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+   421→  3135→                        code
+   422→  3136→                    }
+   423→  3137→                    IRInstr::Phi { .. } => Instruction::Nop.encode().to_vec(),
+   424→  3138→                };
+   425→  3139→                current_byte_offset += encoded.len() as u64;
+   426→  3140→                instructions.push(AllocatedInstruction { opcode: "isel".into(), reads: vec![], writes: vec![], encoded });
+   427→  3141→            }
+   428→  3142→        }
+   429→  3143→
+   430→  3144→        // ── Phase 4: Apply branch fixups ──
+   431→  3145→        for fixup in &branch_fixups {
+   432→  3146→            if let Some(&target_offset) = label_offsets.get(&fixup.target_label) {
+   433→  3147→                let offset_words = (target_offset as i64 - fixup.abs_byte_offset as i64) / 4;
+   434→  3148→                let instr = &mut instructions[fixup.instr_idx];
+   435→  3149→                let encoded = &mut instr.encoded;
+   436→  3150→                if fixup.is_unconditional {
+   437→  3151→                    let imm24 = (offset_words as u32) & 0x00FF_FFFF;
+   438→  3152→                    let b_word: u32 = (18u32 << 26) | (imm24 << 2);
+   439→  3153→                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&b_word.to_be_bytes());
+   440→  3154→                } else {
+   441→  3155→                    let bd = (offset_words as i32) & 0x3FFF;
+   442→  3156→                    let bc_word: u32 = (16u32 << 26) | ((fixup.bc_bo & 0x1F) << 21) | ((fixup.bc_bi & 0x1F) << 16) | (((bd as u32) & 0x3FFF) << 2);
+   443→  3157→                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&bc_word.to_be_bytes());
+   444→  3158→                }
+   445→  3159→            }
+   446→  3160→        }
+   447→  3161→
+   448→  3162→        let code_size = instructions.iter().map(|i| i.encoded.len()).sum();
+   449→  3163→        let callee_saved = vec![PhysicalReg::new(RegClass::Gpr, 31)];
+   450→  3164→        let spill_slots = all_vreg_ids.len();
+   451→  3165→
+   452→  3166→        Ok(AllocatedFunction {
+   453→  3167→            name: func_name,
+   454→  3168→            blocks: vec![AllocatedBlock { label: "entry".into(), instructions, code_offset: 0 }],
+   455→  3169→            frame_size, callee_saved, spill_slots, code_size, relocations,
+   456→  3170→        })
+   457→  3171→    }
+   458→  3172→
+   459→  3173→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+   460→  3174→        let mut bytes = Vec::new();
+   461→  3175→        for block in &func.blocks {
+   462→  3176→            for instr in &block.instructions {
+   463→  3177→                bytes.extend_from_slice(&instr.encoded);
+   464→  3178→            }
+   465→  3179→        }
+   466→  3180→        Ok(bytes)
+   467→  3181→    }
+   468→  3182→
+   469→  3183→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+   470→  3184→        // ── PPC64LE Linux static executable ──
+   471→  3185→        //
+   472→  3186→        // Layout:
+   473→  3187→        //   _start:  BL main           ; call main (result in R3)
+   474→  3188→        //            LI R0, 1          ; sys_exit = 1
+   475→  3189→        //            SC                ; syscall: exit(R3)
+   476→  3190→        //   <functions...>
+   477→  3191→        //
+   478→  3192→        // The _start stub is 3 instructions = 12 bytes.
+   479→  3193→        // After that come all user functions.
+   480→  3194→
+   481→  3195→        const R_PPC64_REL24: &str = "R_PPC64_REL24";
+   482→  3196→
+   483→  3197→        // ── _start stub ──
+   484→  3198→        // BL <main>      — offset 0, needs relocation
+   485→  3199→        // LI R0, 1       — offset 4 (sys_exit = 1 on PPC64 Linux)
+   486→  3200→        // SC             — offset 8
+   487→  3201→
+   488→  3202→        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+   489→  3203→
+   490→  3204→        // ── Compute function offsets ──
+   491→  3205→        // _start stub comes first, then user functions.
+   492→  3206→        let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+   493→  3207→        let mut current_offset: usize = start_stub_size; // after _start
+   494→  3208→
+   495→  3209→        for func in &program.functions {
+   496→  3210→            func_offsets.insert(func.name.clone(), current_offset);
+   497→  3211→            let func_size: usize = func.blocks.iter()
+   498→  3212→                .flat_map(|b| b.instructions.iter())
+   499→  3213→                .map(|i| i.encoded.len())
+   500→  3214→                .sum();
+   501→
+   502→[showing lines 2715-3214 of 4006; use offset=3215 with limit to continue reading]

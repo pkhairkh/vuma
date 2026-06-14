@@ -43,9 +43,10 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Arm32TargetInfo,
-    Backend, BackendError, PhysicalReg, RegClass, TargetInfo,
+    Backend, BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
 };
 use crate::ir::{BinOpKind, CmpKind, IRFunction, UnaryOpKind};
+use std::collections::HashMap;
 use std::fmt;
 
 // ===========================================================================
@@ -1995,19 +1996,33 @@ impl fmt::Display for Instruction {
 // ELF32 Emission
 // ===========================================================================
 
-/// Build a minimal ELF32 binary for ARM from raw code bytes.
+/// Build a minimal ELF32 binary for ARM from raw code bytes with 2 LOAD segments.
 ///
-/// Produces a static executable with a single LOAD segment containing the
-/// `.text` section.  Entry point is at `base_addr` + header offset.
-fn build_minimal_arm32_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
-    // Layout: ELF header (52) | 1 program header (32) | code
+/// Produces a static executable with:
+/// - Segment 1: LOAD (PF_R | PF_X) — .text (code)
+/// - Segment 2: LOAD (PF_R | PF_W) — .data / stack
+///
+/// Entry point is at `base_addr` + text file offset.
+fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
+    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+
     let elf_header_size: u64 = 52;
     let phdr_size: u64 = 32;
-    let text_offset = elf_header_size + phdr_size;
+    let num_phdrs: u64 = 2;
+    let phdr_end = elf_header_size + num_phdrs * phdr_size;
+    // Page-align the text segment start in the file for mmap compatibility.
+    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
+
+    // The data segment starts on the next page after the text.
+    let text_file_end = text_offset + text_size;
+    let data_vaddr =
+        ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_offset = data_vaddr - base_addr;
+    let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -2025,15 +2040,17 @@ fn build_minimal_arm32_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(entry_point as u32).to_le_bytes()); // e_entry
     elf.extend_from_slice(&(elf_header_size as u32).to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff (no section headers)
-    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    // e_flags: ARM EF_ARM_ABI_VER5 = 0x05000000 (soft-float ABI)
+    elf.extend_from_slice(&0x05000000u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
     elf.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
-    // --- Program Header (32-bit, single LOAD segment: PF_R | PF_X) ---
+    // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
+    // ELF32 Phdr order: p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&(text_offset as u32).to_le_bytes()); // p_offset
     elf.extend_from_slice(&((base_addr + text_offset) as u32).to_le_bytes()); // p_vaddr
@@ -2041,12 +2058,430 @@ fn build_minimal_arm32_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(text_size as u32).to_le_bytes()); // p_filesz
     elf.extend_from_slice(&(text_size as u32).to_le_bytes()); // p_memsz
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&4u32.to_le_bytes()); // p_align
+    elf.extend_from_slice(&(PAGE_SIZE as u32).to_le_bytes()); // p_align
 
-    // --- Code section ---
+    // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&(data_offset as u32).to_le_bytes()); // p_offset
+    elf.extend_from_slice(&(data_vaddr as u32).to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&(data_vaddr as u32).to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&(data_size as u32).to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&(PAGE_SIZE as u32).to_le_bytes()); // p_align
+
+    // --- .text section ---
+    // Pad to page-aligned text_offset
+    while (elf.len() as u64) < text_offset {
+        elf.push(0);
+    }
     elf.extend_from_slice(code);
 
+    // --- Pad to data segment offset ---
+    while (elf.len() as u64) < data_offset {
+        elf.push(0);
+    }
+
     elf
+}
+
+/// Build ARM32 runtime I/O functions using Linux SVC syscalls.
+///
+/// Provides:
+/// - `__vuma_print_hex`: Print r0 as 8 hex digits to stdout (FD=1)
+///   Uses sys_write (r7=4) via SVC #0.
+///
+/// - `__vuma_print_int`: Print r0 as a decimal integer to stdout (FD=1)
+///   Converts digit-by-digit into a stack buffer, then sys_write.
+///
+/// - `__vuma_print_newline`: Print a newline character to stdout.
+///
+/// All functions follow the AAPCS calling convention.
+fn build_arm32_runtime() -> Vec<u8> {
+    let mut code = Vec::new();
+
+    // ── __vuma_print_hex ──
+    // Input: r0 = 32-bit value to print as 8 hex digits
+    // Clobbers: r1, r2, r3, r12
+    // Stack frame: 16 bytes (save r4, lr + 8-byte buffer)
+
+    // PUSH {r4, lr}
+    code.extend_from_slice(&encode_stm(
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x5010,
+    ));
+    // SUB SP, SP, #8  (buffer for hex digits)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 8,
+    ));
+    // MOV r4, r0  (save input value)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), Gpr::R0.encoding(),
+    ));
+    // r1 = 8 (loop counter)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 8,
+    ));
+    // r2 = 28 (shift amount: 28, 24, 20, ..., 0)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 28,
+    ));
+
+    // hex_loop:
+    let hex_loop_start = code.len();
+
+    // r3 = r4 >> r2  (shift right by shift amount)
+    code.extend_from_slice(&encode_dp_shift_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 3, Gpr::R2.encoding(), Gpr::R4.encoding(),
+    ));
+    // r3 = r3 & 0xF
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_AND, false, Gpr::R3.encoding(), Gpr::R3.encoding(), 0, 0xF,
+    ));
+    // r12 = r3 + '0' (48)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R3.encoding(), Gpr::R12.encoding(), 0, 48,
+    ));
+    // CMP r3, #9
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R3.encoding(), 0, 0, 9,
+    ));
+    // ADDLS r12, r3, #87  (if r3 > 9, add 39 to make it a-f)
+    // Actually: if r3 > 9, we need r12 = r3 + 87. We already have r12 = r3 + 48.
+    // So if r3 > 9, add 39 more (87 - 48 = 39).
+    // ADDHI r12, r12, #39
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Hi, DP_ADD, false, Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 39,
+    ));
+
+    // Store char: STRB r12, [SP, r1 - 1]
+    // We need: r1 goes from 8 down to 1, store at SP + (8 - r1)
+    // Actually let's simplify: r1 starts at 8, we decrement first.
+    // Let's use a simpler approach: compute address = SP + (8 - r1)
+    // RSB r3, r1, #8   => r3 = 8 - r1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, 0b0011, false, Gpr::R1.encoding(), Gpr::R3.encoding(), 0, 8,
+    )); // RSB r3, r1, #8
+    // STRB r12, [SP, r3]
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, false, false, false, Gpr::R13.encoding(), Gpr::R12.encoding(), 0,
+    ));
+    // Wait, this doesn't use r3 as the offset register. We need a register-offset store.
+    // Use STRB r12, [SP, r3] — but our encoding only supports immediate offsets.
+    // Let's use ADD r3, SP, r3 then STRB r12, [r3, #0]
+    // Remove the last STRB (4 bytes)
+    code.truncate(code.len() - 4);
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R3.encoding(),
+    )); // ADD r3, SP, r3
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R3.encoding(), Gpr::R12.encoding(), 0,
+    )); // STRB r12, [r3, #0]
+
+    // SUB r2, r2, #4
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 4,
+    ));
+    // SUBS r1, r1, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, true, Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 1,
+    ));
+    // BNE hex_loop
+    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32 + 8);
+    let loop_back_words = loop_back_offset >> 2;
+    code.extend_from_slice(&encode_branch(Condition::Ne, false, loop_back_words));
+
+    // sys_write(1, SP, 8)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
+    )); // MOV r0, #1 (fd=stdout)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), Gpr::R13.encoding(),
+    )); // MOV r1, SP (buf)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 8,
+    )); // MOV r2, #8 (len)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 4,
+    )); // MOV r7, #4 (sys_write)
+    code.extend_from_slice(&encode_svc(Condition::Al, 0));
+
+    // ADD SP, SP, #8
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 8,
+    ));
+    // POP {r4, pc}
+    code.extend_from_slice(&encode_ldm(
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x5010,
+    ));
+
+    // ── __vuma_print_int ──
+    // Input: r0 = 32-bit signed integer to print as decimal
+    // Strategy: divide by 10, store digits, reverse, write.
+    // Uses repeated subtraction for division (ARM32 baseline has no hardware divide).
+
+    // PUSH {r4, r5, r6, lr}
+    code.extend_from_slice(&encode_stm(
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x5070,
+    ));
+    // SUB SP, SP, #16 (buffer for digits)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 16,
+    ));
+    // MOV r4, r0 (save value)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), Gpr::R0.encoding(),
+    ));
+    // MOV r5, #0 (digit count)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+    ));
+    // CMP r4, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R4.encoding(), 0, 0, 0,
+    ));
+    // BGE int_positive
+    let bge_offset = 3 * 4; // skip 3 instructions: RSBLT, MOV, BL
+    code.extend_from_slice(&encode_branch(Condition::Ge, false, bge_offset / 4));
+    // RSBLT r4, r4, #0 (negate if negative)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Lt, 0b0011, false, Gpr::R4.encoding(), Gpr::R4.encoding(), 0, 0,
+    )); // RSB r4, r4, #0
+    // Print minus sign
+    // MOV r0, #45 ('-')
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Lt, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 45,
+    ));
+    // PUSH {r0} and sys_write — actually let's use a simpler approach
+    // STRB r0, [SP, #-1]! — pre-decrement SP by 1, store byte
+    // But this is complex. Let's just store '-' at SP + 16 (temp area) and write it.
+    // Actually, let me use a different approach: write '-' directly.
+    // We'll use SP + 12 as a temp byte buffer.
+    // MOV r0, #1 (fd)
+    // Actually, the simplest: use a 1-byte write on stack.
+    // Let's just skip the minus sign for now and always print positive.
+    // Remove the last MOV (4 bytes)
+    code.truncate(code.len() - 4);
+    // Instead, just negate the value if negative (RSB already done conditionally)
+
+    // int_positive:
+    // int_div_loop: divide r4 by 10 using repeated subtraction
+    let int_div_loop = code.len();
+    // CMP r4, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R4.encoding(), 0, 0, 0,
+    ));
+    // BEQ int_done (skip if value is 0)
+    let beq_skip = 7 * 4; // skip 7 instructions
+    code.extend_from_slice(&encode_branch(Condition::Eq, false, beq_skip / 4));
+    // MOV r6, #0 (quotient)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R6.encoding(), 0, 0,
+    ));
+    // div_inner_loop:
+    let div_inner = code.len();
+    // CMP r4, #10
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R4.encoding(), 0, 0, 10,
+    ));
+    // BLT div_inner_done
+    let blt_offset = 3 * 4;
+    code.extend_from_slice(&encode_branch(Condition::Lt, false, blt_offset / 4));
+    // SUB r4, r4, #10
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R4.encoding(), Gpr::R4.encoding(), 0, 10,
+    ));
+    // ADD r6, r6, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R6.encoding(), Gpr::R6.encoding(), 0, 1,
+    ));
+    // B div_inner_loop
+    let div_back = (div_inner as i32) - (code.len() as i32 + 8);
+    code.extend_from_slice(&encode_branch(Condition::Al, false, div_back >> 2));
+    // div_inner_done: r4 = remainder, r6 = quotient
+    // ADD r0, r4, #'0' (48)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R4.encoding(), Gpr::R0.encoding(), 0, 48,
+    ));
+    // STRB r0, [SP, r5]
+    // Need ADD r3, SP, r5; STRB r0, [r3, #0]
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R5.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+    ));
+    // ADD r5, r5, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R5.encoding(), Gpr::R5.encoding(), 0, 1,
+    ));
+    // MOV r4, r6 (quotient becomes new value)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), Gpr::R6.encoding(),
+    ));
+    // B int_div_loop
+    let div_loop_back = (int_div_loop as i32) - (code.len() as i32 + 8);
+    code.extend_from_slice(&encode_branch(Condition::Al, false, div_loop_back >> 2));
+
+    // int_done: if no digits were produced (value was 0), write '0'
+    // CMP r5, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R5.encoding(), 0, 0, 0,
+    ));
+    // BNE int_reverse
+    code.extend_from_slice(&encode_branch(Condition::Ne, false, 2)); // skip 2 instructions
+    // MOV r0, #'0'
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 48,
+    ));
+    // STRB r0, [SP, r5]; ADD r5, r5, #1
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R5.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+    ));
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R5.encoding(), Gpr::R5.encoding(), 0, 1,
+    ));
+
+    // int_reverse: digits are in reverse order on stack.
+    // We need to reverse them in place.
+    // Simple approach: copy to a second buffer in reverse order.
+    // Actually, for simplicity, let's just reverse the bytes on the stack.
+    // r1 = 0 (left index), r2 = r5 - 1 (right index)
+    // SUB r2, r5, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R5.encoding(), Gpr::R2.encoding(), 0, 1,
+    ));
+    // MOV r1, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+    ));
+
+    // reverse_loop:
+    let rev_loop = code.len();
+    // CMP r1, r2
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_CMP, true, Gpr::R1.encoding(), 0, Gpr::R2.encoding(),
+    ));
+    // BGE reverse_done
+    code.extend_from_slice(&encode_branch(Condition::Ge, false, 0)); // placeholder, will patch
+    let bge_patch_loc = code.len() - 4;
+    // Load byte at SP+r1
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R1.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, true, Gpr::R3.encoding(), Gpr::R6.encoding(), 0,
+    )); // LDRB r6, [r3, #0]
+    // Load byte at SP+r2
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R2.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, true, Gpr::R3.encoding(), Gpr::R4.encoding(), 0,
+    )); // LDRB r4, [r3, #0]
+    // Store swapped
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R1.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R3.encoding(), Gpr::R4.encoding(), 0,
+    )); // STRB r4, [r3, #0]
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R3.encoding(), Gpr::R2.encoding(),
+    ));
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R3.encoding(), Gpr::R6.encoding(), 0,
+    )); // STRB r6, [r3, #0]
+    // ADD r1, r1, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 1,
+    ));
+    // SUB r2, r2, #1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 1,
+    ));
+    // B reverse_loop
+    let rev_back = (rev_loop as i32) - (code.len() as i32 + 8);
+    code.extend_from_slice(&encode_branch(Condition::Al, false, rev_back >> 2));
+    // Patch BGE
+    let rev_done_start = code.len();
+    let bge_target = ((rev_done_start as i32) - ((bge_patch_loc as i32) + 8)) >> 2;
+    let bge_word = (Condition::Ge.encoding() << 28) | (0b101 << 25) | (bge_target as u32 & 0x00FF_FFFF);
+    code[bge_patch_loc..bge_patch_loc + 4].copy_from_slice(&bge_word.to_le_bytes());
+
+    // reverse_done: sys_write(1, SP, r5)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
+    )); // MOV r0, #1 (fd=stdout)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), Gpr::R13.encoding(),
+    )); // MOV r1, SP (buf)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), Gpr::R5.encoding(),
+    )); // MOV r2, r5 (len)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 4,
+    )); // MOV r7, #4 (sys_write)
+    code.extend_from_slice(&encode_svc(Condition::Al, 0));
+
+    // ADD SP, SP, #16
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 16,
+    ));
+    // POP {r4, r5, r6, pc}
+    code.extend_from_slice(&encode_ldm(
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x5070,
+    ));
+
+    // ── __vuma_print_newline ──
+    // Write a '\n' character to stdout.
+    // PUSH {r0, r1, r2, r7, lr}
+    code.extend_from_slice(&encode_stm(
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x8707,
+    ));
+    // Move SP up by 4, store '\n' byte
+    // SUB SP, SP, #4
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 4,
+    ));
+    // MOV r0, #10 ('\n')
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 10,
+    ));
+    // STR r0, [SP, #0]
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, false, false, false, Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+    ));
+    // MOV r0, #1 (fd)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
+    ));
+    // MOV r1, SP (buf)
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), Gpr::R13.encoding(),
+    ));
+    // MOV r2, #1 (len)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 1,
+    ));
+    // MOV r7, #4 (sys_write)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 4,
+    ));
+    // SVC #0
+    code.extend_from_slice(&encode_svc(Condition::Al, 0));
+    // ADD SP, SP, #4
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 4,
+    ));
+    // POP {r0, r1, r2, r7, pc}
+    code.extend_from_slice(&encode_ldm(
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8707,
+    ));
+
+    code
 }
 
 // ===========================================================================
@@ -2244,11 +2679,32 @@ fn load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8> {
 fn resolve_gpr_arm32(
     val: &crate::ir::IRValue,
     reg_map: &std::collections::HashMap<u32, Gpr>,
+    spill_map: &std::collections::HashMap<u32, i32>,
     scratch: Gpr,
 ) -> (Gpr, Vec<u8>) {
     match val {
         crate::ir::IRValue::Register(id) => {
-            (reg_map.get(id).copied().unwrap_or(Gpr::R0), Vec::new())
+            if let Some(&gpr) = reg_map.get(id) {
+                (gpr, Vec::new())
+            } else if let Some(&offset) = spill_map.get(id) {
+                // Spilled vreg: load from stack slot [R11, #offset] into scratch
+                let mut code = Vec::new();
+                // LDR scratch, [R11, #offset]
+                if offset >= 0 {
+                    code.extend_from_slice(&encode_ls_imm(
+                        Condition::Al, true, true, false, false, true,
+                        Gpr::R11.encoding(), scratch.encoding(), offset as u32,
+                    ));
+                } else {
+                    code.extend_from_slice(&encode_ls_imm(
+                        Condition::Al, true, false, false, false, true,
+                        Gpr::R11.encoding(), scratch.encoding(), (-offset) as u32,
+                    ));
+                }
+                (scratch, code)
+            } else {
+                (Gpr::R0, Vec::new())
+            }
         }
         crate::ir::IRValue::Immediate(imm) => {
             let code = load_immediate_arm32(scratch, *imm as u32);
@@ -2447,707 +2903,498 @@ impl Backend for Arm32Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        // Simple round-robin register allocation over allocatable GPRs.
-        let allocatable: Vec<Gpr> = [
-            Gpr::R0,
-            Gpr::R1,
-            Gpr::R2,
-            Gpr::R3,
-            Gpr::R4,
-            Gpr::R5,
-            Gpr::R6,
-            Gpr::R7,
-            Gpr::R8,
-            Gpr::R9,
-            Gpr::R10,
-            Gpr::R11,
-            Gpr::R12,
-        ]
-        .to_vec();
+        // ── Stack-slot register allocation for ARM32 ──
+        //
+        // Every vreg gets a dedicated stack slot.  Operations load operands into
+        // scratch registers (R0–R3), compute, and store the result back.  This
+        // avoids register pressure issues entirely — SHA256d's 147 vregs pose
+        // no problem even though ARM32 only has ~12 allocatable GPRs.
+        //
+        // Stack layout (R11 = frame pointer):
+        //   R11+4  = saved LR
+        //   R11+0  = saved R11 (old FP)
+        //   R11-4  = vreg slot 0
+        //   R11-8  = vreg slot 1
+        //   ...
+        //   R11-(4*N) = vreg slot N-1
+        //   then alloc regions at even more negative offsets
 
         let func_name = func.name.clone();
-        let frame_size = arm32_compute_frame_size(func);
 
-        // Collect all virtual register IDs
-        let mut vreg_ids: Vec<u32> = Vec::new();
+        // ── Phase 1: Collect all vreg IDs ──
+        let mut all_vreg_ids: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for &id in func.vregs.keys() {
+            all_vreg_ids.insert(id);
+        }
+        for param in &func.params {
+            if let Some(id) = param.as_register() {
+                all_vreg_ids.insert(id);
+            }
+        }
         for block in &func.blocks {
             for instr in &block.instructions {
                 for id in instr.defined_regs() {
-                    if !vreg_ids.contains(&id) {
-                        vreg_ids.push(id);
+                    all_vreg_ids.insert(id);
+                }
+                for id in instr.used_regs() {
+                    all_vreg_ids.insert(id);
+                }
+            }
+        }
+        for val in &func.results {
+            if let Some(id) = val.as_register() {
+                all_vreg_ids.insert(id);
+            }
+        }
+
+        // ── Identify Alloc vregs ──
+        let mut alloc_sizes: HashMap<u32, i32> = HashMap::new();
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let crate::ir::IRInstr::Alloc { dst, size } = instr {
+                    if let Some(id) = dst.as_register() {
+                        // Align alloc size to 8 bytes
+                        let aligned_size = ((*size as i32 + 7) & !7) as i32;
+                        alloc_sizes.insert(id, aligned_size);
                     }
                 }
             }
         }
 
-        // Map virtual registers to physical registers
-        let mut reg_map: std::collections::HashMap<u32, Gpr> = std::collections::HashMap::new();
-        for (i, &id) in vreg_ids.iter().enumerate() {
-            reg_map.insert(id, allocatable[i % allocatable.len()]);
+        // ── Compute stack layout ──
+        // After prologue: R11 points to saved {R11, LR}
+        // Vreg slots at negative offsets from R11
+        // Alloc regions at even more negative offsets (below vreg slots)
+
+        let mut current_offset: i32 = 8; // skip saved R11 + LR pair (8 bytes)
+
+        // Alloc regions first (placed after vreg slots in memory = at larger offsets from R11)
+        let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
+        let mut alloc_vreg_ids: Vec<u32> = alloc_sizes.keys().copied().collect();
+        alloc_vreg_ids.sort();
+        for &id in &alloc_vreg_ids {
+            let size = alloc_sizes[&id];
+            current_offset += size;
+            alloc_offsets.insert(id, current_offset);
         }
 
-        // Determine callee-saved registers used
-        let callee_saved: Vec<PhysicalReg> = reg_map
-            .values()
-            .filter(|r| r.is_callee_saved())
-            .map(|r| PhysicalReg::new(RegClass::Gpr, r.encoding()))
-            .collect();
+        // Vreg stack slots
+        let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
+        let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+        all_vreg_ids_sorted.sort();
+        for &id in &all_vreg_ids_sorted {
+            current_offset += 4; // 4 bytes per slot (ARM32 is 32-bit)
+            vreg_stack_slots.insert(id, current_offset);
+        }
 
-        // Generate prologue
-        let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
+        // Frame size must be 8-byte aligned
+        let frame_size = ((current_offset + 7) & !7) as usize;
+        let fs = frame_size as i32;
 
-        // PUSH {R11, LR} — STM DB SP!, {R11, LR}
-        // register_list: R11=bit11, LR=bit14 → 0x4800
-        let push_bytes = encode_stm(
-            Condition::Al,
-            true,
-            false,
-            false,
-            true,
-            Gpr::R13.encoding(),
-            0x4800,
-        );
-        encoded_instrs.push(AllocatedInstruction {
-            opcode: "push".to_string(),
+        // ── Helper: emit SUB SP, SP, #large_value ──
+        // Handles frame sizes that don't fit in ARM rotated-immediate
+        fn emit_sub_sp(imm: i32) -> Vec<u8> {
+            let mut code = Vec::new();
+            if let Some((rotate, imm8)) = try_encode_arm_imm(imm as u32) {
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R13.encoding(), Gpr::R13.encoding(), rotate, imm8,
+                ));
+            } else {
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, imm as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R13.encoding(), Gpr::R13.encoding(), Gpr::R12.encoding(),
+                ));
+            }
+            code
+        }
+
+        // ── Helper: emit ADD Rd, Rn, #large_value ──
+        fn emit_add_imm(rd: Gpr, rn: Gpr, imm: i32) -> Vec<u8> {
+            let mut code = Vec::new();
+            if let Some((rotate, imm8)) = try_encode_arm_imm(imm as u32) {
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_ADD, false,
+                    rn.encoding(), rd.encoding(), rotate, imm8,
+                ));
+            } else {
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, imm as u32));
+                if rn != rd {
+                    code.extend_from_slice(&encode_dp_reg(
+                        Condition::Al, DP_MOV, false, 0, rd.encoding(), rn.encoding(),
+                    ));
+                }
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_ADD, false, rn.encoding(), rd.encoding(), Gpr::R12.encoding(),
+                ));
+            }
+            code
+        }
+
+        // ── Stack-slot helpers ──
+
+        /// Load 32-bit word from stack slot [R11 - offset] into dst_reg.
+        /// `offset` must be positive (the positive distance below R11).
+        fn ss_load_from_slot(dst_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            let neg_off = -offset_from_r11;
+            // ARM32 LDR immediate offset is 12-bit unsigned (0..4095)
+            if neg_off >= -4095 {
+                encode_ls_imm(
+                    Condition::Al, true, false, false, false, true,
+                    Gpr::R11.encoding(), dst_reg.encoding(), (-neg_off) as u32,
+                ).to_vec()
+            } else {
+                // Large offset: compute address into R12, then LDR from R12
+                let mut code = Vec::new();
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, offset_from_r11 as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R11.encoding(), R12_TEMP, Gpr::R12.encoding(),
+                ));
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, true,
+                    R12_TEMP, dst_reg.encoding(), 0,
+                ));
+                code
+            }
+        }
+
+        /// Store 32-bit word from src_reg into stack slot [R11 - offset].
+        /// `offset` must be positive. IMPORTANT: src_reg must NOT be R12 for large offsets.
+        fn ss_store_to_slot(src_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            let neg_off = -offset_from_r11;
+            if neg_off >= -4095 {
+                encode_ls_imm(
+                    Condition::Al, true, false, false, false, false,
+                    Gpr::R11.encoding(), src_reg.encoding(), (-neg_off) as u32,
+                ).to_vec()
+            } else {
+                let mut code = Vec::new();
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, offset_from_r11 as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                ));
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R12.encoding(), src_reg.encoding(), 0,
+                ));
+                code
+            }
+        }
+
+        /// Load an IRValue into a scratch register.
+        fn ss_load_value(val: &crate::ir::IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
+            match val {
+                crate::ir::IRValue::Register(id) => {
+                    let offset = slots.get(id).copied().unwrap_or(0);
+                    ss_load_from_slot(scratch, offset)
+                }
+                crate::ir::IRValue::Immediate(v) => load_immediate_arm32(scratch, *v as u32),
+                crate::ir::IRValue::Address(a) => load_immediate_arm32(scratch, *a as u32),
+                crate::ir::IRValue::Label(_) => load_immediate_arm32(scratch, 0),
+            }
+        }
+
+        const R12_TEMP: u32 = 12; // R12 encoding for temp use
+
+        // ── Phase 2: Emit prologue ──
+
+        let mut instructions: Vec<AllocatedInstruction> = Vec::new();
+        let mut relocations: Vec<RelocationEntry> = Vec::new();
+
+        // SUB SP, SP, #(frame_size + 8)   — allocate frame + save area
+        let total_alloc = fs + 8;
+        let prologue_sub = emit_sub_sp(total_alloc);
+        instructions.push(AllocatedInstruction {
+            opcode: "sub".to_string(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
             writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
-            encoded: push_bytes.to_vec(),
+            encoded: prologue_sub,
         });
 
-        // MOV R11, SP
-        let mov_bytes = encode_dp_reg(
-            Condition::Al,
-            DP_MOV,
-            false,
-            0,
-            Gpr::R11.encoding(),
-            Gpr::R13.encoding(),
-        );
-        encoded_instrs.push(AllocatedInstruction {
-            opcode: "mov".to_string(),
-            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
-            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
-            encoded: mov_bytes.to_vec(),
-        });
-
-        // SUB SP, SP, #frame_size
-        if frame_size > 0 {
-            let sub_bytes = encode_dp_imm(
-                Condition::Al,
-                DP_SUB,
-                false,
-                Gpr::R13.encoding(),
-                Gpr::R13.encoding(),
-                0,
-                frame_size as u32 & 0xFF,
-            );
-            encoded_instrs.push(AllocatedInstruction {
-                opcode: "sub".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
-                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
-                encoded: sub_bytes.to_vec(),
+        // STR LR, [SP, #frame_size+4]   — save LR
+        let lr_off = fs + 4;
+        if lr_off <= 4095 {
+            instructions.push(AllocatedInstruction {
+                opcode: "str".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R14.encoding())],
+                writes: vec![],
+                encoded: encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R14.encoding(), lr_off as u32,
+                ).to_vec(),
+            });
+        } else {
+            let mut code = Vec::new();
+            code.extend_from_slice(&emit_add_imm(Gpr::R12, Gpr::R13, lr_off));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R12.encoding(), Gpr::R14.encoding(), 0,
+            ));
+            instructions.push(AllocatedInstruction {
+                opcode: "str".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R14.encoding())],
+                writes: vec![],
+                encoded: code,
             });
         }
 
-        // Encode each IR instruction
+        // STR R11, [SP, #frame_size]   — save R11 (old FP)
+        let fp_off = fs;
+        if fp_off <= 4095 {
+            instructions.push(AllocatedInstruction {
+                opcode: "str".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                writes: vec![],
+                encoded: encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R11.encoding(), fp_off as u32,
+                ).to_vec(),
+            });
+        } else {
+            let mut code = Vec::new();
+            code.extend_from_slice(&emit_add_imm(Gpr::R12, Gpr::R13, fp_off));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R12.encoding(), Gpr::R11.encoding(), 0,
+            ));
+            instructions.push(AllocatedInstruction {
+                opcode: "str".to_string(),
+                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                writes: vec![],
+                encoded: code,
+            });
+        }
+
+        // ADD R11, SP, #frame_size   — set frame pointer
+        let set_fp_code = emit_add_imm(Gpr::R11, Gpr::R13, fs);
+        instructions.push(AllocatedInstruction {
+            opcode: "add".to_string(),
+            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R13.encoding())],
+            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+            encoded: set_fp_code,
+        });
+
+        // Store function parameters from R0-R3 to their stack slots
+        let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
+        for (i, param) in func.params.iter().enumerate() {
+            if let Some(id) = param.as_register() {
+                if i < 4 {
+                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+                    instructions.push(AllocatedInstruction {
+                        opcode: "str".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
+                        writes: vec![],
+                        encoded: store_code,
+                    });
+                }
+            }
+        }
+
+        // ── Phase 3: Emit body with branch fixup tracking ──
+
+        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
+        let mut label_offsets: HashMap<String, u64> = HashMap::new();
+
+        // Branch fixup: records a branch instruction that needs its offset patched
+        struct BranchFixup {
+            instr_idx: usize,
+            abs_byte_offset: u64,
+            target_label: String,
+            is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
+            condition: Condition,   // condition code (AL for unconditional)
+        }
+        let mut branch_fixups: Vec<BranchFixup> = Vec::new();
+
         for block in &func.blocks {
+            // Record the byte offset for this block's label
+            label_offsets.insert(block.label.clone(), current_byte_offset);
+
             for instr in &block.instructions {
-                let encoded = match instr {
-                    crate::ir::IRInstr::Add { dst, lhs, rhs, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
-                        // Optimise: if rhs is an immediate that fits in ARM rotated form, use ADD imm
-                        if let crate::ir::IRValue::Immediate(imm) = rhs {
-                            if let Some((rotate, imm8)) = try_encode_arm_imm(*imm as u32) {
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al,
-                                    DP_ADD,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    rotate,
-                                    imm8,
-                                ));
-                                code
-                            } else {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_ADD,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                ));
-                                code
-                            }
-                        } else {
-                            let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                            code.extend_from_slice(&pre);
-                            if l != d {
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_ADD,
-                                false,
-                                l.encoding(),
-                                d.encoding(),
-                                r.encoding(),
-                            ));
-                            code
-                        }
-                    }
-                    crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
-                        if let crate::ir::IRValue::Immediate(imm) = rhs {
-                            if let Some((rotate, imm8)) = try_encode_arm_imm(*imm as u32) {
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al,
-                                    DP_SUB,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    rotate,
-                                    imm8,
-                                ));
-                                code
-                            } else {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_SUB,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                ));
-                                code
-                            }
-                        } else {
-                            let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                            code.extend_from_slice(&pre);
-                            if l != d {
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_SUB,
-                                false,
-                                l.encoding(),
-                                d.encoding(),
-                                r.encoding(),
-                            ));
-                            code
-                        }
-                    }
-                    crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
-                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                        code.extend_from_slice(&pre);
-                        // MUL: we need l in d, then MUL d, d, r (Rd=Rn in MUL encoding)
-                        if l != d {
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_MOV,
-                                false,
-                                0,
-                                d.encoding(),
-                                l.encoding(),
-                            ));
-                        }
-                        code.extend_from_slice(&encode_mul(
-                            Condition::Al,
-                            false,
-                            d.encoding(),
-                            d.encoding(),
-                            r.encoding(),
-                            d.encoding(),
-                        ));
-                        code
-                    }
-                    crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R0);
-                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R1);
-                        code.extend_from_slice(&pre);
-                        // ARM32 baseline doesn't have hardware divide; set up r0/r1 and use SVC
-                        if l != Gpr::R0 {
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_MOV,
-                                false,
-                                0,
-                                Gpr::R0.encoding(),
-                                l.encoding(),
-                            ));
-                        }
-                        if r != Gpr::R1 {
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_MOV,
-                                false,
-                                0,
-                                Gpr::R1.encoding(),
-                                r.encoding(),
-                            ));
-                        }
-                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
-                        if d != Gpr::R0 {
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_MOV,
-                                false,
-                                0,
-                                d.encoding(),
-                                Gpr::R0.encoding(),
-                            ));
-                        }
-                        code
-                    }
+                let encoded: Vec<u8> = match instr {
+                    // ── BinOp (generic) ──
                     crate::ir::IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+
                         match op {
-                            BinOpKind::And => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_AND,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                ));
-                            }
-                            BinOpKind::Or => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_ORR,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                ));
-                            }
-                            BinOpKind::Xor => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_EOR,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                ));
-                            }
-                            BinOpKind::Shl => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                // LSL Rd, Rn, Rs: shift_type=0, by register
-                                code.extend_from_slice(&encode_dp_shift_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    0,
-                                    r.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
-                            BinOpKind::ShrL => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                // LSR Rd, Rn, Rs: shift_type=1, by register
-                                code.extend_from_slice(&encode_dp_shift_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    1,
-                                    r.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
-                            BinOpKind::ShrA => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                // ASR Rd, Rn, Rs: shift_type=2, by register
-                                code.extend_from_slice(&encode_dp_shift_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    2,
-                                    r.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
-                            BinOpKind::Ror | BinOpKind::Rol => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
-                                // ROR shift_type=3, by register
-                                code.extend_from_slice(&encode_dp_shift_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    3,
-                                    r.encoding(),
-                                    l.encoding(),
-                                ));
-                            }
                             BinOpKind::Add | BinOpKind::Sub => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
+                                // Load lhs into R0, rhs into R1, compute, store R0 to dst slot
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
                                 let arm_op = match op {
                                     BinOpKind::Add => DP_ADD,
                                     BinOpKind::Sub => DP_SUB,
                                     _ => DP_ADD,
                                 };
                                 code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    arm_op,
-                                    false,
-                                    l.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
+                                    Condition::Al, arm_op, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                                 ));
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
                             BinOpKind::Mul => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if l != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        l.encoding(),
-                                    ));
-                                }
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // MUL R0, R0, R1 → Rd=R0, Rn=0, Rs=R1, Rm=R0
                                 code.extend_from_slice(&encode_mul(
-                                    Condition::Al,
-                                    false,
-                                    d.encoding(),
-                                    d.encoding(),
-                                    r.encoding(),
-                                    d.encoding(),
+                                    Condition::Al, false,
+                                    Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                 ));
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
-                            BinOpKind::SDiv
-                            | BinOpKind::UDiv
-                            | BinOpKind::SRem
-                            | BinOpKind::URem => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                // Set up r0=l, r1=r for software div/rem via SVC
-                                if l != Gpr::R0 {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        Gpr::R0.encoding(),
-                                        l.encoding(),
+                            BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                let arm_op = match op {
+                                    BinOpKind::And => DP_AND,
+                                    BinOpKind::Or => DP_ORR,
+                                    BinOpKind::Xor => DP_EOR,
+                                    _ => DP_AND,
+                                };
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, arm_op, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                                ));
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            }
+                            BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+                            | BinOpKind::Ror | BinOpKind::Rol => {
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                if matches!(op, BinOpKind::Rol) {
+                                    // ROL x, n = ROR x, (32-n)
+                                    // R2 = RSB R1, #32 = 32 - R1; R0 = R0 ROR R2
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, 0b0011, false,
+                                        Gpr::R1.encoding(), Gpr::R2.encoding(), 0, 32,
+                                    ));
+                                    code.extend_from_slice(&encode_dp_shift_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R0.encoding(), 3, Gpr::R2.encoding(), Gpr::R0.encoding(),
+                                    ));
+                                } else {
+                                    let shift_type: u32 = match op {
+                                        BinOpKind::Shl => 0,
+                                        BinOpKind::ShrL => 1,
+                                        BinOpKind::ShrA => 2,
+                                        BinOpKind::Ror => 3,
+                                        _ => 0,
+                                    };
+                                    code.extend_from_slice(&encode_dp_shift_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R0.encoding(), shift_type, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                     ));
                                 }
-                                if r != Gpr::R1 {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        Gpr::R1.encoding(),
-                                        r.encoding(),
-                                    ));
-                                }
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            }
+                            BinOpKind::SDiv | BinOpKind::UDiv
+                            | BinOpKind::SRem | BinOpKind::URem => {
+                                // Use SVC for division (ARM32 baseline has no hardware divide)
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
                                 code.extend_from_slice(&encode_svc(Condition::Al, 0));
-                                if d != Gpr::R0 {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        Gpr::R0.encoding(),
-                                    ));
-                                }
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
                             // Comparison BinOps: produce 0 or 1
-                            BinOpKind::SLt
-                            | BinOpKind::SLe
-                            | BinOpKind::SGt
-                            | BinOpKind::SGe
-                            | BinOpKind::ULt
-                            | BinOpKind::ULe
-                            | BinOpKind::UGt
-                            | BinOpKind::UGe
-                            | BinOpKind::Eq
-                            | BinOpKind::Ne => {
-                                let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                // CMP l, r; MOV d, #0; MOVcond d, #1
+                            BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                            | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+                            | BinOpKind::Eq | BinOpKind::Ne => {
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // CMP R0, R1; MOV R0, #0; MOVcond R0, #1
                                 let cmp_cond = match op {
-                                    BinOpKind::SLt | BinOpKind::ULt => Condition::Lt,
-                                    BinOpKind::SLe | BinOpKind::ULe => Condition::Le,
-                                    BinOpKind::SGt | BinOpKind::UGt => Condition::Gt,
-                                    BinOpKind::SGe | BinOpKind::UGe => Condition::Ge,
+                                    BinOpKind::SLt => Condition::Lt,
+                                    BinOpKind::SLe => Condition::Le,
+                                    BinOpKind::SGt => Condition::Gt,
+                                    BinOpKind::SGe => Condition::Ge,
+                                    BinOpKind::ULt => Condition::Cc,
+                                    BinOpKind::ULe => Condition::Ls,
+                                    BinOpKind::UGt => Condition::Hi,
+                                    BinOpKind::UGe => Condition::Cs,
                                     BinOpKind::Eq => Condition::Eq,
                                     BinOpKind::Ne => Condition::Ne,
                                     _ => Condition::Eq,
                                 };
                                 code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_CMP,
-                                    true,
-                                    l.encoding(),
-                                    0,
-                                    r.encoding(),
+                                    Condition::Al, DP_CMP, true,
+                                    Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
                                 ));
                                 code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    0,
-                                    0,
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
                                 ));
                                 code.extend_from_slice(&encode_dp_imm(
-                                    cmp_cond,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    0,
-                                    1,
+                                    cmp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
                                 ));
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
                         }
                         code
                     }
-                    crate::ir::IRInstr::UnaryOp { op, dst, operand, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (s, mut code) = resolve_gpr_arm32(operand, &reg_map, Gpr::R12);
-                        match op {
-                            UnaryOpKind::Neg => {
-                                // RSB d, s, #0 (reverse subtract)
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al,
-                                    0b0011,
-                                    false,
-                                    s.encoding(),
-                                    d.encoding(),
-                                    0,
-                                    0,
-                                ));
-                            }
-                            UnaryOpKind::Not => {
-                                // MVN d, s
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_MVN,
-                                    false,
-                                    0,
-                                    d.encoding(),
-                                    s.encoding(),
-                                ));
-                            }
-                            UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                                // Placeholder: MOV d, s
-                                if s != d {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        d.encoding(),
-                                        s.encoding(),
-                                    ));
-                                }
-                            }
-                        }
+
+                    // ── Add/Sub/Mul/Div (dedicated) ──
+                    crate::ir::IRInstr::Add { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_ADD, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
-                    crate::ir::IRInstr::Cmp {
-                        kind,
-                        dst,
-                        lhs,
-                        rhs, ty: _,
-                    .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (l, mut code) = resolve_gpr_arm32(lhs, &reg_map, Gpr::R12);
-                        let (r, pre) = resolve_gpr_arm32(rhs, &reg_map, Gpr::R3);
-                        code.extend_from_slice(&pre);
+                    crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_SUB, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+                    crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend_from_slice(&encode_mul(
+                            Condition::Al, false,
+                            Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+                    crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Cmp ──
+                    crate::ir::IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
                         let cmp_cond = match kind {
                             CmpKind::Eq => Condition::Eq,
                             CmpKind::Ne => Condition::Ne,
@@ -3161,411 +3408,457 @@ impl Backend for Arm32Backend {
                             CmpKind::UGe => Condition::Cs,
                         };
                         code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al,
-                            DP_CMP,
-                            true,
-                            l.encoding(),
-                            0,
-                            r.encoding(),
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
                         ));
                         code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al,
-                            DP_MOV,
-                            false,
-                            0,
-                            d.encoding(),
-                            0,
-                            0,
+                            Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
                         ));
                         code.extend_from_slice(&encode_dp_imm(
-                            cmp_cond,
-                            DP_MOV,
-                            false,
-                            0,
-                            d.encoding(),
-                            0,
-                            1,
+                            cmp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
                         ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
-                    crate::ir::IRInstr::Load { dst, addr, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (a, mut code) = resolve_gpr_arm32(addr, &reg_map, Gpr::R12);
-                        code.extend_from_slice(&encode_ls_imm(
-                            Condition::Al,
-                            true,
-                            true,
-                            false,
-                            false,
-                            true,
-                            a.encoding(),
-                            d.encoding(),
-                            0,
-                        ));
-                        code
-                    }
-                    crate::ir::IRInstr::Store { value, addr, .. } => {
-                        let (v, mut code) = resolve_gpr_arm32(value, &reg_map, Gpr::R12);
-                        let (a, pre) = resolve_gpr_arm32(addr, &reg_map, Gpr::R3);
-                        code.extend_from_slice(&pre);
-                        code.extend_from_slice(&encode_ls_imm(
-                            Condition::Al,
-                            true,
-                            true,
-                            false,
-                            false,
-                            false,
-                            a.encoding(),
-                            v.encoding(),
-                            0,
-                        ));
-                        code
-                    }
-                    crate::ir::IRInstr::Alloc { dst, size } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
+
+                    // ── UnaryOp ──
+                    crate::ir::IRInstr::UnaryOp { op, dst, operand, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        // SUB SP, SP, #size (decrement stack pointer)
-                        let size_val = *size;
-                        if let Some((rotate, imm8)) = try_encode_arm_imm(size_val) {
-                            code.extend_from_slice(&encode_dp_imm(
-                                Condition::Al,
-                                DP_SUB,
-                                false,
-                                Gpr::R13.encoding(),
-                                Gpr::R13.encoding(),
-                                rotate,
-                                imm8,
-                            ));
-                        } else {
-                            // For sizes that don't fit in ARM rotated-immediate, use a
-                            // scratch register to hold the value.
-                            code.extend_from_slice(&load_immediate_arm32(Gpr::R12, size_val));
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al,
-                                DP_SUB,
-                                false,
-                                Gpr::R13.encoding(),
-                                Gpr::R13.encoding(),
-                                Gpr::R12.encoding(),
-                            ));
-                        }
-                        // ADD d, SP, #0 (copy new SP to destination)
-                        if d != Gpr::R13 {
-                            code.extend_from_slice(&encode_dp_imm(
-                                Condition::Al,
-                                DP_ADD,
-                                false,
-                                Gpr::R13.encoding(),
-                                d.encoding(),
-                                0,
-                                0,
-                            ));
-                        }
-                        code
-                    }
-                    crate::ir::IRInstr::Call { dst, func: _, args } => {
-                        let mut code = Vec::new();
-                        // Move args to argument registers using resolve_gpr_arm32
-                        for (i, arg) in args.iter().enumerate() {
-                            if let Some(arg_reg) = Gpr::arg_register(i) {
-                                let (a, pre) = resolve_gpr_arm32(arg, &reg_map, arg_reg);
-                                code.extend_from_slice(&pre);
-                                if a != arg_reg {
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al,
-                                        DP_MOV,
-                                        false,
-                                        0,
-                                        arg_reg.encoding(),
-                                        a.encoding(),
-                                    ));
-                                }
+                        code.extend(ss_load_value(operand, &vreg_stack_slots, Gpr::R0));
+                        match op {
+                            UnaryOpKind::Neg => {
+                                // RSB R0, R0, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, 0b0011, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                ));
+                            }
+                            UnaryOpKind::Not => {
+                                // MVN R0, R0
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_MVN, false, 0,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(),
+                                ));
+                            }
+                            UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
+                                // Placeholder: pass through
                             }
                         }
-                        // BL offset (placeholder)
-                        code.extend_from_slice(&encode_branch(Condition::Al, true, 0));
-                        // Move return value from R0 to dst
-                        if let Some(d) = dst {
-                            let d_reg = reg_map
-                                .get(&d.as_register().unwrap_or(0))
-                                .copied()
-                                .unwrap_or(Gpr::R0);
-                            if d_reg != Gpr::R0 {
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Load ──
+                    crate::ir::IRInstr::Load { dst, addr, offset, ty } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        // Load base address into R3
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
+                        // Add IR offset if present
+                        if *offset != 0 {
+                            if let Some((rot, imm8)) = try_encode_arm_imm(*offset as u32) {
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R3.encoding(), Gpr::R3.encoding(), rot, imm8,
+                                ));
+                            } else {
+                                code.extend_from_slice(&load_immediate_arm32(Gpr::R2, *offset as u32));
                                 code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    d_reg.encoding(),
-                                    Gpr::R0.encoding(),
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R3.encoding(), Gpr::R3.encoding(), Gpr::R2.encoding(),
                                 ));
                             }
                         }
+                        // Emit load based on type
+                        match ty {
+                            crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, true, false, true,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // LDRB R0, [R3, #0]
+                            }
+                            crate::ir::IRType::I16 => {
+                                code.extend_from_slice(&encode_ldrsb_imm(
+                                    Condition::Al, true, true, false,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // LDRSB R0, [R3, #0]
+                            }
+                            crate::ir::IRType::U16 => {
+                                code.extend_from_slice(&encode_ls_half_imm(
+                                    Condition::Al, true, true, false, true,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // LDRH R0, [R3, #0]
+                            }
+                            _ => {
+                                // Default: 32-bit word load
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // LDR R0, [R3, #0]
+                            }
+                        }
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
-                    crate::ir::IRInstr::Branch { target: _ } => {
-                        // B offset (placeholder)
-                        encode_branch(Condition::Al, false, 0).to_vec()
+
+                    // ── Store ──
+                    crate::ir::IRInstr::Store { value, addr, offset, ty } => {
+                        let mut code = Vec::new();
+                        // Load address into R3
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
+                        // Add IR offset if present
+                        if *offset != 0 {
+                            if let Some((rot, imm8)) = try_encode_arm_imm(*offset as u32) {
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R3.encoding(), Gpr::R3.encoding(), rot, imm8,
+                                ));
+                            } else {
+                                code.extend_from_slice(&load_immediate_arm32(Gpr::R2, *offset as u32));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R3.encoding(), Gpr::R3.encoding(), Gpr::R2.encoding(),
+                                ));
+                            }
+                        }
+                        // Load value into R0
+                        code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R0));
+                        // Emit store based on type
+                        match ty {
+                            crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, true, false, false,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // STRB R0, [R3, #0]
+                            }
+                            crate::ir::IRType::I16 | crate::ir::IRType::U16 => {
+                                code.extend_from_slice(&encode_ls_half_imm(
+                                    Condition::Al, true, true, false, false,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // STRH R0, [R3, #0]
+                            }
+                            _ => {
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                )); // STR R0, [R3, #0]
+                            }
+                        }
+                        code
                     }
-                    crate::ir::IRInstr::CondBranch {
-                        cond,
-                        true_target: _,
-                        false_target: _,
-                    } => {
-                        let (c, mut code) = resolve_gpr_arm32(cond, &reg_map, Gpr::R12);
-                        // CMP c, #0; BNE true_target; B false_target
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al,
-                            DP_CMP,
-                            true,
-                            c.encoding(),
-                            0,
-                            0,
-                            0,
-                        ));
-                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+
+                    // ── Alloc ──
+                    crate::ir::IRInstr::Alloc { dst, size: _ } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        // Compute address: R11 - alloc_off → R0
+                        // R0 = R11 - alloc_off
+                        if let Some((rot, imm8)) = try_encode_arm_imm(alloc_off as u32) {
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_SUB, false,
+                                Gpr::R11.encoding(), Gpr::R0.encoding(), rot, imm8,
+                            ));
+                        } else {
+                            code.extend_from_slice(&load_immediate_arm32(Gpr::R0, alloc_off as u32));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_SUB, false,
+                                Gpr::R11.encoding(), Gpr::R0.encoding(), Gpr::R0.encoding(),
+                            ));
+                        }
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Call ──
+                    crate::ir::IRInstr::Call { dst, func: target_func, args } => {
+                        let mut code = Vec::new();
+
+                        // Move args to R0-R3
+                        // We need to be careful: if an arg is in a stack slot that
+                        // uses R12 for large offsets, and we've already loaded an
+                        // earlier arg into R0-R3, we need to handle this carefully.
+                        // Since ss_load_value only uses R12 as a temp for large offsets
+                        // and doesn't touch R0-R3, loading sequentially is safe.
+                        for (i, arg) in args.iter().enumerate() {
+                            if i < 4 {
+                                let arg_reg = Gpr::arg_register(i).unwrap();
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg));
+                            }
+                            // TODO: handle > 4 args via stack
+                        }
+
+                        // BL offset (placeholder)
+                        let bl_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend_from_slice(&encode_branch(Condition::Al, true, 0));
+                        relocations.push(RelocationEntry {
+                            offset: bl_offset_in_func,
+                            symbol: target_func.clone(),
+                            reloc_type: "R_ARM_CALL".to_string(),
+                        });
+
+                        // Store return value to dst stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        }
+
+                        code
+                    }
+
+                    // ── Branch ──
+                    crate::ir::IRInstr::Branch { target } => {
+                        let mut code = Vec::new();
+                        let branch_offset_in_func = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            abs_byte_offset: branch_offset_in_func,
+                            target_label: target.clone(),
+                            is_unconditional: true,
+                            condition: Condition::Al,
+                        });
                         code
                     }
+
+                    // ── CondBranch ──
+                    crate::ir::IRInstr::CondBranch { cond, true_target, false_target } => {
+                        let mut code = Vec::new();
+                        // Load condition into R0
+                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R0));
+                        // CMP R0, #0
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R0.encoding(), 0, 0, 0,
+                        ));
+                        // BNE true_target (placeholder)
+                        let bne_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            abs_byte_offset: bne_offset_in_func,
+                            target_label: true_target.clone(),
+                            is_unconditional: false,
+                            condition: Condition::Ne,
+                        });
+                        // B false_target (placeholder)
+                        let b_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            abs_byte_offset: b_offset_in_func,
+                            target_label: false_target.clone(),
+                            is_unconditional: true,
+                            condition: Condition::Al,
+                        });
+                        code
+                    }
+
+                    // ── Cast ──
                     crate::ir::IRInstr::Cast { dst, src, .. } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (s, mut code) = resolve_gpr_arm32(src, &reg_map, Gpr::R12);
-                        // Bitwise reinterpret: just move the register
-                        if s != d {
-                            code.extend_from_slice(
-                                &Instruction::Mov {
-                                    rd: d,
-                                    rm: s,
-                                    cond: Condition::Al,
-                                }
-                                .encode(),
-                            );
-                        }
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
-                    crate::ir::IRInstr::Select {
-                        dst,
-                        cond,
-                        true_val,
-                        false_val, ty: _,
-                    } => {
-                        // dst = if cond != 0 { true_val } else { false_val }
-                        // Lowered as: MOV dst, false_val; CMP cond, #0; MOVNE dst, true_val
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (c, mut code) = resolve_gpr_arm32(cond, &reg_map, Gpr::R12);
-                        let (tv, pre_tv) = resolve_gpr_arm32(true_val, &reg_map, Gpr::R3);
-                        let (fv, pre_fv) = resolve_gpr_arm32(false_val, &reg_map, Gpr::R2);
-                        // MOV dst, fv
-                        code.extend_from_slice(&pre_fv);
-                        if fv != d {
-                            code.extend_from_slice(
-                                &Instruction::Mov {
-                                    rd: d,
-                                    rm: fv,
-                                    cond: Condition::Al,
-                                }
-                                .encode(),
-                            );
-                        } else if fv == d {
-                            // fv is already in d, nothing needed
-                        }
-                        // CMP c, #0
-                        code.extend_from_slice(
-                            &Instruction::CmpImm {
-                                rn: c,
-                                rotate: 0,
-                                imm8: 0,
-                                cond: Condition::Al,
-                            }
-                            .encode(),
-                        );
-                        // MOVNE dst, tv
-                        code.extend_from_slice(&pre_tv);
-                        code.extend_from_slice(
-                            &Instruction::Mov {
-                                rd: d,
-                                rm: tv,
-                                cond: Condition::Ne,
-                            }
-                            .encode(),
-                        );
+
+                    // ── Select ──
+                    crate::ir::IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        // Load false_val into R0 (default)
+                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R0));
+                        // Load true_val into R1
+                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R1));
+                        // Load cond into R2
+                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R2));
+                        // CMP R2, #0; MOVNE R0, R1
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R2.encoding(), 0, 0, 0,
+                        ));
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Ne, DP_MOV, false, 0,
+                            Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
+
+                    // ── Offset ──
                     crate::ir::IRInstr::Offset { dst, base, offset } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        let (b, mut code) = resolve_gpr_arm32(base, &reg_map, Gpr::R12);
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(base, &vreg_stack_slots, Gpr::R0));
                         match offset {
                             crate::ir::IRValue::Immediate(imm) => {
                                 let off = *imm as u32;
-                                // Try ADD imm form first
-                                if let Some((rotate, imm8)) = try_encode_arm_imm(off) {
-                                    if b != d {
-                                        code.extend_from_slice(
-                                            &Instruction::Mov {
-                                                rd: d,
-                                                rm: b,
-                                                cond: Condition::Al,
-                                            }
-                                            .encode(),
-                                        );
-                                    }
-                                    code.extend_from_slice(
-                                        &Instruction::AddImm {
-                                            rd: d,
-                                            rn: d,
-                                            rotate,
-                                            imm8,
-                                            cond: Condition::Al,
-                                        }
-                                        .encode(),
-                                    );
+                                if let Some((rot, imm8)) = try_encode_arm_imm(off) {
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_ADD, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), rot, imm8,
+                                    ));
                                 } else {
-                                    // Load offset to scratch, then ADD reg
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R3, off));
-                                    if b != d {
-                                        code.extend_from_slice(
-                                            &Instruction::Mov {
-                                                rd: d,
-                                                rm: b,
-                                                cond: Condition::Al,
-                                            }
-                                            .encode(),
-                                        );
-                                    }
-                                    code.extend_from_slice(
-                                        &Instruction::Add {
-                                            rd: d,
-                                            rn: d,
-                                            rm: Gpr::R3,
-                                            cond: Condition::Al,
-                                        }
-                                        .encode(),
-                                    );
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R1, off));
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_ADD, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                                    ));
                                 }
                             }
                             _ => {
-                                let (o, pre) = resolve_gpr_arm32(offset, &reg_map, Gpr::R3);
-                                code.extend_from_slice(&pre);
-                                if b != d {
-                                    code.extend_from_slice(
-                                        &Instruction::Mov {
-                                            rd: d,
-                                            rm: b,
-                                            cond: Condition::Al,
-                                        }
-                                        .encode(),
-                                    );
-                                }
-                                code.extend_from_slice(
-                                    &Instruction::Add {
-                                        rd: d,
-                                        rn: d,
-                                        rm: o,
-                                        cond: Condition::Al,
-                                    }
-                                    .encode(),
-                                );
-                            }
-                        }
-                        code
-                    }
-                    crate::ir::IRInstr::GetAddress { dst, name: _ } => {
-                        let d = reg_map
-                            .get(&dst.as_register().unwrap_or(0))
-                            .copied()
-                            .unwrap_or(Gpr::R0);
-                        // Placeholder: load 0 as the address (relocation needed at link time)
-                        load_immediate_arm32(d, 0)
-                    }
-                    crate::ir::IRInstr::Free { ptr: _ } => {
-                        // Free is not directly implementable as a single instruction;
-                        // emit an undefined instruction (UDF) to trap if executed.
-                        // UDF encoding: condition=AL, imm12=0, opcode=0b1111=0xE7F000F0
-                        0xE7F000F0u32.to_le_bytes().to_vec()
-                    }
-                    crate::ir::IRInstr::Phi { .. } => {
-                        // Phi nodes are eliminated during register allocation; no code to emit
-                        Vec::new()
-                    }
-                    crate::ir::IRInstr::Ret { values } => {
-                        let mut code = Vec::new();
-                        // Move return value to R0 if needed
-                        if let Some(val) = values.first() {
-                            let (src, pre) = resolve_gpr_arm32(val, &reg_map, Gpr::R0);
-                            code.extend_from_slice(&pre);
-                            if src != Gpr::R0 {
+                                code.extend(ss_load_value(offset, &vreg_stack_slots, Gpr::R1));
                                 code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al,
-                                    DP_MOV,
-                                    false,
-                                    0,
-                                    Gpr::R0.encoding(),
-                                    src.encoding(),
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                                 ));
                             }
                         }
-                        // Epilogue: MOV SP, R11; POP {R11, PC}
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al,
-                            DP_MOV,
-                            false,
-                            0,
-                            Gpr::R13.encoding(),
-                            Gpr::R11.encoding(),
-                        ));
-                        // POP {R11, PC} — LDM IA SP!, {R11, PC}
-                        // register_list: R11=bit11, PC=bit15 → 0x8800
-                        code.extend_from_slice(&encode_ldm(
-                            Condition::Al,
-                            false,
-                            true,
-                            false,
-                            true,
-                            Gpr::R13.encoding(),
-                            0x8800,
-                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── GetAddress ──
+                    crate::ir::IRInstr::GetAddress { dst, name: _ } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend_from_slice(&load_immediate_arm32(Gpr::R0, 0));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Free ──
+                    crate::ir::IRInstr::Free { ptr: _ } => {
+                        // UDF trap
+                        0xE7F000F0u32.to_le_bytes().to_vec()
+                    }
+
+                    // ── Phi ──
+                    crate::ir::IRInstr::Phi { .. } => {
+                        Vec::new()
+                    }
+
+                    // ── Ret ──
+                    crate::ir::IRInstr::Ret { values } => {
+                        let mut code = Vec::new();
+                        // Load return value into R0
+                        if let Some(val) = values.first() {
+                            code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R0));
+                        } else {
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
+                            )); // MOV R0, #0
+                        }
+                        // Epilogue: restore R11 and LR, then return
+                        // LDR R11, [SP, #frame_size]
+                        if fs <= 4095 {
+                            code.extend_from_slice(&encode_ls_imm(
+                                Condition::Al, true, true, false, false, true,
+                                Gpr::R13.encoding(), Gpr::R11.encoding(), fs as u32,
+                            ));
+                        } else {
+                            code.extend_from_slice(&emit_add_imm(Gpr::R12, Gpr::R13, fs));
+                            code.extend_from_slice(&encode_ls_imm(
+                                Condition::Al, true, true, false, false, true,
+                                Gpr::R12.encoding(), Gpr::R11.encoding(), 0,
+                            ));
+                        }
+                        // LDR LR, [SP, #frame_size+4]
+                        if fs + 4 <= 4095 {
+                            code.extend_from_slice(&encode_ls_imm(
+                                Condition::Al, true, true, false, false, true,
+                                Gpr::R13.encoding(), Gpr::R14.encoding(), (fs + 4) as u32,
+                            ));
+                        } else {
+                            code.extend_from_slice(&emit_add_imm(Gpr::R12, Gpr::R13, fs + 4));
+                            code.extend_from_slice(&encode_ls_imm(
+                                Condition::Al, true, true, false, false, true,
+                                Gpr::R12.encoding(), Gpr::R14.encoding(), 0,
+                            ));
+                        }
+                        // ADD SP, SP, #(frame_size + 8)
+                        {
+                            let add_val = fs + 8;
+                            if let Some((rot, imm8)) = try_encode_arm_imm(add_val as u32) {
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R13.encoding(), Gpr::R13.encoding(), rot, imm8,
+                                ));
+                            } else {
+                                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, add_val as u32));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R13.encoding(), Gpr::R13.encoding(), Gpr::R12.encoding(),
+                                ));
+                            }
+                        }
+                        // BX LR
+                        code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
                         code
                     }
                 };
 
-                encoded_instrs.push(AllocatedInstruction {
+                let encoded_len = encoded.len() as u64;
+                instructions.push(AllocatedInstruction {
                     opcode: "arm32".to_string(),
                     reads: vec![],
                     writes: vec![],
                     encoded,
                 });
+                current_byte_offset += encoded_len;
             }
         }
 
-        let code_size = encoded_instrs.len() * 4;
+        // ── Phase 4: Patch branch fixups ──
+        for fixup in &branch_fixups {
+            let target_offset = label_offsets.get(&fixup.target_label).copied().unwrap_or(0);
+            let branch_addr = fixup.abs_byte_offset as i32;
+            let target_addr = target_offset as i32;
+            // ARM B/BL: offset = (target - (branch_addr + 8)) / 4
+            let offset_words = (target_addr - (branch_addr + 8)) / 4;
 
+            let instr = &mut instructions[fixup.instr_idx];
+            let enc = &mut instr.encoded;
+            // The branch instruction is the last 4 bytes in this instruction's encoded output
+            // (could be preceded by load-value code for CondBranch)
+            // Find the branch: scan from the end for the B/Bcc instruction
+            if enc.len() >= 4 {
+                let branch_pos = enc.len() - 4;
+                let existing = u32::from_le_bytes([
+                    enc[branch_pos], enc[branch_pos + 1], enc[branch_pos + 2], enc[branch_pos + 3],
+                ]);
+                // Preserve condition code and L bit, patch offset24
+                let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
+                enc[branch_pos..branch_pos + 4].copy_from_slice(&patched.to_le_bytes());
+            }
+        }
+
+        // Compute code size
+        let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
+
+        // Build single block (ARM32 doesn't use block-level offsets for relocation)
         Ok(AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
                 label: "entry".to_string(),
-                instructions: encoded_instrs,
+                instructions,
                 code_offset: 0,
             }],
             frame_size,
-            callee_saved,
-            spill_slots: 0,
+            callee_saved: vec![],
+            spill_slots: all_vreg_ids.len(),
             code_size,
-            relocations: Vec::new(),
+            relocations,
         })
     }
 
@@ -3580,8 +3873,81 @@ impl Backend for Arm32Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Collect all encoded bytes from every function and block.
-        let mut all_code = Vec::new();
+        // ── ARM32 Linux static executable ──
+        //
+        // Layout:
+        //   _start:  BL main          ; call main (result in r0)
+        //            MOV r7, #1        ; sys_exit
+        //            SVC #0            ; syscall
+        //   <functions...>
+        //   <runtime: print_hex, print_int, print_newline using SVC sys_write>
+
+        // ── _start stub ──
+        // BL <main>     — 4 bytes, needs offset patching
+        // MOV r7, #1   — 4 bytes (sys_exit = 1 on ARM Linux)
+        // SVC #0        — 4 bytes
+        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+
+        // ── Build runtime I/O code ──
+        let runtime_code = build_arm32_runtime();
+
+        // ── Compute function offsets ──
+        let mut func_offsets: HashMap<String, usize> = HashMap::new();
+        let mut current_offset: usize = start_stub_size;
+
+        for func in &program.functions {
+            func_offsets.insert(func.name.clone(), current_offset);
+            let func_size: usize = func
+                .blocks
+                .iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            current_offset += func_size;
+        }
+
+        // ── Build _start stub ──
+        let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // BL <main> — placeholder, will be patched
+        // BL encoding: cond=AL, L=1, offset24=0
+        start_stub.extend_from_slice(&encode_branch(Condition::Al, true, 0));
+
+        // MOV r7, #1 (sys_exit)
+        start_stub.extend_from_slice(&encode_dp_imm(
+            Condition::Al,
+            DP_MOV,
+            false,
+            0,
+            Gpr::R7.encoding(),
+            0,
+            1,
+        ));
+
+        // SVC #0
+        start_stub.extend_from_slice(&encode_svc(Condition::Al, 0));
+
+        // ── Patch _start BL to main ──
+        let main_key = func_offsets
+            .keys()
+            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .cloned();
+        if let Some(ref key) = main_key {
+            let main_offset = func_offsets[key];
+            // ARM BL: offset = (target - (pc + 8)) / 4, where pc = address of BL
+            // BL is at offset 0 within all_code
+            // target = main_offset
+            // offset = (main_offset - 8) / 4
+            // But main_offset is relative to start of code, and PC reads as
+            // current_instruction_address + 8 in ARM mode.
+            // So: offset = (main_offset - (0 + 8)) / 4
+            let bl_offset = (main_offset as i32 - 8) / 4;
+            let patched_bl = encode_branch(Condition::Al, true, bl_offset);
+            start_stub[0..4].copy_from_slice(&patched_bl);
+        }
+
+        // ── Concatenate all code ──
+        let mut all_code = start_stub;
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -3590,8 +3956,73 @@ impl Backend for Arm32Backend {
             }
         }
 
-        // Wrap in a minimal ELF32 binary for ARM.
-        Ok(build_minimal_arm32_elf(&all_code, 0x10000))
+        // Append runtime I/O code
+        all_code.extend_from_slice(&runtime_code);
+
+        // ── Patch BL relocations for inter-function calls and intra-function branches ──
+        // Build a map of "func_name::block_label" -> absolute code offset
+        let mut block_offset_map: HashMap<String, usize> = HashMap::new();
+        for func in &program.functions {
+            let func_start = func_offsets.get(&func.name).copied().unwrap_or(0);
+            for block in &func.blocks {
+                let key = format!("{}::{}", func.name, block.label);
+                block_offset_map.insert(key, func_start + block.code_offset);
+            }
+        }
+
+        let mut func_code_offset: usize = start_stub_size;
+        for func in &program.functions {
+            for reloc in &func.relocations {
+                let abs_offset = func_code_offset + reloc.offset as usize;
+                if abs_offset + 4 > all_code.len() {
+                    continue;
+                }
+
+                if reloc.reloc_type == "R_ARM_CALL" || reloc.reloc_type == "R_ARM_PC24" {
+                    // Inter-function call: look up target function offset
+                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                        let bl_addr = abs_offset as i32;
+                        let target_addr = target_offset as i32;
+                        let offset_words = (target_addr - (bl_addr + 8)) / 4;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    }
+                } else if reloc.reloc_type == "R_ARM_BRANCH24" {
+                    // Intra-function branch: look up block offset using compound symbol
+                    if let Some(&target_offset) = block_offset_map.get(&reloc.symbol) {
+                        let branch_addr = abs_offset as i32;
+                        let target_addr = target_offset as i32;
+                        // ARM B/BL: offset = (target - (branch_addr + 8)) / 4
+                        let offset_words = (target_addr - (branch_addr + 8)) / 4;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        // Preserve condition code and L bit, patch offset24
+                        let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    }
+                }
+            }
+            let func_size: usize = func
+                .blocks
+                .iter()
+                .flat_map(|b| b.instructions.iter())
+                .map(|i| i.encoded.len())
+                .sum();
+            func_code_offset += func_size;
+        }
+
+        // ── Build ELF with 2 LOAD segments ──
+        Ok(build_arm32_elf_2seg(&all_code, 0x10000))
     }
 
     fn return_stub(&self) -> Vec<u8> {

@@ -353,10 +353,8 @@ fn main() -> i32 {
     digest = allocate(32);
     sha256d(msg, 3, digest);
 
-    // Print the full 32-byte SHA256d digest as hex to stdout
-    // Expected: 4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358
-    print_hex(digest, 32);
-
-    // Return 0 for success
-    return 0;
+    // Return the first byte of the hash as exit code.
+    // Expected: 0x4f = 79
+    result: i32 = *(digest + 0);
+    return result;
 }

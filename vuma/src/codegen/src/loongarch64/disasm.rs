@@ -572,50 +572,50 @@ impl Instruction {
                 })
             }
             0x0A4 => {
-                return Ok(Instruction::LdBu {
-                    rd: gpr_from_bits(rd),
-                    rj: gpr_from_bits(rj),
-                    imm12: sign_extend_12(imm12_raw),
-                })
-            }
-            0x0A5 => {
-                return Ok(Instruction::LdHu {
-                    rd: gpr_from_bits(rd),
-                    rj: gpr_from_bits(rj),
-                    imm12: sign_extend_12(imm12_raw),
-                })
-            }
-            0x0A6 => {
-                return Ok(Instruction::LdWu {
-                    rd: gpr_from_bits(rd),
-                    rj: gpr_from_bits(rj),
-                    imm12: sign_extend_12(imm12_raw),
-                })
-            }
-            // Store
-            0x0A7 => {
                 return Ok(Instruction::StB {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
                     imm12: sign_extend_12(imm12_raw),
                 })
             }
-            0x0A8 => {
+            0x0A5 => {
                 return Ok(Instruction::StH {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
                     imm12: sign_extend_12(imm12_raw),
                 })
             }
-            0x0A9 => {
+            0x0A6 => {
                 return Ok(Instruction::StW {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
                     imm12: sign_extend_12(imm12_raw),
                 })
             }
-            0x0AA => {
+            0x0A7 => {
                 return Ok(Instruction::StD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            // Unsigned load
+            0x0A8 => {
+                return Ok(Instruction::LdBu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0A9 => {
+                return Ok(Instruction::LdHu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                })
+            }
+            0x0AA => {
+                return Ok(Instruction::LdWu {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
                     imm12: sign_extend_12(imm12_raw),

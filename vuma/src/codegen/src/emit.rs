@@ -650,22 +650,87 @@ impl Emitter {
             }
         }
 
-        // Emit prologue: SUB SP, SP, #frame_size+16 (space for saved FP/LR + locals)
-        // Then STP X29, X30, [SP, #frame_size] (save FP/LR at top of allocated frame)
-        let aligned_stack = compute_frame_size(func);
-        self.frame_size = aligned_stack;
-        let total_alloc = aligned_stack + 16; // 16 bytes for FP+LR pair
+        // Emit prologue:
+        // 1. SUB SP, SP, #16          (make room for FP/LR save pair)
+        // 2. STP X29, X30, [SP]       (save FP and LR at new SP)
+        // 3. ADD X29, SP, #0           (set frame pointer to new SP)
+        // 4. SUB SP, SP, #frame_size   (make room for local variables)
+        //
+        // NOTE: We cannot use pre-indexed STP [SP, #-16]! because the
+        // Instruction::STP encoding only supports signed-offset mode.
+        // Instead, we explicitly decrement SP with SUB before the STP.
         self.emit_instruction(Instruction::SUB {
             rd: Register::SP,
             rn: Register::SP,
-            rm: Operand::Imm12(total_alloc as u16),
+            rm: Operand::Imm12(16),
         })?;
         self.emit_instruction(Instruction::STP {
             rt1: Register::X29,
             rt2: Register::X30,
             rn: Register::SP,
-            offset: aligned_stack as i32, // save FP/LR at top of frame
+            offset: 0,
         })?;
+
+        // MOV X29, SP (set frame pointer)
+        // IMPORTANT: Cannot use MOV (ORR Xd, XZR, SP) because ORR treats
+        // Rm=31 as XZR, yielding zero. Use ADD X29, SP, #0 instead.
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0),
+        })?;
+
+        // Reserve space for spill slots only. Each Alloc instruction handles
+        // its own SUB SP, SP, #aligned_size. The epilogue will restore only
+        // the spill area reservation. The Alloc areas are NOT restored by the
+        // epilogue — they're effectively "leaked" stack space. This is fine
+        // because the function's stack frame is restored by the LDP + ADD SP, #16.
+        //
+        // For spill slots, we need to estimate the maximum number of spills
+        // that could occur during emission. Since we can't know the exact
+        // count beforehand, we use the compute_frame_size function which
+        // estimates based on the vreg count.
+        let aligned_stack = compute_frame_size(func);
+        // frame_size = only the spill area (NOT the Alloc sizes, since each
+        // Alloc instruction does its own SUB SP)
+        // Compute the spill-only portion:
+        let mut alloc_total: u32 = 0;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Alloc { size, .. } = instr {
+                    let aligned = (*size).div_ceil(16) * 16;
+                    alloc_total += aligned;
+                }
+            }
+        }
+        // Spill area = total frame - alloc area
+        let spill_area = if aligned_stack > alloc_total {
+            aligned_stack - alloc_total
+        } else {
+            // Minimal 16-byte reservation for safety
+            16
+        };
+        let spill_area_aligned = (spill_area + 15) & !15;
+        self.frame_size = spill_area_aligned;
+        if spill_area_aligned > 0 {
+            if spill_area_aligned <= 4095 {
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(spill_area_aligned as u16),
+                })?;
+            } else {
+                self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Reg {
+                        reg: Register::X9,
+                        shift: None,
+                    },
+                })?;
+            }
+        }
 
         // Emit each basic block.
         for block in &func.blocks {
@@ -1428,18 +1493,30 @@ impl Emitter {
                         })?;
                     }
                 }
-                // Use the same frame size computed in the prologue
-                let frame_size = self.frame_size;
+                // Restore SP to point to the saved FP/LR pair.
+                // X29 was set to SP right after the prologue's SUB SP, SP, #16
+                // and STP X29, X30, [SP]. So X29 points to the FP/LR save area.
+                // Using MOV SP, X29 (via ADD SP, X29, #0) is the most robust
+                // way to restore SP regardless of how many Alloc instructions
+                // modified it during the function body.
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X29,
+                    rm: Operand::Imm12(0),
+                })?;
+                // FP/LR were stored at [SP] after the prologue's SUB SP, SP, #16.
+                // After the ADD above, SP points back to the FP/LR save area.
+                // Load from [SP, #0], then restore SP by adding 16.
                 self.emit_instruction(Instruction::LDP {
                     rt1: Register::X29,
                     rt2: Register::X30,
                     rn: Register::SP,
-                    offset: frame_size as i32, // load FP/LR from top of frame
+                    offset: 0,
                 })?;
                 self.emit_instruction(Instruction::ADD {
                     rd: Register::SP,
                     rn: Register::SP,
-                    rm: Operand::Imm12((frame_size + 16) as u16), // restore SP
+                    rm: Operand::Imm12(16),
                 })?;
                 self.emit_instruction(Instruction::RET { rn: None })?;
             }
@@ -2304,15 +2381,12 @@ impl Emitter {
 
             // ── Store ──
             IRInstr::Store { value, addr, offset, ty } => {
-                // Load address into X10 FIRST (before value), because
-                // ss_load_from_slot uses X16 as scratch when dst != X16,
-                // which would clobber a value previously loaded into X16.
+                // Load address into X10 first (may clobber X16 internally)
                 self.ss_load_value(addr, Register::X10, slots)?;
-                // Load value into X15 (not X9/X16 — emit_store uses X9 for
-                // address computation, and ss_load_from_slot uses X16 as
-                // scratch; X15 is safe from both).
-                self.ss_load_value(value, Register::X15, slots)?;
-                self.emit_store(Register::X15, Register::X10, *offset, ty)?;
+                // Load value into X11 (not X9: emit_store uses X9 for large offsets;
+                // not X16: ss_load_from_slot(X10,…) clobbers X16)
+                self.ss_load_value(value, Register::X11, slots)?;
+                self.emit_store(Register::X11, Register::X10, *offset, ty)?;
             }
 
             // ── BinOp (generic) ──
@@ -3427,327 +3501,6 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime I/O functions for Linux executables
-// ---------------------------------------------------------------------------
-
-/// Runtime I/O function relocation (for intra-runtime references like hex_table).
-struct RuntimeReloc {
-    offset: u64,    // byte offset within text_section of the relocation site
-    target: String, // name of the target symbol
-}
-
-/// Append runtime I/O functions (write_stdout, print_hex, print_int) to the text section.
-/// Registers them in function_offsets so call relocations from user code can resolve.
-fn append_runtime_io(
-    text_section: &mut Vec<u8>,
-    function_offsets: &mut HashMap<String, u64>,
-    function_sizes: &mut HashMap<String, u64>,
-    backend: BackendKind,
-) -> Vec<RuntimeReloc> {
-    let mut relocs = Vec::new();
-    match backend {
-        BackendKind::AArch64 => {
-            // ARM64 Linux syscall I/O runtime
-            // Each instruction is 4 bytes, encoded as u32 little-endian
-
-            // __vuma_write_stdout(ptr: x0, len: x1)
-            // mov x2, x1; mov x1, x0; mov x0, #1; mov x8, #64; svc #0; ret
-            let write_stdout_offset = text_section.len() as u64;
-            let write_stdout_code: Vec<u32> = vec![
-                0xAA0103E2, // mov x2, x1
-                0xAA0003E1, // mov x1, x0
-                0xD2800020, // mov x0, #1
-                0xD2800808, // mov x8, #64
-                0xD4000001, // svc #0
-                0xD65F03C0, // ret
-            ];
-            for &word in &write_stdout_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let ws_size = (write_stdout_code.len() as u64) * 4;
-            for name in &["print_buf", "write_stdout", "__vuma_write_stdout"] {
-                function_offsets.insert(name.to_string(), write_stdout_offset);
-                function_sizes.insert(name.to_string(), ws_size);
-            }
-
-            // __vuma_print_hex(ptr: x0, len: x1)
-            // Converts each byte to 2 hex chars and writes to stdout via sys_write.
-            // Uses per-byte sys_write(2 hex chars) + final newline sys_write.
-            let print_hex_offset = text_section.len() as u64;
-            let print_hex_code: Vec<u32> = vec![
-                0xA9BD7BFD, // stp x29, x30, [sp, #-48]!
-                0x910003FD, // add x29, sp, #0
-                0xA90153F3, // stp x19, x20, [sp, #16]
-                0xA9025BF5, // stp x21, x22, [sp, #32]
-                0xAA0003F3, // mov x19, x0 (ptr)
-                0xAA0103F4, // mov x20, x1 (len)
-                0xD2800015, // mov x21, #0 (index)
-                // .Lhex_loop:
-                0xEB1402BF, // cmp x21, x20
-                0x540002AA, // b.ge .Lhex_done (imm19=21)
-                0x38756A69, // ldrb w9, [x19, x21] (register offset, UXTX)
-                0x53047D2A, // lsr w10, w9, #4 (high nibble)
-                0x1100C14B, // add w11, w10, #48 ('0'+nibble)
-                0x7100255F, // cmp w10, #9
-                0x5400004D, // b.le .Lhigh_ok (imm19=2, skip ADD)
-                0x11009D6B, // add w11, w11, #39 (adjust to 'a')
-                // .Lhigh_ok:
-                0x3900A3EB, // strb w11, [sp, #40]
-                0x12000D2A, // and w10, w9, #0xF (low nibble)
-                0x1100C14B, // add w11, w10, #48
-                0x7100255F, // cmp w10, #9
-                0x5400004D, // b.le .Llow_ok (imm19=2, skip ADD)
-                0x11009D6B, // add w11, w11, #39
-                // .Llow_ok:
-                0x3900A7EB, // strb w11, [sp, #41]
-                0xD2800020, // mov x0, #1 (fd=stdout)
-                0x9100A3E1, // add x1, sp, #40 (buf)
-                0xD2800042, // mov x2, #2 (len=2)
-                0xD2800808, // mov x8, #64 (sys_write)
-                0xD4000001, // svc #0
-                0x910006B5, // add x21, x21, #1
-                0x17FFFFEB, // b .Lhex_loop (imm26=-21, back to CMP)
-                // .Lhex_done:
-                0xD2800149, // mov x9, #10 ('\n')
-                0x3900A3E9, // strb w9, [sp, #40]
-                0xD2800020, // mov x0, #1
-                0x9100A3E1, // add x1, sp, #40
-                0xD2800022, // mov x2, #1
-                0xD2800808, // mov x8, #64
-                0xD4000001, // svc #0
-                0xA9425BF5, // ldp x21, x22, [sp, #32]
-                0xA94153F3, // ldp x19, x20, [sp, #16]
-                0xA8C37BFD, // ldp x29, x30, [sp], #48
-                0xD65F03C0, // ret
-            ];
-            for &word in &print_hex_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let ph_size = (print_hex_code.len() as u64) * 4;
-            for name in &["print_hex", "__vuma_print_hex"] {
-                function_offsets.insert(name.to_string(), print_hex_offset);
-                function_sizes.insert(name.to_string(), ph_size);
-            }
-
-            // __vuma_print_int(val: x0)
-            // For now, just call sys_write with a fixed string "N\n" — too complex
-            // Let's just make print_int a no-op that returns 0 on ARM64
-            let print_int_offset = text_section.len() as u64;
-            let print_int_code: Vec<u32> = vec![
-                0xD2800000, // mov x0, #0
-                0xD65F03C0, // ret
-            ];
-            for &word in &print_int_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let pi_size = (print_int_code.len() as u64) * 4;
-            for name in &["print_int", "print", "__vuma_print_int"] {
-                function_offsets.insert(name.to_string(), print_int_offset);
-                function_sizes.insert(name.to_string(), pi_size);
-            }
-        }
-        BackendKind::RiscV64 => {
-            // RISC-V 64 Linux syscall I/O runtime
-            // sys_write: a7=64, a0=fd, a1=buf, a2=count
-
-            // __vuma_write_stdout(ptr: a0, len: a1)
-            let write_stdout_offset = text_section.len() as u64;
-            let ws_code: Vec<u32> = vec![
-                0x00B61513, // mv a2, a1      (a2 = len)
-                0x00A59593, // mv a1, a0      (a1 = ptr)
-                0x00100513, // li a0, 1       (fd = stdout)
-                0x04000893, // li a7, 64      (sys_write)
-                0x00000073, // ecall
-                0x00008067, // ret
-            ];
-            for &word in &ws_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let ws_size = (ws_code.len() as u64) * 4;
-            for name in &["print_buf", "write_stdout", "__vuma_write_stdout"] {
-                function_offsets.insert(name.to_string(), write_stdout_offset);
-                function_sizes.insert(name.to_string(), ws_size);
-            }
-
-            // __vuma_print_hex(ptr: a0, len: a1)
-            // Converts each byte to 2 hex chars and writes to stdout via sys_write.
-            // Uses per-byte sys_write(2 hex chars) + final newline sys_write.
-            let print_hex_offset = text_section.len() as u64;
-            let print_hex_code: Vec<u32> = vec![
-                0xFD010113, // addi sp, sp, -48
-                0x00813023, // sd s0, 0(sp)
-                0x00913423, // sd s1, 8(sp)
-                0x01213823, // sd s2, 16(sp)
-                0x02113023, // sd ra, 32(sp)
-                0x00050413, // mv s0, a0 (ptr)
-                0x00058493, // mv s1, a1 (len)
-                0x00000913, // li s2, 0 (index)
-                // .Lhex_loop:
-                0x04995A63, // bge s2, s1, .Lhex_done
-                0x01240E33, // add t3, s0, s2
-                0x000E4283, // lbu t0, 0(t3)
-                0x0042D313, // srli t1, t0, 4 (high nibble)
-                0x03030393, // addi t2, t1, 48 ('0'+nibble)
-                0x00A00E13, // li t3, 10
-                0x01C34263, // blt t1, t3, .Lhigh_digit
-                0x02738393, // addi t2, t2, 39 (adjust to 'a')
-                // .Lhigh_digit:
-                0x02710423, // sb t2, 40(sp)
-                0x00F2F313, // andi t1, t0, 15 (low nibble)
-                0x03030393, // addi t2, t1, 48
-                0x00A00E13, // li t3, 10
-                0x01C34263, // blt t1, t3, .Llow_digit
-                0x02738393, // addi t2, t2, 39
-                // .Llow_digit:
-                0x027104A3, // sb t2, 41(sp)
-                0x00100513, // li a0, 1 (stdout)
-                0x02810593, // addi a1, sp, 40
-                0x00200613, // li a2, 2
-                0x04000893, // li a7, 64 (sys_write)
-                0x00000073, // ecall
-                0x00190913, // addi s2, s2, 1
-                0xFA9FF06F, // j .Lhex_loop
-                // .Lhex_done:
-                0x00A00293, // li t0, 10 ('\n')
-                0x02510423, // sb t0, 40(sp)
-                0x00100513, // li a0, 1
-                0x02810593, // addi a1, sp, 40
-                0x00100613, // li a2, 1
-                0x04000893, // li a7, 64
-                0x00000073, // ecall
-                0x00013403, // ld s0, 0(sp)
-                0x00813483, // ld s1, 8(sp)
-                0x01013903, // ld s2, 16(sp)
-                0x02013083, // ld ra, 32(sp)
-                0x03010113, // addi sp, sp, 48
-                0x00008067, // ret
-            ];
-            for &word in &print_hex_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let ph_size = (print_hex_code.len() as u64) * 4;
-            for name in &["print_hex", "__vuma_print_hex"] {
-                function_offsets.insert(name.to_string(), print_hex_offset);
-                function_sizes.insert(name.to_string(), ph_size);
-            }
-
-            // print_int: stub that returns 0
-            let print_int_offset = text_section.len() as u64;
-            let pi_code: Vec<u32> = vec![
-                0x00000513, // li a0, 0
-                0x00008067, // ret
-            ];
-            for &word in &pi_code {
-                text_section.extend_from_slice(&word.to_le_bytes());
-            }
-            let pi_size = (pi_code.len() as u64) * 4;
-            for name in &["print_int", "print", "__vuma_print_int"] {
-                function_offsets.insert(name.to_string(), print_int_offset);
-                function_sizes.insert(name.to_string(), pi_size);
-            }
-        }
-        _ => {
-            // No runtime I/O support for other backends yet
-        }
-    }
-    relocs
-}
-
-/// Fill in the _start stub for Linux executables.
-/// The stub calls main() and then exits with the return value.
-fn fill_start_stub(
-    text_section: &mut Vec<u8>,
-    stub_size: u64,
-    function_offsets: &HashMap<String, u64>,
-    backend: BackendKind,
-) {
-    match backend {
-        BackendKind::AArch64 => {
-            // ARM64 _start stub (4 instructions = 16 bytes):
-            //   bl main          ; call main (return value in x0)
-            //   mov x1, x0       ; x1 = exit code (arg2 to sys_exit2... wait)
-            //   Actually: sys_exit(status): x8=93, x0=status
-            //   So: bl main; mov x8, #93; svc #0
-            // But we also need to set up x0 as the exit status from main's return value.
-            // bl main → x0 = return value
-            // mov x8, #93 → syscall number for exit
-            // svc #0 → syscall
-
-            // Find main function offset — search for "main" or any key containing "main"
-            let main_offset = function_offsets.get("main").copied()
-                .or_else(|| function_offsets.get("fn_main").copied())
-                .or_else(|| {
-                    // Search for any function whose name contains "main"
-                    function_offsets.iter()
-                        .find(|(name, _)| name.contains("main"))
-                        .map(|(_, &off)| off)
-                })
-                .unwrap_or(16);
-
-            // BL offset = target - (PC + 4). BL is at offset 0 in text section,
-            // so PC after BL fetch = 4. imm26 = (target - 4) >> 2.
-            let bl_offset = main_offset as i64 - 4; // BL from offset 0 to main_offset
-            // BL encoding: bits[31:26] = 100101, bits[25:0] = signed imm26
-            // offset = imm26 * 4
-            let imm26 = (bl_offset >> 2) as i32 & 0x03FFFFFF;
-            let bl_instr = (0x94000000u32 | (imm26 as u32 & 0x03FFFFFF)) as u32;
-
-            let code: Vec<u32> = vec![
-                bl_instr,       // bl main
-                0xD2800BA8,     // mov x8, #93 (sys_exit)
-                0xD4000001,     // svc #0
-                0xD65F03C0,     // ret (shouldn't reach here)
-            ];
-            assert_eq!(code.len() * 4, stub_size as usize);
-            for (i, &word) in code.iter().enumerate() {
-                let offset = i * 4;
-                text_section[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
-            }
-        }
-        BackendKind::RiscV64 => {
-            // RISC-V _start stub (6 instructions = 24 bytes):
-            //   call main        ; auipc + jalr (2 instructions)
-            //   li a7, 93        ; sys_exit
-            //   ecall
-            //   (shouldn't reach) ret
-
-            let main_offset = function_offsets.get("main").copied()
-                .or_else(|| function_offsets.get("fn_main").copied())
-                .or_else(|| {
-                    function_offsets.iter()
-                        .find(|(name, _)| name.contains("main"))
-                        .map(|(_, &off)| off)
-                })
-                .unwrap_or(24);
-            // RISC-V CALL = AUIPC + JALR pair
-            // call main: auipc ra, %pcrel_hi(main); jalr ra, %pcrel_lo(main)(ra)
-            // Simplified: use direct offset since we know the exact layout
-            let offset = main_offset as i32; // offset from start of text_section (0)
-            let upper = (offset + 0x800) >> 12; // auipc immediate
-            let lower = offset - (upper << 12); // jalr immediate
-
-            let auipc = 0x00000097u32 | ((upper as u32) & 0xFFFFF) << 12; // auipc ra, upper
-            let jalr = 0x000080E7u32 | ((lower as u32) & 0xFFF) << 20;   // jalr ra, lower(ra)
-
-            let code: Vec<u32> = vec![
-                auipc,          // auipc ra, %pcrel_hi(main)
-                jalr,           // jalr ra, %pcrel_lo(main)(ra)
-                0x05D00893,     // li a7, 93 (sys_exit)
-                0x00000073,     // ecall
-                0x00008067,     // ret (fallback)
-                0x00008067,     // ret (padding)
-            ];
-            assert_eq!(code.len() * 4, stub_size as usize);
-            for (i, &word) in code.iter().enumerate() {
-                let offset = i * 4;
-                text_section[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
-            }
-        }
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Top-level emission functions
 // ---------------------------------------------------------------------------
 
@@ -3775,23 +3528,6 @@ pub fn emit_elf(
     let mut function_sizes: HashMap<String, u64> = HashMap::new();
     let mut all_call_relocs: Vec<CallRelocation> = Vec::new();
 
-    // For Linux executables on non-x86_64 backends, prepend a _start stub
-    // that calls main() and then exits via syscall.
-    let start_stub_size = if !is_obj && config.target == Target::Linux {
-        match config.backend {
-            BackendKind::AArch64 => 16u64,  // 4 ARM64 instructions
-            BackendKind::RiscV64 => 24u64,  // 6 RISC-V instructions
-            _ => 0u64,
-        }
-    } else {
-        0u64
-    };
-
-    // Reserve space for _start stub
-    for _ in 0..start_stub_size {
-        text_section.push(0);
-    }
-
     for func in functions {
         let func_offset = text_section.len() as u64;
         function_offsets.insert(func.name.clone(), func_offset);
@@ -3803,21 +3539,6 @@ pub fn emit_elf(
         for word in code {
             text_section.extend_from_slice(&word.to_le_bytes());
         }
-    }
-
-    // ---- Step 1b: Append runtime I/O functions for Linux executables ----
-    let runtime_start = text_section.len() as u64;
-    let runtime_relocs = if !is_obj && config.target == Target::Linux {
-        append_runtime_io(&mut text_section, &mut function_offsets, &mut function_sizes, config.backend)
-    } else {
-        Vec::new()
-    };
-
-    // ---- Step 1c: Fill in _start stub ----
-    if start_stub_size > 0 {
-        fill_start_stub(&mut text_section, start_stub_size, &function_offsets, config.backend);
-        // Also register _start as the entry point
-        function_offsets.insert("_start".to_string(), 0);
     }
 
     // ---- Step 2: Handle inter-function call relocations ----
@@ -3855,7 +3576,7 @@ pub fn emit_elf(
     let text_vaddr = if is_obj { 0 } else { base_addr + text_offset };
 
     let entry_offset = function_offsets
-        .get(if start_stub_size > 0 { "_start" } else { &config.entry_name })
+        .get(&config.entry_name)
         .copied()
         .unwrap_or(0);
     let entry_point = if is_obj { 0 } else { base_addr + entry_offset };

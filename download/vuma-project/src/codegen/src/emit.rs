@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 
-use crate::arm64::{Condition, Instruction, Operand, Register};
+use crate::arm64::{Instruction, Operand, Register};
 use crate::ir::*;
 use crate::regalloc::RegAllocator;
 use crate::CodegenError;
@@ -346,19 +346,18 @@ impl Emitter {
         })?;
 
         // MOV X29, SP (set frame pointer)
-        // When rm=SP, this encodes as ADD X29, SP, #0
-        self.emit_instruction(Instruction::ADD {
+        self.emit_instruction(Instruction::MOV {
             rd: Register::X29,
-            rn: Register::SP,
-            rm: Operand::Imm12(0),
+            rm: Register::SP,
         })?;
 
-        // Compute frame size: count unique vregs to estimate spill slots needed,
-        // plus account for Alloc instructions.
-        let frame_size = self.compute_frame_size(func);
-        if frame_size > 0 {
-            self.emit_large_sub_sp(frame_size)?;
-        }
+        // Fixed 64-byte frame.  TODO: compute from register allocator spill count.
+        let aligned_stack = 64u16;
+        self.emit_instruction(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(aligned_stack),
+        })?;
 
         // Emit each basic block.
         for block in &func.blocks {
@@ -370,89 +369,6 @@ impl Emitter {
         self.apply_fixups()?;
 
         Ok(self.code.clone())
-    }
-
-    /// Compute the frame size needed for a function, including spill slots
-    /// and allocation space.
-    fn compute_frame_size(&self, func: &IRFunction) -> u32 {
-        // Count unique vreg IDs used in this function
-        let mut max_vreg: u32 = 0;
-        let mut alloc_total: u32 = 0;
-        for block in &func.blocks {
-            for instr in &block.instructions {
-                match instr {
-                    IRInstr::Alloc { size, .. } => {
-                        let aligned = ((*size as u32 + 15) / 16) * 16;
-                        alloc_total += aligned;
-                    }
-                    _ => {}
-                }
-                for vreg_id in instr.defined_regs() {
-                    if vreg_id > max_vreg {
-                        max_vreg = vreg_id;
-                    }
-                }
-                for vreg_id in instr.used_regs() {
-                    if vreg_id > max_vreg {
-                        max_vreg = vreg_id;
-                    }
-                }
-            }
-        }
-
-        // Available registers: 16 caller-saved + 10 callee-saved = 26
-        // If max_vreg > 26, we need spill slots
-        let available_regs: u32 = 26;
-        let spill_count = if max_vreg > available_regs {
-            max_vreg - available_regs
-        } else {
-            0
-        };
-        let spill_size = spill_count * 8;
-
-        // Total frame = alloc space + spill space, aligned to 16 bytes
-        let total = alloc_total + spill_size;
-        ((total + 15) / 16) * 16
-    }
-
-    /// Emit a SUB SP, SP, #imm that handles large immediate values.
-    /// If the value fits in Imm12 (0..4096), use a single SUB.
-    /// Otherwise, load into X16 and use SUB SP, SP, X16.
-    fn emit_large_sub_sp(&mut self, size: u32) -> Result<()> {
-        if size <= 4095 {
-            self.emit_instruction(Instruction::SUB {
-                rd: Register::SP,
-                rn: Register::SP,
-                rm: Operand::Imm12(size as u16),
-            })?;
-        } else {
-            self.emit_load_immediate(Register::X16, size as i64)?;
-            self.emit_instruction(Instruction::SUB {
-                rd: Register::SP,
-                rn: Register::SP,
-                rm: Operand::Reg { reg: Register::X16, shift: None },
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Emit a large ADD SP, SP, #imm that handles large immediate values.
-    fn emit_large_add_sp(&mut self, size: u32) -> Result<()> {
-        if size <= 4095 {
-            self.emit_instruction(Instruction::ADD {
-                rd: Register::SP,
-                rn: Register::SP,
-                rm: Operand::Imm12(size as u16),
-            })?;
-        } else {
-            self.emit_load_immediate(Register::X16, size as i64)?;
-            self.emit_instruction(Instruction::ADD {
-                rd: Register::SP,
-                rn: Register::SP,
-                rm: Operand::Reg { reg: Register::X16, shift: None },
-            })?;
-        }
-        Ok(())
     }
 
     /// Emit instructions for a single IR basic block.
@@ -472,33 +388,24 @@ impl Emitter {
     fn emit_ir_instr(&mut self, instr: &IRInstr) -> Result<()> {
         match instr {
             IRInstr::Load { dst, addr } => {
-                // Resolve address first, then dst, to prevent dst from being
-                // spilled when resolving addr.
-                let rn = self.resolve_reg(addr)?;
                 let rt = self.resolve_reg(dst)?;
+                let rn = self.resolve_reg(addr)?;
                 self.emit_instruction(Instruction::LDR { rt, rn, offset: 0 })?;
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Store { value, addr } => {
-                // CRITICAL: resolve address first, then value.
-                // If we resolve value first, a subsequent resolve of addr might
-                // use X16 for spill/reload address computation, overwriting the
-                // value that was resolved into X16.
-                let rn = self.resolve_reg(addr)?;
                 let rt = self.resolve_reg(value)?;
+                let rn = self.resolve_reg(addr)?;
                 self.emit_instruction(Instruction::STR { rt, rn, offset: 0 })?;
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::BinOp { op, dst, lhs, rhs } => {
                 self.emit_binop(*op, dst, lhs, rhs)?;
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::UnaryOp { op, dst, operand } => {
-                let rn = self.resolve_reg(operand)?;
                 let rd = self.resolve_reg(dst)?;
+                let rn = self.resolve_reg(operand)?;
                 match op {
                     UnaryOpKind::Neg => {
                         self.emit_instruction(Instruction::SUB {
@@ -516,96 +423,23 @@ impl Emitter {
                         self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
                     }
                 }
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Call { dst, func: target_name, args } => {
-                // CRITICAL: resolve all argument sources BEFORE moving any to
-                // arg registers, to prevent overwriting.  For immediates, use
-                // different scratch registers (X9, X10, X11, ...) to avoid
-                // overwriting.
-                const ARG_REGS: [Register; 8] = [
-                    Register::X0, Register::X1, Register::X2, Register::X3,
-                    Register::X4, Register::X5, Register::X6, Register::X7,
-                ];
-                // Scratch registers for loading immediate arguments.
-                // Must not overlap with arg regs (X0-X7) or X9 (used by resolve_reg for Imm).
-                const SCRATCH_REGS: [Register; 4] = [
-                    Register::X11, Register::X12, Register::X13, Register::X14,
-                ];
-
-                let mut src_regs: Vec<Register> = Vec::new();
-                let arg_count = args.len().min(8);
-                let mut scratch_idx = 0usize;
-
-                // Resolve all source registers first
+                // Move arguments into X0–X7.
                 for (i, arg) in args.iter().enumerate() {
                     if i >= 8 { break; }
-                    match arg {
-                        IRValue::Immediate(v) => {
-                            // Use a dedicated scratch register for each immediate
-                            // to avoid X9 being overwritten by subsequent immediates.
-                            let scratch = SCRATCH_REGS[scratch_idx % SCRATCH_REGS.len()];
-                            scratch_idx += 1;
-                            self.emit_load_immediate(scratch, *v)?;
-                            src_regs.push(scratch);
-                        }
-                        IRValue::Address(addr) => {
-                            let scratch = SCRATCH_REGS[scratch_idx % SCRATCH_REGS.len()];
-                            scratch_idx += 1;
-                            self.emit_load_immediate(scratch, *addr as i64)?;
-                            src_regs.push(scratch);
-                        }
-                        IRValue::Register(_) => {
-                            let src = self.resolve_reg(arg)?;
-                            src_regs.push(src);
-                        }
-                        IRValue::Label(_) => {
-                            return Err(CodegenError::EncodingError(
-                                "label value cannot be used as call argument".into(),
-                            ));
-                        }
-                    }
-                }
-
-                // Now move sources to argument registers, handling cycles.
-                // Use a simple two-pass approach: first move any source that
-                // doesn't conflict with a destination, then handle conflicts
-                // using X16 as a temp.
-                let mut moved = vec![false; arg_count];
-                
-                // First pass: move non-conflicting sources
-                for i in 0..arg_count {
-                    let dst_reg = ARG_REGS[i];
-                    let src = src_regs[i];
+                    let src = self.resolve_reg(arg)?;
+                    let dst_reg = match i {
+                        0 => Register::X0, 1 => Register::X1,
+                        2 => Register::X2, 3 => Register::X3,
+                        4 => Register::X4, 5 => Register::X5,
+                        6 => Register::X6, 7 => Register::X7,
+                        _ => unreachable!(),
+                    };
                     if src != dst_reg {
-                        // Check if this source register is needed as a destination
-                        // by a later argument (potential cycle)
-                        let mut is_dst_later = false;
-                        for j in (i+1)..arg_count {
-                            if src == ARG_REGS[j] && !moved[j] {
-                                is_dst_later = true;
-                                break;
-                            }
-                        }
-                        if !is_dst_later {
-                            self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
-                            moved[i] = true;
-                        }
-                    } else {
-                        moved[i] = true;
+                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
                     }
-                }
-
-                // Second pass: handle remaining moves (with potential cycles)
-                for i in 0..arg_count {
-                    if moved[i] { continue; }
-                    let dst_reg = ARG_REGS[i];
-                    let src = src_regs[i];
-                    // Use X16 as temp to break the cycle
-                    self.emit_instruction(Instruction::MOV { rd: Register::X16, rm: src })?;
-                    self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: Register::X16 })?;
-                    moved[i] = true;
                 }
 
                 // BL — record a relocation for later patching.
@@ -622,29 +456,17 @@ impl Emitter {
                         self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
                     }
                 }
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Alloc { dst, size } => {
                 let rd = self.resolve_reg(dst)?;
-                // Use ADD rd, SP, #0 instead of MOV rd, SP (MOV with SP
-                // operand is ORR which treats Rm=31 as XZR, giving zero).
-                self.emit_instruction(Instruction::ADD {
-                    rd,
-                    rn: Register::SP,
-                    rm: Operand::Imm12(0),
-                })?;
+                self.emit_instruction(Instruction::MOV { rd, rm: Register::SP })?;
                 let aligned = ((*size as u32 + 15) / 16) * 16;
-                if aligned <= 4095 {
-                    self.emit_instruction(Instruction::SUB {
-                        rd: Register::SP,
-                        rn: Register::SP,
-                        rm: Operand::Imm12(aligned as u16),
-                    })?;
-                } else {
-                    self.emit_large_sub_sp(aligned)?;
-                }
-                self.reg_alloc.unpin_all();
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(aligned as u16),
+                })?;
             }
 
             IRInstr::Free { ptr: _ } => {
@@ -652,13 +474,12 @@ impl Emitter {
             }
 
             IRInstr::Cast { kind, dst, src } => {
-                let rn = self.resolve_reg(src)?;
                 let rd = self.resolve_reg(dst)?;
+                let rn = self.resolve_reg(src)?;
                 if rd != rn {
                     self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
                 }
                 let _ = kind; // TODO: proper UBFM/SBFM for zext/sext/trunc
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Phi { .. } => {
@@ -668,12 +489,11 @@ impl Emitter {
             IRInstr::GetAddress { dst, name: _ } => {
                 let rd = self.resolve_reg(dst)?;
                 self.emit_instruction(Instruction::MOVZ { rd, imm16: 0, shift: 0 })?;
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Offset { dst, base, offset } => {
-                let rn = self.resolve_reg(base)?;
                 let rd = self.resolve_reg(dst)?;
+                let rn = self.resolve_reg(base)?;
                 let rm = match offset {
                     IRValue::Immediate(v) => {
                         if *v >= 0 && *v <= 4095 {
@@ -687,66 +507,33 @@ impl Emitter {
                     _ => Operand::Reg { reg: self.resolve_reg(offset)?, shift: None },
                 };
                 self.emit_instruction(Instruction::ADD { rd, rn, rm })?;
-                self.reg_alloc.unpin_all();
             }
 
             // ── Dedicated arithmetic — delegate to BinOp ──
             IRInstr::Add { dst, lhs, rhs } => {
                 self.emit_binop(BinOpKind::Add, dst, lhs, rhs)?;
-                self.reg_alloc.unpin_all();
             }
             IRInstr::Sub { dst, lhs, rhs } => {
                 self.emit_binop(BinOpKind::Sub, dst, lhs, rhs)?;
-                self.reg_alloc.unpin_all();
             }
             IRInstr::Mul { dst, lhs, rhs } => {
                 self.emit_binop(BinOpKind::Mul, dst, lhs, rhs)?;
-                self.reg_alloc.unpin_all();
             }
             IRInstr::Div { dst, lhs, rhs } => {
                 self.emit_binop(BinOpKind::SDiv, dst, lhs, rhs)?;
-                self.reg_alloc.unpin_all();
             }
 
             // ── Comparison instruction ──
-            IRInstr::Cmp { kind, dst, lhs, rhs } => {
-                // Emit CMP first, then CSET (= CSINC Rd, XZR, XZR, invert(cond))
-                let rn = self.resolve_reg(lhs)?;
-                match rhs {
-                    IRValue::Immediate(v) => {
-                        if *v >= 0 && *v <= 4095 {
-                            self.emit_instruction(Instruction::CMP {
-                                rn,
-                                rm: Operand::Imm12(*v as u16),
-                            })?;
-                        } else {
-                            let temp = Register::X9;
-                            self.emit_load_immediate(temp, *v)?;
-                            self.emit_instruction(Instruction::CMP {
-                                rn,
-                                rm: Operand::Reg { reg: temp, shift: None },
-                            })?;
-                        }
-                    }
-                    _ => {
-                        let rm_reg = self.resolve_reg(rhs)?;
-                        self.emit_instruction(Instruction::CMP {
-                            rn,
-                            rm: Operand::Reg { reg: rm_reg, shift: None },
-                        })?;
-                    }
-                }
+            IRInstr::Cmp { kind: _, dst, lhs, rhs } => {
                 let rd = self.resolve_reg(dst)?;
-                // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
-                let cond = Self::cmp_kind_to_condition(*kind);
-                let inv_cond = Self::invert_condition(cond);
-                self.emit_instruction(Instruction::CSINC {
-                    rd,
-                    rn: Register::XZR,
-                    rm: Register::XZR,
-                    cond: inv_cond,
+                let rn = self.resolve_reg(lhs)?;
+                let rm = self.resolve_reg(rhs)?;
+                self.emit_instruction(Instruction::CMP {
+                    rn,
+                    rm: Operand::Reg { reg: rm, shift: None },
                 })?;
-                self.reg_alloc.unpin_all();
+                // TODO: CSET Rd, cond.  Placeholder MOV for now.
+                self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
             }
 
             // ── Instruction-level control flow ──
@@ -765,7 +552,6 @@ impl Emitter {
                         self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
                     }
                 }
-                self.reg_alloc.unpin_all();
             }
 
             IRInstr::Branch { target } => {
@@ -776,43 +562,20 @@ impl Emitter {
 
             IRInstr::CondBranch { cond, true_target, false_target } => {
                 let rt = self.resolve_reg(cond)?;
-                // CBNZ: branch to true_target if cond != 0
-                let fixup_cbnz = self.code.len();
-                self.fixups.push((fixup_cbnz, true_target.clone()));
+                let fixup_cbz = self.code.len();
+                self.fixups.push((fixup_cbz, false_target.clone()));
                 self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
-                // Fall-through: B to false_target
                 let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, false_target.clone()));
+                self.fixups.push((fixup_b, true_target.clone()));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
-                self.reg_alloc.unpin_all();
             }
         }
         Ok(())
     }
 
-    /// Convert a CmpKind to an ARM64 Condition code.
-    fn cmp_kind_to_condition(kind: CmpKind) -> Condition {
-        match kind {
-            CmpKind::Eq => Condition::EQ,
-            CmpKind::Ne => Condition::NE,
-            CmpKind::SLt => Condition::LT,
-            CmpKind::SLe => Condition::LE,
-            CmpKind::SGt => Condition::GT,
-            CmpKind::SGe => Condition::GE,
-            CmpKind::ULt => Condition::LO,  // CC = LO for unsigned less-than
-            CmpKind::ULe => Condition::LS,
-            CmpKind::UGt => Condition::HI,
-            CmpKind::UGe => Condition::HS,  // CS = HS for unsigned greater-or-equal
-        }
-    }
-
-    /// Invert an ARM64 condition code (for CSET which uses inverted condition).
-    fn invert_condition(cond: Condition) -> Condition {
-        cond.invert()
-    }
-
     /// Emit a binary operation (shared by `BinOp` and dedicated `Add`/`Sub`/…).
     fn emit_binop(&mut self, op: BinOpKind, dst: &IRValue, lhs: &IRValue, rhs: &IRValue) -> Result<()> {
+        let rd = self.resolve_reg(dst)?;
         let rn = self.resolve_reg(lhs)?;
         let rm = match rhs {
             IRValue::Immediate(v) => {
@@ -826,7 +589,6 @@ impl Emitter {
             }
             _ => Operand::Reg { reg: self.resolve_reg(rhs)?, shift: None },
         };
-        let rd = self.resolve_reg(dst)?;
 
         match op {
             BinOpKind::Add => { self.emit_instruction(Instruction::ADD { rd, rn, rm })?; }
@@ -876,35 +638,12 @@ impl Emitter {
                     rn,
                     rm: Operand::Reg { reg: rm_reg, shift: None },
                 })?;
-                // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
-                let cond = Self::binop_to_condition(op);
-                let inv_cond = Self::invert_condition(cond);
-                self.emit_instruction(Instruction::CSINC {
-                    rd,
-                    rn: Register::XZR,
-                    rm: Register::XZR,
-                    cond: inv_cond,
-                })?;
+                // TODO: CSET using condition code.  Placeholder for now.
+                log::warn!("comparison BinOp {:?} not fully lowered, emitting placeholder", op);
+                self.emit_instruction(Instruction::MOV { rd, rm: Register::XZR })?;
             }
         }
         Ok(())
-    }
-
-    /// Convert a BinOpKind comparison to an ARM64 Condition code.
-    fn binop_to_condition(op: BinOpKind) -> Condition {
-        match op {
-            BinOpKind::SLt => Condition::LT,
-            BinOpKind::SLe => Condition::LE,
-            BinOpKind::SGt => Condition::GT,
-            BinOpKind::SGe => Condition::GE,
-            BinOpKind::ULt => Condition::LO,
-            BinOpKind::ULe => Condition::LS,
-            BinOpKind::UGt => Condition::HI,
-            BinOpKind::UGe => Condition::HS,
-            BinOpKind::Eq => Condition::EQ,
-            BinOpKind::Ne => Condition::NE,
-            _ => Condition::AL,
-        }
     }
 
     /// Emit the block terminator.
@@ -939,12 +678,8 @@ impl Emitter {
                         self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: src })?;
                     }
                 }
-                // Epilogue: restore SP to frame pointer (X29 points to saved FP/LR).
-                // This correctly handles any Alloc SUB SP instructions that were
-                // emitted during the function body.
-                // MOV SP, X29 → ADD SP, X29, #0
                 self.emit_instruction(Instruction::ADD {
-                    rd: Register::SP, rn: Register::X29, rm: Operand::Imm12(0),
+                    rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(64),
                 })?;
                 self.emit_instruction(Instruction::LDP {
                     rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 16,
@@ -970,76 +705,21 @@ impl Emitter {
 
     fn resolve_reg(&mut self, val: &IRValue) -> Result<Register> {
         match val {
-            IRValue::Register(id) => {
-                let result = self.reg_alloc.allocate_full(*id)?;
-                let reg = result.reg;
-
-                // If a vreg was spilled to make room, emit STR to save its value
-                if let (Some(_spilled_vreg), Some(spilled_reg), Some(spill_slot)) =
-                    (result.spill_vreg, result.spill_reg, result.spill_slot)
-                {
-                    // Emit: STR spilled_reg, [X29, #-(8 + spill_slot * 8)]
-                    // Use X16 for address computation (NOT X9, which is used for
-                    // loading immediates).
-                    let offset = 8i64 + (spill_slot as i64) * 8;
-                    self.emit_spill_store(spilled_reg, offset)?;
-                }
-
-                // If the requested vreg was reloaded from a spill slot, emit LDR
-                if let Some(reload_slot) = result.reload_slot {
-                    // Emit: LDR reg, [X29, #-(8 + reload_slot * 8)]
-                    let offset = 8i64 + (reload_slot as i64) * 8;
-                    self.emit_spill_load(reg, offset)?;
-                }
-
-                Ok(reg)
-            }
+            IRValue::Register(id) => self.reg_alloc.allocate(*id),
             IRValue::Immediate(v) => {
                 let temp = Register::X9;
                 self.emit_load_immediate(temp, *v)?;
-                self.reg_alloc.pin(temp);
                 Ok(temp)
             }
             IRValue::Address(addr) => {
                 let temp = Register::X10;
                 self.emit_load_immediate(temp, *addr as i64)?;
-                self.reg_alloc.pin(temp);
                 Ok(temp)
             }
             IRValue::Label(_) => {
                 Err(CodegenError::EncodingError("label value cannot be resolved to a register".into()))
             }
         }
-    }
-
-    /// Emit a spill store: STR src, [X29, #-offset]
-    /// Uses X16 for address computation to avoid conflict with X9 (immediates).
-    fn emit_spill_store(&mut self, src: Register, offset: i64) -> Result<()> {
-        // Compute address: X16 = X29 - offset
-        self.emit_load_immediate(Register::X16, -offset)?;
-        self.emit_instruction(Instruction::ADD {
-            rd: Register::X16,
-            rn: Register::X29,
-            rm: Operand::Reg { reg: Register::X16, shift: None },
-        })?;
-        // STR src, [X16]
-        self.emit_instruction(Instruction::STR { rt: src, rn: Register::X16, offset: 0 })?;
-        Ok(())
-    }
-
-    /// Emit a spill load: LDR dst, [X29, #-offset]
-    /// Uses X16 for address computation to avoid conflict with X9 (immediates).
-    fn emit_spill_load(&mut self, dst: Register, offset: i64) -> Result<()> {
-        // Compute address: X16 = X29 - offset
-        self.emit_load_immediate(Register::X16, -offset)?;
-        self.emit_instruction(Instruction::ADD {
-            rd: Register::X16,
-            rn: Register::X29,
-            rm: Operand::Reg { reg: Register::X16, shift: None },
-        })?;
-        // LDR dst, [X16]
-        self.emit_instruction(Instruction::LDR { rt: dst, rn: Register::X16, offset: 0 })?;
-        Ok(())
     }
 
     fn emit_load_immediate(&mut self, rd: Register, value: i64) -> Result<()> {

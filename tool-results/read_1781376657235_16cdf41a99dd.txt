@@ -1,0 +1,502 @@
+     1→  3933→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+     2→  3934→        let func_name = func.name.clone();
+     3→  3935→
+     4→  3936→        // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+     5→  3937→
+     6→  3938→        let mut all_vreg_ids: std::collections::HashSet<u32> =
+     7→  3939→            std::collections::HashSet::new();
+     8→  3940→        for &id in func.vregs.keys() {
+     9→  3941→            all_vreg_ids.insert(id);
+    10→  3942→        }
+    11→  3943→        for param in &func.params {
+    12→  3944→            if let Some(id) = param.as_register() {
+    13→  3945→                all_vreg_ids.insert(id);
+    14→  3946→            }
+    15→  3947→        }
+    16→  3948→        for block in &func.blocks {
+    17→  3949→            for instr in &block.instructions {
+    18→  3950→                for id in instr.defined_regs() {
+    19→  3951→                    all_vreg_ids.insert(id);
+    20→  3952→                }
+    21→  3953→                for id in instr.used_regs() {
+    22→  3954→                    all_vreg_ids.insert(id);
+    23→  3955→                }
+    24→  3956→            }
+    25→  3957→        }
+    26→  3958→        for val in &func.results {
+    27→  3959→            if let Some(id) = val.as_register() {
+    28→  3960→                all_vreg_ids.insert(id);
+    29→  3961→            }
+    30→  3962→        }
+    31→  3963→
+    32→  3964→        // Identify Alloc vregs and their sizes
+    33→  3965→        let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+    34→  3966→            std::collections::HashSet::new();
+    35→  3967→        let mut alloc_sizes: HashMap<u32, i32> = HashMap::new();
+    36→  3968→        for block in &func.blocks {
+    37→  3969→            for instr in &block.instructions {
+    38→  3970→                if let IRInstr::Alloc { dst, size } = instr {
+    39→  3971→                    if let Some(id) = dst.as_register() {
+    40→  3972→                        stack_alloc_vregs.insert(id);
+    41→  3973→                        let aligned_size = ((*size as i32 + 15) & !15) as i32;
+    42→  3974→                        alloc_sizes.insert(id, aligned_size);
+    43→  3975→                    }
+    44→  3976→                }
+    45→  3977→            }
+    46→  3978→        }
+    47→  3979→
+    48→  3980→        // ── Stack Layout ──
+    49→  3981→        let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
+    50→  3982→        let mut current_offset: i32 = 16; // skip RA+S0 save area (16 bytes)
+    51→  3983→
+    52→  3984→        let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
+    53→  3985→        alloc_vreg_ids.sort();
+    54→  3986→        for &id in &alloc_vreg_ids {
+    55→  3987→            let size = alloc_sizes[&id];
+    56→  3988→            current_offset += size;
+    57→  3989→            alloc_offsets.insert(id, current_offset);
+    58→  3990→        }
+    59→  3991→
+    60→  3992→        let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
+    61→  3993→        let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+    62→  3994→        all_vreg_ids_sorted.sort();
+    63→  3995→        for &id in &all_vreg_ids_sorted {
+    64→  3996→            current_offset += 8;
+    65→  3997→            vreg_stack_slots.insert(id, current_offset);
+    66→  3998→        }
+    67→  3999→
+    68→  4000→        let frame_size = ((current_offset + 15) & !15) as usize;
+    69→  4001→        let fs = frame_size as i32;
+    70→  4002→
+    71→  4003→        // ── Phase 2: Emit prologue ──
+    72→  4004→
+    73→  4005→        let mut instructions: Vec<AllocatedInstruction> = Vec::new();
+    74→  4006→        let mut relocations: Vec<RelocationEntry> = Vec::new();
+    75→  4007→
+    76→  4008→        // Prologue: addi sp, sp, -frame_size; sd ra, fs-8(sp); sd s0, fs-16(sp); addi s0, sp, fs
+    77→  4009→        if fs >= -2048 && fs <= 2047 {
+    78→  4010→            instructions.push(AllocatedInstruction {
+    79→  4011→                opcode: "addi".to_string(),
+    80→  4012→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+    81→  4013→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+    82→  4014→                encoded: Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -fs }.encode().to_vec(),
+    83→  4015→            });
+    84→  4016→        } else {
+    85→  4017→            let mut prologue = Vec::new();
+    86→  4018→            prologue.extend(ss_load_imm(Gpr::T0, fs as i64));
+    87→  4019→            prologue.extend(Instruction::Sub { rd: Gpr::Sp, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+    88→  4020→            instructions.push(AllocatedInstruction {
+    89→  4021→                opcode: "sub".to_string(),
+    90→  4022→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+    91→  4023→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+    92→  4024→                encoded: prologue,
+    93→  4025→            });
+    94→  4026→        }
+    95→  4027→
+    96→  4028→        // Save RA and S0
+    97→  4029→        if fs - 8 >= -2048 {
+    98→  4030→            instructions.push(AllocatedInstruction {
+    99→  4031→                opcode: "sd".to_string(),
+   100→  4032→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   101→  4033→                writes: vec![],
+   102→  4034→                encoded: Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Ra, imm: fs - 8 }.encode().to_vec(),
+   103→  4035→            });
+   104→  4036→        } else {
+   105→  4037→            let mut code = Vec::new();
+   106→  4038→            code.extend(ss_load_imm(Gpr::T0, (fs - 8) as i64));
+   107→  4039→            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+   108→  4040→            code.extend(Instruction::Sd { rs1: Gpr::T0, rs2: Gpr::Ra, imm: 0 }.encode());
+   109→  4041→            instructions.push(AllocatedInstruction {
+   110→  4042→                opcode: "sd".to_string(),
+   111→  4043→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   112→  4044→                writes: vec![],
+   113→  4045→                encoded: code,
+   114→  4046→            });
+   115→  4047→        }
+   116→  4048→
+   117→  4049→        if fs - 16 >= -2048 {
+   118→  4050→            instructions.push(AllocatedInstruction {
+   119→  4051→                opcode: "sd".to_string(),
+   120→  4052→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   121→  4053→                writes: vec![],
+   122→  4054→                encoded: Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::S0, imm: fs - 16 }.encode().to_vec(),
+   123→  4055→            });
+   124→  4056→        } else {
+   125→  4057→            let mut code = Vec::new();
+   126→  4058→            code.extend(ss_load_imm(Gpr::T0, (fs - 16) as i64));
+   127→  4059→            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+   128→  4060→            code.extend(Instruction::Sd { rs1: Gpr::T0, rs2: Gpr::S0, imm: 0 }.encode());
+   129→  4061→            instructions.push(AllocatedInstruction {
+   130→  4062→                opcode: "sd".to_string(),
+   131→  4063→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   132→  4064→                writes: vec![],
+   133→  4065→                encoded: code,
+   134→  4066→            });
+   135→  4067→        }
+   136→  4068→
+   137→  4069→        // Set frame pointer: addi s0, sp, frame_size
+   138→  4070→        if fs >= -2048 && fs <= 2047 {
+   139→  4071→            instructions.push(AllocatedInstruction {
+   140→  4072→                opcode: "addi".to_string(),
+   141→  4073→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   142→  4074→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding())],
+   143→  4075→                encoded: Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: fs }.encode().to_vec(),
+   144→  4076→            });
+   145→  4077→        } else {
+   146→  4078→            let mut code = Vec::new();
+   147→  4079→            code.extend(ss_load_imm(Gpr::T0, fs as i64));
+   148→  4080→            code.extend(Instruction::Add { rd: Gpr::S0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+   149→  4081→            instructions.push(AllocatedInstruction {
+   150→  4082→                opcode: "add".to_string(),
+   151→  4083→                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+   152→  4084→                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding())],
+   153→  4085→                encoded: code,
+   154→  4086→            });
+   155→  4087→        }
+   156→  4088→
+   157→  4089→        // Store function parameters from A0-A7 to their stack slots
+   158→  4090→        let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+   159→  4091→        for (i, param) in func.params.iter().enumerate() {
+   160→  4092→            if let Some(id) = param.as_register() {
+   161→  4093→                if i < 8 {
+   162→  4094→                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+   163→  4095→                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+   164→  4096→                    instructions.push(AllocatedInstruction {
+   165→  4097→                        opcode: "sd".to_string(),
+   166→  4098→                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
+   167→  4099→                        writes: vec![],
+   168→  4100→                        encoded: store_code,
+   169→  4101→                    });
+   170→  4102→                }
+   171→  4103→            }
+   172→  4104→        }
+   173→  4105→
+   174→  4106→        // ── Phase 3: Emit body with branch fixup tracking ──
+   175→  4107→
+   176→  4108→        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
+   177→  4109→        let mut label_offsets: HashMap<String, u64> = HashMap::new();
+   178→  4110→
+   179→  4111→        // Branch fixup: records a branch instruction that needs its offset patched
+   180→  4112→        struct BranchFixup {
+   181→  4113→            instr_idx: usize,         // Index in instructions vector
+   182→  4114→            offset_in_encoded: usize, // Byte offset within the instruction's encoded bytes
+   183→  4115→            abs_byte_offset: u64,     // Absolute byte offset of the branch in the function
+   184→  4116→            target_label: String,     // Target block label
+   185→  4117→            is_jal: bool,             // true for JAL, false for BNE
+   186→  4118→            jal_rd: Gpr,              // For JAL: rd field
+   187→  4119→            bne_rs1: Gpr,             // For BNE: rs1 field
+   188→  4120→            bne_rs2: Gpr,             // For BNE: rs2 field
+   189→  4121→        }
+   190→  4122→        let mut branch_fixups: Vec<BranchFixup> = Vec::new();
+   191→  4123→
+   192→  4124→        for block in &func.blocks {
+   193→  4125→            // Record the byte offset for this block's label
+   194→  4126→            label_offsets.insert(block.label.clone(), current_byte_offset);
+   195→  4127→
+   196→  4128→            for instr in &block.instructions {
+   197→  4129→                let encoded: Vec<u8> = match instr {
+   198→  4130→                    // ── BinOp (generic) ──────────────────────────────────────
+   199→  4131→                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+   200→  4132→                        let dst_id = dst.as_register().unwrap_or(0);
+   201→  4133→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   202→  4134→                        let mut code = Vec::new();
+   203→  4135→
+   204→  4136→                        match op {
+   205→  4137→                            BinOpKind::Ror | BinOpKind::Rol => {
+   206→  4138→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T1));
+   207→  4139→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+   208→  4140→                                code.extend(Instruction::Sub { rd: Gpr::T4, rs1: Gpr::Zero, rs2: Gpr::T2 }.encode());
+   209→  4141→                                code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T4, imm: 64 }.encode());
+   210→  4142→                                if *op == BinOpKind::Ror {
+   211→  4143→                                    code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T1, rs2: Gpr::T2 }.encode());
+   212→  4144→                                    code.extend(Instruction::Sll { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T4 }.encode());
+   213→  4145→                                } else {
+   214→  4146→                                    code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T1, rs2: Gpr::T2 }.encode());
+   215→  4147→                                    code.extend(Instruction::Srl { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T4 }.encode());
+   216→  4148→                                }
+   217→  4149→                                code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T4 }.encode());
+   218→  4150→                            }
+   219→  4151→                            _ => {
+   220→  4152→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   221→  4153→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   222→  4154→                                match op {
+   223→  4155→                                    BinOpKind::Add => { code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   224→  4156→                                    BinOpKind::Sub => { code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   225→  4157→                                    BinOpKind::Mul => { code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   226→  4158→                                    BinOpKind::SDiv => { code.extend(Instruction::Div { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   227→  4159→                                    BinOpKind::UDiv => { code.extend(Instruction::Divu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   228→  4160→                                    BinOpKind::SRem => { code.extend(Instruction::Rem { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   229→  4161→                                    BinOpKind::URem => { code.extend(Instruction::Remu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   230→  4162→                                    BinOpKind::And => { code.extend(Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   231→  4163→                                    BinOpKind::Or => { code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   232→  4164→                                    BinOpKind::Xor => { code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   233→  4165→                                    BinOpKind::Shl => { code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   234→  4166→                                    BinOpKind::ShrL => { code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   235→  4167→                                    BinOpKind::ShrA => { code.extend(Instruction::Sra { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+   236→  4168→                                    BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+   237→  4169→                                    | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+   238→  4170→                                    | BinOpKind::Eq | BinOpKind::Ne => {
+   239→  4171→                                        code.extend(emit_binop_cmp_isel(op, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
+   240→  4172→                                    }
+   241→  4173→                                    BinOpKind::Ror | BinOpKind::Rol => unreachable!(),
+   242→  4174→                                }
+   243→  4175→                            }
+   244→  4176→                        }
+   245→  4177→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   246→  4178→                        code
+   247→  4179→                    }
+   248→  4180→
+   249→  4181→                    IRInstr::Add { dst, lhs, rhs, .. } => {
+   250→  4182→                        let dst_id = dst.as_register().unwrap_or(0);
+   251→  4183→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   252→  4184→                        let mut code = Vec::new();
+   253→  4185→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   254→  4186→                        if let IRValue::Immediate(imm) = rhs {
+   255→  4187→                            let i = *imm as i32;
+   256→  4188→                            if (-2048..=2047).contains(&i) {
+   257→  4189→                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: i }.encode());
+   258→  4190→                            } else {
+   259→  4191→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   260→  4192→                                code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   261→  4193→                            }
+   262→  4194→                        } else {
+   263→  4195→                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   264→  4196→                            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   265→  4197→                        }
+   266→  4198→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   267→  4199→                        code
+   268→  4200→                    }
+   269→  4201→                    IRInstr::Sub { dst, lhs, rhs, .. } => {
+   270→  4202→                        let dst_id = dst.as_register().unwrap_or(0);
+   271→  4203→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   272→  4204→                        let mut code = Vec::new();
+   273→  4205→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   274→  4206→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   275→  4207→                        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   276→  4208→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   277→  4209→                        code
+   278→  4210→                    }
+   279→  4211→                    IRInstr::Mul { dst, lhs, rhs, .. } => {
+   280→  4212→                        let dst_id = dst.as_register().unwrap_or(0);
+   281→  4213→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   282→  4214→                        let mut code = Vec::new();
+   283→  4215→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   284→  4216→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   285→  4217→                        code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   286→  4218→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   287→  4219→                        code
+   288→  4220→                    }
+   289→  4221→                    IRInstr::Div { dst, lhs, rhs, .. } => {
+   290→  4222→                        let dst_id = dst.as_register().unwrap_or(0);
+   291→  4223→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   292→  4224→                        let mut code = Vec::new();
+   293→  4225→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   294→  4226→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   295→  4227→                        code.extend(Instruction::Div { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   296→  4228→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   297→  4229→                        code
+   298→  4230→                    }
+   299→  4231→
+   300→  4232→                    IRInstr::UnaryOp { op, dst, operand, .. } => {
+   301→  4233→                        let dst_id = dst.as_register().unwrap_or(0);
+   302→  4234→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   303→  4235→                        let mut code = Vec::new();
+   304→  4236→                        code.extend(ss_load_value(operand, &vreg_stack_slots, Gpr::T0));
+   305→  4237→                        match op {
+   306→  4238→                            UnaryOpKind::Neg => { code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::Zero, rs2: Gpr::T0 }.encode()); }
+   307→  4239→                            UnaryOpKind::Not => { code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: -1 }.encode()); }
+   308→  4240→                            UnaryOpKind::Clz => { code.extend(emit_clz_isel(Gpr::T0, Gpr::T0)); }
+   309→  4241→                            UnaryOpKind::Ctz => { code.extend(emit_ctz_isel(Gpr::T0, Gpr::T0)); }
+   310→  4242→                            UnaryOpKind::Popcnt => { code.extend(emit_popcnt_isel(Gpr::T0, Gpr::T0)); }
+   311→  4243→                        }
+   312→  4244→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   313→  4245→                        code
+   314→  4246→                    }
+   315→  4247→
+   316→  4248→                    IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+   317→  4249→                        let dst_id = dst.as_register().unwrap_or(0);
+   318→  4250→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   319→  4251→                        let mut code = Vec::new();
+   320→  4252→                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+   321→  4253→                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+   322→  4254→                        code.extend(emit_cmp_isel(kind, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
+   323→  4255→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   324→  4256→                        code
+   325→  4257→                    }
+   326→  4258→
+   327→  4259→                    IRInstr::Load { dst, addr, offset, ty } => {
+   328→  4260→                        let dst_id = dst.as_register().unwrap_or(0);
+   329→  4261→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   330→  4262→                        let mut code = Vec::new();
+   331→  4263→                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
+   332→  4264→                        let off = *offset as i32;
+   333→  4265→                        match ty {
+   334→  4266→                            IRType::I8 => {
+   335→  4267→                                if off >= -2048 && off <= 2047 {
+   336→  4268→                                    code.extend(Instruction::Lb { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
+   337→  4269→                                } else {
+   338→  4270→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   339→  4271→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   340→  4272→                                    code.extend(Instruction::Lb { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
+   341→  4273→                                }
+   342→  4274→                            }
+   343→  4275→                            IRType::U8 => {
+   344→  4276→                                if off >= -2048 && off <= 2047 {
+   345→  4277→                                    code.extend(Instruction::Lbu { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
+   346→  4278→                                } else {
+   347→  4279→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   348→  4280→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   349→  4281→                                    code.extend(Instruction::Lbu { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
+   350→  4282→                                }
+   351→  4283→                            }
+   352→  4284→                            IRType::I32 | IRType::U32 => {
+   353→  4285→                                if off >= -2048 && off <= 2047 {
+   354→  4286→                                    code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
+   355→  4287→                                } else {
+   356→  4288→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   357→  4289→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   358→  4290→                                    code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
+   359→  4291→                                }
+   360→  4292→                            }
+   361→  4293→                            _ => {
+   362→  4294→                                if off >= -2048 && off <= 2047 {
+   363→  4295→                                    code.extend(Instruction::Ld { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
+   364→  4296→                                } else {
+   365→  4297→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   366→  4298→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   367→  4299→                                    code.extend(Instruction::Ld { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
+   368→  4300→                                }
+   369→  4301→                            }
+   370→  4302→                        }
+   371→  4303→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   372→  4304→                        code
+   373→  4305→                    }
+   374→  4306→
+   375→  4307→                    IRInstr::Store { value, addr, offset, ty } => {
+   376→  4308→                        let mut code = Vec::new();
+   377→  4309→                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
+   378→  4310→                        code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T0));
+   379→  4311→                        let off = *offset as i32;
+   380→  4312→                        match ty {
+   381→  4313→                            IRType::I8 | IRType::U8 => {
+   382→  4314→                                if off >= -2048 && off <= 2047 {
+   383→  4315→                                    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+   384→  4316→                                } else {
+   385→  4317→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   386→  4318→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   387→  4319→                                    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+   388→  4320→                                }
+   389→  4321→                            }
+   390→  4322→                            IRType::I32 | IRType::U32 => {
+   391→  4323→                                if off >= -2048 && off <= 2047 {
+   392→  4324→                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+   393→  4325→                                } else {
+   394→  4326→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   395→  4327→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   396→  4328→                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+   397→  4329→                                }
+   398→  4330→                            }
+   399→  4331→                            _ => {
+   400→  4332→                                if off >= -2048 && off <= 2047 {
+   401→  4333→                                    code.extend(Instruction::Sd { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+   402→  4334→                                } else {
+   403→  4335→                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+   404→  4336→                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+   405→  4337→                                    code.extend(Instruction::Sd { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+   406→  4338→                                }
+   407→  4339→                            }
+   408→  4340→                        }
+   409→  4341→                        code
+   410→  4342→                    }
+   411→  4343→
+   412→  4344→                    IRInstr::Alloc { dst, .. } => {
+   413→  4345→                        let dst_id = dst.as_register().unwrap_or(0);
+   414→  4346→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   415→  4347→                        let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(0);
+   416→  4348→                        let mut code = Vec::new();
+   417→  4349→                        let neg_alloc = -alloc_off;
+   418→  4350→                        if neg_alloc >= -2048 {
+   419→  4351→                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::S0, imm: neg_alloc }.encode());
+   420→  4352→                        } else {
+   421→  4353→                            code.extend(ss_load_imm(Gpr::T3, alloc_off as i64));
+   422→  4354→                            code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+   423→  4355→                        }
+   424→  4356→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   425→  4357→                        code
+   426→  4358→                    }
+   427→  4359→
+   428→  4360→                    IRInstr::Free { .. } => Vec::new(),
+   429→  4361→
+   430→  4362→                    IRInstr::Cast { kind, dst, src } => {
+   431→  4363→                        let dst_id = dst.as_register().unwrap_or(0);
+   432→  4364→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   433→  4365→                        let mut code = Vec::new();
+   434→  4366→                        code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+   435→  4367→                        match kind {
+   436→  4368→                            CastKind::BitCast | CastKind::Trunc | CastKind::ZExt => {}
+   437→  4369→                            CastKind::SExt => {
+   438→  4370→                                code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+   439→  4371→                            }
+   440→  4372→                        }
+   441→  4373→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   442→  4374→                        code
+   443→  4375→                    }
+   444→  4376→
+   445→  4377→                    IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+   446→  4378→                        let dst_id = dst.as_register().unwrap_or(0);
+   447→  4379→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   448→  4380→                        let mut code = Vec::new();
+   449→  4381→                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::T0));
+   450→  4382→                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::T1));
+   451→  4383→                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T2));
+   452→  4384→                        code.extend(Instruction::Beq { rs1: Gpr::T2, rs2: Gpr::Zero, offset: 8 }.encode());
+   453→  4385→                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T1, imm: 0 }.encode());
+   454→  4386→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   455→  4387→                        code
+   456→  4388→                    }
+   457→  4389→
+   458→  4390→                    IRInstr::Offset { dst, base, offset } => {
+   459→  4391→                        let dst_id = dst.as_register().unwrap_or(0);
+   460→  4392→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   461→  4393→                        let mut code = Vec::new();
+   462→  4394→                        code.extend(ss_load_value(base, &vreg_stack_slots, Gpr::T0));
+   463→  4395→                        match offset {
+   464→  4396→                            IRValue::Immediate(imm) => {
+   465→  4397→                                let off = *imm as i32;
+   466→  4398→                                if (-2048..=2047).contains(&off) {
+   467→  4399→                                    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: off }.encode());
+   468→  4400→                                } else {
+   469→  4401→                                    code.extend(ss_load_value(offset, &vreg_stack_slots, Gpr::T1));
+   470→  4402→                                    code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   471→  4403→                                }
+   472→  4404→                            }
+   473→  4405→                            _ => {
+   474→  4406→                                code.extend(ss_load_value(offset, &vreg_stack_slots, Gpr::T1));
+   475→  4407→                                code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+   476→  4408→                            }
+   477→  4409→                        }
+   478→  4410→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   479→  4411→                        code
+   480→  4412→                    }
+   481→  4413→
+   482→  4414→                    IRInstr::GetAddress { dst, .. } => {
+   483→  4415→                        let dst_id = dst.as_register().unwrap_or(0);
+   484→  4416→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   485→  4417→                        let mut code = Vec::new();
+   486→  4418→                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+   487→  4419→                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+   488→  4420→                        code
+   489→  4421→                    }
+   490→  4422→
+   491→  4423→                    IRInstr::Call { dst, func: target_func, args } => {
+   492→  4424→                        let mut code = Vec::new();
+   493→  4425→                        let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
+   494→  4426→                                            Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+   495→  4427→                        for (i, arg) in args.iter().enumerate() {
+   496→  4428→                            if i >= 8 { break; }
+   497→  4429→                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[i]));
+   498→  4430→                        }
+   499→  4431→                        let jal_byte_offset_in_func = current_byte_offset + code.len() as u64;
+   500→  4432→                        code.extend(Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
+
+[showing lines 1-500 of 502; use offset=501 with limit to continue reading]

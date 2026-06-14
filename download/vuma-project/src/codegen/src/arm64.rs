@@ -275,14 +275,6 @@ pub enum Condition {
     GT,
     /// Signed less than or equal (Z == 1 || N != V)
     LE,
-    /// Always (alias: unconditional) — condition code 0b1110
-    AL,
-    /// Never (alias: the inverse of AL) — condition code 0b1111
-    NV,
-    /// Unsigned lower (alias for CC / LO)
-    LO,
-    /// Unsigned higher or same (alias for CS / HS)
-    HS,
 }
 
 impl Condition {
@@ -291,8 +283,8 @@ impl Condition {
         match self {
             Condition::EQ => 0b0000,
             Condition::NE => 0b0001,
-            Condition::CS | Condition::HS => 0b0010,
-            Condition::CC | Condition::LO => 0b0011,
+            Condition::CS => 0b0010,
+            Condition::CC => 0b0011,
             Condition::MI => 0b0100,
             Condition::PL => 0b0101,
             Condition::VS => 0b0110,
@@ -303,8 +295,6 @@ impl Condition {
             Condition::LT => 0b1011,
             Condition::GT => 0b1100,
             Condition::LE => 0b1101,
-            Condition::AL => 0b1110,
-            Condition::NV => 0b1111,
         }
     }
 
@@ -325,10 +315,6 @@ impl Condition {
             Condition::LT => "lt",
             Condition::GT => "gt",
             Condition::LE => "le",
-            Condition::AL => "al",
-            Condition::NV => "nv",
-            Condition::LO => "lo",
-            Condition::HS => "hs",
         }
     }
 
@@ -349,10 +335,6 @@ impl Condition {
             Condition::LT => Condition::GE,
             Condition::GT => Condition::LE,
             Condition::LE => Condition::GT,
-            Condition::AL => Condition::NV,
-            Condition::NV => Condition::AL,
-            Condition::LO => Condition::HS,
-            Condition::HS => Condition::LO,
         }
     }
 }
@@ -743,10 +725,6 @@ pub enum Instruction {
     TST { rn: Register, rm: Register },
     /// Conditional select: `CSEL Rd, Rn, Rm, cond`
     CSEL { rd: Register, rn: Register, rm: Register, cond: Condition },
-    /// Conditional select increment: `CSINC Rd, Rn, Rm, cond`
-    /// If cond is TRUE, Rd = Rn; otherwise Rd = Rm + 1.
-    /// CSET Rd, cond is an alias for CSINC Rd, XZR, XZR, invert(cond).
-    CSINC { rd: Register, rn: Register, rm: Register, cond: Condition },
 
     // ---- Cast / Convert ----
     /// Sign-extend word to doubleword: `SXTW Xd, Wn` (alias for SBFM Xd, Xn, #0, #31)
@@ -1240,22 +1218,9 @@ impl Instruction {
             }
 
             // ---- CSEL ----
-            // CSEL: sf 1 0 1101 0 00 Rm cond 00 Rn Rd
-            // For 64-bit (sf=1): base = 0x9A800000
+            // CSEL: 1 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
             Instruction::CSEL { rd, rn, rm, cond } => {
-                Ok((0x9A800000u64
-                    | (rm.encoding() as u64) << 16
-                    | (cond.encoding() as u64) << 12
-                    | (rn.encoding() as u64) << 5
-                    | rd.encoding() as u64) as u32)
-            }
-
-            // ---- CSINC ----
-            // CSINC: sf 1 0 1101 0 01 Rm cond 00 Rn Rd
-            // For 64-bit (sf=1): base = 0x9AC00000
-            // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
-            Instruction::CSINC { rd, rn, rm, cond } => {
-                Ok((0x9AC00000u64
+                Ok((0x1A800000u64
                     | (rm.encoding() as u64) << 16
                     | (cond.encoding() as u64) << 12
                     | (rn.encoding() as u64) << 5
@@ -1411,14 +1376,6 @@ impl std::fmt::Display for Instruction {
             Instruction::TST { rn, rm } => write!(f, "tst {}, {}", rn, rm),
             Instruction::CSEL { rd, rn, rm, cond } => {
                 write!(f, "csel {}, {}, {}, {}", rd, rn, rm, cond.asm_suffix())
-            }
-            Instruction::CSINC { rd, rn, rm, cond } => {
-                // CSET alias: CSINC Rd, XZR, XZR, invert(cond)
-                if *rn == Register::XZR && *rm == Register::XZR {
-                    write!(f, "cset {}, {}", rd, cond.invert().asm_suffix())
-                } else {
-                    write!(f, "csinc {}, {}, {}, {}", rd, rn, rm, cond.asm_suffix())
-                }
             }
             Instruction::SXTW { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
             Instruction::SCVTF { rd, rn } => write!(f, "scvtf {}, {}", rd, rn),

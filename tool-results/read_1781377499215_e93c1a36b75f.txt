@@ -1,0 +1,702 @@
+  2200→        IRInstr::Cmp {
+  2201→            kind,
+  2202→            dst,
+  2203→            lhs,
+  2204→            rhs, ty: _,
+  2205→        } => {
+  2206→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2207→            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+  2208→            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+  2209→            result.extend(lower_cmp_ppc64(kind, d, l, r));
+  2210→        }
+  2211→
+  2212→        IRInstr::Load { dst, addr, offset, ty } => {
+  2213→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2214→            let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R11, &mut result);
+  2215→            let off = *offset;
+  2216→            // Choose the correct load instruction based on the type width.
+  2217→            let load_inst = match ty {
+  2218→                IRType::I8 | IRType::U8 => Instruction::Lbz { rt: d, ra: a, d: off },
+  2219→                IRType::I16 | IRType::U16 => Instruction::Lhz { rt: d, ra: a, d: off },
+  2220→                IRType::I32 | IRType::U32 => Instruction::Lwz { rt: d, ra: a, d: off },
+  2221→                IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  2222→                    // LD uses DS-form which requires 4-byte aligned displacement.
+  2223→                    // For simplicity, if offset is not 4-byte aligned, add it to
+  2224→                    // the base register first.
+  2225→                    if off % 4 == 0 {
+  2226→                        Instruction::Ld { rt: d, ra: a, ds: off }
+  2227→                    } else {
+  2228→                        // addi scratch, a, off; ld d, 0(scratch)
+  2229→                        let scratch = if a != Gpr::R0 { Gpr::R0 } else { Gpr::R11 };
+  2230→                        result.push(emit_alloc_instr(
+  2231→                            Instruction::Addi { rt: scratch, ra: a, simm: off },
+  2232→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2233→                            vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+  2234→                        ));
+  2235→                        Instruction::Ld { rt: d, ra: scratch, ds: 0 }
+  2236→                    }
+  2237→                }
+  2238→                IRType::F32 => Instruction::Lfs { ft: Fpr::F0, ra: a, d: off },
+  2239→                IRType::F64 => Instruction::Lfd { ft: Fpr::F0, ra: a, d: off },
+  2240→                _ => Instruction::Ld { rt: d, ra: a, ds: off }, // fallback: 64-bit
+  2241→            };
+  2242→            result.push(emit_alloc_instr(
+  2243→                load_inst,
+  2244→                vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2245→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2246→            ));
+  2247→        }
+  2248→
+  2249→        IRInstr::Store { value, addr, offset, ty } => {
+  2250→            let v = resolve_gpr_ppc64(value, vreg_map, Gpr::R0, &mut result);
+  2251→            let a = resolve_gpr_ppc64(addr, vreg_map, Gpr::R11, &mut result);
+  2252→            let off = *offset;
+  2253→            // Choose the correct store instruction based on the type width.
+  2254→            let store_inst = match ty {
+  2255→                IRType::I8 | IRType::U8 => Instruction::Stb { rs: v, ra: a, d: off },
+  2256→                IRType::I16 | IRType::U16 => Instruction::Sth { rs: v, ra: a, d: off },
+  2257→                IRType::I32 | IRType::U32 => Instruction::Stw { rs: v, ra: a, d: off },
+  2258→                IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  2259→                    if off % 4 == 0 {
+  2260→                        Instruction::Std { rs: v, ra: a, ds: off }
+  2261→                    } else {
+  2262→                        let scratch = if a != Gpr::R0 { Gpr::R0 } else { Gpr::R11 };
+  2263→                        result.push(emit_alloc_instr(
+  2264→                            Instruction::Addi { rt: scratch, ra: a, simm: off },
+  2265→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2266→                            vec![PhysicalReg::new(RegClass::Gpr, scratch.encoding())],
+  2267→                        ));
+  2268→                        Instruction::Std { rs: v, ra: scratch, ds: 0 }
+  2269→                    }
+  2270→                }
+  2271→                IRType::F32 => Instruction::Stfs { fs: Fpr::F0, ra: a, d: off },
+  2272→                IRType::F64 => Instruction::Stfd { fs: Fpr::F0, ra: a, d: off },
+  2273→                _ => Instruction::Std { rs: v, ra: a, ds: off }, // fallback: 64-bit
+  2274→            };
+  2275→            result.push(emit_alloc_instr(
+  2276→                store_inst,
+  2277→                vec![
+  2278→                    PhysicalReg::new(RegClass::Gpr, a.encoding()),
+  2279→                    PhysicalReg::new(RegClass::Gpr, v.encoding()),
+  2280→                ],
+  2281→                vec![],
+  2282→            ));
+  2283→        }
+  2284→
+  2285→        IRInstr::Alloc { dst, size } => {
+  2286→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2287→            // The prologue already allocated the full frame (computed by
+  2288→            // ppc64_compute_frame_size), so we must NOT emit another stdu.
+  2289→            // Instead, compute the address of this slot within the frame.
+  2290→            // alloc_offset starts at 32 (after the mandatory save area) and
+  2291→            // is advanced by the aligned size for each Alloc.
+  2292→            let aligned_size = (*size as i32 + 15) & !15; // 16-byte aligned
+  2293→            let slot_off = *alloc_offset;
+  2294→            *alloc_offset += aligned_size;
+  2295→            // addi dst, r1, slot_off
+  2296→            if slot_off == 0 {
+  2297→                // mr dst, r1
+  2298→                if d != Gpr::R1 {
+  2299→                    result.push(emit_alloc_instr(
+  2300→                        Instruction::Mr { ra: d, rs: Gpr::R1 },
+  2301→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2302→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2303→                    ));
+  2304→                }
+  2305→            } else {
+  2306→                result.push(emit_alloc_instr(
+  2307→                    Instruction::Addi { rt: d, ra: Gpr::R1, simm: slot_off },
+  2308→                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2309→                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2310→                ));
+  2311→            }
+  2312→        }
+  2313→
+  2314→        IRInstr::Ret { values } => {
+  2315→            if let Some(val) = values.first() {
+  2316→                let v = resolve_gpr_ppc64(val, vreg_map, Gpr::R0, &mut result);
+  2317→                if v != Gpr::R3 {
+  2318→                    result.push(emit_alloc_instr(
+  2319→                        Instruction::Mr { ra: Gpr::R3, rs: v },
+  2320→                        vec![PhysicalReg::new(RegClass::Gpr, v.encoding())],
+  2321→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+  2322→                    ));
+  2323→                }
+  2324→            }
+  2325→            // Do NOT emit BLR here — the epilogue will handle the return.
+  2326→            // The epilogue restores LR, deallocates the frame, and emits BLR.
+  2327→        }
+  2328→
+  2329→        IRInstr::Call { dst, func, args } => {
+  2330→            for (i, arg) in args.iter().enumerate() {
+  2331→                if let Some(arg_reg) = Gpr::arg_register(i) {
+  2332→                    let a = resolve_gpr_ppc64(arg, vreg_map, Gpr::R0, &mut result);
+  2333→                    if a != arg_reg {
+  2334→                        result.push(emit_alloc_instr(
+  2335→                            Instruction::Mr { ra: arg_reg, rs: a },
+  2336→                            vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
+  2337→                            vec![PhysicalReg::new(RegClass::Gpr, arg_reg.encoding())],
+  2338→                        ));
+  2339→                    }
+  2340→                }
+  2341→            }
+  2342→            // Record relocation for the BL instruction.
+  2343→            let bl_offset = (result.len() * 4) as u64; // byte offset within this batch
+  2344→            result.push(emit_alloc_instr(
+  2345→                Instruction::Bl { li: 0 },
+  2346→                vec![],
+  2347→                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+  2348→            ));
+  2349→            relocations.push(crate::backend::RelocationEntry {
+  2350→                offset: bl_offset,
+  2351→                symbol: func.clone(),
+  2352→                reloc_type: "R_PPC64_REL24".to_string(),
+  2353→            });
+  2354→            if let Some(d) = dst {
+  2355→                let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
+  2356→                if d_reg != Gpr::R3 {
+  2357→                    result.push(emit_alloc_instr(
+  2358→                        Instruction::Mr {
+  2359→                            ra: d_reg,
+  2360→                            rs: Gpr::R3,
+  2361→                        },
+  2362→                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R3.encoding())],
+  2363→                        vec![PhysicalReg::new(RegClass::Gpr, d_reg.encoding())],
+  2364→                    ));
+  2365→                }
+  2366→            }
+  2367→        }
+  2368→
+  2369→        IRInstr::Branch { target: _ } => {
+  2370→            result.push(emit_alloc_instr(Instruction::B { li: 0 }, vec![], vec![]));
+  2371→        }
+  2372→
+  2373→        IRInstr::CondBranch {
+  2374→            cond,
+  2375→            true_target: _,
+  2376→            false_target: _,
+  2377→        } => {
+  2378→            let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R0, &mut result);
+  2379→            // cmpi cr0, 0, c, 0; bne cr0, +2; b false_target
+  2380→            result.push(emit_alloc_instr(
+  2381→                Instruction::Cmpi {
+  2382→                    bf: CrField::CR0,
+  2383→                    l: 1,
+  2384→                    ra: c,
+  2385→                    simm: 0,
+  2386→                },
+  2387→                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+  2388→                vec![],
+  2389→            ));
+  2390→            result.push(emit_alloc_instr(
+  2391→                Instruction::Bc {
+  2392→                    bo: 12,
+  2393→                    bi: 2 + CrField::CR0.encoding() * 4,
+  2394→                    bd: 2,
+  2395→                },
+  2396→                vec![],
+  2397→                vec![],
+  2398→            ));
+  2399→            result.push(emit_alloc_instr(Instruction::B { li: 0 }, vec![], vec![]));
+  2400→        }
+  2401→
+  2402→        IRInstr::Cast { kind, dst, src, .. } => {
+  2403→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2404→            let s = resolve_gpr_ppc64(src, vreg_map, Gpr::R0, &mut result);
+  2405→            match kind {
+  2406→                CastKind::SExt => {
+  2407→                    // extsw d, s — sign-extend word to doubleword
+  2408→                    result.push(emit_alloc_instr(
+  2409→                        Instruction::Extsw { ra: d, rs: s },
+  2410→                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2411→                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2412→                    ));
+  2413→                }
+  2414→                CastKind::ZExt | CastKind::Trunc | CastKind::BitCast => {
+  2415→                    // Zero-extend, trunc, and bitcast are all just moves on PPC64
+  2416→                    // (zero-extension is free after load, trunc just uses lower bits)
+  2417→                    if d != s {
+  2418→                        result.push(emit_alloc_instr(
+  2419→                            Instruction::Mr { ra: d, rs: s },
+  2420→                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+  2421→                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2422→                        ));
+  2423→                    }
+  2424→                }
+  2425→            }
+  2426→        }
+  2427→
+  2428→        IRInstr::Select {
+  2429→            dst,
+  2430→            cond,
+  2431→            true_val,
+  2432→            false_val, ty: _,
+  2433→        } => {
+  2434→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2435→            let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R0, &mut result);
+  2436→            let tv = resolve_gpr_ppc64(true_val, vreg_map, Gpr::R11, &mut result);
+  2437→            // For false_val, we reuse R11 since cond is consumed by cmpi before false_val is used.
+  2438→            // However, if false_val is an immediate it needs a scratch reg. Use the dst register
+  2439→            // as scratch if it differs from R11/R12, otherwise use R11 (after cond is consumed).
+  2440→            let fv = resolve_gpr_ppc64(false_val, vreg_map, Gpr::R0, &mut result);
+  2441→            // mr d, fv; cmpi cr0, 0, c, 0; bne cr0, +8; mr d, tv
+  2442→            if fv != d {
+  2443→                result.push(emit_alloc_instr(
+  2444→                    Instruction::Mr { ra: d, rs: fv },
+  2445→                    vec![PhysicalReg::new(RegClass::Gpr, fv.encoding())],
+  2446→                    vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2447→                ));
+  2448→            }
+  2449→            result.push(emit_alloc_instr(
+  2450→                Instruction::Cmpi {
+  2451→                    bf: CrField::CR0,
+  2452→                    l: 1,
+  2453→                    ra: c,
+  2454→                    simm: 0,
+  2455→                },
+  2456→                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+  2457→                vec![],
+  2458→            ));
+  2459→            result.push(emit_alloc_instr(
+  2460→                Instruction::Bc {
+  2461→                    bo: 4,
+  2462→                    bi: 2 + CrField::CR0.encoding() * 4,
+  2463→                    bd: 2,
+  2464→                },
+  2465→                vec![],
+  2466→                vec![],
+  2467→            ));
+  2468→            result.push(emit_alloc_instr(
+  2469→                Instruction::Mr { ra: d, rs: tv },
+  2470→                vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+  2471→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2472→            ));
+  2473→        }
+  2474→
+  2475→        IRInstr::Offset { dst, base, offset } => {
+  2476→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2477→            let b = resolve_gpr_ppc64(base, vreg_map, Gpr::R0, &mut result);
+  2478→            let o = resolve_gpr_ppc64(offset, vreg_map, Gpr::R11, &mut result);
+  2479→            result.push(emit_alloc_instr(
+  2480→                Instruction::Add {
+  2481→                    rt: d,
+  2482→                    ra: b,
+  2483→                    rb: o,
+  2484→                },
+  2485→                vec![
+  2486→                    PhysicalReg::new(RegClass::Gpr, b.encoding()),
+  2487→                    PhysicalReg::new(RegClass::Gpr, o.encoding()),
+  2488→                ],
+  2489→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2490→            ));
+  2491→        }
+  2492→
+  2493→        IRInstr::GetAddress { dst, name: _ } => {
+  2494→            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+  2495→            result.push(emit_alloc_instr(
+  2496→                Instruction::Li { rt: d, simm: 0 },
+  2497→                vec![],
+  2498→                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+  2499→            ));
+  2500→        }
+  2501→
+  2502→        IRInstr::Free { ptr: _ } => {
+  2503→            // Free is not directly implementable as a single instruction;
+  2504→            // emit a trap to catch any accidental execution at runtime.
+  2505→            result.push(emit_alloc_instr(Instruction::Trap, vec![], vec![]));
+  2506→        }
+  2507→
+  2508→        IRInstr::Phi { .. } => {
+  2509→            // Phi nodes are eliminated by SSA deconstruction; emit NOP.
+  2510→            result.push(emit_alloc_instr(Instruction::Nop, vec![], vec![]));
+  2511→        }
+  2512→    }
+  2513→
+  2514→    (result, relocations)
+  2515→}
+  2516→
+  2517→impl Backend for PPC64Backend {
+  2518→    fn target_info(&self) -> &dyn TargetInfo {
+  2519→        &self.target_info
+  2520→    }
+  2521→
+  2522→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  2523→        let func_name = func.name.clone();
+  2524→        let frame_size = ppc64_compute_frame_size(func);
+  2525→
+  2526→        // Build a mapping from virtual register IDs to physical GPRs.
+  2527→        let mut vreg_map: std::collections::HashMap<u32, Gpr> = std::collections::HashMap::new();
+  2528→
+  2529→        // Scan instructions and build the register map.
+  2530→        let param_count = func.params.len();
+  2531→        for block in &func.blocks {
+  2532→            for instr in &block.instructions {
+  2533→                let arg_index = |vreg_id: u32| -> Option<usize> {
+  2534→                    if (vreg_id as usize) < param_count {
+  2535→                        Some(vreg_id as usize)
+  2536→                    } else {
+  2537→                        None
+  2538→                    }
+  2539→                };
+  2540→
+  2541→                let values: Vec<&IRValue> = match instr {
+  2542→                    IRInstr::BinOp { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2543→                    IRInstr::Add { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2544→                    IRInstr::Sub { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2545→                    IRInstr::Mul { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2546→                    IRInstr::Div { dst, lhs, rhs, .. } => vec![dst, lhs, rhs],
+  2547→                    IRInstr::UnaryOp { dst, operand, .. } => vec![dst, operand],
+  2548→                    IRInstr::Load { dst, addr, .. } => vec![dst, addr],
+  2549→                    IRInstr::Store { value, addr, .. } => vec![value, addr],
+  2550→                    IRInstr::Alloc { dst, .. } => vec![dst],
+  2551→                    IRInstr::Cast { dst, src, .. } => vec![dst, src],
+  2552→                    IRInstr::Select {
+  2553→                        dst,
+  2554→                        cond,
+  2555→                        true_val,
+  2556→                        false_val, ty: _,
+  2557→                    } => vec![dst, cond, true_val, false_val],
+  2558→                    IRInstr::Offset { dst, base, offset } => vec![dst, base, offset],
+  2559→                    IRInstr::GetAddress { dst, .. } => vec![dst],
+  2560→                    _ => vec![],
+  2561→                };
+  2562→                for val in values {
+  2563→                    if let IRValue::Register(id) = val {
+  2564→                        map_vreg_to_gpr(*id, arg_index(*id), &mut vreg_map);
+  2565→                    }
+  2566→                }
+  2567→            }
+  2568→        }
+  2569→
+  2570→        // Determine which callee-saved registers are used.
+  2571→        let callee_saved: Vec<PhysicalReg> = vreg_map
+  2572→            .values()
+  2573→            .filter(|r| r.is_callee_saved())
+  2574→            .map(|r| PhysicalReg::new(RegClass::Gpr, r.encoding()))
+  2575→            .collect();
+  2576→
+  2577→        // Generate prologue + body + epilogue as allocated instructions.
+  2578→        let mut instructions: Vec<AllocatedInstruction> = Vec::new();
+  2579→
+  2580→        // Prologue for ELFv2 ABI:
+  2581→        //   stdu r1, -frame_size(r1)    // allocate frame, save back chain
+  2582→        //   mflr r0                      // move LR to r0
+  2583→        //   std r0, frame_size+16(r1)    // save LR
+  2584→        //   std r2, frame_size+24(r1)    // save TOC (if needed for calls)
+  2585→        let fs = frame_size as i32;
+  2586→
+  2587→        // STDU r1, -frame_size(r1): pseudo, encoded as STDU with DS-form
+  2588→        // primary=62, rS=1, rA=1, ds=-frame_size, xo=1
+  2589→        instructions.push(AllocatedInstruction {
+  2590→            opcode: "stdu".to_string(),
+  2591→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2592→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2593→            encoded: Instruction::Stdu {
+  2594→                rs: Gpr::R1,
+  2595→                ra: Gpr::R1,
+  2596→                ds: -fs,
+  2597→            }
+  2598→            .encode()
+  2599→            .to_vec(),
+  2600→        });
+  2601→
+  2602→        // MFLR r0: primary=31, rS=0, rA=0, rB=0, xo=339 (SPR move)
+  2603→        // mflr = mfsprr 0, 8  => X-form: primary=31, rT=0, SPR=8<<5, xo=339
+  2604→        // Actually: mflr rT: bits [0:5]=31, [6:10]=rT, [11:20]=8(SPR), [21:30]=339, [31]=0
+  2605→        // SPR encoding for LR = 8, so bits [11:15]=0(SPR lower), [16:20]=8(SPR upper)
+  2606→        let mflr_word: u32 = (31u32 << 26) | (Gpr::R0.encoding() << 21) | (8u32 << 16) | (339 << 1);
+  2607→        instructions.push(AllocatedInstruction {
+  2608→            opcode: "mflr".to_string(),
+  2609→            reads: vec![],
+  2610→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+  2611→            encoded: encode_word(mflr_word).to_vec(),
+  2612→        });
+  2613→
+  2614→        // STD r0, frame_size+16(r1): save LR
+  2615→        instructions.push(AllocatedInstruction {
+  2616→            opcode: "std".to_string(),
+  2617→            reads: vec![
+  2618→                PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding()),
+  2619→                PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding()),
+  2620→            ],
+  2621→            writes: vec![],
+  2622→            encoded: Instruction::Std {
+  2623→                rs: Gpr::R0,
+  2624→                ra: Gpr::R1,
+  2625→                ds: fs + 16,
+  2626→            }
+  2627→            .encode()
+  2628→            .to_vec(),
+  2629→        });
+  2630→
+  2631→        // STD r2, frame_size+24(r1): save TOC
+  2632→        instructions.push(AllocatedInstruction {
+  2633→            opcode: "std".to_string(),
+  2634→            reads: vec![
+  2635→                PhysicalReg::new(RegClass::Gpr, Gpr::R2.encoding()),
+  2636→                PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding()),
+  2637→            ],
+  2638→            writes: vec![],
+  2639→            encoded: Instruction::Std {
+  2640→                rs: Gpr::R2,
+  2641→                ra: Gpr::R1,
+  2642→                ds: fs + 24,
+  2643→            }
+  2644→            .encode()
+  2645→            .to_vec(),
+  2646→        });
+  2647→
+  2648→        // Body: real instruction selection — translate each IR instruction
+  2649→        // into one or more PPC64 machine-code instructions.
+  2650→        let mut all_relocations: Vec<crate::backend::RelocationEntry> = Vec::new();
+  2651→        let mut alloc_offset: i32 = 32; // first free slot after the mandatory save area
+  2652→        let prologue_size: u64 = (instructions.len() * 4) as u64;
+  2653→        let mut body_code_offset: u64 = prologue_size;
+  2654→        for block in &func.blocks {
+  2655→            for instr in &block.instructions {
+  2656→                let (instrs, relocs) = lower_ir_instr_ppc64(instr, &mut vreg_map, &mut alloc_offset);
+  2657→                // Adjust relocation offsets to be relative to function start.
+  2658→                for mut reloc in relocs {
+  2659→                    reloc.offset += body_code_offset;
+  2660→                    all_relocations.push(reloc);
+  2661→                }
+  2662→                body_code_offset += (instrs.len() * 4) as u64;
+  2663→                instructions.extend(instrs);
+  2664→            }
+  2665→        }
+  2666→
+  2667→        // Epilogue:
+  2668→        //   ld r0, frame_size+16(r1)    // restore LR
+  2669→        //   ld r2, frame_size+24(r1)    // restore TOC
+  2670→        //   mtlr r0                      // move r0 to LR
+  2671→        //   addi r1, r1, frame_size      // deallocate frame
+  2672→        //   blr                          // return
+  2673→
+  2674→        // LD r0, frame_size+16(r1): restore LR
+  2675→        instructions.push(AllocatedInstruction {
+  2676→            opcode: "ld".to_string(),
+  2677→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2678→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+  2679→            encoded: Instruction::Ld {
+  2680→                rt: Gpr::R0,
+  2681→                ra: Gpr::R1,
+  2682→                ds: fs + 16,
+  2683→            }
+  2684→            .encode()
+  2685→            .to_vec(),
+  2686→        });
+  2687→
+  2688→        // LD r2, frame_size+24(r1): restore TOC
+  2689→        instructions.push(AllocatedInstruction {
+  2690→            opcode: "ld".to_string(),
+  2691→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2692→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R2.encoding())],
+  2693→            encoded: Instruction::Ld {
+  2694→                rt: Gpr::R2,
+  2695→                ra: Gpr::R1,
+  2696→                ds: fs + 24,
+  2697→            }
+  2698→            .encode()
+  2699→            .to_vec(),
+  2700→        });
+  2701→
+  2702→        // MTLR r0: primary=31, rS=0, SPR=8, xo=467
+  2703→        let mtlr_word: u32 = (31u32 << 26) | (Gpr::R0.encoding() << 21) | (8u32 << 16) | (467 << 1);
+  2704→        instructions.push(AllocatedInstruction {
+  2705→            opcode: "mtlr".to_string(),
+  2706→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding())],
+  2707→            writes: vec![],
+  2708→            encoded: encode_word(mtlr_word).to_vec(),
+  2709→        });
+  2710→
+  2711→        // ADDI r1, r1, frame_size: deallocate frame
+  2712→        instructions.push(AllocatedInstruction {
+  2713→            opcode: "addi".to_string(),
+  2714→            reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2715→            writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+  2716→            encoded: Instruction::Addi {
+  2717→                rt: Gpr::R1,
+  2718→                ra: Gpr::R1,
+  2719→                simm: fs,
+  2720→            }
+  2721→            .encode()
+  2722→            .to_vec(),
+  2723→        });
+  2724→
+  2725→        // BLR: bclr 20, 0, 0 (BO=20 = always, BI=0, BH=0, LK=0)
+  2726→        instructions.push(AllocatedInstruction {
+  2727→            opcode: "blr".to_string(),
+  2728→            reads: vec![],
+  2729→            writes: vec![],
+  2730→            encoded: Instruction::Bclr {
+  2731→                bo: 20,
+  2732→                bi: 0,
+  2733→                bh: 0,
+  2734→            }
+  2735→            .encode()
+  2736→            .to_vec(),
+  2737→        });
+  2738→
+  2739→        let code_size = instructions.len() * 4;
+  2740→
+  2741→        Ok(AllocatedFunction {
+  2742→            name: func_name,
+  2743→            blocks: vec![AllocatedBlock {
+  2744→                label: "entry".to_string(),
+  2745→                instructions,
+  2746→                code_offset: 0,
+  2747→            }],
+  2748→            frame_size,
+  2749→            callee_saved,
+  2750→            spill_slots: 0,
+  2751→            code_size,
+  2752→            relocations: all_relocations,
+  2753→        })
+  2754→    }
+  2755→
+  2756→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+  2757→        let mut bytes = Vec::new();
+  2758→        for block in &func.blocks {
+  2759→            for instr in &block.instructions {
+  2760→                bytes.extend_from_slice(&instr.encoded);
+  2761→            }
+  2762→        }
+  2763→        Ok(bytes)
+  2764→    }
+  2765→
+  2766→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+  2767→        // ── PPC64LE Linux static executable ──
+  2768→        //
+  2769→        // Layout:
+  2770→        //   _start:  BL main           ; call main (result in R3)
+  2771→        //            LI R0, 1          ; sys_exit = 1
+  2772→        //            SC                ; syscall: exit(R3)
+  2773→        //   <functions...>
+  2774→        //
+  2775→        // The _start stub is 3 instructions = 12 bytes.
+  2776→        // After that come all user functions.
+  2777→
+  2778→        const R_PPC64_REL24: &str = "R_PPC64_REL24";
+  2779→
+  2780→        // ── _start stub ──
+  2781→        // BL <main>      — offset 0, needs relocation
+  2782→        // LI R0, 1       — offset 4 (sys_exit = 1 on PPC64 Linux)
+  2783→        // SC             — offset 8
+  2784→
+  2785→        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+  2786→
+  2787→        // ── Compute function offsets ──
+  2788→        // _start stub comes first, then user functions.
+  2789→        let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+  2790→        let mut current_offset: usize = start_stub_size; // after _start
+  2791→
+  2792→        for func in &program.functions {
+  2793→            func_offsets.insert(func.name.clone(), current_offset);
+  2794→            let func_size: usize = func.blocks.iter()
+  2795→                .flat_map(|b| b.instructions.iter())
+  2796→                .map(|i| i.encoded.len())
+  2797→                .sum();
+  2798→            current_offset += func_size;
+  2799→        }
+  2800→
+  2801→        // ── Build _start stub bytes ──
+  2802→        let mut start_stub = Vec::with_capacity(start_stub_size);
+  2803→
+  2804→        // BL <main> — placeholder, will be patched
+  2805→        // BL encoding: I-form, primary=18, LI=0, AA=0, LK=1
+  2806→        start_stub.extend_from_slice(&Instruction::Bl { li: 0 }.encode());
+  2807→
+  2808→        // LI R0, 1 = ADDI R0, 0, 1 (sys_exit = 1)
+  2809→        start_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 1 }.encode());
+  2810→
+  2811→        // SC (syscall)
+  2812→        start_stub.extend_from_slice(&Instruction::Sc.encode());
+  2813→
+  2814→        // ── Patch _start BL to main ──
+  2815→        let main_key = func_offsets.keys()
+  2816→            .find(|k| *k == "main" || k.starts_with("fn_main"))
+  2817→            .cloned();
+  2818→        if let Some(ref key) = main_key {
+  2819→            let main_offset = func_offsets[key];
+  2820→            // BL target = CIA + LI*4, where CIA = address of BL instruction.
+  2821→            // BL is at offset 0 within all_code. main is at main_offset.
+  2822→            // LI = (main_offset - 0) / 4
+  2823→            let li_val = (main_offset as i64) / 4;
+  2824→            // Mask to 24 bits (signed)
+  2825→            let imm24 = (li_val as u32) & 0x00FF_FFFF;
+  2826→            // BL word: primary=18 (bits 26-31), LI (bits 2-25), AA=0 (bit 1), LK=1 (bit 0)
+  2827→            let bl_word: u32 = (18u32 << 26) | (imm24 << 2) | 1;
+  2828→            start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
+  2829→        }
+  2830→
+  2831→        // ── Concatenate all code ──
+  2832→        let mut all_code = start_stub;
+  2833→        for func in &program.functions {
+  2834→            for block in &func.blocks {
+  2835→                for instr in &block.instructions {
+  2836→                    all_code.extend_from_slice(&instr.encoded);
+  2837→                }
+  2838→            }
+  2839→        }
+  2840→
+  2841→        // ── Patch BL relocations ──
+  2842→        // Each function's relocations are relative to the start of that function's code.
+  2843→        // We need to adjust them by the _start stub size + preceding functions' sizes.
+  2844→        let mut func_code_offset: usize = start_stub_size;
+  2845→        for func in &program.functions {
+  2846→            for reloc in &func.relocations {
+  2847→                let abs_offset = func_code_offset + reloc.offset as usize;
+  2848→                if abs_offset + 4 > all_code.len() {
+  2849→                    continue; // skip invalid relocations
+  2850→                }
+  2851→
+  2852→                if reloc.reloc_type == R_PPC64_REL24 {
+  2853→                    // R_PPC64_REL24: patch BL instruction's LI field (24 bits).
+  2854→                    // BL target = CIA + LI*4, where CIA = address of BL instruction.
+  2855→                    // So: LI = (target_addr - bl_addr) / 4
+  2856→                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+  2857→                        let bl_addr = abs_offset as i64;
+  2858→                        let target_addr = target_offset as i64;
+  2859→                        let offset_words = (target_addr - bl_addr) / 4;
+  2860→                        // Check range: ±32MB (24-bit signed)
+  2861→                        if offset_words < -(1 << 23) || offset_words >= (1 << 23) {
+  2862→                            eprintln!(
+  2863→                                "warning: BL relocation to '{}' out of range: {} words",
+  2864→                                reloc.symbol, offset_words
+  2865→                            );
+  2866→                            continue;
+  2867→                        }
+  2868→                        let imm24 = (offset_words as u32) & 0x00FF_FFFF;
+  2869→                        let existing = u32::from_le_bytes([
+  2870→                            all_code[abs_offset],
+  2871→                            all_code[abs_offset + 1],
+  2872→                            all_code[abs_offset + 2],
+  2873→                            all_code[abs_offset + 3],
+  2874→                        ]);
+  2875→                        // Clear LI field (bits 2-25) and set new value
+  2876→                        let patched = (existing & 0xFC00_0003) | (imm24 << 2);
+  2877→                        all_code[abs_offset..abs_offset + 4]
+  2878→                            .copy_from_slice(&patched.to_le_bytes());
+  2879→                    }
+  2880→                }
+  2881→            }
+  2882→            let func_size: usize = func.blocks.iter()
+  2883→                .flat_map(|b| b.instructions.iter())
+  2884→                .map(|i| i.encoded.len())
+  2885→                .sum();
+  2886→            func_code_offset += func_size;
+  2887→        }
+  2888→
+  2889→        // ── Build ELF with 2 LOAD segments ──
+  2890→        Ok(build_ppc64_elf_2seg(&all_code, 0x10000000))
+  2891→    }
+  2892→
+  2893→    fn return_stub(&self) -> Vec<u8> {
+  2894→        // BLR: bclr 20, 0, 0
+  2895→        Instruction::Bclr {
+  2896→            bo: 20,
+  2897→            bi: 0,
+  2898→            bh: 0,
+  2899→        }
+
+[showing lines 2200-2899 of 3589; use offset=2900 with limit to continue reading]

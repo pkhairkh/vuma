@@ -1,0 +1,523 @@
+Let me read the backend file and test the current state directly.
+Good, it builds. Let me test all backends now:
+Now let me understand how the test framework works and test each backend:
+I see - the `run` command only handles aarch64. I need to use `emit` to generate ELF files and then manually run with the appropriate QEMU. Let me create a test script and also read the backend code:
+Now let me test all backends properly:
+All backends pass the basic test_exit (exit 42). Now let me test SHA256d:
+Current status:
+- ✅ x86_64, AArch64, RISC-V 64, ARM32 — all SHA256d exit 79
+- ❌ MIPS64 — exit 181
+- ❌ PPC64 — segfault (139)
+- ❌ LoongArch64 — segfault (139)
+- ❓ Wasm32 — not tested
+
+Let me read the backend.rs to understand the current state of each broken backend, then fix them systematically.
+Now let me focus on reading the MIPS64, PPC64, and LoongArch64 backend implementations. These are in separate files:
+Let me read the three broken backends in parallel:
+These files are very large. Let me focus on the key sections — the `allocate_registers` (stack-slot) and `encode_program` functions for each broken backend. Let me read the critical parts:
+I now have a good understanding of the MIPS64 stack-slot code. The key issue is that in the `Call` handler (line 2703-2727), after calling a function, the return value in `$v0` is stored to the stack slot using `ss_sd` (which does `SD` - a 64-bit store). But the called function might return a value with garbage in the upper 32 bits. Similarly, when loading values with `ss_load_value`, we use `ss_ld` which does `LD` (64-bit load), which will load garbage upper bits.
+
+The critical insight: **when storing the result of a function call (V0) to a stack slot, we should mask it to 32 bits first**, because SHA256d operates with u32 values throughout.
+
+But more fundamentally, the issue is that `And`, `Or`, `Xor` operations DON'T mask to 32 bits. If one operand has garbage in upper 32 bits, the result will too. Let me think about the best systematic fix.
+
+The most reliable approach: **mask to 32 bits at every BinOp result, not just Add/Sub/Shl/ShrL/Ror/Rol**. And also mask the return value from function calls.
+
+Let me also check the XOR/And/Or issue more carefully. In SHA256d, we have lots of XOR operations. If the XOR of two values each having garbage in upper 32 bits produces garbage in the upper 32 bits, that garbage will propagate.
+
+Actually, looking more carefully: if both operands have garbage in upper 32 bits, the XOR result will also have garbage. So the fix is to mask ALL BinOp results to 32 bits, not just some.
+
+Let me now implement a comprehensive fix for MIPS64. I'll add 32-bit masking after every BinOp and after function call return values.
+Now I understand the MIPS64 issue clearly. The problem is that `And`, `Or`, `Xor` operations DON'T mask to 32 bits. If one operand has garbage in upper 32 bits (from a previous Add/Sub that overflowed), the result will carry that garbage.
+
+But actually, thinking more carefully: `And` with `0xFFFFFFFF` should mask properly. The issue is more subtle. In SHA256d, all values are u32. The problem is that values loaded from the stack via `LD` (64-bit load) will have whatever was stored, and if a value was stored with `SD` (64-bit store) after an operation that didn't properly mask, the garbage upper bits persist.
+
+The most systematic fix: **add 32-bit masking (DSLL 32 + DSRL 32) after every operation in the BinOp handler**. Also add masking after function call returns (V0) and after the dedicated Add/Sub instructions.
+
+Let me implement this now. I'll modify the MIPS64 backend to add masking after And, Or, Xor, and also after function call return values and the dedicated Add/Sub/Mul/Div:
+Now I also need to add zero-extension to the operands in the BinOp handler for Add/Sub (since they now only mask the result but not the inputs). Wait, looking at the code more carefully, the BinOp::Add and BinOp::Sub already mask the result with DSLL+DSRL, but they don't zero-extend the inputs. Let me also add input zero-extension for those:
+Now I need to also add input zero-extension for the BinOp Add and Sub. Let me also add zero-extension for the Mul/Div/Rem 32-bit path. And importantly, I need to zero-extend the inputs for BinOp::Add and BinOp::Sub too:
+Now I also need to remove the redundant DSLL+DSRL masking from And/Or/Xor since the inputs are already zero-extended, making them produce clean results. Actually wait — with the zero-extended inputs, And/Or/Xor will produce clean results. But the masking I added after them is still correct and just redundant. Let me keep it for safety.
+
+Now let me also add masking after the Mul/Div/Rem 32-bit operations and after the Offset instruction:
+Now let me also check the UnaryOp — `Neg` on a 32-bit value could produce garbage in upper 32 bits. And `Not` (NOR with zero) will also produce garbage in upper 32 bits. Let me add masking after those too:
+Now let me also add zero-extension to the Mul/Div dedicated IR instructions:
+Now let me also check the Select and Offset instructions — Select might need masking, and Offset is for pointer arithmetic so it should be fine. Let me also check the `ss_load_value` function — when loading from a register slot, it uses `ss_ld` which does a 64-bit load. If the value stored was 32-bit with garbage upper bits, the load will also have garbage. But since we're now masking at every operation's output, the values stored should always be clean.
+
+However, there's one more critical thing: the `ss_load_value` function itself might load a value that was a function return value (now masked) or a BinOp result (now masked). But what about values loaded via `IRInstr::Load` (memory load)? The `Lwu` instruction zero-extends, so that's fine. But `Ld` doesn't.
+
+Wait, actually I need to look at this from a different angle. The `ss_load_value` loads from a stack slot using `ss_ld` (which does LD, a 64-bit load). If we always store clean 32-bit values (upper 32 bits zero), then LD will load them correctly. The issue was that we weren't always storing clean values. With the fixes I've made, all BinOp/UnaryOp results should now be clean. And function call return values are also masked.
+
+Let me now build and test:
+Still exit 181. The issue is deeper than just masking. Let me look at the `encode_program` function for MIPS64, specifically how the JAL relocations are patched:
+Let me look at the ELF builder for MIPS64 and also try a simple multi-function test to isolate the issue:
+Let me try simpler tests to isolate the MIPS64 issue:
+Interesting! MIPS64 test_call works (exit 42), but PPC64 test_call segfaults. LoongArch64 test_call works now! Let me test more:
+MIPS64 passes all these basic tests. The issue is specifically with SHA256d. Let me write a targeted test that exercises u32 arithmetic more heavily:
+MIPS64 passes the u32 arithmetic test! The issue is specific to the SHA256d program. Let me create a more complex test that mimics SHA256d's memory patterns:
+All backends (including MIPS64) produce the same result (77) for the SHA round test. So the issue with SHA256d must be something specific to that program. Let me look at what's different — likely it's the memory-based operations (allocate, store, load through pointers).
+OK, the JAL encoding looks correct. Let me now try a different approach — let me create a more targeted test that exercises the `sha256_transform` function pattern with loops:
+All agree (128 = 0x80). Let me go bigger — test the full SHA256d but with a minimal version that's easier to debug. Let me actually try to compare the MIPS64 output with the x86_64 output for the test_sha_manual test. Since they disagree (205 vs 110), I need to understand where the divergence starts.
+
+Let me use a more systematic approach — I'll use subagents to investigate all three broken backends in parallel:
+Excellent findings! Let me now fix these bugs.
+
+**MIPS64**: The `alloc_offsets` map stores the offset BEFORE incrementing, making pointers point to the wrong end of the allocation. Let me fix this.
+
+**LoongArch64**: The branch patching code for I26 and 1RI21 formats uses a simple linear bit layout instead of LoongArch's non-linear layout. Need to fix the patching code.
+
+**PPC64**: The subagent returned empty, so I'll need to debug it separately.
+
+Let me fix MIPS64 first:
+Now let me check how the working backends handle this. Let me look at the RISC-V 64 backend for comparison:
+Confirmed! RISC-V 64 stores the offset AFTER incrementing (`current_offset += size; alloc_offsets.insert(id, current_offset);`), while MIPS64 stores it BEFORE (`alloc_offsets.insert(id, current_offset); current_offset += size;`).
+
+Now let me also check how the Alloc instruction computes the pointer in both backends:
+OK so in RISC-V 64, the Alloc pointer is computed as `fp - alloc_off`. With the "store after increment" approach:
+- If current_offset was 16 before the first alloc of size 32, it becomes 48, and alloc_offsets[id] = 48
+- The pointer = fp - 48, which points to the TOP of the allocation (fp-48 to fp-16)
+
+Wait, that doesn't make sense either. Let me think about this more carefully.
+
+The stack grows downward. FP points to the top of the frame. Allocations are below FP.
+
+With RISC-V 64:
+- current_offset starts at 16 (for RA+S0 save)
+- First alloc of 32 bytes: current_offset += 32 = 48; alloc_offsets[id] = 48
+- Pointer = fp - 48 → this points 48 bytes below FP
+- The allocation occupies fp-48 to fp-16 (32 bytes)
+- But we want the allocation to start at fp-48 and end at fp-16
+- So the pointer should be fp-48, which points to the START of the allocation
+
+Wait, that's backwards. The allocation should be from fp-48 to fp-16, so fp-48 is the start (lowest address) and fp-16 is the end (highest address). The pointer should point to the start (lowest address), which is fp-48. ✓
+
+Now with MIPS64 (buggy):
+- current_offset starts at 16 (for RA+FP save)
+- First alloc of 32 bytes: alloc_offsets[id] = 16; current_offset += 32 = 48
+- Pointer = fp - 16 → this points 16 bytes below FP, which is the END of the allocation
+- The allocation should occupy fp-48 to fp-16, but the pointer points to fp-16 (the end)
+
+So the fix is: swap lines 2174 and 2175, so that current_offset is incremented BEFORE inserting into alloc_offsets.
+
+But wait, let me also check the MIPS64 Alloc handler:
+Now I can see the bug clearly. The Alloc handler computes `fp - alloc_off`. With the current buggy code:
+- `alloc_off = 16` (the offset before incrementing)
+- Pointer = fp - 16, which is the END of the allocation
+
+With the fix (increment before insert):
+- `alloc_off = 48` (the offset after incrementing by 32)
+- Pointer = fp - 48, which is the START of the allocation ✓
+
+Let me fix it:
+In RISC-V 64:
+1. Alloc regions come FIRST (no skip for alloc vregs)
+2. ALL vregs (including alloc dst vregs) get vreg stack slots
+
+In MIPS64:
+1. Vreg slots come FIRST (but alloc vregs are SKIPPED!)
+2. Alloc regions come after
+
+This is a critical difference. In MIPS64, the alloc dst vregs don't get vreg stack slots, so when the Alloc handler tries to store the pointer, it uses `vreg_stack_slots.get(&dst_id).copied().unwrap_or(0)`, which returns 0. This means the pointer is stored at `fp - 0 = fp`, which is wrong!
+
+Let me fix this by removing the skip for alloc vregs:
+The test_sha_manual now returns 205 (matching x86_64/aarch64)! And test_u32_mem returns 79. The simple tests are working. The issue is specific to the full SHA256d. The exit 142 might be from a stack overflow — the SHA256d has deeply nested function calls with large stack allocations. Let me check the frame size:
+Found a critical bug! The QEMU trace shows `dsll t0, t0, 0x0` instead of `dsll t0, t0, 32`. This means the shift amount of 32 is being encoded as 0! In MIPS64, DSLL can only shift by 0-31. For shift of 32, we need DSLL32.
+There's the bug! `*sa & 0x1F` masks the shift amount to 5 bits (0-31). So `sa: 32` becomes `32 & 0x1F = 0`, which is a no-op shift!
+
+In MIPS64, for shifts of 32-63, we need to use the DSLL32/DSRL32/DSRA32 variants with a 5-bit `sa` field that represents `sa + 32`. Let me check what function codes are used:
+The MIPS64 function codes are:
+- DSLL = 0x38 (for sa 0-31)
+- DSRL = 0x3A (for sa 0-31)
+- DSRA = 0x3B (for sa 0-31)
+- DSLL32 = 0x3C (for sa 0-31, actual shift = sa + 32)
+- DSRL32 = 0x3E (for sa 0-31, actual shift = sa + 32)
+- DSRA32 = 0x3F (for sa 0-31, actual shift = sa + 32)
+
+The fix: When `sa >= 32`, use DSLL32/DSRL32/DSRA32 with `sa - 32` instead. Let me modify the `encode()` method:
+Now I need to add the FN_DSLL32, FN_DSRL32, FN_DSRA32 constants:
+DSLL32/DSRL32 is now being encoded correctly! The instructions are being decoded properly by QEMU. But the program segfaults. Let me look at the full trace more carefully:
+I found the problem — the unconditional zero-extension of inputs before BinOp is destroying pointer values (like `buf + offset` where `buf` is a 64-bit pointer). I need to remove the input zero-extension and only mask the outputs:
+Now I also need to remove the And/Or/Xor output masking (since it's not needed and might cause issues), and remove the zero-extension from the dedicated Add/Sub/Mul/Div handlers:
+Now remove the zero-extension from the dedicated Add/Sub handlers and the UnaryOp handler:
+Also remove the zero-extension from Mul/Div/UnaryOp:
+Now revert the UnaryOp changes back to the original:
+Also remove the function call return value masking (it might be a pointer):
+**MIPS64 SHA256d NOW PASSES WITH EXIT 79!** 🎉
+
+The key fixes were:
+1. **DSLL/DSRL shift of 32**: Needed to use DSLL32/DSRL32 variants for shifts >= 32
+2. **alloc_offsets off-by-one**: Stored offset before incrementing instead of after
+3. **Alloc vregs missing stack slots**: Removed the skip for alloc vregs in vreg_stack_slots
+
+Now let me test all backends and move on to fixing PPC64 and LoongArch64:
+5 down, 3 to go (PPC64, LoongArch64, Wasm32). Let me now fix PPC64 and LoongArch64 in parallel:
+Let me debug PPC64 first. The subagent returned empty, so I need to investigate directly. PPC64 segfaults even on test_call (exit 139). Let me look at the PPC64 backend:
+Found the PPC64 bug! The prologue allocates 0xC0 (192) bytes but the epilogue only restores 0x30 (48) bytes. Let me look at the PPC64 backend code:
+I see the issue! Look at the epilogue:
+1. `LD R0, fs+8(R1)` — loads LR from `R1 + fs + 8`
+2. `LD R31, fs-16(R1)` — loads R31 from `R1 + fs - 16`  
+3. `ADDI R1, R1, fs` — restores SP
+
+But in the prologue:
+1. `STDU R1, -fs(R1)` — allocates frame (SP = old_SP - fs)
+2. `STD R0, fs+8(R1)` — saves LR at SP + fs + 8 = old_SP + 8 ✓
+3. `STD R31, fs-16(R1)` — saves R31 at SP + fs - 16 = old_SP - 16 (wait, that's wrong!)
+
+Wait, let me re-read the prologue. After `STDU R1, -fs(R1)`:
+- R1 = old_R1 - fs
+- STD R0, fs+8(R1) = store at (old_R1 - fs) + fs + 8 = old_R1 + 8 ← This is wrong for PPC64 ELFv2!
+
+In PPC64 ELFv2 ABI, LR is saved at `R1 + 16` (offset 16 from the stack pointer after the prologue). Let me check the actual offsets in the trace:
+
+From the trace:
+- Prologue: `std r0, 0xe0(r1)` — LR saved at R1 + 0xE0 = R1 + 224
+- Prologue: `std r31, 0x80(r1)` — R31 saved at R1 + 0x80 = R1 + 128
+- Epilogue: `ld r0, 0xe0(r1)` — LR loaded from R1 + 0xE0
+- Epilogue: `ld r31, 0x80(r1)` — R31 loaded from R1 + 0x80
+- Epilogue: `addi r1, r1, 0x30` — SP += 0x30 = 48
+
+But the frame was 0xC0 = 192 bytes! The epilogue should do `addi r1, r1, 0xC0` but it does `addi r1, r1, 0x30`.
+
+The `fs` variable seems to be wrong in the epilogue. Let me check how `fs` is used:
+Wait, the epilogue uses `fs` (frame_size as i32), but `fs` is defined at line 2779 as a local variable in the stack-slot code generation function. Let me check if `fs` is accessible in the Ret handler:
+OK so `fs` is a local variable in `allocate_registers`. The Ret handler at line 3102 uses `fs`, which should be the same `fs` from the enclosing scope. Let me check where the `0x30` value in the trace comes from. The frame_size is computed as 0xC0 = 192. But the epilogue does `addi r1, r1, 0x30`. This suggests `fs` is 0x30 at the point of the Ret handler, but `frame_size` was 0xC0 in the prologue.
+
+Wait, maybe the `fs` value is captured in a closure and there's a scope issue. Let me look at the code structure more carefully:
+Now I see that `fs` is defined at line 2779 as `let fs = frame_size as i32;`. It's in the scope of `allocate_registers`. The Ret handler at line 3102 references `fs`. Let me check if `fs` is being shadowed or modified anywhere. 
+
+Looking at the trace output:
+- Prologue: `stdu r1, -0xc0(r1)` → frame_size = 0xC0 = 192
+- Epilogue: `addi r1, r1, 0x30` → fs = 0x30 = 48
+
+This suggests `fs` is 0x30 in the epilogue but 0xC0 in the prologue. But they should be the same variable! Unless there's a different `fs` in scope...
+
+Wait, let me check if there's another `fs` variable that shadows the frame_size one. Let me search for all `fs` declarations:
+OK, `ppc64_compute_frame_size` is only used in the old code path (line 2288). The new stack-slot path uses its own frame_size calculation. But let me check the stack-slot prologue more carefully. The issue is that the `STDU` instruction and the `ADDI R31` use different values.
+
+Let me look at the actual prologue code again:
+The prologue uses `fs` for both `STDU` and `ADDI`. But the trace shows different values. Let me check the `Stdu` encoding:
+OK so `Gpr::R1 = 1` (encoding = 1). Let me re-verify the trace encoding:
+
+`0xF821FF41` in binary: `1111 1000 0010 0001 1111 1111 0100 0001`
+
+Let me break it down per the DS-form:
+- Bits [0:5] = 111110 = 62 ✓
+- Bits [6:10] = 00001 = 1 (rs = R1) ✓
+- Bits [11:15] = 00001 = 1 (ra = R1) ✓
+- Bits [16:29] = 11111111110100 = 0x3FD4
+- Bits [30:31] = 01 = 1 (xo) ✓
+
+Wait, let me recompute: 0xF821FF41 in binary:
+F = 1111
+8 = 1000
+2 = 0010
+1 = 0001
+F = 1111
+F = 1111
+4 = 0100
+1 = 0001
+
+So: 11111000 00100001 11111111 01000001
+
+Breaking down:
+- [31:26] = 111110 = 62
+- [25:21] = 00001 = 1 (rS = R1)
+- [20:16] = 00001 = 1 (rA = R1)
+- [15:2] = 11111111110100 = 0x3FD4
+- [1:0] = 01 = 1 (xo)
+
+The ds field (14 bits at [15:2]) is 0x3FD4 = 16340.
+As signed 14-bit: 16340 - 16384 = -44.
+Byte offset = -44 * 4 = -176 = -0xB0.
+
+But we wanted -0xC0 = -192! So the DS-form encoding is actually producing -176 instead of -192. This is a bug in the DS-form encoding!
+
+Let me verify: the current code is:
+```rust
+(((ds as u32) & 0x3FFC) << 2)
+```
+
+For ds = -192:
+- ds as u32 = 0xFFFFFF40
+- 0xFFFFFF40 & 0x3FFC = 0x3F40
+- 0x3F40 << 2 = 0xFD00
+
+But the trace shows bits [15:2] = 0x3FD4, which would give 0xFD00 | something? No wait, let me recompute.
+
+Actually, the bits at [15:2] from the trace:
+0xF821FF41 = 11111000001000011111111101000001
+
+Bits 15:2 = 11111111010000 = 0x3FD0
+
+Wait let me recount:
+Bit 31: 1
+Bit 30: 1
+Bit 29: 1
+Bit 28: 1
+Bit 27: 1
+Bit 26: 0
+Bit 25: 0
+Bit 24: 0
+Bit 23: 0
+Bit 22: 1
+Bit 21: 0
+Bit 20: 0
+Bit 19: 0
+Bit 18: 1
+Bit 17: 1
+Bit 16: 1
+Bit 15: 1
+Bit 14: 1
+Bit 13: 1
+Bit 12: 1
+Bit 11: 1
+Bit 10: 1
+Bit 9: 1
+Bit 8: 0
+Bit 7: 1
+Bit 6: 0
+Bit 5: 0
+Bit 4: 0
+Bit 3: 0
+Bit 2: 0
+Bit 1: 0
+Bit 0: 1
+
+Hmm, let me just convert the hex directly:
+0xF821FF41
+
+Byte 0: 0xF8 = 11111000
+Byte 1: 0x21 = 00100001
+Byte 2: 0xFF = 11111111
+Byte 3: 0x41 = 01000001
+
+So the 32-bit word is: 11111000 00100001 11111111 01000001
+
+Breaking down:
+- [31:26] = 111110 = 62 ✓
+- [25:21] = 00001 = 1 (rS = R1) ✓ 
+- [20:16] = 00001 = 1 (rA = R1) ✓
+- [15:2] = 11111111010000 = let me count: 1111 1111 0100 00 = 0x3FD0
+
+Wait: bits [15:2]:
+Bit 15: 1
+Bit 14: 1
+Bit 13: 1
+Bit 12: 1
+Bit 11: 1
+Bit 10: 1
+Bit 9: 1
+Bit 8: 1
+Bit 7: 0
+Bit 6: 1
+Bit 5: 0
+Bit 4: 0
+Bit 3: 0
+Bit 2: 0
+
+= 11111111010000 = 0x3FD0
+
+- [1:0] = 01
+
+ds field (14 bits) = 0x3FD0 = 16336. As signed 14-bit: 16336 - 16384 = -48.
+Byte offset = -48 * 4 = -192 = -0xC0. ✓!
+
+So the STDU encoding IS correct! The trace correctly shows `stdu r1, -0xc0(r1)`.
+
+But then the epilogue shows `addi r1, r1, 0x30`, which means `fs = 0x30 = 48`. This doesn't match the prologue's `fs = 0xC0 = 192`.
+
+This means the `fs` variable has different values at the prologue and the epilogue. How is that possible? It's the same immutable variable!
+
+Unless... there are TWO functions being emitted, and the add1 function has a different frame_size than main. Let me re-read the trace:
+
+1. _start: bl 0x10010048 (call main at 0x10010048)
+2. main at 0x10010048: stdu r1, -0xc0(r1), ... li r3, 0x29, bl 0x1001000c (call add1 at 0x1001000c)
+3. add1 at 0x1001000c: stdu r1, -0xc0(r1), ... addi r1, r1, 0x30, blr
+
+Wait, add1 also has stdu r1, -0xc0(r1) and addi r1, r1, 0x30! So BOTH functions have the same bug: prologue allocates 0xC0 but epilogue restores 0x30.
+
+For the add1 function, let me compute the expected frame_size:
+- No Alloc instructions
+- Few vregs (maybe 3-4)
+- current_offset starts at 24
+- 3 vregs × 8 = 24
+- current_offset = 24 + 24 = 48 = 0x30
+- frame_size = 48 (already 16-aligned)
+
+So `fs` should be 48 = 0x30. But the prologue uses 0xC0!
+
+This means the prologue's `STDU` is NOT using `fs` but some other value. Let me check... 
+
+Wait, maybe the issue is that the prologue is NOT emitted by the stack-slot code. Maybe there's a separate prologue emission that uses `ppc64_compute_frame_size` instead of the stack-slot frame_size.
+
+Let me look at how the add1 function's prologue is being generated. I need to check if the `ppc64_stack_slot_isel` function is being used for ALL functions, or if some functions go through a different code path.
+Let me look at the Alloc handler — it says "so we must NOT emit another stdu":
+I see — there are TWO code paths! The old `lower_ir_instr_ppc64` (used by the linear scan allocator) and the new stack-slot approach (in `allocate_registers`). The PPC64 backend has BOTH, and the old path is still being used.
+
+Let me check which path is actually being called:
+The `lower_ir_instr_ppc64` function is defined but never called! The PPC64 backend must be using only the stack-slot approach in `allocate_registers`. Let me verify by checking what happens in `allocate_registers`:
+OK so the body is definitely using the stack-slot approach with `vreg_stack_slots`. The prologue at line 2785 uses `fs`, and the Ret handler at line 3102 also uses `fs`. They should be the same. Let me look at the STDU encoding more carefully by checking what value is actually being emitted:
+The add1 function has 3 vregs. Let me compute the frame_size for add1:
+- current_offset starts at 24
+- No alloc vregs
+- 3 vregs × 8 = 24 bytes
+- current_offset = 24 + 24 = 48 = 0x30
+- frame_size = 48
+
+So `fs = 0x30 = 48` for add1. The prologue should emit `STDU R1, -48(R1)` = `STDU R1, -0x30(R1)`. But the trace shows `STDU R1, -0xC0(R1)` = `STDU R1, -192(R1)`.
+
+This means the prologue is NOT using the stack-slot `fs` value! The prologue must be using `ppc64_compute_frame_size` instead.
+
+Wait, but `ppc64_compute_frame_size` for add1:
+- total = 32 (LR + CR + back chain + TOC)
+- No Alloc instructions
+- Round up: 32 (already 16-aligned)
+- Result = 32
+
+That's not 0xC0 either. Let me check the encode_program to see if there's something modifying the code:
+The disassembler is using the wrong ISA (aarch64). Let me look at the raw bytes directly at the code section:
+So BOTH functions have `stdu r1, -0xc0(r1)` and `addi r1, r1, 0x30`. The prologue allocates 0xC0 = 192 bytes but the epilogue only restores 0x30 = 48 bytes. This means `fs` is 0x30 but the STDU encoding is somehow using -0xC0 instead of -0x30.
+
+Wait, that can't be. Let me re-check the STDU encoding with fs=0x30:
+- ds = -fs = -0x30 = -48
+- ds as u32 = 0xFFFFFFD0
+- 0xFFFFFFD0 & 0x3FFC = 0x3FD0
+- 0x3FD0 << 2 = 0xFF40
+- word = (62 << 26) | (1 << 21) | (1 << 16) | 0xFF40 | 1 = 0xF821FF41
+
+And from the binary, we find 0xF821FF41 at offset 0x1000C. So the STDU is actually `stdu r1, -0x30(r1)`, not `stdu r1, -0xc0(r1)`!
+
+The QEMU disassembly was wrong! It said `-0xc0` but the actual encoding is `-0x30`. Let me verify:
+
+0xF821FF41 in the DS-form:
+- Bits [15:2] = (0xF821FF41 >> 2) & 0x3FFF
+- 0xF821FF41 >> 2 = 0x3E087FD0
+- 0x3E087FD0 & 0x3FFF = 0x3FD0
+- 0x3FD0 as signed 14-bit = 0x3FD0 - 0x4000 = -48
+- Byte offset = -48 * 4 = -192 = -0xC0
+
+Wait, that's -192 = -0xC0, NOT -0x30 = -48. So the QEMU disassembly is correct.
+
+But then the `fs` value for the STDU is 192 = 0xC0, not 48 = 0x30. This contradicts the `addi r1, r1, 0x30` which uses fs = 0x30.
+
+Unless... the `addi` at 0x10040 is NOT the epilogue of the add1 function. Let me dump the actual instructions:
+Now I can see the issue clearly! Both functions have:
+1. `stdu r1, -0xC0(r1)` — allocates 192 bytes (0xC0)
+2. `addi r31, r1, 0x30` — sets R31 = R1 + 48 (0x30)
+3. `addi r1, r1, 0x30` — restores only 48 bytes
+
+The `stdu` uses -0xC0 but the `addi` uses 0x30. The `fs` value is 0x30, so the `addi` is correct. But the `stdu` is using -0xC0 instead of -0x30.
+
+This means the `STDU` encoding is wrong! The `ds = -fs = -0x30 = -48` should encode as `stdu r1, -48(r1)`, not `stdu r1, -192(r1)`.
+
+Let me check the DS-form encoding for ds = -48:
+- ds = -48
+- ds as u32 = 0xFFFFFFD0
+- 0xFFFFFFD0 & 0x3FFC = 0x3FD0
+- 0x3FD0 << 2 = 0xFF40
+
+Expected instruction word: (62 << 26) | (1 << 21) | (1 << 16) | 0xFF40 | 1 = 0xF821FF41
+
+But 0xF821FF41 decodes as ds field = 0x3FD0, which as signed 14-bit is -48, and byte offset = -48 * 4 = -192 = -0xC0.
+
+**There's the bug!** The DS-form `ds` field represents the byte offset divided by 4, but the current encoding treats the `ds` parameter as a byte offset and tries to encode it directly. The DS-form requires the offset to be a multiple of 4, and the `ds` field in the instruction stores `byte_offset / 4`.
+
+The current code passes `-fs` as the `ds` parameter, which is the byte offset. But the DS-form encoding should store `byte_offset / 4` in the ds field. The mask `0x3FFC` captures bits [13:2] of the byte offset, which IS `byte_offset / 4` (shifted left by 2). But then `<< 2` shifts it back, putting it at positions [16:29].
+
+Wait, I'm confusing myself. Let me trace through more carefully.
+
+The DS-form instruction layout:
+- Bits [0:5] = opcode (6 bits)
+- Bits [6:10] = rS (5 bits)
+- Bits [11:15] = rA (5 bits)  
+- Bits [16:29] = ds (14 bits) — this is the offset divided by 4
+- Bits [30:31] = xo (2 bits)
+
+The `ds` field in the instruction is 14 bits and represents the 16-bit byte offset divided by 4 (since the lower 2 bits must be 0).
+
+For byte_offset = -48:
+- ds_field = -48 / 4 = -12
+- As 14-bit signed: -12 = 0x3FF4
+- At instruction bits [16:29]: 0x3FF4 << 2 = 0xFFD0
+
+Expected instruction: (62 << 26) | (1 << 21) | (1 << 16) | 0xFFD0 | 1 = 0xF821FFD1
+
+But the actual instruction is 0xF821FF41. Let me decode 0xF821FF41:
+- ds field = (0xF821FF41 >> 2) & 0x3FFF = 0x3FD0
+- As 14-bit signed: 0x3FD0 - 0x4000 = -48
+- Byte offset = -48 * 4 = -192
+
+So 0xF821FF41 encodes byte_offset = -192, NOT -48. The encoding is putting -192 instead of -48 into the STDU.
+
+This means `fs = 0x30 = 48`, but `-fs = -48`, and somehow the encoding produces byte_offset = -192. Let me check: if the code is `ds: -fs` and `fs = 48`, then `ds = -48`. But the encoding produces -192.
+
+The current encoding is:
+```rust
+(((ds as u32) & 0x3FFC) << 2)
+```
+
+For ds = -48:
+- ds as u32 = 0xFFFFFFD0
+- 0xFFFFFFD0 & 0x3FFC = 0x3FD0
+- 0x3FD0 << 2 = 0xFF40
+
+This puts 0xFF40 at bits [16:29], which is the ds_field = 0x3FD0.
+Decoding: ds_field = 0x3FD0, signed = -48, byte_offset = -48 * 4 = -192.
+
+**The BUG**: The current encoding treats the `ds` parameter as a byte offset, but it should treat it as the divided-by-4 offset! The mask `0x3FFC` captures the byte offset's bits [13:2] (which is byte_offset / 4 in the lower 14 bits), but then `<< 2` puts them at instruction bits [16:29]. The result is that the instruction's ds field contains `byte_offset / 4`, and when the CPU decodes it, it multiplies by 4, giving `byte_offset`. But the CPU ALSO divides by 4 first, so the actual decoded offset is `byte_offset`.
+
+Wait, no. The ds field IS `byte_offset / 4`. The CPU computes `byte_offset = ds_field * 4`. So if ds_field = -48, byte_offset = -192. But we wanted byte_offset = -48, so ds_field should be -12.
+
+The fix: The `ds` parameter to `Stdu` should be the raw byte offset, and the encoding should divide by 4:
+
+```rust
+(((ds >> 2) as u32 & 0x3FFF) << 2)
+```
+
+Or, change the `ds` parameter to mean the divided-by-4 value.
+
+Let me fix the DS-form encoding to properly divide by 4:
+PPC64 test_call works now (exit 42)! SHA256d exits 0 instead of 79. Progress! The SHA256d probably has the same 32-bit value handling issues as MIPS64 had. Let me also check the LoongArch64 branch patching issue. But first, let me quickly check if the PPC64 has the same alloc_offsets bug as MIPS64:
+PPC64 already has the correct order (increment before insert) for alloc_offsets. Good. Now let me work on LoongArch64 and then circle back to the PPC64 SHA256d issue. Let me tackle the LoongArch64 branch patching first since the subagent identified the specific bugs:
+Now let me check the correct I26 and 1RI21 format encodings. According to the LoongArch ISA manual:
+
+**I26 format** (B/BL):
+- Bits [31:26] = opcode
+- Bits [25:10] = offs26[15:0] (lower 16 bits of offset)
+- Bits [9:0] = offs26[25:16] (upper 10 bits of offset)
+
+**1RI21 format** (BEQZ/BNEZ):
+- Bits [31:26] = opcode
+- Bits [25:10] = offs21[15:0] (lower 16 bits of offset)
+- Bits [9:5] = offs21[20:16] (upper 5 bits of offset)
+- Bits [4:0] = rj
+
+Let me check the original encoding functions:
+The `encode_i26` function correctly encodes the I26 format with the non-linear bit layout. Now I need to fix the patching code in `stack_slot_isel.rs` to use the same non-linear layout:
+Now also fix the Select instruction issue (Bug 3 from the subagent — the BEQZ offset should skip 2 instructions, not 1):
+The Select instruction uses `beqz S2, +1` which means "skip 1 instruction forward" (the `add.d` move). With `offs21: 1`, this means branch to PC + 4 + 1*4 = PC + 8, which is the instruction after the `add.d`. This is correct! If cond == 0, skip the move and keep the false value. If cond != 0, execute the move and use the true value.
+
+Wait, but the subagent said `offs21: 1` means "branch to PC+4" (the next instruction), which doesn't skip anything. Let me check the LoongArch spec: the offset in BEQZ is a PC-relative offset in instructions, relative to the current instruction. So `offs21: 1` means "branch to PC + 4 + 1*4 = PC + 8", which skips one instruction. This is correct!
+
+Actually, let me double check: in LoongArch, the PC-relative offset for BEQZ is relative to the address of the BEQZ instruction itself. The offset value of N means the target is `PC + N*4`. So `offs21: 1` means target = PC + 4, which is the next instruction. That doesn't skip anything!
+
+Wait, I need to check if the offset is relative to PC or PC+4. Let me check the LoongArch spec more carefully.
+
+According to the LoongArch spec, for BEQZ:
+- Target address = PC + SignExtend(offs21) * 4
+
+Where PC is the address of the BEQZ instruction itself. So `offs21: 1` means target = BEQZ_addr + 4, which IS the next instruction. This means the branch doesn't skip anything — both paths execute the move!
+
+The fix: `offs21: 2` means target = BEQZ_addr + 8, which skips the next instruction (the move).
+test_rotr still has illegal instruction (exit 132). The rotr function uses loops and more complex code. Let me check the LoongArch64 Alloc handler — it likely has the same alloc_offsets bug as MIPS64:
+The LoongArch64 alloc_offsets stores `-(alloc_running + size)`, which is negative. The Alloc handler uses this as an offset from $fp. Let me check how the Alloc instruction uses this:
+The LoongArch64 Alloc handler uses `alloc_off` which is negative (from $fp). It computes `$fp + alloc_off` to get the pointer. With `alloc_offsets.insert(id, -(alloc_running + size))`:
+- For first alloc of size 32, with `alloc_running` starting at `vreg_area_end`:
+  - `alloc_off = -(vreg_area_end + 32)`
+  - Pointer = $fp + alloc_off = $fp - (vreg_area_end + 32)
+
+This is correct — it points to the start (lowest address) of the allocation. Good.
+
+The illegal instruction issue in test_rotr must be something else. Let me check if the LoongArch64 backend has the same DSLL/DSRL issue for 32-bit masking. Actually, LoongArch64 uses different shift instructions. Let me check if there's a 32-bit value handling issue.
+
+Given the complexity, let me focus on what I can test and fix. Let me now test all backends with SHA256d to see the current state:

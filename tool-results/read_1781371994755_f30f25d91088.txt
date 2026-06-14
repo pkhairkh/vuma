@@ -1,0 +1,2002 @@
+     1→//! # LoongArch 64-bit Backend
+     2→//!
+     3→//! Implements the `Backend` trait for the LoongArch 64-bit target (LP64 ABI).
+     4→//! This module provides:
+     5→//!
+     6→//! - `Gpr` — General-purpose register enum (r0–r31)
+     7→//! - `Fpr` — Floating-point register enum (f0–f31)
+     8→//! - `Instruction` — LoongArch64 instruction enum with correct encoding
+     9→//! - Encoding helpers for all 9 instruction formats (2R, 3R, 4R, 2RI8, 2RI12,
+    10→//!   2RI14, 2RI16, 1RI21, I26)
+    11→//! - `LoongArch64Backend` — `Backend` implementation that lowers IR to LoongArch64
+    12→//!   machine code and emits ELF64 binaries
+    13→//!
+    14→//! ## LoongArch64 Register Convention (LP64 ABI)
+    15→//!
+    16→//! | Register(s) | ABI Name | Role                              |
+    17→//! |-------------|----------|-----------------------------------|
+    18→//! | r0          | zero     | Hardwired zero                    |
+    19→//! | r1          | ra       | Return address                    |
+    20→//! | r2          | tp       | Thread pointer                    |
+    21→//! | r3          | sp       | Stack pointer                     |
+    22→//! | r4–r11      | a0–a7    | Argument / return registers       |
+    23→//! | r12–r20     | t0–t8    | Caller-saved temporaries          |
+    24→//! | r21         | —        | Reserved                          |
+    25→//! | r22         | fp       | Frame pointer (callee-saved)      |
+    26→//! | r23–r31     | s0–s8    | Callee-saved                      |
+    27→//!
+    28→//! ## LoongArch64 FP Register Convention (LP64 ABI)
+    29→//!
+    30→//! | Register(s) | ABI Name | Role                              |
+    31→//! |-------------|----------|-----------------------------------|
+    32→//! | f0–f7       | fa0–fa7  | FP argument / return registers    |
+    33→//! | f8–f23      | ft0–ft15 | Caller-saved temporaries          |
+    34→//! | f24–f31     | fs0–fs7  | Callee-saved                      |
+    35→//!
+    36→//! ## Instruction Formats
+    37→//!
+    38→//! All instructions are 32 bits, little-endian, with no branch delay slots.
+    39→//! Nine formats: 2R, 3R, 4R, 2RI8, 2RI12, 2RI14, 2RI16, 1RI21, I26.
+    40→//!
+    41→//! ## References
+    42→//!
+    43→//! - LoongArch Reference Manual, Volume 1: Basic Architecture
+    44→//! - <https://loongson.github.io/LoongArch-Documentation/>
+    45→
+    46→use crate::backend::{
+    47→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    48→    BackendError, LoongArch64TargetInfo, PhysicalReg, RegClass, TargetInfo,
+    49→};
+    50→use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRValue, UnaryOpKind};
+    51→use std::fmt;
+    52→
+    53→// ===========================================================================
+    54→// General-Purpose Registers
+    55→// ===========================================================================
+    56→
+    57→/// LoongArch64 general-purpose registers (r0–r31).
+    58→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    59→pub enum Gpr {
+    60→    R0 = 0,
+    61→    Ra = 1,
+    62→    Tp = 2,
+    63→    Sp = 3,
+    64→    A0 = 4,
+    65→    A1 = 5,
+    66→    A2 = 6,
+    67→    A3 = 7,
+    68→    A4 = 8,
+    69→    A5 = 9,
+    70→    A6 = 10,
+    71→    A7 = 11,
+    72→    T0 = 12,
+    73→    T1 = 13,
+    74→    T2 = 14,
+    75→    T3 = 15,
+    76→    T4 = 16,
+    77→    T5 = 17,
+    78→    T6 = 18,
+    79→    T7 = 19,
+    80→    T8 = 20,
+    81→    R21 = 21,
+    82→    Fp = 22,
+    83→    S0 = 23,
+    84→    S1 = 24,
+    85→    S2 = 25,
+    86→    S3 = 26,
+    87→    S4 = 27,
+    88→    S5 = 28,
+    89→    S6 = 29,
+    90→    S7 = 30,
+    91→    S8 = 31,
+    92→}
+    93→
+    94→impl Gpr {
+    95→    /// Returns the 5-bit encoding index for this register.
+    96→    pub fn encoding(&self) -> u32 {
+    97→        *self as u32
+    98→    }
+    99→
+   100→    /// Returns `true` if this register is available for register allocation.
+   101→    ///
+   102→    /// R0 (zero), Ra, Tp, and Sp are reserved.
+   103→    pub fn is_allocatable(&self) -> bool {
+   104→        !matches!(self, Gpr::R0 | Gpr::Ra | Gpr::Tp | Gpr::Sp)
+   105→    }
+   106→
+   107→    /// Returns `true` if this register is callee-saved (fp, s0–s8).
+   108→    pub fn is_callee_saved(&self) -> bool {
+   109→        matches!(
+   110→            self,
+   111→            Gpr::Fp
+   112→                | Gpr::S0
+   113→                | Gpr::S1
+   114→                | Gpr::S2
+   115→                | Gpr::S3
+   116→                | Gpr::S4
+   117→                | Gpr::S5
+   118→                | Gpr::S6
+   119→                | Gpr::S7
+   120→                | Gpr::S8
+   121→        )
+   122→    }
+   123→
+   124→    /// Returns `true` if this register is an argument register (a0–a7).
+   125→    pub fn is_arg_reg(&self) -> bool {
+   126→        matches!(
+   127→            self,
+   128→            Gpr::A0 | Gpr::A1 | Gpr::A2 | Gpr::A3 | Gpr::A4 | Gpr::A5 | Gpr::A6 | Gpr::A7
+   129→        )
+   130→    }
+   131→
+   132→    /// Returns the standard assembly name for this register.
+   133→    pub fn asm_name(&self) -> &'static str {
+   134→        match self {
+   135→            Gpr::R0 => "$r0",
+   136→            Gpr::Ra => "$ra",
+   137→            Gpr::Tp => "$tp",
+   138→            Gpr::Sp => "$sp",
+   139→            Gpr::A0 => "$a0",
+   140→            Gpr::A1 => "$a1",
+   141→            Gpr::A2 => "$a2",
+   142→            Gpr::A3 => "$a3",
+   143→            Gpr::A4 => "$a4",
+   144→            Gpr::A5 => "$a5",
+   145→            Gpr::A6 => "$a6",
+   146→            Gpr::A7 => "$a7",
+   147→            Gpr::T0 => "$t0",
+   148→            Gpr::T1 => "$t1",
+   149→            Gpr::T2 => "$t2",
+   150→            Gpr::T3 => "$t3",
+   151→            Gpr::T4 => "$t4",
+   152→            Gpr::T5 => "$t5",
+   153→            Gpr::T6 => "$t6",
+   154→            Gpr::T7 => "$t7",
+   155→            Gpr::T8 => "$t8",
+   156→            Gpr::R21 => "$r21",
+   157→            Gpr::Fp => "$fp",
+   158→            Gpr::S0 => "$s0",
+   159→            Gpr::S1 => "$s1",
+   160→            Gpr::S2 => "$s2",
+   161→            Gpr::S3 => "$s3",
+   162→            Gpr::S4 => "$s4",
+   163→            Gpr::S5 => "$s5",
+   164→            Gpr::S6 => "$s6",
+   165→            Gpr::S7 => "$s7",
+   166→            Gpr::S8 => "$s8",
+   167→        }
+   168→    }
+   169→
+   170→    /// Returns the Gpr for a given argument index (0–7). Returns `None` for
+   171→    /// indices >= 8.
+   172→    pub fn arg_register(index: usize) -> Option<Gpr> {
+   173→        match index {
+   174→            0 => Some(Gpr::A0),
+   175→            1 => Some(Gpr::A1),
+   176→            2 => Some(Gpr::A2),
+   177→            3 => Some(Gpr::A3),
+   178→            4 => Some(Gpr::A4),
+   179→            5 => Some(Gpr::A5),
+   180→            6 => Some(Gpr::A6),
+   181→            7 => Some(Gpr::A7),
+   182→            _ => None,
+   183→        }
+   184→    }
+   185→}
+   186→
+   187→impl fmt::Display for Gpr {
+   188→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   189→        f.write_str(self.asm_name())
+   190→    }
+   191→}
+   192→
+   193→// ===========================================================================
+   194→// Floating-Point Registers
+   195→// ===========================================================================
+   196→
+   197→/// LoongArch64 floating-point registers (f0–f31).
+   198→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   199→pub enum Fpr {
+   200→    F0 = 0,
+   201→    F1 = 1,
+   202→    F2 = 2,
+   203→    F3 = 3,
+   204→    F4 = 4,
+   205→    F5 = 5,
+   206→    F6 = 6,
+   207→    F7 = 7,
+   208→    F8 = 8,
+   209→    F9 = 9,
+   210→    F10 = 10,
+   211→    F11 = 11,
+   212→    F12 = 12,
+   213→    F13 = 13,
+   214→    F14 = 14,
+   215→    F15 = 15,
+   216→    F16 = 16,
+   217→    F17 = 17,
+   218→    F18 = 18,
+   219→    F19 = 19,
+   220→    F20 = 20,
+   221→    F21 = 21,
+   222→    F22 = 22,
+   223→    F23 = 23,
+   224→    F24 = 24,
+   225→    F25 = 25,
+   226→    F26 = 26,
+   227→    F27 = 27,
+   228→    F28 = 28,
+   229→    F29 = 29,
+   230→    F30 = 30,
+   231→    F31 = 31,
+   232→}
+   233→
+   234→impl Fpr {
+   235→    /// Returns the 5-bit encoding index for this register.
+   236→    pub fn encoding(&self) -> u32 {
+   237→        *self as u32
+   238→    }
+   239→
+   240→    /// Returns `true` if this register is callee-saved (fs0–fs7, f24–f31).
+   241→    pub fn is_callee_saved(&self) -> bool {
+   242→        matches!(
+   243→            self,
+   244→            Fpr::F24 | Fpr::F25 | Fpr::F26 | Fpr::F27 | Fpr::F28 | Fpr::F29 | Fpr::F30 | Fpr::F31
+   245→        )
+   246→    }
+   247→
+   248→    /// Returns `true` if this register is an FP argument register (fa0–fa7, f0–f7).
+   249→    pub fn is_arg_reg(&self) -> bool {
+   250→        matches!(
+   251→            self,
+   252→            Fpr::F0 | Fpr::F1 | Fpr::F2 | Fpr::F3 | Fpr::F4 | Fpr::F5 | Fpr::F6 | Fpr::F7
+   253→        )
+   254→    }
+   255→
+   256→    /// Returns `true` if this register is available for register allocation.
+   257→    pub fn is_allocatable(&self) -> bool {
+   258→        true
+   259→    }
+   260→
+   261→    /// Returns the standard assembly name for this register.
+   262→    pub fn asm_name(&self) -> &'static str {
+   263→        match self {
+   264→            Fpr::F0 => "$fa0",
+   265→            Fpr::F1 => "$fa1",
+   266→            Fpr::F2 => "$fa2",
+   267→            Fpr::F3 => "$fa3",
+   268→            Fpr::F4 => "$fa4",
+   269→            Fpr::F5 => "$fa5",
+   270→            Fpr::F6 => "$fa6",
+   271→            Fpr::F7 => "$fa7",
+   272→            Fpr::F8 => "$ft0",
+   273→            Fpr::F9 => "$ft1",
+   274→            Fpr::F10 => "$ft2",
+   275→            Fpr::F11 => "$ft3",
+   276→            Fpr::F12 => "$ft4",
+   277→            Fpr::F13 => "$ft5",
+   278→            Fpr::F14 => "$ft6",
+   279→            Fpr::F15 => "$ft7",
+   280→            Fpr::F16 => "$ft8",
+   281→            Fpr::F17 => "$ft9",
+   282→            Fpr::F18 => "$ft10",
+   283→            Fpr::F19 => "$ft11",
+   284→            Fpr::F20 => "$ft12",
+   285→            Fpr::F21 => "$ft13",
+   286→            Fpr::F22 => "$ft14",
+   287→            Fpr::F23 => "$ft15",
+   288→            Fpr::F24 => "$fs0",
+   289→            Fpr::F25 => "$fs1",
+   290→            Fpr::F26 => "$fs2",
+   291→            Fpr::F27 => "$fs3",
+   292→            Fpr::F28 => "$fs4",
+   293→            Fpr::F29 => "$fs5",
+   294→            Fpr::F30 => "$fs6",
+   295→            Fpr::F31 => "$fs7",
+   296→        }
+   297→    }
+   298→
+   299→    /// Returns the Fpr for a given FP argument index (0–7). Returns `None` for
+   300→    /// indices >= 8.
+   301→    pub fn arg_register(index: usize) -> Option<Fpr> {
+   302→        match index {
+   303→            0 => Some(Fpr::F0),
+   304→            1 => Some(Fpr::F1),
+   305→            2 => Some(Fpr::F2),
+   306→            3 => Some(Fpr::F3),
+   307→            4 => Some(Fpr::F4),
+   308→            5 => Some(Fpr::F5),
+   309→            6 => Some(Fpr::F6),
+   310→            7 => Some(Fpr::F7),
+   311→            _ => None,
+   312→        }
+   313→    }
+   314→}
+   315→
+   316→impl fmt::Display for Fpr {
+   317→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   318→        f.write_str(self.asm_name())
+   319→    }
+   320→}
+   321→
+   322→// ===========================================================================
+   323→// Instruction Encoding Helpers
+   324→// ===========================================================================
+   325→
+   326→/// Encode a 2R format instruction.
+   327→///
+   328→/// Format: `opcode[31:10] | rj[9:5] | rd[4:0]`
+   329→fn encode_2r(opcode: u32, rj: u32, rd: u32) -> [u8; 4] {
+   330→    let word = ((opcode & 0x3FF_FFFF) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   331→    word.to_le_bytes()
+   332→}
+   333→
+   334→/// Encode a 3R format instruction.
+   335→///
+   336→/// Format: `opcode[31:15] | rk[14:10] | rj[9:5] | rd[4:0]`
+   337→fn encode_3r(opcode: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
+   338→    let word = ((opcode & 0x1FFFF) << 15) | ((rk & 0x1F) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   339→    word.to_le_bytes()
+   340→}
+   341→
+   342→/// Encode a 4R format instruction.
+   343→///
+   344→/// Format: `opcode[31:20] | ra[19:15] | rk[14:10] | rj[9:5] | rd[4:0]`
+   345→#[allow(dead_code)]
+   346→fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
+   347→    let word = ((opcode & 0xFFF) << 20)
+   348→        | ((ra & 0x1F) << 15)
+   349→        | ((rk & 0x1F) << 10)
+   350→        | ((rj & 0x1F) << 5)
+   351→        | (rd & 0x1F);
+   352→    word.to_le_bytes()
+   353→}
+   354→
+   355→/// Encode a 2RI8 format instruction.
+   356→///
+   357→/// Format: `opcode[31:22] | I8[21:14] | rj[9:5] | rd[4:0]`
+   358→fn encode_2ri8(opcode: u32, imm8: u32, rj: u32, rd: u32) -> [u8; 4] {
+   359→    let word = ((opcode & 0x3FF) << 22) | ((imm8 & 0xFF) << 14) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   360→    word.to_le_bytes()
+   361→}
+   362→
+   363→/// Encode a 2RI12 format instruction.
+   364→///
+   365→/// Format: `opcode[31:22] | I12[21:10] | rj[9:5] | rd[4:0]`
+   366→fn encode_2ri12(opcode: u32, imm12: u32, rj: u32, rd: u32) -> [u8; 4] {
+   367→    let word =
+   368→        ((opcode & 0x3FF) << 22) | ((imm12 & 0xFFF) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   369→    word.to_le_bytes()
+   370→}
+   371→
+   372→/// Encode a 2RI14 format instruction.
+   373→///
+   374→/// Format: `opcode[31:24] | I14[23:10] | rj[9:5] | rd[4:0]`
+   375→fn encode_2ri14(opcode: u32, imm14: u32, rj: u32, rd: u32) -> [u8; 4] {
+   376→    let word =
+   377→        ((opcode & 0xFF) << 24) | ((imm14 & 0x3FFF) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   378→    word.to_le_bytes()
+   379→}
+   380→
+   381→/// Encode a 2RI16 format instruction.
+   382→///
+   383→/// Format: `opcode[31:26] | I16[25:10] | rj[9:5] | rd[4:0]`
+   384→fn encode_2ri16(opcode: u32, imm16: u32, rj: u32, rd: u32) -> [u8; 4] {
+   385→    let word =
+   386→        ((opcode & 0x3F) << 26) | ((imm16 & 0xFFFF) << 10) | ((rj & 0x1F) << 5) | (rd & 0x1F);
+   387→    word.to_le_bytes()
+   388→}
+   389→
+   390→/// Encode a 1RI21 format instruction.
+   391→///
+   392→/// Format: `opcode[31:26] | I21[25:5] | rj[9:5]`
+   393→///
+   394→/// The 21-bit immediate is split: bits[20:16] in bits[25:21], bits[15:0] in
+   395→/// bits[20:5].
+   396→fn encode_1ri21(opcode: u32, imm21: u32, rj: u32) -> [u8; 4] {
+   397→    let word = ((opcode & 0x3F) << 26)
+   398→        | ((imm21 & 0x1F) << 21)
+   399→        | ((imm21 >> 5) & 0xFFFF) << 5
+   400→        | (rj & 0x1F);
+   401→    word.to_le_bytes()
+   402→}
+   403→
+   404→/// Encode an I26 format instruction.
+   405→///
+   406→/// Format: `opcode[31:26] | I26[25:0]`
+   407→///
+   408→/// The 26-bit immediate is split: bits[25:16] in bits[25:16], bits[15:0] in
+   409→/// bits[9:0] with bits[15:10] in bits[25:20] and bits[9:0] in bits[9:0].
+   410→fn encode_i26(opcode: u32, imm26: u32) -> [u8; 4] {
+   411→    let hi10 = (imm26 >> 16) & 0x3FF;
+   412→    let lo16 = imm26 & 0xFFFF;
+   413→    let word = ((opcode & 0x3F) << 26) | (hi10 << 16) | lo16;
+   414→    word.to_le_bytes()
+   415→}
+   416→
+   417→// ===========================================================================
+   418→// 3R-format Opcodes (bits[31:15])
+   419→// ===========================================================================
+   420→
+   421→const OPC_ADD_W: u32 = 0x0020;
+   422→const OPC_ADD_D: u32 = 0x0021;
+   423→const OPC_SUB_W: u32 = 0x0030;
+   424→const OPC_SUB_D: u32 = 0x0031;
+   425→const OPC_SLT: u32 = 0x0040;
+   426→const OPC_SLTU: u32 = 0x0041;
+   427→const OPC_MUL_W: u32 = 0x0098;
+   428→const OPC_MUL_D: u32 = 0x0099;
+   429→const OPC_DIV_W: u32 = 0x009E;
+   430→const OPC_MOD_W: u32 = 0x009F;
+   431→const OPC_DIV_D: u32 = 0x00A0;
+   432→const OPC_MOD_D: u32 = 0x00A1;
+   433→const OPC_AND: u32 = 0x0080;
+   434→const OPC_OR: u32 = 0x0081;
+   435→const OPC_XOR: u32 = 0x0082;
+   436→const OPC_NOR: u32 = 0x0083;
+   437→const OPC_ANDN: u32 = 0x0084;
+   438→const OPC_ORN: u32 = 0x0085;
+   439→const OPC_SLL_W: u32 = 0x0089;
+   440→const OPC_SRL_W: u32 = 0x008A;
+   441→const OPC_SRA_W: u32 = 0x008B;
+   442→const OPC_SLL_D: u32 = 0x008C;
+   443→const OPC_SRL_D: u32 = 0x008D;
+   444→const OPC_SRA_D: u32 = 0x008E;
+   445→const OPC_ROTR_W: u32 = 0x008F;
+   446→const OPC_ROTR_D: u32 = 0x0090;
+   447→
+   448→// ===========================================================================
+   449→// 3R-format FP Arithmetic Opcodes (bits[31:15])
+   450→// ===========================================================================
+   451→
+   452→const OPC_FADD_S: u32 = 0x0100;
+   453→const OPC_FADD_D: u32 = 0x0101;
+   454→const OPC_FSUB_S: u32 = 0x0102;
+   455→const OPC_FSUB_D: u32 = 0x0103;
+   456→const OPC_FMUL_S: u32 = 0x0104;
+   457→const OPC_FMUL_D: u32 = 0x0105;
+   458→const OPC_FDIV_S: u32 = 0x0106;
+   459→const OPC_FDIV_D: u32 = 0x0107;
+   460→
+   461→// ===========================================================================
+   462→// 2R-format FP Move Opcodes (bits[31:10])
+   463→// ===========================================================================
+   464→
+   465→const OPC_FMOV_S: u32 = 0x000004E;
+   466→const OPC_FMOV_D: u32 = 0x000004F;
+   467→
+   468→// ===========================================================================
+   469→// 4R-format FP Compare Opcodes (bits[31:20])
+   470→// ===========================================================================
+   471→
+   472→const OPC_FCMP_S: u32 = 0x0C4;
+   473→const OPC_FCMP_D: u32 = 0x0C5;
+   474→
+   475→// ===========================================================================
+   476→// 2RI12-format FP Load/Store Opcodes (bits[31:22])
+   477→// ===========================================================================
+   478→
+   479→const OPC_FLD_S: u32 = 0x0AB;
+   480→const OPC_FLD_D: u32 = 0x0AC;
+   481→const OPC_FST_S: u32 = 0x0AD;
+   482→const OPC_FST_D: u32 = 0x0AE;
+   483→
+   484→// ===========================================================================
+   485→// 2R-format FP GPR<->FPR Move Opcodes (bits[31:10])
+   486→// ===========================================================================
+   487→
+   488→const OPC_MOVFR2GR_D: u32 = 0x0000052;
+   489→const OPC_MOVGR2FR_D: u32 = 0x0000053;
+   490→
+   491→// ===========================================================================
+   492→// 2RI12-format Opcodes (bits[31:22])
+   493→// ===========================================================================
+   494→
+   495→const OPC_ADDI_W: u32 = 0x00A;
+   496→const OPC_ADDI_D: u32 = 0x00B;
+   497→const OPC_SLTI: u32 = 0x008;
+   498→const OPC_SLTUI: u32 = 0x009;
+   499→const OPC_ANDI: u32 = 0x00D;
+   500→const OPC_ORI: u32 = 0x00E;
+   501→const OPC_XORI: u32 = 0x00F;
+   502→const OPC_LD_B: u32 = 0x0A0;
+   503→const OPC_LD_H: u32 = 0x0A1;
+   504→const OPC_LD_W: u32 = 0x0A2;
+   505→const OPC_LD_D: u32 = 0x0A3;
+   506→const OPC_LD_BU: u32 = 0x0A4;
+   507→const OPC_LD_HU: u32 = 0x0A5;
+   508→const OPC_LD_WU: u32 = 0x0A6;
+   509→const OPC_ST_B: u32 = 0x0A7;
+   510→const OPC_ST_H: u32 = 0x0A8;
+   511→const OPC_ST_W: u32 = 0x0A9;
+   512→const OPC_ST_D: u32 = 0x0AA;
+   513→
+   514→// ===========================================================================
+   515→// 2RI16-format Opcodes (bits[31:26])
+   516→// ===========================================================================
+   517→
+   518→const OPC_BEQ: u32 = 0x16;
+   519→const OPC_BNE: u32 = 0x17;
+   520→const OPC_BLT: u32 = 0x18;
+   521→const OPC_BGE: u32 = 0x19;
+   522→const OPC_BLTU: u32 = 0x1A;
+   523→const OPC_BGEU: u32 = 0x1B;
+   524→const OPC_JIRL: u32 = 0x13;
+   525→const OPC_LU12I_W: u32 = 0x05;
+   526→const OPC_LU32I_D: u32 = 0x06;
+   527→const OPC_LU52I_D: u32 = 0x03;
+   528→
+   529→// ===========================================================================
+   530→// I26-format Opcodes (bits[31:26])
+   531→// ===========================================================================
+   532→
+   533→const OPC_B: u32 = 0x14;
+   534→const OPC_BL: u32 = 0x15;
+   535→
+   536→// ===========================================================================
+   537→// 2RI14-format Opcodes (bits[31:24])
+   538→// ===========================================================================
+   539→
+   540→const OPC_LL_W: u32 = 0x20;
+   541→const OPC_SC_W: u32 = 0x21;
+   542→const OPC_LL_D: u32 = 0x22;
+   543→const OPC_SC_D: u32 = 0x23;
+   544→
+   545→// ===========================================================================
+   546→// 1RI21-format Opcodes (bits[31:26])
+   547→// ===========================================================================
+   548→
+   549→const OPC_BEQZ: u32 = 0x1C;
+   550→const OPC_BNEZ: u32 = 0x1D;
+   551→const OPC_PCADDU12I: u32 = 0x0E;
+   552→const OPC_PCADDU18I: u32 = 0x0F;
+   553→
+   554→// ===========================================================================
+   555→// 2R-format Opcodes (bits[31:10])
+   556→// ===========================================================================
+   557→
+   558→const OPC_EXT_W_H: u32 = 0x000005A;
+   559→const OPC_EXT_W_B: u32 = 0x000005B;
+   560→/// CLO.D (count leading ones, doubleword): opcode 0x00000014 in 2R format.
+   561→const OPC_CLO_D: u32 = 0x00000014;
+   562→
+   563→#[allow(dead_code)]
+   564→const OPC_REVB_2H: u32 = 0x0000060;
+   565→#[allow(dead_code)]
+   566→const OPC_REVB_4H: u32 = 0x0000061;
+   567→#[allow(dead_code)]
+   568→const OPC_REVB_2W: u32 = 0x0000062;
+   569→#[allow(dead_code)]
+   570→const OPC_BITREV_4B: u32 = 0x0000064;
+   571→#[allow(dead_code)]
+   572→const OPC_BITREV_8B: u32 = 0x0000065;
+   573→#[allow(dead_code)]
+   574→const OPC_CPBYTE: u32 = 0x0000057;
+   575→
+   576→// 2R: special opcodes for move/clover
+   577→#[allow(dead_code)]
+   578→const OPC_MOVCF2GR: u32 = 0x0000055;
+   579→#[allow(dead_code)]
+   580→const OPC_MOVGR2CF: u32 = 0x0000054;
+   581→
+   582→// ===========================================================================
+   583→// 4R-format Opcodes (bits[31:20])
+   584→// ===========================================================================
+   585→
+   586→#[allow(dead_code)]
+   587→const OPC_BYTEREV_D: u32 = 0x009;
+   588→#[allow(dead_code)]
+   589→const OPC_BYTEREV_W: u32 = 0x00A;
+   590→#[allow(dead_code)]
+   591→const OPC_BYTEREV_H: u32 = 0x00B;
+   592→
+   593→// ===========================================================================
+   594→// 2RI8-format Opcodes (bits[31:22])
+   595→// ===========================================================================
+   596→
+   597→const OPC_SLLI_W: u32 = 0x008;
+   598→const OPC_SRLI_W: u32 = 0x009;
+   599→const OPC_SRAI_W: u32 = 0x00A;
+   600→const OPC_SLLI_D: u32 = 0x00B;
+   601→const OPC_SRLI_D: u32 = 0x00C;
+   602→const OPC_SRAI_D: u32 = 0x00D;
+   603→#[allow(dead_code)]
+   604→const OPC_ROTRI_W: u32 = 0x00E;
+   605→#[allow(dead_code)]
+   606→const OPC_ROTRI_D: u32 = 0x00F;
+   607→
+   608→// ===========================================================================
+   609→// Instruction Enum
+   610→// ===========================================================================
+   611→
+   612→/// LoongArch64 instruction representations for code generation.
+   613→///
+   614→/// Covers key arithmetic, logical, shift, load/store, branch, move, and FP
+   615→/// instructions. Each variant captures the operands needed for encoding and
+   616→/// disassembly. The `encode()` method produces a 4-byte little-endian machine
+   617→/// code word.
+   618→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   619→pub enum Instruction {
+   620→    // ── Arithmetic (3R) ──────────────────────────────────────────────
+   621→    /// Add Word: `add.w rd, rj, rk`
+   622→    AddW { rd: Gpr, rj: Gpr, rk: Gpr },
+   623→    /// Add Doubleword: `add.d rd, rj, rk`
+   624→    AddD { rd: Gpr, rj: Gpr, rk: Gpr },
+   625→    /// Subtract Word: `sub.w rd, rj, rk`
+   626→    SubW { rd: Gpr, rj: Gpr, rk: Gpr },
+   627→    /// Subtract Doubleword: `sub.d rd, rj, rk`
+   628→    SubD { rd: Gpr, rj: Gpr, rk: Gpr },
+   629→    /// Set Less Than (signed): `slt rd, rj, rk`
+   630→    Slt { rd: Gpr, rj: Gpr, rk: Gpr },
+   631→    /// Set Less Than (unsigned): `sltu rd, rj, rk`
+   632→    Sltu { rd: Gpr, rj: Gpr, rk: Gpr },
+   633→    /// Multiply Word: `mul.w rd, rj, rk`
+   634→    MulW { rd: Gpr, rj: Gpr, rk: Gpr },
+   635→    /// Multiply Doubleword: `mul.d rd, rj, rk`
+   636→    MulD { rd: Gpr, rj: Gpr, rk: Gpr },
+   637→    /// Divide Word (signed): `div.w rd, rj, rk`
+   638→    DivW { rd: Gpr, rj: Gpr, rk: Gpr },
+   639→    /// Modulo Word (signed): `mod.w rd, rj, rk`
+   640→    ModW { rd: Gpr, rj: Gpr, rk: Gpr },
+   641→    /// Divide Doubleword (signed): `div.d rd, rj, rk`
+   642→    DivD { rd: Gpr, rj: Gpr, rk: Gpr },
+   643→    /// Modulo Doubleword (signed): `mod.d rd, rj, rk`
+   644→    ModD { rd: Gpr, rj: Gpr, rk: Gpr },
+   645→
+   646→    // ── Logical (3R) ────────────────────────────────────────────────
+   647→    /// AND: `and rd, rj, rk`
+   648→    And { rd: Gpr, rj: Gpr, rk: Gpr },
+   649→    /// OR: `or rd, rj, rk`
+   650→    Or { rd: Gpr, rj: Gpr, rk: Gpr },
+   651→    /// XOR: `xor rd, rj, rk`
+   652→    Xor { rd: Gpr, rj: Gpr, rk: Gpr },
+   653→    /// NOR: `nor rd, rj, rk`
+   654→    Nor { rd: Gpr, rj: Gpr, rk: Gpr },
+   655→    /// AND NOT: `andn rd, rj, rk`
+   656→    Andn { rd: Gpr, rj: Gpr, rk: Gpr },
+   657→    /// OR NOT: `orn rd, rj, rk`
+   658→    Orn { rd: Gpr, rj: Gpr, rk: Gpr },
+   659→
+   660→    // ── Shift (3R) ──────────────────────────────────────────────────
+   661→    /// Shift Left Logical Word: `sll.w rd, rj, rk`
+   662→    SllW { rd: Gpr, rj: Gpr, rk: Gpr },
+   663→    /// Shift Right Logical Word: `srl.w rd, rj, rk`
+   664→    SrlW { rd: Gpr, rj: Gpr, rk: Gpr },
+   665→    /// Shift Right Arithmetic Word: `sra.w rd, rj, rk`
+   666→    SraW { rd: Gpr, rj: Gpr, rk: Gpr },
+   667→    /// Shift Left Logical Doubleword: `sll.d rd, rj, rk`
+   668→    SllD { rd: Gpr, rj: Gpr, rk: Gpr },
+   669→    /// Shift Right Logical Doubleword: `srl.d rd, rj, rk`
+   670→    SrlD { rd: Gpr, rj: Gpr, rk: Gpr },
+   671→    /// Shift Right Arithmetic Doubleword: `sra.d rd, rj, rk`
+   672→    SraD { rd: Gpr, rj: Gpr, rk: Gpr },
+   673→    /// Rotate Right Word: `rotr.w rd, rj, rk`
+   674→    RotrW { rd: Gpr, rj: Gpr, rk: Gpr },
+   675→    /// Rotate Right Doubleword: `rotr.d rd, rj, rk`
+   676→    RotrD { rd: Gpr, rj: Gpr, rk: Gpr },
+   677→
+   678→    // ── Shift Immediate (2RI8) ──────────────────────────────────────
+   679→    /// Shift Left Logical Immediate Word: `slli.w rd, rj, ui8`
+   680→    SlliW { rd: Gpr, rj: Gpr, imm8: u32 },
+   681→    /// Shift Right Logical Immediate Word: `srli.w rd, rj, ui8`
+   682→    SrliW { rd: Gpr, rj: Gpr, imm8: u32 },
+   683→    /// Shift Right Arithmetic Immediate Word: `srai.w rd, rj, ui8`
+   684→    SraiW { rd: Gpr, rj: Gpr, imm8: u32 },
+   685→    /// Shift Left Logical Immediate Doubleword: `slli.d rd, rj, ui8`
+   686→    SlliD { rd: Gpr, rj: Gpr, imm8: u32 },
+   687→    /// Shift Right Logical Immediate Doubleword: `srli.d rd, rj, ui8`
+   688→    SrliD { rd: Gpr, rj: Gpr, imm8: u32 },
+   689→    /// Shift Right Arithmetic Immediate Doubleword: `srai.d rd, rj, ui8`
+   690→    SraiD { rd: Gpr, rj: Gpr, imm8: u32 },
+   691→
+   692→    // ── Immediate Arithmetic (2RI12) ────────────────────────────────
+   693→    /// Add Immediate Word: `addi.w rd, rj, si12`
+   694→    AddiW { rd: Gpr, rj: Gpr, imm12: i32 },
+   695→    /// Add Immediate Doubleword: `addi.d rd, rj, si12`
+   696→    AddiD { rd: Gpr, rj: Gpr, imm12: i32 },
+   697→    /// Set Less Than Immediate (signed): `slti rd, rj, si12`
+   698→    Slti { rd: Gpr, rj: Gpr, imm12: i32 },
+   699→    /// Set Less Than Immediate (unsigned): `sltui rd, rj, si12`
+   700→    Sltui { rd: Gpr, rj: Gpr, imm12: i32 },
+   701→    /// AND Immediate: `andi rd, rj, ui12`
+   702→    Andi { rd: Gpr, rj: Gpr, imm12: u32 },
+   703→    /// OR Immediate: `ori rd, rj, ui12`
+   704→    Ori { rd: Gpr, rj: Gpr, imm12: u32 },
+   705→    /// XOR Immediate: `xori rd, rj, ui12`
+   706→    Xori { rd: Gpr, rj: Gpr, imm12: u32 },
+   707→
+   708→    // ── Load (2RI12) ────────────────────────────────────────────────
+   709→    /// Load Byte (sign-extended): `ld.b rd, rj, si12`
+   710→    LdB { rd: Gpr, rj: Gpr, imm12: i32 },
+   711→    /// Load Halfword (sign-extended): `ld.h rd, rj, si12`
+   712→    LdH { rd: Gpr, rj: Gpr, imm12: i32 },
+   713→    /// Load Word (sign-extended): `ld.w rd, rj, si12`
+   714→    LdW { rd: Gpr, rj: Gpr, imm12: i32 },
+   715→    /// Load Doubleword: `ld.d rd, rj, si12`
+   716→    LdD { rd: Gpr, rj: Gpr, imm12: i32 },
+   717→    /// Load Byte (zero-extended): `ld.bu rd, rj, si12`
+   718→    LdBu { rd: Gpr, rj: Gpr, imm12: i32 },
+   719→    /// Load Halfword (zero-extended): `ld.hu rd, rj, si12`
+   720→    LdHu { rd: Gpr, rj: Gpr, imm12: i32 },
+   721→    /// Load Word (zero-extended): `ld.wu rd, rj, si12`
+   722→    LdWu { rd: Gpr, rj: Gpr, imm12: i32 },
+   723→
+   724→    // ── Store (2RI12) ───────────────────────────────────────────────
+   725→    /// Store Byte: `st.b rd, rj, si12`
+   726→    StB { rd: Gpr, rj: Gpr, imm12: i32 },
+   727→    /// Store Halfword: `st.h rd, rj, si12`
+   728→    StH { rd: Gpr, rj: Gpr, imm12: i32 },
+   729→    /// Store Word: `st.w rd, rj, si12`
+   730→    StW { rd: Gpr, rj: Gpr, imm12: i32 },
+   731→    /// Store Doubleword: `st.d rd, rj, si12`
+   732→    StD { rd: Gpr, rj: Gpr, imm12: i32 },
+   733→
+   734→    // ── Branch (2RI16) ──────────────────────────────────────────────
+   735→    /// Branch if Equal: `beq rj, rd, offs16`
+   736→    Beq { rj: Gpr, rd: Gpr, offs16: i32 },
+   737→    /// Branch if Not Equal: `bne rj, rd, offs16`
+   738→    Bne { rj: Gpr, rd: Gpr, offs16: i32 },
+   739→    /// Branch if Less Than (signed): `blt rj, rd, offs16`
+   740→    Blt { rj: Gpr, rd: Gpr, offs16: i32 },
+   741→    /// Branch if Greater or Equal (signed): `bge rj, rd, offs16`
+   742→    Bge { rj: Gpr, rd: Gpr, offs16: i32 },
+   743→    /// Branch if Less Than (unsigned): `bltu rj, rd, offs16`
+   744→    Bltu { rj: Gpr, rd: Gpr, offs16: i32 },
+   745→    /// Branch if Greater or Equal (unsigned): `bgeu rj, rd, offs16`
+   746→    Bgeu { rj: Gpr, rd: Gpr, offs16: i32 },
+   747→    /// Jump Indirect and Return Link: `jirl rd, rj, offs16`
+   748→    Jirl { rd: Gpr, rj: Gpr, offs16: i32 },
+   749→
+   750→    // ── Unconditional Branch (I26) ──────────────────────────────────
+   751→    /// Branch: `b offs26`
+   752→    B { offs26: i32 },
+   753→    /// Branch and Link: `bl offs26`
+   754→    Bl { offs26: i32 },
+   755→
+   756→    // ── Branch on Zero/NonZero (1RI21) ──────────────────────────────
+   757→    /// Branch if Equal Zero: `beqz rj, offs21`
+   758→    Beqz { rj: Gpr, offs21: i32 },
+   759→    /// Branch if Not Equal Zero: `bnez rj, offs21`
+   760→    Bnez { rj: Gpr, offs21: i32 },
+   761→
+   762→    // ── Upper Immediate (2RI16 / 1RI21) ─────────────────────────────
+   763→    /// Load Upper 12-bit Immediate Word: `lu12i.w rd, si20`
+   764→    Lu12iW { rd: Gpr, imm20: i32 },
+   765→    /// Load Upper 32-bit Immediate Doubleword (high): `lu32i.d rd, si20`
+   766→    Lu32iD { rd: Gpr, imm20: i32 },
+   767→    /// Load Upper 52-bit Immediate Doubleword: `lu52i.d rd, si12`
+   768→    Lu52iD { rd: Gpr, rj: Gpr, imm12: i32 },
+   769→    /// PC-add Upper: `pcaddu12i rd, si20`
+   770→    Pcaddu12i { rd: Gpr, imm20: i32 },
+   771→    /// PC-add Upper (18-bit): `pcaddu18i rd, si20`
+   772→    Pcaddu18i { rd: Gpr, imm20: i32 },
+   773→
+   774→    // ── Atomic (2RI14) ──────────────────────────────────────────────
+   775→    /// Load-Linked Word: `ll.w rd, rj, si14`
+   776→    LlW { rd: Gpr, rj: Gpr, imm14: i32 },
+   777→    /// Store-Conditional Word: `sc.w rd, rj, si14`
+   778→    ScW { rd: Gpr, rj: Gpr, imm14: i32 },
+   779→    /// Load-Linked Doubleword: `ll.d rd, rj, si14`
+   780→    LlD { rd: Gpr, rj: Gpr, imm14: i32 },
+   781→    /// Store-Conditional Doubleword: `sc.d rd, rj, si14`
+   782→    ScD { rd: Gpr, rj: Gpr, imm14: i32 },
+   783→
+   784→    // ── Move (2R) ───────────────────────────────────────────────────
+   785→    /// Sign-extend Halfword to Word: `ext.w.h rd, rj`
+   786→    ExtWH { rd: Gpr, rj: Gpr },
+   787→    /// Sign-extend Byte to Word: `ext.w.b rd, rj`
+   788→    ExtWB { rd: Gpr, rj: Gpr },
+   789→    /// Count Leading Ones, Doubleword: `clo.d rd, rj`
+   790→    CloD { rd: Gpr, rj: Gpr },
+   791→
+   792→    // ── FP Load/Store (2RI12) ───────────────────────────────────────
+   793→    /// Load Float Word to FP: `fld.s fd, rj, si12`
+   794→    FldS { fd: Fpr, rj: Gpr, imm12: i32 },
+   795→    /// Load Double to FP: `fld.d fd, rj, si12`
+   796→    FldD { fd: Fpr, rj: Gpr, imm12: i32 },
+   797→    /// Store Float Word: `fst.s fd, rj, si12`
+   798→    FstS { fd: Fpr, rj: Gpr, imm12: i32 },
+   799→    /// Store Double: `fst.d fd, rj, si12`
+   800→    FstD { fd: Fpr, rj: Gpr, imm12: i32 },
+   801→
+   802→    // ── FP Move (2R) ────────────────────────────────────────────────
+   803→    /// Move FP to GR Doubleword: `movfr2gr.d rd, fj`
+   804→    FmovGr2FprD { rd: Gpr, fj: Fpr },
+   805→    /// Move GR to FP Doubleword: `movgr2fr.d fd, rj`
+   806→    FmovFpr2GrD { fd: Fpr, rj: Gpr },
+   807→
+   808→    // ── FP Arithmetic (3R) ──────────────────────────────────────────
+   809→    /// FP Add Single: `fadd.s fd, fj, fk`
+   810→    FaddS { fd: Fpr, fj: Fpr, fk: Fpr },
+   811→    /// FP Add Double: `fadd.d fd, fj, fk`
+   812→    FaddD { fd: Fpr, fj: Fpr, fk: Fpr },
+   813→    /// FP Subtract Single: `fsub.s fd, fj, fk`
+   814→    FsubS { fd: Fpr, fj: Fpr, fk: Fpr },
+   815→    /// FP Subtract Double: `fsub.d fd, fj, fk`
+   816→    FsubD { fd: Fpr, fj: Fpr, fk: Fpr },
+   817→    /// FP Multiply Single: `fmul.s fd, fj, fk`
+   818→    FmulS { fd: Fpr, fj: Fpr, fk: Fpr },
+   819→    /// FP Multiply Double: `fmul.d fd, fj, fk`
+   820→    FmulD { fd: Fpr, fj: Fpr, fk: Fpr },
+   821→    /// FP Divide Single: `fdiv.s fd, fj, fk`
+   822→    FdivS { fd: Fpr, fj: Fpr, fk: Fpr },
+   823→    /// FP Divide Double: `fdiv.d fd, fj, fk`
+   824→    FdivD { fd: Fpr, fj: Fpr, fk: Fpr },
+   825→
+   826→    // ── FP Move (2R) ───────────────────────────────────────────────
+   827→    /// FP Move Single: `fmov.s fd, fj`
+   828→    FmovS { fd: Fpr, fj: Fpr },
+   829→    /// FP Move Double: `fmov.d fd, fj`
+   830→    FmovD { fd: Fpr, fj: Fpr },
+   831→
+   832→    // ── FP Compare (4R-like) ────────────────────────────────────────
+   833→    /// FP Compare Single: `fcmp.cond.s cd, fj, fk`
+   834→    FCmpS { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
+   835→    /// FP Compare Double: `fcmp.cond.d cd, fj, fk`
+   836→    FCmpD { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
+   837→
+   838→    // ── No-op / Break ───────────────────────────────────────────────
+   839→    /// No-operation (pseudo: `and $r0, $r0, $r0`)
+   840→    Nop,
+   841→    /// System Call: `syscall 0x0`
+   842→    Syscall,
+   843→    /// Break: `break 0x0`
+   844→    Break,
+   845→}
+   846→
+   847→impl Instruction {
+   848→    /// Encode this instruction into a 4-byte little-endian machine code word.
+   849→    ///
+   850→    /// Encoding follows the LoongArch ISA Specification.
+   851→    pub fn encode(&self) -> [u8; 4] {
+   852→        match self {
+   853→            // ── Arithmetic (3R) ────────────────────────────────────
+   854→            Instruction::AddW { rd, rj, rk } => {
+   855→                encode_3r(OPC_ADD_W, rk.encoding(), rj.encoding(), rd.encoding())
+   856→            }
+   857→            Instruction::AddD { rd, rj, rk } => {
+   858→                encode_3r(OPC_ADD_D, rk.encoding(), rj.encoding(), rd.encoding())
+   859→            }
+   860→            Instruction::SubW { rd, rj, rk } => {
+   861→                encode_3r(OPC_SUB_W, rk.encoding(), rj.encoding(), rd.encoding())
+   862→            }
+   863→            Instruction::SubD { rd, rj, rk } => {
+   864→                encode_3r(OPC_SUB_D, rk.encoding(), rj.encoding(), rd.encoding())
+   865→            }
+   866→            Instruction::Slt { rd, rj, rk } => {
+   867→                encode_3r(OPC_SLT, rk.encoding(), rj.encoding(), rd.encoding())
+   868→            }
+   869→            Instruction::Sltu { rd, rj, rk } => {
+   870→                encode_3r(OPC_SLTU, rk.encoding(), rj.encoding(), rd.encoding())
+   871→            }
+   872→            Instruction::MulW { rd, rj, rk } => {
+   873→                encode_3r(OPC_MUL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   874→            }
+   875→            Instruction::MulD { rd, rj, rk } => {
+   876→                encode_3r(OPC_MUL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   877→            }
+   878→            Instruction::DivW { rd, rj, rk } => {
+   879→                encode_3r(OPC_DIV_W, rk.encoding(), rj.encoding(), rd.encoding())
+   880→            }
+   881→            Instruction::ModW { rd, rj, rk } => {
+   882→                encode_3r(OPC_MOD_W, rk.encoding(), rj.encoding(), rd.encoding())
+   883→            }
+   884→            Instruction::DivD { rd, rj, rk } => {
+   885→                encode_3r(OPC_DIV_D, rk.encoding(), rj.encoding(), rd.encoding())
+   886→            }
+   887→            Instruction::ModD { rd, rj, rk } => {
+   888→                encode_3r(OPC_MOD_D, rk.encoding(), rj.encoding(), rd.encoding())
+   889→            }
+   890→
+   891→            // ── Logical (3R) ──────────────────────────────────────
+   892→            Instruction::And { rd, rj, rk } => {
+   893→                encode_3r(OPC_AND, rk.encoding(), rj.encoding(), rd.encoding())
+   894→            }
+   895→            Instruction::Or { rd, rj, rk } => {
+   896→                encode_3r(OPC_OR, rk.encoding(), rj.encoding(), rd.encoding())
+   897→            }
+   898→            Instruction::Xor { rd, rj, rk } => {
+   899→                encode_3r(OPC_XOR, rk.encoding(), rj.encoding(), rd.encoding())
+   900→            }
+   901→            Instruction::Nor { rd, rj, rk } => {
+   902→                encode_3r(OPC_NOR, rk.encoding(), rj.encoding(), rd.encoding())
+   903→            }
+   904→            Instruction::Andn { rd, rj, rk } => {
+   905→                encode_3r(OPC_ANDN, rk.encoding(), rj.encoding(), rd.encoding())
+   906→            }
+   907→            Instruction::Orn { rd, rj, rk } => {
+   908→                encode_3r(OPC_ORN, rk.encoding(), rj.encoding(), rd.encoding())
+   909→            }
+   910→
+   911→            // ── Shift (3R) ────────────────────────────────────────
+   912→            Instruction::SllW { rd, rj, rk } => {
+   913→                encode_3r(OPC_SLL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   914→            }
+   915→            Instruction::SrlW { rd, rj, rk } => {
+   916→                encode_3r(OPC_SRL_W, rk.encoding(), rj.encoding(), rd.encoding())
+   917→            }
+   918→            Instruction::SraW { rd, rj, rk } => {
+   919→                encode_3r(OPC_SRA_W, rk.encoding(), rj.encoding(), rd.encoding())
+   920→            }
+   921→            Instruction::SllD { rd, rj, rk } => {
+   922→                encode_3r(OPC_SLL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   923→            }
+   924→            Instruction::SrlD { rd, rj, rk } => {
+   925→                encode_3r(OPC_SRL_D, rk.encoding(), rj.encoding(), rd.encoding())
+   926→            }
+   927→            Instruction::SraD { rd, rj, rk } => {
+   928→                encode_3r(OPC_SRA_D, rk.encoding(), rj.encoding(), rd.encoding())
+   929→            }
+   930→            Instruction::RotrW { rd, rj, rk } => {
+   931→                encode_3r(OPC_ROTR_W, rk.encoding(), rj.encoding(), rd.encoding())
+   932→            }
+   933→            Instruction::RotrD { rd, rj, rk } => {
+   934→                encode_3r(OPC_ROTR_D, rk.encoding(), rj.encoding(), rd.encoding())
+   935→            }
+   936→
+   937→            // ── Shift Immediate (2RI8) ────────────────────────────
+   938→            Instruction::SlliW { rd, rj, imm8 } => {
+   939→                encode_2ri8(OPC_SLLI_W, *imm8, rj.encoding(), rd.encoding())
+   940→            }
+   941→            Instruction::SrliW { rd, rj, imm8 } => {
+   942→                encode_2ri8(OPC_SRLI_W, *imm8, rj.encoding(), rd.encoding())
+   943→            }
+   944→            Instruction::SraiW { rd, rj, imm8 } => {
+   945→                encode_2ri8(OPC_SRAI_W, *imm8, rj.encoding(), rd.encoding())
+   946→            }
+   947→            Instruction::SlliD { rd, rj, imm8 } => {
+   948→                encode_2ri8(OPC_SLLI_D, *imm8, rj.encoding(), rd.encoding())
+   949→            }
+   950→            Instruction::SrliD { rd, rj, imm8 } => {
+   951→                encode_2ri8(OPC_SRLI_D, *imm8, rj.encoding(), rd.encoding())
+   952→            }
+   953→            Instruction::SraiD { rd, rj, imm8 } => {
+   954→                encode_2ri8(OPC_SRAI_D, *imm8, rj.encoding(), rd.encoding())
+   955→            }
+   956→
+   957→            // ── Immediate Arithmetic (2RI12) ──────────────────────
+   958→            Instruction::AddiW { rd, rj, imm12 } => encode_2ri12(
+   959→                OPC_ADDI_W,
+   960→                (*imm12 as u32) & 0xFFF,
+   961→                rj.encoding(),
+   962→                rd.encoding(),
+   963→            ),
+   964→            Instruction::AddiD { rd, rj, imm12 } => encode_2ri12(
+   965→                OPC_ADDI_D,
+   966→                (*imm12 as u32) & 0xFFF,
+   967→                rj.encoding(),
+   968→                rd.encoding(),
+   969→            ),
+   970→            Instruction::Slti { rd, rj, imm12 } => encode_2ri12(
+   971→                OPC_SLTI,
+   972→                (*imm12 as u32) & 0xFFF,
+   973→                rj.encoding(),
+   974→                rd.encoding(),
+   975→            ),
+   976→            Instruction::Sltui { rd, rj, imm12 } => encode_2ri12(
+   977→                OPC_SLTUI,
+   978→                (*imm12 as u32) & 0xFFF,
+   979→                rj.encoding(),
+   980→                rd.encoding(),
+   981→            ),
+   982→            Instruction::Andi { rd, rj, imm12 } => {
+   983→                encode_2ri12(OPC_ANDI, *imm12 & 0xFFF, rj.encoding(), rd.encoding())
+   984→            }
+   985→            Instruction::Ori { rd, rj, imm12 } => {
+   986→                encode_2ri12(OPC_ORI, *imm12 & 0xFFF, rj.encoding(), rd.encoding())
+   987→            }
+   988→            Instruction::Xori { rd, rj, imm12 } => {
+   989→                encode_2ri12(OPC_XORI, *imm12 & 0xFFF, rj.encoding(), rd.encoding())
+   990→            }
+   991→
+   992→            // ── Load (2RI12) ──────────────────────────────────────
+   993→            Instruction::LdB { rd, rj, imm12 } => encode_2ri12(
+   994→                OPC_LD_B,
+   995→                (*imm12 as u32) & 0xFFF,
+   996→                rj.encoding(),
+   997→                rd.encoding(),
+   998→            ),
+   999→            Instruction::LdH { rd, rj, imm12 } => encode_2ri12(
+  1000→                OPC_LD_H,
+  1001→                (*imm12 as u32) & 0xFFF,
+  1002→                rj.encoding(),
+  1003→                rd.encoding(),
+  1004→            ),
+  1005→            Instruction::LdW { rd, rj, imm12 } => encode_2ri12(
+  1006→                OPC_LD_W,
+  1007→                (*imm12 as u32) & 0xFFF,
+  1008→                rj.encoding(),
+  1009→                rd.encoding(),
+  1010→            ),
+  1011→            Instruction::LdD { rd, rj, imm12 } => encode_2ri12(
+  1012→                OPC_LD_D,
+  1013→                (*imm12 as u32) & 0xFFF,
+  1014→                rj.encoding(),
+  1015→                rd.encoding(),
+  1016→            ),
+  1017→            Instruction::LdBu { rd, rj, imm12 } => encode_2ri12(
+  1018→                OPC_LD_BU,
+  1019→                (*imm12 as u32) & 0xFFF,
+  1020→                rj.encoding(),
+  1021→                rd.encoding(),
+  1022→            ),
+  1023→            Instruction::LdHu { rd, rj, imm12 } => encode_2ri12(
+  1024→                OPC_LD_HU,
+  1025→                (*imm12 as u32) & 0xFFF,
+  1026→                rj.encoding(),
+  1027→                rd.encoding(),
+  1028→            ),
+  1029→            Instruction::LdWu { rd, rj, imm12 } => encode_2ri12(
+  1030→                OPC_LD_WU,
+  1031→                (*imm12 as u32) & 0xFFF,
+  1032→                rj.encoding(),
+  1033→                rd.encoding(),
+  1034→            ),
+  1035→
+  1036→            // ── Store (2RI12) ─────────────────────────────────────
+  1037→            Instruction::StB { rd, rj, imm12 } => encode_2ri12(
+  1038→                OPC_ST_B,
+  1039→                (*imm12 as u32) & 0xFFF,
+  1040→                rj.encoding(),
+  1041→                rd.encoding(),
+  1042→            ),
+  1043→            Instruction::StH { rd, rj, imm12 } => encode_2ri12(
+  1044→                OPC_ST_H,
+  1045→                (*imm12 as u32) & 0xFFF,
+  1046→                rj.encoding(),
+  1047→                rd.encoding(),
+  1048→            ),
+  1049→            Instruction::StW { rd, rj, imm12 } => encode_2ri12(
+  1050→                OPC_ST_W,
+  1051→                (*imm12 as u32) & 0xFFF,
+  1052→                rj.encoding(),
+  1053→                rd.encoding(),
+  1054→            ),
+  1055→            Instruction::StD { rd, rj, imm12 } => encode_2ri12(
+  1056→                OPC_ST_D,
+  1057→                (*imm12 as u32) & 0xFFF,
+  1058→                rj.encoding(),
+  1059→                rd.encoding(),
+  1060→            ),
+  1061→
+  1062→            // ── Branch (2RI16) ────────────────────────────────────
+  1063→            Instruction::Beq { rj, rd, offs16 } => encode_2ri16(
+  1064→                OPC_BEQ,
+  1065→                (*offs16 as u32) & 0xFFFF,
+  1066→                rj.encoding(),
+  1067→                rd.encoding(),
+  1068→            ),
+  1069→            Instruction::Bne { rj, rd, offs16 } => encode_2ri16(
+  1070→                OPC_BNE,
+  1071→                (*offs16 as u32) & 0xFFFF,
+  1072→                rj.encoding(),
+  1073→                rd.encoding(),
+  1074→            ),
+  1075→            Instruction::Blt { rj, rd, offs16 } => encode_2ri16(
+  1076→                OPC_BLT,
+  1077→                (*offs16 as u32) & 0xFFFF,
+  1078→                rj.encoding(),
+  1079→                rd.encoding(),
+  1080→            ),
+  1081→            Instruction::Bge { rj, rd, offs16 } => encode_2ri16(
+  1082→                OPC_BGE,
+  1083→                (*offs16 as u32) & 0xFFFF,
+  1084→                rj.encoding(),
+  1085→                rd.encoding(),
+  1086→            ),
+  1087→            Instruction::Bltu { rj, rd, offs16 } => encode_2ri16(
+  1088→                OPC_BLTU,
+  1089→                (*offs16 as u32) & 0xFFFF,
+  1090→                rj.encoding(),
+  1091→                rd.encoding(),
+  1092→            ),
+  1093→            Instruction::Bgeu { rj, rd, offs16 } => encode_2ri16(
+  1094→                OPC_BGEU,
+  1095→                (*offs16 as u32) & 0xFFFF,
+  1096→                rj.encoding(),
+  1097→                rd.encoding(),
+  1098→            ),
+  1099→            Instruction::Jirl { rd, rj, offs16 } => encode_2ri16(
+  1100→                OPC_JIRL,
+  1101→                (*offs16 as u32) & 0xFFFF,
+  1102→                rj.encoding(),
+  1103→                rd.encoding(),
+  1104→            ),
+  1105→
+  1106→            // ── Unconditional Branch (I26) ────────────────────────
+  1107→            Instruction::B { offs26 } => encode_i26(OPC_B, (*offs26 as u32) & 0x3FFFFFF),
+  1108→            Instruction::Bl { offs26 } => encode_i26(OPC_BL, (*offs26 as u32) & 0x3FFFFFF),
+  1109→
+  1110→            // ── Branch on Zero/NonZero (1RI21) ────────────────────
+  1111→            Instruction::Beqz { rj, offs21 } => {
+  1112→                encode_1ri21(OPC_BEQZ, (*offs21 as u32) & 0x1FFFFF, rj.encoding())
+  1113→            }
+  1114→            Instruction::Bnez { rj, offs21 } => {
+  1115→                encode_1ri21(OPC_BNEZ, (*offs21 as u32) & 0x1FFFFF, rj.encoding())
+  1116→            }
+  1117→
+  1118→            // ── Upper Immediate ────────────────────────────────────
+  1119→            Instruction::Lu12iW { rd, imm20 } => {
+  1120→                // 2RI16 format with rd and si20
+  1121→                encode_2ri16(
+  1122→                    OPC_LU12I_W,
+  1123→                    (*imm20 as u32) & 0xFFFFF,
+  1124→                    Gpr::R0.encoding(),
+  1125→                    rd.encoding(),
+  1126→                )
+  1127→            }
+  1128→            Instruction::Lu32iD { rd, imm20 } => {
+  1129→                // 1RI21 format: opcode[31:26] | si20[25:6] | rd[4:0]
+  1130→                // Actually a special encoding: opcode + si20 + rd (no rj)
+  1131→                let word = ((OPC_LU32I_D & 0x3F) << 26)
+  1132→                    | (((*imm20 as u32) & 0xFFFFF) << 5)
+  1133→                    | (rd.encoding() & 0x1F);
+  1134→                word.to_le_bytes()
+  1135→            }
+  1136→            Instruction::Lu52iD { rd, rj, imm12 } => {
+  1137→                // 2RI12 format
+  1138→                encode_2ri12(
+  1139→                    OPC_LU52I_D,
+  1140→                    (*imm12 as u32) & 0xFFF,
+  1141→                    rj.encoding(),
+  1142→                    rd.encoding(),
+  1143→                )
+  1144→            }
+  1145→            Instruction::Pcaddu12i { rd, imm20 } => {
+  1146→                encode_1ri21(OPC_PCADDU12I, (*imm20 as u32) & 0x1FFFFF, rd.encoding())
+  1147→            }
+  1148→            Instruction::Pcaddu18i { rd, imm20 } => {
+  1149→                encode_1ri21(OPC_PCADDU18I, (*imm20 as u32) & 0x1FFFFF, rd.encoding())
+  1150→            }
+  1151→
+  1152→            // ── Atomic (2RI14) ────────────────────────────────────
+  1153→            Instruction::LlW { rd, rj, imm14 } => encode_2ri14(
+  1154→                OPC_LL_W,
+  1155→                (*imm14 as u32) & 0x3FFF,
+  1156→                rj.encoding(),
+  1157→                rd.encoding(),
+  1158→            ),
+  1159→            Instruction::ScW { rd, rj, imm14 } => encode_2ri14(
+  1160→                OPC_SC_W,
+  1161→                (*imm14 as u32) & 0x3FFF,
+  1162→                rj.encoding(),
+  1163→                rd.encoding(),
+  1164→            ),
+  1165→            Instruction::LlD { rd, rj, imm14 } => encode_2ri14(
+  1166→                OPC_LL_D,
+  1167→                (*imm14 as u32) & 0x3FFF,
+  1168→                rj.encoding(),
+  1169→                rd.encoding(),
+  1170→            ),
+  1171→            Instruction::ScD { rd, rj, imm14 } => encode_2ri14(
+  1172→                OPC_SC_D,
+  1173→                (*imm14 as u32) & 0x3FFF,
+  1174→                rj.encoding(),
+  1175→                rd.encoding(),
+  1176→            ),
+  1177→
+  1178→            // ── Move (2R) ─────────────────────────────────────────
+  1179→            Instruction::ExtWH { rd, rj } => encode_2r(OPC_EXT_W_H, rj.encoding(), rd.encoding()),
+  1180→            Instruction::ExtWB { rd, rj } => encode_2r(OPC_EXT_W_B, rj.encoding(), rd.encoding()),
+  1181→            Instruction::CloD { rd, rj } => encode_2r(OPC_CLO_D, rj.encoding(), rd.encoding()),
+  1182→
+  1183→            // ── FP Load/Store (2RI12) ─────────────────────────────
+  1184→            Instruction::FldS { fd, rj, imm12 } => encode_2ri12(
+  1185→                OPC_FLD_S,
+  1186→                (*imm12 as u32) & 0xFFF,
+  1187→                rj.encoding(),
+  1188→                fd.encoding(),
+  1189→            ),
+  1190→            Instruction::FldD { fd, rj, imm12 } => encode_2ri12(
+  1191→                OPC_FLD_D,
+  1192→                (*imm12 as u32) & 0xFFF,
+  1193→                rj.encoding(),
+  1194→                fd.encoding(),
+  1195→            ),
+  1196→            Instruction::FstS { fd, rj, imm12 } => encode_2ri12(
+  1197→                OPC_FST_S,
+  1198→                (*imm12 as u32) & 0xFFF,
+  1199→                rj.encoding(),
+  1200→                fd.encoding(),
+  1201→            ),
+  1202→            Instruction::FstD { fd, rj, imm12 } => encode_2ri12(
+  1203→                OPC_FST_D,
+  1204→                (*imm12 as u32) & 0xFFF,
+  1205→                rj.encoding(),
+  1206→                fd.encoding(),
+  1207→            ),
+  1208→
+  1209→            // ── FP Move GPR<->FPR (2R) ────────────────────────────
+  1210→            Instruction::FmovGr2FprD { rd, fj } => {
+  1211→                encode_2r(OPC_MOVFR2GR_D, fj.encoding(), rd.encoding())
+  1212→            }
+  1213→            Instruction::FmovFpr2GrD { fd, rj } => {
+  1214→                encode_2r(OPC_MOVGR2FR_D, rj.encoding(), fd.encoding())
+  1215→            }
+  1216→
+  1217→            // ── FP Arithmetic (3R) ────────────────────────────────
+  1218→            Instruction::FaddS { fd, fj, fk } => {
+  1219→                encode_3r(OPC_FADD_S, fk.encoding(), fj.encoding(), fd.encoding())
+  1220→            }
+  1221→            Instruction::FaddD { fd, fj, fk } => {
+  1222→                encode_3r(OPC_FADD_D, fk.encoding(), fj.encoding(), fd.encoding())
+  1223→            }
+  1224→            Instruction::FsubS { fd, fj, fk } => {
+  1225→                encode_3r(OPC_FSUB_S, fk.encoding(), fj.encoding(), fd.encoding())
+  1226→            }
+  1227→            Instruction::FsubD { fd, fj, fk } => {
+  1228→                encode_3r(OPC_FSUB_D, fk.encoding(), fj.encoding(), fd.encoding())
+  1229→            }
+  1230→            Instruction::FmulS { fd, fj, fk } => {
+  1231→                encode_3r(OPC_FMUL_S, fk.encoding(), fj.encoding(), fd.encoding())
+  1232→            }
+  1233→            Instruction::FmulD { fd, fj, fk } => {
+  1234→                encode_3r(OPC_FMUL_D, fk.encoding(), fj.encoding(), fd.encoding())
+  1235→            }
+  1236→            Instruction::FdivS { fd, fj, fk } => {
+  1237→                encode_3r(OPC_FDIV_S, fk.encoding(), fj.encoding(), fd.encoding())
+  1238→            }
+  1239→            Instruction::FdivD { fd, fj, fk } => {
+  1240→                encode_3r(OPC_FDIV_D, fk.encoding(), fj.encoding(), fd.encoding())
+  1241→            }
+  1242→
+  1243→            // ── FP Move (2R) ──────────────────────────────────────
+  1244→            Instruction::FmovS { fd, fj } => encode_2r(OPC_FMOV_S, fj.encoding(), fd.encoding()),
+  1245→            Instruction::FmovD { fd, fj } => encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding()),
+  1246→
+  1247→            // ── FP Compare (4R-like) ──────────────────────────────
+  1248→            Instruction::FCmpS { cond, fj, fk, cd } => encode_4r(
+  1249→                OPC_FCMP_S,
+  1250→                (*cond & 0x1F) as u32,
+  1251→                fk.encoding(),
+  1252→                fj.encoding(),
+  1253→                (*cd & 0x1F) as u32,
+  1254→            ),
+  1255→            Instruction::FCmpD { cond, fj, fk, cd } => encode_4r(
+  1256→                OPC_FCMP_D,
+  1257→                (*cond & 0x1F) as u32,
+  1258→                fk.encoding(),
+  1259→                fj.encoding(),
+  1260→                (*cd & 0x1F) as u32,
+  1261→            ),
+  1262→
+  1263→            // ── No-op / Break ─────────────────────────────────────
+  1264→            Instruction::Nop => {
+  1265→                // NOP pseudo: and $r0, $r0, $r0
+  1266→                encode_3r(
+  1267→                    OPC_AND,
+  1268→                    Gpr::R0.encoding(),
+  1269→                    Gpr::R0.encoding(),
+  1270→                    Gpr::R0.encoding(),
+  1271→                )
+  1272→            }
+  1273→            Instruction::Syscall => {
+  1274→                // SYSCALL = 0x0000002B (opcode bits [31:15] = 0x0000, bits [14:0] = 0x002B)
+  1275→                0x0000002Bu32.to_le_bytes()
+  1276→            }
+  1277→            Instruction::Break => {
+  1278→                // BREAK = 0x0000002A (opcode bits [31:15] = 0x0000, bits [14:0] = 0x002A)
+  1279→                0x0000002Au32.to_le_bytes()
+  1280→            }
+  1281→        }
+  1282→    }
+  1283→
+  1284→    /// Returns the mnemonic name of this instruction.
+  1285→    pub fn mnemonic(&self) -> &'static str {
+  1286→        match self {
+  1287→            Instruction::AddW { .. } => "add.w",
+  1288→            Instruction::AddD { .. } => "add.d",
+  1289→            Instruction::SubW { .. } => "sub.w",
+  1290→            Instruction::SubD { .. } => "sub.d",
+  1291→            Instruction::Slt { .. } => "slt",
+  1292→            Instruction::Sltu { .. } => "sltu",
+  1293→            Instruction::MulW { .. } => "mul.w",
+  1294→            Instruction::MulD { .. } => "mul.d",
+  1295→            Instruction::DivW { .. } => "div.w",
+  1296→            Instruction::ModW { .. } => "mod.w",
+  1297→            Instruction::DivD { .. } => "div.d",
+  1298→            Instruction::ModD { .. } => "mod.d",
+  1299→            Instruction::And { .. } => "and",
+  1300→            Instruction::Or { .. } => "or",
+  1301→            Instruction::Xor { .. } => "xor",
+  1302→            Instruction::Nor { .. } => "nor",
+  1303→            Instruction::Andn { .. } => "andn",
+  1304→            Instruction::Orn { .. } => "orn",
+  1305→            Instruction::SllW { .. } => "sll.w",
+  1306→            Instruction::SrlW { .. } => "srl.w",
+  1307→            Instruction::SraW { .. } => "sra.w",
+  1308→            Instruction::SllD { .. } => "sll.d",
+  1309→            Instruction::SrlD { .. } => "srl.d",
+  1310→            Instruction::SraD { .. } => "sra.d",
+  1311→            Instruction::RotrW { .. } => "rotr.w",
+  1312→            Instruction::RotrD { .. } => "rotr.d",
+  1313→            Instruction::SlliW { .. } => "slli.w",
+  1314→            Instruction::SrliW { .. } => "srli.w",
+  1315→            Instruction::SraiW { .. } => "srai.w",
+  1316→            Instruction::SlliD { .. } => "slli.d",
+  1317→            Instruction::SrliD { .. } => "srli.d",
+  1318→            Instruction::SraiD { .. } => "srai.d",
+  1319→            Instruction::AddiW { .. } => "addi.w",
+  1320→            Instruction::AddiD { .. } => "addi.d",
+  1321→            Instruction::Slti { .. } => "slti",
+  1322→            Instruction::Sltui { .. } => "sltui",
+  1323→            Instruction::Andi { .. } => "andi",
+  1324→            Instruction::Ori { .. } => "ori",
+  1325→            Instruction::Xori { .. } => "xori",
+  1326→            Instruction::LdB { .. } => "ld.b",
+  1327→            Instruction::LdH { .. } => "ld.h",
+  1328→            Instruction::LdW { .. } => "ld.w",
+  1329→            Instruction::LdD { .. } => "ld.d",
+  1330→            Instruction::LdBu { .. } => "ld.bu",
+  1331→            Instruction::LdHu { .. } => "ld.hu",
+  1332→            Instruction::LdWu { .. } => "ld.wu",
+  1333→            Instruction::StB { .. } => "st.b",
+  1334→            Instruction::StH { .. } => "st.h",
+  1335→            Instruction::StW { .. } => "st.w",
+  1336→            Instruction::StD { .. } => "st.d",
+  1337→            Instruction::Beq { .. } => "beq",
+  1338→            Instruction::Bne { .. } => "bne",
+  1339→            Instruction::Blt { .. } => "blt",
+  1340→            Instruction::Bge { .. } => "bge",
+  1341→            Instruction::Bltu { .. } => "bltu",
+  1342→            Instruction::Bgeu { .. } => "bgeu",
+  1343→            Instruction::Jirl { .. } => "jirl",
+  1344→            Instruction::B { .. } => "b",
+  1345→            Instruction::Bl { .. } => "bl",
+  1346→            Instruction::Beqz { .. } => "beqz",
+  1347→            Instruction::Bnez { .. } => "bnez",
+  1348→            Instruction::Lu12iW { .. } => "lu12i.w",
+  1349→            Instruction::Lu32iD { .. } => "lu32i.d",
+  1350→            Instruction::Lu52iD { .. } => "lu52i.d",
+  1351→            Instruction::Pcaddu12i { .. } => "pcaddu12i",
+  1352→            Instruction::Pcaddu18i { .. } => "pcaddu18i",
+  1353→            Instruction::LlW { .. } => "ll.w",
+  1354→            Instruction::ScW { .. } => "sc.w",
+  1355→            Instruction::LlD { .. } => "ll.d",
+  1356→            Instruction::ScD { .. } => "sc.d",
+  1357→            Instruction::ExtWH { .. } => "ext.w.h",
+  1358→            Instruction::ExtWB { .. } => "ext.w.b",
+  1359→            Instruction::CloD { .. } => "clo.d",
+  1360→            Instruction::FldS { .. } => "fld.s",
+  1361→            Instruction::FldD { .. } => "fld.d",
+  1362→            Instruction::FstS { .. } => "fst.s",
+  1363→            Instruction::FstD { .. } => "fst.d",
+  1364→            Instruction::FmovGr2FprD { .. } => "movfr2gr.d",
+  1365→            Instruction::FmovFpr2GrD { .. } => "movgr2fr.d",
+  1366→            Instruction::FaddS { .. } => "fadd.s",
+  1367→            Instruction::FaddD { .. } => "fadd.d",
+  1368→            Instruction::FsubS { .. } => "fsub.s",
+  1369→            Instruction::FsubD { .. } => "fsub.d",
+  1370→            Instruction::FmulS { .. } => "fmul.s",
+  1371→            Instruction::FmulD { .. } => "fmul.d",
+  1372→            Instruction::FdivS { .. } => "fdiv.s",
+  1373→            Instruction::FdivD { .. } => "fdiv.d",
+  1374→            Instruction::FmovS { .. } => "fmov.s",
+  1375→            Instruction::FmovD { .. } => "fmov.d",
+  1376→            Instruction::FCmpS { .. } => "fcmp.cond.s",
+  1377→            Instruction::FCmpD { .. } => "fcmp.cond.d",
+  1378→            Instruction::Nop => "nop",
+  1379→            Instruction::Syscall => "syscall",
+  1380→            Instruction::Break => "break",
+  1381→        }
+  1382→    }
+  1383→}
+  1384→
+  1385→/// Returns the mnemonic for an FCMP condition code.
+  1386→fn fcmp_cond_mnemonic(cond: u8) -> &'static str {
+  1387→    match cond {
+  1388→        0x00 => "caf",
+  1389→        0x01 => "clt",
+  1390→        0x02 => "ceq",
+  1391→        0x03 => "cle",
+  1392→        0x04 => "cun",
+  1393→        0x05 => "cult",
+  1394→        0x06 => "cueq",
+  1395→        0x07 => "cule",
+  1396→        0x08 => "cne",
+  1397→        0x09 => "clts", // signed less-than (alternative encoding)
+  1398→        0x0A => "cnes",
+  1399→        0x0B => "cles",
+  1400→        0x0C => "cuns",
+  1401→        0x0D => "cults",
+  1402→        0x0E => "cunes",
+  1403→        0x0F => "cules",
+  1404→        0x10 => "cat",
+  1405→        _ => "c??",
+  1406→    }
+  1407→}
+  1408→
+  1409→impl fmt::Display for Instruction {
+  1410→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1411→        match self {
+  1412→            Instruction::AddW { rd, rj, rk } => write!(f, "add.w {}, {}, {}", rd, rj, rk),
+  1413→            Instruction::AddD { rd, rj, rk } => write!(f, "add.d {}, {}, {}", rd, rj, rk),
+  1414→            Instruction::SubW { rd, rj, rk } => write!(f, "sub.w {}, {}, {}", rd, rj, rk),
+  1415→            Instruction::SubD { rd, rj, rk } => write!(f, "sub.d {}, {}, {}", rd, rj, rk),
+  1416→            Instruction::Slt { rd, rj, rk } => write!(f, "slt {}, {}, {}", rd, rj, rk),
+  1417→            Instruction::Sltu { rd, rj, rk } => write!(f, "sltu {}, {}, {}", rd, rj, rk),
+  1418→            Instruction::MulW { rd, rj, rk } => write!(f, "mul.w {}, {}, {}", rd, rj, rk),
+  1419→            Instruction::MulD { rd, rj, rk } => write!(f, "mul.d {}, {}, {}", rd, rj, rk),
+  1420→            Instruction::DivW { rd, rj, rk } => write!(f, "div.w {}, {}, {}", rd, rj, rk),
+  1421→            Instruction::ModW { rd, rj, rk } => write!(f, "mod.w {}, {}, {}", rd, rj, rk),
+  1422→            Instruction::DivD { rd, rj, rk } => write!(f, "div.d {}, {}, {}", rd, rj, rk),
+  1423→            Instruction::ModD { rd, rj, rk } => write!(f, "mod.d {}, {}, {}", rd, rj, rk),
+  1424→            Instruction::And { rd, rj, rk } => write!(f, "and {}, {}, {}", rd, rj, rk),
+  1425→            Instruction::Or { rd, rj, rk } => write!(f, "or {}, {}, {}", rd, rj, rk),
+  1426→            Instruction::Xor { rd, rj, rk } => write!(f, "xor {}, {}, {}", rd, rj, rk),
+  1427→            Instruction::Nor { rd, rj, rk } => write!(f, "nor {}, {}, {}", rd, rj, rk),
+  1428→            Instruction::Andn { rd, rj, rk } => write!(f, "andn {}, {}, {}", rd, rj, rk),
+  1429→            Instruction::Orn { rd, rj, rk } => write!(f, "orn {}, {}, {}", rd, rj, rk),
+  1430→            Instruction::SllW { rd, rj, rk } => write!(f, "sll.w {}, {}, {}", rd, rj, rk),
+  1431→            Instruction::SrlW { rd, rj, rk } => write!(f, "srl.w {}, {}, {}", rd, rj, rk),
+  1432→            Instruction::SraW { rd, rj, rk } => write!(f, "sra.w {}, {}, {}", rd, rj, rk),
+  1433→            Instruction::SllD { rd, rj, rk } => write!(f, "sll.d {}, {}, {}", rd, rj, rk),
+  1434→            Instruction::SrlD { rd, rj, rk } => write!(f, "srl.d {}, {}, {}", rd, rj, rk),
+  1435→            Instruction::SraD { rd, rj, rk } => write!(f, "sra.d {}, {}, {}", rd, rj, rk),
+  1436→            Instruction::RotrW { rd, rj, rk } => write!(f, "rotr.w {}, {}, {}", rd, rj, rk),
+  1437→            Instruction::RotrD { rd, rj, rk } => write!(f, "rotr.d {}, {}, {}", rd, rj, rk),
+  1438→            Instruction::SlliW { rd, rj, imm8 } => write!(f, "slli.w {}, {}, {}", rd, rj, imm8),
+  1439→            Instruction::SrliW { rd, rj, imm8 } => write!(f, "srli.w {}, {}, {}", rd, rj, imm8),
+  1440→            Instruction::SraiW { rd, rj, imm8 } => write!(f, "srai.w {}, {}, {}", rd, rj, imm8),
+  1441→            Instruction::SlliD { rd, rj, imm8 } => write!(f, "slli.d {}, {}, {}", rd, rj, imm8),
+  1442→            Instruction::SrliD { rd, rj, imm8 } => write!(f, "srli.d {}, {}, {}", rd, rj, imm8),
+  1443→            Instruction::SraiD { rd, rj, imm8 } => write!(f, "srai.d {}, {}, {}", rd, rj, imm8),
+  1444→            Instruction::AddiW { rd, rj, imm12 } => write!(f, "addi.w {}, {}, {}", rd, rj, imm12),
+  1445→            Instruction::AddiD { rd, rj, imm12 } => write!(f, "addi.d {}, {}, {}", rd, rj, imm12),
+  1446→            Instruction::Slti { rd, rj, imm12 } => write!(f, "slti {}, {}, {}", rd, rj, imm12),
+  1447→            Instruction::Sltui { rd, rj, imm12 } => write!(f, "sltui {}, {}, {}", rd, rj, imm12),
+  1448→            Instruction::Andi { rd, rj, imm12 } => write!(f, "andi {}, {}, {:#x}", rd, rj, imm12),
+  1449→            Instruction::Ori { rd, rj, imm12 } => write!(f, "ori {}, {}, {:#x}", rd, rj, imm12),
+  1450→            Instruction::Xori { rd, rj, imm12 } => write!(f, "xori {}, {}, {:#x}", rd, rj, imm12),
+  1451→            Instruction::LdB { rd, rj, imm12 } => write!(f, "ld.b {}, {}, {}", rd, rj, imm12),
+  1452→            Instruction::LdH { rd, rj, imm12 } => write!(f, "ld.h {}, {}, {}", rd, rj, imm12),
+  1453→            Instruction::LdW { rd, rj, imm12 } => write!(f, "ld.w {}, {}, {}", rd, rj, imm12),
+  1454→            Instruction::LdD { rd, rj, imm12 } => write!(f, "ld.d {}, {}, {}", rd, rj, imm12),
+  1455→            Instruction::LdBu { rd, rj, imm12 } => write!(f, "ld.bu {}, {}, {}", rd, rj, imm12),
+  1456→            Instruction::LdHu { rd, rj, imm12 } => write!(f, "ld.hu {}, {}, {}", rd, rj, imm12),
+  1457→            Instruction::LdWu { rd, rj, imm12 } => write!(f, "ld.wu {}, {}, {}", rd, rj, imm12),
+  1458→            Instruction::StB { rd, rj, imm12 } => write!(f, "st.b {}, {}, {}", rd, rj, imm12),
+  1459→            Instruction::StH { rd, rj, imm12 } => write!(f, "st.h {}, {}, {}", rd, rj, imm12),
+  1460→            Instruction::StW { rd, rj, imm12 } => write!(f, "st.w {}, {}, {}", rd, rj, imm12),
+  1461→            Instruction::StD { rd, rj, imm12 } => write!(f, "st.d {}, {}, {}", rd, rj, imm12),
+  1462→            Instruction::Beq { rj, rd, offs16 } => write!(f, "beq {}, {}, {:+}", rj, rd, offs16),
+  1463→            Instruction::Bne { rj, rd, offs16 } => write!(f, "bne {}, {}, {:+}", rj, rd, offs16),
+  1464→            Instruction::Blt { rj, rd, offs16 } => write!(f, "blt {}, {}, {:+}", rj, rd, offs16),
+  1465→            Instruction::Bge { rj, rd, offs16 } => write!(f, "bge {}, {}, {:+}", rj, rd, offs16),
+  1466→            Instruction::Bltu { rj, rd, offs16 } => write!(f, "bltu {}, {}, {:+}", rj, rd, offs16),
+  1467→            Instruction::Bgeu { rj, rd, offs16 } => write!(f, "bgeu {}, {}, {:+}", rj, rd, offs16),
+  1468→            Instruction::Jirl { rd, rj, offs16 } => write!(f, "jirl {}, {}, {:+}", rd, rj, offs16),
+  1469→            Instruction::B { offs26 } => write!(f, "b {:+}", offs26),
+  1470→            Instruction::Bl { offs26 } => write!(f, "bl {:+}", offs26),
+  1471→            Instruction::Beqz { rj, offs21 } => write!(f, "beqz {}, {:+}", rj, offs21),
+  1472→            Instruction::Bnez { rj, offs21 } => write!(f, "bnez {}, {:+}", rj, offs21),
+  1473→            Instruction::Lu12iW { rd, imm20 } => write!(f, "lu12i.w {}, {}", rd, imm20),
+  1474→            Instruction::Lu32iD { rd, imm20 } => write!(f, "lu32i.d {}, {}", rd, imm20),
+  1475→            Instruction::Lu52iD { rd, rj, imm12 } => write!(f, "lu52i.d {}, {}, {}", rd, rj, imm12),
+  1476→            Instruction::Pcaddu12i { rd, imm20 } => write!(f, "pcaddu12i {}, {}", rd, imm20),
+  1477→            Instruction::Pcaddu18i { rd, imm20 } => write!(f, "pcaddu18i {}, {}", rd, imm20),
+  1478→            Instruction::LlW { rd, rj, imm14 } => write!(f, "ll.w {}, {}, {}", rd, rj, imm14),
+  1479→            Instruction::ScW { rd, rj, imm14 } => write!(f, "sc.w {}, {}, {}", rd, rj, imm14),
+  1480→            Instruction::LlD { rd, rj, imm14 } => write!(f, "ll.d {}, {}, {}", rd, rj, imm14),
+  1481→            Instruction::ScD { rd, rj, imm14 } => write!(f, "sc.d {}, {}, {}", rd, rj, imm14),
+  1482→            Instruction::ExtWH { rd, rj } => write!(f, "ext.w.h {}, {}", rd, rj),
+  1483→            Instruction::ExtWB { rd, rj } => write!(f, "ext.w.b {}, {}", rd, rj),
+  1484→            Instruction::CloD { rd, rj } => write!(f, "clo.d {}, {}", rd, rj),
+  1485→            Instruction::FldS { fd, rj, imm12 } => write!(f, "fld.s {}, {}, {}", fd, rj, imm12),
+  1486→            Instruction::FldD { fd, rj, imm12 } => write!(f, "fld.d {}, {}, {}", fd, rj, imm12),
+  1487→            Instruction::FstS { fd, rj, imm12 } => write!(f, "fst.s {}, {}, {}", fd, rj, imm12),
+  1488→            Instruction::FstD { fd, rj, imm12 } => write!(f, "fst.d {}, {}, {}", fd, rj, imm12),
+  1489→            Instruction::FmovGr2FprD { rd, fj } => write!(f, "movfr2gr.d {}, {}", rd, fj),
+  1490→            Instruction::FmovFpr2GrD { fd, rj } => write!(f, "movgr2fr.d {}, {}", fd, rj),
+  1491→            Instruction::FaddS { fd, fj, fk } => write!(f, "fadd.s {}, {}, {}", fd, fj, fk),
+  1492→            Instruction::FaddD { fd, fj, fk } => write!(f, "fadd.d {}, {}, {}", fd, fj, fk),
+  1493→            Instruction::FsubS { fd, fj, fk } => write!(f, "fsub.s {}, {}, {}", fd, fj, fk),
+  1494→            Instruction::FsubD { fd, fj, fk } => write!(f, "fsub.d {}, {}, {}", fd, fj, fk),
+  1495→            Instruction::FmulS { fd, fj, fk } => write!(f, "fmul.s {}, {}, {}", fd, fj, fk),
+  1496→            Instruction::FmulD { fd, fj, fk } => write!(f, "fmul.d {}, {}, {}", fd, fj, fk),
+  1497→            Instruction::FdivS { fd, fj, fk } => write!(f, "fdiv.s {}, {}, {}", fd, fj, fk),
+  1498→            Instruction::FdivD { fd, fj, fk } => write!(f, "fdiv.d {}, {}, {}", fd, fj, fk),
+  1499→            Instruction::FmovS { fd, fj } => write!(f, "fmov.s {}, {}", fd, fj),
+  1500→            Instruction::FmovD { fd, fj } => write!(f, "fmov.d {}, {}", fd, fj),
+  1501→            Instruction::FCmpS { cond, fj, fk, cd } => write!(
+  1502→                f,
+  1503→                "fcmp.{}.s $c{}, {}, {}",
+  1504→                fcmp_cond_mnemonic(*cond),
+  1505→                cd,
+  1506→                fj,
+  1507→                fk
+  1508→            ),
+  1509→            Instruction::FCmpD { cond, fj, fk, cd } => write!(
+  1510→                f,
+  1511→                "fcmp.{}.d $c{}, {}, {}",
+  1512→                fcmp_cond_mnemonic(*cond),
+  1513→                cd,
+  1514→                fj,
+  1515→                fk
+  1516→            ),
+  1517→            Instruction::Nop => write!(f, "nop"),
+  1518→            Instruction::Syscall => write!(f, "syscall"),
+  1519→            Instruction::Break => write!(f, "break"),
+  1520→        }
+  1521→    }
+  1522→}
+  1523→
+  1524→// ===========================================================================
+  1525→// ELF64 Emission
+  1526→// ===========================================================================
+  1527→
+  1528→/// Build a minimal ELF64 binary for LoongArch64 from raw code bytes.
+  1529→///
+  1530→/// Produces a static executable with a single LOAD segment containing the
+  1531→/// `.text` section. Entry point is at `base_addr` + header offset.
+  1532→fn build_minimal_loongarch64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1533→    let elf_header_size: u64 = 64;
+  1534→    let phdr_size: u64 = 56;
+  1535→    let text_offset = elf_header_size + phdr_size;
+  1536→    let text_size = code.len() as u64;
+  1537→    let entry_point = base_addr + text_offset;
+  1538→
+  1539→    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+  1540→
+  1541→    // --- e_ident ---
+  1542→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1543→    elf.push(2); // ELFCLASS64
+  1544→    elf.push(1); // ELFDATA2LSB
+  1545→    elf.push(1); // EV_CURRENT
+  1546→    elf.push(3); // ELFOSABI_LINUX
+  1547→    elf.push(0); // padding
+  1548→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1549→
+  1550→    // --- ELF header fields ---
+  1551→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1552→    elf.extend_from_slice(&258u16.to_le_bytes()); // e_machine = EM_LOONGARCH
+  1553→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1554→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1555→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1556→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1557→    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+  1558→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1559→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1560→    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+  1561→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1562→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1563→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1564→
+  1565→    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+  1566→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1567→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1568→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1569→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1570→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1571→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1572→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1573→    elf.extend_from_slice(&16u64.to_le_bytes()); // p_align
+  1574→
+  1575→    // --- Code section ---
+  1576→    elf.extend_from_slice(code);
+  1577→
+  1578→    elf
+  1579→}
+  1580→
+  1581→// ===========================================================================
+  1582→// LoongArch64Backend
+  1583→// ===========================================================================
+  1584→
+  1585→/// Decode a single LoongArch64 32-bit instruction word into a mnemonic string.
+  1586→fn decode_loongarch64_instruction(word: u32) -> String {
+  1587→    let opcode = word & 0x7f;
+  1588→    match opcode {
+  1589→        0x00 => {
+  1590→            let rd = (word >> 7) & 0x1f;
+  1591→            let rj = (word >> 15) & 0x1f;
+  1592→            let rk = (word >> 10) & 0x1f;
+  1593→            format!("add.w $r{}, $r{}, $r{}", rd, rj, rk)
+  1594→        }
+  1595→        0x01 => {
+  1596→            let rd = (word >> 7) & 0x1f;
+  1597→            let rj = (word >> 15) & 0x1f;
+  1598→            let rk = (word >> 10) & 0x1f;
+  1599→            format!("sub.w $r{}, $r{}, $r{}", rd, rj, rk)
+  1600→        }
+  1601→        0x02 => {
+  1602→            let rd = (word >> 7) & 0x1f;
+  1603→            let rj = (word >> 15) & 0x1f;
+  1604→            let rk = (word >> 10) & 0x1f;
+  1605→            format!("mul.w $r{}, $r{}, $r{}", rd, rj, rk)
+  1606→        }
+  1607→        0x05 => {
+  1608→            let rd = (word >> 7) & 0x1f;
+  1609→            let _rj = (word >> 15) & 0x1f; // lu12i.w does not use rj in the disassembly
+  1610→            let si12 = ((word >> 10) as i32) << 20 >> 20;
+  1611→            format!("lu12i.w $r{}, {}({})", rd, si12, si12)
+  1612→        }
+  1613→        0x08 => {
+  1614→            let rd = (word >> 7) & 0x1f;
+  1615→            let rj = (word >> 15) & 0x1f;
+  1616→            let si12 = ((word >> 10) as i32) << 20 >> 20;
+  1617→            format!("ld.w $r{}, $r{}, {}({})", rd, rj, si12, si12)
+  1618→        }
+  1619→        0x0a => {
+  1620→            let rd = (word >> 7) & 0x1f;
+  1621→            let rj = (word >> 15) & 0x1f;
+  1622→            let si12 = ((word >> 10) as i32) << 20 >> 20;
+  1623→            format!("st.w $r{}, $r{}, {}({})", rd, rj, si12, si12)
+  1624→        }
+  1625→        0x0c => {
+  1626→            let rd = (word >> 7) & 0x1f;
+  1627→            let rj = (word >> 15) & 0x1f;
+  1628→            let si12 = ((word >> 10) as i32) << 20 >> 20;
+  1629→            format!("ld.d $r{}, $r{}, {}({})", rd, rj, si12, si12)
+  1630→        }
+  1631→        0x0e => {
+  1632→            let rd = (word >> 7) & 0x1f;
+  1633→            let rj = (word >> 15) & 0x1f;
+  1634→            let si12 = ((word >> 10) as i32) << 20 >> 20;
+  1635→            format!("st.d $r{}, $r{}, {}({})", rd, rj, si12, si12)
+  1636→        }
+  1637→        0x10 => {
+  1638→            let rj = (word >> 15) & 0x1f;
+  1639→            let offs = ((word >> 10) as i32) << 12 >> 10;
+  1640→            format!("beq $r{}, {}({})", rj, offs, offs)
+  1641→        }
+  1642→        0x11 => {
+  1643→            let rj = (word >> 15) & 0x1f;
+  1644→            let offs = ((word >> 10) as i32) << 12 >> 10;
+  1645→            format!("bne $r{}, {}({})", rj, offs, offs)
+  1646→        }
+  1647→        0x14 => format!("bl {}", ((word >> 10) as i32) << 12 >> 10),
+  1648→        0x15 => {
+  1649→            let rd = (word >> 7) & 0x1f;
+  1650→            format!("jirl $r{}, {}", rd, ((word >> 10) as i32) << 12 >> 10)
+  1651→        }
+  1652→        _ => format!(".word {:08x}", word),
+  1653→    }
+  1654→}
+  1655→
+  1656→/// LoongArch64 code generation backend (LP64 ABI).
+  1657→pub struct LoongArch64Backend {
+  1658→    target_info: LoongArch64TargetInfo,
+  1659→}
+  1660→
+  1661→impl LoongArch64Backend {
+  1662→    /// Create a new LoongArch64 backend.
+  1663→    pub fn new() -> Self {
+  1664→        Self {
+  1665→            target_info: LoongArch64TargetInfo,
+  1666→        }
+  1667→    }
+  1668→}
+  1669→
+  1670→impl Default for LoongArch64Backend {
+  1671→    fn default() -> Self {
+  1672→        Self::new()
+  1673→    }
+  1674→}
+  1675→
+  1676→/// Compute the stack frame size for an IR function on LoongArch64.
+  1677→///
+  1678→/// Sums `Alloc` instruction sizes, adds 16 bytes for the ra/fp save pair,
+  1679→/// and rounds up to 16-byte alignment.
+  1680→fn loongarch64_compute_frame_size(func: &IRFunction) -> usize {
+  1681→    let mut total: u32 = 16; // ra + fp save pair
+  1682→    for block in &func.blocks {
+  1683→        for instr in &block.instructions {
+  1684→            if let IRInstr::Alloc { size, .. } = instr {
+  1685→                let aligned = (*size).div_ceil(16) * 16;
+  1686→                total += aligned;
+  1687→            }
+  1688→        }
+  1689→    }
+  1690→    // Round up to 16-byte alignment
+  1691→    total = (total + 15) & !15;
+  1692→    total as usize
+  1693→}
+  1694→
+  1695→/// Allocatable GPR registers for LoongArch64, in priority order.
+  1696→///
+  1697→/// Order: temporaries first, then argument registers, then callee-saved.
+  1698→const ALLOCATABLE_GPRS: &[Gpr] = &[
+  1699→    // Caller-saved temporaries (highest priority — no save/restore needed)
+  1700→    Gpr::T0,
+  1701→    Gpr::T1,
+  1702→    Gpr::T2,
+  1703→    Gpr::T3,
+  1704→    Gpr::T4,
+  1705→    Gpr::T5,
+  1706→    Gpr::T6,
+  1707→    Gpr::T7,
+  1708→    Gpr::T8,
+  1709→    // Argument registers (also caller-saved)
+  1710→    Gpr::A0,
+  1711→    Gpr::A1,
+  1712→    Gpr::A2,
+  1713→    Gpr::A3,
+  1714→    Gpr::A4,
+  1715→    Gpr::A5,
+  1716→    Gpr::A6,
+  1717→    Gpr::A7,
+  1718→    // Callee-saved (require save/restore)
+  1719→    Gpr::S0,
+  1720→    Gpr::S1,
+  1721→    Gpr::S2,
+  1722→    Gpr::S3,
+  1723→    Gpr::S4,
+  1724→    Gpr::S5,
+  1725→    Gpr::S6,
+  1726→    Gpr::S7,
+  1727→    Gpr::S8,
+  1728→    // Frame pointer is last — we prefer not to use it for general allocation
+  1729→    Gpr::Fp,
+  1730→];
+  1731→
+  1732→/// Map from virtual register ID to a physical GPR using a simple linear scan.
+  1733→fn map_vreg_to_gpr(
+  1734→    vreg_id: u32,
+  1735→    arg_index: Option<usize>,
+  1736→    vreg_map: &mut std::collections::HashMap<u32, Gpr>,
+  1737→) -> Gpr {
+  1738→    if let Some(gpr) = vreg_map.get(&vreg_id) {
+  1739→        return *gpr;
+  1740→    }
+  1741→
+  1742→    // If this is an argument, map it to the corresponding argument register.
+  1743→    if let Some(idx) = arg_index {
+  1744→        if let Some(reg) = Gpr::arg_register(idx) {
+  1745→            vreg_map.insert(vreg_id, reg);
+  1746→            return reg;
+  1747→        }
+  1748→    }
+  1749→
+  1750→    // Otherwise, pick the first available allocatable register.
+  1751→    let used: std::collections::HashSet<Gpr> = vreg_map.values().copied().collect();
+  1752→    for &reg in ALLOCATABLE_GPRS {
+  1753→        if !used.contains(&reg) {
+  1754→            vreg_map.insert(vreg_id, reg);
+  1755→            return reg;
+  1756→        }
+  1757→    }
+  1758→
+  1759→    // Fallback: use t8 as a scratch register.
+  1760→    Gpr::T8
+  1761→}
+  1762→
+  1763→/// Helper: extract the virtual register ID from an IRValue, if it is a register.
+  1764→fn vreg_id(val: &IRValue) -> u32 {
+  1765→    match val {
+  1766→        IRValue::Register(id) => *id,
+  1767→        _ => 0,
+  1768→    }
+  1769→}
+  1770→
+  1771→/// Load a 64-bit immediate into a register using the lu12i.w/ori/lu32i.d/lu52i.d
+  1772→/// instruction sequence.
+  1773→///
+  1774→/// Returns the list of AllocatedInstructions emitted to perform the load.
+  1775→fn load_imm_la64(rd: Gpr, imm: i64) -> Vec<AllocatedInstruction> {
+  1776→    let mut result = Vec::new();
+  1777→    let val = imm as u64;
+  1778→
+  1779→    // lu12i.w rd, bits[31:12]
+  1780→    let hi20 = ((val >> 12) & 0xFFFFF) as i32;
+  1781→    result.push(emit_alloc_instr(
+  1782→        Instruction::Lu12iW { rd, imm20: hi20 },
+  1783→        vec![],
+  1784→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1785→    ));
+  1786→
+  1787→    // ori rd, rd, bits[11:0]
+  1788→    let lo12 = (val & 0xFFF) as u32;
+  1789→    result.push(emit_alloc_instr(
+  1790→        Instruction::Ori {
+  1791→            rd,
+  1792→            rj: rd,
+  1793→            imm12: lo12,
+  1794→        },
+  1795→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1796→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1797→    ));
+  1798→
+  1799→    // lu32i.d rd, bits[51:32]
+  1800→    let hi32 = ((val >> 32) & 0xFFFFF) as i32;
+  1801→    result.push(emit_alloc_instr(
+  1802→        Instruction::Lu32iD { rd, imm20: hi32 },
+  1803→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1804→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1805→    ));
+  1806→
+  1807→    // lu52i.d rd, rd, bits[63:52]
+  1808→    let hi52 = ((val >> 52) & 0xFFF) as i32;
+  1809→    result.push(emit_alloc_instr(
+  1810→        Instruction::Lu52iD {
+  1811→            rd,
+  1812→            rj: rd,
+  1813→            imm12: hi52,
+  1814→        },
+  1815→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1816→        vec![PhysicalReg::new(RegClass::Gpr, rd.encoding())],
+  1817→    ));
+  1818→
+  1819→    result
+  1820→}
+  1821→
+  1822→/// Resolve an IRValue to a physical GPR.
+  1823→///
+  1824→/// - For `IRValue::Register`: looks up in `vreg_map`.
+  1825→/// - For `IRValue::Immediate`: loads the value into `scratch` and returns
+  1826→///   `(scratch, instructions)`.
+  1827→/// - For `IRValue::Address`: loads the address into `scratch`.
+  1828→/// - For `IRValue::Label`: loads a placeholder into `scratch`.
+  1829→fn resolve_gpr_la64(
+  1830→    val: &IRValue,
+  1831→    vreg_map: &mut std::collections::HashMap<u32, Gpr>,
+  1832→    scratch: Gpr,
+  1833→) -> (Gpr, Vec<AllocatedInstruction>) {
+  1834→    match val {
+  1835→        IRValue::Register(id) => {
+  1836→            let reg = map_vreg_to_gpr(*id, None, vreg_map);
+  1837→            (reg, Vec::new())
+  1838→        }
+  1839→        IRValue::Immediate(imm) => {
+  1840→            let code = load_imm_la64(scratch, *imm);
+  1841→            (scratch, code)
+  1842→        }
+  1843→        IRValue::Address(addr) => {
+  1844→            let code = load_imm_la64(scratch, *addr as i64);
+  1845→            (scratch, code)
+  1846→        }
+  1847→        IRValue::Label(_) => {
+  1848→            // Labels need relocation; emit a placeholder load
+  1849→            let code = load_imm_la64(scratch, 0);
+  1850→            (scratch, code)
+  1851→        }
+  1852→    }
+  1853→}
+  1854→
+  1855→/// Check if an immediate value fits in a signed 12-bit range (for addi.d/slti/etc.).
+  1856→fn fits_si12(val: i64) -> bool {
+  1857→    (-2048..=2047).contains(&val)
+  1858→}
+  1859→
+  1860→/// Emit a single AllocatedInstruction from a LoongArch64 Instruction.
+  1861→fn emit_alloc_instr(
+  1862→    inst: Instruction,
+  1863→    reads: Vec<PhysicalReg>,
+  1864→    writes: Vec<PhysicalReg>,
+  1865→) -> AllocatedInstruction {
+  1866→    AllocatedInstruction {
+  1867→        opcode: inst.mnemonic().to_string(),
+  1868→        reads,
+  1869→        writes,
+  1870→        encoded: inst.encode().to_vec(),
+  1871→    }
+  1872→}
+  1873→
+  1874→/// Lower a comparison kind to LoongArch64 instructions, producing 0 or 1 in `dst`.
+  1875→fn lower_cmp_la64(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<AllocatedInstruction> {
+  1876→    let mut result = Vec::new();
+  1877→    match kind {
+  1878→        CmpKind::Eq => {
+  1879→            // xor dst, lhs, rhs; sltui dst, dst, 1
+  1880→            result.push(emit_alloc_instr(
+  1881→                Instruction::Xor {
+  1882→                    rd: dst,
+  1883→                    rj: lhs,
+  1884→                    rk: rhs,
+  1885→                },
+  1886→                vec![
+  1887→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1888→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1889→                ],
+  1890→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1891→            ));
+  1892→            result.push(emit_alloc_instr(
+  1893→                Instruction::Sltui {
+  1894→                    rd: dst,
+  1895→                    rj: dst,
+  1896→                    imm12: 1,
+  1897→                },
+  1898→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1899→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1900→            ));
+  1901→        }
+  1902→        CmpKind::Ne => {
+  1903→            // xor dst, lhs, rhs; sltu dst, $r0, dst
+  1904→            result.push(emit_alloc_instr(
+  1905→                Instruction::Xor {
+  1906→                    rd: dst,
+  1907→                    rj: lhs,
+  1908→                    rk: rhs,
+  1909→                },
+  1910→                vec![
+  1911→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1912→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1913→                ],
+  1914→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1915→            ));
+  1916→            result.push(emit_alloc_instr(
+  1917→                Instruction::Sltu {
+  1918→                    rd: dst,
+  1919→                    rj: Gpr::R0,
+  1920→                    rk: dst,
+  1921→                },
+  1922→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1923→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1924→            ));
+  1925→        }
+  1926→        CmpKind::SLt => {
+  1927→            result.push(emit_alloc_instr(
+  1928→                Instruction::Slt {
+  1929→                    rd: dst,
+  1930→                    rj: lhs,
+  1931→                    rk: rhs,
+  1932→                },
+  1933→                vec![
+  1934→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1935→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1936→                ],
+  1937→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1938→            ));
+  1939→        }
+  1940→        CmpKind::SLe => {
+  1941→            // slt dst, rhs, lhs; xori dst, dst, 1
+  1942→            result.push(emit_alloc_instr(
+  1943→                Instruction::Slt {
+  1944→                    rd: dst,
+  1945→                    rj: rhs,
+  1946→                    rk: lhs,
+  1947→                },
+  1948→                vec![
+  1949→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1950→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1951→                ],
+  1952→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1953→            ));
+  1954→            result.push(emit_alloc_instr(
+  1955→                Instruction::Xori {
+  1956→                    rd: dst,
+  1957→                    rj: dst,
+  1958→                    imm12: 1,
+  1959→                },
+  1960→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1961→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1962→            ));
+  1963→        }
+  1964→        CmpKind::SGt => {
+  1965→            // slt dst, rhs, lhs
+  1966→            result.push(emit_alloc_instr(
+  1967→                Instruction::Slt {
+  1968→                    rd: dst,
+  1969→                    rj: rhs,
+  1970→                    rk: lhs,
+  1971→                },
+  1972→                vec![
+  1973→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1974→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1975→                ],
+  1976→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1977→            ));
+  1978→        }
+  1979→        CmpKind::SGe => {
+  1980→            // slt dst, lhs, rhs; xori dst, dst, 1
+  1981→            result.push(emit_alloc_instr(
+  1982→                Instruction::Slt {
+  1983→                    rd: dst,
+  1984→                    rj: lhs,
+  1985→                    rk: rhs,
+  1986→                },
+  1987→                vec![
+  1988→                    PhysicalReg::new(RegClass::Gpr, lhs.encoding()),
+  1989→                    PhysicalReg::new(RegClass::Gpr, rhs.encoding()),
+  1990→                ],
+  1991→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  1992→            ));
+  1993→            result.push(emit_alloc_instr(
+  1994→                Instruction::Xori {
+  1995→                    rd: dst,
+  1996→                    rj: dst,
+  1997→                    imm12: 1,
+  1998→                },
+  1999→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+  2000→                vec![PhysicalReg::new(RegClass::Gpr, dst.encoding())],
+
+[showing lines 1-2000 of 4070; use offset=2001 with limit to continue reading]

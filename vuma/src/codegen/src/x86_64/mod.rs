@@ -40,139 +40,6 @@ use std::collections::HashMap;
 use std::fmt;
 
 // ===========================================================================
-// Linux x86_64 Runtime Functions (syscall-based I/O)
-// ===========================================================================
-// Pre-assembled machine code for built-in I/O functions.
-// These are appended to the .text section after user functions.
-//
-// Functions provided:
-//   __vuma_write_stdout(ptr: rdi, len: rsi) — write raw bytes to stdout
-//   __vuma_print_hex(ptr: rdi, len: rsi)    — write bytes as hex + newline to stdout
-//   __vuma_print_int(val: rdi)              — write integer as decimal + newline to stdout
-
-/// Machine code for `__vuma_write_stdout`: sys_write(1, ptr, len)
-///   mov rdx, rsi; mov rsi, rdi; mov rdi, 1; mov rax, 1; syscall; ret
-const RUNTIME_WRITE_STDOUT: &[u8] = &[
-    0x48, 0x89, 0xf2,                         // mov rdx, rsi
-    0x48, 0x89, 0xfe,                         // mov rsi, rdi
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, // mov rdi, 1
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, // mov rax, 1
-    0x0f, 0x05,                               // syscall
-    0xc3,                                     // ret
-];
-const RUNTIME_WRITE_STDOUT_SIZE: usize = 23;
-
-/// Machine code for `__vuma_print_hex`: hex conversion loop + sys_write
-/// Uses r14 to hold the hex_table pointer (fix: rdx was being clobbered by movzbl)
-const RUNTIME_PRINT_HEX: &[u8] = &[
-    0x55,                                           // push rbp
-    0x48, 0x89, 0xe5,                               // mov rbp, rsp
-    0x48, 0x83, 0xec, 0x10,                         // sub rsp, 16
-    0x53,                                           // push rbx
-    0x41, 0x54,                                     // push r12
-    0x41, 0x55,                                     // push r13
-    0x41, 0x56,                                     // push r14
-    0x49, 0x89, 0xfc,                               // mov r12, rdi
-    0x49, 0x89, 0xf5,                               // mov r13, rsi
-    0x48, 0x31, 0xdb,                               // xor rbx, rbx
-    0x4c, 0x8d, 0x35, 0x00, 0x00, 0x00, 0x00,       // lea r14, [rip+hex_table] (PATCHED)
-    // .Lhex_loop:
-    0x4c, 0x39, 0xeb,                               // cmp rbx, r13
-    0x7d, 0x3f,                                     // jge .Lhex_done (+63)
-    0x41, 0x0f, 0xb6, 0x04, 0x1c,                   // movzbl (r12,rbx,1), eax
-    0x89, 0xc1,                                     // mov ecx, eax
-    0xc1, 0xe9, 0x04,                               // shr ecx, 4
-    0x41, 0x0f, 0xb6, 0x14, 0x0e,                   // movzbl (r14,rcx,1), edx
-    0x88, 0x55, 0xfe,                               // mov [rbp-2], dl
-    0x89, 0xc1,                                     // mov ecx, eax
-    0x83, 0xe1, 0x0f,                               // and ecx, 0xf
-    0x41, 0x0f, 0xb6, 0x14, 0x0e,                   // movzbl (r14,rcx,1), edx
-    0x88, 0x55, 0xff,                               // mov [rbp-1], dl
-    0x48, 0x8d, 0x75, 0xfe,                         // lea rsi, [rbp-2]
-    0x48, 0xc7, 0xc2, 0x02, 0x00, 0x00, 0x00,       // mov rdx, 2
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
-    0x0f, 0x05,                                     // syscall
-    0x48, 0xff, 0xc3,                               // inc rbx
-    0xeb, 0xbc,                                     // jmp .Lhex_loop (-68)
-    // .Lhex_done:
-    0xc6, 0x45, 0xff, 0x0a,                         // movb [rbp-1], 10
-    0x48, 0x8d, 0x75, 0xff,                         // lea rsi, [rbp-1]
-    0x48, 0xc7, 0xc2, 0x01, 0x00, 0x00, 0x00,       // mov rdx, 1
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
-    0x0f, 0x05,                                     // syscall
-    0x41, 0x5e,                                     // pop r14
-    0x41, 0x5d,                                     // pop r13
-    0x41, 0x5c,                                     // pop r12
-    0x5b,                                           // pop rbx
-    0x48, 0x83, 0xc4, 0x10,                         // add rsp, 16
-    0x5d,                                           // pop rbp
-    0xc3,                                           // ret
-];
-const RUNTIME_PRINT_HEX_SIZE: usize = 143;
-
-/// Offset of the RIP-relative displacement in `__vuma_print_hex` that
-/// points to `hex_table`. This is relative to the start of __vuma_print_hex.
-/// The LEA instruction is at byte 24, and the 4-byte displacement starts at byte 27.
-const PRINT_HEX_LEA_DISP_OFFSET: usize = 27;
-
-/// Machine code for `__vuma_print_int`: integer-to-decimal conversion + sys_write
-const RUNTIME_PRINT_INT: &[u8] = &[
-    0x55,                                           // push rbp
-    0x48, 0x89, 0xe5,                               // mov rbp, rsp
-    0x48, 0x83, 0xec, 0x20,                         // sub rsp, 32
-    0x53,                                           // push rbx
-    0x41, 0x54,                                     // push r12
-    0x49, 0x89, 0xfc,                               // mov r12, rdi
-    0x48, 0x8d, 0x5d, 0xff,                         // lea rbx, [rbp-1]
-    0xc6, 0x03, 0x0a,                               // movb [rbx], 10
-    0x48, 0xff, 0xcb,                               // dec rbx
-    0x4d, 0x85, 0xe4,                               // test r12, r12
-    0x75, 0x08,                                     // jne .Lint_loop
-    0xc6, 0x03, 0x30,                               // movb [rbx], '0'
-    0x48, 0xff, 0xcb,                               // dec rbx
-    0xeb, 0x1f,                                     // jmp .Lint_write
-    // .Lint_loop:
-    0x4d, 0x85, 0xe4,                               // test r12, r12
-    0x74, 0x1a,                                     // je .Lint_write
-    0x4c, 0x89, 0xe0,                               // mov rax, r12
-    0x31, 0xd2,                                     // xor edx, edx
-    0xb9, 0x0a, 0x00, 0x00, 0x00,                   // mov ecx, 10
-    0x48, 0xf7, 0xf1,                               // div rcx
-    0x49, 0x89, 0xc4,                               // mov r12, rax
-    0x80, 0xc2, 0x30,                               // add dl, '0'
-    0x88, 0x13,                                     // mov [rbx], dl
-    0x48, 0xff, 0xcb,                               // dec rbx
-    0xeb, 0xe1,                                     // jmp .Lint_loop
-    // .Lint_write:
-    0x48, 0xff, 0xc3,                               // inc rbx
-    0x48, 0x89, 0xe8,                               // mov rax, rbp
-    0x48, 0x29, 0xd8,                               // sub rax, rbx
-    0x48, 0x89, 0xde,                               // mov rsi, rbx
-    0x48, 0x89, 0xc2,                               // mov rdx, rax
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       // mov rdi, 1
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       // mov rax, 1
-    0x0f, 0x05,                                     // syscall
-    0x41, 0x5c,                                     // pop r12
-    0x5b,                                           // pop rbx
-    0x48, 0x83, 0xc4, 0x20,                         // add rsp, 32
-    0x5d,                                           // pop rbp
-    0xc3,                                           // ret
-];
-const RUNTIME_PRINT_INT_SIZE: usize = 108;
-
-/// Hex lookup table: "0123456789abcdef"
-const HEX_TABLE: &[u8] = b"0123456789abcdef";
-const HEX_TABLE_SIZE: usize = 16;
-
-/// Total size of all runtime code (write_stdout + print_hex + print_int)
-const RUNTIME_CODE_SIZE: usize = RUNTIME_WRITE_STDOUT_SIZE + RUNTIME_PRINT_HEX_SIZE + RUNTIME_PRINT_INT_SIZE;
-
-/// Total size of runtime code + data
-const RUNTIME_TOTAL_SIZE: usize = RUNTIME_CODE_SIZE + HEX_TABLE_SIZE;
-
-// ===========================================================================
 // General-Purpose Registers
 // ===========================================================================
 
@@ -1964,19 +1831,24 @@ impl Backend for X86_64Backend {
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
         // Build the _start stub: call main; mov rdi, rax; mov rax, 60; syscall
+        // This is exactly 16 bytes.
         // E8 <rel32 to main>          ; call main       (5 bytes)
         // 48 89 C7                    ; mov rdi, rax    (3 bytes)
         // 48 C7 C0 3C 00 00 00       ; mov rax, 60     (7 bytes)
         // 0F 05                       ; syscall          (2 bytes)
+        // Total: 5 + 3 + 7 + 2 = 17 bytes... wait, let me recalculate
+        // call main = E8 xx xx xx xx = 5 bytes
+        // mov rdi, rax = 48 89 C7 = 3 bytes
+        // mov rax, 60 = 48 C7 C0 3C 00 00 00 = 7 bytes
+        // syscall = 0F 05 = 2 bytes
         // Total = 5 + 3 + 7 + 2 = 17 bytes
+
         let start_stub_size: usize = 17;
 
-        // ── Phase 1: Compute layout offsets ──────────────────────────────
-        // Layout: [_start stub] [user functions] [runtime functions] [hex_table]
+        // Find the main function and compute its offset within all_code
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size;
+        let mut current_offset: usize = start_stub_size; // _start stub comes first
 
-        // User functions
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
             let func_size: usize = func.blocks.iter()
@@ -1986,48 +1858,40 @@ impl Backend for X86_64Backend {
             current_offset += func_size;
         }
 
-        // Runtime I/O functions — registered under VUMA-friendly names
-        let write_stdout_offset = current_offset;
-        func_offsets.insert("print_buf".to_string(), write_stdout_offset);
-        func_offsets.insert("write_stdout".to_string(), write_stdout_offset);
-        func_offsets.insert("__vuma_write_stdout".to_string(), write_stdout_offset);
-        current_offset += RUNTIME_WRITE_STDOUT_SIZE;
-
-        let print_hex_offset = current_offset;
-        func_offsets.insert("print_hex".to_string(), print_hex_offset);
-        func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
-        current_offset += RUNTIME_PRINT_HEX_SIZE;
-
-        let print_int_offset = current_offset;
-        func_offsets.insert("print_int".to_string(), print_int_offset);
-        func_offsets.insert("print".to_string(), print_int_offset);
-        func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
-        current_offset += RUNTIME_PRINT_INT_SIZE;
-
-        // hex_table data follows runtime code
-        let hex_table_offset = current_offset;
-
-        // ── Phase 2: Build _start stub ──────────────────────────────────
+        // Build _start stub
         let mut start_stub = Vec::with_capacity(start_stub_size);
-        start_stub.extend(encode_call_rel32(0));        // call main
-        start_stub.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // mov rdi, rax
-        start_stub.extend(encode_mov_reg_imm32(Gpr::Rax, 60));     // mov rax, 60
-        start_stub.extend(encode_syscall());             // syscall
 
-        // Patch call-main rel32
+        // call main (E8 + rel32 placeholder)
+        start_stub.extend(encode_call_rel32(0));
+
+        // mov rdi, rax
+        start_stub.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax));
+
+        // mov rax, 60 (sys_exit)
+        start_stub.extend(encode_mov_reg_imm32(Gpr::Rax, 60));
+
+        // syscall
+        start_stub.extend(encode_syscall());
+
+        // Patch the call main rel32 offset in _start stub
+        // The rel32 is at offset 1 (after the E8 opcode byte)
+        // Find the "main" function — could be named "main" or "fn_main_entry(...)"
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
+            let rel32_patch_offset = 1usize; // offset within start_stub
+            // rel32 = target - (call_site + 5)
+            // The CALL instruction is at offset 0 of all_code, so the
+            // instruction after CALL is at offset 5.
             let rel32 = (main_offset as i64) - 5i64;
-            start_stub[1..5].copy_from_slice(&(rel32 as i32).to_le_bytes());
+            start_stub[rel32_patch_offset..rel32_patch_offset + 4]
+                .copy_from_slice(&(rel32 as i32).to_le_bytes());
         }
 
-        // ── Phase 3: Concatenate all code ───────────────────────────────
+        // Concatenate all function code
         let mut all_code = start_stub;
-
-        // User functions
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -2036,37 +1900,27 @@ impl Backend for X86_64Backend {
             }
         }
 
-        // Runtime I/O functions
-        all_code.extend_from_slice(RUNTIME_WRITE_STDOUT);
-        all_code.extend_from_slice(RUNTIME_PRINT_HEX);
-        all_code.extend_from_slice(RUNTIME_PRINT_INT);
-
-        // Hex lookup table (read-only data in .text segment)
-        all_code.extend_from_slice(HEX_TABLE);
-
-        // ── Phase 4: Patch RIP-relative LEA in __vuma_print_hex ─────────
-        // The LEA instruction references hex_table via RIP-relative addressing.
-        // displacement = hex_table_addr - (lea_instruction_end_addr)
-        // = hex_table_offset - (print_hex_offset + PRINT_HEX_LEA_DISP_OFFSET + 4)
-        let lea_end_addr = print_hex_offset + PRINT_HEX_LEA_DISP_OFFSET + 4;
-        let lea_displacement = (hex_table_offset as i64) - (lea_end_addr as i64);
-        let lea_patch_abs = print_hex_offset + PRINT_HEX_LEA_DISP_OFFSET;
-        if lea_patch_abs + 4 <= all_code.len() {
-            all_code[lea_patch_abs..lea_patch_abs + 4]
-                .copy_from_slice(&(lea_displacement as i32).to_le_bytes());
-        }
-
-        // ── Phase 5: Patch relocations for user functions ───────────────
+        // Patch relocations for each function
+        // We need to adjust relocation offsets: they are relative to the start
+        // of the function's code, but now all_code has the _start stub prepended,
+        // plus all preceding functions.
         let mut func_code_offset: usize = start_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
                 if abs_offset + 4 > all_code.len() {
-                    continue;
+                    continue; // skip invalid relocations
                 }
 
                 if reloc.reloc_type == R_X86_64_PLT32 {
-                    // Resolve via func_offsets (includes runtime functions)
+                    // R_X86_64_PLT32 for x86_64 CALL/JMP rel32:
+                    // The rel32 field is relative to the end of the 4-byte displacement,
+                    // i.e., the address AFTER the rel32 field (P + 4).
+                    // So: rel32 = S - (P + 4) = S - P - 4
+                    // With addend: rel32 = S + A - P - 4
+                    // S = symbol value (target address)
+                    // A = addend (current value at the relocation site)
+                    // P = place (address of the relocation site)
                     if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
@@ -2081,16 +1935,12 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&resolved.to_le_bytes());
                     }
-                    // External symbols (e.g., __vuma_free) left as placeholder
+                    // If the symbol is not found (e.g., external like __vuma_free),
+                    // leave the placeholder as-is
                 }
-
-                if reloc.reloc_type == R_X86_64_64 {
-                    // Absolute 64-bit address relocation
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
-                        all_code[abs_offset..abs_offset + 8]
-                            .copy_from_slice(&(target_offset as u64).to_le_bytes());
-                    }
-                }
+                // R_X86_64_64 relocations would need different handling
+                // (absolute 64-bit address), but for intra-program references
+                // we currently only use PLT32.
             }
             let func_size: usize = func.blocks.iter()
                 .flat_map(|b| b.instructions.iter())

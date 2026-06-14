@@ -1,0 +1,457 @@
+     1→     1→     1→I'll continue fixing the remaining backends. Let me start by reading the current state of the code and understanding what's left to fix.
+     2→     2→     2→Let me first build and test the current state:
+     3→     3→     3→Good, it builds. Let me test the current state of each backend:
+     4→     4→     4→Exit 127 usually means the QEMU binary can't be found or the ELF is not executable. Let me check:
+     5→     5→     5→Current state:
+     6→     6→     6→- **x86_64** ✅, **AArch64** ✅, **RISC-V 64** ✅, **ARM32** ✅ — all SHA256d exit 79
+     7→     7→     7→- **MIPS64** ❌ exit 181 (not 79)
+     8→     8→     8→- **PPC64** ❌ segfault
+     9→     9→     9→- **LoongArch64** ❌ segfault (even on return 42)
+    10→    10→    10→
+    11→    11→    11→Let me tackle these three. I'll start by reading each backend to understand the issues:
+    12→    12→    12→Let me start with LoongArch64 since it's the most broken (can't even return 42), then MIPS64 and PPC64 in parallel:
+    13→    13→    13→Let me now read the critical sections - the Call handler, Ret handler, encode_program, and the instruction encoding:
+    14→    14→    14→Now let me read the `encode_program` and instruction encoding functions:
+    15→    15→    15→Now let me check the instruction encoding - specifically the BL instruction and the Lu12iW instruction, since these are critical for LoongArch64:
+    16→    16→    16→Now let me check the critical encode_i26 function and other format encoders:
+    17→    17→    17→Now I can see a critical issue with the LoongArch64 I26 format encoding. Let me check the LoongArch spec for B/BL:
+    18→    18→    18→
+    19→    19→    19→The I26 format for LoongArch64 is:
+    20→    20→    20→- `opcode[31:26] | offs26[25:10] in bits[25:10] | offs26[9:0] in bits[9:0]`
+    21→    21→    21→
+    22→    22→    22→But the current encoding does:
+    23→    23→    23→```rust
+    24→    24→    24→let word = ((opcode & 0x3F) << 26)
+    25→    25→    25→    | ((imm26 & 0xFFFF) << 10)    // lower 16 bits in [25:10]
+    26→    26→    26→    | ((imm26 >> 16) & 0x3FF);    // upper 10 bits in [9:0]
+    27→    27→    27→```
+    28→    28→    28→
+    29→    29→    29→This looks wrong. The LoongArch manual says for I26 format:
+    30→    30→    30→- Bits [31:26] = opcode
+    31→    31→    31→- Bits [25:10] = offs26[15:0]  (lower 16 bits of offset)
+    32→    32→    32→- Bits [9:0] = offs26[25:16]  (upper 10 bits of offset)
+    33→    33→    33→
+    34→    34→    34→Wait, the encoding IS correct for the bit layout - the lower 16 bits of the 26-bit offset go in bits [25:10], and the upper 10 bits go in bits [9:0]. Let me verify with the test:
+    35→    35→    35→
+    36→    36→    36→```rust
+    37→    37→    37→let bytes = Instruction::Bl { offs26: 0x100 }.encode();
+    38→    38→    38→let word = u32::from_le_bytes(bytes);
+    39→    39→    39→let expected = (0x15u32 << 26) | 0x100u32;
+    40→    40→    40→assert_eq!(word, expected);
+    41→    41→    41→```
+    42→    42→    42→
+    43→    43→    43→0x100 has: lower 16 bits = 0x100, upper 10 bits = 0. So the word = `(0x15 << 26) | (0x100 << 10) | 0`. That's `(0x15 << 26) | 0x40000`. But the expected is `(0x15 << 26) | 0x100`. These don't match!
+    44→    44→    44→
+    45→    45→    45→Let me re-check... Actually `(0x100 & 0xFFFF) << 10 = 0x40000` and `(0x100 >> 16) & 0x3FF = 0`. So the word is `(0x15 << 26) | 0x40000`. The expected is `(0x15 << 26) | 0x100`. That's different!
+    46→    46→    46→
+    47→    47→    47→This means the I26 encoding is **WRONG** and the test is also wrong. The actual LoongArch I26 format per the spec:
+    48→    48→    48→
+    49→    49→    49→Looking at the LoongArch Reference Manual:
+    50→    50→    50→- B: `0101 00 | offs26[15:0] | offs26[25:16]` → opcode 0x14
+    51→    51→    51→- BL: `0101 01 | offs26[15:0] | offs26[25:16]` → opcode 0x15
+    52→    52→    52→
+    53→    53→    53→The layout: bits[31:26]=opcode, bits[25:10]=offs26[15:0], bits[9:0]=offs26[25:16]
+    54→    54→    54→
+    55→    55→    55→So for offs26=0x100:
+    56→    56→    56→- offs26[15:0] = 0x0100, placed in bits[25:10] = 0x0100 << 10 = 0x40000
+    57→    57→    57→- offs26[25:16] = 0x00, placed in bits[9:0] = 0
+    58→    58→    58→
+    59→    59→    59→Total word = 0x5400000 | 0x40000 = 0x5440000
+    60→    60→    60→
+    61→    61→    61→But the test expects `(0x15 << 26) | 0x100 = 0x5400100`. That's clearly wrong.
+    62→    62→    62→
+    63→    63→    63→Wait, let me re-read the test more carefully:
+    64→    64→    64→
+    65→    65→    65→```rust
+    66→    66→    66→let expected = (0x15u32 << 26) | 0x100u32;
+    67→    67→    67→```
+    68→    68→    68→
+    69→    69→    69→This is testing the raw word format, not the actual encoding. The test is WRONG because it doesn't account for the bit-swapping in I26 format.
+    70→    70→    70→
+    71→    71→    71→But actually, the question is: does the current encoding produce correct machine code that QEMU can execute? Let me check if QEMU expects the I26 format with the bit-swap or without.
+    72→    72→    72→
+    73→    73→    73→Let me think about this differently. Instead of analyzing the encoding, let me just debug the actual binary:
+    74→    74→    74→I can see critical issues in the LoongArch64 backend. The opcode constants appear to be wrong - QEMU is decoding `st.d` as `ld.wu` and `lu32i.d` as `pcaddi`. Let me verify this with a web search for the correct LoongArch64 instruction encodings:
+    75→    75→    75→Let me take a completely different approach. Instead of searching the web, let me empirically determine the correct opcodes by creating test binaries and checking QEMU's behavior:
+    76→    76→    76→So the corrected st.d opcode (0x28A) produces an illegal instruction! That means 0x28A is also wrong. Let me try other values:
+    77→    77→    77→The simple program works. Now let me find the correct st.d and ld.d opcodes by binary search:
+    78→    78→    78→Now I can see the correct opcode mapping! QEMU reveals:
+    79→    79→    79→- `0xA0` → `ld_b` (code has `OPC_LD_B = 0x0A0` ✅)
+    80→    80→    80→- `0xA1` → `ld_h` (code has `OPC_LD_H = 0x0A1` ✅)
+    81→    81→    81→- `0xA2` → `ld_w` (code has `OPC_LD_W = 0x0A2` ✅)
+    82→    82→    82→- `0xA3` → `ld_d` (code has `OPC_LD_D = 0x0A3` ✅)
+    83→    83→    83→- `0xA4` → `st_b` (**code says `OPC_ST_B = 0x0A7`** ❌ — should be 0x0A4!)
+    84→    84→    84→- `0xA5` → `st_h` (code has `OPC_ST_H = 0x0A8` ❌ — should be 0x0A5!)
+    85→    85→    85→- `0xA6` → `st_w` (code has `OPC_ST_W = 0x0A9` ❌ — should be 0x0A6!)
+    86→    86→    86→- `0xA7` → `st_d` (**code has `OPC_ST_D = 0x0AA`** ❌ — should be 0x0A7!)
+    87→    87→    87→- `0xA8` → `ld_bu` (code has `OPC_LD_BU = 0x0A4` ❌ — should be 0x0A8!)
+    88→    88→    88→- `0xA9` → `ld_hu` (code has `OPC_LD_HU = 0x0A5` ❌ — should be 0x0A9!)
+    89→    89→    89→- `0xAA` → `ld_wu` (code has `OPC_LD_WU = 0x0A6` ❌ — should be 0x0AA!)
+    90→    90→    90→
+    91→    91→    91→The opcodes are swapped! The code has loads and stores in the wrong order. The correct order is:
+    92→    92→    92→- 0xA0-0xA3: ld.b, ld.h, ld.w, ld.d ✅
+    93→    93→    93→- 0xA4-0xA7: st.b, st.h, st.w, st.d (code has these at 0xA7-0xAA!)
+    94→    94→    94→- 0xA8-0xAA: ld.bu, ld.hu, ld.wu (code has these at 0xA4-0xA6!)
+    95→    95→    95→
+    96→    96→    96→Now let me also check the other opcode groups that might be wrong. Let me check more:
+    97→    97→    97→Now I can see the correct 1RI20 opcodes:
+    98→    98→    98→- opcode 0x04 = `addu16i_d` (not in the code's opcode list!)
+    99→    99→    99→- opcode 0x05 = `lu12i_w` ✅
+   100→   100→   100→- opcode 0x06 = `pcaddi` (the code has `OPC_LU32I_D = 0x06` ❌)
+   101→   101→   101→- opcode 0x0E = `pcaddu12i` ✅ (the code has `OPC_PCADDU12I = 0x0E`)
+   102→   102→   102→
+   103→   103→   103→Wait, where is `lu32i.d`? Let me check more opcodes:
+   104→   104→   104→Excellent! Found it! The correct opcode for `lu52i.d` is **0x00C** (not 0x003 as the code has). The code's `OPC_LU52I_D = 0x03` is wrong.
+   105→   105→   105→
+   106→   106→   106→Now I have a complete picture of the wrong opcodes. Let me compile the full list:
+   107→   107→   107→
+   108→   108→   108→**Wrong opcodes found:**
+   109→   109→   109→1. `OPC_ST_B` = 0x0A7 → should be **0x0A4**
+   110→   110→   110→2. `OPC_ST_H` = 0x0A8 → should be **0x0A5**
+   111→   111→   111→3. `OPC_ST_W` = 0x0A9 → should be **0x0A6**
+   112→   112→   112→4. `OPC_ST_D` = 0x0AA → should be **0x0A7**
+   113→   113→   113→5. `OPC_LD_BU` = 0x0A4 → should be **0x0A8**
+   114→   114→   114→6. `OPC_LD_HU` = 0x0A5 → should be **0x0A9**
+   115→   115→   115→7. `OPC_LD_WU` = 0x0A6 → should be **0x0AA**
+   116→   116→   116→8. `OPC_LU52I_D` = 0x03 → should be **0x0C**
+   117→   117→   117→
+   118→   118→   118→And `OPC_LU32I_D` = 0x06 is actually `pcaddi`, not `lu32i.d`. I need to find where `lu32i.d` actually is. Let me check:
+   119→   119→   119→**Exit 42 works!** Now I have the complete list of wrong opcodes. Let me now fix the LoongArch64 backend systematically:
+   120→   120→   120→Now I'll fix all the wrong opcodes:
+   121→   121→   121→Now I also need to fix the `encode_load_imm` function in both the main module and the stack_slot_isel. The key issue is that `lu32i.d` (opcode 0x06) is actually `pcaddi` in QEMU, which adds the PC to the immediate - this destroys the register value. I need to change the approach:
+   122→   122→   122→Now I need to fix the `encode_load_imm` function. The problem is that `lu32i.d` (opcode 0x06 in 1RI20 format) is actually `pcaddi` in QEMU, which computes `rd = PC + imm20 * 4`. This destroys the register value instead of setting bits[51:32].
+   123→   123→   123→
+   124→   124→   124→The correct approach for loading 64-bit immediates on LoongArch64 when `lu32i.d` is actually `pcaddi`:
+   125→   125→   125→1. For values where bits[63:32] are all zero: just use `lu12i.w` + `ori`
+   126→   126→   126→2. For values where bits[51:32] are non-zero: need an alternative approach
+   127→   127→   127→
+   128→   128→   128→Let me check if there's a way to use `lu32i.d` properly. Actually, looking at the LoongArch spec more carefully, `lu32i.d` and `pcaddi` share the same opcode but are DIFFERENT instructions distinguished by a bit in the instruction word. Let me check:
+   129→   129→   129→Good, `SlliD` and `SrliD` are available. Now let me fix the `encode_load_imm` function:
+   130→   130→   130→Now I also need to fix the same function in the main mod.rs (the old `load_imm_la64` function) and update the disasm.rs to match the corrected opcodes. Let me also fix the `load_imm_la64` function in mod.rs:
+   131→   131→   131→Now I also need to update the `trampoline` function in mod.rs and the `encode_program` function's `_start` stub. Let me also fix the disasm.rs to match the corrected opcodes:
+   132→   132→   132→There's a leftover from the old code. Let me fix it:
+   133→   133→   133→I see the issue - there's leftover code from the old 0x0A9 and 0x0AA entries. Let me remove those:
+   134→   134→   134→Also need to update the lu52i.d opcode in the disasm. Let me also fix the tests in mod.rs that test the wrong opcodes:
+   135→   135→   135→Now let me build and test:
+   136→   136→   136→The st.d encoding is now correct! But the program exits with code 1 instead of 42. Let me check the full instruction trace more carefully. The issue might be with the load_imm function producing wrong code for the value 42:
+   137→   137→   137→The code is identical! But the manual one works and vuma's doesn't. The issue must be in the ELF header or segment layout. Let me compare:
+   138→   138→   138→The issue is clear! The vuma ELF has `filesz=0x4C` for the text segment (only the actual code), while the manual ELF has `filesz=0x10034` (the entire segment including padding). This means QEMU can't read the data segment from the file for the vuma ELF because the file offset calculation is wrong.
+   139→   139→   139→
+   140→   140→   140→Wait actually, `filesz=0x4C` should be fine - it just means the text segment only covers 0x4C bytes. But the data segment has `filesz=0x0` and `memsz=0x10000`, which means it's all zeros (BSS-like). That should be OK too.
+   141→   141→   141→
+   142→   142→   142→Let me look more carefully - maybe the data segment offset in the file doesn't exist:
+   143→   143→   143→The vuma ELF is only 0x20000 bytes (128KB), so the data segment at file offset 0x20000 doesn't exist in the file. But the data segment has `filesz=0` and `memsz=0x10000`, meaning it's all zeros and doesn't need to be loaded from the file. QEMU should handle this (it's like a BSS segment).
+   144→   144→   144→
+   145→   145→   145→Wait, but the manual ELF IS 0x30000 bytes and includes 0x10000 bytes of zeros for the data segment. Let me check if this is actually the issue. Let me try padding the vuma ELF:
+   146→   146→   146→The padding fixes it! The issue is that QEMU requires the data segment to actually exist in the file, even though it's all zeros. Let me fix the `build_loongarch64_elf_2seg` function:
+   147→   147→   147→The issue is clear: the data segment has `p_filesz = 0` and no actual file data is written. But QEMU expects the data segment to exist in the file. I need to change it to write the data segment:
+   148→   148→   148→Now let me build and test:
+   149→   149→   149→Still exit=1 for return 42. The ELF file size is now 196608 (0x30000) which includes the data segment. But it still doesn't work. Let me compare more carefully with the working manual binary:
+   150→   150→   150→The differences are:
+   151→   151→   151→1. At offsets 0x60-0x6A: This is in the program header — the `p_filesz` and `p_memsz` fields. Manual has 0x10034 (includes the entire text segment page), while vuma has 0x4C (just the code). 
+   152→   152→   152→2. At offsets 0x10034+: These are the extra bytes that the vuma ELF has beyond the code (the duplicate Ret/epilogue code).
+   153→   153→   153→
+   154→   154→   154→The key difference is the `p_filesz`/`p_memsz` in the text segment header. The manual version sets `filesz = memsz = 0x10034` (covering the entire page), while vuma sets `filesz = memsz = 0x4C` (just the code bytes).
+   155→   155→   155→
+   156→   156→   156→QEMU might require the text segment to be page-aligned in size. Let me fix this:
+   157→   157→   157→Still exit=1 for return 42! Let me do a more careful comparison. Maybe the issue is also in the data segment offset calculation:
+   158→   158→   158→The difference: Manual has `filesz=0x10034` for the text segment, while vuma has `filesz=0x10000`. The manual version includes 0x34 extra bytes beyond the page boundary. This means the data segment's file offset in the manual version overlaps with the end of the text segment by 0x34 bytes. 
+   159→   159→   159→
+   160→   160→   160→Actually, the manual version is calculating `text_memsz` as the size that includes the actual code + page alignment, while vuma rounds down to the page size. Let me check: the code is 0x34 bytes (52 bytes), which is less than one page. The text segment should cover from 0x10000 to 0x20000 (one page). But the manual version sets filesz=0x10034, which extends past the page boundary.
+   161→   161→   161→
+   162→   162→   162→Wait, that means the manual ELF's data segment at file offset 0x20000 actually has 0x34 bytes of text code in it too! That seems like a bug in my manual ELF builder, but it works because QEMU just maps the entire file.
+   163→   163→   163→
+   164→   164→   164→The real issue might be that QEMU requires the text segment's `p_filesz` to include the code bytes AND the file must have data at those offsets. Let me just set filesz to match the actual code size but keep memsz page-aligned:
+   165→   165→   165→Wait, the issue might not be the text segment size at all. Let me check if the data segment offset calculation is correct. The manual ELF has data at file offset 0x20000 but the text segment extends to file offset 0x10000 + 0x10034 = 0x20034. That means the data segment at 0x20000 is INSIDE the text segment's claimed file range. This is confusing.
+   166→   166→   166→
+   167→   167→   167→Actually, looking more carefully at the manual ELF builder code, I see that it pads to 0x10000 and then writes the code (0x34 bytes). Then it pads to 0x20000 and writes the data segment. The `p_filesz = 0x10034` includes the code page + the 0x34 bytes of code. But the data segment also starts at 0x20000.
+   168→   168→   168→
+   169→   169→   169→The key difference between working and non-working is that in the manual version, there are zeros between offset 0x10034 and 0x20000. But in vuma, the file is also padded correctly. Let me just try matching the manual ELF exactly:
+   170→   170→   170→The gap is NOT all zeros! There's extra code there. This is the duplicate epilogue from the `Ret` instruction AND the `Return` terminator. Let me check the actual code at 0x10034:
+   171→   171→   171→Yes! There's duplicate epilogue code. The `Ret` IR instruction generates an epilogue, AND the `Return` terminator also generates one. This means after the first `jirl $r0, $ra, 0`, execution falls through to the second epilogue which loads garbage into $a0 (since the stack has been deallocated), and then exits with whatever value is in $a0.
+   172→   172→   172→
+   173→   173→   173→This is a critical bug in the stack_slot_isel: both `IRInstr::Ret` and `IRTerminator::Return` generate epilogues, but only one should. Let me fix this by making `IRInstr::Ret` NOT generate an epilogue (the terminator should handle it):
+   174→   174→   174→Both `IRInstr::Ret` and `IRTerminator::Return` generate full epilogues. The fix is to make `IRInstr::Ret` just load the return value into $a0 without the epilogue, since the terminator will handle it:
+   175→   175→   175→Great progress! **5 out of 7 backends pass both tests**. The remaining issues are:
+   176→   176→   176→- **MIPS64**: SHA256d exit 181 (not 79) - 32-bit value handling issue
+   177→   177→   177→- **PPC64**: SHA256d segfaults
+   178→   178→   178→- **LoongArch64**: SHA256d segfaults
+   179→   179→   179→
+   180→   180→   180→Let me now focus on these. The LoongArch64 segfault on SHA256d is likely a more complex code generation issue. Let me work on all three in parallel:
+   181→   181→   181→Let me tackle the LoongArch64 SHA256d segfault first. The most likely issue is that the `encode_load_imm` function generates wrong code for values like `0xFFFFFFFF` (the AND mask used in SHA256d's `rotr32` function). Let me debug:
+   182→   182→   182→Function calls don't work on LoongArch64! Exit code 1 means $a0 = 1. The issue is likely with how the BL relocation is patched or with the function call mechanism. Let me debug:
+   183→   183→   183→The add.d instruction IS correct! I was decoding wrong before. So the binary looks correct. Let me trace the issue differently. Let me check if the BL relocation is correctly patched:
+   184→   184→   184→The BL relocations look correct:
+   185→   185→   185→- _start BL → main at 0x12001004C ✅
+   186→   186→   186→- main BL → add at 0x12001000C ✅
+   187→   187→   187→
+   188→   188→   188→The issue must be something else. Let me look at the main function more carefully. Let me decode the full main function:
+   189→   189→   189→I see the issue! After the BL call to `add`, the return value is in $a0 (r4). Then:
+   190→   190→   190→1. `st.d r4, r22, -32` — stores return value to fp-32
+   191→   191→   191→2. `ld.d r4, r22, -32` — loads it back (redundant but OK)
+   192→   192→   192→3. `ld.d r4, r22, -32` — loads it AGAIN (triple load!)
+   193→   193→   193→
+   194→   194→   194→But more importantly, I don't see the epilogue! There's no `ld.d ra, fp, -8` or `jirl`. The main function is missing its Return terminator epilogue. After the last ld.d, execution falls through to whatever comes next (likely zeros = illegal instruction).
+   195→   195→   195→
+   196→   196→   196→Wait, let me check what's at offset 0x12001007C:
+   197→   197→   197→OK the epilogue IS there at 0x12001007C:
+   198→   198→   198→- ld.d ra, fp, -8
+   199→   199→   199→- ld.d fp, fp, -16
+   200→   200→   200→- addi.d sp, sp, 48
+   201→   201→   201→- jirl r0, ra, 0
+   202→   202→   202→
+   203→   203→   203→So the full main function is:
+   204→   204→   204→1. addi.d sp, sp, -48
+   205→   205→   205→2. st.d ra, sp, 40
+   206→   206→   206→3. st.d fp, sp, 32
+   207→   207→   207→4. addi.d fp, sp, 48
+   208→   208→   208→5. lu12i.w a0, 0; ori a0, a0, 20
+   209→   209→   209→6. lu12i.w a1, 0; ori a1, a1, 22
+   210→   210→   210→7. BL add
+   211→   211→   211→8. st.d a0, fp, -32  (store return value)
+   212→   212→   212→9. ld.d a0, fp, -32  (load return value into a0 for exit)
+   213→   213→   213→10. ld.d a0, fp, -32  (duplicate load from Ret instruction)
+   214→   214→   214→11. ld.d ra, fp, -8
+   215→   215→   215→12. ld.d fp, fp, -16
+   216→   216→   216→13. addi.d sp, sp, 48
+   217→   217→   217→14. jirl r0, ra, 0
+   218→   218→   218→
+   219→   219→   219→This looks correct! The return value from `add(20, 22) = 42` should be in a0 after step 7. Then it's stored and loaded back. Then the epilogue restores ra and returns.
+   220→   220→   220→
+   221→   221→   221→But the program exits with code 1. Let me check if the `add` function itself works correctly. Let me look at the add function:
+   222→   222→   222→The add function looks correct:
+   223→   223→   223→1. addi.d sp, sp, -64 (allocate 64 bytes)
+   224→   224→   224→2. st.d ra, sp, 56 (save ra at sp+56 = fp-8)
+   225→   225→   225→3. st.d fp, sp, 48 (save fp at sp+48 = fp-16)
+   226→   226→   226→4. addi.d fp, sp, 64 (set fp)
+   227→   227→   227→5. st.d a0, fp, -24 (store param a)
+   228→   228→   228→6. st.d a1, fp, -32 (store param b)
+   229→   229→   229→7. ld.d a0, fp, -24 (load a)
+   230→   230→   230→8. ld.d a1, fp, -32 (load b)
+   231→   231→   231→9. add.d a0, a0, a1 (a0 = a + b)
+   232→   232→   232→10. st.d a0, fp, -48 (store result)
+   233→   233→   233→11. ld.d a0, fp, -48 (load result for return) ← from IRInstr::Ret
+   234→   234→   234→12. ld.d a0, fp, -48 (duplicate load) ← from IRTerminator::Return
+   235→   235→   235→13. ld.d ra, fp, -8
+   236→   236→   236→14. ld.d fp, fp, -16
+   237→   237→   237→15. addi.d sp, sp, 64
+   238→   238→   238→16. jirl r0, ra, 0
+   239→   239→   239→
+   240→   240→   240→This should work! But wait — step 12 loads a0 from fp-48 AGAIN (from the Return terminator), then step 13 loads ra from fp-8. The issue is that step 12 is loading the return value, and then step 13 loads ra. These are sequential operations, so step 12 should correctly set a0 = 42, then step 13 sets ra, etc.
+   241→   241→   241→
+   242→   242→   242→Actually, wait. Step 12 and step 13 are part of the Return terminator. The Return terminator generates:
+   243→   243→   243→1. Load return value into a0 (step 12)
+   244→   244→   244→2. ld.d ra, fp, -8 (step 13)
+   245→   245→   245→3. ld.d fp, fp, -16 (step 14)
+   246→   246→   246→4. addi.d sp, sp, 64 (step 15)
+   247→   247→   247→5. jirl r0, ra, 0 (step 16)
+   248→   248→   248→
+   249→   249→   249→And before that, the IRInstr::Ret generates:
+   250→   250→   250→1. Load return value into a0 (step 11)
+   251→   251→   251→
+   252→   252→   252→So we have the return value loaded twice (steps 11 and 12), but that's just redundant, not wrong.
+   253→   253→   253→
+   254→   254→   254→Wait, there's something wrong with the stack offsets. The `add` function has:
+   255→   255→   255→- Frame size: 64 bytes
+   256→   256→   256→- ra saved at sp+56 (fp-8) ✅
+   257→   257→   257→- fp saved at sp+48 (fp-16) ✅
+   258→   258→   258→- Param a at fp-24 ✅
+   259→   259→   259→- Param b at fp-32 ✅
+   260→   260→   260→- Result at fp-48 ✅
+   261→   261→   261→
+   262→   262→   262→But wait, the vreg for the result has offset fp-48, and we also have other vregs (for the lhs and rhs of the Add). Let me count: the add function has 4 vregs (params a, b + the add result + maybe one more). With stack layout:
+   263→   263→   263→- fp-8: ra
+   264→   264→   264→- fp-16: old fp
+   265→   265→   265→- fp-24: vreg 0 (param a)
+   266→   266→   266→- fp-32: vreg 1 (param b)
+   267→   267→   267→- fp-40: vreg 2 (maybe)
+   268→   268→   268→- fp-48: vreg 3 (add result)
+   269→   269→   269→
+   270→   270→   270→Actually, the vreg numbering depends on the IR. The add function IR has:
+   271→   271→   271→```
+   272→   272→   272→params: [Register(0), Register(1)]
+   273→   273→   273→BinOp { op: Add, dst: Register(2), lhs: Register(0), rhs: Register(1) }
+   274→   274→   274→```
+   275→   275→   275→
+   276→   276→   276→Wait, actually the IR might use different register IDs. Let me check.
+   277→   277→   277→
+   278→   278→   278→But regardless, the logic looks correct. Let me try running the binary manually with a more direct approach - write a minimal test that just calls a function:
+   279→   279→   279→Even inline addition returns 1! Let me check this binary:
+   280→   280→   280→I see it now! The add instruction at 0x120010024 is `0x02C05884`. Let me decode this:
+   281→   281→   281→The inline add is: `ori a0, a0, 20` then `addi.d a0, a0, 22`. This gives a0 = 0 + 20 + 22 = 42. That should be correct!
+   282→   282→   282→
+   283→   283→   283→Wait, but the ori is loading 20 into a0 AFTER the lu12i.w set it to 0. So a0 = 0 | 20 = 20. Then addi.d a0, a0, 22 = 42. That's correct!
+   284→   284→   284→
+   285→   285→   285→But then at 0x120010028: st.d r4, r22, -32 → store a0 to fp-32
+   286→   286→   286→0x12001002C: ld.d r4, r22, -32 → load a0 from fp-32 (this is from Ret)
+   287→   287→   287→0x120010030: ld.d r4, r22, -32 → load a0 from fp-32 (this is from Return)
+   288→   288→   288→
+   289→   289→   289→Wait, the Ret just loads the value, and then the Return loads it again and does the epilogue. But where's the actual value being loaded? Let me check: the `IRInstr::Ret` loads the value into S0 ($a0), and the `IRTerminator::Return` also loads the value into S0 ($a0). So both load from the same stack slot.
+   290→   290→   290→
+   291→   291→   291→But wait — the `IRInstr::Ret` handler I changed to just load the value. So after Ret, a0 = 42. Then the Return handler also loads a0 = 42. Then the epilogue runs. This should work!
+   292→   292→   292→
+   293→   293→   293→Unless... the `Ret` instruction's load is clobbering something that the `Return` terminator depends on. Let me check what the Ret loads:
+   294→   294→   294→
+   295→   295→   295→Actually, let me just try the `return 42` test again — I know that works. And `20 + 22` doesn't. The difference is that `20 + 22` goes through the Add BinOp which stores the result to a stack slot, then loads it back. The `42` just uses an Immediate.
+   296→   296→   296→
+   297→   297→   297→Let me check: after `addi.d a0, a0, 22` (a0 = 42), we store it to fp-32. Then the Ret loads from the dst vreg's stack slot. But what's the dst vreg's stack slot? It might not be fp-32!
+   298→   298→   298→
+   299→   299→   299→This is the issue! The `Add` instruction computes the result and stores it to the dst vreg's stack slot. But the `Ret` instruction loads from the values[0] vreg's stack slot. If these are different vregs, the Ret would load the wrong value!
+   300→   300→   300→
+   301→   301→   301→Wait, let me think about this. The IR for `20 + 22` is:
+   302→   302→   302→```
+   303→   303→   303→BinOp { op: Add, dst: Register(2), lhs: Immediate(20), rhs: Immediate(22) }
+   304→   304→   304→Ret { values: [Register(2)] }
+   305→   305→   305→```
+   306→   306→   306→
+   307→   307→   307→So dst = Register(2), and Ret's values[0] = Register(2). They're the same vreg! So the store should go to the same slot that the load reads from.
+   308→   308→   308→
+   309→   309→   309→But wait, the BinOp handler stores to `dst_id`'s slot, and the Ret handler loads from `values[0]`'s slot. If `dst_id` and `values[0].as_register()` are both 2, they should be the same slot.
+   310→   310→   310→
+   311→   311→   311→Actually, the problem might be that the BinOp handler uses `encode_store_to_vreg(S0, dst_id, fp, &vreg_slots)` which stores to the vreg's slot. Then the Ret handler uses `encode_load_value(val, S0, fp, &vreg_slots)` which loads from the vreg's slot. If both reference vreg 2, they should access the same slot.
+   312→   312→   312→
+   313→   313→   313→But let me verify: what's the stack slot for vreg 2? The vregs are sorted by ID and assigned slots starting at fp-24. So:
+   314→   314→   314→- vreg 0 (not used?): fp-24
+   315→   315→   315→- vreg 1 (not used?): fp-32
+   316→   316→   316→- vreg 2 (result): fp-40
+   317→   317→   317→
+   318→   318→   318→Wait, but the `all_vreg_ids` collection includes ALL vreg IDs from the function, including those from `defined_regs()` and `used_regs()`. For the `20 + 22` program:
+   319→   319→   319→- BinOp defines Register(2) → vreg 2 is in all_vreg_ids
+   320→   320→   320→- BinOp uses Immediate(20) and Immediate(22) → no vreg IDs from these
+   321→   321→   321→- Ret uses Register(2) → vreg 2 is in all_vreg_ids
+   322→   322→   322→
+   323→   323→   323→So only vreg 2 is in the set. The stack layout is:
+   324→   324→   324→- fp-8: ra
+   325→   325→   325→- fp-16: old fp
+   326→   326→   326→- fp-24: vreg 2 (the only vreg!)
+   327→   327→   327→
+   328→   328→   328→But the store at 0x120010028 goes to fp-32 (0x29FF82C4 = st.d r4, r22, -32). And the load at 0x12001002C also goes to fp-32. So they're consistent.
+   329→   329→   329→
+   330→   330→   330→But fp-32 is NOT fp-24! If vreg 2's slot is at fp-24, but the store/load use fp-32, there's a mismatch!
+   331→   331→   331→
+   332→   332→   332→Let me check: 0x29FF82C4 = st.d r4, r22, imm12
+   333→   333→   333→imm12 = (0x29FF82C4 >> 10) & 0xFFF = 0xFF8... wait no:
+   334→   334→   334→0x29FF82C4:
+   335→   335→   335→bits[21:10] = (0x29FF82C4 >> 10) & 0xFFF
+   336→   336→   336→
+   337→   337→   337→Let me compute: 0x29FF82C4 >> 10 = 0xA7FFE0B
+   338→   338→   338→0xA7FFE0B & 0xFFF = 0xE0B... that doesn't seem right.
+   339→   339→   339→
+   340→   340→   340→Actually, let me decode more carefully:
+   341→   341→   341→OK so the store is at fp-32. But I expected vreg 2's slot to be at fp-24. Let me check the vreg_slots computation. The issue is that the vreg IDs might not start from 0. Let me trace through the stack_slot_isel:
+   342→   342→   342→The function has 2 vregs (IDs 0 and 1? or just 1?). vreg 1 is the result. But the `all_vreg_ids` set includes IDs from `defined_regs()` and `used_regs()`. Let me check what IDs the Add and Ret instructions report:
+   343→   343→   343→
+   344→   344→   344→- Add: defines Register(1) → vreg 1, uses no registers (immediates)
+   345→   345→   345→- Ret: uses Register(1) → vreg 1
+   346→   346→   346→
+   347→   347→   347→So only vreg 1 is in the set. The sorted list is [1]. So:
+   348→   348→   348→- vreg 1 → offset -(24 + 8*0) = -24
+   349→   349→   349→
+   350→   350→   350→But the store/load uses fp-32, not fp-24! That's the bug!
+   351→   351→   351→
+   352→   352→   352→Wait, let me re-check. The `all_vreg_ids_sorted` has [1]. So vreg 1 maps to offset -(24 + 8*0) = fp-24. But the code stores to fp-32. This means `encode_store_to_vreg` is computing the wrong offset.
+   353→   353→   353→
+   354→   354→   354→Actually, the function says it has 2 vregs (from the emit output). But which 2? Let me check if the `func.vregs` map includes vreg 0. Looking at the stack_slot_isel:
+   355→   355→   355→
+   356→   356→   356→```rust
+   357→   357→   357→for &id in func.vregs.keys() {
+   358→   358→   358→    all_vreg_ids.insert(id);
+   359→   359→   359→}
+   360→   360→   360→```
+   361→   361→   361→
+   362→   362→   362→The `func.vregs` might contain vreg 0 and vreg 1. So the sorted list is [0, 1], and:
+   363→   363→   363→- vreg 0 → offset -(24 + 8*0) = fp-24
+   364→   364→   364→- vreg 1 → offset -(24 + 8*1) = fp-32
+   365→   365→   365→
+   366→   366→   366→That explains why the store goes to fp-32! And the load also goes to fp-32. So they're consistent. The value 42 should be correctly stored and loaded.
+   367→   367→   367→
+   368→   368→   368→But the program exits with code 1, not 42! Let me add some debugging. Actually, let me just test with the manual ELF builder to make sure the instruction sequence works:
+   369→   369→   369→The manual test works! Exit code 42. Now let me compare this with the vuma-generated binary byte by byte:
+   370→   370→   370→The difference is clear:
+   371→   371→   371→- Manual: After the two ld.d a0, fp, -32 (at offsets 40-44), goes directly to the epilogue at offset 48
+   372→   372→   372→- Vuma: Has an EXTRA `ld.d a0, fp, -32` at offset 48 (from the Ret instruction), THEN the epilogue starts at offset 52
+   373→   373→   373→
+   374→   374→   374→The vuma binary has 3 loads instead of 2 (one extra from `IRInstr::Ret`). But that shouldn't matter - the third load just loads the same value again.
+   375→   375→   375→
+   376→   376→   376→Wait, actually let me look at the instruction at offset 48 more carefully:
+   377→   377→   377→- Vuma: 0x28FF82C4 = ld.d r4, r22, -32 ← loads a0 from fp-32
+   378→   378→   378→- Manual: 0x28FFE2C1 = ld.d r1, r22, -8 ← loads ra from fp-8
+   379→   379→   379→
+   380→   380→   380→The vuma binary has the Ret load at offset 48, then the Return epilogue at offset 52. But the manual binary has the epilogue starting at offset 48 directly.
+   381→   381→   381→
+   382→   382→   382→The difference is just one extra instruction. That shouldn't cause exit code 1. Unless... the `IRInstr::Ret` is loading from a DIFFERENT stack slot than what was stored to!
+   383→   383→   383→
+   384→   384→   384→Wait, I need to check: what value is at fp-32 when the Ret loads? After `addi.d a0, a0, 22` (a0=42), `st.d a0, fp, -32` stores 42 at fp-32. Then `ld.d a0, fp, -32` (from the BinOp's store-then-load pattern) loads 42 back. Then `ld.d a0, fp, -32` (from Ret) loads 42 again. Then the epilogue starts.
+   385→   385→   385→
+   386→   386→   386→This should all work. Let me try something different - let me compare the ELF headers more carefully:
+   387→   387→   387→The PH headers are now identical! But the vuma binary still exits with 1. There must be a difference in the actual code. Let me check the vuma code more carefully — I see the third ld.d at offset 48 that shouldn't be there (from the duplicate Ret). But more importantly, let me check if maybe there's an issue with the code size being different:
+   388→   388→   388→The vuma code has 17 instructions (68 bytes), manual has 16 (64 bytes). The extra instruction is the duplicate Ret load. But both binaries should work. Let me just try the vuma binary with the exact same code as the manual one by manually fixing it:
+   389→   389→   389→Interesting! The same code but with the extra ld.d inserted causes exit code 1! But the code should be equivalent. The issue must be that the BL offset in _start is wrong. After inserting the extra instruction, the main function starts 4 bytes later. Let me check:
+   390→   390→   390→The code looks correct! The extra ld.d at 0x120010030 loads a0 from fp-32 (same as the previous two loads), then the epilogue starts at 0x120010034. This should work!
+   391→   391→   391→
+   392→   392→   392→But it exits with code 1. The only difference from the working manual binary is the extra 4 bytes of code. Let me check if the issue is with the ELF PH coverage:
+   393→   393→   393→By removing the extra `ld.d` instruction from the Ret handler, the program works! The issue is that the extra `ld.d` instruction from `IRInstr::Ret` is somehow corrupting the execution. But how? An extra load of the same value shouldn't matter...
+   394→   394→   394→
+   395→   395→   395→Wait, let me look more carefully. The extra instruction shifts the epilogue by 4 bytes. The epilogue includes `ld.d r22, r22, -16` which loads fp from fp-16, which OVERWRITES r22 (fp). If there's an extra instruction before the epilogue, the timing is different but the result should be the same.
+   396→   396→   396→
+   397→   397→   397→Actually, I think the issue is that with 17 instructions, the code doesn't end at a 4-byte boundary relative to the text segment... no, all instructions are 4 bytes.
+   398→   398→   398→
+   399→   399→   399→Let me try a different approach - add a NOP instead:
+   400→   400→   400→A NOP works! So the issue is NOT about the code size or offset. The extra `ld.d` instruction itself is somehow causing problems. Let me check: what if the extra `ld.d` is loading from a different offset than expected?
+   401→   401→   401→
+   402→   402→   402→Wait, let me re-examine the vuma binary. The extra instruction at offset 0x10030 is `0x28FF82C4` = `ld.d r4, r22, -32`. This loads a0 from fp-32. At this point, a0 already has the value 42 from the previous load. So this instruction should just reload 42 into a0. No harm.
+   403→   403→   403→
+   404→   404→   404→Unless... the value at fp-32 has been corrupted! Let me check: what if the `ld.d` at offset 0x1002C (the second load from fp-32) somehow corrupts fp-32?
+   405→   405→   405→
+   406→   406→   406→Wait, that doesn't make sense. A load doesn't modify memory.
+   407→   407→   407→
+   408→   408→   408→Actually, let me look at this from a completely different angle. Maybe the issue is with the `st.d` encoding. Let me check: the store at offset 0x10028 is `0x29FF82C4`. Let me decode this very carefully:
+   409→   409→   409→Everything decodes correctly. The extra ld.d should just reload the same value. I'm puzzled. Let me try one more thing - verify that the vuma binary's code actually executes correctly by replacing the extra ld.d with a NOP:
+   410→   410→   410→Replacing the extra `ld.d r4, r22, -32` with a NOP fixes it! The extra `ld.d` is somehow corrupting the value. Let me investigate: is it possible that `ld.d r4, r22, -32` when r22 (fp) has already been loaded from fp-16, which changes r22, which means the third ld.d reads from a DIFFERENT address?
+   411→   411→   411→
+   412→   412→   412→Wait, no. The extra ld.d is BEFORE the epilogue. At that point, r22 (fp) still has its correct value. The epilogue only starts at offset 0x10034.
+   413→   413→   413→
+   414→   414→   414→Let me check the actual instruction sequence again:
+   415→   415→   415→
+   416→   416→   416→```
+   417→   417→   417→offset 0x10028: st.d r4, r22, -32   ; store 42 to fp-32
+   418→   418→   418→offset 0x1002C: ld.d r4, r22, -32   ; load 42 from fp-32 ← 1st load
+   419→   419→   419→offset 0x10030: ld.d r4, r22, -32   ; load 42 from fp-32 ← 2nd load (extra, from Ret)
+   420→   420→   420→offset 0x10034: ld.d r1, r22, -8    ; load ra from fp-8
+   421→   421→   421→offset 0x10038: ld.d r22, r22, -16  ; load fp from fp-16 ← THIS CHANGES r22!
+   422→   422→   422→offset 0x1003C: addi.d r3, r3, 48   ; restore sp
+   423→   423→   423→offset 0x10040: jirl r0, r1, 0      ; return
+   424→   424→   424→```
+   425→   425→   425→
+   426→   426→   426→The extra ld.d at 0x10030 is perfectly fine - it just reloads a0. The epilogue at 0x10034 onwards is unchanged. This should work.
+   427→   427→   427→
+   428→   428→   428→Unless... there's a QEMU bug with the st.d/ld.d opcodes that I fixed! Wait, I fixed the opcode values. Let me verify that the opcodes 0xA7 (st.d) and 0xA3 (ld.d) are actually correct by testing:
+   429→   429→   429→The triple ld.d works in my manual test! But the vuma binary doesn't work with the extra ld.d. There must be some other difference. Let me do a more precise comparison:
+   430→   430→   430→There are significant differences starting at offset 0x10021! The vuma binary has different instructions than my manual test. The issue is that the vuma code uses `addi.d a0, a0, 22` while the manual test uses `ori a0, a0, 42`. Let me decode the actual vuma instructions at the differing offsets:
+   431→   431→   431→OK so the vuma code is:
+   432→   432→   432→1. ori a0, a0, 20  → a0 = 20
+   433→   433→   433→2. addi.d a0, a0, 22 → a0 = 42
+   434→   434→   434→3. st.d a0, fp, -32 → store 42
+   435→   435→   435→4. ld.d a0, fp, -32 → a0 = 42
+   436→   436→   436→5. ld.d a0, fp, -32 → a0 = 42 (extra)
+   437→   437→   437→6. ld.d ra, fp, -8 → ra = saved ra
+   438→   438→   438→7. ld.d fp, fp, -16 → fp = saved fp
+   439→   439→   439→8. addi.d sp, sp, 48 → restore sp
+   440→   440→   440→9. jirl r0, ra, 0 → return
+   441→   441→   441→
+   442→   442→   442→And my manual test that works uses:
+   443→   443→   443→1. ori a0, a0, 20 → a0 = 20
+   444→   444→   444→2. addi.d a0, a0, 22 → a0 = 42
+   445→   445→   445→3. st.d a0, fp, -32 → store 42
+   446→   446→   446→4. ld.d a0, fp, -32 → a0 = 42
+   447→   447→   447→5. ld.d a0, fp, -32 → a0 = 42 (extra)
+   448→   448→   448→6. ld.d ra, fp, -8
+   449→   449→   449→7. ld.d fp, fp, -16
+   450→   450→   450→8. addi.d sp, sp, 48
+   451→   451→   451→9. jirl r0, ra, 0
+   452→   452→   452→
+   453→   453→   453→They're IDENTICAL! But one exits with 42 and the other with 1. The only difference must be in the ELF structure. Let me check the exact bytes of both files:
+   454→   454→   454→They're identical outside the code section! And we showed the code is identical too. But one works and the other doesn't. That makes no sense... unless I made an error in the manual test. Let me re-verify:
+   455→   455→   455→They're NOT identical! The first diff is at offset 0x10021, which is in the `ori a0, a0, 20` instruction. Let me decode both:
+   456→   456→   456→The manual test uses `ori a0, a0, 42` (direct 42) while the vuma binary uses `ori a0, a0, 20` then `addi.d a0, a0, 22`. My manual test was wrong - it was loading 42 directly instead of going through the add! Let me fix my manual test:
+   457→   457→   457→Wait... the binary is IDENTICAL to vuma but it exits with 42?! Let me verify once more:
