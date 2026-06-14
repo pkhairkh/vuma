@@ -2487,6 +2487,40 @@ fn lower_ir_instr_ppc64(
                         ));
                     }
                 }
+                CastKind::IntToFloat | CastKind::UIntToFloat => {
+                    // Int to FP: use FCFID (signed) or FCFIDU (unsigned) after
+                    // loading into FP register via LFD from stack.
+                    // For now, emit a move as placeholder.
+                    if d != s {
+                        result.push(emit_alloc_instr(
+                            Instruction::Mr { ra: d, rs: s },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
+                }
+                CastKind::FloatToInt | CastKind::FloatToUInt => {
+                    // FP to int: use FCTIDZ (signed) or FCTIDUZ (unsigned) then
+                    // store to stack and load into GPR.
+                    // For now, emit a move as placeholder.
+                    if d != s {
+                        result.push(emit_alloc_instr(
+                            Instruction::Mr { ra: d, rs: s },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
+                }
+                CastKind::FloatToFloat => {
+                    // FP to FP: just move between FP registers
+                    if d != s {
+                        result.push(emit_alloc_instr(
+                            Instruction::Mr { ra: d, rs: s },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
+                }
             }
         }
 
@@ -3216,6 +3250,11 @@ impl Backend for PPC64Backend {
                                 code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
                             }
                             CastKind::Trunc | CastKind::BitCast => {}
+                            CastKind::IntToFloat | CastKind::UIntToFloat |
+                            CastKind::FloatToInt | CastKind::FloatToUInt |
+                            CastKind::FloatToFloat => {
+                                // FP conversion casts: placeholder no-op
+                            }
                         }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code

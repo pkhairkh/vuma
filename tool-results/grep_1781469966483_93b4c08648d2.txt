@@ -1,0 +1,252 @@
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:1452:fn load_immediate_ppc64(rd: Gpr, val: i64, out: &mut Vec<AllocatedInstruction>) {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:1592:///   `load_immediate_ppc64` and returns `scratch`
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:1607:            load_immediate_ppc64(scratch, *imm, out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:1611:            load_immediate_ppc64(scratch, *addr as i64, out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:1616:            load_immediate_ppc64(scratch, 0, out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2344:            // The prologue already allocated the full frame (computed by
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2382:            // Do NOT emit BLR here — the epilogue will handle the return.
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2383:            // The epilogue restores LR, deallocates the frame, and emits BLR.
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2587:fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2644:        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2663:        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2674:        IRValue::Immediate(v) => ss_load_imm(scratch, *v),
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2675:        IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2714:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2723:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2732:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2744:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2761:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2770:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2779:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2791:                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:2866:        // ── Phase 2: Emit prologue ──
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3195:                            code.extend(ss_load_imm(Gpr::R3, alloc_off as i64));
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3371:        //   _start:  BL main           ; call main (result in R3)
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3376:        // The _start stub is 3 instructions = 12 bytes.
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3381:        // ── _start stub ──
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3389:        // _start stub comes first, then user functions.
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3391:        let mut current_offset: usize = start_stub_size; // after _start
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3402:        // ── Build _start stub bytes ──
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3415:        // ── Patch _start BL to main ──
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:3444:        // We need to adjust them by the _start stub size + preceding functions' sizes.
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4012:    fn test_load_immediate_ppc64_small() {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4015:        load_immediate_ppc64(Gpr::R11, 42, &mut out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4025:    fn test_load_immediate_ppc64_32bit() {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4028:        load_immediate_ppc64(Gpr::R11, 0x12345678, &mut out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4041:    fn test_load_immediate_ppc64_64bit() {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4044:        load_immediate_ppc64(Gpr::R12, 0x12345678_9ABCDEF0i64 as i64, &mut out);
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4145:    fn test_load_immediate_ppc64_negative() {
+/home/z/my-project/vuma/src/codegen/src/ppc64/mod.rs:4148:        load_immediate_ppc64(Gpr::R11, -1, &mut out);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:60:fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:148:            code.extend(encode_load_imm(Gpr::T0, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:197:                    code.extend(encode_load_imm(Gpr::T0, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:235:                        code.extend(encode_load_imm(Gpr::T0, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:257:                        code.extend(encode_load_imm(Gpr::S0, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:332:            code.extend(encode_load_imm(reg, *imm));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:338:            code.extend(encode_load_imm(reg, *addr as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:344:            code.extend(encode_load_imm(reg, 0));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:435:        let mut c = encode_load_imm(Gpr::S0, -(fs as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:444:        let mut c = encode_load_imm(Gpr::S0, ra_off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:454:        let mut c = encode_load_imm(Gpr::S0, fp_off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:463:        let mut c = encode_load_imm(Gpr::S0, fs as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:488:                    c.extend(encode_load_imm(Gpr::T0, off as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:527:                let (c, pre) = if let Some(vid) = cond.as_register() { cache.read_vreg(vid, fp) } else { (Gpr::T0, encode_load_imm(Gpr::T0, 1)) };
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:544:                    } else if let IRValue::Immediate(imm) = val { code.extend(encode_load_imm(Gpr::A0, *imm)); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:550:                else { code.extend(encode_load_imm(Gpr::T0, fs as i64)); code.extend_from_slice(&Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: Gpr::T0 }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:651:                else { code.extend(encode_load_imm(tmp, *offset as i64)); code.extend_from_slice(&Instruction::AddD { rd: tmp, rj: a, rk: tmp }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:673:                else { code.extend(encode_load_imm(tmp, *offset as i64)); code.extend_from_slice(&Instruction::AddD { rd: tmp, rj: a, rk: tmp }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:690:                else { code.extend(encode_load_imm(Gpr::T0, aoff as i64)); code.extend_from_slice(&Instruction::AddD { rd: d, rj: fp, rk: Gpr::T0 }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:700:                } else if let IRValue::Immediate(imm) = val { code.extend(encode_load_imm(Gpr::A0, *imm)); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:712:                    } else if let IRValue::Immediate(imm) = arg { code.extend(encode_load_imm(call_arg_regs[i], *imm)); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:713:                    else if let IRValue::Address(addr) = arg { code.extend(encode_load_imm(call_arg_regs[i], *addr as i64)); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:761:            code.extend(encode_load_imm(d, 0));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:776:                    match val { IRValue::Immediate(imm) => code.extend(encode_load_imm(d, *imm)), IRValue::Address(addr) => code.extend(encode_load_imm(d, *addr as i64)), _ => {} }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:786:                    match val { IRValue::Immediate(imm) => code.extend(encode_load_imm(d, *imm)), IRValue::Address(addr) => code.extend(encode_load_imm(d, *addr as i64)), _ => {} }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:806:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::AddD { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:816:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::SubD { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:827:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::And { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:838:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::Or { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:848:                else { let u = *imm as u64; if u < 4096 { code.extend_from_slice(&Instruction::Xori { rd: d, rj: d, imm12: u as u32 }.encode()); } else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::Xor { rd: d, rj: d, rk: r }.encode()); } }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:858:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::SllD { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:868:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::SrlD { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/reg_alloc_isel.rs:878:                else { let (r, pre2) = cache.alloc_reg(None, fp); code.extend(pre2); code.extend(encode_load_imm(r, *imm)); code.extend_from_slice(&Instruction::SraD { rd: d, rj: d, rk: r }.encode()); }
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:1748:fn patch_load_imm_64(code: &mut [u8], offset: usize, val: u64) {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:1971:fn load_imm_la64(rd: Gpr, imm: i64) -> Vec<AllocatedInstruction> {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:2061:            let code = load_imm_la64(scratch, *imm);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:2065:            let code = load_imm_la64(scratch, *addr as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:2070:            let code = load_imm_la64(scratch, 0);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3109:            // The prologue already decremented SP by the full frame_size which
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3138:                    let offset_code = load_imm_la64(Gpr::T0, off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3405:        //   _start:  BL main           ; call main (result in $a0)
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3410:        // The _start stub is 3 instructions = 12 bytes.
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3417:        let mut current_offset: usize = start_stub_size; // after _start
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3430:        // ── Build _start stub bytes ──
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3449:        // ── Patch _start BL to main ──
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:3529:                        patch_load_imm_64(&mut all_code, abs_offset, vaddr);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:4221:    fn test_isel_load_immediate_emits_lu12i() {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:5191:    fn test_elf_entry_point_points_to_start_stub() {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:5224:        assert_eq!(e_entry, 0x120010000, "entry point should point to _start stub");
+/home/z/my-project/vuma/src/codegen/src/loongarch64/mod.rs:5235:    fn test_patch_load_imm_64() {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:22://!   ├────────────────────┤ ← $fp (= old $sp = $sp + frame_size after prologue)
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:31://!   └────────────────────┘ ← $sp (after prologue)
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:80:fn encode_load_imm(rd: Gpr, imm: i64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:138:fn encode_load_imm_full_64(rd: Gpr, val: u64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:177:        code.extend(encode_load_imm(S2, offset_from_fp as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:194:        code.extend(encode_load_imm(S2, offset_from_fp as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:209:            encode_load_imm(scratch, *imm)
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:212:            encode_load_imm(scratch, *addr as i64)
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:215:            encode_load_imm(scratch, 0) // placeholder
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:418:        let mut code = encode_load_imm(S0, -(fs as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:431:        let mut code = encode_load_imm(S0, ra_off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:445:        let mut code = encode_load_imm(S0, fp_off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:458:        let mut code = encode_load_imm(S0, fs as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:485:                    let mut code = encode_load_imm(S2, stack_off as i64);
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:821:                            code.extend(encode_load_imm(S2, *offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:850:                            code.extend(encode_load_imm(S2, *offset as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:874:                            code.extend(encode_load_imm(S0, alloc_off as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:888:                    // The actual epilogue is emitted by the IRTerminator::Return handler.
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:914:                            code.extend(encode_load_imm(S2, -(stack_arg_space as i64)));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:933:                                code.extend(encode_load_imm(S2, sp_off as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:967:                            code.extend(encode_load_imm(S2, stack_arg_space as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:1075:                    code.extend(encode_load_imm_full_64(S0, 0));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:1164:                    code.extend(encode_load_imm(S2, fs as i64));
+/home/z/my-project/vuma/src/codegen/src/loongarch64/stack_slot_isel.rs:1280:    // Callee-saved: we save $ra and $fp in the prologue
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:724:            let block_start = current_offset;
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:759:                    start_offset: block_start,
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:769:                    block_start,
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:1241:    /// Generate prologue code to set up the coroutine frame.
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:1243:    /// The prologue:
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:1247:    pub fn generate_prologue(frame: &CoroutineFrame, vreg_counter: &mut u32) -> Vec<IRInstr> {
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:1290:            "CoroutineLowerer: generated prologue, frame size={}",
+/home/z/my-project/vuma/src/codegen/src/control_flow.rs:1312:        // In practice the prologue would have stored it and the register
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2092:/// `Ret` handler to generate a proper epilogue that restores $ra and
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2144:    // [high address]  = $fp = $sp + frame_size (after prologue)
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2186:    fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2234:            code.extend(ss_load_imm(Gpr::T3, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2250:            code.extend(ss_load_imm(Gpr::T3, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2271:            code.extend(ss_load_imm(Gpr::T3, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2295:            code.extend(ss_load_imm(Gpr::T3, offset as i64));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2314:            IRValue::Immediate(v) => ss_load_imm(scratch, *v),
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2315:            IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2316:            IRValue::Label(_) => ss_load_imm(scratch, 0),
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2320:    // ── Phase 3: Emit prologue ──
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2551:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lb { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2555:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2559:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2563:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2577:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sb { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2581:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2585:                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2600:                        code.extend(ss_load_imm(Gpr::T0, alloc_off as i64));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2608:                IRInstr::Free { ptr: _ } => { /* Stack allocations freed by epilogue */ }
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2657:                    code.extend(ss_load_imm(Gpr::T0, 0));
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2771:/// their byte offset from the post-prologue stack pointer.
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:2938:            // The prologue already allocated space for this allocation at a
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3382:        //   _start:  JAL main          ; call main (result in $v0)
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3389:        // The _start stub is 5 instructions = 20 bytes.
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3403:        // ── _start stub ──
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3407:        // _start stub comes first, then user functions.
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3420:        // ── Build _start stub bytes ──
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:3442:        // ── Patch _start JAL to main ──
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4038:        // Find the daddiu instruction for the alloc (not the prologue one)
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4045:        // Should have at least the prologue daddiu and the alloc daddiu
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4048:            "expected at least 2 daddiu instructions (prologue + alloc), got {}",
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4133:        // Skip prologue (2 instructions: daddiu + sd), look for daddu
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4161:    fn test_isel_ret_emits_epilogue() {
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4177:        assert!(has_ld_ra, "expected ld to restore $ra in epilogue");
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4178:        assert!(has_jr, "expected jr $ra in epilogue");
+/home/z/my-project/vuma/src/codegen/src/mips64/mod.rs:4268:            "expected at least 2 daddiu (prologue + alloc), found {daddiu_count}"
+/home/z/my-project/vuma/src/codegen/src/emit.rs:424:            entry_name: "_start".to_string(),
+/home/z/my-project/vuma/src/codegen/src/emit.rs:438:            entry_name: "_start".to_string(),
+/home/z/my-project/vuma/src/codegen/src/emit.rs:481:            entry_name: "_start".to_string(),
+/home/z/my-project/vuma/src/codegen/src/emit.rs:674:        // Emit prologue:
+/home/z/my-project/vuma/src/codegen/src/emit.rs:705:        // its own SUB SP, SP, #aligned_size. The epilogue will restore only
+/home/z/my-project/vuma/src/codegen/src/emit.rs:707:        // epilogue — they're effectively "leaked" stack space. This is fine
+/home/z/my-project/vuma/src/codegen/src/emit.rs:744:                self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:840:                        self.emit_load_immediate(Register::X9, -1)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:942:                            self.emit_load_immediate(scratch, v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:947:                            self.emit_load_immediate(scratch, v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1138:                self.emit_load_immediate(Register::X0, name_hash as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1168:                            self.emit_load_immediate(temp, *v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1220:                            IRValue::Immediate(v) => self.emit_load_immediate(temp, *v)?,
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1221:                            IRValue::Address(a) => self.emit_load_immediate(temp, *a as i64)?,
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1373:                    self.emit_load_immediate_with_width(scratch, *v, width)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1518:                // X29 was set to SP right after the prologue's SUB SP, SP, #16
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1528:                // FP/LR were stored at [SP] after the prologue's SUB SP, SP, #16.
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1815:            self.emit_load_immediate(Register::X9, offset as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1852:                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1873:                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1893:                self.emit_load_immediate(temp, *v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1898:                self.emit_load_immediate(temp, *addr as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1907:    fn emit_load_immediate(&mut self, rd: Register, value: i64) -> Result<()> {
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1969:    fn emit_load_immediate_with_width(
+/home/z/my-project/vuma/src/codegen/src/emit.rs:1976:            RegWidth::X64 => self.emit_load_immediate(rd, value),
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2180:        // ── Phase 2: Emit prologue ──
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2210:                self.emit_load_immediate(Register::X9, frame_size as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2271:            self.emit_load_immediate(dst, offset as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2333:                self.emit_load_immediate(dst, *v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2336:                self.emit_load_immediate(dst, *a as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2364:                self.emit_load_immediate_with_width(dst, *v, width)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2367:                self.emit_load_immediate(dst, *a as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2440:                        self.emit_load_immediate(Register::X10, -1)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2624:                self.emit_load_immediate(Register::X0, name_hash as i64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:2654:                            self.emit_load_immediate(Register::X10, *v)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:3019:                            self.emit_load_immediate(Register::X17, 64)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:3042:                            self.emit_load_immediate(Register::X16, 32)?;
+/home/z/my-project/vuma/src/codegen/src/emit.rs:3443:/// because the prologue handles that separately with an explicit
+/home/z/my-project/vuma/src/codegen/src/emit.rs:4008:/// The entry-point function (`_start` or `main`) is set as the Wasm start
+/home/z/my-project/vuma/src/codegen/src/emit.rs:4030:/// │ Start Section            │  _start / main function index
+/home/z/my-project/vuma/src/codegen/src/emit.rs:4448:        let funcs = vec![make_return_function("_start")];
+/home/z/my-project/vuma/src/codegen/src/emit.rs:4519:        let funcs = vec![make_return_function("_start")];
+/home/z/my-project/vuma/src/codegen/src/emit.rs:5568:        assert_eq!(config.entry_name, "_start");
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1367:/// NOTE: Does NOT include 16 bytes for FP/LR pair (handled by prologue separately).
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1584:    let loop_start = loop_offset as i64;
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1585:    let back_offset = (loop_start - current_pos) / 4 - 1; // B.LT is relative to PC+4
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1660:    let div_loop_start = code.len();
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1682:    let back = (div_loop_start as i64 - cur as i64) / 4 - 1;
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1778:    let newline_start_offset = code.len() - 7 * 4; // remove 7 instructions back
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1780:    code.truncate(newline_start_offset);
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1882:        //   _start:  BL main           ; call main (result in X0)
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1889:        // The _start stub is 4 instructions = 16 bytes.
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1895:        // ── _start stub ──
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1910:        // _start stub comes first, then user functions, then runtime.
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1912:        let mut current_offset: usize = start_stub_size; // after _start
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1924:        let runtime_offsets_start = current_offset;
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1925:        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1926:        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1932:        // ── Build _start stub bytes ──
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1949:        // ── Patch _start BL to main ──
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1959:            // bl_addr = 0 (relative to start of all_code = _start)
+/home/z/my-project/vuma/src/codegen/src/backend.rs:1983:        // We need to adjust them by the _start stub size + preceding functions' sizes.
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:782:    let new_sections_start = e_shoff as usize;
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:793:    let debug_abbrev_file_offset = new_sections_start + new_section_data.len();
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:798:    let debug_info_file_offset = new_sections_start + new_section_data.len();
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:803:    let debug_line_file_offset = new_sections_start + new_section_data.len();
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:810:    let new_shstrtab_file_offset = new_sections_start + new_section_data.len();
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:830:    let shstrtab_shdr_start = e_shstrndx * 64;
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:831:    if shstrtab_shdr_start + 64 <= new_shdrs.len() {
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:833:        new_shdrs[shstrtab_shdr_start + 24..shstrtab_shdr_start + 32]
+/home/z/my-project/vuma/src/codegen/src/dwarf.rs:836:        new_shdrs[shstrtab_shdr_start + 32..shstrtab_shdr_start + 40]
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2062:    let hex_loop_start = code.len();
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2118:    // Compute branch back to hex_loop_start
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2119:    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2127:    let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2179:    let div_loop_start = code.len();
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2200:    let div_back = (div_loop_start as i32) - (code.len() as i32);
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2221:    let rev_start = code.len() as i32;
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:2222:    let bne_offset = rev_start - (bne_notzero_pos as i32);
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:3788:fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:3875:        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:3898:        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:3917:        IRValue::Immediate(v) => ss_load_imm(scratch, *v),
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:3918:        IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4003:        // ── Phase 2: Emit prologue ──
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4017:            let mut prologue = Vec::new();
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4018:            prologue.extend(ss_load_imm(Gpr::T0, fs as i64));
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4019:            prologue.extend(Instruction::Sub { rd: Gpr::Sp, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4024:                encoded: prologue,
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4038:            code.extend(ss_load_imm(Gpr::T0, (fs - 8) as i64));
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4058:            code.extend(ss_load_imm(Gpr::T0, (fs - 16) as i64));
+/home/z/my-project/vuma/src/codegen/src/riscv64.rs:4079:            code.extend(ss_load_imm(Gpr::T0, fs as i64));
+
+[Showing results with pagination = limit: 250]

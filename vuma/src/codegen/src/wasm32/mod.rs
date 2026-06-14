@@ -342,12 +342,20 @@ pub enum WasmInstr {
     F64PromoteF32,
     I32TruncF32S,
     I32TruncF64S,
+    I32TruncF32U,
+    I32TruncF64U,
     I64TruncF32S,
     I64TruncF64S,
+    I64TruncF32U,
+    I64TruncF64U,
     F32ConvertI32S,
     F32ConvertI64S,
+    F32ConvertI32U,
+    F32ConvertI64U,
     F64ConvertI32S,
     F64ConvertI64S,
+    F64ConvertI32U,
+    F64ConvertI64U,
     I32ReinterpretF32,
     I64ReinterpretF64,
     F32ReinterpretI32,
@@ -712,12 +720,20 @@ impl WasmInstr {
             WasmInstr::F64PromoteF32 => out.push(0xBB),
             WasmInstr::I32TruncF32S => out.push(0xA8),
             WasmInstr::I32TruncF64S => out.push(0xA9),
+            WasmInstr::I32TruncF32U => out.push(0xAA),
+            WasmInstr::I32TruncF64U => out.push(0xAB),
             WasmInstr::I64TruncF32S => out.push(0xAE),
             WasmInstr::I64TruncF64S => out.push(0xAF),
+            WasmInstr::I64TruncF32U => out.push(0xB0),
+            WasmInstr::I64TruncF64U => out.push(0xB1),
             WasmInstr::F32ConvertI32S => out.push(0xB2),
             WasmInstr::F32ConvertI64S => out.push(0xB3),
+            WasmInstr::F32ConvertI32U => out.push(0xB4),
+            WasmInstr::F32ConvertI64U => out.push(0xB5),
             WasmInstr::F64ConvertI32S => out.push(0xB7),
             WasmInstr::F64ConvertI64S => out.push(0xB8),
+            WasmInstr::F64ConvertI32U => out.push(0xB9),
+            WasmInstr::F64ConvertI64U => out.push(0xBA),
             WasmInstr::I32ReinterpretF32 => out.push(0xBC),
             WasmInstr::I64ReinterpretF64 => out.push(0xBD),
             WasmInstr::F32ReinterpretI32 => out.push(0xBE),
@@ -2080,6 +2096,27 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                         WasmType::F64 => (WasmInstr::I64ReinterpretF64, WasmType::I64),
                     }
                 }
+                CastKind::IntToFloat => match src_ty {
+                    WasmType::I64 => (WasmInstr::F64ConvertI64S, WasmType::F64),
+                    _ => (WasmInstr::F32ConvertI32S, WasmType::F32),
+                },
+                CastKind::UIntToFloat => match src_ty {
+                    WasmType::I64 => (WasmInstr::F64ConvertI64U, WasmType::F64),
+                    _ => (WasmInstr::F32ConvertI32U, WasmType::F32),
+                },
+                CastKind::FloatToInt => match src_ty {
+                    WasmType::F64 => (WasmInstr::I64TruncF64S, WasmType::I64),
+                    _ => (WasmInstr::I32TruncF32S, WasmType::I32),
+                },
+                CastKind::FloatToUInt => match src_ty {
+                    WasmType::F64 => (WasmInstr::I64TruncF64U, WasmType::I64),
+                    _ => (WasmInstr::I32TruncF32U, WasmType::I32),
+                },
+                CastKind::FloatToFloat => match src_ty {
+                    WasmType::F32 => (WasmInstr::F64PromoteF32, WasmType::F64),
+                    WasmType::F64 => (WasmInstr::F32DemoteF64, WasmType::F32),
+                    _ => (WasmInstr::Nop, src_ty.clone()), // same type, no conversion
+                },
             };
             ctx.emit(wasm_op);
             if let IRValue::Register(id) = dst {

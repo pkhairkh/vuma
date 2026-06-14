@@ -806,6 +806,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         CastKind::Trunc | CastKind::BitCast => {
                             code.extend(load_value(src, Gpr::Rax));
                         }
+                        CastKind::IntToFloat | CastKind::UIntToFloat |
+                        CastKind::FloatToInt | CastKind::FloatToUInt |
+                        CastKind::FloatToFloat => {
+                            // FP casts — not yet implemented; pass through.
+                            code.extend(load_value(src, Gpr::Rax));
+                        }
                     }
                     code.extend(store_vreg(dst_id, Gpr::Rax));
                     code

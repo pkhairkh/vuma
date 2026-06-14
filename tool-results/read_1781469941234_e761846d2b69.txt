@@ -1,0 +1,872 @@
+  2000→    fn test_rex_prefix_r_only() {
+  2001→        // REX.R only: 0x44
+  2002→        assert_eq!(rex_prefix(false, true, false, false), Some(0x44));
+  2003→    }
+  2004→
+  2005→    #[test]
+  2006→    fn test_rex_prefix_x_only() {
+  2007→        // REX.X only: 0x42
+  2008→        assert_eq!(rex_prefix(false, false, true, false), Some(0x42));
+  2009→    }
+  2010→
+  2011→    #[test]
+  2012→    fn test_rex_prefix_b_only() {
+  2013→        // REX.B only: 0x41
+  2014→        assert_eq!(rex_prefix(false, false, false, true), Some(0x41));
+  2015→    }
+  2016→
+  2017→    #[test]
+  2018→    fn test_rex_prefix_wrb() {
+  2019→        // REX.WRB: 0x4D
+  2020→        assert_eq!(rex_prefix(true, true, false, true), Some(0x4D));
+  2021→    }
+  2022→
+  2023→    #[test]
+  2024→    fn test_rex_prefix_all() {
+  2025→        // All bits: 0x4F
+  2026→        assert_eq!(rex_prefix(true, true, true, true), Some(0x4F));
+  2027→    }
+  2028→
+  2029→    // ── ModR/M Tests ────────────────────────────────────────────────────
+  2030→
+  2031→    #[test]
+  2032→    fn test_modrm_reg_reg() {
+  2033→        // mod=3, reg=RAX(0), rm=RCX(1) => 0xC1
+  2034→        assert_eq!(modrm(3, 0, 1), 0xC1);
+  2035→    }
+  2036→
+  2037→    #[test]
+  2038→    fn test_modrm_mem_disp8() {
+  2039→        // mod=1, reg=RAX(0), rm=RBX(3) => 0x43
+  2040→        assert_eq!(modrm(1, 0, 3), 0x43);
+  2041→    }
+  2042→
+  2043→    #[test]
+  2044→    fn test_modrm_mem_no_disp() {
+  2045→        // mod=0, reg=RCX(1), rm=RDX(2) => 0x0A
+  2046→        assert_eq!(modrm(0, 1, 2), 0x0A);
+  2047→    }
+  2048→
+  2049→    #[test]
+  2050→    fn test_modrm_mem_disp32() {
+  2051→        // mod=2, reg=RSI(6), rm=RDI(7) => 0xB7
+  2052→        assert_eq!(modrm(2, 6, 7), 0xB7);
+  2053→    }
+  2054→
+  2055→    // ── SIB Tests ───────────────────────────────────────────────────────
+  2056→
+  2057→    #[test]
+  2058→    fn test_sib_basic() {
+  2059→        // scale=0, index=RAX(0), base=RCX(1) => 0x01
+  2060→        assert_eq!(sib(0, 0, 1), 0x01);
+  2061→    }
+  2062→
+  2063→    #[test]
+  2064→    fn test_sib_scale2_index3_base5() {
+  2065→        // scale=1, index=RBX(3), base=RBP(5): (1<<6)|(3<<3)|5 = 0x5D
+  2066→        assert_eq!(sib(1, 3, 5), 0x5D);
+  2067→    }
+  2068→
+  2069→    // ── MOV Reg-Reg Tests ──────────────────────────────────────────────
+  2070→
+  2071→    #[test]
+  2072→    fn test_mov_rax_rcx() {
+  2073→        // MOV RCX, RAX => REX.W + 89 /r with src=RAX, dst=RCX
+  2074→        let code = encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax);
+  2075→        assert_eq!(code, vec![0x48, 0x89, 0xC1]);
+  2076→    }
+  2077→
+  2078→    #[test]
+  2079→    fn test_mov_rax_r8() {
+  2080→        // MOV R8, RAX => REX.WB + 89 /r (src=RAX in reg field, dst=R8 in rm field with REX.B)
+  2081→        let code = encode_mov_reg_reg(Gpr::R8, Gpr::Rax);
+  2082→        assert_eq!(code, vec![0x49, 0x89, 0xC0]);
+  2083→    }
+  2084→
+  2085→    #[test]
+  2086→    fn test_mov_r9_r15() {
+  2087→        // MOV R15, R9 => REX.WRB + 89 /r
+  2088→        let code = encode_mov_reg_reg(Gpr::R15, Gpr::R9);
+  2089→        assert_eq!(code, vec![0x4D, 0x89, 0xCF]);
+  2090→    }
+  2091→
+  2092→    // ── MOV Reg-Imm64 Tests ────────────────────────────────────────────
+  2093→
+  2094→    #[test]
+  2095→    fn test_mov_rax_imm64() {
+  2096→        let code = encode_mov_reg_imm64(Gpr::Rax, 0xDEADBEEFCAFE0000);
+  2097→        assert_eq!(code[0], 0x48); // REX.W
+  2098→        assert_eq!(code[1], 0xB8); // MOV RAX, imm64
+  2099→        assert_eq!(&code[2..10], 0xDEADBEEFCAFE0000u64.to_le_bytes());
+  2100→    }
+  2101→
+  2102→    #[test]
+  2103→    fn test_mov_r8_imm64() {
+  2104→        let code = encode_mov_reg_imm64(Gpr::R8, 0x1234);
+  2105→        assert_eq!(code[0], 0x49); // REX.WB
+  2106→        assert_eq!(code[1], 0xB8); // MOV R8, imm64
+  2107→    }
+  2108→
+  2109→    // ── MOV Reg-Imm32 Tests ────────────────────────────────────────────
+  2110→
+  2111→    #[test]
+  2112→    fn test_mov_rcx_imm32() {
+  2113→        let code = encode_mov_reg_imm32(Gpr::Rcx, 42);
+  2114→        assert_eq!(code, vec![0x48, 0xC7, 0xC1, 0x2A, 0x00, 0x00, 0x00]);
+  2115→    }
+  2116→
+  2117→    // ── ADD/SUB Tests ──────────────────────────────────────────────────
+  2118→
+  2119→    #[test]
+  2120→    fn test_add_rax_rcx() {
+  2121→        let code = encode_add_reg_reg(Gpr::Rax, Gpr::Rcx);
+  2122→        assert_eq!(code, vec![0x48, 0x01, 0xC8]);
+  2123→    }
+  2124→
+  2125→    #[test]
+  2126→    fn test_sub_rdx_rsi() {
+  2127→        let code = encode_sub_reg_reg(Gpr::Rdx, Gpr::Rsi);
+  2128→        assert_eq!(code, vec![0x48, 0x29, 0xF2]);
+  2129→    }
+  2130→
+  2131→    #[test]
+  2132→    fn test_add_r8_r9() {
+  2133→        let code = encode_add_reg_reg(Gpr::R8, Gpr::R9);
+  2134→        assert_eq!(code, vec![0x4D, 0x01, 0xC8]);
+  2135→    }
+  2136→
+  2137→    // ── IMUL Tests ─────────────────────────────────────────────────────
+  2138→
+  2139→    #[test]
+  2140→    fn test_imul_rax_rcx() {
+  2141→        let code = encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx);
+  2142→        assert_eq!(code, vec![0x48, 0x0F, 0xAF, 0xC1]);
+  2143→    }
+  2144→
+  2145→    #[test]
+  2146→    fn test_imul_r8_r15() {
+  2147→        let code = encode_imul_reg_reg(Gpr::R8, Gpr::R15);
+  2148→        assert_eq!(code, vec![0x4D, 0x0F, 0xAF, 0xC7]);
+  2149→    }
+  2150→
+  2151→    // ── IDIV Test ──────────────────────────────────────────────────────
+  2152→
+  2153→    #[test]
+  2154→    fn test_idiv_rcx() {
+  2155→        let code = encode_idiv_reg(Gpr::Rcx);
+  2156→        assert_eq!(code, vec![0x48, 0xF7, 0xF9]);
+  2157→    }
+  2158→
+  2159→    // ── CMP Tests ──────────────────────────────────────────────────────
+  2160→
+  2161→    #[test]
+  2162→    fn test_cmp_rax_rcx() {
+  2163→        let code = encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx);
+  2164→        assert_eq!(code, vec![0x48, 0x39, 0xC8]);
+  2165→    }
+  2166→
+  2167→    #[test]
+  2168→    fn test_cmp_reg_imm32() {
+  2169→        let code = encode_cmp_reg_imm32(Gpr::Rax, 100);
+  2170→        assert_eq!(code[0], 0x48); // REX.W
+  2171→        assert_eq!(code[1], 0x81); // CMP r/m64, imm32
+  2172→        assert_eq!(code[2], 0xF8); // mod=3, reg=7(/7), rm=RAX(0)
+  2173→        let imm = i32::from_le_bytes([code[3], code[4], code[5], code[6]]);
+  2174→        assert_eq!(imm, 100);
+  2175→    }
+  2176→
+  2177→    // ── TEST Test ──────────────────────────────────────────────────────
+  2178→
+  2179→    #[test]
+  2180→    fn test_test_rax_rax() {
+  2181→        let code = encode_test_reg_reg(Gpr::Rax, Gpr::Rax);
+  2182→        assert_eq!(code, vec![0x48, 0x85, 0xC0]);
+  2183→    }
+  2184→
+  2185→    // ── AND/OR/XOR Tests ──────────────────────────────────────────────
+  2186→
+  2187→    #[test]
+  2188→    fn test_and_rax_rcx() {
+  2189→        let code = encode_and_reg_reg(Gpr::Rax, Gpr::Rcx);
+  2190→        assert_eq!(code, vec![0x48, 0x21, 0xC8]);
+  2191→    }
+  2192→
+  2193→    #[test]
+  2194→    fn test_or_rdx_rsi() {
+  2195→        let code = encode_or_reg_reg(Gpr::Rdx, Gpr::Rsi);
+  2196→        assert_eq!(code, vec![0x48, 0x09, 0xF2]);
+  2197→    }
+  2198→
+  2199→    #[test]
+  2200→    fn test_xor_rax_rax() {
+  2201→        let code = encode_xor_reg_reg(Gpr::Rax, Gpr::Rax);
+  2202→        assert_eq!(code, vec![0x48, 0x31, 0xC0]);
+  2203→    }
+  2204→
+  2205→    // ── Shift Tests ────────────────────────────────────────────────────
+  2206→
+  2207→    #[test]
+  2208→    fn test_shl_cl() {
+  2209→        let code = encode_shl_reg_cl(Gpr::Rax);
+  2210→        assert_eq!(code, vec![0x48, 0xD3, 0xE0]);
+  2211→    }
+  2212→
+  2213→    #[test]
+  2214→    fn test_shr_cl() {
+  2215→        // SHR RCX, CL => REX.W + D3 /5 + ModRM(3,5,1) = 0xE9
+  2216→        let code = encode_shr_reg_cl(Gpr::Rcx);
+  2217→        assert_eq!(code, vec![0x48, 0xD3, 0xE9]);
+  2218→    }
+  2219→
+  2220→    #[test]
+  2221→    fn test_sar_cl() {
+  2222→        let code = encode_sar_reg_cl(Gpr::Rdx);
+  2223→        assert_eq!(code, vec![0x48, 0xD3, 0xFA]);
+  2224→    }
+  2225→
+  2226→    // ── JMP/CALL/RET Tests ─────────────────────────────────────────────
+  2227→
+  2228→    #[test]
+  2229→    fn test_jmp_rel32() {
+  2230→        let code = encode_jmp_rel32(0x100);
+  2231→        assert_eq!(code[0], 0xE9);
+  2232→        assert_eq!(&code[1..5], 0x100i32.to_le_bytes());
+  2233→    }
+  2234→
+  2235→    #[test]
+  2236→    fn test_call_rel32() {
+  2237→        let code = encode_call_rel32(-16);
+  2238→        assert_eq!(code[0], 0xE8);
+  2239→        assert_eq!(&code[1..5], (-16i32).to_le_bytes());
+  2240→    }
+  2241→
+  2242→    #[test]
+  2243→    fn test_ret() {
+  2244→        assert_eq!(encode_ret(), vec![0xC3]);
+  2245→    }
+  2246→
+  2247→    // ── NOP Test ───────────────────────────────────────────────────────
+  2248→
+  2249→    #[test]
+  2250→    fn test_nop() {
+  2251→        assert_eq!(encode_nop(), vec![0x90]);
+  2252→    }
+  2253→
+  2254→    // ── PUSH/POP Tests ─────────────────────────────────────────────────
+  2255→
+  2256→    #[test]
+  2257→    fn test_push_rax() {
+  2258→        assert_eq!(encode_push(Gpr::Rax), vec![0x50]);
+  2259→    }
+  2260→
+  2261→    #[test]
+  2262→    fn test_push_r8() {
+  2263→        assert_eq!(encode_push(Gpr::R8), vec![0x41, 0x50]);
+  2264→    }
+  2265→
+  2266→    #[test]
+  2267→    fn test_pop_rbx() {
+  2268→        assert_eq!(encode_pop(Gpr::Rbx), vec![0x5B]);
+  2269→    }
+  2270→
+  2271→    #[test]
+  2272→    fn test_pop_r15() {
+  2273→        assert_eq!(encode_pop(Gpr::R15), vec![0x41, 0x5F]);
+  2274→    }
+  2275→
+  2276→    // ── SETcc Tests ────────────────────────────────────────────────────
+  2277→
+  2278→    #[test]
+  2279→    fn test_sete_al() {
+  2280→        let code = encode_setcc(Cc::Equal, Gpr::Rax);
+  2281→        assert_eq!(code, vec![0x0F, 0x94, 0xC0]);
+  2282→    }
+  2283→
+  2284→    #[test]
+  2285→    fn test_setl_r8b() {
+  2286→        let code = encode_setcc(Cc::Less, Gpr::R8);
+  2287→        assert_eq!(code, vec![0x41, 0x0F, 0x9C, 0xC0]);
+  2288→    }
+  2289→
+  2290→    // ── Jcc Tests ──────────────────────────────────────────────────────
+  2291→
+  2292→    #[test]
+  2293→    fn test_je_rel32() {
+  2294→        let code = encode_jcc_rel32(Cc::Equal, 0x20);
+  2295→        assert_eq!(code[0], 0x0F);
+  2296→        assert_eq!(code[1], 0x84);
+  2297→        assert_eq!(&code[2..6], 0x20i32.to_le_bytes());
+  2298→    }
+  2299→
+  2300→    #[test]
+  2301→    fn test_jl_rel32() {
+  2302→        let code = encode_jcc_rel32(Cc::Less, -8);
+  2303→        assert_eq!(code[0], 0x0F);
+  2304→        assert_eq!(code[1], 0x8C);
+  2305→        assert_eq!(&code[2..6], (-8i32).to_le_bytes());
+  2306→    }
+  2307→
+  2308→    // ── CMOVcc Tests ───────────────────────────────────────────────────
+  2309→
+  2310→    #[test]
+  2311→    fn test_cmove_rax_rcx() {
+  2312→        let code = encode_cmovcc_reg_reg(Cc::Equal, Gpr::Rax, Gpr::Rcx);
+  2313→        assert_eq!(code, vec![0x48, 0x0F, 0x44, 0xC1]);
+  2314→    }
+  2315→
+  2316→    // ── LEA Tests ──────────────────────────────────────────────────────
+  2317→
+  2318→    #[test]
+  2319→    fn test_lea_rax_rbp_offset8() {
+  2320→        let code = encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, 8);
+  2321→        assert_eq!(code, vec![0x48, 0x8D, 0x45, 0x08]);
+  2322→    }
+  2323→
+  2324→    #[test]
+  2325→    fn test_lea_rax_rsp_offset0() {
+  2326→        // RSP as base requires SIB byte
+  2327→        let code = encode_lea_reg_mem(Gpr::Rax, Gpr::Rsp, 0);
+  2328→        assert_eq!(code, vec![0x48, 0x8D, 0x04, 0x24]);
+  2329→    }
+  2330→
+  2331→    // ── MOVZX/MOVSX Tests ──────────────────────────────────────────────
+  2332→
+  2333→    #[test]
+  2334→    fn test_movzx_reg8() {
+  2335→        let code = encode_movzx_reg8(Gpr::Rax, Gpr::Rcx);
+  2336→        assert_eq!(code, vec![0x48, 0x0F, 0xB6, 0xC1]);
+  2337→    }
+  2338→
+  2339→    #[test]
+  2340→    fn test_movsx_reg8() {
+  2341→        let code = encode_movsx_reg8(Gpr::Rax, Gpr::Rcx);
+  2342→        assert_eq!(code, vec![0x48, 0x0F, 0xBE, 0xC1]);
+  2343→    }
+  2344→
+  2345→    #[test]
+  2346→    fn test_movsxd() {
+  2347→        let code = encode_movsxd(Gpr::Rax, Gpr::Rcx);
+  2348→        assert_eq!(code, vec![0x48, 0x63, 0xC1]);
+  2349→    }
+  2350→
+  2351→    // ── XCHG Test ──────────────────────────────────────────────────────
+  2352→
+  2353→    #[test]
+  2354→    fn test_xchg_rax_rcx() {
+  2355→        let code = encode_xchg_rax_reg(Gpr::Rcx);
+  2356→        assert_eq!(code, vec![0x48, 0x91]);
+  2357→    }
+  2358→
+  2359→    // ── SYSCALL/INT3 Tests ─────────────────────────────────────────────
+  2360→
+  2361→    #[test]
+  2362→    fn test_syscall() {
+  2363→        assert_eq!(encode_syscall(), vec![0x0F, 0x05]);
+  2364→    }
+  2365→
+  2366→    #[test]
+  2367→    fn test_int3() {
+  2368→        assert_eq!(encode_int3(), vec![0xCC]);
+  2369→    }
+  2370→
+  2371→    // ── Gpr Properties Tests ───────────────────────────────────────────
+  2372→
+  2373→    #[test]
+  2374→    fn test_gpr_encoding() {
+  2375→        assert_eq!(Gpr::Rax.encoding(), 0);
+  2376→        assert_eq!(Gpr::Rdi.encoding(), 7);
+  2377→        assert_eq!(Gpr::R8.encoding(), 8);
+  2378→        assert_eq!(Gpr::R15.encoding(), 15);
+  2379→    }
+  2380→
+  2381→    #[test]
+  2382→    fn test_gpr_needs_rex() {
+  2383→        assert!(!Gpr::Rax.needs_rex());
+  2384→        assert!(!Gpr::Rdi.needs_rex());
+  2385→        assert!(Gpr::R8.needs_rex());
+  2386→        assert!(Gpr::R15.needs_rex());
+  2387→    }
+  2388→
+  2389→    #[test]
+  2390→    fn test_gpr_callee_saved() {
+  2391→        assert!(Gpr::Rbx.is_callee_saved());
+  2392→        assert!(Gpr::Rbp.is_callee_saved());
+  2393→        assert!(Gpr::R12.is_callee_saved());
+  2394→        assert!(!Gpr::Rax.is_callee_saved());
+  2395→        assert!(!Gpr::Rdi.is_callee_saved());
+  2396→    }
+  2397→
+  2398→    #[test]
+  2399→    fn test_gpr_arg_regs() {
+  2400→        assert!(Gpr::Rdi.is_arg_reg());
+  2401→        assert!(Gpr::R9.is_arg_reg());
+  2402→        assert!(!Gpr::Rax.is_arg_reg());
+  2403→        assert!(!Gpr::R10.is_arg_reg());
+  2404→    }
+  2405→
+  2406→    #[test]
+  2407→    fn test_gpr_allocatable() {
+  2408→        assert!(Gpr::Rax.is_allocatable());
+  2409→        assert!(!Gpr::Rsp.is_allocatable());
+  2410→    }
+  2411→
+  2412→    #[test]
+  2413→    fn test_gpr_arg_register() {
+  2414→        assert_eq!(Gpr::arg_register(0), Some(Gpr::Rdi));
+  2415→        assert_eq!(Gpr::arg_register(5), Some(Gpr::R9));
+  2416→        assert_eq!(Gpr::arg_register(6), None);
+  2417→    }
+  2418→
+  2419→    // ── Return Stub Test ───────────────────────────────────────────────
+  2420→
+  2421→    #[test]
+  2422→    fn test_return_stub() {
+  2423→        let backend = X86_64Backend::new();
+  2424→        let stub = backend.return_stub();
+  2425→        // xor eax, eax; ret
+  2426→        assert_eq!(stub, vec![0x31, 0xC0, 0xC3]);
+  2427→    }
+  2428→
+  2429→    // ── Trampoline Test ────────────────────────────────────────────────
+  2430→
+  2431→    #[test]
+  2432→    fn test_trampoline() {
+  2433→        let backend = X86_64Backend::new();
+  2434→        let tramp = backend.trampoline(0x7FFFF7000000);
+  2435→        // mov rax, imm64; jmp rax
+  2436→        assert_eq!(tramp[0], 0x48); // REX.W
+  2437→        assert_eq!(tramp[1], 0xB8); // MOV RAX, imm64
+  2438→        assert_eq!(&tramp[2..10], 0x7FFFF7000000u64.to_le_bytes());
+  2439→        assert_eq!(&tramp[10..12], &[0xFF, 0xE0]); // JMP RAX
+  2440→    }
+  2441→
+  2442→    // ── ELF Header Validation Test ─────────────────────────────────────
+  2443→
+  2444→    #[test]
+  2445→    fn test_elf_header() {
+  2446→        let code = encode_ret();
+  2447→        let elf = build_minimal_x86_64_elf(&code, 0x400000);
+  2448→
+  2449→        // Check ELF magic
+  2450→        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
+  2451→        // ELFCLASS64
+  2452→        assert_eq!(elf[4], 2);
+  2453→        // ELFDATA2LSB
+  2454→        assert_eq!(elf[5], 1);
+  2455→        // e_type = ET_EXEC (2)
+  2456→        assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
+  2457→        // e_machine = EM_X86_64 (62)
+  2458→        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
+  2459→        // e_entry should be base + 64 + 56 = 0x400078
+  2460→        let entry = u64::from_le_bytes([
+  2461→            elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
+  2462→        ]);
+  2463→        assert_eq!(entry, 0x400078);
+  2464→    }
+  2465→
+  2466→    // ── Backend Trait Dispatch Test ─────────────────────────────────────
+  2467→
+  2468→    #[test]
+  2469→    fn test_backend_trait_dispatch() {
+  2470→        let backend: Box<dyn Backend> = Box::new(X86_64Backend::new());
+  2471→        assert_eq!(backend.name(), "x86_64");
+  2472→        assert_eq!(backend.target_info().isa_name(), "x86_64");
+  2473→        assert_eq!(backend.target_info().elf_machine_type(), 62);
+  2474→        assert_eq!(backend.target_info().calling_convention_name(), "systemv");
+  2475→    }
+  2476→
+  2477→    // ── Backend TargetInfo Consistency Test ─────────────────────────────
+  2478→
+  2479→    #[test]
+  2480→    fn test_target_info_consistency() {
+  2481→        let backend = X86_64Backend::new();
+  2482→        let info = backend.target_info();
+  2483→        assert_eq!(info.pointer_width(), 8);
+  2484→        assert_eq!(info.num_gp_regs(), 16);
+  2485→        assert_eq!(info.num_simd_fp_regs(), 16);
+  2486→        assert!(!info.has_hardwired_zero());
+  2487→        assert!(!info.has_link_register());
+  2488→        assert_eq!(info.stack_alignment(), 16);
+  2489→        assert_eq!(info.instruction_alignment(), 1);
+  2490→        assert_eq!(info.instruction_width_range(), (1, 15));
+  2491→        assert_eq!(info.num_int_arg_regs(), 6);
+  2492→        assert_eq!(info.num_fp_arg_regs(), 8);
+  2493→    }
+  2494→
+  2495→    // ── MOV [mem] Tests ────────────────────────────────────────────────
+  2496→
+  2497→    #[test]
+  2498→    fn test_mov_reg_mem_offset8() {
+  2499→        let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rbx, 8);
+  2500→        assert_eq!(code, vec![0x48, 0x8B, 0x43, 0x08]);
+  2501→    }
+  2502→
+  2503→    #[test]
+  2504→    fn test_mov_reg_mem_offset0_rbp() {
+  2505→        // RBP with offset 0 requires mod=01 with disp8=0
+  2506→        let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, 0);
+  2507→        assert_eq!(code, vec![0x48, 0x8B, 0x45, 0x00]);
+  2508→    }
+  2509→
+  2510→    #[test]
+  2511→    fn test_mov_reg_mem_rsp_sib() {
+  2512→        // RSP as base requires SIB byte
+  2513→        let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 0);
+  2514→        assert_eq!(code, vec![0x48, 0x8B, 0x04, 0x24]);
+  2515→    }
+  2516→
+  2517→    #[test]
+  2518→    fn test_mov_mem_reg_offset8() {
+  2519→        let code = encode_mov_mem_reg(Gpr::Rbx, 8, Gpr::Rax);
+  2520→        assert_eq!(code, vec![0x48, 0x89, 0x43, 0x08]);
+  2521→    }
+  2522→
+  2523→    // ── CQO Test ───────────────────────────────────────────────────────
+  2524→
+  2525→    #[test]
+  2526→    fn test_cqo() {
+  2527→        assert_eq!(encode_cqo(), vec![0x48, 0x99]);
+  2528→    }
+  2529→
+  2530→    // ── NEG/NOT Tests ──────────────────────────────────────────────────
+  2531→
+  2532→    #[test]
+  2533→    fn test_neg_rax() {
+  2534→        let code = encode_neg_reg(Gpr::Rax);
+  2535→        assert_eq!(code, vec![0x48, 0xF7, 0xD8]);
+  2536→    }
+  2537→
+  2538→    #[test]
+  2539→    fn test_not_rcx() {
+  2540→        let code = encode_not_reg(Gpr::Rcx);
+  2541→        assert_eq!(code, vec![0x48, 0xF7, 0xD1]);
+  2542→    }
+  2543→
+  2544→    // ── MOVZX r16 Test ─────────────────────────────────────────────────
+  2545→
+  2546→    #[test]
+  2547→    fn test_movzx_reg16() {
+  2548→        let code = encode_movzx_reg16(Gpr::Rax, Gpr::Rcx);
+  2549→        assert_eq!(code, vec![0x48, 0x0F, 0xB7, 0xC1]);
+  2550→    }
+  2551→
+  2552→    // ── ADD/SUB imm32 Tests ────────────────────────────────────────────
+  2553→
+  2554→    #[test]
+  2555→    fn test_sub_reg_imm32() {
+  2556→        let code = encode_sub_reg_imm32(Gpr::Rsp, 32);
+  2557→        assert_eq!(code[0], 0x48); // REX.W
+  2558→        assert_eq!(code[1], 0x81); // SUB r/m64, imm32
+  2559→        assert_eq!(code[2], 0xEC); // mod=3, /5, rm=RSP(4)
+  2560→    }
+  2561→
+  2562→    // ── Disassemble Test ───────────────────────────────────────────────
+  2563→
+  2564→    #[test]
+  2565→    fn test_disassemble_ret() {
+  2566→        let backend = X86_64Backend::new();
+  2567→        let bytes = encode_ret();
+  2568→        let lines = backend.disassemble(&bytes, 0x400000);
+  2569→        assert!(!lines.is_empty());
+  2570→        assert!(lines[0].contains("400000"));
+  2571→        assert!(lines[0].contains("c3"));
+  2572→    }
+  2573→
+  2574→    // ── MOVSX r16 Test ─────────────────────────────────────────────────
+  2575→
+  2576→    #[test]
+  2577→    fn test_movsx_reg16_rax_rcx() {
+  2578→        let code = encode_movsx_reg16(Gpr::Rax, Gpr::Rcx);
+  2579→        assert_eq!(code, vec![0x48, 0x0F, 0xBF, 0xC1]);
+  2580→    }
+  2581→
+  2582→    #[test]
+  2583→    fn test_movsx_reg16_r8_r9() {
+  2584→        let code = encode_movsx_reg16(Gpr::R8, Gpr::R9);
+  2585→        assert_eq!(code, vec![0x4D, 0x0F, 0xBF, 0xC1]);
+  2586→    }
+  2587→
+  2588→    // ── ISel Tests (full allocate_registers pipeline) ──────────────────
+  2589→
+  2590→    /// Helper: build a minimal IR function with a single instruction and
+  2591→    /// a Ret, then run allocate_registers and return the encoded bytes
+  2592→    /// for the instruction (skipping prologue).
+  2593→    fn isel_single_instr(instr: IRInstr) -> Vec<u8> {
+  2594→        let mut func = IRFunction::new("test");
+  2595→        // vreg 0 = dst, vreg 1 = lhs (if any), vreg 2 = rhs (if any)
+  2596→        func.current_block().instructions.push(instr);
+  2597→        func.current_block().instructions.push(IRInstr::Ret {
+  2598→            values: vec![IRValue::Register(0)],
+  2599→        });
+  2600→        let backend = X86_64Backend::new();
+  2601→        let allocated = backend.allocate_registers(&func).unwrap();
+  2602→        // The encoded bytes include prologue + instruction(s) + epilogue.
+  2603→        // Concatenate all instructions and return the full encoded output.
+  2604→        let mut bytes = Vec::new();
+  2605→        for block in &allocated.blocks {
+  2606→            for instr in &block.instructions {
+  2607→                bytes.extend_from_slice(&instr.encoded);
+  2608→            }
+  2609→        }
+  2610→        bytes
+  2611→    }
+  2612→
+  2613→    #[test]
+  2614→    fn test_isel_add_reg_reg() {
+  2615→        let code = isel_single_instr(IRInstr::Add {
+  2616→            dst: IRValue::Register(0),
+  2617→            lhs: IRValue::Register(1),
+  2618→            rhs: IRValue::Register(2),
+  2619→            ty: None,
+  2620→        });
+  2621→        // Should contain an ADD r64, r64 instruction (opcode 0x01)
+  2622→        assert!(
+  2623→            code.iter().any(|&b| b == 0x01),
+  2624→            "ADD opcode 0x01 not found in encoded output"
+  2625→        );
+  2626→    }
+  2627→
+  2628→    #[test]
+  2629→    fn test_isel_add_imm32() {
+  2630→        let code = isel_single_instr(IRInstr::Add {
+  2631→            dst: IRValue::Register(0),
+  2632→            lhs: IRValue::Register(1),
+  2633→            rhs: IRValue::Immediate(42),
+  2634→            ty: None,
+  2635→        });
+  2636→        // With immediate rhs, should use ADD r64, imm32 (opcode 0x81 /0)
+  2637→        let has_add_imm = code
+  2638→            .windows(2)
+  2639→            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x00);
+  2640→        assert!(has_add_imm, "ADD r64, imm32 not found in encoded output");
+  2641→    }
+  2642→
+  2643→    #[test]
+  2644→    fn test_isel_sub_reg_reg() {
+  2645→        let code = isel_single_instr(IRInstr::Sub {
+  2646→            dst: IRValue::Register(0),
+  2647→            lhs: IRValue::Register(1),
+  2648→            rhs: IRValue::Register(2),
+  2649→            ty: None,
+  2650→        });
+  2651→        // Should contain SUB r64, r64 (opcode 0x29)
+  2652→        assert!(code.iter().any(|&b| b == 0x29), "SUB opcode 0x29 not found");
+  2653→    }
+  2654→
+  2655→    #[test]
+  2656→    fn test_isel_sub_imm32() {
+  2657→        let code = isel_single_instr(IRInstr::Sub {
+  2658→            dst: IRValue::Register(0),
+  2659→            lhs: IRValue::Register(1),
+  2660→            rhs: IRValue::Immediate(10),
+  2661→            ty: None,
+  2662→        });
+  2663→        // With immediate, should use SUB r64, imm32 (0x81 /5)
+  2664→        let has_sub_imm = code
+  2665→            .windows(2)
+  2666→            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x28);
+  2667→        assert!(has_sub_imm, "SUB r64, imm32 not found");
+  2668→    }
+  2669→
+  2670→    #[test]
+  2671→    fn test_isel_binop_and() {
+  2672→        let code = isel_single_instr(IRInstr::BinOp {
+  2673→            op: BinOpKind::And,
+  2674→            dst: IRValue::Register(0),
+  2675→            lhs: IRValue::Register(1),
+  2676→            rhs: IRValue::Register(2),
+  2677→            ty: None,
+  2678→        });
+  2679→        // AND r64, r64 (opcode 0x21)
+  2680→        assert!(code.iter().any(|&b| b == 0x21), "AND opcode 0x21 not found");
+  2681→    }
+  2682→
+  2683→    #[test]
+  2684→    fn test_isel_binop_xor() {
+  2685→        let code = isel_single_instr(IRInstr::BinOp {
+  2686→            op: BinOpKind::Xor,
+  2687→            dst: IRValue::Register(0),
+  2688→            lhs: IRValue::Register(1),
+  2689→            rhs: IRValue::Register(2),
+  2690→            ty: None,
+  2691→        });
+  2692→        // XOR r64, r64 (opcode 0x31)
+  2693→        assert!(code.iter().any(|&b| b == 0x31), "XOR opcode 0x31 not found");
+  2694→    }
+  2695→
+  2696→    #[test]
+  2697→    fn test_isel_binop_sdiv() {
+  2698→        let code = isel_single_instr(IRInstr::BinOp {
+  2699→            op: BinOpKind::SDiv,
+  2700→            dst: IRValue::Register(0),
+  2701→            lhs: IRValue::Register(1),
+  2702→            rhs: IRValue::Register(2),
+  2703→            ty: None,
+  2704→        });
+  2705→        // SDiv uses CQO (0x48 0x99) + IDIV (0xF7 /7)
+  2706→        assert!(
+  2707→            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x99),
+  2708→            "CQO not found for SDiv"
+  2709→        );
+  2710→        assert!(
+  2711→            code.iter().any(|&b| b == 0xF7),
+  2712→            "IDIV opcode not found for SDiv"
+  2713→        );
+  2714→    }
+  2715→
+  2716→    #[test]
+  2717→    fn test_isel_unaryop_neg() {
+  2718→        let code = isel_single_instr(IRInstr::UnaryOp {
+  2719→            op: UnaryOpKind::Neg,
+  2720→            dst: IRValue::Register(0),
+  2721→            operand: IRValue::Register(1),
+  2722→            ty: None,
+  2723→        });
+  2724→        // NEG r64 (0xF7 /3)
+  2725→        assert!(code.iter().any(|&b| b == 0xF7), "NEG opcode 0xF7 not found");
+  2726→    }
+  2727→
+  2728→    #[test]
+  2729→    fn test_isel_unaryop_not() {
+  2730→        let code = isel_single_instr(IRInstr::UnaryOp {
+  2731→            op: UnaryOpKind::Not,
+  2732→            dst: IRValue::Register(0),
+  2733→            operand: IRValue::Register(1),
+  2734→            ty: None,
+  2735→        });
+  2736→        // NOT r64 (0xF7 /2)
+  2737→        assert!(code.iter().any(|&b| b == 0xF7), "NOT opcode 0xF7 not found");
+  2738→    }
+  2739→
+  2740→    #[test]
+  2741→    fn test_isel_cmp_imm32() {
+  2742→        let code = isel_single_instr(IRInstr::Cmp {
+  2743→            kind: CmpKind::Eq,
+  2744→            dst: IRValue::Register(0),
+  2745→            lhs: IRValue::Register(1),
+  2746→            rhs: IRValue::Immediate(5),
+  2747→            ty: None,
+  2748→        });
+  2749→        // CMP r64, imm32 (0x81 /7)
+  2750→        let has_cmp_imm = code
+  2751→            .windows(2)
+  2752→            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38);
+  2753→        assert!(has_cmp_imm, "CMP r64, imm32 not found");
+  2754→        // Should also have SETcc (0F 9x) and MOVZX (0F B6)
+  2755→        assert!(
+  2756→            code.windows(2)
+  2757→                .any(|w| w[0] == 0x0F && w[1] >= 0x90 && w[1] <= 0x9F),
+  2758→            "SETcc not found"
+  2759→        );
+  2760→    }
+  2761→
+  2762→    #[test]
+  2763→    fn test_isel_cast_zext() {
+  2764→        let code = isel_single_instr(IRInstr::Cast {
+  2765→            kind: CastKind::ZExt,
+  2766→            dst: IRValue::Register(0),
+  2767→            src: IRValue::Register(1),
+  2768→        });
+  2769→        // ZExt of a register uses MOVZX r8→r64 (0F B6)
+  2770→        assert!(
+  2771→            code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xB6),
+  2772→            "MOVZX r8 not found for ZExt"
+  2773→        );
+  2774→    }
+  2775→
+  2776→    #[test]
+  2777→    fn test_isel_cast_sext() {
+  2778→        let code = isel_single_instr(IRInstr::Cast {
+  2779→            kind: CastKind::SExt,
+  2780→            dst: IRValue::Register(0),
+  2781→            src: IRValue::Register(1),
+  2782→        });
+  2783→        // SExt of a register uses MOVSX r8→r64 (0F BE)
+  2784→        assert!(
+  2785→            code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xBE),
+  2786→            "MOVSX r8 not found for SExt"
+  2787→        );
+  2788→    }
+  2789→
+  2790→    #[test]
+  2791→    fn test_isel_select() {
+  2792→        let code = isel_single_instr(IRInstr::Select {
+  2793→            dst: IRValue::Register(0),
+  2794→            cond: IRValue::Register(1),
+  2795→            true_val: IRValue::Register(2),
+  2796→            false_val: IRValue::Register(3),
+  2797→            ty: None,
+  2798→        });
+  2799→        // Select uses TEST + CMOVcc
+  2800→        assert!(
+  2801→            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85),
+  2802→            "TEST not found for Select"
+  2803→        );
+  2804→        assert!(
+  2805→            code.windows(2)
+  2806→                .any(|w| w[0] == 0x0F && w[1] >= 0x40 && w[1] <= 0x4F),
+  2807→            "CMOVcc not found for Select"
+  2808→        );
+  2809→    }
+  2810→
+  2811→    // ── Disassembler Tests ───────────────────────────────────────────
+  2812→
+  2813→    #[test]
+  2814→    fn test_x86_64_disassemble_nop() {
+  2815→        let backend = X86_64Backend::new();
+  2816→        let bytes = encode_nop();
+  2817→        let lines = backend.disassemble(&bytes, 0x1000);
+  2818→        assert_eq!(lines.len(), 1);
+  2819→        assert!(lines[0].contains("nop"), "Expected nop, got: {}", lines[0]);
+  2820→    }
+  2821→
+  2822→    #[test]
+  2823→    fn test_x86_64_disassemble_ret() {
+  2824→        let backend = X86_64Backend::new();
+  2825→        let bytes = encode_ret();
+  2826→        let lines = backend.disassemble(&bytes, 0x1000);
+  2827→        assert_eq!(lines.len(), 1);
+  2828→        assert!(lines[0].contains("ret"), "Expected ret, got: {}", lines[0]);
+  2829→    }
+  2830→
+  2831→    #[test]
+  2832→    fn test_x86_64_disassemble_push_pop() {
+  2833→        let backend = X86_64Backend::new();
+  2834→        let mut bytes = Vec::new();
+  2835→        bytes.extend(encode_push(Gpr::Rbp));
+  2836→        bytes.extend(encode_pop(Gpr::Rbp));
+  2837→        let lines = backend.disassemble(&bytes, 0);
+  2838→        assert_eq!(lines.len(), 2);
+  2839→        assert!(
+  2840→            lines[0].contains("push"),
+  2841→            "Expected push, got: {}",
+  2842→            lines[0]
+  2843→        );
+  2844→        assert!(lines[1].contains("pop"), "Expected pop, got: {}", lines[1]);
+  2845→    }
+  2846→
+  2847→    #[test]
+  2848→    fn test_x86_64_disassemble_mov_reg_reg() {
+  2849→        let backend = X86_64Backend::new();
+  2850→        let bytes = encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp);
+  2851→        let lines = backend.disassemble(&bytes, 0);
+  2852→        assert_eq!(lines.len(), 1);
+  2853→        assert!(lines[0].contains("mov"), "Expected mov, got: {}", lines[0]);
+  2854→    }
+  2855→
+  2856→    #[test]
+  2857→    fn test_x86_64_disassemble_add_sub() {
+  2858→        let backend = X86_64Backend::new();
+  2859→        let mut bytes = Vec::new();
+  2860→        bytes.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+  2861→        bytes.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+  2862→        let lines = backend.disassemble(&bytes, 0);
+  2863→        assert_eq!(lines.len(), 2);
+  2864→        assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
+  2865→        assert!(lines[1].contains("sub"), "Expected sub, got: {}", lines[1]);
+  2866→    }
+  2867→}
+  2868→pub mod disasm;
+  2869→pub mod stack_slot_isel;
+
+[showing lines 2000-2869 of 2870; use offset=2870 with limit to continue reading]

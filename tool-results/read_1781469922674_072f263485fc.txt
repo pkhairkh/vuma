@@ -1,0 +1,785 @@
+     1→---
+     2→Task ID: 1
+     3→Agent: main
+     4→Task: Fix all 8 compiler backend platforms to pass SHA256d (exit code 79)
+     5→
+     6→Work Log:
+     7→- Read PPC64 backend source, identified broken RLDICL encoding in ss_load_imm
+     8→- Replaced manual RLDICL encoding with Instruction::Rlwinm for clearing upper 32 bits
+     9→- Replaced manual SLDI encoding with li+sld using R11 temp in function call trampoline  
+    10→- Added proper 32-bit type handling to PPC64 stack-slot BinOp using IR ty field
+    11→- Used rlwinm masking, SLW/SRW/SRAW, rlwnm for 32-bit rotations, Mullw/Divw
+    12→- Fixed PPC64 ss_load_imm to correctly zero-extend 32-bit immediates
+    13→- Discovered LoongArch64 had 24 out of 26 3R-format opcodes completely wrong
+    14→- Fixed all LoongArch64 3R opcodes (ADD/SUB/SLT/AND/OR/XOR/shifts/rotates/mul/div)
+    15→- Fixed LoongArch64 shift immediate formats (reg2i5 for .W, reg2i6 for .D)
+    16→- Added encode_reg2i5 and encode_reg2i6 encoding functions
+    17→- Fixed LoongArch64 LU12I_W/LU32I_D encoding (reg1i20 format instead of reg2i16)
+    18→- Fixed LoongArch64 BEQZ/BNEZ opcodes and 1RI21 encoding format
+    19→- Fixed LoongArch64 FP opcodes and 2R format opcodes
+    20→- Wasm32: Added ROR/ROL implementation using shift+or sequence
+    21→- Wasm32: Fixed push_value type hints to use WasmType instead of IRType
+    22→- Wasm32: Still has type inference issues for SHA256d (register type tracking needed)
+    23→- Committed and pushed all changes
+    24→
+    25→Stage Summary:
+    26→- All 6 native backends pass SHA256d (exit 79): x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64
+    27→- LoongArch64 passes all individual SHA256 operations and u32_arith test; full SHA256d too slow for QEMU but should work natively
+    28→- Wasm32 still has type inference issues (needs proper register type tracking)
+    29→- Key root causes fixed:
+    30→  1. PPC64: RLDICL encoding wrong, no 32-bit masking on 64-bit arithmetic
+    31→  2. LoongArch64: Almost all opcodes were wrong (from a different ISA or incorrect mapping)
+    32→---
+    33→Task ID: 1
+    34→Agent: Main
+    35→Task: Resolve remaining backend issues and commit/push
+    36→
+    37→Work Log:
+    38→- Discovered uncommitted changes from previous session that regressed RISC-V64, ARM32, MIPS64, and PPC64 backends
+    39→- Reverted all regressed changes since the committed code already worked for all 6 native backends
+    40→- Fixed Wasm32 backend with multiple improvements:
+    41→  - Added vreg_types tracking for register type awareness
+    42→  - Fixed push_value to allocate unallocated registers (was silently skipping, causing "not enough arguments on stack")
+    43→  - Forced all integer types to I32 on Wasm32 target (32-bit address space)
+    44→  - Fixed function type generation using pseudo-instruction approach
+    45→  - Added Option<WasmType> for Block/Loop/If to support void block types
+    46→  - Added WasmType::from_byte() and decode_func_type_from_bytes()
+    47→  - Fixed Load/Store to use IR type for i32 vs i64 selection
+    48→- Committed and pushed via PAT
+    49→
+    50→Stage Summary:
+    51→- All 6 native backends pass SHA256d with exit code 79
+    52→- LoongArch64 passes u32 arithmetic tests (full SHA256d too slow for QEMU)
+    53→- Wasm32 basic arithmetic works (SHA256d needs linear memory support - architectural change required)
+    54→- Pushed commit bf0ebd4 to origin/main
+    55→---
+    56→Task ID: 1-a
+    57→Agent: sub
+    58→Task: Remove Pi5 crate directory and workspace member
+    59→
+    60→Work Log:
+    61→- Deleted /home/z/my-project/vuma/src/pi5/ directory (rm -rf)
+    62→- Removed "src/pi5" from workspace members in /home/z/my-project/vuma/Cargo.toml
+    63→- Verified directory no longer exists
+    64→- Verified Cargo.toml no longer contains "src/pi5"
+    65→
+    66→Stage Summary:
+    67→- Pi5 crate directory fully removed
+    68→- Root Cargo.toml workspace members list updated (no more "src/pi5" entry)
+    69→- No other references to pi5 in dependencies section (was not a dependency of root crate)
+    70→---
+    71→Task ID: 1-c
+    72→Agent: sub
+    73→Task: Remove Pi5 from main.rs
+    74→
+    75→Work Log:
+    76→- Removed Pi5Bare and Pi5Linux variants from TargetArg enum (only Linux remains)
+    77→- Removed corresponding match arms in From<TargetArg> for CompileTarget impl
+    78→- Changed default_value on build subcommand from "pi5-linux" to "linux"
+    79→- Replaced CompileTarget::Pi5Linux with CompileTarget::Linux in cmd_run, cmd_check, cmd_verify
+    80→- Updated test_build_basic: assert target is TargetArg::Linux instead of Pi5Linux
+    81→- Updated test_build_with_options: changed "pi5-bare" to "linux", TargetArg::Pi5Bare to TargetArg::Linux
+    82→- Updated test_target_conversion: removed Pi5Bare and Pi5Linux assertions, kept only Linux
+    83→- Verified zero remaining Pi5/pi5 references in main.rs via grep
+    84→
+    85→Stage Summary:
+    86→- All Pi5 references surgically removed from main.rs
+    87→- TargetArg enum now has single variant: Linux
+    88→- Default target changed from "pi5-linux" to "linux"
+    89→- All three command functions (run, check, verify) now use CompileTarget::Linux
+    90→- All test code updated to use Linux instead of Pi5 variants
+    91→- Note: CompileTarget::Pi5Bare/Pi5Linux still exist in pipeline.rs (not in scope of this task)
+    92→---
+    93→Task ID: 1-b
+    94→Agent: sub
+    95→Task: Remove Pi5 from pipeline.rs
+    96→
+    97→Work Log:
+    98→- Removed Pi5Bare and Pi5Linux enum variants from CompileTarget
+    99→- Made Linux the #[default] variant (was previously Pi5Linux)
+   100→- Removed Pi5Bare/Pi5Linux match arms from Display impl
+   101→- Removed pi5_bare() and pi5_linux() constructor methods from CompileConfig
+   102→- Updated emit_config() match arm: removed Pi5Bare arm, simplified Pi5Linux|Linux to just Linux
+   103→- Updated Default impl: changed target from CompileTarget::Pi5Linux to CompileTarget::Linux
+   104→- Removed test_compile_pi5_bare test function entirely
+   105→- Updated test_config_defaults: assert changed from Pi5Linux to Linux
+   106→- Verified zero remaining Pi5/pi5 references in pipeline.rs
+   107→- Verified no remaining bare_metal references (EmitConfig::bare_metal_elf call removed)
+   108→
+   109→Stage Summary:
+   110→- All Pi5 references surgically removed from pipeline.rs
+   111→- CompileTarget enum now has single variant: Linux (with #[default])
+   112→- Code logically consistent: match arms updated, default updated, tests updated
+   113→---
+   114→Task ID: 1-e
+   115→Agent: sub
+   116→Task: Remove Pi5 from tests
+   117→
+   118→Work Log:
+   119→- framework.rs: Removed Pi5 row from test categories doc table
+   120→- framework.rs: Removed vuma_pi5_test! macro reference from helper macros doc list
+   121→- framework.rs: Removed TestCategory::Pi5 variant from enum
+   122→- framework.rs: Changed TestCategory::all() return type from [TestCategory; 5] to [TestCategory; 4], removed Pi5 from array
+   123→- framework.rs: Removed TestCategory::Pi5 => "pi5" arm from label() match
+   124→- framework.rs: Removed entire vuma_pi5_test! macro definition (doc comment + macro body)
+   125→- framework.rs: Removed Pi5 label assertion from test_category_labels test
+   126→- framework.rs: Renamed test_category_all_has_five to test_category_all_has_four, changed assert from 5 to 4
+   127→- lib.rs: Removed Pi5 row from test categories doc table
+   128→- lib.rs: Removed vuma_pi5_test! from helper macros doc list
+   129→- lib.rs: Removed `#[cfg(test)] pub mod pi5_hardware;` module declaration
+   130→- Deleted pi5_hardware.rs entirely
+   131→- Verified zero remaining pi5_hardware references in tests/src directory
+   132→
+   133→Stage Summary:
+   134→- All Pi5 references removed from framework.rs, lib.rs, and pi5_hardware.rs deleted
+   135→- TestCategory enum now has 4 variants: Unit, Integration, Verification, Codegen
+   136→- Test infrastructure logically consistent (array size, label match, tests updated)
+   137→- Note: benchmarks.rs contains descriptive "Pi 5" hardware target mentions in comments (not test category references) — left as-is
+   138→---
+   139→Task ID: 1-f
+   140→Agent: sub
+   141→Task: Remove Pi5 from vuma-core (security.rs, io.rs, lib.rs)
+   142→
+   143→Work Log:
+   144→- security.rs: Renamed pi5_development() → default_development() and pi5_production() → default_production()
+   145→- security.rs: Updated doc comments: "for Pi 5" → "for ARM64", "Raspberry Pi 5 (BCM2712, Cortex-A76, ARMv8.2-A)" → "ARM64 platforms (ARMv8.2-A+)"
+   146→- security.rs: Updated section header comment from "ARM64 Security Mapping (Pi 5)" to "ARM64 Security Mapping"
+   147→- security.rs: Updated table row "CapD → PAC/BTI/MTE for Pi 5" → "CapD → PAC/BTI/MTE for ARM64"
+   148→- security.rs: Updated all 5 test references from pi5_development/pi5_production to default_development/default_production
+   149→- io.rs: Replaced all "Pi 5" → "ARM64" throughout file (27 occurrences in comments/doc strings)
+   150→- io.rs: Removed 3 "Must match `vuma_pi5::platform::...`" doc-comment lines from BCM2712_PERIPHERAL_BASE, BCM2712_PERIPHERAL_BASE_HIGH, and BCM2712_UART_BASE_OFFSET constants
+   151→- io.rs: Constants retained as plain BCM2712 hardware constants (no vuma_pi5 crate dependency)
+   152→- lib.rs: Removed `vuma-pi5 | Raspberry Pi 5 bare-metal runtime` row from crate table
+   153→
+   154→Stage Summary:
+   155→- All Pi5 references removed from the 3 specified files
+   156→- security.rs: pi5_development/pi5_production replaced with platform-agnostic default_development/default_production
+   157→- io.rs: All vuma_pi5 crate references eliminated; BCM2712 constants kept as standalone values
+   158→- lib.rs: vuma-pi5 crate removed from documentation table
+   159→- Other Pi5 references remain in files outside scope (access_analysis.rs, emit.rs, arm64.rs, cor/*, benchmarks.rs)
+   160→---
+   161→Task ID: 1-g
+   162→Agent: sub
+   163→Task: Remove Pi5 example and docs
+   164→
+   165→Work Log:
+   166→- Deleted /home/z/my-project/vuma/examples/pi5_sensor.vuma
+   167→- Deleted /home/z/my-project/vuma/docs/specs/pi5-memory-model-spec.md
+   168→- Deleted /home/z/my-project/vuma/agent-ctx/pi5-spin-wait-exception-fix.md
+   169→- Edited examples/README.md: removed pi5_sensor example entry (section 8), renumbered sections 9→8 and 10→9, removed Pi 5 from gpio_blink description, removed rpi5 target commands, removed pi5_sensor from learning path and IVE table
+   170→- Edited docs/GLOSSARY.md: generalized COR description (removed Pi 5 PMU), AAPCS64 (removed "on Pi 5"), DSB (removed "Pi 5 peripherals"), ISB (removed Pi 5 boot.rs reference), CAS (removed "in the Pi 5"), Cortex-A76 (generalized from Pi5-specific), renamed "Raspberry Pi 5 Terms" section to "Hardware Terms", generalized BCM2712/GPIO/UART entries
+   171→- Edited docs/AUDIT.md: removed vuma-pi5 crate row, removed pi5_sensor example row, removed Pi 5 from gpio_blink description, removed vuma-pi5 from cargo check results, updated architecture description, fixed table formatting
+   172→- Edited docs/ROADMAP.md: replaced Raspberry Pi 5 primary platform with ARM64, generalized all Pi 5 hardware references to target hardware/bare metal, removed Pi 5 Crate deliverable, renamed milestones and sections, updated success criteria, risk table, and summary table
+   173→- Edited docs/architecture.md: generalized TOC, Layer 4 description, layer interaction diagram, architectural principles, data flow diagrams, stage descriptions, workspace layout (removed pi5/ directory), dependency graph and rules, codegen pipeline heading, boot sequence, PmuCounters, DeploymentTarget, security model
+   174→- Edited docs/CONTRIBUTING.md: generalized prerequisites, cross-compilation section, Makefile targets, ARM64 memory model reference
+   175→- Edited docs/WORKLOG.md: generalized all historical Pi 5 references in work log entries (platform descriptions, crate references, type names, Makefile targets, section headings)
+   176→- Edited docs/CONVENTIONS.md: updated build scope example from pi5 to bare-metal
+   177→
+   178→Stage Summary:
+   179→- 3 files deleted: pi5_sensor.vuma, pi5-memory-model-spec.md, pi5-spin-wait-exception-fix.md
+   180→- 8 files edited: examples/README.md, docs/GLOSSARY.md, docs/AUDIT.md, docs/ROADMAP.md, docs/architecture.md, docs/CONTRIBUTING.md, docs/WORKLOG.md, docs/CONVENTIONS.md
+   181→- All Pi5 product/brand references removed; crate name references (vuma-pi5, src/pi5/) retained where they refer to actual code
+   182→- Pi5PmuCounters renamed to PmuCounters, Pi5Bare/Pi5Linux renamed to BareMetal/Linux in docs
+   183→---
+   184→Task ID: 1-d
+   185→Agent: sub
+   186→Task: Remove Pi5 from COR crate (optimization.rs, profile.rs, deployment.rs, config.rs)
+   187→
+   188→Work Log:
+   189→- optimization.rs: Removed `target_pi5` field from MemoryOptimization struct
+   190→- optimization.rs: Removed `for_pi5()` constructor method
+   191→- optimization.rs: Updated `new()` to no longer derive target_pi5 from TargetArch
+   192→- optimization.rs: Changed alignment condition from `self.target_pi5 || is_hot` to just `is_hot`
+   193→- optimization.rs: Updated doc comments: removed Pi 5 / Cortex-A76 / BCM2712 references
+   194→- optimization.rs: Updated test: replaced `MemoryOptimization::for_pi5()` with `MemoryOptimization::new(TargetArch::ArmV8A)`
+   195→- profile.rs: Removed entire Pi5PmuCounters struct and impl block (cycle_count, instruction_count, cache_misses, branch_misses, ipc(), cache_miss_rate(), branch_miss_rate())
+   196→- profile.rs: Removed `pmu: Option<Pi5PmuCounters>` field from ProfileSample
+   197→- profile.rs: Removed `with_pmu()` constructor from ProfileSample
+   198→- profile.rs: Removed `node_pmu: HashMap<NodeId, Pi5PmuCounters>` field from ProfileData
+   199→- profile.rs: Removed `record_pmu()` method from ProfileData
+   200→- profile.rs: Simplified `ingest_samples()` to no longer process PMU data
+   201→- profile.rs: Removed `record_pmu()` and `make_sample_with_pmu()` from ProfileCollector
+   202→- profile.rs: Removed `aggregate_pmu` and `node_pmu` fields from ProfileReport
+   203→- profile.rs: Removed PMU aggregation logic from `collect_profile()`
+   204→- profile.rs: Removed cache/branch PMU-based suggestions from `suggest_optimizations()`
+   205→- profile.rs: Removed pi5_pmu_counters_ipc_and_rates test entirely
+   206→- profile.rs: Replaced ingest_samples_accumulates_pmu test with ingest_samples_accumulates_counts
+   207→- profile.rs: Updated profile_sample_creation_and_pmu test to profile_sample_creation (removed PMU assertions)
+   208→- deployment.rs: Removed Pi5Bare and Pi5Linux variants from DeploymentTarget enum
+   209→- deployment.rs: Removed `is_pi5()` method from DeploymentTarget
+   210→- deployment.rs: Updated `supports_hot_swap()` to return false for all targets
+   211→- deployment.rs: Updated `kind_label()` and Display impl to remove Pi5 match arms
+   212→- deployment.rs: Simplified `compute_deployment_plan()` to always use Local target (removed Pi5-specific logic)
+   213→- deployment.rs: Updated DeploymentManager doc comment (removed "Pi 5" reference)
+   214→- deployment.rs: Updated hot_swap doc comment (removed "Pi 5" reference)
+   215→- deployment.rs: Removed `make_pi5_config()` test helper and `use crate::config::TargetArch` import
+   216→- deployment.rs: Removed deploy_to_pi5_bare_target test, hot_swap_on_pi5_bare test, deploy_to_pi5_linux_target test
+   217→- deployment.rs: Updated target_display_and_predicates test (removed Pi5 assertions)
+   218→- deployment.rs: Renamed deployment_plan_pi5_bare_targets to deployment_plan_local_targets
+   219→- deployment.rs: Updated version_tracking_and_rollback to use Local target instead of Pi5Linux
+   220→- config.rs: Removed `is_pi5_target()` method from Config
+   221→- config.rs: Updated ArmV8A doc comment (removed Raspberry Pi 5 reference)
+   222→- config.rs: Updated Default impl comment (removed Pi 5 reference)
+   223→- config.rs: Updated builder_pattern_works test (replaced is_pi5_target() with matches! assertion)
+   224→- lib.rs: Updated deployment module doc comment (removed "Pi 5 cores")
+   225→- types.rs: Updated alignment field doc comment (removed "Pi 5" reference)
+   226→
+   227→Stage Summary:
+   228→- All Pi5 references surgically removed from 6 files in src/cor/src/
+   229→- optimization.rs: MemoryOptimization no longer has Pi5-specific field or constructor; alignment only for hot paths
+   230→- profile.rs: Pi5PmuCounters struct entirely removed; all PMU-related fields, methods, and tests removed
+   231→- deployment.rs: DeploymentTarget reduced to Local and Remote variants; Pi5 deployment logic removed
+   232→- config.rs: is_pi5_target() method removed; ArmV8A variant kept but without Pi5-specific documentation
+   233→- lib.rs + types.rs: Minor doc comment updates
+   234→- Zero remaining Pi5/pi5 references in src/cor/src/
+   235→---
+   236→Task ID: 2-c
+   237→Agent: sub
+   238→Task: Wasm32 _start entry point
+   239→
+   240→Work Log:
+   241→- Read wasm32/mod.rs: found encode_program had no _start entry point, no start section, no WASI imports
+   242→- Read emit.rs: confirmed Wasm32 handling is only in wasm32/mod.rs (emit.rs produces ELF for native backends only)
+   243→- Found WasmModuleBuilder already supported set_start() and add_import() but they were never used
+   244→- Found WasmImport::wasi_proc_exit() helper already existed but was unused
+   245→- Modified encode_program in wasm32/mod.rs to:
+   246→  1. Add WASI proc_exit import (wasi_snapshot_preview1.proc_exit) as function index 0
+   247→  2. Add _start wrapper function type (() -> ()) to satisfy Wasm start-section requirement
+   248→  3. Track main function index and type during program function iteration
+   249→  4. Generate _start body that:
+   250→     - If main exists and returns i32: call main(), pass result to proc_exit
+   251→     - If main exists and returns void: call main(), then proc_exit(0)
+   252→     - If main exists and returns other type: call main(), drop result, proc_exit(0)
+   253→     - If no main function: proc_exit(1) to signal error
+   254→     - Always followed by unreachable + end (proc_exit is divergent)
+   255→  5. Export _start as "_start" in Wasm module exports
+   256→  6. Set _start as the Wasm start function via set_start()
+   257→- Added test_encode_program_with_start_entry_point: comprehensive test parsing Wasm binary to verify proc_exit import, _start export, and start section
+   258→- Added test_encode_program_no_main_exits_with_1: test when no main function exists
+   259→- Fixed ownership issue: func_type.clone() before add_type() since func_type is also stored in main_func_type
+   260→
+   261→Stage Summary:
+   262→- Wasm32 backend now properly generates a _start entry point
+   263→- _start calls main() and passes the return value to WASI proc_exit
+   264→- _start is exported as "_start" in the Wasm module exports section
+   265→- _start is set as the Wasm start function (start section) for automatic execution on module instantiation
+   266→- WASI proc_exit import enables process termination with correct exit code
+   267→- Three branches handled: main returns i32 (exit code), main returns void (exit 0), no main (exit 1)
+   268→- No changes needed in emit.rs (Wasm32 uses its own binary encoder, not the ELF emitter)
+   269→---
+   270→Task ID: 2-d
+   271→Agent: sub
+   272→Task: Wasm32 ptr type mapping fix
+   273→
+   274→Work Log:
+   275→- Audited all pointer type handling in /home/z/my-project/vuma/src/codegen/src/wasm32/mod.rs
+   276→- Verified IRType::Ptr correctly maps to WasmType::I32 in from_ir_type (line 75)
+   277→- Verified IRValue::Address(addr) always emits I32Const(*addr as i32), truncating u64 to i32
+   278→- Verified all function parameters of integer/pointer type are forced to I32 (lines 1606-1612)
+   279→- Verified IRInstr::Offset uses I32Add, IRInstr::Alloc uses I32Add for heap pointer arithmetic
+   280→- Verified Load/Store push addresses as I32, offsets truncated via (*offset).max(0) as u32
+   281→- Verified GetAddress emits I32Const(0) placeholder
+   282→- Found inconsistency: wasm_type_for_dedicated_arith mapped I64/U64 → WasmType::I64, but wasm_type_for_binop mapped all integers → I32. This meant Add/Sub/Mul/Div/Cmp with ty=I64/U64 would try to emit I64 ops, but push_value couldn't emit I64Const for immediates (fell through to I32Const), creating a Wasm stack type mismatch.
+   283→- Fixed wasm_type_for_dedicated_arith: now maps all integer types (including I64/U64) to I32, consistent with wasm_type_for_binop. This ensures all pointer arithmetic on Wasm32 uses i32 operations.
+   284→- Fixed push_value: added explicit WasmType::I64 arm that emits I64Const(*v) instead of falling through to I32Const(*v as i32). This fixes I64Store of immediate values and is needed for proper I64 support when it's eventually enabled.
+   285→- Updated doc comments on both functions to explain the Wasm32 pointer model.
+   286→- Verified I64Const is NOT used for addresses — only for I64 ROL/ROR shift amounts (value 64) and the new push_value I64 immediate path.
+   287→
+   288→Stage Summary:
+   289→- Two bugs fixed in wasm32/mod.rs:
+   290→  1. wasm_type_for_dedicated_arith: I64/U64 now map to I32 on Wasm32 (was I64, inconsistent with wasm_type_for_binop)
+   291→  2. push_value: I64 immediates now emit I64Const instead of being truncated to I32Const
+   292→- All 5 checklist items verified:
+   293→  1. IRType::Ptr → WasmType::I32 ✓
+   294→  2. Pointer arithmetic uses i32 ops ✓
+   295→  3. Address/Ptr function params handled as i32 ✓
+   296→  4. u64 pointer offsets truncated to i32 ✓
+   297→  5. No i64.const for addresses ✓
+   298→---
+   299→Task ID: 2-f
+   300→Agent: sub
+   301→Task: Check and fix Wasm32 load/store instruction encoding for proper alignment values
+   302→
+   303→Work Log:
+   304→- Read wasm32/mod.rs and identified the IR Load/Store lowering code (lines ~1978-2008)
+   305→- Verified that the binary encoding of load/store instructions (opcode + align LEB128 + offset LEB128) was already correct
+   306→- Verified that LEB128 encoding function (encode_unsigned_leb128) is correct for both align and offset fields
+   307→- Found critical bug: IR Load/Store lowering mapped all sub-32-bit types (I8, U8, I16, U16) to I32Load/I32Store with align=2, which is semantically wrong
+   308→  - i32.load reads 4 bytes; for byte/halfword accesses the Wasm spec has dedicated instructions
+   309→  - Using i32.load for a byte access reads 3 extra bytes from memory (undefined behavior / wrong values)
+   310→- Fixed Load lowering: now matches on IR type directly to select the correct instruction:
+   311→  - I8 → I32Load8S { align: 0 } (1 byte, sign-extend)
+   312→  - U8 → I32Load8U { align: 0 } (1 byte, zero-extend)
+   313→  - I16 → I32Load16S { align: 1 } (2 bytes, sign-extend)
+   314→  - U16 → I32Load16U { align: 1 } (2 bytes, zero-extend)
+   315→  - I32/U32/Ptr/Func → I32Load { align: 2 } (4 bytes, natural alignment)
+   316→  - I64/U64 → I64Load { align: 3 } (8 bytes, natural alignment)
+   317→  - F32 → F32Load { align: 2 }, F64 → F64Load { align: 3 }
+   318→- Fixed Store lowering with same pattern:
+   319→  - I8/U8 → I32Store8 { align: 0 }
+   320→  - I16/U16 → I32Store16 { align: 1 }
+   321→  - I32/U32/Ptr/Func → I32Store { align: 2 }
+   322→  - I64/U64 → I64Store { align: 3 }
+   323→  - F32 → F32Store { align: 2 }, F64 → F64Store { align: 3 }
+   324→- Updated existing test that incorrectly asserted i32.load for an I64-typed load (now correctly asserts i64.load/i64.store)
+   325→- Added test_load_store_alignment_values: verifies all 14 load/store opcodes encode with correct alignment
+   326→- Added test_load_store_offset_leb128: verifies offset is properly LEB128-encoded (tests multi-byte offsets 128 and 16384)
+   327→
+   328→Stage Summary:
+   329→- Fixed two bugs in IR→Wasm Load/Store lowering:
+   330→  1. Sub-32-bit types now use correct byte/halfword load/store instructions instead of i32.load/i32.store
+   331→  2. Alignment values are now correct per Wasm spec: log2(access_size) — 0 for byte, 1 for halfword, 2 for word, 3 for doubleword
+   332→- LEB128 offset encoding was already correct (verified)
+   333→- Binary encoding of all WasmInstr load/store variants was already correct (verified opcodes and field order)
+   334→---
+   335→Task ID: 2-b
+   336→Agent: sub
+   337→Task: Add global variable support to the Wasm32 module builder
+   338→
+   339→Work Log:
+   340→- Analyzed existing WasmModuleBuilder: globals field (Vec<WasmGlobal>) already existed, but WasmGlobal used val_type/init_expr fields and no add_global() method
+   341→- Changed WasmGlobal struct fields from val_type/init_expr to ty (WasmType) / mutable (bool) / init_value (i64) per task spec
+   342→- Updated encode() global section to generate init expr from init_value at encode time (i32.const/i64.const + signed LEB128 + 0x0B end)
+   343→- Added add_global() method to WasmModuleBuilder (returns global index)
+   344→- Added __heap_ptr global (mutable i32, init_value 65536) in encode_program() before function processing
+   345→- Changed memory min pages from 1 to 2 (128KB) in encode_program() so heap has room past 64KB boundary
+   346→
+   347→Stage Summary:
+   348→- WasmGlobal now has ty/mutable/init_value fields instead of val_type/init_expr
+   349→- add_global() method added to WasmModuleBuilder
+   350→- __heap_ptr global emitted as global index 0 (aligns with existing HEAP_PTR_GLOBAL_IDX constant)
+   351→- Memory minimum set to 2 pages (128KB) with heap starting at 65536 (page 2)
+   352→- Global section (ID 6) encoding properly generates i32.const 65536 + end init expr
+   353→---
+   354→Task ID: 2-a
+   355→Agent: sub
+   356→Task: Fix Wasm32 bump allocator in mod.rs (IRInstr::Alloc/Free)
+   357→
+   358→Work Log:
+   359→- Read full wasm32/mod.rs to understand structure (4263 lines)
+   360→- Found that the bump allocator implementation was already in place from a prior agent (Task 2-b)
+   361→- Verified all 5 required components are present and correct:
+   362→  1. HEAP_PTR_GLOBAL_IDX constant (u32 = 0) at line 1007
+   363→  2. HEAP_START constant (i32 = 65536) at line 1011
+   364→  3. WasmGlobal struct with ty/mutable/init_value fields (replaces old val_type/init_expr)
+   365→  4. add_global() method on WasmModuleBuilder
+   366→  5. IRInstr::Alloc uses bump allocator: GlobalGet → pop_to_vreg → GlobalGet → I32Const(aligned_size) → I32Add → GlobalSet
+   367→  6. IRInstr::Free is a no-op (bump allocator doesn't free)
+   368→  7. Memory min pages = 2 in encode_program()
+   369→  8. __heap_ptr global added in encode_program() (mutable i32, init_value = HEAP_START)
+   370→- Fixed misleading comment in Alloc: old comment described runtime alignment (i32.const 7 / i32.or / i32.const ~7 / i32.and) but code does compile-time alignment — updated comment to accurately reflect the generated instructions
+   371→- Changed encode_program() to use HEAP_START as i64 constant instead of hardcoded 65536 for consistency with the constant definition
+   372→- Verified global section encoding correctly uses new struct fields (g.ty.to_byte(), g.mutable, g.init_value with signed LEB128)
+   373→- Verified no remaining references to old val_type/init_expr fields in WasmGlobal
+   374→- Verified test coverage: test_wasm32_allocate_and_store checks global.get/global.set in opcodes, test_wasm32_full_module_structure validates global section encoding and HEAP_START init value
+   375→
+   376→Stage Summary:
+   377→- Bump allocator implementation verified complete and correct
+   378→- Two minor fixes applied: updated misleading Alloc comment, used HEAP_START constant in encode_program
+   379→- All 5 task requirements satisfied:
+   380→  1. ✅ __heap_ptr global at index 0 (mutable i32, init 65536)
+   381→  2. ✅ Alloc returns linear memory address via GlobalGet, advances pointer by aligned size
+   382→  3. ✅ Free is a no-op
+   383→  4. ✅ Mutable i32 global emitted in module (global section)
+   384→  5. ✅ Module has 2 pages minimum (128KB)
+   385→---
+   386→Task ID: 2-g
+   387→Agent: sub
+   388→Task: Wasm32 tests and validation
+   389→
+   390→Work Log:
+   391→- Read worklog.md for context and existing task history
+   392→- Read full wasm32/mod.rs to understand test patterns (file is ~4264 lines)
+   393→- Found all 62 existing #[test] functions in the wasm32 module
+   394→- Identified existing test pattern: make_simple_func() helper, Wasm32Backend::new(), allocate_registers(), opcode string checks on AllocatedInstruction, encoded byte verification
+   395→- Found the bump allocator was already implemented (from prior Task 2-a/2-b):
+   396→  - IRInstr::Alloc lowers to: GlobalGet(0) → pop_to_vreg → GlobalGet(0) → I32Const(aligned_size) → I32Add → GlobalSet(0)
+   397→  - HEAP_PTR_GLOBAL_IDX = 0, HEAP_START = 65536
+   398→  - WasmModuleBuilder.add_global() adds __heap_ptr, encode_program() includes it
+   399→- Added test_wasm32_bump_allocator (line ~3894):
+   400→  - Creates IR function with Alloc { dst: Reg(0), size: 16 }
+   401→  - Verifies opcodes contain global.get and global.set
+   402→  - Verifies encoded bytes contain 0x23 (global.get) and 0x24 (global.set)
+   403→  - Verifies returned address is from linear memory: checks that no i32.const with a small local-index value (< 8) is used as the allocated address; only the allocation size constant is allowed
+   404→- Added test_wasm32_allocate_and_store (line ~3982):
+   405→  - Creates IR function with Alloc, Store, and Load instructions
+   406→  - Verifies opcodes contain i32.store and i32.load
+   407→  - Verifies encoded bytes contain 0x36 (i32.store) and 0x28 (i32.load)
+   408→  - Verifies i32.store starts with opcode byte 0x36 and i32.load starts with 0x28
+   409→  - Also verifies bump allocator global.get/global.set present
+   410→- Added test_wasm32_full_module_structure (line ~4089):
+   411→  - Builds complete Wasm module via WasmModuleBuilder with type, memory, global, function, code, export sections
+   412→  - Adds __heap_ptr global (mutable i32, init_value = HEAP_START = 65536)
+   413→  - Verifies heap_ptr_idx == HEAP_PTR_GLOBAL_IDX (0)
+   414→  - Encodes module and verifies magic/version header
+   415→  - Parses binary section by section, verifying type, memory, global, export, code sections exist
+   416→  - In global section: verifies 1 global, type i32 (0x7F), mutable (0x01), init expr i32.const (0x41) + value + end (0x0B)
+   417→  - Verifies __heap_ptr init value equals HEAP_START (65536)
+   418→  - Re-parses all sections for well-formedness check (5+ sections)
+   419→- Fixed unused variable warning: section_id → _section_id in well-formedness check loop
+   420→- Note: Full test suite cannot be run due to pre-existing compilation errors in other modules (emit.rs, arm32, ir.rs, loongarch64, mips64, opt.rs, ppc64, regalloc.rs — missing `ty` field on IRInstr::Add/Sub/BinOp/Cmp, missing functions, type mismatches). These are unrelated to the new tests.
+   421→
+   422→Stage Summary:
+   423→- 3 new tests added to wasm32/mod.rs test module:
+   424→  1. test_wasm32_bump_allocator — verifies Alloc uses global.get/global.set for __heap_ptr and returns linear memory addresses
+   425→  2. test_wasm32_allocate_and_store — verifies Alloc + Store + Load produce i32.load/i32.store with proper encoding
+   426→  3. test_wasm32_full_module_structure — verifies complete .wasm module encoding with globals, memory, function, and __heap_ptr global section
+   427→- All tests follow existing patterns (make_simple_func, Wasm32Backend, AllocatedInstruction, WasmModuleBuilder)
+   428→- No changes to production code — bump allocator was already correctly implemented by prior tasks
+   429→---
+   430→Task ID: 2-h
+   431→Agent: sub
+   432→Task: Wasm32 scg_to_ir ptr handling — check and fix pointer/address handling for 32-bit targets
+   433→
+   434→Work Log:
+   435→- Read scg_to_ir.rs: Found Alloc/Free lowering at lines 1227-1265
+   436→  - Alloc produces `IRInstr::Alloc { dst, size: u32 }` — correct, target-independent
+   437→  - Heap alloc lowers to `Call { func: "__vuma_alloc", args: [size_val] }` — correct
+   438→  - No `size_of`/`alignment_of` calls in scg_to_ir.rs — target-independent as-is
+   439→  - No `IRValue::Address` values created in scg_to_ir.rs
+   440→- Read ir.rs: Found `IRType::Ptr` and `IRValue::Address(u64)` definitions
+   441→  - `size_of`/`alignment_of` were hardcoded for ARM64 LP64 (Ptr = 8 bytes)
+   442→  - `Wasm32TargetInfo` and `Arm32TargetInfo` had manual overrides to return 4 for Ptr/Func
+   443→  - `IRValue::Address(u64)` could hold values > u32::MAX with no validation for 32-bit targets
+   444→- Read Wasm32 backend (wasm32/mod.rs): Already handles pointers as i32 correctly
+   445→  - `WasmType::from_ir_type` maps `Ptr` → `I32`
+   446→  - `push_value` casts `Address` with `*addr as i32` (unsafe truncation)
+   447→  - Alloc maps to Wasm locals (not linear memory — known architectural limitation)
+   448→- Checked stack_slot_isel: Wasm32 does NOT use stack_slot_isel pattern — has its own lowering
+   449→- No u64 address constants found that would overflow on Wasm32
+   450→
+   451→Fixes Applied:
+   452→1. ir.rs: Added `size_of_with_ptr_width(ty, ptr_width)` and `alignment_of_with_ptr_width(ty, ptr_width)` functions that correctly handle Ptr/Func sizes based on target pointer width
+   453→2. ir.rs: Refactored `size_of`/`alignment_of` to delegate to `size_of_with_ptr_width(ty, 8)` / `alignment_of_with_ptr_width(ty, 8)` (backward-compatible, ARM64 LP64 default)
+   454→3. backend.rs: Updated all TargetInfo implementations to use the new parameterized functions instead of manual match overrides:
+   455→   - Wasm32TargetInfo: `size_of_with_ptr_width(ty, 4)`
+   456→   - Arm32TargetInfo: `size_of_with_ptr_width(ty, 4)` (with i64 alignment override preserved)
+   457→   - All 64-bit targets: `size_of_with_ptr_width(ty, 8)`
+   458→4. ir.rs: Updated `IRType` doc comment from "ARM64 LP64" to target-independent description
+   459→5. ir.rs: Updated `IRType::Ptr` doc comment to document target-dependent size
+   460→6. ir.rs: Added `IRValue::as_address_32bit()` method that returns `None` for addresses > u32::MAX (safe 32-bit extraction)
+   461→7. ir.rs: Updated `IRValue::Address` doc comment to reference `as_address_32bit`
+   462→8. ir.rs: Added test assertions for `size_of_with_ptr_width` with ptr_width=4 and ptr_width=8
+   463→9. ir.rs: Added test assertions for `alignment_of_with_ptr_width` with ptr_width=4 and ptr_width=8
+   464→10. ir.rs: Added test assertions for `as_address_32bit` (valid, boundary, overflow cases)
+   465→
+   466→Stage Summary:
+   467→- scg_to_ir.rs Alloc/Free lowering is target-independent and correct — no changes needed
+   468→- Key fix: `size_of`/`alignment_of` now have target-parameterized variants that correctly compute Ptr/Func sizes for 32-bit targets
+   469→- Wasm32/ARM32 backends now use the parameterized functions for struct layout with pointer fields
+   470→- `IRValue::Address(u64)` now has a safe 32-bit extraction method `as_address_32bit()`
+   471→- Full project builds successfully (cargo build passes)
+   472→- Pre-existing test compilation errors in wasm32/mod.rs tests are unrelated to these changes
+   473→---
+   474→Task ID: 2-e
+   475→Agent: sub
+   476→Task: Wasm32 emit.rs integration
+   477→
+   478→Work Log:
+   479→- Read emit.rs (5356 lines) and identified all Wasm32-specific code paths:
+   480→  1. `em_machine_for_backend(Wasm32)` → returned `EM_AARCH64` with comment "Wasm doesn't produce native ELF"
+   481→  2. `call_reloc_type_for_backend(Wasm32)` → returned `R_AARCH64_CALL26` with comment "Wasm doesn't produce native ELF"
+   482→  3. These were silent fallback values that would produce corrupt ELF if called
+   483→- Read pipeline.rs: Stage 10 unconditionally called `emit_elf()` for all backends including Wasm32
+   484→- Read Wasm32Backend::encode_program: confirmed _start function was already correctly wired up by prior task (2-c):
+   485→  - WASI proc_exit import at function index 0
+   486→  - _start wrapper that calls main() and passes return value to proc_exit
+   487→  - _start exported as "_start" and set as Wasm start function via `module.set_start()`
+   488→- Read Emitter struct: entirely ARM64-specific (emits ARM64 instructions, uses AAPCS64 calling convention)
+   489→- Identified 6 critical issues:
+   490→  1. No `OutputFormat::Wasm` variant — Wasm had no output format in emit.rs
+   491→  2. No `Target::Wasm32` variant — Wasm had no target platform
+   492→  3. No `EmitConfig::wasm_binary()` — no way to configure Wasm emission
+   493→  4. No `emit_wasm()` function — no way to produce .wasm output from emit.rs
+   494→  5. `emit_elf`/`emit_raw`/`emit_obj` would silently produce garbage for Wasm32
+   495→  6. Pipeline always called `emit_elf()` regardless of backend
+   496→
+   497→Changes to emit.rs:
+   498→1. Added `OutputFormat::Wasm` variant to OutputFormat enum
+   499→2. Added `Target::Wasm32` variant to Target enum
+   500→3. Added `EmitConfig::wasm_binary()` constructor (Wasm format, Wasm32 backend, entry_name "_start")
+   501→4. Updated `effective_base_addr()` to handle `Target::Wasm32` (returns 0)
+   502→5. Changed `em_machine_for_backend()` return type from `u16` to `Result<u16>`:
+   503→   - All native backends return `Ok(machine)`
+   504→   - Wasm32 returns `Err(CodegenError::ElfError(...))` with clear message
+   505→6. Changed `call_reloc_type_for_backend()` return type from `u32` to `Result<u32>`:
+   506→   - All native backends return `Ok(reloc_type)`
+   507→   - Wasm32 returns `Err(CodegenError::ElfError(...))` with clear message
+   508→7. Added early-rejection guard in `emit_elf()`: returns error if backend is Wasm32 or format is Wasm
+   509→8. Added early-rejection guard in `emit_raw()`: same check
+   510→9. Added early-rejection guard in `emit_obj()`: returns error if backend is Wasm32
+   511→10. Added `emit_wasm()` function:
+   512→    - Uses `Wasm32Backend` to allocate registers (lower IR → Wasm bytecode)
+   513→    - Calls `backend.encode_program()` to produce .wasm binary
+   514→    - Proper error mapping from BackendError → CodegenError
+   515→11. Added `emit_binary()` dispatcher function:
+   516→    - Routes to `emit_elf` for ELF/Obj format
+   517→    - Routes to `emit_raw` for Raw format
+   518→    - Routes to `emit_wasm` for Wasm format
+   519→12. Updated `Emitter::emit_program()` to use `emit_binary()` instead of `emit_elf()`
+   520→13. Added 6 new tests:
+   521→    - test_emit_elf_rejects_wasm32: verifies emit_elf returns error for Wasm32
+   522→    - test_emit_raw_rejects_wasm32: verifies emit_raw returns error for Wasm32
+   523→    - test_emit_obj_rejects_wasm32: verifies emit_obj returns error for Wasm32
+   524→    - test_emit_binary_dispatches_wasm: verifies emit_binary produces valid .wasm with magic number
+   525→    - test_emit_wasm_produces_valid_module: verifies emit_wasm produces Wasm magic + version
+   526→    - test_emit_config_wasm_binary: verifies EmitConfig::wasm_binary() defaults
+   527→14. Updated existing tests for `em_machine_for_backend` and `call_reloc_type_for_backend`:
+   528→    - Added `.unwrap()` calls since functions now return Result
+   529→    - Added Wasm32 error assertions
+   530→
+   531→Changes to pipeline.rs:
+   532→1. Changed import from `emit_elf` to `emit_binary`
+   533→2. Changed Stage 10 call from `emit_elf()` to `emit_binary()`
+   534→
+   535→Build verification:
+   536→- `cargo build` passes (entire project)
+   537→- `cargo test --package vuma` passes (20 tests)
+   538→- `cargo test --package vuma-tests` passes (153 tests)
+   539→- Pre-existing wasm32/mod.rs test compilation errors (missing `ty` field on IRInstr) are unrelated to these changes
+   540→
+   541→Stage Summary:
+   542→- Wasm32 now has its own complete emission pipeline through emit.rs
+   543→- ELF/raw/obj emitters properly reject Wasm32 with clear error messages
+   544→- `emit_binary()` provides a single entry point that dispatches to the correct emitter
+   545→- `emit_wasm()` bridges IR → Wasm32Backend → .wasm binary output
+   546→- Pipeline now uses `emit_binary()` instead of `emit_elf()` for format-agnostic emission
+   547→- _start function was already correctly wired in Wasm32Backend::encode_program (by prior Task 2-c)
+   548→
+   549→---
+   550→Task ID: 3-a
+   551→Agent: general-purpose
+   552→Task: LoongArch64 encoding audit
+   553→
+   554→Work Log:
+   555→- Full audit of all LoongArch64 instruction encodings against the ISA specification
+   556→- Verified all 3R-format opcodes (ADD/SUB/SLT/SLTU/NOR/AND/OR/XOR/ORN/ANDN/shifts/rotates/mul/div): all correct
+   557→- Verified all 2RI12-format opcodes (ADDI/SLTI/SLTUI/ANDI/ORI/XORI/loads/stores): all correct
+   558→- Verified all 2RI16-format branch opcodes (BEQ/BNE/BLT/BGE/BLTU/BGEU/JIRL): all correct
+   559→- Verified I26-format opcodes (B=0x14, BL=0x15): correct
+   560→- Verified 1RI21-format opcodes (BEQZ=0x10, BNEZ=0x11): correct
+   561→- Verified reg1i20-format opcodes (LU12I_W=0x0A, LU32I_D=0x0B): correct
+   562→- Verified reg2i5/reg2i6 shift immediate opcodes: correct
+   563→- Verified 2R-format opcodes (EXT_W_H, EXT_W_B, CLO_D): correct
+   564→- Verified FP opcodes (FADD/FSUB/FMUL/FDIV/FMOV/FCMP/FLD/FST): correct
+   565→- Verified _start stub and return_stub: correct (sys_exit=93, jirl $r0,$ra,0)
+   566→
+   567→Bugs found and fixed:
+   568→1. **PCADDU12I/PCADDU18I wrong encoding format** (CRITICAL): Was using 1RI21 format
+   569→   (6-bit opcode at bits[31:26], imm20 at bits[25:6]) instead of reg1i20 format
+   570→   (7-bit opcode at bits[31:25], si20 at bits[24:5]). This produced opcode 0x38000000
+   571→   instead of the correct 0x1C000000 for PCADDU12I $r0, 0. Fixed to use reg1i20.
+   572→2. **UDiv/URem using signed division** (HIGH): BinOpKind::UDiv used Instruction::DivD
+   573→   instead of DivDu, and URem used ModD instead of ModDu. This would produce wrong
+   574→   results for large unsigned values. Fixed to use DivDu/ModDu.
+   575→3. **load_imm_la64 broken 64-bit immediate loading** (HIGH): The function had a broken
+   576→   workaround that avoided LU32I.D (commented "lu32i.d is actually pcaddi in QEMU").
+   577→   The workaround used LU12I_W + SLLI.D 32 to set bits[51:32], but this places the
+   578→   value at bits[63:44] (12 bits too high) due to LU12I.W shifting the immediate by 12.
+   579→   Replaced with the correct 4-instruction sequence: LU12I.W + ORI + LU32I.D + LU52I.D,
+   580→   with each upper-bit instruction emitted only when needed.
+   581→4. **test_encode_sub_d wrong expected opcode** (MEDIUM): Test used 0x0031 (OPC_SLL_D)
+   582→   instead of 0x0023 (OPC_SUB_D). Fixed.
+   583→5. **test_encode_bl wrong expected layout** (MEDIUM): Test assumed linear offset layout
+   584→   ((0x15<<26)|0x100) instead of I26 split format ((0x15<<26)|(0x100<<10)). Fixed.
+   585→
+   586→Non-critical issues noted but not fixed:
+   587→- FmovGr2FprD/FmovFpr2GrD variant names are swapped relative to their semantics
+   588→  (FmovGr2FprD actually does MOVFR2GR.D, i.e., FPR→GPR), but opcodes/operands correct
+   589→- decode_loongarch64_instruction disassembler uses bits[6:0] as opcode (wrong for LA64)
+   590→  but only affects debug output, not code generation
+   591→
+   592→---
+   593→Task ID: 3-d
+   594→Agent: general-purpose
+   595→Task: Research and verify the LoongArch64 calling convention used in the VUMA backend
+   596→
+   597→Work Log:
+   598→- Read loongarch64/mod.rs and loongarch64/stack_slot_isel.rs to analyze the full calling convention implementation
+   599→- Verified register definitions are correct: Gpr enum matches LP64 ABI (a0-a7 = r4-r11, t0-t8 = r12-r20, fp = r22, s0-s8 = r23-r31)
+   600→- Verified is_callee_saved() correctly identifies fp + s0-s8 (not ra — ra is handled separately in prologue/epilogue)
+   601→- Verified Gpr::arg_register() correctly supports indices 0-7 (a0-a7)
+   602→
+   603→Bugs Found and Fixed:
+   604→
+   605→1. **Only 6 argument registers used instead of 8** (HIGH): In stack_slot_isel.rs, both the prologue
+   606→   parameter storage and the Call instruction handler used hardcoded arrays of only 6 arg registers
+   607→   [A0-A5], dropping parameters/arguments 6 and 7. The LP64 ABI specifies 8 arg registers (A0-A7).
+   608→   Fixed by extending arrays to include A6 and A7.
+   609→
+   610→2. **No support for stack-passed arguments** (HIGH): Arguments beyond 8 (now correctly beyond 8
+   611→   instead of beyond 6) were silently dropped. The LP64 ABI requires args 8+ to be passed on the
+   612→   stack at $sp+0, $sp+8, etc. Fixed by:
+   613→   - Adding outgoing_arg_size calculation (scan all Call instructions for max stack args)
+   614→   - Including outgoing_arg_size in frame_size computation
+   615→   - Storing stack-passed arguments at $sp+offset BEFORE loading register arguments (to avoid
+   616→     clobbering)
+   617→   - Loading stack-passed parameters from $fp+(i-8)*8 in prologue
+   618→
+   619→3. **Second return value not placed in $a1** (MEDIUM): The Return handler only placed the first
+   620→   return value in $a0. The LP64 ABI uses $a0 and $a1 for return values. Fixed by adding handling
+   621→   for the second return value (vals[1]) to be placed in S1 ($a1) in both stack_slot_isel.rs and
+   622→   the old lower_ir_block code in mod.rs.
+   623→
+   624→4. **loongarch64_compute_frame_size missing outgoing arg area** (MEDIUM): The helper function in
+   625→   mod.rs didn't account for stack-passed arguments. Added scanning for Call instructions and
+   626→   including outgoing_arg_size in the frame size.
+   627→
+   628→5. **Old lower_ir_block Call handler silently dropped args 8+** (MEDIUM): Added stack-passed
+   629→   argument support to the old code path in mod.rs for consistency.
+   630→
+   631→6. **Maskeqz/Masknez missing from mnemonic() and Display match arms** (FIXED): Pre-existing
+   632→   issue where Instruction::Maskeqz and Instruction::Masknez were added to the enum and encode()
+   633→   but not to the mnemonic() and fmt::Display implementations. Added missing match arms.
+   634→
+   635→Verified Correct (no changes needed):
+   636→- Prologue correctly saves $ra and $fp, sets $fp = old $sp, decrements $sp by frame_size
+   637→- Epilogue correctly restores $ra and $fp from $fp-relative offsets, restores $sp, returns via jirl
+   638→- Stack alignment is 16-byte (frame_size rounded up to 16)
+   639→- Callee-saved register handling is correct: stack-slot ISel only uses scratch registers (A0, A1, T0,
+   640→  T1) which are all caller-saved, so only $ra and $fp need saving/restoring
+   641→- BL instruction correctly saves return address to $ra and is patched via R_LARCH_B26 relocations
+   642→
+   643→---
+   644→Task ID: 3-e
+   645→Agent: sub-agent
+   646→Task: LoongArch64 disasm.rs audit and fix
+   647→
+   648→Work Log:
+   649→- Audited disasm.rs against mod.rs encoding constants and the LoongArch ISA specification
+   650→- Found ALL 3R opcodes were wrong (except ADD.W=0x0020 and ADD.D=0x0021):
+   651→  - SubW: 0x0030→0x0022, SubD: 0x0031→0x0023, Slt: 0x0040→0x0024, Sltu: 0x0041→0x0025
+   652→  - And: 0x0080→0x0029, Or: 0x0081→0x002A, Xor: 0x0082→0x002B, Nor: 0x0083→0x0028
+   653→  - Andn: 0x0084→0x002D, Orn: 0x0085→0x002C
+   654→  - SllW: 0x0089→0x002E, SrlW: 0x008A→0x002F, SraW: 0x008B→0x0030
+   655→  - SllD: 0x008C→0x0031, SrlD: 0x008D→0x0032, SraD: 0x008E→0x0033
+   656→  - RotrW: 0x008F→0x0036, RotrD: 0x0090→0x0037
+   657→  - MulW: 0x0098→0x0038, MulD: 0x0099→0x003B
+   658→  - DivW: 0x009E→0x0040, ModW: 0x009F→0x0041, DivD: 0x00A0→0x0044, ModD: 0x00A1→0x0045
+   659→- Found ALL FP 3R opcodes wrong (e.g., FaddS: 0x0100→0x0201, FaddD: 0x0101→0x0202, etc.)
+   660→- Found shift immediate instructions decoded using wrong 2RI8 format instead of correct reg2i5/reg2i6 formats
+   661→  - Replaced 2RI8 match block with reg2i5 (in 3R match, .W shifts) and reg2i6 (separate block, .D shifts)
+   662→  - Fixed immediate extraction: reg2i5 uses 5-bit imm at bits[14:10], reg2i6 uses 6-bit imm at bits[15:10]
+   663→- Found FP load/store 2RI12 opcodes wrong: FldS 0x0AB→0x0AC, FldD 0x0AC→0x0AE, FstD 0x0AE→0x0AF
+   664→- Found 1RI21 opcodes wrong: BEQZ 0x1C→0x10, BNEZ 0x1D→0x11
+   665→- Found 1RI21 offset extraction completely wrong: extracted from bits[25:21]+bits[20:5] instead of bits[25:10]+bits[4:0]
+   666→- Found I26 offset extraction completely wrong: extracted from bits[25:16]+bits[15:0] instead of bits[25:10]+bits[9:0]
+   667→- Found ALL 2R opcodes wrong: ExtWH 0x5A→0x016, ExtWB 0x5B→0x017, FmovS 0x4E→0x04525, FmovD 0x4F→0x04526, MovFR2GR.D 0x52→0x0452E, MovGR2FR.D 0x53→0x0452A
+   668→- Found 4R FP compare opcodes wrong: FCmpS 0x0C4→0x0C1, FCmpD 0x0C5→0x0C2
+   669→- Added sign_extend_26 function for I26 branch offsets
+   670→- Added missing DivWu, ModWu, DivDu, ModDu instruction decodings
+   671→- Added opcode constants (matching mod.rs) as named constants in disasm.rs for clarity
+   672→- Moved 2R and 4R format checks before 3R to match longest-opcode-first convention
+   673→- Added comprehensive tests for all instruction categories
+   674→- Verified all opcodes match mod.rs using Python cross-check
+   675→- Library compiles cleanly with `cargo check --lib` (no errors in disasm.rs)
+   676→
+   677→Stage Summary:
+   678→- Fixed 50+ incorrect opcode values across all instruction formats
+   679→- Fixed 2 critical branch offset extraction bugs (I26 and 1RI21)
+   680→- Fixed shift immediate decoding from wrong 2RI8 format to correct reg2i5/reg2i6
+   681→- All opcodes now match mod.rs encoder constants and LoongArch ISA specification
+   682→
+   683→---
+   684→Task ID: 3-b
+   685→Agent: sub-agent
+   686→Task: LoongArch64 stack_slot_isel.rs audit and fix
+   687→
+   688→Work Log:
+   689→- Read and audited the full stack_slot_isel.rs (1218 lines) for correctness
+   690→- Checked stack slot allocation/access, function arg passing, prologue/epilogue,
+   691→  call/return handling, alloc/free mapping, off-by-one errors, and 16-byte alignment
+   692→
+   693→Bugs Found and Fixed:
+   694→
+   695→1. **CRITICAL: Only 6 arg registers instead of 8** — The LoongArch64 LP64 ABI specifies
+   696→   that the first 8 general-purpose arguments go in $a0-$a7, but the code only listed
+   697→   $a0-$a5 (6 registers). This means params 6 and 7 would be silently dropped.
+   698→   - Fixed both prologue param reception and Call arg setup to use all 8 registers.
+   699→   - Also added stack-passed parameter reception for params 8+ in the prologue
+   700→     (loaded from $fp + (i-8)*8 per the ABI).
+   701→
+   702→2. **CRITICAL: Select used hardcoded branch offset** — The Select instruction used
+   703→   `beqz S2, +2` (skip 1 instruction), which only works when the subsequent store is
+   704→   a single instruction. For large stack offsets, `encode_store_to_vreg` generates
+   705→   multiple instructions, causing the branch to land in the middle of the store
+   706→   sequence and corrupt data.
+   707→   - Fixed by replacing the conditional branch approach with a branchless sequence
+   708→     using LoongArch64's maskeqz/masknez instructions:
+   709→     `maskeqz S0, S0, S2; masknez S1, S1, S2; or S0, S0, S1`
+   710→
+   711→3. **CRITICAL: Call didn't allocate stack space for >8 args** — When calling a function
+   712→   with more than 8 arguments, args 8+ were stored at [sp + offset] without first
+   713→   decrementing sp, which would overwrite the caller's own stack frame data.
+   714→   - Fixed by adding proper stack space allocation before storing stack arguments
+   715→     and deallocation after the call. Stack arg space is 16-byte aligned per ABI.
+   716→
+   717→4. **Added Maskeqz/Masknez instructions to the Instruction enum** — These LoongArch64
+   718→   3R-format instructions (opcodes 0x0026 and 0x0027) were missing from the encoder.
+   719→   - Added opcode constants OPC_MASKEQZ/OPC_MASKNEZ
+   720→   - Added Instruction::Maskeqz and Instruction::Masknez variants
+   721→   - Added encoding (using encode_3r), mnemonic, and Display implementations
+   722→
+   723→Audit Results (No Bugs Found):
+   724→- Prologue/epilogue: Correct. $ra saved at fp-8, old $fp at fp-16, sp correctly
+   725→  restored by adding frame_size back, return via jirl $r0, $ra, 0.
+   726→- Stack layout: Vreg slots at fp-24, fp-32, etc. — correct, no off-by-one errors.
+   727→- Alloc regions: Correctly placed below vreg area, addresses computed as fp+alloc_off.
+   728→- Frame size: Properly 16-byte aligned using ((size + 15) & !15).
+   729→- Branch patching: Correctly handles I26 (B/BL), 1RI21 (BEQZ/BNEZ), and 2RI16 formats.
+   730→
+   731→Files Modified:
+   732→- src/codegen/src/loongarch64/stack_slot_isel.rs
+   733→- src/codegen/src/loongarch64/mod.rs
+   734→
+   735→---
+   736→Task ID: 3-g
+   737→Agent: general-purpose
+   738→Task: LoongArch64 ELF emission audit and bug fixes
+   739→
+   740→Work Log:
+   741→- Read and analyzed the full LoongArch64 ELF emission pipeline:
+   742→  - `build_loongarch64_elf_2seg()` generates a minimal ELF64 binary with 2 LOAD segments
+   743→  - `encode_program()` builds the _start stub, concatenates function code, patches relocations
+   744→  - `stack_slot_isel.rs` handles intra-function branch patching and records R_LARCH_B26/R_LARCH_64 relocations
+   745→- Verified ELF header correctness:
+   746→  - e_ident: ELFCLASS64 ✓, ELFDATA2LSB (little-endian) ✓, ELFOSABI_LINUX ✓
+   747→  - e_machine = 258 (EM_LOONGARCH) ✓
+   748→  - e_flags = 0x43 (EF_LARCH_ABI_LP64D double-float ABI) ✓
+   749→  - e_entry points to base_addr + text_offset (0x120010000) ✓
+   750→  - e_type = ET_EXEC (2) ✓
+   751→- Verified program headers:
+   752→  - PH1: PT_LOAD, PF_R|PF_X (text segment) ✓
+   753→  - PH2: PT_LOAD, PF_R|PF_W (data segment) ✓
+   754→  - Alignment: p_offset % p_align == p_vaddr % p_align ✓
+   755→- Verified _start stub:
+   756→  - BL main → addi.d $a7, $r0, 93 → syscall 0x0 ✓
+   757→  - exit syscall number 93 is correct for LoongArch64 Linux ✓
+   758→  - BL offset calculation for main is correct ✓
+   759→- Verified R_LARCH_B26 relocation:
+   760→  - BL offset = (target - pc) / 4 in words ✓
+   761→  - Range check: ±128MB (26-bit signed) ✓
+   762→  - Re-encodes full BL instruction ✓
+   763→
+   764→Bugs Found and Fixed:
+   765→1. **GetAddress R_LARCH_64 relocation offset underflow**: The code computed `imm_offset = byte_offset + code.len() - 16`, but `encode_load_imm(S0, 0)` only generates 8 bytes for value 0 (not 16), causing usize underflow. Fixed by using `encode_load_imm_full_64(S0, 0)` which always emits 4 instructions (16 bytes) and computing offset before emitting code.
+   766→2. **R_LARCH_64 relocation not handled in encode_program**: GetAddress recorded R_LARCH_64 relocations that were never patched. Added R_LARCH_64 handling that patches the 4-instruction lu12i.w+ori+lu32i.d+lu52i.d sequence with the target function's virtual address.
+   767→3. **Dead code in encode_program**: Removed unused `imm26` and `existing` variables from the _start BL patching code.
+   768→4. **Missing Gpr::from_encoding**: Added `from_encoding()` method to Gpr enum to support extracting register from existing instructions during relocation patching.
+   769→
+   770→New Functions Added:
+   771→- `encode_load_imm_full_64()` in stack_slot_isel.rs: Always emits 4-instruction sequence (16 bytes) for 64-bit immediate loading, ensuring space for R_LARCH_64 patching.
+   772→- `patch_load_imm_64()` in mod.rs: Patches a 4-instruction load-immediate sequence with a new 64-bit value, used by R_LARCH_64 relocation handling.
+   773→- `Gpr::from_encoding()` in mod.rs: Converts 5-bit encoding back to Gpr variant.
+   774→
+   775→New Tests Added:
+   776→- `test_elf_header_endianness`: Verifies ELFCLASS64 and ELFDATA2LSB
+   777→- `test_elf_header_flags_lp64d`: Verifies e_flags = 0x43 (LP64D ABI)
+   778→- `test_elf_entry_point_points_to_start_stub`: Verifies e_entry = 0x120010000 and first instruction is BL
+   779→- `test_patch_load_imm_64`: Verifies patch_load_imm_64 correctly re-encodes all 4 instructions
+   780→- `test_elf_program_headers`: Verifies 2 PT_LOAD segments with correct flags
+   781→
+   782→Files Modified:
+   783→- src/codegen/src/loongarch64/mod.rs
+   784→- src/codegen/src/loongarch64/stack_slot_isel.rs
+   785→

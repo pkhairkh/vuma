@@ -762,14 +762,16 @@ fn encode_svc(cond: Condition, imm24: u32) -> [u8; 4] {
 
 /// Encode MRS instruction (Move Status Register to GPR).
 ///
-/// Format: `cond[31:28] | 00010000[27:20] | Rd[15:12] | 111100000000[11:0]`
+/// Format: `cond[31:28] | 0001_0R_00[27:20] | 1111[19:16] (SBZ) | Rd[15:12] |
+///         000000000000[11:0] (SBZ)`
 /// For CPSR: R=0. For SPSR: R=1 (bit 22).
 fn encode_mrs(cond: Condition, rd: u32, spsr: bool) -> [u8; 4] {
     let word = (cond.encoding() << 28)
         | (0b0001_0000 << 20)
         | ((spsr as u32) << 22)
-        | ((rd & 0xF) << 12)
-        | 0x0F00; // bits [19:16] = 1111 (SBZ), bits [11:0] = 0
+        | (0b1111 << 16) // bits [19:16] = 1111 (SBZ)
+        | ((rd & 0xF) << 12);
+        // bits [11:0] = 0 by default
     word.to_le_bytes()
 }
 
@@ -1340,7 +1342,7 @@ impl Instruction {
             // ── Multiply ────────────────────────────────────────────
             Instruction::Mul {
                 rd,
-                rn,
+                rn: _,
                 rs,
                 rm,
                 cond,
@@ -1348,7 +1350,7 @@ impl Instruction {
                 *cond,
                 false,
                 rd.encoding(),
-                rn.encoding(),
+                0, // SBZ: bits [15:12] must be 0 for MUL
                 rs.encoding(),
                 rm.encoding(),
             ),
@@ -2107,7 +2109,7 @@ fn build_arm32_runtime() -> Vec<u8> {
 
     // PUSH {r4, lr}
     code.extend_from_slice(&encode_stm(
-        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x5010,
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x4010,
     ));
     // SUB SP, SP, #8  (buffer for hex digits)
     code.extend_from_slice(&encode_dp_imm(
@@ -2211,7 +2213,7 @@ fn build_arm32_runtime() -> Vec<u8> {
     ));
     // POP {r4, pc}
     code.extend_from_slice(&encode_ldm(
-        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x5010,
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8010,
     ));
 
     // ── __vuma_print_int ──
@@ -2221,7 +2223,7 @@ fn build_arm32_runtime() -> Vec<u8> {
 
     // PUSH {r4, r5, r6, lr}
     code.extend_from_slice(&encode_stm(
-        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x5070,
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x4070,
     ));
     // SUB SP, SP, #16 (buffer for digits)
     code.extend_from_slice(&encode_dp_imm(
@@ -2432,14 +2434,14 @@ fn build_arm32_runtime() -> Vec<u8> {
     ));
     // POP {r4, r5, r6, pc}
     code.extend_from_slice(&encode_ldm(
-        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x5070,
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8070,
     ));
 
     // ── __vuma_print_newline ──
     // Write a '\n' character to stdout.
     // PUSH {r0, r1, r2, r7, lr}
     code.extend_from_slice(&encode_stm(
-        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x8707,
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x4087,
     ));
     // Move SP up by 4, store '\n' byte
     // SUB SP, SP, #4
@@ -2478,7 +2480,7 @@ fn build_arm32_runtime() -> Vec<u8> {
     ));
     // POP {r0, r1, r2, r7, pc}
     code.extend_from_slice(&encode_ldm(
-        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8707,
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8087,
     ));
 
     code
@@ -4342,19 +4344,65 @@ mod tests {
 
     #[test]
     fn test_mul_encoding() {
-        // MUL R0, R1, R2 (AL) — Rd=R0, Rn=R1, Rs=R2, Rm=R1
+        // MUL R0, R1, R2 (AL) — Rd=R0, SBZ=0, Rs=R2, Rm=R1
         let instr = Instruction::Mul {
             rd: Gpr::R0,
-            rn: Gpr::R1,
+            rn: Gpr::R1, // rn is unused (SBZ field in MUL encoding)
             rs: Gpr::R2,
             rm: Gpr::R1,
             cond: Condition::Al,
         };
         let bytes = instr.encode();
         let word = u32::from_le_bytes(bytes);
-        // cond=1110, 000000, S=0, Rd[19:16]=0000, Rn[15:12]=0001, Rs[11:8]=0010, 1001, Rm[3:0]=0001
-        let expected = 0xE0001291u32;
+        // cond=1110, 000000, S=0, Rd[19:16]=0000, SBZ[15:12]=0000, Rs[11:8]=0010, 1001, Rm[3:0]=0001
+        let expected = 0xE0000291u32;
         assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_mrs_cpsr_encoding() {
+        // MRS R0, CPSR (AL) — should encode as 0xE10F0000
+        let instr = Instruction::Mrs {
+            rd: Gpr::R0,
+            spsr: false,
+            cond: Condition::Al,
+        };
+        let bytes = instr.encode();
+        let word = u32::from_le_bytes(bytes);
+        // cond=1110, 00010000[27:20], 1111[19:16](SBZ), Rd=0000[15:12], 000000000000[11:0]
+        let expected = 0xE10F0000u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_mrs_spsr_encoding() {
+        // MRS R5, SPSR (AL) — R bit (bit 22) set for SPSR
+        let instr = Instruction::Mrs {
+            rd: Gpr::R5,
+            spsr: true,
+            cond: Condition::Al,
+        };
+        let bytes = instr.encode();
+        let word = u32::from_le_bytes(bytes);
+        // cond=1110, 00010100[27:20] (R=1), 1111[19:16], Rd=0101[15:12], 000000000000[11:0]
+        let expected = 0xE14F5000u32;
+        assert_eq!(word, expected);
+    }
+
+    #[test]
+    fn test_push_pop_register_list() {
+        // Verify PUSH {r4, lr} register list: (1<<4)|(1<<14) = 0x4010
+        assert_eq!((1u16 << 4) | (1u16 << 14), 0x4010);
+        // Verify POP {r4, pc} register list: (1<<4)|(1<<15) = 0x8010
+        assert_eq!((1u16 << 4) | (1u16 << 15), 0x8010);
+        // Verify PUSH {r4,r5,r6,lr}: (1<<4)|(1<<5)|(1<<6)|(1<<14) = 0x4070
+        assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<14), 0x4070);
+        // Verify POP {r4,r5,r6,pc}: (1<<4)|(1<<5)|(1<<6)|(1<<15) = 0x8070
+        assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<15), 0x8070);
+        // Verify PUSH {r0,r1,r2,r7,lr}: (1<<0)|(1<<1)|(1<<2)|(1<<7)|(1<<14) = 0x4087
+        assert_eq!((1u16<<0)|(1u16<<1)|(1u16<<2)|(1u16<<7)|(1u16<<14), 0x4087);
+        // Verify POP {r0,r1,r2,r7,pc}: (1<<0)|(1<<1)|(1<<2)|(1<<7)|(1<<15) = 0x8087
+        assert_eq!((1u16<<0)|(1u16<<1)|(1u16<<2)|(1u16<<7)|(1u16<<15), 0x8087);
     }
 
     // ── Backend Tests ──────────────────────────────────────────────────

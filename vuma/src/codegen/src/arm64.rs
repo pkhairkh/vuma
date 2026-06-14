@@ -3548,6 +3548,14 @@ impl InstructionSelector {
                         self.push(Instruction::MOV { rd, rm: rn });
                     }
                 }
+                CastKind::IntToFloat | CastKind::UIntToFloat |
+                CastKind::FloatToInt | CastKind::FloatToUInt |
+                CastKind::FloatToFloat => {
+                    // FP conversion casts — not yet implemented; pass through.
+                    if rd != rn {
+                        self.push(Instruction::MOV { rd, rm: rn });
+                    }
+                }
             }
         }
     }

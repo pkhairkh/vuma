@@ -1026,6 +1026,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         CastKind::Trunc | CastKind::BitCast => {
                             // No-op: truncation happens naturally when storing to stack
                         }
+                        CastKind::IntToFloat | CastKind::UIntToFloat |
+                        CastKind::FloatToInt | CastKind::FloatToUInt |
+                        CastKind::FloatToFloat => {
+                            // FP conversion casts require FP register support;
+                            // for now, treat as a no-op move.
+                        }
                     }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code

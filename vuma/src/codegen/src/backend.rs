@@ -1045,8 +1045,8 @@ impl TargetInfo for Mips64TargetInfo {
         "n64"
     }
     fn num_int_arg_regs(&self) -> usize {
-        4
-    } // $a0-$a3 (but N64 extends to 8)
+        8
+    } // $a0-$a7 (N64 ABI: $4-$11, $8-$11 are $a4-$a7)
     fn num_fp_arg_regs(&self) -> usize {
         8
     } // $f12-$f19 (N64 FP args)

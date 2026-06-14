@@ -2413,6 +2413,10 @@ fn map_vreg_to_gpr(
 ///
 /// Returns `(Gpr, Vec<u8>)` where the Vec contains any pre-code needed
 /// to materialise the value (e.g. load-immediate sequences).
+///
+/// **Note:** This function has known bugs for certain 32-bit immediates and is
+/// currently unused.  Use `ss_load_value` / `ss_load_imm` instead, which
+/// handle LUI sign-extension correctly.
 fn resolve_gpr(
     val: &IRValue,
     vreg_map: &std::collections::HashMap<u32, Gpr>,
@@ -3804,6 +3808,15 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         if lo != 0 {
             code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
         }
+        // If the value is non-negative but hi has bit 31 set, LUI sign-extends
+        // bit 31 and produces a negative 64-bit result.  Zero-extend with
+        // SLLI 32 + SRLI 32 to clear the upper 32 bits.
+        // This happens for positive i32 values near 0x8000_0000 (e.g. 0x7FFF_FF00)
+        // where the +0x800 rounding pushes hi into the negative-i32 range.
+        if val >= 0 && hi >= 0x8000_0000 {
+            code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
+            code.extend(Instruction::Srli { rd: dst, rs1: dst, shamt: 32 }.encode());
+        }
         return code;
     }
 
@@ -4374,6 +4387,18 @@ impl Backend for RiscV64Backend {
                             CastKind::SExt => {
                                 code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                             }
+                            CastKind::IntToFloat | CastKind::UIntToFloat => {
+                                // FCVT.S.L / FCVT.S.LU or FCVT.D.L / FCVT.D.LU
+                                // Placeholder: treat as no-op for now
+                            }
+                            CastKind::FloatToInt | CastKind::FloatToUInt => {
+                                // FCVT.L.S / FCVT.LU.S or FCVT.L.D / FCVT.LU.D
+                                // Placeholder: treat as no-op for now
+                            }
+                            CastKind::FloatToFloat => {
+                                // FCVT.S.D / FCVT.D.S
+                                // Placeholder: treat as no-op for now
+                            }
                         }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                         code
@@ -4637,7 +4662,7 @@ impl Backend for RiscV64Backend {
         // Layout:
         //   _start:  JAL ra, main        ; call main (result in a0)
         //            ADDI a0, a0, 0       ; (nop, keep result)
-        //            ADDI a7, zero, 93    ; sys_exit_group
+        //            ADDI a7, zero, 93    ; sys_exit (93=exit; for single-threaded, same as exit_group=94)
         //            ECALL                ; syscall
         //   <functions...>
         //   <runtime: print_hex, print_int using ECALL sys_write>
@@ -4645,7 +4670,7 @@ impl Backend for RiscV64Backend {
         // ── _start stub ──
         // JAL ra, <main>    — 4 bytes, needs offset patching
         // ADDI a0, a0, 0    — 4 bytes (nop, keep result)
-        // ADDI a7, zero, 93 — 4 bytes (sys_exit_group = 93 on RISC-V Linux)
+        // ADDI a7, zero, 93 — 4 bytes (sys_exit = 93; exit_group = 94)
         // ECALL             — 4 bytes
 
         let start_stub_size: usize = 16; // 4 × 4-byte instructions
@@ -4687,7 +4712,7 @@ impl Backend for RiscV64Backend {
             .encode(),
         );
 
-        // ADDI a7, zero, 93 (sys_exit_group)
+        // ADDI a7, zero, 93 (sys_exit)
         start_stub.extend_from_slice(
             &Instruction::Addi {
                 rd: Gpr::A7,

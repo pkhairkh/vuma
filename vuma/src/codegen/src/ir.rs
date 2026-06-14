@@ -1129,6 +1129,17 @@ pub enum CastKind {
     Trunc,
     /// Reinterpret bits (no data change, just type change).
     BitCast,
+    /// Integer to floating-point (e.g. i32 → f64).  The source is treated as
+    /// signed; for unsigned conversion use `UIntToFloat`.
+    IntToFloat,
+    /// Unsigned integer to floating-point (e.g. u32 → f64).
+    UIntToFloat,
+    /// Floating-point to signed integer (e.g. f64 → i32).
+    FloatToInt,
+    /// Floating-point to unsigned integer (e.g. f64 → u32).
+    FloatToUInt,
+    /// Floating-point to floating-point (e.g. f32 → f64 or f64 → f32).
+    FloatToFloat,
 }
 
 impl fmt::Display for CastKind {
@@ -1138,6 +1149,11 @@ impl fmt::Display for CastKind {
             CastKind::SExt => "sext",
             CastKind::Trunc => "trunc",
             CastKind::BitCast => "bitcast",
+            CastKind::IntToFloat => "inttofloat",
+            CastKind::UIntToFloat => "uinttofloat",
+            CastKind::FloatToInt => "floattoint",
+            CastKind::FloatToUInt => "floattouint",
+            CastKind::FloatToFloat => "floattofloat",
         })
     }
 }

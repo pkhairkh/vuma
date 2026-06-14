@@ -1119,6 +1119,14 @@ impl Emitter {
                             self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
                         }
                     }
+                    CastKind::IntToFloat | CastKind::UIntToFloat |
+                    CastKind::FloatToInt | CastKind::FloatToUInt |
+                    CastKind::FloatToFloat => {
+                        // FP casts — not yet implemented; pass through.
+                        if rd != rn {
+                            self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
+                        }
+                    }
                 }
             }
 
@@ -2587,6 +2595,11 @@ impl Emitter {
                     }
                     CastKind::Trunc | CastKind::BitCast => {
                         // No-op: just store the value
+                    }
+                    CastKind::IntToFloat | CastKind::UIntToFloat |
+                    CastKind::FloatToInt | CastKind::FloatToUInt |
+                    CastKind::FloatToFloat => {
+                        // FP casts — not yet implemented; pass through.
                     }
                 }
                 self.ss_store_to_slot(Register::X9, dst_offset)?;

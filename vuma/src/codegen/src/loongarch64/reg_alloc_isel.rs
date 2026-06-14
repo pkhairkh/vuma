@@ -730,6 +730,13 @@ fn lower_instr(
                 CastKind::ZExt => { code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode()); code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode()); }
                 CastKind::SExt => { code.extend_from_slice(&Instruction::SlliW { rd: d, rj: d, imm8: 0 }.encode()); }
                 CastKind::Trunc | CastKind::BitCast => {}
+                CastKind::IntToFloat | CastKind::UIntToFloat |
+                CastKind::FloatToInt | CastKind::FloatToUInt |
+                CastKind::FloatToFloat => {
+                    // FP conversion casts require FP register support;
+                    // for now, emit as a no-op move (backends should handle
+                    // via proper FP instructions when available).
+                }
             }
             cache.mark_dirty(dst_id); code
         }

@@ -1,0 +1,502 @@
+   501→   501→   501→        | ((bo & 0x1F) << 21)
+   502→   502→   502→        | ((bi & 0x1F) << 16)
+   503→   503→   503→        | ((bh & 0x7) << 11)
+   504→   504→   504→        | ((xo & 0x3FF) << 1)
+   505→   505→   505→        | (lk & 1);
+   506→   506→   506→    encode_word(word)
+   507→   507→   507→}
+   508→   508→   508→
+   509→   509→   509→// ===========================================================================
+   510→   510→   510→// Instruction Enum
+   511→   511→   511→// ===========================================================================
+   512→   512→   512→
+   513→   513→   513→/// PowerPC64 instruction representations for code generation.
+   514→   514→   514→///
+   515→   515→   515→/// Covers key arithmetic, logical, shift/rotate, load/store, compare, branch,
+   516→   516→   516→/// move, and system instructions. Each variant captures the operands needed for
+   517→   517→   517→/// encoding and disassembly. The `encode()` method produces a 4-byte
+   518→   518→   518→/// little-endian machine code word.
+   519→   519→   519→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   520→   520→   520→pub enum Instruction {
+   521→   521→   521→    // ── Arithmetic ──────────────────────────────────────────────────
+   522→   522→   522→    /// Add: `add rT, rA, rB` (XO-form, primary=31, xo=266)
+   523→   523→   523→    Add { rt: Gpr, ra: Gpr, rb: Gpr },
+   524→   524→   524→    /// Add Immediate: `addi rT, rA, simm16` (D-form, primary=14)
+   525→   525→   525→    Addi { rt: Gpr, ra: Gpr, simm: i32 },
+   526→   526→   526→    /// Add Immediate Shifted: `addis rT, rA, simm16` (D-form, primary=15)
+   527→   527→   527→    Addis { rt: Gpr, ra: Gpr, simm: i32 },
+   528→   528→   528→    /// Subtract From: `subf rT, rA, rB` (XO-form, primary=31, xo=40)
+   529→   529→   529→    Subf { rt: Gpr, ra: Gpr, rb: Gpr },
+   530→   530→   530→    /// Multiply Low Word: `mullw rT, rA, rB` (XO-form, primary=31, xo=235)
+   531→   531→   531→    Mullw { rt: Gpr, ra: Gpr, rb: Gpr },
+   532→   532→   532→    /// Multiply Low Doubleword: `mulld rT, rA, rB` (XO-form, primary=31, xo=233)
+   533→   533→   533→    Mulld { rt: Gpr, ra: Gpr, rb: Gpr },
+   534→   534→   534→    /// Multiply High Word: `mulhw rT, rA, rB` (X-form, primary=31, xo=75)
+   535→   535→   535→    Mulhw { rt: Gpr, ra: Gpr, rb: Gpr },
+   536→   536→   536→    /// Multiply High Doubleword: `mulhd rT, rA, rB` (X-form, primary=31, xo=73)
+   537→   537→   537→    Mulhd { rt: Gpr, ra: Gpr, rb: Gpr },
+   538→   538→   538→    /// Divide Word: `divw rT, rA, rB` (XO-form, primary=31, xo=491)
+   539→   539→   539→    Divw { rt: Gpr, ra: Gpr, rb: Gpr },
+   540→   540→   540→    /// Divide Doubleword: `divd rT, rA, rB` (XO-form, primary=31, xo=459)
+   541→   541→   541→    Divd { rt: Gpr, ra: Gpr, rb: Gpr },
+   542→   542→   542→    /// Divide Word Unsigned: `divwu rT, rA, rB` (XO-form, primary=31, xo=455)
+   543→   543→   543→    Divwu { rt: Gpr, ra: Gpr, rb: Gpr },
+   544→   544→   544→    /// Divide Doubleword Unsigned: `divdu rT, rA, rB` (XO-form, primary=31, xo=457)
+   545→   545→   545→    Divdu { rt: Gpr, ra: Gpr, rb: Gpr },
+   546→   546→   546→    /// Negate: `neg rT, rA` (XO-form, primary=31, xo=104)
+   547→   547→   547→    Neg { rt: Gpr, ra: Gpr },
+   548→   548→   548→    /// Count Leading Zeros Doubleword: `cntlzd rA, rS` (X-form, primary=31, xo=58)
+   549→   549→   549→    Cntlzd { ra: Gpr, rs: Gpr },
+   550→   550→   550→    /// Population Count Doubleword: `popcntd rA, rS` (X-form, primary=31, xo=506)
+   551→   551→   551→    Popcntd { ra: Gpr, rs: Gpr },
+   552→   552→   552→    /// Extend Sign Word: `extsw rA, rS` (X-form, primary=31, xo=986)
+   553→   553→   553→    Extsw { ra: Gpr, rs: Gpr },
+   554→   554→   554→
+   555→   555→   555→    // ── Logical ────────────────────────────────────────────────────
+   556→   556→   556→    /// AND: `and rA, rS, rB` (X-form, primary=31, xo=28)
+   557→   557→   557→    And { ra: Gpr, rs: Gpr, rb: Gpr },
+   558→   558→   558→    /// AND Immediate: `andi. rA, rS, uimm16` (D-form, primary=28, Rc=1)
+   559→   559→   559→    Andi { ra: Gpr, rs: Gpr, uimm: u32 },
+   560→   560→   560→    /// OR: `or rA, rS, rB` (X-form, primary=31, xo=444)
+   561→   561→   561→    Or { ra: Gpr, rs: Gpr, rb: Gpr },
+   562→   562→   562→    /// OR Immediate: `ori rA, rS, uimm16` (D-form, primary=24)
+   563→   563→   563→    Ori { ra: Gpr, rs: Gpr, uimm: u32 },
+   564→   564→   564→    /// XOR: `xor rA, rS, rB` (X-form, primary=31, xo=316)
+   565→   565→   565→    Xor { ra: Gpr, rs: Gpr, rb: Gpr },
+   566→   566→   566→    /// XOR Immediate: `xori rA, rS, uimm16` (D-form, primary=26)
+   567→   567→   567→    Xori { ra: Gpr, rs: Gpr, uimm: u32 },
+   568→   568→   568→    /// NOR: `nor rA, rS, rB` (X-form, primary=31, xo=124)
+   569→   569→   569→    Nor { ra: Gpr, rs: Gpr, rb: Gpr },
+   570→   570→   570→    /// AND with Complement: `andc rA, rS, rB` (X-form, primary=31, xo=60)
+   571→   571→   571→    Andc { ra: Gpr, rs: Gpr, rb: Gpr },
+   572→   572→   572→    /// OR with Complement: `orc rA, rS, rB` (X-form, primary=31, xo=412)
+   573→   573→   573→    Orc { ra: Gpr, rs: Gpr, rb: Gpr },
+   574→   574→   574→    /// Equivalent: `eqv rA, rS, rB` (X-form, primary=31, xo=284)
+   575→   575→   575→    Eqv { ra: Gpr, rs: Gpr, rb: Gpr },
+   576→   576→   576→
+   577→   577→   577→    // ── Shift / Rotate ─────────────────────────────────────────────
+   578→   578→   578→    /// Shift Left Doubleword: `sld rA, rS, rB` (X-form, primary=31, xo=27)
+   579→   579→   579→    Sld { ra: Gpr, rs: Gpr, rb: Gpr },
+   580→   580→   580→    /// Shift Right Doubleword: `srd rA, rS, rB` (X-form, primary=31, xo=539)
+   581→   581→   581→    Srd { ra: Gpr, rs: Gpr, rb: Gpr },
+   582→   582→   582→    /// Shift Right Algebraic Doubleword: `srad rA, rS, rB` (X-form, primary=31, xo=794)
+   583→   583→   583→    Srad { ra: Gpr, rs: Gpr, rb: Gpr },
+   584→   584→   584→    /// Shift Left Word: `slw rA, rS, rB` (X-form, primary=31, xo=24)
+   585→   585→   585→    Slw { ra: Gpr, rs: Gpr, rb: Gpr },
+   586→   586→   586→    /// Shift Right Word: `srw rA, rS, rB` (X-form, primary=31, xo=536)
+   587→   587→   587→    Srw { ra: Gpr, rs: Gpr, rb: Gpr },
+   588→   588→   588→    /// Shift Right Algebraic Word: `sraw rA, rS, rB` (X-form, primary=31, xo=792)
+   589→   589→   589→    Sraw { ra: Gpr, rs: Gpr, rb: Gpr },
+   590→   590→   590→    /// Rotate Left Doubleword then Clear Left: `rldcl rA, rS, rB, MB` (X-form, primary=31, xo=8)
+   591→   591→   591→    Rldcl { ra: Gpr, rs: Gpr, rb: Gpr, mb: u32 },
+   592→   592→   592→    /// Rotate Left Doubleword then Clear Right: `rldcr rA, rS, rB, ME` (X-form, primary=31, xo=9)
+   593→   593→   593→    Rldcr { ra: Gpr, rs: Gpr, rb: Gpr, me: u32 },
+   594→   594→   594→    /// Rotate Left Word Immediate then AND Mask: `rlwinm rA, rS, SH, MB, ME` (M-form, primary=21)
+   595→   595→   595→    Rlwinm {
+   596→   596→   596→        ra: Gpr,
+   597→   597→   597→        rs: Gpr,
+   598→   598→   598→        sh: u32,
+   599→   599→   599→        mb: u32,
+   600→   600→   600→        me: u32,
+   601→   601→   601→    },
+   602→   602→   602→    /// Rotate Left Word Immediate then Insert Mask: `rlwimi rA, rS, SH, MB, ME` (M-form, primary=20)
+   603→   603→   603→    Rlwimi {
+   604→   604→   604→        ra: Gpr,
+   605→   605→   605→        rs: Gpr,
+   606→   606→   606→        sh: u32,
+   607→   607→   607→        mb: u32,
+   608→   608→   608→        me: u32,
+   609→   609→   609→    },
+   610→   610→   610→
+   611→   611→   611→    // ── Load / Store ───────────────────────────────────────────────
+   612→   612→   612→    /// Load Doubleword: `ld rT, ds(rA)` (DS-form, primary=58, xo=0)
+   613→   613→   613→    Ld { rt: Gpr, ra: Gpr, ds: i32 },
+   614→   614→   614→    /// Load Word Algebraic: `lwa rT, ds(rA)` (DS-form, primary=58, xo=2)
+   615→   615→   615→    Lwa { rt: Gpr, ra: Gpr, ds: i32 },
+   616→   616→   616→    /// Load Word and Zero: `lwz rT, d(rA)` (D-form, primary=32)
+   617→   617→   617→    Lwz { rt: Gpr, ra: Gpr, d: i32 },
+   618→   618→   618→    /// Load Word with Zero Update: `lwzu rT, d(rA)` (D-form, primary=33)
+   619→   619→   619→    Lwzu { rt: Gpr, ra: Gpr, d: i32 },
+   620→   620→   620→    /// Store Doubleword: `std rS, ds(rA)` (DS-form, primary=62, xo=0)
+   621→   621→   621→    Std { rs: Gpr, ra: Gpr, ds: i32 },
+   622→   622→   622→    /// Store Word: `stw rS, d(rA)` (D-form, primary=36)
+   623→   623→   623→    Stw { rs: Gpr, ra: Gpr, d: i32 },
+   624→   624→   624→    /// Store Word with Update: `stwu rS, d(rA)` (D-form, primary=37)
+   625→   625→   625→    Stwu { rs: Gpr, ra: Gpr, d: i32 },
+   626→   626→   626→    /// Store Doubleword with Update: `stdu rS, ds(rA)` (DS-form, primary=62, xo=1)
+   627→   627→   627→    Stdu { rs: Gpr, ra: Gpr, ds: i32 },
+   628→   628→   628→    /// Load Byte and Zero: `lbz rT, d(rA)` (D-form, primary=34)
+   629→   629→   629→    Lbz { rt: Gpr, ra: Gpr, d: i32 },
+   630→   630→   630→    /// Load Halfword and Zero: `lhz rT, d(rA)` (D-form, primary=40)
+   631→   631→   631→    Lhz { rt: Gpr, ra: Gpr, d: i32 },
+   632→   632→   632→    /// Store Byte: `stb rS, d(rA)` (D-form, primary=38)
+   633→   633→   633→    Stb { rs: Gpr, ra: Gpr, d: i32 },
+   634→   634→   634→    /// Store Halfword: `sth rS, d(rA)` (D-form, primary=44)
+   635→   635→   635→    Sth { rs: Gpr, ra: Gpr, d: i32 },
+   636→   636→   636→    /// Load Floating-Point Double: `lfd fT, d(rA)` (D-form, primary=50)
+   637→   637→   637→    Lfd { ft: Fpr, ra: Gpr, d: i32 },
+   638→   638→   638→    /// Store Floating-Point Double: `stfd fS, d(rA)` (D-form, primary=54)
+   639→   639→   639→    Stfd { fs: Fpr, ra: Gpr, d: i32 },
+   640→   640→   640→    /// Load Floating-Point Single: `lfs fT, d(rA)` (D-form, primary=48)
+   641→   641→   641→    Lfs { ft: Fpr, ra: Gpr, d: i32 },
+   642→   642→   642→    /// Store Floating-Point Single: `stfs fS, d(rA)` (D-form, primary=52)
+   643→   643→   643→    Stfs { fs: Fpr, ra: Gpr, d: i32 },
+   644→   644→   644→
+   645→   645→   645→    // ── Compare ────────────────────────────────────────────────────
+   646→   646→   646→    /// Compare: `cmp crf, l, rA, rB` (X-form, primary=31, xo=0)
+   647→   647→   647→    Cmp {
+   648→   648→   648→        bf: CrField,
+   649→   649→   649→        l: u32,
+   650→   650→   650→        ra: Gpr,
+   651→   651→   651→        rb: Gpr,
+   652→   652→   652→    },
+   653→   653→   653→    /// Compare Immediate: `cmpi crf, l, rA, simm16` (D-form, primary=11)
+   654→   654→   654→    Cmpi {
+   655→   655→   655→        bf: CrField,
+   656→   656→   656→        l: u32,
+   657→   657→   657→        ra: Gpr,
+   658→   658→   658→        simm: i32,
+   659→   659→   659→    },
+   660→   660→   660→    /// Compare Logical: `cmpl crf, l, rA, rB` (X-form, primary=31, xo=32)
+   661→   661→   661→    Cmpl {
+   662→   662→   662→        bf: CrField,
+   663→   663→   663→        l: u32,
+   664→   664→   664→        ra: Gpr,
+   665→   665→   665→        rb: Gpr,
+   666→   666→   666→    },
+   667→   667→   667→    /// Compare Logical Immediate: `cmpli crf, l, rA, uimm16` (D-form, primary=10)
+   668→   668→   668→    Cmpli {
+   669→   669→   669→        bf: CrField,
+   670→   670→   670→        l: u32,
+   671→   671→   671→        ra: Gpr,
+   672→   672→   672→        uimm: u32,
+   673→   673→   673→    },
+   674→   674→   674→
+   675→   675→   675→    // ── Branch ─────────────────────────────────────────────────────
+   676→   676→   676→    /// Branch: `b li` (I-form, primary=18, AA=0, LK=0)
+   677→   677→   677→    B { li: i32 },
+   678→   678→   678→    /// Branch Absolute: `ba li` (I-form, primary=18, AA=1, LK=0)
+   679→   679→   679→    Ba { li: i32 },
+   680→   680→   680→    /// Branch with Link: `bl li` (I-form, primary=18, AA=0, LK=1)
+   681→   681→   681→    Bl { li: i32 },
+   682→   682→   682→    /// Branch Absolute with Link: `bla li` (I-form, primary=18, AA=1, LK=1)
+   683→   683→   683→    Bla { li: i32 },
+   684→   684→   684→    /// Branch Conditional: `bc BO, BI, BD` (B-form, primary=16, AA=0, LK=0)
+   685→   685→   685→    Bc { bo: u32, bi: u32, bd: i32 },
+   686→   686→   686→    /// Branch Conditional Absolute: `bca BO, BI, BD` (B-form, primary=16, AA=1, LK=0)
+   687→   687→   687→    Bca { bo: u32, bi: u32, bd: i32 },
+   688→   688→   688→    /// Branch Conditional to Link Register: `bclr BO, BI, BH` (XL-form, primary=19, xo=16)
+   689→   689→   689→    Bclr { bo: u32, bi: u32, bh: u32 },
+   690→   690→   690→    /// Branch Conditional to Count Register: `bcctr BO, BI, BH` (XL-form, primary=19, xo=528)
+   691→   691→   691→    Bcctr { bo: u32, bi: u32, bh: u32 },
+   692→   692→   692→    /// Branch Conditional to Target Address Register: `bctar BO, BI, BH` (XL-form, primary=19, xo=560)
+   693→   693→   693→    Bctar { bo: u32, bi: u32, bh: u32 },
+   694→   694→   694→
+   695→   695→   695→    // ── Move ───────────────────────────────────────────────────────
+   696→   696→   696→    /// Move Register: `mr rA, rS` (pseudo: `or rA, rS, rS`)
+   697→   697→   697→    Mr { ra: Gpr, rs: Gpr },
+   698→   698→   698→    /// Load Immediate: `li rT, simm16` (pseudo: `addi rT, 0, simm16`)
+   699→   699→   699→    Li { rt: Gpr, simm: i32 },
+   700→   700→   700→    /// Load Immediate Shifted: `lis rT, simm16` (pseudo: `addis rT, 0, simm16`)
+   701→   701→   701→    Lis { rt: Gpr, simm: i32 },
+   702→   702→   702→
+   703→   703→   703→    // ── System ─────────────────────────────────────────────────────
+   704→   704→   704→    /// System Call: `sc` (primary=17, SVC=0)
+   705→   705→   705→    Sc,
+   706→   706→   706→    /// No-operation: `nop` (pseudo: `ori r0, r0, 0`)
+   707→   707→   707→    Nop,
+   708→   708→   708→    /// Trap: `trap` (pseudo: `tw 31, r0, r0`)
+   709→   709→   709→    Trap,
+   710→   710→   710→}
+   711→   711→   711→
+   712→   712→   712→impl Instruction {
+   713→   713→   713→    /// Encode this instruction into a 4-byte little-endian machine code word.
+   714→   714→   714→    ///
+   715→   715→   715→    /// Encoding follows the Power ISA Version 3.1.
+   716→   716→   716→    pub fn encode(&self) -> [u8; 4] {
+   717→   717→   717→        match self {
+   718→   718→   718→            // ── Arithmetic ──────────────────────────────────────
+   719→   719→   719→            Instruction::Add { rt, ra, rb } => {
+   720→   720→   720→                // ADD rT, rA, rB: primary=31, OE=0, xo=266, Rc=0
+   721→   721→   721→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 266, 0)
+   722→   722→   722→            }
+   723→   723→   723→            Instruction::Addi { rt, ra, simm } => {
+   724→   724→   724→                // ADDI rT, rA, simm16: primary=14
+   725→   725→   725→                encode_d_form(14, rt.encoding(), ra.encoding(), *simm)
+   726→   726→   726→            }
+   727→   727→   727→            Instruction::Addis { rt, ra, simm } => {
+   728→   728→   728→                // ADDIS rT, rA, simm16: primary=15
+   729→   729→   729→                encode_d_form(15, rt.encoding(), ra.encoding(), *simm)
+   730→   730→   730→            }
+   731→   731→   731→            Instruction::Subf { rt, ra, rb } => {
+   732→   732→   732→                // SUBF rT, rA, rB: primary=31, OE=0, xo=40, Rc=0
+   733→   733→   733→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 40, 0)
+   734→   734→   734→            }
+   735→   735→   735→            Instruction::Mullw { rt, ra, rb } => {
+   736→   736→   736→                // MULLW rT, rA, rB: primary=31, OE=0, xo=235, Rc=0
+   737→   737→   737→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 235, 0)
+   738→   738→   738→            }
+   739→   739→   739→            Instruction::Mulld { rt, ra, rb } => {
+   740→   740→   740→                // MULLD rT, rA, rB: primary=31, OE=0, xo=233, Rc=0
+   741→   741→   741→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 233, 0)
+   742→   742→   742→            }
+   743→   743→   743→            Instruction::Mulhw { rt, ra, rb } => {
+   744→   744→   744→                // MULHW rT, rA, rB: primary=31, xo=75, Rc=0
+   745→   745→   745→                encode_x_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 75, 0)
+   746→   746→   746→            }
+   747→   747→   747→            Instruction::Mulhd { rt, ra, rb } => {
+   748→   748→   748→                // MULHD rT, rA, rB: primary=31, xo=73, Rc=0
+   749→   749→   749→                encode_x_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 73, 0)
+   750→   750→   750→            }
+   751→   751→   751→            Instruction::Divw { rt, ra, rb } => {
+   752→   752→   752→                // DIVW rT, rA, rB: primary=31, OE=0, xo=491, Rc=0
+   753→   753→   753→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
+   754→   754→   754→            }
+   755→   755→   755→            Instruction::Divd { rt, ra, rb } => {
+   756→   756→   756→                // DIVD rT, rA, rB: primary=31, OE=0, xo=459, Rc=0
+   757→   757→   757→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
+   758→   758→   758→            }
+   759→   759→   759→            Instruction::Divwu { rt, ra, rb } => {
+   760→   760→   760→                // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0
+   761→   761→   761→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 455, 0)
+   762→   762→   762→            }
+   763→   763→   763→            Instruction::Divdu { rt, ra, rb } => {
+   764→   764→   764→                // DIVDU rT, rA, rB: primary=31, OE=0, xo=457, Rc=0
+   765→   765→   765→                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 457, 0)
+   766→   766→   766→            }
+   767→   767→   767→            Instruction::Neg { rt, ra } => {
+   768→   768→   768→                // NEG rT, rA: primary=31, OE=0, xo=104, Rc=0, rB=0
+   769→   769→   769→                encode_xo_form(31, rt.encoding(), ra.encoding(), 0, 0, 104, 0)
+   770→   770→   770→            }
+   771→   771→   771→            Instruction::Cntlzd { ra, rs } => {
+   772→   772→   772→                // CNTLZD rA, rS: primary=31, xo=58, Rc=0, rB=0
+   773→   773→   773→                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 58, 0)
+   774→   774→   774→            }
+   775→   775→   775→            Instruction::Popcntd { ra, rs } => {
+   776→   776→   776→                // POPCNTD rA, rS: primary=31, xo=506, Rc=0, rB=0
+   777→   777→   777→                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 506, 0)
+   778→   778→   778→            }
+   779→   779→   779→            Instruction::Extsw { ra, rs } => {
+   780→   780→   780→                // EXTSW rA, rS: primary=31, xo=986, Rc=0, rB=0
+   781→   781→   781→                encode_x_form(31, rs.encoding(), ra.encoding(), 0, 986, 0)
+   782→   782→   782→            }
+   783→   783→   783→
+   784→   784→   784→            // ── Logical ────────────────────────────────────────
+   785→   785→   785→            Instruction::And { ra, rs, rb } => {
+   786→   786→   786→                // AND rA, rS, rB: primary=31, xo=28, Rc=0
+   787→   787→   787→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 28, 0)
+   788→   788→   788→            }
+   789→   789→   789→            Instruction::Andi { ra, rs, uimm } => {
+   790→   790→   790→                // ANDI. rA, rS, uimm16: primary=28, Rc=1 (always)
+   791→   791→   791→                let word = ((28u32 & 0x3F) << 26)
+   792→   792→   792→                    | ((rs.encoding() & 0x1F) << 21)
+   793→   793→   793→                    | ((ra.encoding() & 0x1F) << 16)
+   794→   794→   794→                    | (uimm & 0xFFFF);
+   795→   795→   795→                encode_word(word)
+   796→   796→   796→            }
+   797→   797→   797→            Instruction::Or { ra, rs, rb } => {
+   798→   798→   798→                // OR rA, rS, rB: primary=31, xo=444, Rc=0
+   799→   799→   799→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 444, 0)
+   800→   800→   800→            }
+   801→   801→   801→            Instruction::Ori { ra, rs, uimm } => {
+   802→   802→   802→                // ORI rA, rS, uimm16: primary=24
+   803→   803→   803→                let word = ((24u32 & 0x3F) << 26)
+   804→   804→   804→                    | ((rs.encoding() & 0x1F) << 21)
+   805→   805→   805→                    | ((ra.encoding() & 0x1F) << 16)
+   806→   806→   806→                    | (uimm & 0xFFFF);
+   807→   807→   807→                encode_word(word)
+   808→   808→   808→            }
+   809→   809→   809→            Instruction::Xor { ra, rs, rb } => {
+   810→   810→   810→                // XOR rA, rS, rB: primary=31, xo=316, Rc=0
+   811→   811→   811→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 316, 0)
+   812→   812→   812→            }
+   813→   813→   813→            Instruction::Xori { ra, rs, uimm } => {
+   814→   814→   814→                // XORI rA, rS, uimm16: primary=26
+   815→   815→   815→                let word = ((26u32 & 0x3F) << 26)
+   816→   816→   816→                    | ((rs.encoding() & 0x1F) << 21)
+   817→   817→   817→                    | ((ra.encoding() & 0x1F) << 16)
+   818→   818→   818→                    | (uimm & 0xFFFF);
+   819→   819→   819→                encode_word(word)
+   820→   820→   820→            }
+   821→   821→   821→            Instruction::Nor { ra, rs, rb } => {
+   822→   822→   822→                // NOR rA, rS, rB: primary=31, xo=124, Rc=0
+   823→   823→   823→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 124, 0)
+   824→   824→   824→            }
+   825→   825→   825→            Instruction::Andc { ra, rs, rb } => {
+   826→   826→   826→                // ANDC rA, rS, rB: primary=31, xo=60, Rc=0
+   827→   827→   827→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 60, 0)
+   828→   828→   828→            }
+   829→   829→   829→            Instruction::Orc { ra, rs, rb } => {
+   830→   830→   830→                // ORC rA, rS, rB: primary=31, xo=412, Rc=0
+   831→   831→   831→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 412, 0)
+   832→   832→   832→            }
+   833→   833→   833→            Instruction::Eqv { ra, rs, rb } => {
+   834→   834→   834→                // EQV rA, rS, rB: primary=31, xo=284, Rc=0
+   835→   835→   835→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 284, 0)
+   836→   836→   836→            }
+   837→   837→   837→
+   838→   838→   838→            // ── Shift / Rotate ─────────────────────────────────
+   839→   839→   839→            Instruction::Sld { ra, rs, rb } => {
+   840→   840→   840→                // SLD rA, rS, rB: primary=31, xo=27, Rc=0
+   841→   841→   841→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 27, 0)
+   842→   842→   842→            }
+   843→   843→   843→            Instruction::Srd { ra, rs, rb } => {
+   844→   844→   844→                // SRD rA, rS, rB: primary=31, xo=539, Rc=0
+   845→   845→   845→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 539, 0)
+   846→   846→   846→            }
+   847→   847→   847→            Instruction::Srad { ra, rs, rb } => {
+   848→   848→   848→                // SRAD rA, rS, rB: primary=31, xo=794, Rc=0
+   849→   849→   849→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 794, 0)
+   850→   850→   850→            }
+   851→   851→   851→            Instruction::Slw { ra, rs, rb } => {
+   852→   852→   852→                // SLW rA, rS, rB: primary=31, xo=24, Rc=0
+   853→   853→   853→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 24, 0)
+   854→   854→   854→            }
+   855→   855→   855→            Instruction::Srw { ra, rs, rb } => {
+   856→   856→   856→                // SRW rA, rS, rB: primary=31, xo=536, Rc=0
+   857→   857→   857→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 536, 0)
+   858→   858→   858→            }
+   859→   859→   859→            Instruction::Sraw { ra, rs, rb } => {
+   860→   860→   860→                // SRAW rA, rS, rB: primary=31, xo=792, Rc=0
+   861→   861→   861→                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 792, 0)
+   862→   862→   862→            }
+   863→   863→   863→            Instruction::Rldcl { ra, rs, rb, mb } => {
+   864→   864→   864→                // RLDCL rA, rS, rB, MB: primary=31, rB, MB, xo=8, sh=0, Rc=0
+   865→   865→   865→                // Encoding: [0:5]=31, [6:10]=rS, [11:15]=rA, [16:20]=rB,
+   866→   866→   866→                //           [21:25]=MB, [26:30]=xo=8, [31]=Rc=0
+   867→   867→   867→                // Note: for RLDCL the mb field occupies bits [21:25] (5 bits,
+   868→   868→   868→                // representing the beginning mask position encoded as
+   869→   869→   869→                // mb[5] in bit 1 and mb[0:4] in bits [21:25]).
+   870→   870→   870→                // Simplified: we treat mb as 5-bit field in bits [21:25]
+   871→   871→   871→                let word = (31u32 << 26)
+   872→   872→   872→                    | (rs.encoding() << 21)
+   873→   873→   873→                    | (ra.encoding() << 16)
+   874→   874→   874→                    | (rb.encoding() << 11)
+   875→   875→   875→                    | ((mb & 0x1F) << 6)
+   876→   876→   876→                    | (8 << 1);
+   877→   877→   877→                encode_word(word)
+   878→   878→   878→            }
+   879→   879→   879→            Instruction::Rldcr { ra, rs, rb, me } => {
+   880→   880→   880→                // RLDCR rA, rS, rB, ME: primary=31, rB, ME, xo=9, Rc=0
+   881→   881→   881→                let word = (31u32 << 26)
+   882→   882→   882→                    | (rs.encoding() << 21)
+   883→   883→   883→                    | (ra.encoding() << 16)
+   884→   884→   884→                    | (rb.encoding() << 11)
+   885→   885→   885→                    | ((me & 0x1F) << 6)
+   886→   886→   886→                    | (9 << 1);
+   887→   887→   887→                encode_word(word)
+   888→   888→   888→            }
+   889→   889→   889→            Instruction::Rlwinm { ra, rs, sh, mb, me } => {
+   890→   890→   890→                // RLWINM rA, rS, SH, MB, ME: primary=21
+   891→   891→   891→                encode_m_form(21, rs.encoding(), ra.encoding(), *sh, *mb, *me, 0)
+   892→   892→   892→            }
+   893→   893→   893→            Instruction::Rlwimi { ra, rs, sh, mb, me } => {
+   894→   894→   894→                // RLWIMI rA, rS, SH, MB, ME: primary=20
+   895→   895→   895→                encode_m_form(20, rs.encoding(), ra.encoding(), *sh, *mb, *me, 0)
+   896→   896→   896→            }
+   897→   897→   897→
+   898→   898→   898→            // ── Load / Store ───────────────────────────────────
+   899→   899→   899→            Instruction::Ld { rt, ra, ds } => {
+   900→   900→   900→                // LD rT, ds(rA): primary=58, xo=0
+   901→   901→   901→                encode_ds_form(58, rt.encoding(), ra.encoding(), *ds, 0)
+   902→   902→   902→            }
+   903→   903→   903→            Instruction::Lwa { rt, ra, ds } => {
+   904→   904→   904→                // LWA rT, ds(rA): primary=58, xo=2
+   905→   905→   905→                encode_ds_form(58, rt.encoding(), ra.encoding(), *ds, 2)
+   906→   906→   906→            }
+   907→   907→   907→            Instruction::Lwz { rt, ra, d } => {
+   908→   908→   908→                // LWZ rT, d(rA): primary=32
+   909→   909→   909→                encode_d_form(32, rt.encoding(), ra.encoding(), *d)
+   910→   910→   910→            }
+   911→   911→   911→            Instruction::Lwzu { rt, ra, d } => {
+   912→   912→   912→                // LWZU rT, d(rA): primary=33
+   913→   913→   913→                encode_d_form(33, rt.encoding(), ra.encoding(), *d)
+   914→   914→   914→            }
+   915→   915→   915→            Instruction::Std { rs, ra, ds } => {
+   916→   916→   916→                // STD rS, ds(rA): primary=62, xo=0
+   917→   917→   917→                encode_ds_form(62, rs.encoding(), ra.encoding(), *ds, 0)
+   918→   918→   918→            }
+   919→   919→   919→            Instruction::Stw { rs, ra, d } => {
+   920→   920→   920→                // STW rS, d(rA): primary=36
+   921→   921→   921→                encode_d_form(36, rs.encoding(), ra.encoding(), *d)
+   922→   922→   922→            }
+   923→   923→   923→            Instruction::Stwu { rs, ra, d } => {
+   924→   924→   924→                // STWU rS, d(rA): primary=37
+   925→   925→   925→                encode_d_form(37, rs.encoding(), ra.encoding(), *d)
+   926→   926→   926→            }
+   927→   927→   927→            Instruction::Stdu { rs, ra, ds } => {
+   928→   928→   928→                // STDU rS, ds(rA): primary=62, xo=1
+   929→   929→   929→                encode_ds_form(62, rs.encoding(), ra.encoding(), *ds, 1)
+   930→   930→   930→            }
+   931→   931→   931→            Instruction::Lbz { rt, ra, d } => {
+   932→   932→   932→                // LBZ rT, d(rA): primary=34
+   933→   933→   933→                encode_d_form(34, rt.encoding(), ra.encoding(), *d)
+   934→   934→   934→            }
+   935→   935→   935→            Instruction::Lhz { rt, ra, d } => {
+   936→   936→   936→                // LHZ rT, d(rA): primary=40
+   937→   937→   937→                encode_d_form(40, rt.encoding(), ra.encoding(), *d)
+   938→   938→   938→            }
+   939→   939→   939→            Instruction::Stb { rs, ra, d } => {
+   940→   940→   940→                // STB rS, d(rA): primary=38
+   941→   941→   941→                encode_d_form(38, rs.encoding(), ra.encoding(), *d)
+   942→   942→   942→            }
+   943→   943→   943→            Instruction::Sth { rs, ra, d } => {
+   944→   944→   944→                // STH rS, d(rA): primary=44
+   945→   945→   945→                encode_d_form(44, rs.encoding(), ra.encoding(), *d)
+   946→   946→   946→            }
+   947→   947→   947→            Instruction::Lfd { ft, ra, d } => {
+   948→   948→   948→                // LFD fT, d(rA): primary=50
+   949→   949→   949→                encode_d_form(50, ft.encoding(), ra.encoding(), *d)
+   950→   950→   950→            }
+   951→   951→   951→            Instruction::Stfd { fs, ra, d } => {
+   952→   952→   952→                // STFD fS, d(rA): primary=54
+   953→   953→   953→                encode_d_form(54, fs.encoding(), ra.encoding(), *d)
+   954→   954→   954→            }
+   955→   955→   955→            Instruction::Lfs { ft, ra, d } => {
+   956→   956→   956→                // LFS fT, d(rA): primary=48
+   957→   957→   957→                encode_d_form(48, ft.encoding(), ra.encoding(), *d)
+   958→   958→   958→            }
+   959→   959→   959→            Instruction::Stfs { fs, ra, d } => {
+   960→   960→   960→                // STFS fS, d(rA): primary=52
+   961→   961→   961→                encode_d_form(52, fs.encoding(), ra.encoding(), *d)
+   962→   962→   962→            }
+   963→   963→   963→
+   964→   964→   964→            // ── Compare ────────────────────────────────────────
+   965→   965→   965→            Instruction::Cmp { bf, l, ra, rb } => {
+   966→   966→   966→                // CMP crf, l, rA, rB: primary=31, xo=0, Rc=0
+   967→   967→   967→                // bits [6:8] = bf, [9]=l, [11:15]=rA, [16:20]=rB
+   968→   968→   968→                let word = (31u32 << 26)
+   969→   969→   969→                    | ((bf.encoding() & 0x7) << 23)
+   970→   970→   970→                    | ((*l & 1) << 21)
+   971→   971→   971→                    | (ra.encoding() << 16)
+   972→   972→   972→                    | (rb.encoding() << 11);
+   973→   973→   973→                encode_word(word)
+   974→   974→   974→            }
+   975→   975→   975→            Instruction::Cmpi { bf, l, ra, simm } => {
+   976→   976→   976→                // CMPI crf, l, rA, simm16: primary=11
+   977→   977→   977→                let word = (11u32 << 26)
+   978→   978→   978→                    | ((bf.encoding() & 0x7) << 23)
+   979→   979→   979→                    | ((*l & 1) << 21)
+   980→   980→   980→                    | (ra.encoding() << 16)
+   981→   981→   981→                    | ((*simm as u32) & 0xFFFF);
+   982→   982→   982→                encode_word(word)
+   983→   983→   983→            }
+   984→   984→   984→            Instruction::Cmpl { bf, l, ra, rb } => {
+   985→   985→   985→                // CMPL crf, l, rA, rB: primary=31, xo=32, Rc=0
+   986→   986→   986→                let word = (31u32 << 26)
+   987→   987→   987→                    | ((bf.encoding() & 0x7) << 23)
+   988→   988→   988→                    | ((*l & 1) << 21)
+   989→   989→   989→                    | (ra.encoding() << 16)
+   990→   990→   990→                    | (rb.encoding() << 11)
+   991→   991→   991→                    | (32 << 1);
+   992→   992→   992→                encode_word(word)
+   993→   993→   993→            }
+   994→   994→   994→            Instruction::Cmpli { bf, l, ra, uimm } => {
+   995→   995→   995→                // CMPLI crf, l, rA, uimm16: primary=10
+   996→   996→   996→                let word = (10u32 << 26)
+   997→   997→   997→                    | ((bf.encoding() & 0x7) << 23)
+   998→   998→   998→                    | ((*l & 1) << 21)
+   999→   999→   999→                    | (ra.encoding() << 16)
+  1000→  1000→  1000→                    | (uimm & 0xFFFF);
+
+[showing lines 501-1000 of 2002; use offset=1001 with limit to continue reading]
