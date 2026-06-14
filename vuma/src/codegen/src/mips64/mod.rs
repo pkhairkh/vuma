@@ -2761,6 +2761,8 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
         spill_slots: 0,
         code_size,
         relocations,
+        wasm_func_type: None,
+        wasm_locals: None,
     })
 }
 

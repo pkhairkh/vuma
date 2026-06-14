@@ -3262,6 +3262,8 @@ impl Backend for PPC64Backend {
             name: func_name,
             blocks: vec![AllocatedBlock { label: "entry".into(), instructions, code_offset: 0 }],
             frame_size, callee_saved, spill_slots, code_size, relocations,
+            wasm_func_type: None,
+            wasm_locals: None,
         })
     }
 

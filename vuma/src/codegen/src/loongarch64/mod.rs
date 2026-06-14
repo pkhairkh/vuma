@@ -2208,7 +2208,7 @@ fn lower_binop_cmp_la64(op: &BinOpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<All
         BinOpKind::UGe => CmpKind::UGe,
         BinOpKind::Eq => CmpKind::Eq,
         BinOpKind::Ne => CmpKind::Ne,
-        _ => CmpKind::Eq, // fallback, shouldn't happen
+        other => unreachable!("BinOpKind::{:?} is not a comparison", other),
     };
     lower_cmp_la64(&kind, dst, lhs, rhs)
 }
@@ -3910,6 +3910,8 @@ mod tests {
                 spill_slots: 0,
                 code_size: 4,
                 relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
             }],
             total_code_size: 4,
             total_data_size: 0,

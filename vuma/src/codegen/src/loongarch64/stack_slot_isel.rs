@@ -282,7 +282,7 @@ fn binop_kind_to_cmp_kind(op: &BinOpKind) -> CmpKind {
         BinOpKind::UGe => CmpKind::UGe,
         BinOpKind::Eq => CmpKind::Eq,
         BinOpKind::Ne => CmpKind::Ne,
-        _ => CmpKind::Eq,
+        other => unreachable!("BinOpKind::{:?} is not a comparison", other),
     }
 }
 
@@ -1189,5 +1189,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         spill_slots: 0,
         code_size,
         relocations,
+        wasm_func_type: None,
+        wasm_locals: None,
     })
 }

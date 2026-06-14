@@ -4611,6 +4611,8 @@ impl Backend for RiscV64Backend {
             spill_slots: 0,
             code_size,
             relocations,
+            wasm_func_type: None,
+            wasm_locals: None,
         })
     }
 

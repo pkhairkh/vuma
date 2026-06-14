@@ -19,6 +19,8 @@ use crate::ir::{
 };
 use std::collections::HashMap;
 
+pub mod disasm;
+
 // ===========================================================================
 // Wasm value types
 // ===========================================================================
@@ -838,35 +840,6 @@ pub fn decode_unsigned_leb128(bytes: &[u8]) -> (u64, usize) {
     (result, count)
 }
 
-/// Decode a `WasmFuncType` from the raw type section bytes.
-/// The bytes should start with 0x60 (func type marker) followed by
-/// the param count, param types, result count, and result types.
-fn decode_func_type_from_bytes(bytes: &[u8]) -> WasmFuncType {
-    let mut pos = 0;
-    if bytes[pos] != 0x60 {
-        return WasmFuncType { params: vec![], results: vec![] };
-    }
-    pos += 1;
-
-    let (num_params, n) = decode_unsigned_leb128(&bytes[pos..]);
-    pos += n;
-    let mut params = Vec::new();
-    for _ in 0..num_params {
-        params.push(WasmType::from_byte(bytes[pos]).unwrap_or(WasmType::I32));
-        pos += 1;
-    }
-
-    let (num_results, n) = decode_unsigned_leb128(&bytes[pos..]);
-    pos += n;
-    let mut results = Vec::new();
-    for _ in 0..num_results {
-        results.push(WasmType::from_byte(bytes[pos]).unwrap_or(WasmType::I32));
-        pos += 1;
-    }
-
-    WasmFuncType { params, results }
-}
-
 /// Decode a signed LEB128 value from a byte slice.
 /// Returns (decoded_value, number_of_bytes_consumed).
 pub fn decode_signed_leb128(bytes: &[u8]) -> (i64, usize) {
@@ -1333,6 +1306,28 @@ fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
     skip_leb128(bytes, offset, count);
 }
 
+/// Convert a WasmType (from this module) to the serializable WasmValueType
+/// (from the backend module).
+fn wasm_type_to_backend(ty: WasmType) -> crate::backend::WasmValueType {
+    match ty {
+        WasmType::I32 => crate::backend::WasmValueType::I32,
+        WasmType::I64 => crate::backend::WasmValueType::I64,
+        WasmType::F32 => crate::backend::WasmValueType::F32,
+        WasmType::F64 => crate::backend::WasmValueType::F64,
+    }
+}
+
+/// Convert a serializable WasmValueType (from the backend module) back to
+/// the WasmType used by this module.
+fn backend_to_wasm_type(ty: &crate::backend::WasmValueType) -> WasmType {
+    match ty {
+        crate::backend::WasmValueType::I32 => WasmType::I32,
+        crate::backend::WasmValueType::I64 => WasmType::I64,
+        crate::backend::WasmValueType::F32 => WasmType::F32,
+        crate::backend::WasmValueType::F64 => WasmType::F64,
+    }
+}
+
 /// Skip a single Wasm instruction starting at `offset`, advancing past it.
 ///
 /// This is used by `allocate_registers` to split the body bytecode into
@@ -1539,6 +1534,19 @@ impl LoweringContext {
         if let Some(local_idx) = self.get_local(vreg_id) {
             self.emit(WasmInstr::LocalSet(local_idx));
         }
+    }
+}
+
+/// Determine the Wasm type for dedicated arithmetic IR instructions (Add, Sub,
+/// Mul, Div, Cmp).  These instructions carry an optional `ty` field that
+/// indicates the operand width.  On Wasm32, integer types narrower than I64
+/// map to I32; I64/U64 are preserved for 64-bit arithmetic.
+fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
+    match ir_ty {
+        Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
+        Some(IRType::F32) => WasmType::F32,
+        Some(IRType::F64) => WasmType::F64,
+        _ => WasmType::I32, // default: I32 for all other integer types
     }
 }
 
@@ -1760,7 +1768,38 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::Shl => WasmInstr::I64Shl,
                     BinOpKind::ShrL => WasmInstr::I64ShrU,
                     BinOpKind::ShrA => WasmInstr::I64ShrS,
-                    BinOpKind::Ror | BinOpKind::Rol => WasmInstr::I64ShrS, // TODO: implement i64 rotate
+                    BinOpKind::Ror | BinOpKind::Rol => {
+                        skip_emit = true;
+                        let lhs_local = ctx.num_locals;
+                        ctx.num_locals += 1;
+                        ctx.locals.push((1, WasmType::I64));
+                        let rhs_local = ctx.num_locals;
+                        ctx.num_locals += 1;
+                        ctx.locals.push((1, WasmType::I64));
+                        ctx.emit(WasmInstr::LocalSet(rhs_local));
+                        ctx.emit(WasmInstr::LocalSet(lhs_local));
+                        if *op == BinOpKind::Ror {
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I64ShrU);
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::I64Const(64));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I64Sub);
+                            ctx.emit(WasmInstr::I64Shl);
+                        } else {
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I64Shl);
+                            ctx.emit(WasmInstr::LocalGet(lhs_local));
+                            ctx.emit(WasmInstr::I64Const(64));
+                            ctx.emit(WasmInstr::LocalGet(rhs_local));
+                            ctx.emit(WasmInstr::I64Sub);
+                            ctx.emit(WasmInstr::I64ShrU);
+                        }
+                        ctx.emit(WasmInstr::I64Or);
+                        WasmInstr::Nop
+                    }
                     BinOpKind::SLt => WasmInstr::I64LtS,
                     BinOpKind::SLe => WasmInstr::I64LeS,
                     BinOpKind::SGt => WasmInstr::I64GtS,
@@ -1783,7 +1822,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::SGt | BinOpKind::UGt => WasmInstr::F32Gt,
                     BinOpKind::SLe | BinOpKind::ULe => WasmInstr::F32Le,
                     BinOpKind::SGe | BinOpKind::UGe => WasmInstr::F32Ge,
-                    _ => WasmInstr::I32Add, // fallback for unsupported float ops
+                    _ => {
+                        return Err(BackendError::UnsupportedFeature {
+                            isa: "wasm32",
+                            feature: format!("{:?} on f32", op),
+                        });
+                    }
                 },
                 WasmType::F64 => match op {
                     BinOpKind::Add => WasmInstr::F64Add,
@@ -1796,7 +1840,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     BinOpKind::SGt | BinOpKind::UGt => WasmInstr::F64Gt,
                     BinOpKind::SLe | BinOpKind::ULe => WasmInstr::F64Le,
                     BinOpKind::SGe | BinOpKind::UGe => WasmInstr::F64Ge,
-                    _ => WasmInstr::I32Add, // fallback for unsupported float ops
+                    _ => {
+                        return Err(BackendError::UnsupportedFeature {
+                            isa: "wasm32",
+                            feature: format!("{:?} on f64", op),
+                        });
+                    }
                 },
             };
             if !skip_emit {
@@ -1885,14 +1934,15 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Load { dst, addr, offset: _, ty } => {
+        IRInstr::Load { dst, addr, offset, ty } => {
             let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
             ctx.push_value(addr, Some(&WasmType::I32));
+            let wasm_offset = (*offset).max(0) as u32;
             let load_op = match load_ty {
-                WasmType::I64 => WasmInstr::I64Load { align: 3, offset: 0 },
-                WasmType::F32 => WasmInstr::F32Load { align: 2, offset: 0 },
-                WasmType::F64 => WasmInstr::F64Load { align: 3, offset: 0 },
-                _ => WasmInstr::I32Load { align: 2, offset: 0 },
+                WasmType::I64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
+                WasmType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
+                WasmType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
+                _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
             };
             ctx.emit(load_op);
             if let IRValue::Register(id) = dst {
@@ -1902,15 +1952,16 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Store { value, addr, offset: _, ty } => {
+        IRInstr::Store { value, addr, offset, ty } => {
             let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, Some(&store_ty));
+            let wasm_offset = (*offset).max(0) as u32;
             let store_op = match store_ty {
-                WasmType::I64 => WasmInstr::I64Store { align: 3, offset: 0 },
-                WasmType::F32 => WasmInstr::F32Store { align: 2, offset: 0 },
-                WasmType::F64 => WasmInstr::F64Store { align: 3, offset: 0 },
-                _ => WasmInstr::I32Store { align: 2, offset: 0 },
+                WasmType::I64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
+                WasmType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
+                WasmType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
+                _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
             };
             ctx.emit(store_op);
         }
@@ -2025,45 +2076,61 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        IRInstr::Add { dst, lhs, rhs, .. } => {
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            ctx.emit(WasmInstr::I32Add);
+        IRInstr::Add { dst, lhs, rhs, ty } => {
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            ctx.emit(match wasm_ty {
+                WasmType::I64 => WasmInstr::I64Add,
+                _ => WasmInstr::I32Add,
+            });
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+                ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
         }
 
-        IRInstr::Sub { dst, lhs, rhs, .. } => {
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            ctx.emit(WasmInstr::I32Sub);
+        IRInstr::Sub { dst, lhs, rhs, ty } => {
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            ctx.emit(match wasm_ty {
+                WasmType::I64 => WasmInstr::I64Sub,
+                _ => WasmInstr::I32Sub,
+            });
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+                ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
         }
 
-        IRInstr::Mul { dst, lhs, rhs, .. } => {
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            ctx.emit(WasmInstr::I32Mul);
+        IRInstr::Mul { dst, lhs, rhs, ty } => {
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            ctx.emit(match wasm_ty {
+                WasmType::I64 => WasmInstr::I64Mul,
+                _ => WasmInstr::I32Mul,
+            });
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+                ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
         }
 
-        IRInstr::Div { dst, lhs, rhs, .. } => {
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            ctx.emit(WasmInstr::I32DivS);
+        IRInstr::Div { dst, lhs, rhs, ty } => {
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            ctx.emit(match wasm_ty {
+                WasmType::I64 => WasmInstr::I64DivS,
+                _ => WasmInstr::I32DivS,
+            });
             if let IRValue::Register(id) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+                ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
             }
@@ -2073,21 +2140,37 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             kind,
             dst,
             lhs,
-            rhs, ty: _,
+            rhs,
+            ty,
         } => {
-            ctx.push_value(lhs, None);
-            ctx.push_value(rhs, None);
-            let wasm_op = match kind {
-                crate::ir::CmpKind::Eq => WasmInstr::I32Eq,
-                crate::ir::CmpKind::Ne => WasmInstr::I32Ne,
-                crate::ir::CmpKind::SLt => WasmInstr::I32LtS,
-                crate::ir::CmpKind::SLe => WasmInstr::I32LeS,
-                crate::ir::CmpKind::SGt => WasmInstr::I32GtS,
-                crate::ir::CmpKind::SGe => WasmInstr::I32GeS,
-                crate::ir::CmpKind::ULt => WasmInstr::I32LtU,
-                crate::ir::CmpKind::ULe => WasmInstr::I32LeU,
-                crate::ir::CmpKind::UGt => WasmInstr::I32GtU,
-                crate::ir::CmpKind::UGe => WasmInstr::I32GeU,
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            ctx.push_value(lhs, Some(&wasm_ty));
+            ctx.push_value(rhs, Some(&wasm_ty));
+            let wasm_op = match wasm_ty {
+                WasmType::I64 => match kind {
+                    crate::ir::CmpKind::Eq => WasmInstr::I64Eq,
+                    crate::ir::CmpKind::Ne => WasmInstr::I64Ne,
+                    crate::ir::CmpKind::SLt => WasmInstr::I64LtS,
+                    crate::ir::CmpKind::SLe => WasmInstr::I64LeS,
+                    crate::ir::CmpKind::SGt => WasmInstr::I64GtS,
+                    crate::ir::CmpKind::SGe => WasmInstr::I64GeS,
+                    crate::ir::CmpKind::ULt => WasmInstr::I64LtU,
+                    crate::ir::CmpKind::ULe => WasmInstr::I64LeU,
+                    crate::ir::CmpKind::UGt => WasmInstr::I64GtU,
+                    crate::ir::CmpKind::UGe => WasmInstr::I64GeU,
+                },
+                _ => match kind {
+                    crate::ir::CmpKind::Eq => WasmInstr::I32Eq,
+                    crate::ir::CmpKind::Ne => WasmInstr::I32Ne,
+                    crate::ir::CmpKind::SLt => WasmInstr::I32LtS,
+                    crate::ir::CmpKind::SLe => WasmInstr::I32LeS,
+                    crate::ir::CmpKind::SGt => WasmInstr::I32GtS,
+                    crate::ir::CmpKind::SGe => WasmInstr::I32GeS,
+                    crate::ir::CmpKind::ULt => WasmInstr::I32LtU,
+                    crate::ir::CmpKind::ULe => WasmInstr::I32LeU,
+                    crate::ir::CmpKind::UGt => WasmInstr::I32GtU,
+                    crate::ir::CmpKind::UGe => WasmInstr::I32GeU,
+                },
             };
             ctx.emit(wasm_op);
             if let IRValue::Register(id) = dst {
@@ -2098,8 +2181,9 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Ret { values } => {
-            for val in values {
-                ctx.push_value(val, Some(&WasmType::I32));
+            for (i, val) in values.iter().enumerate() {
+                let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
+                ctx.push_value(val, Some(&ty));
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2135,8 +2219,9 @@ fn lower_terminator(
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
-            for val in values {
-                ctx.push_value(val, Some(&WasmType::I32));
+            for (i, val) in values.iter().enumerate() {
+                let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
+                ctx.push_value(val, Some(&ty));
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2231,57 +2316,15 @@ impl Backend for Wasm32Backend {
                 reason: e.to_string(),
             })?;
 
-        // Build an AllocatedFunction from the lowered bytecode.
-        // Each Wasm instruction is represented as an AllocatedInstruction
-        // with its mnemonic and encoded bytes.
+        // Build an AllocatedFunction with the body bytes as a single instruction
+        // and Wasm-specific metadata stored in typed fields.
         let mut instructions = Vec::new();
 
-        // Encode the function type as a pseudo-instruction so that
-        // encode_program can recover it.  Format:
-        //   "wasm_type:<num_params>:<param_bytes>:<num_results>:<result_bytes>"
-        // The encoded bytes contain the raw type section entry.
-        {
-            let mut type_bytes = Vec::new();
-            type_bytes.push(0x60); // func type marker
-            type_bytes.extend_from_slice(&encode_unsigned_leb128(func_type.params.len() as u64));
-            for p in &func_type.params {
-                type_bytes.push(p.to_byte());
-            }
-            type_bytes.extend_from_slice(&encode_unsigned_leb128(func_type.results.len() as u64));
-            for r in &func_type.results {
-                type_bytes.push(r.to_byte());
-            }
-            let param_str: Vec<String> = func_type.params.iter().map(|p| p.to_string()).collect();
-            let result_str: Vec<String> = func_type.results.iter().map(|r| r.to_string()).collect();
-            instructions.push(AllocatedInstruction {
-                opcode: format!("wasm_type:{}:->:{}", param_str.join(","), result_str.join(",")),
-                reads: vec![],
-                writes: vec![],
-                encoded: type_bytes,
-            });
-        }
-
-        // Emit local declarations as pseudo-instructions
-        for (count, ty) in &func_body.locals {
-            let mut encoded = Vec::new();
-            encoded.extend_from_slice(&encode_unsigned_leb128(*count as u64));
-            encoded.push(ty.to_byte());
-            instructions.push(AllocatedInstruction {
-                opcode: format!("local_decl_{}", ty),
-                reads: vec![],
-                writes: vec![],
-                encoded,
-            });
-        }
-
         // Disassemble the body bytes into per-instruction AllocatedInstructions
-        // by re-parsing the bytecode we just emitted.  This gives us real
-        // opcode mnemonics instead of a single opaque "wasm_body" blob.
+        // for debugging / inspection purposes.
         let disasm = self.disassemble(&func_body.body, 0);
         let mut offset = 0usize;
         for mnemonic in &disasm {
-            // Determine how many bytes this instruction occupies by decoding
-            // forward from the current offset.
             let start = offset;
             skip_one_instruction(&func_body.body, &mut offset);
             let instr_bytes = func_body.body[start..offset].to_vec();
@@ -2295,6 +2338,22 @@ impl Backend for Wasm32Backend {
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
+        // Convert WasmFuncType to the serializable backend type
+        let backend_func_type = crate::backend::WasmFuncType {
+            params: func_type.params.iter().map(|t| wasm_type_to_backend(*t)).collect(),
+            results: func_type.results.iter().map(|t| wasm_type_to_backend(*t)).collect(),
+        };
+
+        // Convert local declarations to the serializable backend type
+        let backend_locals: Vec<crate::backend::WasmLocalDecl> = func_body
+            .locals
+            .iter()
+            .map(|(count, ty)| crate::backend::WasmLocalDecl {
+                count: *count,
+                ty: wasm_type_to_backend(*ty),
+            })
+            .collect();
+
         Ok(AllocatedFunction {
             name: func.name.clone(),
             blocks: vec![AllocatedBlock {
@@ -2307,6 +2366,8 @@ impl Backend for Wasm32Backend {
             spill_slots: 0,
             code_size,
             relocations: Vec::new(),
+            wasm_func_type: Some(backend_func_type),
+            wasm_locals: Some(backend_locals),
         })
     }
 
@@ -2332,47 +2393,36 @@ impl Backend for Wasm32Backend {
 
         // For each function, add a type and function entry
         for func in &program.functions {
-            // Extract the function type from the first pseudo-instruction
-            let func_type = if let Some(first_instr) = func.blocks.first()
-                .and_then(|b| b.instructions.first())
-                .filter(|i| i.opcode.starts_with("wasm_type:"))
-            {
-                decode_func_type_from_bytes(&first_instr.encoded)
-            } else {
-                WasmFuncType {
+            // Recover the function type from the typed metadata field.
+            let func_type = func.wasm_func_type.as_ref().map_or_else(
+                || WasmFuncType {
                     params: vec![],
                     results: vec![],
-                }
-            };
+                },
+                |ft| WasmFuncType {
+                    params: ft.params.iter().map(backend_to_wasm_type).collect(),
+                    results: ft.results.iter().map(backend_to_wasm_type).collect(),
+                },
+            );
 
             let type_idx = module.add_type(func_type);
             let func_idx = module.add_function(type_idx);
 
-            // Encode the function body, skipping the wasm_type pseudo-instruction
-            // and local_decl pseudo-instructions (locals are encoded separately)
-            let mut local_decls: Vec<(u32, WasmType)> = Vec::new();
+            // Recover local declarations from the typed metadata field.
+            let local_decls: Vec<(u32, WasmType)> = func
+                .wasm_locals
+                .as_ref()
+                .map(|ls| {
+                    ls.iter()
+                        .map(|decl| (decl.count, backend_to_wasm_type(&decl.ty)))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Encode the function body directly from the instruction encoded bytes.
             let mut body_bytes = Vec::new();
             for block in &func.blocks {
                 for instr in &block.instructions {
-                    if instr.opcode.starts_with("wasm_type:") {
-                        // Skip type pseudo-instruction
-                        continue;
-                    }
-                    if instr.opcode.starts_with("local_decl_") {
-                        // Parse local declarations from the encoded bytes
-                        let ty_name = instr.opcode.strip_prefix("local_decl_").unwrap_or("");
-                        let ty = match ty_name {
-                            "i64" => WasmType::I64,
-                            "f32" => WasmType::F32,
-                            "f64" => WasmType::F64,
-                            _ => WasmType::I32,
-                        };
-                        // The encoded bytes contain: LEB128(count) + type_byte
-                        let count_bytes = &instr.encoded[..instr.encoded.len() - 1];
-                        let (count, _) = decode_unsigned_leb128(count_bytes);
-                        local_decls.push((count as u32, ty));
-                        continue;
-                    }
                     body_bytes.extend_from_slice(&instr.encoded);
                 }
             }
@@ -2394,9 +2444,6 @@ impl Backend for Wasm32Backend {
             });
         }
 
-        // Add data sections as Wasm data segments
-        // (This is handled at a higher level; for now, we skip it.)
-
         Ok(module.encode())
     }
 
@@ -2416,211 +2463,35 @@ impl Backend for Wasm32Backend {
         let mut pc = addr;
 
         while offset < bytes.len() {
-            let byte = bytes[offset];
             let start_offset = offset;
-
-            // Handle multi-byte opcodes (0xFC = bulk memory, 0xFD = SIMD)
-            let mnemonic = if byte == 0xFC && offset + 1 < bytes.len() {
-                // Bulk memory / saturated arithmetic prefix
-                let (subop, subop_size) = decode_unsigned_leb128(&bytes[offset + 1..]);
-                offset += 1 + subop_size;
-                let name = match subop {
-                    0x08 => "memory.init".to_string(),
-                    0x09 => "data.drop".to_string(),
-                    0x0A => "memory.copy".to_string(),
-                    0x0B => "memory.fill".to_string(),
-                    0x0C => "memory.grow".to_string(),
-                    0x0D => "memory.size".to_string(),
-                    _ => format!("fc_subop_{:#04x}", subop),
-                };
-                // Skip remaining LEB128 operands for the sub-opcode
-                match subop {
-                    0x08 => {
-                        skip_leb128(bytes, &mut offset, 2);
-                    } // data_idx, mem
-                    0x0A => {
-                        skip_leb128(bytes, &mut offset, 2);
-                    } // src, dst
-                    0x0B => {
-                        skip_leb128(bytes, &mut offset, 1);
-                    } // mem
-                    _ => {}
+            match WasmInstr::decode(&bytes[offset..]) {
+                Ok((instr, consumed)) => {
+                    let hex_bytes: Vec<String> = bytes[start_offset..start_offset + consumed]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    lines.push(format!(
+                        "{:#010x}:  {:20}  {}",
+                        pc,
+                        hex_bytes.join(" "),
+                        instr
+                    ));
+                    offset += consumed;
+                    pc += consumed as u64;
                 }
-                name
-            } else if byte == 0xFD && offset + 1 < bytes.len() {
-                // SIMD prefix
-                let (subop, subop_size) = decode_unsigned_leb128(&bytes[offset + 1..]);
-                offset += 1 + subop_size;
-                let name = match subop {
-                    0x0C => "v128.const".to_string(),
-                    0x0E => "i32x4.add".to_string(),
-                    0x15 => "i32x4.mul".to_string(),
-                    0x2C => "f32x4.add".to_string(),
-                    0x35 => "f32x4.mul".to_string(),
-                    _ => format!("simd_subop_{:#04x}", subop),
-                };
-                // Skip v128.const payload (16 bytes)
-                if subop == 0x0C {
-                    offset += 16;
+                Err(_) => {
+                    // Fallback: unknown byte, emit as raw hex
+                    let hex_bytes = format!("{:02x}", bytes[offset]);
+                    lines.push(format!(
+                        "{:#010x}:  {:20}  op_{:#04x}",
+                        pc,
+                        hex_bytes,
+                        bytes[offset]
+                    ));
+                    offset += 1;
+                    pc += 1;
                 }
-                name
-            } else {
-                let m = match byte {
-                    0x00 => "unreachable".to_string(),
-                    0x01 => "nop".to_string(),
-                    0x02 => "block".to_string(),
-                    0x03 => "loop".to_string(),
-                    0x04 => "if".to_string(),
-                    0x05 => "else".to_string(),
-                    0x0B => "end".to_string(),
-                    0x0C => "br".to_string(),
-                    0x0D => "br_if".to_string(),
-                    0x0E => "br_table".to_string(),
-                    0x0F => "return".to_string(),
-                    0x10 => "call".to_string(),
-                    0x11 => "call_indirect".to_string(),
-                    0x1A => "drop".to_string(),
-                    0x1B => "select".to_string(),
-                    0x20 => "local.get".to_string(),
-                    0x21 => "local.set".to_string(),
-                    0x22 => "local.tee".to_string(),
-                    0x23 => "global.get".to_string(),
-                    0x24 => "global.set".to_string(),
-                    0x28 => "i32.load".to_string(),
-                    0x29 => "i64.load".to_string(),
-                    0x2A => "f32.load".to_string(),
-                    0x2B => "f64.load".to_string(),
-                    0x36 => "i32.store".to_string(),
-                    0x37 => "i64.store".to_string(),
-                    0x38 => "f32.store".to_string(),
-                    0x39 => "f64.store".to_string(),
-                    0x41 => "i32.const".to_string(),
-                    0x42 => "i64.const".to_string(),
-                    0x43 => "f32.const".to_string(),
-                    0x44 => "f64.const".to_string(),
-                    0x45 => "i32.eqz".to_string(),
-                    0x46 => "i32.eq".to_string(),
-                    0x47 => "i32.ne".to_string(),
-                    0x48 => "i32.lt_s".to_string(),
-                    0x49 => "i32.lt_u".to_string(),
-                    0x4A => "i32.gt_s".to_string(),
-                    0x4B => "i32.gt_u".to_string(),
-                    0x4C => "i32.le_s".to_string(),
-                    0x4D => "i32.le_u".to_string(),
-                    0x4E => "i32.ge_s".to_string(),
-                    0x4F => "i32.ge_u".to_string(),
-                    0x6A => "i32.add".to_string(),
-                    0x6B => "i32.sub".to_string(),
-                    0x6C => "i32.mul".to_string(),
-                    0x6D => "i32.div_s".to_string(),
-                    0x6E => "i32.div_u".to_string(),
-                    0x6F => "i32.rem_s".to_string(),
-                    0x70 => "i32.rem_u".to_string(),
-                    0x71 => "i32.and".to_string(),
-                    0x72 => "i32.or".to_string(),
-                    0x73 => "i32.xor".to_string(),
-                    0x74 => "i32.shl".to_string(),
-                    0x75 => "i32.shr_s".to_string(),
-                    0x76 => "i32.shr_u".to_string(),
-                    0x77 => "i32.rotl".to_string(),
-                    0x78 => "i32.rotr".to_string(),
-                    0x67 => "i32.clz".to_string(),
-                    0x68 => "i32.ctz".to_string(),
-                    0x69 => "i32.popcnt".to_string(),
-                    0x50 => "i64.eqz".to_string(),
-                    0x51 => "i64.eq".to_string(),
-                    0x52 => "i64.ne".to_string(),
-                    0x53 => "i64.lt_s".to_string(),
-                    0x54 => "i64.lt_u".to_string(),
-                    0x55 => "i64.gt_s".to_string(),
-                    0x56 => "i64.gt_u".to_string(),
-                    0x57 => "i64.le_s".to_string(),
-                    0x58 => "i64.le_u".to_string(),
-                    0x59 => "i64.ge_s".to_string(),
-                    0x5A => "i64.ge_u".to_string(),
-                    0x79 => "i64.clz".to_string(),
-                    0x7A => "i64.ctz".to_string(),
-                    0x7B => "i64.popcnt".to_string(),
-                    0x7C => "i64.add".to_string(),
-                    0x7D => "i64.sub".to_string(),
-                    0x7E => "i64.mul".to_string(),
-                    0x7F => "i64.div_s".to_string(),
-                    0x80 => "i64.div_u".to_string(),
-                    0x81 => "i64.rem_s".to_string(),
-                    0x82 => "i64.rem_u".to_string(),
-                    0x83 => "i64.and".to_string(),
-                    0x84 => "i64.or".to_string(),
-                    0x85 => "i64.xor".to_string(),
-                    0x86 => "i64.shl".to_string(),
-                    0x87 => "i64.shr_s".to_string(),
-                    0x88 => "i64.shr_u".to_string(),
-                    0x89 => "i64.rotl".to_string(),
-                    0x8A => "i64.rotr".to_string(),
-                    0x8C => "f32.neg".to_string(),
-                    0x91 => "f32.sqrt".to_string(),
-                    0x92 => "f32.add".to_string(),
-                    0x93 => "f32.sub".to_string(),
-                    0x94 => "f32.mul".to_string(),
-                    0x95 => "f32.div".to_string(),
-                    0x9A => "f64.neg".to_string(),
-                    0x9F => "f64.sqrt".to_string(),
-                    0xA0 => "f64.add".to_string(),
-                    0xA1 => "f64.sub".to_string(),
-                    0xA2 => "f64.mul".to_string(),
-                    0xA3 => "f64.div".to_string(),
-                    0xA7 => "i32.wrap_i64".to_string(),
-                    0xAC => "i64.extend_i32_s".to_string(),
-                    0xAD => "i64.extend_i32_u".to_string(),
-                    0xB6 => "f32.demote_f64".to_string(),
-                    0xBB => "f64.promote_f32".to_string(),
-                    0xBC => "i32.reinterpret_f32".to_string(),
-                    0xBD => "i64.reinterpret_f64".to_string(),
-                    0xBE => "f32.reinterpret_i32".to_string(),
-                    0xBF => "f64.reinterpret_i64".to_string(),
-                    _ => format!("op_{:#04x}", byte),
-                };
-                offset += 1;
-
-                // Skip LEB128 immediates for common patterns
-                match byte {
-                    0x20..=0x24 | 0x0C..=0x0D | 0x10 => {
-                        skip_leb128(bytes, &mut offset, 1);
-                    }
-                    0x11 => {
-                        skip_leb128(bytes, &mut offset, 2);
-                    }
-                    0x41 | 0x42 => {
-                        skip_signed_leb128(bytes, &mut offset, 1);
-                    }
-                    0x28..=0x3E => {
-                        skip_leb128(bytes, &mut offset, 2);
-                    }
-                    0x3F..=0x40 => {
-                        skip_leb128(bytes, &mut offset, 1);
-                    }
-                    0x43 => {
-                        offset += 4;
-                    } // f32.const: 4 bytes
-                    0x44 => {
-                        offset += 8;
-                    } // f64.const: 8 bytes
-                    _ => {}
-                }
-                m
-            };
-
-            let consumed = offset - start_offset;
-            let hex_bytes: Vec<String> = bytes[start_offset..offset]
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            lines.push(format!(
-                "{:#010x}:  {:20}  {}",
-                pc,
-                hex_bytes.join(" "),
-                mnemonic
-            ));
-            pc += consumed as u64;
+            }
         }
         lines
     }
@@ -3088,6 +2959,11 @@ mod tests {
                 spill_slots: 0,
                 code_size: 3,
                 relocations: Vec::new(),
+                wasm_func_type: Some(crate::backend::WasmFuncType {
+                    params: vec![],
+                    results: vec![],
+                }),
+                wasm_locals: Some(vec![]),
             }],
             total_code_size: 3,
             total_data_size: 0,
@@ -3615,4 +3491,3 @@ mod tests {
         );
     }
 }
-pub mod disasm;

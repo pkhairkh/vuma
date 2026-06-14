@@ -158,6 +158,37 @@ pub struct AllocatedBlock {
 }
 
 // ---------------------------------------------------------------------------
+// Wasm-specific metadata (used only by the Wasm32 backend)
+// ---------------------------------------------------------------------------
+
+/// A Wasm value type, stored as a simple enum for serialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum WasmValueType {
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+/// A Wasm function type (parameter types → result types).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct WasmFuncType {
+    /// Parameter types.
+    pub params: Vec<WasmValueType>,
+    /// Result types.
+    pub results: Vec<WasmValueType>,
+}
+
+/// A Wasm local declaration: `count` locals of type `ty`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct WasmLocalDecl {
+    /// Number of consecutive locals of this type.
+    pub count: u32,
+    /// Type of these locals.
+    pub ty: WasmValueType,
+}
+
+// ---------------------------------------------------------------------------
 // AllocatedFunction
 // ---------------------------------------------------------------------------
 
@@ -179,6 +210,16 @@ pub struct AllocatedFunction {
     /// Relocation entries for this function.
     #[serde(default)]
     pub relocations: Vec<RelocationEntry>,
+
+    // ── Wasm-specific metadata ──────────────────────────────────────
+    /// Wasm function type (params → results), used by the Wasm32 backend
+    /// to emit the type section.  `None` for non-Wasm targets.
+    #[serde(default)]
+    pub wasm_func_type: Option<WasmFuncType>,
+    /// Wasm local declarations (count, type) beyond function parameters.
+    /// `None` for non-Wasm targets.
+    #[serde(default)]
+    pub wasm_locals: Option<Vec<WasmLocalDecl>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1827,6 +1868,8 @@ impl Backend for AArch64Backend {
             spill_slots: 0,
             code_size,
             relocations,
+            wasm_func_type: None,
+            wasm_locals: None,
         })
     }
 

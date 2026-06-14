@@ -3859,6 +3859,8 @@ impl Backend for Arm32Backend {
             spill_slots: all_vreg_ids.len(),
             code_size,
             relocations,
+            wasm_func_type: None,
+            wasm_locals: None,
         })
     }
 
@@ -4397,6 +4399,8 @@ mod tests {
                 spill_slots: 0,
                 code_size: 4,
                 relocations: Vec::new(),
+                wasm_func_type: None,
+                wasm_locals: None,
             }],
             total_code_size: 4,
             total_data_size: 0,
