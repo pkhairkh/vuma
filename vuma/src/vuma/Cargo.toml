@@ -13,3 +13,4 @@ vuma-parser = { path = "../parser" }
 vuma-ive = { path = "../ive" }
 vuma-bd = { path = "../bd" }
 vuma-cor = { path = "../cor" }
+vuma-codegen = { path = "../codegen" }

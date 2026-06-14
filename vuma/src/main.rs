@@ -8,6 +8,7 @@
 //! - `vuma disasm <file>` — Read binary and disassemble
 //! - `vuma verify <file>` — Run IVE 5-invariant verification
 //! - `vuma repl` — Interactive REPL (parse expr, print AST)
+//! - `vuma lsp`  — Start Language Server (LSP) for IDE/LLM integration
 
 use std::fs;
 use std::io::{self, Write as IoWrite};
@@ -45,8 +46,12 @@ struct Cli {
     #[arg(long, global = true)]
     debug: bool,
 
+    /// Launch the interactive REPL (shorthand for `vuma repl`)
+    #[arg(long, global = true)]
+    repl: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 /// Optimization level CLI argument.
@@ -200,6 +205,9 @@ enum Commands {
 
     /// Interactive REPL: parse expressions and print AST
     Repl,
+
+    /// Start the Language Server (LSP) for IDE/LLM integration
+    Lsp,
 }
 
 /// Target platform CLI argument for the `build` subcommand.
@@ -1344,6 +1352,13 @@ fn cmd_repl() -> Result<(), String> {
     Ok(())
 }
 
+/// Start the VUMA Language Server (LSP) over stdin/stdout.
+fn cmd_lsp() -> Result<(), String> {
+    let mut server = vuma::lsp::LspServer::new();
+    server.run();
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1354,7 +1369,26 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    // Handle --repl flag: launch the full VumaRepl instead of subcommand.
+    if cli.repl {
+        let mut repl = vuma_core::repl::VumaRepl::new();
+        if let Err(e) = repl.run() {
+            eprintln!("REPL error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            // No subcommand and no --repl: print help.
+            eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");
+            std::process::exit(1);
+        }
+    };
+
+    let result = match command {
         Commands::Build {
             ref file,
             ref output,
@@ -1374,6 +1408,7 @@ fn main() {
         } => cmd_disasm(file, isa, base_addr),
         Commands::Verify { ref file } => cmd_verify(&cli, file),
         Commands::Repl => cmd_repl(),
+        Commands::Lsp => cmd_lsp(),
     };
 
     if let Err(err) = result {
@@ -1552,12 +1587,19 @@ mod tests {
 
     /// Test 10: `vuma repl` parses correctly.
     #[test]
-    fn test_repl() {
+    fn test_repl_subcommand() {
         let cli = Cli::try_parse_from(["vuma", "repl"]).unwrap();
         match cli.command {
-            Commands::Repl => {}
+            Some(Commands::Repl) => {}
             _ => panic!("expected Repl command"),
         }
+    }
+
+    /// Test 10b: `vuma --repl` parses correctly.
+    #[test]
+    fn test_repl_flag() {
+        let cli = Cli::try_parse_from(["vuma", "--repl"]).unwrap();
+        assert!(cli.repl, "--repl flag should be true");
     }
 
     /// Test 11: Global --opt-level flag works.

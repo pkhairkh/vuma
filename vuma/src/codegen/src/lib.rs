@@ -65,6 +65,9 @@ pub use riscv64::RiscV64Backend;
 /// Re-export Wasm32 backend types.
 pub use wasm32::Wasm32Backend;
 
+/// Re-export the Wasm32 compile_to_wasm convenience function.
+pub use wasm32::compile_to_wasm;
+
 /// Re-export LoongArch64 backend types.
 pub use loongarch64::LoongArch64Backend;
 

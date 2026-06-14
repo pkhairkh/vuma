@@ -39,10 +39,37 @@
 
 #![warn(missing_docs)]
 
+pub mod api;
+pub mod diagnostics;
+pub mod lsp;
 pub mod pipeline;
 
 // Re-export the primary pipeline API at the crate root for convenience.
 pub use pipeline::{
-    compile, compile_incremental, CompilationOutput, CompileConfig, CompileTarget, DebugInfo,
-    IncrementalCache, OptLevel, PipelineStage, SourceFingerprint, VerificationLevel, VumaError,
+    compile, compile_incremental, compile_to_wasm, CompilationOutput, CompileConfig,
+    CompileTarget, DebugInfo, IncrementalCache, OptLevel, PipelineStage, SourceFingerprint,
+    VerificationLevel, VumaError,
 };
+
+// Re-export diagnostics types for convenience.
+pub use diagnostics::{
+    diagnostics_to_json, diagnostics_to_json_pretty, from_codegen_error, from_parse_error,
+    from_parse_errors, from_vuma_error, code_for_parse_error_kind, code_for_codegen_error,
+    code_description, DiagnosticSeverity, DiagnosticSourceLocation, RelatedInfo, VumaDiagnostic,
+};
+
+// Re-export the primary API types for convenience.
+pub use api::{
+    ApiTargetInfo, CompileMetadata, CompileResult, FunctionSummary, ParseResult, ScgSummary,
+    TargetOutput, VumaCompiler,
+};
+
+// Re-export REPL types from vuma-core for convenience.
+pub use vuma_core::repl::{ReplError, ReplProfile, ReplResult, VumaRepl};
+
+// Re-export LSP types for convenience.
+pub use lsp::{
+    CompletionItem, CompletionItemKind, Diagnostic, DocumentSymbol,
+    LspServer, Position, Range, SemanticTokensLegend, SymbolKind, VumaDocument,
+};
+pub use lsp::DiagnosticSeverity as LspDiagnosticSeverity;

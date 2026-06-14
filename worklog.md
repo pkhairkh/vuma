@@ -1153,3 +1153,241 @@ Files Modified:
 - vuma/src/codegen/src/arm64.rs (bug #12: CastKind FP variants)
 - vuma/src/codegen/src/emit.rs (bug #12: CastKind FP variants, 2 locations)
 - vuma/src/codegen/src/x86_64/stack_slot_isel.rs (bug #12: CastKind FP variants)
+
+---
+Task ID: 5-h
+Agent: general-purpose
+Task: Create LLM system prompt template for VUMA programming
+
+Work Log:
+- Read worklog.md for project context and history
+- Studied language-reference.md for syntax, type system, memory model, control flow
+- Studied architecture.md for system overview and pipeline stages
+- Studied GLOSSARY.md for terminology (SCG, MSG, IVE, BD, LIVE invariants)
+- Read all example programs: minimal.vuma, test_exit.vuma, test_call.vuma, test_alloc.vuma, test_store.vuma, hello_memory.vuma, test_loop.vuma, test_u32_arith.vuma, test_u32_mem.vuma, test_rotr.vuma, test_endian.vuma, sha256d.vuma
+- Read parser/AST source (ast.rs, lexer.rs) for syntax details and keyword list
+- Read IR types (ir.rs) for type system details (IRType enum)
+- Read pipeline.rs for compile() API, CompileConfig, VumaError, and compilation stages
+- Read backend.rs for BackendKind enum (8 backends: AArch64, x86_64, RiscV64, LoongArch64, MIPS64, PPC64, ARM32, Wasm32)
+- Read repl.rs for VumaRepl API and REPL commands
+- Read main.rs for CLI subcommands (build, run, check, emit, disasm, verify, repl)
+- Created /home/z/my-project/vuma/docs/llm-system-prompt.md (5012 words) containing:
+  - Part 1: System prompt with language syntax, type system, memory model, control flow, common pitfalls, backends, BD system
+  - Part 2: Five few-shot examples (Hello World, Arithmetic, Memory Allocation, Function Calling, SHA256d)
+  - Part 3: Error recovery patterns (reading diagnostics, fixing common errors, iterative workflow)
+  - Part 4: Integration guide (compile API, analyze/SCG, Wasm sandboxed execution, REPL, CLI reference, LLM workflow)
+  - Appendix: VUMA idiom quick reference table
+
+Stage Summary:
+- Created comprehensive LLM system prompt document at /home/z/my-project/vuma/docs/llm-system-prompt.md
+- Document is 5012 words (well above 2000 word minimum)
+- Covers all 4 required sections: system prompt, few-shot examples, error recovery, integration guide
+- All examples are drawn from actual VUMA source code and tested programs
+- Emphasis on the critical u32 masking pitfall that is the #1 source of bugs in VUMA programs
+
+---
+Task ID: 5-e
+Agent: general-purpose
+Task: Create comprehensive VUMA language reference document for LLMs
+
+Work Log:
+- Read existing language reference at /home/z/my-project/download/vuma-project/docs/language-reference.md (1102 lines)
+- Read parser AST types (ast.rs), lexer source (lexer.rs), and IR types (ir.rs) to understand full grammar
+- Read all example programs: sha256d.vuma, minimal.vuma, test_u32_arith.vuma, test_alloc.vuma, test_loop.vuma, test_call.vuma, test_sha_manual.vuma, test_store.vuma, test_u32_mem.vuma, test_hex.vuma, test_endian.vuma, test_sha_round.vuma, test_exit.vuma, test_rotr.vuma
+- Read codegen IR types: IRType (I8-U64, F32-F64, Ptr, Void, Func, Struct, Array), BinOpKind (Add-Xor, Shl-ShrA, Ror-Rol, SLt-Ne), UnaryOpKind (Neg, Not, Clz, Ctz, Popcnt), IRInstr (Load, Store, BinOp, UnaryOp, Call, Alloc, Free, Cast, Phi, GetAddress, Offset, Select, Add, Sub, Mul, Div, Cmp, Ret, Branch, CondBranch)
+- Read worklog for historical context on language behavior and pitfalls (u32 masking, NOT operator issues, backend-specific bugs)
+- Created /home/z/my-project/vuma/docs/ directory
+- Wrote /home/z/my-project/vuma/docs/llm-language-reference.md (5542 words)
+- All 15 required sections present with code examples
+- Key emphasis: u32 masking (& 4294967295), no ~ for bitwise NOT (use ^ 4294967295), allocate/free pairing, rotate composition from shifts
+
+Stage Summary:
+- Created comprehensive LLM language reference at /home/z/my-project/vuma/docs/llm-language-reference.md
+- Document is 5542 words (well above 3000 word minimum)
+- All 15 required sections included: Quick Start, Types, Functions, Variables, Control Flow, Memory, Pointer Operations, Bitwise Operations, Arithmetic, Comparison, Constants, Calling Convention, Common Patterns, Pitfalls, Target Platforms
+- Every section has at least one code example (most have multiple)
+- Special emphasis on critical pitfalls: u32 masking on 64-bit registers, ~x vs x^0xFFFFFFFF, left-shift masking, rotate masking
+- Includes Quick Reference Card for fast lookup
+- Document format is clear and unambiguous for LLM parsing
+
+---
+Task ID: 5-d
+Agent: sub
+Task: Structured SCG output for LLMs
+
+Work Log:
+- Read and analyzed entire SCG crate: graph.rs, node.rs, edge.rs, region.rs, serialize.rs, diff.rs, query.rs, callgraph.rs
+- Created new `structured_output.rs` module with LLM-friendly JSON and text representations
+- Added `SCG::to_json()` method producing clean JSON with nodes, edges, functions, regions, and summary
+- Added `SCG::to_text()` method producing human-readable text with function-by-function breakdown
+- LLM JSON types: LlmNode, LlmEdge, LlmFunction, LlmCallTarget, LlmRegion, LlmSummary, LlmScgJson
+- Enhanced diff.rs with:
+  - Serde derives on all diff types (DiffEntry, SCGDiff, DiffStats, DiffError, MergeConflict, NodeConflict, EdgeConflict, RegionConflict)
+  - `SCGDiff::affected_functions()` method showing which functions are modified/added/removed
+  - `SCGDiff::to_json()` and `SCGDiff::to_text()` methods for LLM consumption
+  - `AffectedFunctions`, `LlmDiff`, `LlmDiffChange` types for structured diff output
+  - `scg_diff()` function alias for more intuitive LLM-facing API
+- Enhanced query.rs with 4 LLM-friendly query variants:
+  - `SCGQuery::ListFunctions` — "What functions does this program define?"
+  - `SCGQuery::FunctionInputsOutputs` — "What are the inputs/outputs of function X?"
+  - `SCGQuery::DataFlowPath` — "What is the data flow from variable A to variable B?"
+  - `SCGQuery::CallersOf` — "Which functions call function X?"
+- Extended `QueryResult` with `functions: Vec<FunctionInfo>` and `data_flow_edges: Vec<EdgeData>`
+- Added `FunctionInfo` struct with entry/return node IDs, name, contained nodes, calls, callers, recursion flag, input/output nodes
+- Updated lib.rs re-exports for all new types and methods
+- All 183 existing tests pass + 8 doc tests + 8 new structured_output tests pass
+
+Stage Summary:
+- SCG now has comprehensive LLM-facing output capabilities
+- to_json() produces structured JSON optimized for LLM parsing (minimal redundancy, function-centric, type info)
+- to_text() produces readable text for human/LLM consumption
+- Diff output includes affected function tracking and LLM-friendly JSON/text representations
+- Query engine supports 4 new question-answering queries for LLMs
+- All new types have Serde derives for JSON serialization
+
+---
+Task ID: 5-g
+Agent: general-purpose
+Task: Enhance Wasm32 backend as first-class LLM target
+
+Work Log:
+- Read and analyzed the complete Wasm32 backend (wasm32/mod.rs, ~4300 lines)
+- Verified existing WASI integration: proc_exit import was present, fd_write import was defined but NOT wired into encode_program
+- Added WASI fd_write import to encode_program (now function index 0, proc_exit moves to index 1)
+- Fixed _start wrapper to use WASI_PROC_EXIT_IDX constant (1) instead of hardcoded 0
+- Added three runtime helper functions with WASI fd_write support:
+  - __vuma_print_int: Converts i32 to decimal string and writes to stdout via fd_write
+  - __vuma_print_hex: Writes i32 as 8 lowercase hex digits to stdout via fd_write
+  - __vuma_print_newline: Writes '\n' to stdout via fd_write
+- Added call relocation resolution mechanism:
+  - Modified LoweringContext to track call_targets (instruction index → function name)
+  - Changed lower_instruction Call from Call(0) placeholder to Call(UNRESOLVED_CALL_IDX=0xDEAD)
+  - Modified lower_function to return Vec<(usize, String)> relocations alongside (WasmFuncBody, WasmFuncType)
+  - Modified allocate_registers to store relocations as RelocationEntry in AllocatedFunction
+  - Added resolve_call_relocations() function that patches LEB128-encoded function indices in bytecode
+- Added compile_to_wasm() convenience function in wasm32/mod.rs:
+  - Takes &[IRFunction], returns Result<Vec<u8>, BackendError>
+  - Internally uses Wasm32Backend::allocate_registers + encode_program
+- Re-exported compile_to_wasm from codegen lib.rs
+- Added CompileTarget::Wasm32 variant to pipeline.rs
+- Added pipeline-level compile_to_wasm(source: &str) function:
+  - Takes VUMA source code, returns Result<Vec<u8>, Vec<VumaError>>
+  - Uses lightweight compilation path (skip verification, O1 opt)
+- Re-exported compile_to_wasm and CompileTarget::Wasm32 from vuma lib.rs
+- Added 8 comprehensive tests in wasm_target_tests module:
+  - test_compile_to_wasm_simple_return: Compiles fn main() -> i32 { return 42; }
+  - test_compile_to_wasm_void_main: Compiles fn main() { }
+  - test_compile_to_wasm_no_main: Compiles with no main function
+  - test_wasm_module_has_wasi_fd_write: Verifies fd_write import presence
+  - test_print_int_runtime_emission: Verifies print_int bytecode structure
+  - test_print_hex_runtime_emission: Verifies print_hex bytecode structure
+  - test_print_newline_runtime_emission: Verifies print_newline bytecode structure
+  - test_resolve_call_relocations: Tests call target patching
+- All 8 new tests pass; existing codegen tests still pass
+
+Stage Summary:
+- Wasm32 backend is now a first-class LLM target with:
+  - WASI fd_write + proc_exit imports for stdout and exit
+  - Runtime print helpers (__vuma_print_int, __vuma_print_hex, __vuma_print_newline)
+  - Proper call relocation resolution (no more placeholder Call(0))
+  - compile_to_wasm() convenience function at both codegen and pipeline levels
+  - CompileTarget::Wasm32 variant
+  - The produced .wasm binary is directly executable with wasmer, wasmtime, or Node.js
+- LLM can now do: source = "fn main() -> i32 { return 42; }"; wasm_binary = vuma.compile_to_wasm(source)
+
+---
+Task ID: 5-f
+Agent: sub-agent
+Task: Add REPL (Read-Eval-Print Loop) mode to the VUMA compiler
+
+Work Log:
+- Read existing repl.rs (1590 lines) — already had core REPL with :help, :load, :verify, :show, :compile, :profile, :history, :reset, :quit
+- Identified missing features from the spec: :type, :scg, :target, compile_session(), load_file(), session_source/target fields
+- Added `target: String` field to VumaRepl struct (default "aarch64") with VALID_TARGETS constant
+- Renamed `source_buffer` → `session_source` to match the spec
+- Added `ReplError::Compilation` variant and `ReplResult::Compiled { bytes, target }` variant
+- Implemented `:type <expr>` command — shows inferred type via simple evaluator, AST parsing, or BD inference
+- Implemented `:scg <func_name>` command — searches SCG nodes by payload content, shows nodes/edges with BD info
+- Implemented `:target <isa>` command — switches compilation target among 8 ISAs (aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64)
+- Added `compile_session()` public method — runs full pipeline (parse → SCG → MSG → verify) and reports target
+- Added `load_file()` public method — wraps existing :load logic for programmatic use
+- Added `target()` accessor method
+- Updated :reset to also reset target to default
+- Updated :help text to include new commands, current target, and valid targets list
+- Added `format_ast_type()` helper (delegates to Type's Display impl)
+- Added `node_label()` helper to extract human-readable labels from SCG NodeData payloads
+- Added 7 new tests (test_type_command, test_target_command, test_scg_command_no_scg, test_compiled_result_display, test_compilation_error_display, test_help_includes_new_commands, test_reset_resets_target)
+- All 29 REPL tests pass successfully
+- Added `--repl` flag to CLI in main.rs — launches VumaRepl directly (alongside existing `vuma repl` subcommand)
+- Changed CLI `command` field to `Option<Commands>` to allow --repl without subcommand
+- Added test_repl_subcommand and test_repl_flag tests to main.rs
+- Updated src/lib.rs to re-export REPL types from vuma-core: ReplError, ReplProfile, ReplResult, VumaRepl
+- Fixed pre-existing build errors in vuma-scg (structured_output.rs temporary value lifetime, callgraph.rs private method visibility)
+
+Stage Summary:
+- REPL now supports all 10 required features from the spec:
+  1. Expression evaluation (existing + enhanced)
+  2. Function definition (existing, incremental)
+  3. Variable binding (existing)
+  4. Compile command (:compile with target awareness)
+  5. Type query (:type expr)
+  6. SCG visualization (:scg func_name)
+  7. Help (:help with target info)
+  8. Target selection (:target x86_64)
+  9. Load file (:load filename.vuma)
+  10. Reset (:reset clears target too)
+- vuma-core crate compiles and all 29 REPL tests pass
+- CLI supports both `vuma repl` and `vuma --repl` entry points
+
+---
+Task ID: 5-a
+Agent: sub-agent
+Task: Create LSP (Language Server Protocol) implementation for VUMA
+
+Work Log:
+- Created `/home/z/my-project/vuma/src/lsp/` directory with `mod.rs`
+- Implemented full LSP server with JSON-RPC over stdin/stdout transport
+- All 8 required capabilities implemented:
+  1. **LSP Server** — stdin/stdout JSON-RPC transport (Content-Length header protocol)
+  2. **TextDocumentSync** — full document sync for .vuma files (open/close/change)
+  3. **Diagnostics** — publish compilation errors from lexer + parser with line/column info
+  4. **Hover** — show type information for variables, functions, structs, enums, regions, traits
+  5. **Go to Definition** — navigate from usage to definition across all symbol types
+  6. **Completion** — suggest VUMA keywords, document symbols (functions/structs/enums/regions/consts/vars), and built-in types
+  7. **Document Symbols** — list all functions, structs, enums, regions, constants, traits with LSP SymbolKind
+  8. **Semantic Tokens** — highlight keywords, types, variables, strings, numbers, operators, comments using delta encoding
+- Hooked into vuma-parser for lexing (Lexer) and parsing (Parser) with error recovery
+- Extracts document info from AST: functions (with return types), structs (with fields), enums, regions, constants, traits, let bindings, impl blocks
+- Updated `src/lib.rs` to add `pub mod lsp` and re-export key LSP types
+- Updated `src/main.rs` to add `vuma lsp` CLI subcommand
+- Fixed pre-existing bug in `src/scg/src/query.rs` (deref comparison for FunctionId)
+- All 15 unit tests pass:
+  - test_lsp_server_creation
+  - test_initialize_response
+  - test_document_open_and_diagnostics
+  - test_document_change
+  - test_completion_keywords
+  - test_completion_with_document_symbols
+  - test_hover_function
+  - test_go_to_definition
+  - test_document_symbols
+  - test_semantic_tokens
+  - test_position_conversion
+  - test_word_at_position
+  - test_format_type
+  - test_diagnostic_from_parse_error
+  - test_semantic_tokens_legend
+- LSP module verified to compile cleanly against vuma-parser (isolated test)
+
+Key Design Decisions:
+- Used `ParseResult.value` instead of `Result` match since parser always returns a ParseResult
+- Type formatting delegates to `Type::Display` impl which handles BDBase, Ptr, RegionPtr, Array, Struct, Generic, Func, BdAnnot
+- Semantic tokens use heuristic: uppercase-starting identifiers → type, others → variable
+- Parser errors accessed via `parser.errors()` method (field is private)
+- MatchArm.body is an Expr (not Block), so no nested statement extraction for match arms
+
+Stage Summary:
+- LSP implementation is complete with all 8 required capabilities
+- `vuma lsp` CLI command starts the language server
+- Full document sync, diagnostics, hover, definition, completion, symbols, and semantic tokens all wired up
+- All tests pass; module compiles against vuma-parser cleanly

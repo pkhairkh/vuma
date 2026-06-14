@@ -15,7 +15,9 @@
 //! relative to a common base.
 
 use hashbrown::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
 
+use crate::callgraph::CallGraph;
 use crate::edge::{EdgeData, EdgeId};
 use crate::graph::SCG;
 use crate::node::{NodeData, NodeId};
@@ -27,7 +29,7 @@ use crate::region::{RegionId, SCGRegion};
 ///
 /// Each variant captures one specific kind of graph modification, making
 /// diffs inspectable, serializable, and reversible.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffEntry {
     /// A node was added in the new graph.
     NodeAdded(NodeData),
@@ -132,7 +134,7 @@ impl DiffEntry {
 /// An `SCGDiff` contains an ordered list of `DiffEntry` items that
 /// collectively describe all changes needed to transform the old graph
 /// into the new graph.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SCGDiff {
     /// The ordered list of diff entries.
     entries: Vec<DiffEntry>,
@@ -141,7 +143,7 @@ pub struct SCGDiff {
 }
 
 /// Summary statistics for a diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DiffStats {
     /// Number of nodes added.
     pub nodes_added: usize,
@@ -253,6 +255,248 @@ impl SCGDiff {
             )
         })
     }
+
+    /// Returns the set of function names affected by this diff.
+    ///
+    /// An affected function is one that contains at least one changed node
+    /// (added, removed, or modified). This is computed by inspecting the
+    /// old and new graphs to determine which functions the changed nodes
+    /// belong to.
+    ///
+    /// This is particularly useful for LLMs that need to understand which
+    /// parts of a program were impacted by a change.
+    pub fn affected_functions(&self, old: &SCG, new: &SCG) -> AffectedFunctions {
+        let old_cg = CallGraph::build(old);
+        let new_cg = CallGraph::build(new);
+
+        let mut affected = AffectedFunctions {
+            modified: Vec::new(),
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+
+        // Track all changed node IDs
+        let mut changed_node_ids: HashSet<NodeId> = HashSet::new();
+        for entry in &self.entries {
+            match entry {
+                DiffEntry::NodeAdded(data) => {
+                    changed_node_ids.insert(data.id);
+                }
+                DiffEntry::NodeRemoved(id) => {
+                    changed_node_ids.insert(*id);
+                }
+                DiffEntry::NodeModified { id, .. } => {
+                    changed_node_ids.insert(*id);
+                }
+                DiffEntry::EdgeAdded(data) => {
+                    changed_node_ids.insert(data.source);
+                    changed_node_ids.insert(data.target);
+                }
+                DiffEntry::EdgeRemoved(_) => {
+                    // Edge removal doesn't necessarily mean function change
+                }
+                DiffEntry::EdgeModified { id, .. } => {
+                    // Look up the edge to find its endpoints
+                    if let Some(edge) = old.get_edge(*id).or_else(|| new.get_edge(*id)) {
+                        changed_node_ids.insert(edge.source);
+                        changed_node_ids.insert(edge.target);
+                    }
+                }
+                DiffEntry::RegionAdded(_) | DiffEntry::RegionRemoved(_) => {}
+                DiffEntry::RegionModified { .. } => {}
+            }
+        }
+
+        // For each changed node, find which function it belongs to
+        let mut old_func_names: HashSet<String> = HashSet::new();
+        let mut new_func_names: HashSet<String> = HashSet::new();
+
+        for node_id in &changed_node_ids {
+            // Try to find the function in the new graph first
+            if let Some(entry_id) = new_cg.find_enclosing_function(new, *node_id) {
+                let fid = crate::callgraph::FunctionId(entry_id);
+                if let Some(name) = new_cg.function_label(&fid) {
+                    new_func_names.insert(name.to_string());
+                } else {
+                    new_func_names.insert(format!("func_{}", entry_id.as_u64()));
+                }
+            }
+            // Also try the old graph
+            if let Some(entry_id) = old_cg.find_enclosing_function(old, *node_id) {
+                let fid = crate::callgraph::FunctionId(entry_id);
+                if let Some(name) = old_cg.function_label(&fid) {
+                    old_func_names.insert(name.to_string());
+                } else {
+                    old_func_names.insert(format!("func_{}", entry_id.as_u64()));
+                }
+            }
+        }
+
+        // Check for functions that were entirely added or removed
+        let old_fids: HashSet<_> = old_cg.functions().copied().collect();
+        let new_fids: HashSet<_> = new_cg.functions().copied().collect();
+
+        for fid in &new_fids - &old_fids {
+            if let Some(name) = new_cg.function_label(&fid) {
+                affected.added.push(name.to_string());
+            } else {
+                affected.added.push(format!("func_{}", fid.0.as_u64()));
+            }
+        }
+        for fid in &old_fids - &new_fids {
+            if let Some(name) = old_cg.function_label(&fid) {
+                affected.removed.push(name.to_string());
+            } else {
+                affected.removed.push(format!("func_{}", fid.0.as_u64()));
+            }
+        }
+
+        // Modified functions = those in both old and new that have changed nodes
+        let all_names: HashSet<String> = old_func_names
+            .union(&new_func_names)
+            .cloned()
+            .collect();
+        for name in &all_names {
+            if !affected.added.contains(name) && !affected.removed.contains(name) {
+                affected.modified.push(name.clone());
+            }
+        }
+
+        // Sort for deterministic output
+        affected.modified.sort();
+        affected.added.sort();
+        affected.removed.sort();
+
+        affected
+    }
+
+    /// Produces a clean, LLM-friendly JSON representation of this diff.
+    ///
+    /// Includes summary statistics, affected functions, and a list of
+    /// changes with human-readable descriptions.
+    pub fn to_json(&self, old: &SCG, new: &SCG) -> String {
+        let affected = self.affected_functions(old, new);
+        let llm_diff = LlmDiff {
+            summary: self.stats,
+            affected_functions: affected,
+            changes: self
+                .entries
+                .iter()
+                .map(|e| LlmDiffChange {
+                    kind: match e {
+                        DiffEntry::NodeAdded(_) => "node_added".to_string(),
+                        DiffEntry::NodeRemoved(_) => "node_removed".to_string(),
+                        DiffEntry::NodeModified { .. } => "node_modified".to_string(),
+                        DiffEntry::EdgeAdded(_) => "edge_added".to_string(),
+                        DiffEntry::EdgeRemoved(_) => "edge_removed".to_string(),
+                        DiffEntry::EdgeModified { .. } => "edge_modified".to_string(),
+                        DiffEntry::RegionAdded(_) => "region_added".to_string(),
+                        DiffEntry::RegionRemoved(_) => "region_removed".to_string(),
+                        DiffEntry::RegionModified { .. } => "region_modified".to_string(),
+                    },
+                    description: e.describe(),
+                })
+                .collect(),
+        };
+        serde_json::to_string_pretty(&llm_diff)
+            .unwrap_or_else(|e| format!(r#"{{"error": "diff JSON serialization failed: {}"}}"#, e))
+    }
+
+    /// Produces a human/LLM-readable text representation of this diff.
+    pub fn to_text(&self, old: &SCG, new: &SCG) -> String {
+        let affected = self.affected_functions(old, new);
+        let mut out = String::with_capacity(2048);
+
+        out.push_str("=== SCG Diff ===\n\n");
+
+        // Summary
+        out.push_str(&format!(
+            "Changes: {} added, {} removed, {} modified nodes; {} added, {} removed, {} modified edges; {} added, {} removed, {} modified regions\n",
+            self.stats.nodes_added, self.stats.nodes_removed, self.stats.nodes_modified,
+            self.stats.edges_added, self.stats.edges_removed, self.stats.edges_modified,
+            self.stats.regions_added, self.stats.regions_removed, self.stats.regions_modified,
+        ));
+        out.push_str(&format!("Total changes: {}\n\n", self.stats.total_changes()));
+
+        // Affected functions
+        if !affected.modified.is_empty() {
+            out.push_str(&format!(
+                "Modified functions: {}\n",
+                affected.modified.join(", ")
+            ));
+        }
+        if !affected.added.is_empty() {
+            out.push_str(&format!(
+                "Added functions: {}\n",
+                affected.added.join(", ")
+            ));
+        }
+        if !affected.removed.is_empty() {
+            out.push_str(&format!(
+                "Removed functions: {}\n",
+                affected.removed.join(", ")
+            ));
+        }
+        if !affected.modified.is_empty() || !affected.added.is_empty() || !affected.removed.is_empty() {
+            out.push('\n');
+        }
+
+        // Changes
+        out.push_str("--- Changes ---\n\n");
+        for entry in &self.entries {
+            out.push_str(&format!("  {}\n", entry.describe()));
+        }
+
+        out
+    }
+}
+
+// ── LLM-friendly diff types ─────────────────────────────────────────────
+
+/// Information about which functions are affected by a diff.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AffectedFunctions {
+    /// Functions that were modified (had nodes changed within them).
+    pub modified: Vec<String>,
+    /// Functions that were entirely added.
+    pub added: Vec<String>,
+    /// Functions that were entirely removed.
+    pub removed: Vec<String>,
+}
+
+impl AffectedFunctions {
+    /// Returns `true` if no functions are affected.
+    pub fn is_empty(&self) -> bool {
+        self.modified.is_empty() && self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// LLM-friendly JSON representation of a diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmDiff {
+    /// Summary statistics.
+    pub summary: DiffStats,
+    /// Affected functions.
+    pub affected_functions: AffectedFunctions,
+    /// List of changes with descriptions.
+    pub changes: Vec<LlmDiffChange>,
+}
+
+/// A single change in LLM-friendly format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmDiffChange {
+    /// The kind of change (e.g., "node_added", "edge_removed").
+    pub kind: String,
+    /// A human-readable description of the change.
+    pub description: String,
+}
+
+/// Computes the diff between two SCGs and returns an `SCGDiff`.
+///
+/// This is an alias for [`diff_scg`] that provides a more intuitive name
+/// for LLM-facing documentation.
+pub fn scg_diff(old: &SCG, new: &SCG) -> SCGDiff {
+    diff_scg(old, new)
 }
 
 /// Compute stats from a slice of diff entries.
@@ -277,7 +521,7 @@ fn compute_stats(entries: &[DiffEntry]) -> DiffStats {
 // ── Diff Error ──────────────────────────────────────────────────────────────
 
 /// Errors that can occur when applying a diff to an SCG.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DiffError {
     /// A node referenced in the diff was not found in the target graph.
     NodeNotFound(NodeId),
@@ -639,7 +883,7 @@ pub fn compute_edit_script(old: &SCG, new: &SCG) -> Vec<DiffEntry> {
 // ── Three-Way Merge ─────────────────────────────────────────────────────────
 
 /// A conflict encountered during three-way merge.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeConflict {
     /// Conflicts involving nodes.
     pub node_conflicts: Vec<NodeConflict>,
@@ -687,7 +931,7 @@ impl std::fmt::Display for MergeConflict {
 impl std::error::Error for MergeConflict {}
 
 /// A conflict involving a single node.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeConflict {
     /// The ID of the conflicting node.
     pub id: NodeId,
@@ -700,7 +944,7 @@ pub struct NodeConflict {
 }
 
 /// A conflict involving a single edge.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EdgeConflict {
     /// The ID of the conflicting edge.
     pub id: EdgeId,
@@ -713,7 +957,7 @@ pub struct EdgeConflict {
 }
 
 /// A conflict involving a single region.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegionConflict {
     /// The ID of the conflicting region.
     pub id: RegionId,

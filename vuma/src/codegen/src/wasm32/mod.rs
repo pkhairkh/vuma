@@ -12,7 +12,7 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, Wasm32TargetInfo,
+    BackendError, RelocationEntry, Wasm32TargetInfo,
 };
 use crate::ir::{
     BinOpKind, CastKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind,
@@ -1026,6 +1026,32 @@ const HEAP_PTR_GLOBAL_IDX: u32 = 0;
 /// the first page for globals / stack).
 const HEAP_START: i32 = 65536;
 
+// ── WASI import function indices ─────────────────────────────────────────
+// These are the function indices of WASI imports in the module.
+// fd_write is the first import (index 0), proc_exit is the second (index 1).
+// MUST be kept in sync with the order imports are added in `encode_program`.
+
+/// Function index for the WASI `fd_write` import (first imported function).
+const WASI_FD_WRITE_IDX: u32 = 0;
+/// Function index for the WASI `proc_exit` import (second imported function).
+const WASI_PROC_EXIT_IDX: u32 = 1;
+
+// ── Runtime helper memory layout ─────────────────────────────────────────
+// These addresses are in page 0 of linear memory, well below the heap.
+// Used by the __vuma_print_int / __vuma_print_hex runtime helpers.
+
+/// Address of the 32-byte print buffer in linear memory.
+const PRINT_BUF_ADDR: i32 = 0x0800;
+/// Address of the 8-byte WASI iov structure (ptr: i32, len: i32).
+const IOV_BUF_ADDR: i32 = 0x0820;
+/// Address of the 4-byte nwritten result pointer.
+const NWRITTEN_ADDR: i32 = 0x0828;
+
+/// Placeholder function index for unresolved Call instructions.
+/// Will be patched during `encode_program` when the function index mapping
+/// is known.
+const UNRESOLVED_CALL_IDX: u32 = 0xDEAD;
+
 /// A Wasm data segment.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WasmDataSegment {
@@ -1502,6 +1528,12 @@ struct LoweringContext {
     instrs: Vec<WasmInstr>,
     /// Expected result types for the function (used for return type coercion).
     result_types: Vec<WasmType>,
+    /// For each Call instruction (indexed by position in `instrs`),
+    /// record the target function name for later resolution during
+    /// `encode_program`.  The placeholder `UNRESOLVED_CALL_IDX` is emitted
+    /// as the call index and must be patched once the module's function
+    /// index space is known.
+    call_targets: Vec<(usize, String)>,
 }
 
 impl LoweringContext {
@@ -1514,6 +1546,7 @@ impl LoweringContext {
             block_labels: HashMap::new(),
             instrs: Vec::new(),
             result_types,
+            call_targets: Vec::new(),
         }
     }
 
@@ -1640,9 +1673,16 @@ fn infer_wasm_type(val: &IRValue) -> WasmType {
     }
 }
 
-/// Lower an IR function to Wasm bytecode, returning the function body bytes
-/// and local declarations.
-fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), BackendError> {
+/// Lower an IR function to Wasm bytecode, returning the function body,
+/// type, and a list of call relocations that must be patched during
+/// `encode_program`.
+///
+/// Each relocation is `(byte_offset, func_name)` where `byte_offset` is
+/// the position *within the encoded body bytes* where the LEB128 function
+/// index starts (i.e., one byte past the `0x10` Call opcode).
+fn lower_function(
+    func: &IRFunction,
+) -> Result<(WasmFuncBody, WasmFuncType, Vec<(usize, String)>), BackendError> {
     // Compute result types.
     // In Wasm32, all integer results are i32 since it's a 32-bit target.
     let result_types: Vec<WasmType> = func
@@ -1726,10 +1766,24 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
         results: result_types,
     };
 
-    // Encode all instructions to bytecode
+    // Encode all instructions to bytecode and compute call relocations.
     let mut body_bytes = Vec::new();
-    for instr in &ctx.instrs {
+    let mut call_relocations: Vec<(usize, String)> = Vec::new();
+    for (i, instr) in ctx.instrs.iter().enumerate() {
+        let offset_before = body_bytes.len();
         instr.encode(&mut body_bytes);
+
+        // If this is a Call with an unresolved placeholder, record a relocation.
+        if let WasmInstr::Call(idx) = instr {
+            if *idx == UNRESOLVED_CALL_IDX {
+                // Find the function name for this instruction index.
+                if let Some((_, func_name)) = ctx.call_targets.iter().find(|(instr_idx, _)| *instr_idx == i) {
+                    // The LEB128 function index starts at offset_before + 1
+                    // (the 0x10 Call opcode is 1 byte).
+                    call_relocations.push((offset_before + 1, func_name.clone()));
+                }
+            }
+        }
     }
     // Append the implicit end byte for the function body
     body_bytes.push(0x0B);
@@ -1739,7 +1793,7 @@ fn lower_function(func: &IRFunction) -> Result<(WasmFuncBody, WasmFuncType), Bac
         body: body_bytes,
     };
 
-    Ok((func_body, func_type))
+    Ok((func_body, func_type, call_relocations))
 }
 
 /// Lower a single IR instruction.
@@ -2032,13 +2086,16 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.emit(store_op);
         }
 
-        IRInstr::Call { dst, func: _, args } => {
+        IRInstr::Call { dst, func, args } => {
             for arg in args {
                 ctx.push_value(arg, None);
             }
-            // The function index is resolved during module linking;
-            // use a placeholder index 0 here.
-            ctx.emit(WasmInstr::Call(0));
+            // Record the call target for later resolution in `encode_program`.
+            // We emit a placeholder index that will be patched once the
+            // module's function index space is fully known.
+            let instr_idx = ctx.instrs.len();
+            ctx.call_targets.push((instr_idx, func.clone()));
+            ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
             if let Some(IRValue::Register(id)) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             }
@@ -2404,7 +2461,7 @@ impl Backend for Wasm32Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Wasm has no registers — map virtual regs to locals.
         // We lower the IR function to Wasm bytecode here.
-        let (func_body, func_type) =
+        let (func_body, func_type, call_relocs) =
             lower_function(func).map_err(|e| BackendError::RegisterAllocFailed {
                 isa: "wasm32",
                 reason: e.to_string(),
@@ -2448,6 +2505,16 @@ impl Backend for Wasm32Backend {
             })
             .collect();
 
+        // Convert call relocations to RelocationEntry objects.
+        let relocations: Vec<RelocationEntry> = call_relocs
+            .into_iter()
+            .map(|(byte_offset, func_name)| RelocationEntry {
+                offset: byte_offset as u64,
+                symbol: func_name,
+                reloc_type: "R_WASM_FUNCTION_INDEX_LEB".to_string(),
+            })
+            .collect();
+
         Ok(AllocatedFunction {
             name: func.name.clone(),
             blocks: vec![AllocatedBlock {
@@ -2459,7 +2526,7 @@ impl Backend for Wasm32Backend {
             callee_saved: vec![],
             spill_slots: 0,
             code_size,
-            relocations: Vec::new(),
+            relocations,
             wasm_func_type: Some(backend_func_type),
             wasm_locals: Some(backend_locals),
         })
@@ -2492,7 +2559,16 @@ impl Backend for Wasm32Backend {
             init_value: HEAP_START as i64,
         });
 
-        // ── WASI proc_exit import ──────────────────────────────────
+        // ── WASI imports ────────────────────────────────────────────
+        // Import wasi_snapshot_preview1.fd_write for stdout output.
+        // Signature: (fd: i32, iov_ptr: i32, iov_cnt: i32, nwritten_ptr: i32) -> i32
+        let fd_write_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_fd_write(fd_write_type_idx));
+        // fd_write is now function index 0 (WASI_FD_WRITE_IDX).
+
         // Import wasi_snapshot_preview1.proc_exit so the _start wrapper
         // can terminate the process with an exit code.
         let proc_exit_type_idx = module.add_type(WasmFuncType {
@@ -2500,7 +2576,7 @@ impl Backend for Wasm32Backend {
             results: vec![],
         });
         module.add_import(WasmImport::wasi_proc_exit(proc_exit_type_idx));
-        // proc_exit is now function index 0 (first imported function).
+        // proc_exit is now function index 1 (WASI_PROC_EXIT_IDX).
 
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
@@ -2508,6 +2584,54 @@ impl Backend for Wasm32Backend {
             params: vec![],
             results: vec![],
         });
+
+        // ── Runtime helper functions ───────────────────────────────
+        // Add __vuma_print_int, __vuma_print_hex, and __vuma_print_newline
+        // as local Wasm functions that call fd_write for stdout output.
+
+        let print_int_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32],
+            results: vec![],
+        });
+        let print_int_func_idx = module.add_function(print_int_type_idx);
+        module.add_code(emit_print_int_runtime());
+
+        let print_hex_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32],
+            results: vec![],
+        });
+        let print_hex_func_idx = module.add_function(print_hex_type_idx);
+        module.add_code(emit_print_hex_runtime());
+
+        let print_newline_type_idx = module.add_type(WasmFuncType {
+            params: vec![],
+            results: vec![],
+        });
+        let print_newline_func_idx = module.add_function(print_newline_type_idx);
+        module.add_code(emit_print_newline_runtime());
+
+        // Export the runtime helpers so they can be called from outside.
+        module.add_export(WasmExport {
+            name: "__vuma_print_int".to_string(),
+            kind: WasmExportKind::Function,
+            index: print_int_func_idx,
+        });
+        module.add_export(WasmExport {
+            name: "__vuma_print_hex".to_string(),
+            kind: WasmExportKind::Function,
+            index: print_hex_func_idx,
+        });
+        module.add_export(WasmExport {
+            name: "__vuma_print_newline".to_string(),
+            kind: WasmExportKind::Function,
+            index: print_newline_func_idx,
+        });
+
+        // ── Build function name → index mapping ────────────────────
+        let mut func_name_to_idx: HashMap<String, u32> = HashMap::new();
+        func_name_to_idx.insert("__vuma_print_int".to_string(), print_int_func_idx);
+        func_name_to_idx.insert("__vuma_print_hex".to_string(), print_hex_func_idx);
+        func_name_to_idx.insert("__vuma_print_newline".to_string(), print_newline_func_idx);
 
         // ── Program functions ──────────────────────────────────────
         // Track the main function so the _start wrapper can call it.
@@ -2535,6 +2659,9 @@ impl Backend for Wasm32Backend {
                 main_func_type = Some(func_type);
             }
 
+            // Record this function in the name → index map.
+            func_name_to_idx.insert(func.name.clone(), func_idx);
+
             // Recover local declarations from the typed metadata field.
             let local_decls: Vec<(u32, WasmType)> = func
                 .wasm_locals
@@ -2558,6 +2685,10 @@ impl Backend for Wasm32Backend {
                 body_bytes.push(0x0B);
             }
 
+            // ── Resolve call relocations ────────────────────────────
+            // Patch unresolved Call targets in the body bytecode.
+            resolve_call_relocations(&mut body_bytes, &func.relocations, &func_name_to_idx)?;
+
             module.add_code(WasmFuncBody {
                 locals: local_decls,
                 body: body_bytes,
@@ -2566,7 +2697,7 @@ impl Backend for Wasm32Backend {
             // Export the function
             module.add_export(WasmExport {
                 name: func.name.clone(),
-                kind: crate::wasm32::WasmExportKind::Function,
+                kind: WasmExportKind::Function,
                 index: func_idx,
             });
         }
@@ -2589,22 +2720,22 @@ impl Backend for Wasm32Backend {
 
             if main_type.results == vec![WasmType::I32] {
                 // main() returned i32 — pass it directly to proc_exit
-                // (imported function index 0).
-                WasmInstr::Call(0).encode(&mut start_body);
+                // (imported function index WASI_PROC_EXIT_IDX = 1).
+                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
             } else if main_type.results.is_empty() {
                 // main() returned void — exit with code 0.
                 WasmInstr::I32Const(0).encode(&mut start_body);
-                WasmInstr::Call(0).encode(&mut start_body);
+                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
             } else {
                 // main() returned some other type — drop it and exit 0.
                 WasmInstr::Drop.encode(&mut start_body);
                 WasmInstr::I32Const(0).encode(&mut start_body);
-                WasmInstr::Call(0).encode(&mut start_body);
+                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
             }
         } else {
             // No main function found — exit with code 1 (error).
             WasmInstr::I32Const(1).encode(&mut start_body);
-            WasmInstr::Call(0).encode(&mut start_body);
+            WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
         }
 
         // proc_exit is divergent (never returns), but Wasm validation
@@ -2620,7 +2751,7 @@ impl Backend for Wasm32Backend {
         // Export _start as "_start" in the Wasm module exports.
         module.add_export(WasmExport {
             name: "_start".to_string(),
-            kind: crate::wasm32::WasmExportKind::Function,
+            kind: WasmExportKind::Function,
             index: start_func_idx,
         });
 
@@ -2683,6 +2814,387 @@ impl Backend for Wasm32Backend {
     fn name(&self) -> &'static str {
         "wasm32"
     }
+}
+
+// ===========================================================================
+// Call relocation resolution
+// ===========================================================================
+
+/// Patch unresolved `Call` targets in Wasm function body bytecode.
+///
+/// Each `RelocationEntry` with `reloc_type == "R_WASM_FUNCTION_INDEX_LEB"`
+/// describes a position where the LEB128-encoded function index of a `call`
+/// instruction must be replaced with the resolved index from `func_name_to_idx`.
+fn resolve_call_relocations(
+    body_bytes: &mut Vec<u8>,
+    relocations: &[RelocationEntry],
+    func_name_to_idx: &HashMap<String, u32>,
+) -> Result<(), BackendError> {
+    for reloc in relocations {
+        if reloc.reloc_type != "R_WASM_FUNCTION_INDEX_LEB" {
+            continue;
+        }
+        let offset = reloc.offset as usize;
+        let resolved_idx = func_name_to_idx.get(&reloc.symbol).ok_or_else(|| {
+            BackendError::RegisterAllocFailed {
+                isa: "wasm32",
+                reason: format!(
+                    "unresolved call target '{}' — function not found in module",
+                    reloc.symbol
+                ),
+            }
+        })?;
+
+        // Decode the existing LEB128 to find its byte length.
+        let (old_idx, leb_len) = decode_unsigned_leb128(&body_bytes[offset..]);
+        let _ = old_idx; // was the placeholder UNRESOLVED_CALL_IDX
+
+        // Encode the resolved index as LEB128.
+        let new_leb = encode_unsigned_leb128(*resolved_idx as u64);
+
+        // If the new encoding is a different length, we need to splice.
+        if new_leb.len() == leb_len {
+            // Same length — overwrite in place.
+            body_bytes[offset..offset + leb_len].copy_from_slice(&new_leb);
+        } else {
+            // Different length — splice (rare: only if idx > 127).
+            body_bytes.splice(offset..offset + leb_len, new_leb);
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Runtime helper function emitters
+// ===========================================================================
+//
+// These functions emit Wasm bytecode for the __vuma_print_int,
+// __vuma_print_hex, and __vuma_print_newline runtime helpers.
+//
+// All helpers use WASI fd_write (function index WASI_FD_WRITE_IDX) to write
+// to stdout (fd=1).  They share a common memory layout:
+//
+//   PRINT_BUF_ADDR  : 32-byte buffer for string conversion
+//   IOV_BUF_ADDR    : 8-byte iov structure (ptr: i32, len: i32)
+//   NWRITTEN_ADDR   : 4-byte nwritten result
+
+/// Emit the Wasm function body for `__vuma_print_int(value: i32) -> void`.
+///
+/// Converts the i32 argument to its decimal string representation and writes
+/// it to stdout via WASI `fd_write`.
+///
+/// Algorithm:
+///   1. Handle value == 0 → write '0'
+///   2. Handle negative: if value < 0, negate and prepend '-'
+///   3. Write digits backwards from the end of PRINT_BUF
+///   4. Call fd_write(1, iov, 1, nwritten_ptr) and drop the result
+fn emit_print_int_runtime() -> WasmFuncBody {
+    // Locals beyond the parameter (value: i32 = local 0):
+    //   local 1: pos (i32)    — write position in buffer
+    //   local 2: is_neg (i32) — 1 if value was negative
+    //   local 3: digit (i32)  — current digit
+    //   local 4: tmp (i32)    — temporary for fd_write
+    let mut body = Vec::new();
+
+    // is_neg = 0
+    WasmInstr::I32Const(0).encode(&mut body);
+    WasmInstr::LocalSet(2).encode(&mut body);
+
+    // if value < 0: is_neg = 1; value = 0 - value
+    WasmInstr::LocalGet(0).encode(&mut body); // value
+    WasmInstr::I32Const(0).encode(&mut body);
+    WasmInstr::I32LtS.encode(&mut body);
+    WasmInstr::If(None).encode(&mut body);
+    // is_neg = 1
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::LocalSet(2).encode(&mut body);
+    // value = 0 - value
+    WasmInstr::I32Const(0).encode(&mut body);
+    WasmInstr::LocalGet(0).encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body);
+    WasmInstr::LocalSet(0).encode(&mut body);
+    WasmInstr::End.encode(&mut body);
+
+    // pos = PRINT_BUF_ADDR + 20 (start writing from end of 20-byte area)
+    WasmInstr::I32Const(PRINT_BUF_ADDR + 20).encode(&mut body);
+    WasmInstr::LocalSet(1).encode(&mut body);
+
+    // Special case: value == 0 → write '0'
+    WasmInstr::LocalGet(0).encode(&mut body);
+    WasmInstr::I32Eqz.encode(&mut body);
+    WasmInstr::If(None).encode(&mut body);
+    // pos -= 1; store '0' (48)
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body);
+    WasmInstr::LocalTee(1).encode(&mut body);
+    WasmInstr::I32Const(48).encode(&mut body); // '0'
+    WasmInstr::I32Store8 { align: 0, offset: 0 }.encode(&mut body);
+    WasmInstr::End.encode(&mut body);
+
+    // While value != 0: write digits backwards
+    WasmInstr::Block(None).encode(&mut body);
+    WasmInstr::Loop(None).encode(&mut body);
+    // br_if: if value == 0, break
+    WasmInstr::LocalGet(0).encode(&mut body);
+    WasmInstr::I32Eqz.encode(&mut body);
+    WasmInstr::BrIf(1).encode(&mut body); // break out of block
+
+    // digit = value % 10
+    WasmInstr::LocalGet(0).encode(&mut body);
+    WasmInstr::I32Const(10).encode(&mut body);
+    WasmInstr::I32RemU.encode(&mut body);
+    WasmInstr::LocalTee(3).encode(&mut body);
+
+    // value = value / 10
+    WasmInstr::LocalGet(0).encode(&mut body);
+    WasmInstr::I32Const(10).encode(&mut body);
+    WasmInstr::I32DivU.encode(&mut body);
+    WasmInstr::LocalSet(0).encode(&mut body);
+
+    // pos -= 1
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body);
+    WasmInstr::LocalTee(1).encode(&mut body);
+
+    // store '0' + digit at pos
+    WasmInstr::I32Const(48).encode(&mut body);
+    WasmInstr::LocalGet(3).encode(&mut body);
+    WasmInstr::I32Add.encode(&mut body);
+    WasmInstr::I32Store8 { align: 0, offset: 0 }.encode(&mut body);
+
+    // continue loop
+    WasmInstr::Br(0).encode(&mut body);
+    WasmInstr::End.encode(&mut body); // end loop
+    WasmInstr::End.encode(&mut body); // end block
+
+    // If is_neg: pos -= 1; store '-'
+    WasmInstr::LocalGet(2).encode(&mut body);
+    WasmInstr::If(None).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body);
+    WasmInstr::LocalTee(1).encode(&mut body);
+    WasmInstr::I32Const(45).encode(&mut body); // '-'
+    WasmInstr::I32Store8 { align: 0, offset: 0 }.encode(&mut body);
+    WasmInstr::End.encode(&mut body);
+
+    // ── Set up iov and call fd_write ──────────────────────────────
+    // iov[0].ptr = pos
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // iov[0].len = (PRINT_BUF_ADDR + 20) - pos
+    WasmInstr::I32Const(IOV_BUF_ADDR + 4).encode(&mut body);
+    WasmInstr::I32Const(PRINT_BUF_ADDR + 20).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // fd_write(1, IOV_BUF_ADDR, 1, NWRITTEN_ADDR)
+    WasmInstr::I32Const(1).encode(&mut body); // fd = stdout
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body); // 1 iov entry
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);
+    WasmInstr::Call(WASI_FD_WRITE_IDX).encode(&mut body);
+    WasmInstr::Drop.encode(&mut body); // ignore nwritten
+
+    body.push(0x0B); // end
+
+    WasmFuncBody {
+        locals: vec![(4, WasmType::I32)], // pos, is_neg, digit, tmp
+        body,
+    }
+}
+
+/// Emit the Wasm function body for `__vuma_print_hex(value: i32) -> void`.
+///
+/// Writes the i32 argument as 8 lowercase hex digits to stdout via WASI
+/// `fd_write`.
+fn emit_print_hex_runtime() -> WasmFuncBody {
+    // Locals beyond the parameter (value: i32 = local 0):
+    //   local 1: i (i32)      — loop counter 0..7
+    //   local 2: nibble (i32) — current hex digit
+    let mut body = Vec::new();
+
+    // i = 0
+    WasmInstr::I32Const(0).encode(&mut body);
+    WasmInstr::LocalSet(1).encode(&mut body);
+
+    // Loop: for i in 0..8
+    WasmInstr::Block(None).encode(&mut body);
+    WasmInstr::Loop(None).encode(&mut body);
+    // if i >= 8, break
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(8).encode(&mut body);
+    WasmInstr::I32GeS.encode(&mut body);
+    WasmInstr::BrIf(1).encode(&mut body); // break
+
+    // nibble = (value >> (28 - i*4)) & 0xF
+    WasmInstr::LocalGet(0).encode(&mut body); // value
+    WasmInstr::I32Const(28).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(4).encode(&mut body);
+    WasmInstr::I32Mul.encode(&mut body);
+    WasmInstr::I32Sub.encode(&mut body); // 28 - i*4
+    WasmInstr::I32ShrU.encode(&mut body); // value >> shift
+    WasmInstr::I32Const(0x0F).encode(&mut body);
+    WasmInstr::I32And.encode(&mut body); // & 0xF
+    WasmInstr::LocalTee(2).encode(&mut body); // nibble
+
+    // if nibble < 10: char = '0' + nibble, else char = 'a' + nibble - 10
+    WasmInstr::I32Const(10).encode(&mut body);
+    WasmInstr::I32LtU.encode(&mut body);
+    WasmInstr::If(None).encode(&mut body);
+    // nibble < 10: char = 48 + nibble
+    WasmInstr::I32Const(48).encode(&mut body);
+    WasmInstr::LocalGet(2).encode(&mut body);
+    WasmInstr::I32Add.encode(&mut body);
+    WasmInstr::Else.encode(&mut body);
+    // nibble >= 10: char = 87 + nibble  (87 = 'a' - 10)
+    WasmInstr::I32Const(87).encode(&mut body);
+    WasmInstr::LocalGet(2).encode(&mut body);
+    WasmInstr::I32Add.encode(&mut body);
+    WasmInstr::End.encode(&mut body);
+
+    // store char at PRINT_BUF + i
+    WasmInstr::I32Const(PRINT_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Add.encode(&mut body);
+    WasmInstr::I32Store8 { align: 0, offset: 0 }.encode(&mut body);
+
+    // i++
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::I32Add.encode(&mut body);
+    WasmInstr::LocalSet(1).encode(&mut body);
+
+    // continue loop
+    WasmInstr::Br(0).encode(&mut body);
+    WasmInstr::End.encode(&mut body); // end loop
+    WasmInstr::End.encode(&mut body); // end block
+
+    // ── Set up iov and call fd_write ──────────────────────────────
+    // iov[0].ptr = PRINT_BUF_ADDR
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(PRINT_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // iov[0].len = 8
+    WasmInstr::I32Const(IOV_BUF_ADDR + 4).encode(&mut body);
+    WasmInstr::I32Const(8).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // fd_write(1, IOV_BUF_ADDR, 1, NWRITTEN_ADDR)
+    WasmInstr::I32Const(1).encode(&mut body); // fd = stdout
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body); // 1 iov entry
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);
+    WasmInstr::Call(WASI_FD_WRITE_IDX).encode(&mut body);
+    WasmInstr::Drop.encode(&mut body); // ignore nwritten
+
+    body.push(0x0B); // end
+
+    WasmFuncBody {
+        locals: vec![(2, WasmType::I32)], // i, nibble
+        body,
+    }
+}
+
+/// Emit the Wasm function body for `__vuma_print_newline() -> void`.
+///
+/// Writes a newline character (`\n`) to stdout via WASI `fd_write`.
+fn emit_print_newline_runtime() -> WasmFuncBody {
+    let mut body = Vec::new();
+
+    // store '\n' at PRINT_BUF
+    WasmInstr::I32Const(PRINT_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(10).encode(&mut body); // '\n'
+    WasmInstr::I32Store8 { align: 0, offset: 0 }.encode(&mut body);
+
+    // iov[0].ptr = PRINT_BUF_ADDR
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(PRINT_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // iov[0].len = 1
+    WasmInstr::I32Const(IOV_BUF_ADDR + 4).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // fd_write(1, IOV_BUF_ADDR, 1, NWRITTEN_ADDR)
+    WasmInstr::I32Const(1).encode(&mut body); // fd = stdout
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::I32Const(1).encode(&mut body); // 1 iov entry
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);
+    WasmInstr::Call(WASI_FD_WRITE_IDX).encode(&mut body);
+    WasmInstr::Drop.encode(&mut body); // ignore nwritten
+
+    body.push(0x0B); // end
+
+    WasmFuncBody {
+        locals: vec![],
+        body,
+    }
+}
+
+// ===========================================================================
+// compile_to_wasm convenience function
+// ===========================================================================
+
+/// Compile IR functions directly to a `.wasm` binary.
+///
+/// This is the primary convenience API for LLM sandbox integration.
+/// An LLM can generate VUMA IR, compile it to Wasm, and execute it
+/// safely in a sandboxed environment using `wasmer`, `wasmtime`, or Node.js.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use vuma_codegen::wasm32::compile_to_wasm;
+/// use vuma_codegen::ir::{IRFunction, IRType, IRValue, IRInstr, IRTerminator};
+///
+/// // Build a simple IR function: fn main() -> i32 { return 42; }
+/// let func = IRFunction {
+///     name: "main".to_string(),
+///     params: vec![],
+///     param_types: vec![],
+///     result_types: vec![IRType::I32],
+///     blocks: vec![ /* ... */ ],
+/// };
+///
+/// let wasm_bytes = compile_to_wasm(&[func]).expect("compilation should succeed");
+/// // wasm_bytes is a valid .wasm module that exits with code 42
+/// ```
+///
+/// # Module Layout
+///
+/// The produced module:
+/// - Imports `wasi_snapshot_preview1.fd_write` and `.proc_exit`
+/// - Exports `main`, `_start`, and runtime print helpers
+/// - Has a `_start` entry point that calls `main()` and passes the
+///   return value to `proc_exit`
+/// - Includes 2 pages of linear memory and a bump allocator
+pub fn compile_to_wasm(functions: &[IRFunction]) -> Result<Vec<u8>, BackendError> {
+    let backend = Wasm32Backend::new();
+
+    // Allocate registers (lowers IR → Wasm bytecode) for each function.
+    let mut allocated_funcs = Vec::new();
+    for func in functions {
+        let af = backend.allocate_registers(func)?;
+        allocated_funcs.push(af);
+    }
+
+    let program = AllocatedProgram {
+        functions: allocated_funcs,
+        total_code_size: 0,
+        total_data_size: 0,
+    };
+
+    // Encode the program into a .wasm module.
+    backend.encode_program(&program)
 }
 
 // ===========================================================================
@@ -4296,5 +4808,347 @@ mod tests {
             "Module should have at least 5 sections (type, memory, global, export, code), got {}",
             total_section_bytes
         );
+    }
+}
+
+// ===========================================================================
+// Active tests (compile_to_wasm & binary structure verification)
+// ===========================================================================
+
+#[cfg(test)]
+mod wasm_target_tests {
+    use super::*;
+    use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
+    use std::collections::HashSet;
+
+    /// Helper: build a minimal IR function `fn main() -> i32 { return N; }`.
+    fn make_main_returning(value: i32) -> IRFunction {
+        IRFunction {
+            name: "main".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![IRType::I32],
+            vregs: HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Ret {
+                    values: vec![IRValue::Immediate(value as i64)],
+                }],
+                terminator: IRTerminator::Return(vec![IRValue::Immediate(value as i64)]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        }
+    }
+
+    /// Helper: build a minimal IR function `fn main() { }` (void return).
+    fn make_main_void() -> IRFunction {
+        IRFunction {
+            name: "main".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Ret { values: vec![] }],
+                terminator: IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        }
+    }
+
+    /// Verify the binary structure of a .wasm module produced by `compile_to_wasm`.
+    fn verify_wasm_module_structure(wasm: &[u8]) {
+        // Check Wasm magic and version
+        assert!(wasm.len() > 8, "Module should be at least 8 bytes");
+        assert_eq!(&wasm[0..4], &WASM_MAGIC, "Module should start with Wasm magic");
+        assert_eq!(&wasm[4..8], &WASM_VERSION, "Module should have Wasm version 1");
+
+        // Parse sections and verify key structural properties
+        let mut found_type_section = false;
+        let mut found_import_section = false;
+        let mut found_memory_section = false;
+        let mut found_global_section = false;
+        let mut found_export_section = false;
+        let mut found_start_section = false;
+        let mut found_code_section = false;
+        let mut import_count = 0u32;
+        let mut export_names: Vec<String> = Vec::new();
+        let mut found_fd_write_import = false;
+        let mut found_proc_exit_import = false;
+
+        let mut offset = 8; // skip magic + version
+        while offset < wasm.len() {
+            let section_id = wasm[offset];
+            offset += 1;
+            let (size, size_len) = decode_unsigned_leb128(&wasm[offset..]);
+            offset += size_len;
+            let section_end = offset + size as usize;
+
+            match section_id {
+                SECTION_TYPE => found_type_section = true,
+                SECTION_IMPORT => {
+                    found_import_section = true;
+                    // Parse import section
+                    let (count, count_len) = decode_unsigned_leb128(&wasm[offset..]);
+                    import_count = count as u32;
+                    let mut imp_offset = offset + count_len;
+                    for _ in 0..count {
+                        // module name
+                        let (mod_len, ml_len) = decode_unsigned_leb128(&wasm[imp_offset..]);
+                        imp_offset += ml_len;
+                        let mod_name = std::str::from_utf8(&wasm[imp_offset..imp_offset + mod_len as usize])
+                            .unwrap_or("");
+                        imp_offset += mod_len as usize;
+                        // import name
+                        let (name_len, nl_len) = decode_unsigned_leb128(&wasm[imp_offset..]);
+                        imp_offset += nl_len;
+                        let import_name = std::str::from_utf8(&wasm[imp_offset..imp_offset + name_len as usize])
+                            .unwrap_or("");
+                        imp_offset += name_len as usize;
+
+                        if mod_name == "wasi_snapshot_preview1" && import_name == "fd_write" {
+                            found_fd_write_import = true;
+                        }
+                        if mod_name == "wasi_snapshot_preview1" && import_name == "proc_exit" {
+                            found_proc_exit_import = true;
+                        }
+
+                        // Skip the rest of the import entry (kind-specific)
+                        if imp_offset < section_end {
+                            let kind = wasm[imp_offset];
+                            imp_offset += 1;
+                            match kind {
+                                0x00 => {
+                                    // Function import: skip type index
+                                    let (_, tl) = decode_unsigned_leb128(&wasm[imp_offset..]);
+                                    imp_offset += tl;
+                                }
+                                _ => {
+                                    // For other import kinds, just skip to next
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                SECTION_MEMORY => found_memory_section = true,
+                SECTION_GLOBAL => found_global_section = true,
+                SECTION_EXPORT => {
+                    found_export_section = true;
+                    let (count, count_len) = decode_unsigned_leb128(&wasm[offset..]);
+                    let mut exp_offset = offset + count_len;
+                    for _ in 0..count {
+                        let (name_len, nl_len) = decode_unsigned_leb128(&wasm[exp_offset..]);
+                        exp_offset += nl_len;
+                        let name = std::str::from_utf8(&wasm[exp_offset..exp_offset + name_len as usize])
+                            .unwrap_or("")
+                            .to_string();
+                        export_names.push(name);
+                        exp_offset += name_len as usize;
+                        // kind byte + index LEB128
+                        exp_offset += 1;
+                        let (_, il) = decode_unsigned_leb128(&wasm[exp_offset..]);
+                        exp_offset += il;
+                    }
+                }
+                SECTION_START => found_start_section = true,
+                SECTION_CODE => found_code_section = true,
+                _ => {}
+            }
+
+            offset = section_end;
+        }
+
+        // Verify all required sections are present
+        assert!(found_type_section, "Module should contain a type section");
+        assert!(found_import_section, "Module should contain an import section");
+        assert!(found_memory_section, "Module should contain a memory section");
+        assert!(found_global_section, "Module should contain a global section");
+        assert!(found_export_section, "Module should contain an export section");
+        assert!(found_start_section, "Module should contain a start section");
+        assert!(found_code_section, "Module should contain a code section");
+
+        // Verify WASI imports
+        assert!(
+            found_fd_write_import,
+            "Module should import wasi_snapshot_preview1.fd_write"
+        );
+        assert!(
+            found_proc_exit_import,
+            "Module should import wasi_snapshot_preview1.proc_exit"
+        );
+        assert!(
+            import_count >= 2,
+            "Module should have at least 2 WASI imports, found {}",
+            import_count
+        );
+
+        // Verify _start is exported
+        assert!(
+            export_names.iter().any(|n| n == "_start"),
+            "Module should export '_start', found exports: {:?}",
+            export_names
+        );
+
+        // Verify runtime helpers are exported
+        assert!(
+            export_names.iter().any(|n| n == "__vuma_print_int"),
+            "Module should export '__vuma_print_int', found exports: {:?}",
+            export_names
+        );
+        assert!(
+            export_names.iter().any(|n| n == "__vuma_print_hex"),
+            "Module should export '__vuma_print_hex', found exports: {:?}",
+            export_names
+        );
+    }
+
+    #[test]
+    fn test_compile_to_wasm_simple_return() {
+        // Compile fn main() -> i32 { return 42; }
+        let func = make_main_returning(42);
+        let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
+
+        // Verify it's a valid .wasm module
+        assert!(wasm.len() > 8, "Module should be non-trivial");
+        assert_eq!(&wasm[0..4], &WASM_MAGIC, "Should start with Wasm magic");
+        assert_eq!(&wasm[4..8], &WASM_VERSION, "Should have Wasm version 1");
+
+        // Verify structural requirements
+        verify_wasm_module_structure(&wasm);
+    }
+
+    #[test]
+    fn test_compile_to_wasm_void_main() {
+        // Compile fn main() { }
+        let func = make_main_void();
+        let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
+
+        assert!(wasm.len() > 8, "Module should be non-trivial");
+        verify_wasm_module_structure(&wasm);
+    }
+
+    #[test]
+    fn test_compile_to_wasm_no_main() {
+        // Compile with no main function — should still produce a valid module
+        // that exits with code 1
+        let func = IRFunction {
+            name: "other".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![IRType::I32],
+            vregs: HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Ret {
+                    values: vec![IRValue::Immediate(0)],
+                }],
+                terminator: IRTerminator::Return(vec![IRValue::Immediate(0)]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+            }],
+        };
+        let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
+
+        assert!(wasm.len() > 8, "Module should be non-trivial");
+        // Should still have the basic structure
+        assert_eq!(&wasm[0..4], &WASM_MAGIC, "Should start with Wasm magic");
+    }
+
+    #[test]
+    fn test_wasm_module_has_wasi_fd_write() {
+        // Verify that the module includes the fd_write WASI import
+        let func = make_main_returning(0);
+        let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
+
+        // Find fd_write in the import section
+        let mut found_fd_write = false;
+        let mut offset = 8;
+        while offset < wasm.len() {
+            let section_id = wasm[offset];
+            offset += 1;
+            let (size, size_len) = decode_unsigned_leb128(&wasm[offset..]);
+            offset += size_len;
+            let section_end = offset + size as usize;
+
+            if section_id == SECTION_IMPORT {
+                // Look for "fd_write" string in the import section bytes
+                let section_bytes = &wasm[offset..section_end];
+                let fd_write_str = b"fd_write";
+                // Search for the fd_write import name
+                for i in 0..section_bytes.len().saturating_sub(fd_write_str.len()) {
+                    if &section_bytes[i..i + fd_write_str.len()] == fd_write_str {
+                        found_fd_write = true;
+                        break;
+                    }
+                }
+            }
+
+            offset = section_end;
+        }
+
+        assert!(found_fd_write, "Module should import fd_write from WASI");
+    }
+
+    #[test]
+    fn test_print_int_runtime_emission() {
+        // Verify that the print_int runtime function body is valid Wasm
+        let body = emit_print_int_runtime();
+        assert!(!body.body.is_empty(), "print_int body should not be empty");
+        assert!(body.body.last() == Some(&0x0B), "Body should end with 0x0B (end)");
+        assert_eq!(body.locals.len(), 1, "Should have 1 local declaration group");
+        assert_eq!(body.locals[0].0, 4, "Should declare 4 locals");
+        assert_eq!(body.locals[0].1, WasmType::I32, "Locals should be i32");
+    }
+
+    #[test]
+    fn test_print_hex_runtime_emission() {
+        // Verify that the print_hex runtime function body is valid Wasm
+        let body = emit_print_hex_runtime();
+        assert!(!body.body.is_empty(), "print_hex body should not be empty");
+        assert!(body.body.last() == Some(&0x0B), "Body should end with 0x0B (end)");
+    }
+
+    #[test]
+    fn test_print_newline_runtime_emission() {
+        let body = emit_print_newline_runtime();
+        assert!(!body.body.is_empty(), "print_newline body should not be empty");
+        assert!(body.body.last() == Some(&0x0B), "Body should end with 0x0B (end)");
+        assert!(body.locals.is_empty(), "print_newline should have no extra locals");
+    }
+
+    #[test]
+    fn test_resolve_call_relocations() {
+        // Create a body with a Call(UNRESOLVED_CALL_IDX) and resolve it
+        let mut body = Vec::new();
+        WasmInstr::Call(UNRESOLVED_CALL_IDX).encode(&mut body);
+        body.push(0x0B); // end
+
+        // The Call opcode (0x10) is 1 byte, then the LEB128 index follows.
+        // UNRESOLVED_CALL_IDX = 0xDEAD is a 3-byte LEB128.
+        let relocs = vec![RelocationEntry {
+            offset: 1, // after the 0x10 opcode
+            symbol: "main".to_string(),
+            reloc_type: "R_WASM_FUNCTION_INDEX_LEB".to_string(),
+        }];
+
+        let mut name_map = HashMap::new();
+        name_map.insert("main".to_string(), 5u32);
+
+        resolve_call_relocations(&mut body, &relocs, &name_map).expect("resolution should succeed");
+
+        // Verify the Call target was patched
+        let (_, leb_len) = decode_unsigned_leb128(&body[1..]);
+        let (resolved_idx, _) = decode_unsigned_leb128(&body[1..]);
+        assert_eq!(resolved_idx, 5, "Call should target function index 5");
+
+        // Verify the rest of the body is intact
+        assert_eq!(body[1 + leb_len], 0x0B, "End byte should still be present");
     }
 }

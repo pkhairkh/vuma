@@ -1,0 +1,1919 @@
+     1→//! SCG Diff Algorithm
+     2→//!
+     3→//! This module provides diff computation, application, and three-way merging
+     4→//! for Semantic Computation Graphs. It is used by:
+     5→//! - **COR** (Change-Oriented Recompilation) for incremental recompilation
+     6→//! - **Projection system** for visualizing changes between program versions
+     7→//! - **IVE** (Incremental Verifier Engine) for incremental re-verification
+     8→//!
+     9→//! # Overview
+    10→//!
+    11→//! The diff algorithm compares two SCGs and produces a structured representation
+    12→//! of the differences, including added/removed/modified nodes, edges, and regions.
+    13→//! A minimal edit script can be computed that transforms one graph into another.
+    14→//! Three-way merge enables combining independent changes from two branches
+    15→//! relative to a common base.
+    16→
+    17→use hashbrown::{HashMap, HashSet};
+    18→
+    19→use crate::edge::{EdgeData, EdgeId};
+    20→use crate::graph::SCG;
+    21→use crate::node::{NodeData, NodeId};
+    22→use crate::region::{RegionId, SCGRegion};
+    23→
+    24→// ── Diff Entry ──────────────────────────────────────────────────────────────
+    25→
+    26→/// A single atomic change between two SCG versions.
+    27→///
+    28→/// Each variant captures one specific kind of graph modification, making
+    29→/// diffs inspectable, serializable, and reversible.
+    30→#[derive(Debug, Clone, PartialEq)]
+    31→pub enum DiffEntry {
+    32→    /// A node was added in the new graph.
+    33→    NodeAdded(NodeData),
+    34→    /// A node was removed from the old graph.
+    35→    NodeRemoved(NodeId),
+    36→    /// A node exists in both graphs but its data changed.
+    37→    NodeModified {
+    38→        /// The stable identifier of the modified node.
+    39→        id: NodeId,
+    40→        /// The node data in the old graph.
+    41→        old: NodeData,
+    42→        /// The node data in the new graph.
+    43→        new: NodeData,
+    44→    },
+    45→    /// An edge was added in the new graph.
+    46→    EdgeAdded(EdgeData),
+    47→    /// An edge was removed from the old graph.
+    48→    EdgeRemoved(EdgeId),
+    49→    /// An edge exists in both graphs but its data changed.
+    50→    EdgeModified {
+    51→        /// The stable identifier of the modified edge.
+    52→        id: EdgeId,
+    53→        /// The edge data in the old graph.
+    54→        old: EdgeData,
+    55→        /// The edge data in the new graph.
+    56→        new: EdgeData,
+    57→    },
+    58→    /// A region was added in the new graph.
+    59→    RegionAdded(SCGRegion),
+    60→    /// A region was removed from the old graph.
+    61→    RegionRemoved(RegionId),
+    62→    /// A region exists in both graphs but its data changed.
+    63→    RegionModified {
+    64→        /// The stable identifier of the modified region.
+    65→        id: RegionId,
+    66→        /// The region data in the old graph.
+    67→        old: SCGRegion,
+    68→        /// The region data in the new graph.
+    69→        new: SCGRegion,
+    70→    },
+    71→}
+    72→
+    73→impl DiffEntry {
+    74→    /// Returns `true` if this entry represents an addition (node, edge, or region).
+    75→    pub fn is_addition(&self) -> bool {
+    76→        matches!(
+    77→            self,
+    78→            DiffEntry::NodeAdded(_) | DiffEntry::EdgeAdded(_) | DiffEntry::RegionAdded(_)
+    79→        )
+    80→    }
+    81→
+    82→    /// Returns `true` if this entry represents a removal (node, edge, or region).
+    83→    pub fn is_removal(&self) -> bool {
+    84→        matches!(
+    85→            self,
+    86→            DiffEntry::NodeRemoved(_) | DiffEntry::EdgeRemoved(_) | DiffEntry::RegionRemoved(_)
+    87→        )
+    88→    }
+    89→
+    90→    /// Returns `true` if this entry represents a modification (node, edge, or region).
+    91→    pub fn is_modification(&self) -> bool {
+    92→        matches!(
+    93→            self,
+    94→            DiffEntry::NodeModified { .. }
+    95→                | DiffEntry::EdgeModified { .. }
+    96→                | DiffEntry::RegionModified { .. }
+    97→        )
+    98→    }
+    99→
+   100→    /// Returns a human-readable description of this diff entry.
+   101→    pub fn describe(&self) -> String {
+   102→        match self {
+   103→            DiffEntry::NodeAdded(data) => format!("node {} added ({})", data.id, data.node_type),
+   104→            DiffEntry::NodeRemoved(id) => format!("node {} removed", id),
+   105→            DiffEntry::NodeModified { id, old, new } => {
+   106→                format!(
+   107→                    "node {} modified ({} -> {})",
+   108→                    id, old.node_type, new.node_type
+   109→                )
+   110→            }
+   111→            DiffEntry::EdgeAdded(data) => {
+   112→                format!(
+   113→                    "edge {} added ({} -> {}, {})",
+   114→                    data.id, data.source, data.target, data.kind
+   115→                )
+   116→            }
+   117→            DiffEntry::EdgeRemoved(id) => format!("edge {} removed", id),
+   118→            DiffEntry::EdgeModified { id, old, new } => {
+   119→                format!("edge {} modified ({} -> {})", id, old.kind, new.kind)
+   120→            }
+   121→            DiffEntry::RegionAdded(data) => format!("region {} added", data.id),
+   122→            DiffEntry::RegionRemoved(id) => format!("region {} removed", id),
+   123→            DiffEntry::RegionModified { id, .. } => format!("region {} modified", id),
+   124→        }
+   125→    }
+   126→}
+   127→
+   128→// ── SCG Diff ────────────────────────────────────────────────────────────────
+   129→
+   130→/// The complete difference between two SCG versions.
+   131→///
+   132→/// An `SCGDiff` contains an ordered list of `DiffEntry` items that
+   133→/// collectively describe all changes needed to transform the old graph
+   134→/// into the new graph.
+   135→#[derive(Debug, Clone, PartialEq)]
+   136→pub struct SCGDiff {
+   137→    /// The ordered list of diff entries.
+   138→    entries: Vec<DiffEntry>,
+   139→    /// Summary statistics for quick inspection.
+   140→    stats: DiffStats,
+   141→}
+   142→
+   143→/// Summary statistics for a diff.
+   144→#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+   145→pub struct DiffStats {
+   146→    /// Number of nodes added.
+   147→    pub nodes_added: usize,
+   148→    /// Number of nodes removed.
+   149→    pub nodes_removed: usize,
+   150→    /// Number of nodes modified.
+   151→    pub nodes_modified: usize,
+   152→    /// Number of edges added.
+   153→    pub edges_added: usize,
+   154→    /// Number of edges removed.
+   155→    pub edges_removed: usize,
+   156→    /// Number of edges modified.
+   157→    pub edges_modified: usize,
+   158→    /// Number of regions added.
+   159→    pub regions_added: usize,
+   160→    /// Number of regions removed: usize,
+   161→    pub regions_removed: usize,
+   162→    /// Number of regions modified.
+   163→    pub regions_modified: usize,
+   164→}
+   165→
+   166→impl DiffStats {
+   167→    /// Returns the total number of changes.
+   168→    pub fn total_changes(&self) -> usize {
+   169→        self.nodes_added
+   170→            + self.nodes_removed
+   171→            + self.nodes_modified
+   172→            + self.edges_added
+   173→            + self.edges_removed
+   174→            + self.edges_modified
+   175→            + self.regions_added
+   176→            + self.regions_removed
+   177→            + self.regions_modified
+   178→    }
+   179→
+   180→    /// Returns `true` if there are no changes.
+   181→    pub fn is_empty(&self) -> bool {
+   182→        self.total_changes() == 0
+   183→    }
+   184→}
+   185→
+   186→impl SCGDiff {
+   187→    /// Creates a new empty diff.
+   188→    pub fn empty() -> Self {
+   189→        Self {
+   190→            entries: Vec::new(),
+   191→            stats: DiffStats::default(),
+   192→        }
+   193→    }
+   194→
+   195→    /// Creates a diff from a list of entries, computing stats automatically.
+   196→    pub fn from_entries(entries: Vec<DiffEntry>) -> Self {
+   197→        let stats = compute_stats(&entries);
+   198→        Self { entries, stats }
+   199→    }
+   200→
+   201→    /// Returns the list of diff entries.
+   202→    pub fn entries(&self) -> &[DiffEntry] {
+   203→        &self.entries
+   204→    }
+   205→
+   206→    /// Returns the diff statistics.
+   207→    pub fn stats(&self) -> DiffStats {
+   208→        self.stats
+   209→    }
+   210→
+   211→    /// Returns `true` if the diff contains no entries.
+   212→    pub fn is_empty(&self) -> bool {
+   213→        self.entries.is_empty()
+   214→    }
+   215→
+   216→    /// Returns the number of entries in the diff.
+   217→    pub fn len(&self) -> usize {
+   218→        self.entries.len()
+   219→    }
+   220→
+   221→    /// Returns an iterator over entries that only affect nodes.
+   222→    pub fn node_entries(&self) -> impl Iterator<Item = &DiffEntry> {
+   223→        self.entries.iter().filter(|e| {
+   224→            matches!(
+   225→                e,
+   226→                DiffEntry::NodeAdded(_)
+   227→                    | DiffEntry::NodeRemoved(_)
+   228→                    | DiffEntry::NodeModified { .. }
+   229→            )
+   230→        })
+   231→    }
+   232→
+   233→    /// Returns an iterator over entries that only affect edges.
+   234→    pub fn edge_entries(&self) -> impl Iterator<Item = &DiffEntry> {
+   235→        self.entries.iter().filter(|e| {
+   236→            matches!(
+   237→                e,
+   238→                DiffEntry::EdgeAdded(_)
+   239→                    | DiffEntry::EdgeRemoved(_)
+   240→                    | DiffEntry::EdgeModified { .. }
+   241→            )
+   242→        })
+   243→    }
+   244→
+   245→    /// Returns an iterator over entries that only affect regions.
+   246→    pub fn region_entries(&self) -> impl Iterator<Item = &DiffEntry> {
+   247→        self.entries.iter().filter(|e| {
+   248→            matches!(
+   249→                e,
+   250→                DiffEntry::RegionAdded(_)
+   251→                    | DiffEntry::RegionRemoved(_)
+   252→                    | DiffEntry::RegionModified { .. }
+   253→            )
+   254→        })
+   255→    }
+   256→}
+   257→
+   258→/// Compute stats from a slice of diff entries.
+   259→fn compute_stats(entries: &[DiffEntry]) -> DiffStats {
+   260→    let mut stats = DiffStats::default();
+   261→    for entry in entries {
+   262→        match entry {
+   263→            DiffEntry::NodeAdded(_) => stats.nodes_added += 1,
+   264→            DiffEntry::NodeRemoved(_) => stats.nodes_removed += 1,
+   265→            DiffEntry::NodeModified { .. } => stats.nodes_modified += 1,
+   266→            DiffEntry::EdgeAdded(_) => stats.edges_added += 1,
+   267→            DiffEntry::EdgeRemoved(_) => stats.edges_removed += 1,
+   268→            DiffEntry::EdgeModified { .. } => stats.edges_modified += 1,
+   269→            DiffEntry::RegionAdded(_) => stats.regions_added += 1,
+   270→            DiffEntry::RegionRemoved(_) => stats.regions_removed += 1,
+   271→            DiffEntry::RegionModified { .. } => stats.regions_modified += 1,
+   272→        }
+   273→    }
+   274→    stats
+   275→}
+   276→
+   277→// ── Diff Error ──────────────────────────────────────────────────────────────
+   278→
+   279→/// Errors that can occur when applying a diff to an SCG.
+   280→#[derive(Debug, Clone, PartialEq)]
+   281→pub enum DiffError {
+   282→    /// A node referenced in the diff was not found in the target graph.
+   283→    NodeNotFound(NodeId),
+   284→    /// An edge referenced in the diff was not found in the target graph.
+   285→    EdgeNotFound(EdgeId),
+   286→    /// A region referenced in the diff was not found in the target graph.
+   287→    RegionNotFound(RegionId),
+   288→    /// A node with the given ID already exists (cannot add duplicate).
+   289→    DuplicateNode(NodeId),
+   290→    /// An edge with the given ID already exists (cannot add duplicate).
+   291→    DuplicateEdge(EdgeId),
+   292→    /// An edge's source or target node does not exist.
+   293→    InvalidEdgeEndpoints {
+   294→        /// The source node of the invalid edge.
+   295→        source: NodeId,
+   296→        /// The target node of the invalid edge.
+   297→        target: NodeId,
+   298→    },
+   299→    /// The diff cannot be applied in its current state (e.g., dependency
+   300→    /// ordering issue).
+   301→    CannotApply(String),
+   302→}
+   303→
+   304→impl std::fmt::Display for DiffError {
+   305→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   306→        match self {
+   307→            DiffError::NodeNotFound(id) => write!(f, "diff error: node not found: {id}"),
+   308→            DiffError::EdgeNotFound(id) => write!(f, "diff error: edge not found: {id}"),
+   309→            DiffError::RegionNotFound(id) => write!(f, "diff error: region not found: {id}"),
+   310→            DiffError::DuplicateNode(id) => write!(f, "diff error: duplicate node: {id}"),
+   311→            DiffError::DuplicateEdge(id) => write!(f, "diff error: duplicate edge: {id}"),
+   312→            DiffError::InvalidEdgeEndpoints { source, target } => {
+   313→                write!(
+   314→                    f,
+   315→                    "diff error: invalid edge endpoints: source={source}, target={target}"
+   316→                )
+   317→            }
+   318→            DiffError::CannotApply(msg) => write!(f, "diff error: cannot apply: {msg}"),
+   319→        }
+   320→    }
+   321→}
+   322→
+   323→impl std::error::Error for DiffError {}
+   324→
+   325→// ── Diff Computation ────────────────────────────────────────────────────────
+   326→
+   327→/// Computes the diff between two SCGs.
+   328→///
+   329→/// The diff captures all changes needed to transform `old` into `new`.
+   330→/// Nodes and edges are matched by their stable `NodeId`/`EdgeId` identifiers.
+   331→/// Regions are matched by `RegionId`.
+   332→///
+   333→/// # Algorithm
+   334→///
+   335→/// 1. **Nodes**: Identify nodes present only in old (removed), only in new
+   336→///    (added), or in both (check for modifications by comparing `NodeData`).
+   337→/// 2. **Edges**: Identify edges present only in old (removed), only in new
+   338→///    (added), or in both (check for modifications by comparing `EdgeData`).
+   339→/// 3. **Regions**: Identify regions present only in old (removed), only in
+   340→///    new (added), or in both (check for modifications by comparing `SCGRegion`).
+   341→///
+   342→/// The ordering of entries follows: removed nodes, removed edges, removed
+   343→/// regions, modified nodes, modified edges, modified regions, added regions,
+   344→/// added edges, added nodes. This ordering ensures safe application:
+   345→/// removals happen before additions, so no dangling references exist.
+   346→pub fn diff_scg(old: &SCG, new: &SCG) -> SCGDiff {
+   347→    let mut entries = Vec::new();
+   348→
+   349→    // ── Collect node IDs from both graphs ──
+   350→    let old_node_ids: HashSet<NodeId> = old.node_ids().collect();
+   351→    let new_node_ids: HashSet<NodeId> = new.node_ids().collect();
+   352→
+   353→    // Removed nodes (in old but not in new)
+   354→    for id in &old_node_ids - &new_node_ids {
+   355→        entries.push(DiffEntry::NodeRemoved(id));
+   356→    }
+   357→
+   358→    // Modified nodes (in both, but data differs)
+   359→    for id in &old_node_ids & &new_node_ids {
+   360→        let old_data = old.get_node(id).unwrap();
+   361→        let new_data = new.get_node(id).unwrap();
+   362→        if old_data != new_data {
+   363→            entries.push(DiffEntry::NodeModified {
+   364→                id,
+   365→                old: old_data.clone(),
+   366→                new: new_data.clone(),
+   367→            });
+   368→        }
+   369→    }
+   370→
+   371→    // ── Collect edge IDs from both graphs ──
+   372→    let old_edge_ids: HashSet<EdgeId> = old.edge_ids().collect();
+   373→    let new_edge_ids: HashSet<EdgeId> = new.edge_ids().collect();
+   374→
+   375→    // Removed edges (in old but not in new)
+   376→    for id in &old_edge_ids - &new_edge_ids {
+   377→        entries.push(DiffEntry::EdgeRemoved(id));
+   378→    }
+   379→
+   380→    // Modified edges (in both, but data differs)
+   381→    for id in &old_edge_ids & &new_edge_ids {
+   382→        let old_data = old.get_edge(id).unwrap();
+   383→        let new_data = new.get_edge(id).unwrap();
+   384→        if old_data != new_data {
+   385→            entries.push(DiffEntry::EdgeModified {
+   386→                id,
+   387→                old: old_data.clone(),
+   388→                new: new_data.clone(),
+   389→            });
+   390→        }
+   391→    }
+   392→
+   393→    // ── Collect region IDs from both graphs ──
+   394→    let old_region_ids: HashSet<RegionId> = old.regions().map(|r| r.id).collect();
+   395→    let new_region_ids: HashSet<RegionId> = new.regions().map(|r| r.id).collect();
+   396→
+   397→    // Removed regions (in old but not in new)
+   398→    for id in &old_region_ids - &new_region_ids {
+   399→        entries.push(DiffEntry::RegionRemoved(id));
+   400→    }
+   401→
+   402→    // Modified regions (in both, but data differs)
+   403→    for id in &old_region_ids & &new_region_ids {
+   404→        let old_region = old.get_region(id).unwrap();
+   405→        let new_region = new.get_region(id).unwrap();
+   406→        if old_region != new_region {
+   407→            entries.push(DiffEntry::RegionModified {
+   408→                id,
+   409→                old: old_region.clone(),
+   410→                new: new_region.clone(),
+   411→            });
+   412→        }
+   413→    }
+   414→
+   415→    // Added regions (in new but not in old) — must come before added nodes
+   416→    for id in &new_region_ids - &old_region_ids {
+   417→        let region = new.get_region(id).unwrap();
+   418→        entries.push(DiffEntry::RegionAdded(region.clone()));
+   419→    }
+   420→
+   421→    // Added edges (in new but not in old)
+   422→    for id in &new_edge_ids - &old_edge_ids {
+   423→        let edge_data = new.get_edge(id).unwrap();
+   424→        entries.push(DiffEntry::EdgeAdded(edge_data.clone()));
+   425→    }
+   426→
+   427→    // Added nodes (in new but not in old)
+   428→    for id in &new_node_ids - &old_node_ids {
+   429→        let node_data = new.get_node(id).unwrap();
+   430→        entries.push(DiffEntry::NodeAdded(node_data.clone()));
+   431→    }
+   432→
+   433→    SCGDiff::from_entries(entries)
+   434→}
+   435→
+   436→// ── Apply Diff ──────────────────────────────────────────────────────────────
+   437→
+   438→/// Applies a diff to an SCG, mutating it in place.
+   439→///
+   440→/// The diff entries are applied in order. The expected ordering is:
+   441→/// 1. Removals (nodes, edges, regions) — clean up old state
+   442→/// 2. Modifications — update existing elements
+   443→/// 3. Additions (regions, nodes, edges) — add new state
+   444→///
+   445→/// If any entry cannot be applied (e.g., a node to remove doesn't exist,
+   446→/// or a node to add already exists), an error is returned and the graph
+   447→/// may be partially modified.
+   448→pub fn apply_diff(scg: &mut SCG, diff: &SCGDiff) -> Result<(), DiffError> {
+   449→    for entry in &diff.entries {
+   450→        apply_entry(scg, entry)?;
+   451→    }
+   452→    Ok(())
+   453→}
+   454→
+   455→/// Applies a single diff entry to an SCG.
+   456→fn apply_entry(scg: &mut SCG, entry: &DiffEntry) -> Result<(), DiffError> {
+   457→    match entry {
+   458→        DiffEntry::NodeRemoved(id) => {
+   459→            scg.remove_node(*id)
+   460→                .map_err(|_| DiffError::NodeNotFound(*id))?;
+   461→            Ok(())
+   462→        }
+   463→        DiffEntry::NodeAdded(data) => {
+   464→            if scg.get_node(data.id).is_some() {
+   465→                return Err(DiffError::DuplicateNode(data.id));
+   466→            }
+   467→            scg.add_node_with_id(
+   468→                data.id,
+   469→                data.node_type.clone(),
+   470→                data.payload.clone(),
+   471→                data.program_point.clone(),
+   472→            )
+   473→            .map_err(|_| DiffError::DuplicateNode(data.id))?;
+   474→            // Copy annotation if present
+   475→            if let Some(ref ann) = data.annotation {
+   476→                if let Some(node) = scg.get_node_mut(data.id) {
+   477→                    node.annotation = Some(ann.clone());
+   478→                }
+   479→            }
+   480→            Ok(())
+   481→        }
+   482→        DiffEntry::NodeModified { id, new, .. } => {
+   483→            let node = scg.get_node_mut(*id).ok_or(DiffError::NodeNotFound(*id))?;
+   484→            node.node_type = new.node_type.clone();
+   485→            node.payload = new.payload.clone();
+   486→            node.annotation = new.annotation.clone();
+   487→            node.program_point = new.program_point.clone();
+   488→            Ok(())
+   489→        }
+   490→        DiffEntry::EdgeRemoved(id) => {
+   491→            scg.remove_edge(*id)
+   492→                .map_err(|_| DiffError::EdgeNotFound(*id))?;
+   493→            Ok(())
+   494→        }
+   495→        DiffEntry::EdgeAdded(data) => {
+   496→            if scg.get_edge(data.id).is_some() {
+   497→                return Err(DiffError::DuplicateEdge(data.id));
+   498→            }
+   499→            // Verify endpoints exist
+   500→            if scg.get_node(data.source).is_none() {
+   501→                return Err(DiffError::InvalidEdgeEndpoints {
+   502→                    source: data.source,
+   503→                    target: data.target,
+   504→                });
+   505→            }
+   506→            if scg.get_node(data.target).is_none() {
+   507→                return Err(DiffError::InvalidEdgeEndpoints {
+   508→                    source: data.source,
+   509→                    target: data.target,
+   510→                });
+   511→            }
+   512→            scg.add_edge_with_id(data.id, data.source, data.target, data.kind.clone())
+   513→                .map_err(|_| DiffError::DuplicateEdge(data.id))?;
+   514→            // Copy label if present
+   515→            if let Some(ref label) = data.label {
+   516→                if let Some(edge) = scg.get_edge_mut(data.id) {
+   517→                    edge.label = Some(label.clone());
+   518→                }
+   519→            }
+   520→            Ok(())
+   521→        }
+   522→        DiffEntry::EdgeModified { id, new, .. } => {
+   523→            let edge = scg.get_edge_mut(*id).ok_or(DiffError::EdgeNotFound(*id))?;
+   524→            edge.kind = new.kind.clone();
+   525→            edge.label = new.label.clone();
+   526→            // Note: source/target changes on an existing edge are not
+   527→            // supported through modification. Use remove + add instead.
+   528→            Ok(())
+   529→        }
+   530→        DiffEntry::RegionRemoved(id) => {
+   531→            scg.remove_region(*id);
+   532→            Ok(())
+   533→        }
+   534→        DiffEntry::RegionAdded(data) => {
+   535→            if scg.get_region(data.id).is_some() {
+   536→                return Err(DiffError::RegionNotFound(data.id));
+   537→            }
+   538→            scg.add_region(data.clone());
+   539→            Ok(())
+   540→        }
+   541→        DiffEntry::RegionModified { id, new, .. } => {
+   542→            let region = scg
+   543→                .get_region_mut(*id)
+   544→                .ok_or(DiffError::RegionNotFound(*id))?;
+   545→            region.scope_level = new.scope_level;
+   546→            region.security_boundary = new.security_boundary;
+   547→            region.deployment_target = new.deployment_target.clone();
+   548→            region.nodes = new.nodes.clone();
+   549→            Ok(())
+   550→        }
+   551→    }
+   552→}
+   553→
+   554→// ── Edit Script ─────────────────────────────────────────────────────────────
+   555→
+   556→/// Computes a minimal edit script to transform `old` into `new`.
+   557→///
+   558→/// The edit script is an ordered sequence of `DiffEntry` items that, when
+   559→/// applied sequentially to `old`, produces a graph equivalent to `new`.
+   560→///
+   561→/// The ordering is carefully chosen to ensure safe application:
+   562→/// 1. Remove edges (to disconnect nodes before removal)
+   563→/// 2. Remove nodes (leaf-first to avoid dangling references)
+   564→/// 3. Remove regions
+   565→/// 4. Modify existing nodes, edges, and regions
+   566→/// 5. Add regions (before nodes so regions exist for node assignment)
+   567→/// 6. Add nodes
+   568→/// 7. Add edges (after nodes so endpoints exist)
+   569→pub fn compute_edit_script(old: &SCG, new: &SCG) -> Vec<DiffEntry> {
+   570→    let raw_diff = diff_scg(old, new);
+   571→    let mut script = Vec::with_capacity(raw_diff.len());
+   572→
+   573→    // Phase 1: Removals — edges first, then nodes, then regions
+   574→    for entry in raw_diff.edge_entries() {
+   575→        if let DiffEntry::EdgeRemoved(id) = entry {
+   576→            script.push(DiffEntry::EdgeRemoved(*id));
+   577→        }
+   578→    }
+   579→    for entry in raw_diff.node_entries() {
+   580→        if let DiffEntry::NodeRemoved(id) = entry {
+   581→            script.push(DiffEntry::NodeRemoved(*id));
+   582→        }
+   583→    }
+   584→    for entry in raw_diff.region_entries() {
+   585→        if let DiffEntry::RegionRemoved(id) = entry {
+   586→            script.push(DiffEntry::RegionRemoved(*id));
+   587→        }
+   588→    }
+   589→
+   590→    // Phase 2: Modifications — nodes, then edges, then regions
+   591→    for entry in raw_diff.node_entries() {
+   592→        if let DiffEntry::NodeModified { id, old, new } = entry {
+   593→            script.push(DiffEntry::NodeModified {
+   594→                id: *id,
+   595→                old: old.clone(),
+   596→                new: new.clone(),
+   597→            });
+   598→        }
+   599→    }
+   600→    for entry in raw_diff.edge_entries() {
+   601→        if let DiffEntry::EdgeModified { id, old, new } = entry {
+   602→            script.push(DiffEntry::EdgeModified {
+   603→                id: *id,
+   604→                old: old.clone(),
+   605→                new: new.clone(),
+   606→            });
+   607→        }
+   608→    }
+   609→    for entry in raw_diff.region_entries() {
+   610→        if let DiffEntry::RegionModified { id, old, new } = entry {
+   611→            script.push(DiffEntry::RegionModified {
+   612→                id: *id,
+   613→                old: old.clone(),
+   614→                new: new.clone(),
+   615→            });
+   616→        }
+   617→    }
+   618→
+   619→    // Phase 3: Additions — regions first, then nodes, then edges
+   620→    for entry in raw_diff.region_entries() {
+   621→        if let DiffEntry::RegionAdded(data) = entry {
+   622→            script.push(DiffEntry::RegionAdded(data.clone()));
+   623→        }
+   624→    }
+   625→    for entry in raw_diff.node_entries() {
+   626→        if let DiffEntry::NodeAdded(data) = entry {
+   627→            script.push(DiffEntry::NodeAdded(data.clone()));
+   628→        }
+   629→    }
+   630→    for entry in raw_diff.edge_entries() {
+   631→        if let DiffEntry::EdgeAdded(data) = entry {
+   632→            script.push(DiffEntry::EdgeAdded(data.clone()));
+   633→        }
+   634→    }
+   635→
+   636→    script
+   637→}
+   638→
+   639→// ── Three-Way Merge ─────────────────────────────────────────────────────────
+   640→
+   641→/// A conflict encountered during three-way merge.
+   642→#[derive(Debug, Clone, PartialEq)]
+   643→pub struct MergeConflict {
+   644→    /// Conflicts involving nodes.
+   645→    pub node_conflicts: Vec<NodeConflict>,
+   646→    /// Conflicts involving edges.
+   647→    pub edge_conflicts: Vec<EdgeConflict>,
+   648→    /// Conflicts involving regions.
+   649→    pub region_conflicts: Vec<RegionConflict>,
+   650→}
+   651→
+   652→impl MergeConflict {
+   653→    /// Creates an empty merge conflict set.
+   654→    pub fn empty() -> Self {
+   655→        Self {
+   656→            node_conflicts: Vec::new(),
+   657→            edge_conflicts: Vec::new(),
+   658→            region_conflicts: Vec::new(),
+   659→        }
+   660→    }
+   661→
+   662→    /// Returns `true` if there are no conflicts.
+   663→    pub fn is_empty(&self) -> bool {
+   664→        self.node_conflicts.is_empty()
+   665→            && self.edge_conflicts.is_empty()
+   666→            && self.region_conflicts.is_empty()
+   667→    }
+   668→
+   669→    /// Returns the total number of conflicts across all categories.
+   670→    pub fn total_conflicts(&self) -> usize {
+   671→        self.node_conflicts.len() + self.edge_conflicts.len() + self.region_conflicts.len()
+   672→    }
+   673→}
+   674→
+   675→impl std::fmt::Display for MergeConflict {
+   676→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   677→        write!(
+   678→            f,
+   679→            "merge conflict: {} node, {} edge, {} region conflicts",
+   680→            self.node_conflicts.len(),
+   681→            self.edge_conflicts.len(),
+   682→            self.region_conflicts.len()
+   683→        )
+   684→    }
+   685→}
+   686→
+   687→impl std::error::Error for MergeConflict {}
+   688→
+   689→/// A conflict involving a single node.
+   690→#[derive(Debug, Clone, PartialEq)]
+   691→pub struct NodeConflict {
+   692→    /// The ID of the conflicting node.
+   693→    pub id: NodeId,
+   694→    /// The node data in the base graph (if it exists there).
+   695→    pub base: Option<NodeData>,
+   696→    /// The node data in our branch (if it exists there).
+   697→    pub ours: Option<NodeData>,
+   698→    /// The node data in their branch (if it exists there).
+   699→    pub theirs: Option<NodeData>,
+   700→}
+   701→
+   702→/// A conflict involving a single edge.
+   703→#[derive(Debug, Clone, PartialEq)]
+   704→pub struct EdgeConflict {
+   705→    /// The ID of the conflicting edge.
+   706→    pub id: EdgeId,
+   707→    /// The edge data in the base graph (if it exists there).
+   708→    pub base: Option<EdgeData>,
+   709→    /// The edge data in our branch (if it exists there).
+   710→    pub ours: Option<EdgeData>,
+   711→    /// The edge data in their branch (if it exists there).
+   712→    pub theirs: Option<EdgeData>,
+   713→}
+   714→
+   715→/// A conflict involving a single region.
+   716→#[derive(Debug, Clone, PartialEq)]
+   717→pub struct RegionConflict {
+   718→    /// The ID of the conflicting region.
+   719→    pub id: RegionId,
+   720→    /// The region data in the base graph (if it exists there).
+   721→    pub base: Option<SCGRegion>,
+   722→    /// The region data in our branch (if it exists there).
+   723→    pub ours: Option<SCGRegion>,
+   724→    /// The region data in their branch (if it exists there).
+   725→    pub theirs: Option<SCGRegion>,
+   726→}
+   727→
+   728→/// Performs a three-way merge of SCGs.
+   729→///
+   730→/// Given a common `base` graph and two divergent versions (`ours` and `theirs`),
+   731→/// this function produces a merged graph that incorporates changes from both
+   732→/// branches. When both branches modify the same element differently, a conflict
+   733→/// is reported.
+   734→///
+   735→/// # Merge Rules
+   736→///
+   737→/// For each element (node, edge, region):
+   738→/// - **Unchanged in both**: Keep as-is from base.
+   739→/// - **Changed in ours only**: Apply ours' version.
+   740→/// - **Changed in theirs only**: Apply theirs' version.
+   741→/// - **Changed identically in both**: Apply either (they agree).
+   742→/// - **Changed differently in both**: Conflict — include in `MergeConflict`.
+   743→/// - **Added in ours only**: Include ours' addition.
+   744→/// - **Added in theirs only**: Include theirs' addition.
+   745→/// - **Added in both (same data)**: Include either.
+   746→/// - **Added in both (different data)**: Conflict.
+   747→/// - **Removed in ours only**: Remove.
+   748→/// - **Removed in theirs only**: Remove.
+   749→/// - **Removed in one, modified in other**: Conflict.
+   750→/// - **Removed in both**: Remove.
+   751→pub fn three_way_merge(base: &SCG, ours: &SCG, theirs: &SCG) -> Result<SCG, MergeConflict> {
+   752→    let diff_ours = diff_scg(base, ours);
+   753→    let diff_theirs = diff_scg(base, theirs);
+   754→
+   755→    let mut conflict = MergeConflict::empty();
+   756→
+   757→    // Start with a clone of the base graph
+   758→    let mut merged = base.clone();
+   759→
+   760→    // ── Merge Nodes ──
+   761→    let ours_node_changes = collect_node_changes(&diff_ours);
+   762→    let theirs_node_changes = collect_node_changes(&diff_theirs);
+   763→
+   764→    let all_node_ids: HashSet<NodeId> = ours_node_changes
+   765→        .keys()
+   766→        .chain(theirs_node_changes.keys())
+   767→        .copied()
+   768→        .collect();
+   769→
+   770→    for node_id in &all_node_ids {
+   771→        let ours_change = ours_node_changes.get(node_id);
+   772→        let theirs_change = theirs_node_changes.get(node_id);
+   773→
+   774→        match (ours_change, theirs_change) {
+   775→            (None, None) => { /* No change in either — keep base */ }
+   776→            (Some(oc), None) => {
+   777→                // Only ours changed — apply ours' change
+   778→                apply_node_change(&mut merged, node_id, oc);
+   779→            }
+   780→            (None, Some(tc)) => {
+   781→                // Only theirs changed — apply theirs' change
+   782→                apply_node_change(&mut merged, node_id, tc);
+   783→            }
+   784→            (Some(oc), Some(tc)) => {
+   785→                // Both changed — check if they agree
+   786→                if oc == tc {
+   787→                    apply_node_change(&mut merged, node_id, oc);
+   788→                } else {
+   789→                    conflict.node_conflicts.push(NodeConflict {
+   790→                        id: *node_id,
+   791→                        base: base.get_node(*node_id).cloned(),
+   792→                        ours: change_to_node_data(oc),
+   793→                        theirs: change_to_node_data(tc),
+   794→                    });
+   795→                }
+   796→            }
+   797→        }
+   798→    }
+   799→
+   800→    // ── Merge Edges ──
+   801→    let ours_edge_changes = collect_edge_changes(&diff_ours);
+   802→    let theirs_edge_changes = collect_edge_changes(&diff_theirs);
+   803→
+   804→    let all_edge_ids: HashSet<EdgeId> = ours_edge_changes
+   805→        .keys()
+   806→        .chain(theirs_edge_changes.keys())
+   807→        .copied()
+   808→        .collect();
+   809→
+   810→    for edge_id in &all_edge_ids {
+   811→        let ours_change = ours_edge_changes.get(edge_id);
+   812→        let theirs_change = theirs_edge_changes.get(edge_id);
+   813→
+   814→        match (ours_change, theirs_change) {
+   815→            (None, None) => {}
+   816→            (Some(oc), None) => {
+   817→                apply_edge_change(&mut merged, edge_id, oc);
+   818→            }
+   819→            (None, Some(tc)) => {
+   820→                apply_edge_change(&mut merged, edge_id, tc);
+   821→            }
+   822→            (Some(oc), Some(tc)) => {
+   823→                if oc == tc {
+   824→                    apply_edge_change(&mut merged, edge_id, oc);
+   825→                } else {
+   826→                    conflict.edge_conflicts.push(EdgeConflict {
+   827→                        id: *edge_id,
+   828→                        base: base.get_edge(*edge_id).cloned(),
+   829→                        ours: change_to_edge_data(oc),
+   830→                        theirs: change_to_edge_data(tc),
+   831→                    });
+   832→                }
+   833→            }
+   834→        }
+   835→    }
+   836→
+   837→    // ── Merge Regions ──
+   838→    let ours_region_changes = collect_region_changes(&diff_ours);
+   839→    let theirs_region_changes = collect_region_changes(&diff_theirs);
+   840→
+   841→    let all_region_ids: HashSet<RegionId> = ours_region_changes
+   842→        .keys()
+   843→        .chain(theirs_region_changes.keys())
+   844→        .copied()
+   845→        .collect();
+   846→
+   847→    for region_id in &all_region_ids {
+   848→        let ours_change = ours_region_changes.get(region_id);
+   849→        let theirs_change = theirs_region_changes.get(region_id);
+   850→
+   851→        match (ours_change, theirs_change) {
+   852→            (None, None) => {}
+   853→            (Some(oc), None) => {
+   854→                apply_region_change(&mut merged, region_id, oc);
+   855→            }
+   856→            (None, Some(tc)) => {
+   857→                apply_region_change(&mut merged, region_id, tc);
+   858→            }
+   859→            (Some(oc), Some(tc)) => {
+   860→                if oc == tc {
+   861→                    apply_region_change(&mut merged, region_id, oc);
+   862→                } else {
+   863→                    conflict.region_conflicts.push(RegionConflict {
+   864→                        id: *region_id,
+   865→                        base: base.get_region(*region_id).cloned(),
+   866→                        ours: change_to_region_data(oc),
+   867→                        theirs: change_to_region_data(tc),
+   868→                    });
+   869→                }
+   870→            }
+   871→        }
+   872→    }
+   873→
+   874→    if conflict.is_empty() {
+   875→        Ok(merged)
+   876→    } else {
+   877→        Err(conflict)
+   878→    }
+   879→}
+   880→
+   881→// ── Change Tracking Helpers ─────────────────────────────────────────────────
+   882→
+   883→/// Represents a change to a single element, used for merge conflict detection.
+   884→#[derive(Debug, Clone, PartialEq)]
+   885→enum ElementChange<T> {
+   886→    /// The element was added with the given data.
+   887→    Added(T),
+   888→    /// The element was removed.
+   889→    Removed,
+   890→    /// The element was modified to the given data.
+   891→    Modified(T),
+   892→}
+   893→
+   894→/// Collect node-level changes from a diff into a map keyed by NodeId.
+   895→fn collect_node_changes(diff: &SCGDiff) -> HashMap<NodeId, ElementChange<NodeData>> {
+   896→    let mut changes = HashMap::new();
+   897→    for entry in diff.entries() {
+   898→        match entry {
+   899→            DiffEntry::NodeAdded(data) => {
+   900→                changes.insert(data.id, ElementChange::Added(data.clone()));
+   901→            }
+   902→            DiffEntry::NodeRemoved(id) => {
+   903→                changes.insert(*id, ElementChange::Removed);
+   904→            }
+   905→            DiffEntry::NodeModified { id, new, .. } => {
+   906→                changes.insert(*id, ElementChange::Modified(new.clone()));
+   907→            }
+   908→            _ => {}
+   909→        }
+   910→    }
+   911→    changes
+   912→}
+   913→
+   914→/// Collect edge-level changes from a diff into a map keyed by EdgeId.
+   915→fn collect_edge_changes(diff: &SCGDiff) -> HashMap<EdgeId, ElementChange<EdgeData>> {
+   916→    let mut changes = HashMap::new();
+   917→    for entry in diff.entries() {
+   918→        match entry {
+   919→            DiffEntry::EdgeAdded(data) => {
+   920→                changes.insert(data.id, ElementChange::Added(data.clone()));
+   921→            }
+   922→            DiffEntry::EdgeRemoved(id) => {
+   923→                changes.insert(*id, ElementChange::Removed);
+   924→            }
+   925→            DiffEntry::EdgeModified { id, new, .. } => {
+   926→                changes.insert(*id, ElementChange::Modified(new.clone()));
+   927→            }
+   928→            _ => {}
+   929→        }
+   930→    }
+   931→    changes
+   932→}
+   933→
+   934→/// Collect region-level changes from a diff into a map keyed by RegionId.
+   935→fn collect_region_changes(diff: &SCGDiff) -> HashMap<RegionId, ElementChange<SCGRegion>> {
+   936→    let mut changes = HashMap::new();
+   937→    for entry in diff.entries() {
+   938→        match entry {
+   939→            DiffEntry::RegionAdded(data) => {
+   940→                changes.insert(data.id, ElementChange::Added(data.clone()));
+   941→            }
+   942→            DiffEntry::RegionRemoved(id) => {
+   943→                changes.insert(*id, ElementChange::Removed);
+   944→            }
+   945→            DiffEntry::RegionModified { id, new, .. } => {
+   946→                changes.insert(*id, ElementChange::Modified(new.clone()));
+   947→            }
+   948→            _ => {}
+   949→        }
+   950→    }
+   951→    changes
+   952→}
+   953→
+   954→/// Apply a node change to the merged graph.
+   955→fn apply_node_change(scg: &mut SCG, id: &NodeId, change: &ElementChange<NodeData>) {
+   956→    match change {
+   957→        ElementChange::Added(data) => {
+   958→            if scg.get_node(*id).is_none() {
+   959→                let _ = scg.add_node_with_id(
+   960→                    data.id,
+   961→                    data.node_type.clone(),
+   962→                    data.payload.clone(),
+   963→                    data.program_point.clone(),
+   964→                );
+   965→                if let Some(ref ann) = data.annotation {
+   966→                    if let Some(node) = scg.get_node_mut(*id) {
+   967→                        node.annotation = Some(ann.clone());
+   968→                    }
+   969→                }
+   970→            }
+   971→        }
+   972→        ElementChange::Removed => {
+   973→            let _ = scg.remove_node(*id);
+   974→        }
+   975→        ElementChange::Modified(data) => {
+   976→            if let Some(node) = scg.get_node_mut(*id) {
+   977→                node.node_type = data.node_type.clone();
+   978→                node.payload = data.payload.clone();
+   979→                node.annotation = data.annotation.clone();
+   980→                node.program_point = data.program_point.clone();
+   981→            }
+   982→        }
+   983→    }
+   984→}
+   985→
+   986→/// Apply an edge change to the merged graph.
+   987→fn apply_edge_change(scg: &mut SCG, id: &EdgeId, change: &ElementChange<EdgeData>) {
+   988→    match change {
+   989→        ElementChange::Added(data) => {
+   990→            if scg.get_edge(*id).is_none() {
+   991→                let _ = scg.add_edge_with_id(data.id, data.source, data.target, data.kind.clone());
+   992→                if let Some(ref label) = data.label {
+   993→                    if let Some(edge) = scg.get_edge_mut(*id) {
+   994→                        edge.label = Some(label.clone());
+   995→                    }
+   996→                }
+   997→            }
+   998→        }
+   999→        ElementChange::Removed => {
+  1000→            let _ = scg.remove_edge(*id);
+  1001→        }
+  1002→        ElementChange::Modified(data) => {
+  1003→            if let Some(edge) = scg.get_edge_mut(*id) {
+  1004→                edge.kind = data.kind.clone();
+  1005→                edge.label = data.label.clone();
+  1006→            }
+  1007→        }
+  1008→    }
+  1009→}
+  1010→
+  1011→/// Apply a region change to the merged graph.
+  1012→fn apply_region_change(scg: &mut SCG, id: &RegionId, change: &ElementChange<SCGRegion>) {
+  1013→    match change {
+  1014→        ElementChange::Added(data) => {
+  1015→            if scg.get_region(*id).is_none() {
+  1016→                scg.add_region(data.clone());
+  1017→            }
+  1018→        }
+  1019→        ElementChange::Removed => {
+  1020→            scg.remove_region(*id);
+  1021→        }
+  1022→        ElementChange::Modified(data) => {
+  1023→            if let Some(region) = scg.get_region_mut(*id) {
+  1024→                region.scope_level = data.scope_level;
+  1025→                region.security_boundary = data.security_boundary;
+  1026→                region.deployment_target = data.deployment_target.clone();
+  1027→                region.nodes = data.nodes.clone();
+  1028→            }
+  1029→        }
+  1030→    }
+  1031→}
+  1032→
+  1033→/// Extract node data from a change, if available.
+  1034→fn change_to_node_data(change: &ElementChange<NodeData>) -> Option<NodeData> {
+  1035→    match change {
+  1036→        ElementChange::Added(data) | ElementChange::Modified(data) => Some(data.clone()),
+  1037→        ElementChange::Removed => None,
+  1038→    }
+  1039→}
+  1040→
+  1041→/// Extract edge data from a change, if available.
+  1042→fn change_to_edge_data(change: &ElementChange<EdgeData>) -> Option<EdgeData> {
+  1043→    match change {
+  1044→        ElementChange::Added(data) | ElementChange::Modified(data) => Some(data.clone()),
+  1045→        ElementChange::Removed => None,
+  1046→    }
+  1047→}
+  1048→
+  1049→/// Extract region data from a change, if available.
+  1050→fn change_to_region_data(change: &ElementChange<SCGRegion>) -> Option<SCGRegion> {
+  1051→    match change {
+  1052→        ElementChange::Added(data) | ElementChange::Modified(data) => Some(data.clone()),
+  1053→        ElementChange::Removed => None,
+  1054→    }
+  1055→}
+  1056→
+  1057→// ── Tests ───────────────────────────────────────────────────────────────────
+  1058→
+  1059→#[cfg(test)]
+  1060→mod tests {
+  1061→    use super::*;
+  1062→    use crate::edge::EdgeKind;
+  1063→    use crate::node::{ComputationNode, NodePayload, NodeType, PhantomNode, ProgramPoint};
+  1064→    use crate::region::{DeploymentTarget, SCGRegion};
+  1065→
+  1066→    /// Helper to create a default program point.
+  1067→    fn pp() -> ProgramPoint {
+  1068→        ProgramPoint {
+  1069→            file: Some("test.vu".to_string()),
+  1070→            line: Some(1),
+  1071→            column: Some(1),
+  1072→            offset: None,
+  1073→        }
+  1074→    }
+  1075→
+  1076→    /// Build a simple SCG with two computation nodes and a data-flow edge.
+  1077→    fn make_simple_scg() -> SCG {
+  1078→        let mut scg = SCG::new();
+  1079→        let n1 = scg.add_node(
+  1080→            NodeType::Computation,
+  1081→            NodePayload::Computation(ComputationNode {
+  1082→                operation: "add".to_string(),
+  1083→                result_type: Some("i32".to_string()),
+  1084→                tail_call: false,
+  1085→            }),
+  1086→            pp(),
+  1087→        );
+  1088→        let n2 = scg.add_node(
+  1089→            NodeType::Computation,
+  1090→            NodePayload::Computation(ComputationNode {
+  1091→                operation: "sub".to_string(),
+  1092→                result_type: None,
+  1093→                tail_call: false,
+  1094→            }),
+  1095→            pp(),
+  1096→        );
+  1097→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+  1098→        scg
+  1099→    }
+  1100→
+  1101→    // ── Test 1: Identical graphs produce an empty diff ──
+  1102→
+  1103→    #[test]
+  1104→    fn test_diff_identical_graphs() {
+  1105→        let scg1 = make_simple_scg();
+  1106→
+  1107→        // Build an identical SCG with the same node/edge IDs
+  1108→        let mut scg2 = SCG::new();
+  1109→        let n1 = scg2
+  1110→            .add_node_with_id(
+  1111→                NodeId::new(0),
+  1112→                NodeType::Computation,
+  1113→                NodePayload::Computation(ComputationNode {
+  1114→                    operation: "add".to_string(),
+  1115→                    result_type: Some("i32".to_string()),
+  1116→                    tail_call: false,
+  1117→                }),
+  1118→                pp(),
+  1119→            )
+  1120→            .unwrap();
+  1121→        let n2 = scg2
+  1122→            .add_node_with_id(
+  1123→                NodeId::new(1),
+  1124→                NodeType::Computation,
+  1125→                NodePayload::Computation(ComputationNode {
+  1126→                    operation: "sub".to_string(),
+  1127→                    result_type: None,
+  1128→                    tail_call: false,
+  1129→                }),
+  1130→                pp(),
+  1131→            )
+  1132→            .unwrap();
+  1133→        scg2.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow)
+  1134→            .unwrap();
+  1135→
+  1136→        let diff = diff_scg(&scg1, &scg2);
+  1137→        assert!(
+  1138→            diff.is_empty(),
+  1139→            "Expected empty diff for identical graphs, got {} entries",
+  1140→            diff.len()
+  1141→        );
+  1142→        assert!(diff.stats().is_empty());
+  1143→    }
+  1144→
+  1145→    // ── Test 2: Adding a node is detected ──
+  1146→
+  1147→    #[test]
+  1148→    fn test_diff_node_added() {
+  1149→        let old = make_simple_scg();
+  1150→
+  1151→        // Rebuild with same IDs plus a new node
+  1152→        let mut new = SCG::new();
+  1153→        new.add_node_with_id(
+  1154→            NodeId::new(0),
+  1155→            NodeType::Computation,
+  1156→            NodePayload::Computation(ComputationNode {
+  1157→                operation: "add".to_string(),
+  1158→                result_type: Some("i32".to_string()),
+  1159→                tail_call: false,
+  1160→            }),
+  1161→            pp(),
+  1162→        )
+  1163→        .unwrap();
+  1164→        new.add_node_with_id(
+  1165→            NodeId::new(1),
+  1166→            NodeType::Computation,
+  1167→            NodePayload::Computation(ComputationNode {
+  1168→                operation: "sub".to_string(),
+  1169→                result_type: None,
+  1170→                tail_call: false,
+  1171→            }),
+  1172→            pp(),
+  1173→        )
+  1174→        .unwrap();
+  1175→        new.add_edge_with_id(
+  1176→            EdgeId::new(0),
+  1177→            NodeId::new(0),
+  1178→            NodeId::new(1),
+  1179→            EdgeKind::DataFlow,
+  1180→        )
+  1181→        .unwrap();
+  1182→
+  1183→        // Add a new node
+  1184→        new.add_node(
+  1185→            NodeType::Phantom,
+  1186→            NodePayload::Phantom(PhantomNode {
+  1187→                purpose: "marker".to_string(),
+  1188→            }),
+  1189→            pp(),
+  1190→        );
+  1191→
+  1192→        let diff = diff_scg(&old, &new);
+  1193→        assert_eq!(diff.stats().nodes_added, 1);
+  1194→        assert_eq!(diff.stats().nodes_removed, 0);
+  1195→        assert_eq!(diff.stats().nodes_modified, 0);
+  1196→    }
+  1197→
+  1198→    // ── Test 3: Removing a node is detected ──
+  1199→
+  1200→    #[test]
+  1201→    fn test_diff_node_removed() {
+  1202→        let mut old = SCG::new();
+  1203→        old.add_node_with_id(
+  1204→            NodeId::new(0),
+  1205→            NodeType::Computation,
+  1206→            NodePayload::Computation(ComputationNode {
+  1207→                operation: "a".to_string(),
+  1208→                result_type: None,
+  1209→                tail_call: false,
+  1210→            }),
+  1211→            pp(),
+  1212→        )
+  1213→        .unwrap();
+  1214→        old.add_node_with_id(
+  1215→            NodeId::new(1),
+  1216→            NodeType::Computation,
+  1217→            NodePayload::Computation(ComputationNode {
+  1218→                operation: "b".to_string(),
+  1219→                result_type: None,
+  1220→                tail_call: false,
+  1221→            }),
+  1222→            pp(),
+  1223→        )
+  1224→        .unwrap();
+  1225→
+  1226→        let mut new = SCG::new();
+  1227→        new.add_node_with_id(
+  1228→            NodeId::new(0),
+  1229→            NodeType::Computation,
+  1230→            NodePayload::Computation(ComputationNode {
+  1231→                operation: "a".to_string(),
+  1232→                result_type: None,
+  1233→                tail_call: false,
+  1234→            }),
+  1235→            pp(),
+  1236→        )
+  1237→        .unwrap();
+  1238→
+  1239→        let diff = diff_scg(&old, &new);
+  1240→        assert_eq!(diff.stats().nodes_removed, 1);
+  1241→        assert_eq!(diff.stats().nodes_added, 0);
+  1242→    }
+  1243→
+  1244→    // ── Test 4: Modifying a node is detected ──
+  1245→
+  1246→    #[test]
+  1247→    fn test_diff_node_modified() {
+  1248→        let mut old = SCG::new();
+  1249→        old.add_node_with_id(
+  1250→            NodeId::new(0),
+  1251→            NodeType::Computation,
+  1252→            NodePayload::Computation(ComputationNode {
+  1253→                operation: "add".to_string(),
+  1254→                result_type: Some("i32".to_string()),
+  1255→                tail_call: false,
+  1256→            }),
+  1257→            pp(),
+  1258→        )
+  1259→        .unwrap();
+  1260→
+  1261→        let mut new = SCG::new();
+  1262→        new.add_node_with_id(
+  1263→            NodeId::new(0),
+  1264→            NodeType::Computation,
+  1265→            NodePayload::Computation(ComputationNode {
+  1266→                operation: "mul".to_string(), // changed operation
+  1267→                result_type: Some("i32".to_string()),
+  1268→                tail_call: false,
+  1269→            }),
+  1270→            pp(),
+  1271→        )
+  1272→        .unwrap();
+  1273→
+  1274→        let diff = diff_scg(&old, &new);
+  1275→        assert_eq!(diff.stats().nodes_modified, 1);
+  1276→
+  1277→        // Verify the entry has the right old and new data
+  1278→        let mod_entry = diff.node_entries().next().unwrap();
+  1279→        if let DiffEntry::NodeModified { old, new, .. } = mod_entry {
+  1280→            assert_eq!(
+  1281→                old.payload,
+  1282→                NodePayload::Computation(ComputationNode {
+  1283→                    operation: "add".to_string(),
+  1284→                    result_type: Some("i32".to_string()),
+  1285→                    tail_call: false
+  1286→                })
+  1287→            );
+  1288→            assert_eq!(
+  1289→                new.payload,
+  1290→                NodePayload::Computation(ComputationNode {
+  1291→                    operation: "mul".to_string(),
+  1292→                    result_type: Some("i32".to_string()),
+  1293→                    tail_call: false
+  1294→                })
+  1295→            );
+  1296→        } else {
+  1297→            panic!("Expected NodeModified entry");
+  1298→        }
+  1299→    }
+  1300→
+  1301→    // ── Test 5: Edge changes are detected ──
+  1302→
+  1303→    #[test]
+  1304→    fn test_diff_edge_changes() {
+  1305→        let mut old = SCG::new();
+  1306→        old.add_node_with_id(
+  1307→            NodeId::new(0),
+  1308→            NodeType::Computation,
+  1309→            NodePayload::Computation(ComputationNode {
+  1310→                operation: "a".to_string(),
+  1311→                result_type: None,
+  1312→                tail_call: false,
+  1313→            }),
+  1314→            pp(),
+  1315→        )
+  1316→        .unwrap();
+  1317→        old.add_node_with_id(
+  1318→            NodeId::new(1),
+  1319→            NodeType::Computation,
+  1320→            NodePayload::Computation(ComputationNode {
+  1321→                operation: "b".to_string(),
+  1322→                result_type: None,
+  1323→                tail_call: false,
+  1324→            }),
+  1325→            pp(),
+  1326→        )
+  1327→        .unwrap();
+  1328→        old.add_node_with_id(
+  1329→            NodeId::new(2),
+  1330→            NodeType::Computation,
+  1331→            NodePayload::Computation(ComputationNode {
+  1332→                operation: "c".to_string(),
+  1333→                result_type: None,
+  1334→                tail_call: false,
+  1335→            }),
+  1336→            pp(),
+  1337→        )
+  1338→        .unwrap();
+  1339→        old.add_edge_with_id(
+  1340→            EdgeId::new(0),
+  1341→            NodeId::new(0),
+  1342→            NodeId::new(1),
+  1343→            EdgeKind::DataFlow,
+  1344→        )
+  1345→        .unwrap();
+  1346→
+  1347→        let mut new = SCG::new();
+  1348→        new.add_node_with_id(
+  1349→            NodeId::new(0),
+  1350→            NodeType::Computation,
+  1351→            NodePayload::Computation(ComputationNode {
+  1352→                operation: "a".to_string(),
+  1353→                result_type: None,
+  1354→                tail_call: false,
+  1355→            }),
+  1356→            pp(),
+  1357→        )
+  1358→        .unwrap();
+  1359→        new.add_node_with_id(
+  1360→            NodeId::new(1),
+  1361→            NodeType::Computation,
+  1362→            NodePayload::Computation(ComputationNode {
+  1363→                operation: "b".to_string(),
+  1364→                result_type: None,
+  1365→                tail_call: false,
+  1366→            }),
+  1367→            pp(),
+  1368→        )
+  1369→        .unwrap();
+  1370→        new.add_node_with_id(
+  1371→            NodeId::new(2),
+  1372→            NodeType::Computation,
+  1373→            NodePayload::Computation(ComputationNode {
+  1374→                operation: "c".to_string(),
+  1375→                result_type: None,
+  1376→                tail_call: false,
+  1377→            }),
+  1378→            pp(),
+  1379→        )
+  1380→        .unwrap();
+  1381→        // Old edge removed, new edge added
+  1382→        new.add_edge_with_id(
+  1383→            EdgeId::new(1),
+  1384→            NodeId::new(0),
+  1385→            NodeId::new(2),
+  1386→            EdgeKind::ControlFlow,
+  1387→        )
+  1388→        .unwrap();
+  1389→
+  1390→        let diff = diff_scg(&old, &new);
+  1391→        assert_eq!(diff.stats().edges_removed, 1);
+  1392→        assert_eq!(diff.stats().edges_added, 1);
+  1393→    }
+  1394→
+  1395→    // ── Test 6: Region changes are detected ──
+  1396→
+  1397→    #[test]
+  1398→    fn test_diff_region_changes() {
+  1399→        let mut old = SCG::new();
+  1400→        let mut region1 = SCGRegion::new(RegionId::new(1), DeploymentTarget::Heap);
+  1401→        region1.add_node(NodeId::new(0));
+  1402→        old.add_region(region1);
+  1403→
+  1404→        let mut new = SCG::new();
+  1405→        // Region 1 is removed, region 2 is added
+  1406→        let mut region2 = SCGRegion::new(RegionId::new(2), DeploymentTarget::Stack);
+  1407→        region2.add_node(NodeId::new(1));
+  1408→        new.add_region(region2);
+  1409→
+  1410→        let diff = diff_scg(&old, &new);
+  1411→        assert_eq!(diff.stats().regions_removed, 1);
+  1412→        assert_eq!(diff.stats().regions_added, 1);
+  1413→    }
+  1414→
+  1415→    // ── Test 7: Apply diff round-trip ──
+  1416→
+  1417→    #[test]
+  1418→    fn test_apply_diff_roundtrip() {
+  1419→        let mut old = SCG::new();
+  1420→        let n1 = old
+  1421→            .add_node_with_id(
+  1422→                NodeId::new(0),
+  1423→                NodeType::Computation,
+  1424→                NodePayload::Computation(ComputationNode {
+  1425→                    operation: "add".to_string(),
+  1426→                    result_type: None,
+  1427→                    tail_call: false,
+  1428→                }),
+  1429→                pp(),
+  1430→            )
+  1431→            .unwrap();
+  1432→        let n2 = old
+  1433→            .add_node_with_id(
+  1434→                NodeId::new(1),
+  1435→                NodeType::Computation,
+  1436→                NodePayload::Computation(ComputationNode {
+  1437→                    operation: "sub".to_string(),
+  1438→                    result_type: None,
+  1439→                    tail_call: false,
+  1440→                }),
+  1441→                pp(),
+  1442→            )
+  1443→            .unwrap();
+  1444→        old.add_edge_with_id(EdgeId::new(0), n1, n2, EdgeKind::DataFlow)
+  1445→            .unwrap();
+  1446→
+  1447→        let mut new = SCG::new();
+  1448→        new.add_node_with_id(
+  1449→            NodeId::new(0),
+  1450→            NodeType::Computation,
+  1451→            NodePayload::Computation(ComputationNode {
+  1452→                operation: "mul".to_string(), // modified
+  1453→                result_type: None,
+  1454→                tail_call: false,
+  1455→            }),
+  1456→            pp(),
+  1457→        )
+  1458→        .unwrap();
+  1459→        // n2 removed, n3 added
+  1460→        let n3 = new
+  1461→            .add_node_with_id(
+  1462→                NodeId::new(2),
+  1463→                NodeType::Phantom,
+  1464→                NodePayload::Phantom(PhantomNode {
+  1465→                    purpose: "new".to_string(),
+  1466→                }),
+  1467→                pp(),
+  1468→            )
+  1469→            .unwrap();
+  1470→        new.add_edge_with_id(EdgeId::new(1), NodeId::new(0), n3, EdgeKind::ControlFlow)
+  1471→            .unwrap();
+  1472→
+  1473→        let _diff = diff_scg(&old, &new);
+  1474→        let script = compute_edit_script(&old, &new);
+  1475→        assert!(!script.is_empty());
+  1476→
+  1477→        // Apply the edit script
+  1478→        let mut target = old.clone();
+  1479→        apply_diff(&mut target, &SCGDiff::from_entries(script)).unwrap();
+  1480→
+  1481→        // Verify: node 0 modified, node 1 removed, node 2 added, edge 0 removed, edge 1 added
+  1482→        assert!(target.get_node(NodeId::new(0)).is_some());
+  1483→        assert!(target.get_node(NodeId::new(1)).is_none());
+  1484→        assert!(target.get_node(NodeId::new(2)).is_some());
+  1485→        assert_eq!(target.node_count(), 2);
+  1486→        assert_eq!(target.edge_count(), 1);
+  1487→    }
+  1488→
+  1489→    // ── Test 8: Three-way merge with no conflicts ──
+  1490→
+  1491→    #[test]
+  1492→    fn test_three_way_merge_no_conflicts() {
+  1493→        // Base: single computation node
+  1494→        let mut base = SCG::new();
+  1495→        base.add_node_with_id(
+  1496→            NodeId::new(0),
+  1497→            NodeType::Computation,
+  1498→            NodePayload::Computation(ComputationNode {
+  1499→                operation: "add".to_string(),
+  1500→                result_type: None,
+  1501→                tail_call: false,
+  1502→            }),
+  1503→            pp(),
+  1504→        )
+  1505→        .unwrap();
+  1506→
+  1507→        // Ours: adds a new node
+  1508→        let mut ours = base.clone();
+  1509→        ours.add_node_with_id(
+  1510→            NodeId::new(1),
+  1511→            NodeType::Computation,
+  1512→            NodePayload::Computation(ComputationNode {
+  1513→                operation: "sub".to_string(),
+  1514→                result_type: None,
+  1515→                tail_call: false,
+  1516→            }),
+  1517→            pp(),
+  1518→        )
+  1519→        .unwrap();
+  1520→
+  1521→        // Theirs: modifies the existing node
+  1522→        let mut theirs = SCG::new();
+  1523→        theirs
+  1524→            .add_node_with_id(
+  1525→                NodeId::new(0),
+  1526→                NodeType::Computation,
+  1527→                NodePayload::Computation(ComputationNode {
+  1528→                    operation: "mul".to_string(), // modified
+  1529→                    result_type: None,
+  1530→                    tail_call: false,
+  1531→                }),
+  1532→                pp(),
+  1533→            )
+  1534→            .unwrap();
+  1535→
+  1536→        let result = three_way_merge(&base, &ours, &theirs);
+  1537→        assert!(
+  1538→            result.is_ok(),
+  1539→            "Expected merge to succeed without conflicts"
+  1540→        );
+  1541→
+  1542→        let merged = result.unwrap();
+  1543→        assert_eq!(merged.node_count(), 2);
+  1544→        // Node 0 should have the modification from theirs
+  1545→        let n0 = merged.get_node(NodeId::new(0)).unwrap();
+  1546→        assert_eq!(
+  1547→            n0.payload,
+  1548→            NodePayload::Computation(ComputationNode {
+  1549→                operation: "mul".to_string(),
+  1550→                result_type: None,
+  1551→                tail_call: false
+  1552→            })
+  1553→        );
+  1554→        // Node 1 should have been added from ours
+  1555→        assert!(merged.get_node(NodeId::new(1)).is_some());
+  1556→    }
+  1557→
+  1558→    // ── Test 9: Three-way merge with conflicts ──
+  1559→
+  1560→    #[test]
+  1561→    fn test_three_way_merge_with_conflicts() {
+  1562→        // Base: single computation node
+  1563→        let mut base = SCG::new();
+  1564→        base.add_node_with_id(
+  1565→            NodeId::new(0),
+  1566→            NodeType::Computation,
+  1567→            NodePayload::Computation(ComputationNode {
+  1568→                operation: "add".to_string(),
+  1569→                result_type: None,
+  1570→                tail_call: false,
+  1571→            }),
+  1572→            pp(),
+  1573→        )
+  1574→        .unwrap();
+  1575→
+  1576→        // Ours: modifies the operation to "sub"
+  1577→        let mut ours = SCG::new();
+  1578→        ours.add_node_with_id(
+  1579→            NodeId::new(0),
+  1580→            NodeType::Computation,
+  1581→            NodePayload::Computation(ComputationNode {
+  1582→                operation: "sub".to_string(),
+  1583→                result_type: None,
+  1584→                tail_call: false,
+  1585→            }),
+  1586→            pp(),
+  1587→        )
+  1588→        .unwrap();
+  1589→
+  1590→        // Theirs: modifies the operation to "mul" (conflicting change)
+  1591→        let mut theirs = SCG::new();
+  1592→        theirs
+  1593→            .add_node_with_id(
+  1594→                NodeId::new(0),
+  1595→                NodeType::Computation,
+  1596→                NodePayload::Computation(ComputationNode {
+  1597→                    operation: "mul".to_string(),
+  1598→                    result_type: None,
+  1599→                    tail_call: false,
+  1600→                }),
+  1601→                pp(),
+  1602→            )
+  1603→            .unwrap();
+  1604→
+  1605→        let result = three_way_merge(&base, &ours, &theirs);
+  1606→        assert!(result.is_err(), "Expected merge conflict");
+  1607→
+  1608→        let conflict = result.unwrap_err();
+  1609→        assert!(!conflict.is_empty());
+  1610→        assert_eq!(conflict.node_conflicts.len(), 1);
+  1611→        assert_eq!(conflict.node_conflicts[0].id, NodeId::new(0));
+  1612→    }
+  1613→
+  1614→    // ── Test 10: Edit script ordering is correct ──
+  1615→
+  1616→    #[test]
+  1617→    fn test_edit_script_ordering() {
+  1618→        let mut old = SCG::new();
+  1619→        old.add_node_with_id(
+  1620→            NodeId::new(0),
+  1621→            NodeType::Computation,
+  1622→            NodePayload::Computation(ComputationNode {
+  1623→                operation: "a".to_string(),
+  1624→                result_type: None,
+  1625→                tail_call: false,
+  1626→            }),
+  1627→            pp(),
+  1628→        )
+  1629→        .unwrap();
+  1630→        old.add_node_with_id(
+  1631→            NodeId::new(1),
+  1632→            NodeType::Computation,
+  1633→            NodePayload::Computation(ComputationNode {
+  1634→                operation: "b".to_string(),
+  1635→                result_type: None,
+  1636→                tail_call: false,
+  1637→            }),
+  1638→            pp(),
+  1639→        )
+  1640→        .unwrap();
+  1641→        old.add_edge_with_id(
+  1642→            EdgeId::new(0),
+  1643→            NodeId::new(0),
+  1644→            NodeId::new(1),
+  1645→            EdgeKind::DataFlow,
+  1646→        )
+  1647→        .unwrap();
+  1648→
+  1649→        let mut new = SCG::new();
+  1650→        new.add_node_with_id(
+  1651→            NodeId::new(0),
+  1652→            NodeType::Computation,
+  1653→            NodePayload::Computation(ComputationNode {
+  1654→                operation: "a_v2".to_string(),
+  1655→                result_type: None,
+  1656→                tail_call: false,
+  1657→            }),
+  1658→            pp(),
+  1659→        )
+  1660→        .unwrap();
+  1661→        new.add_node_with_id(
+  1662→            NodeId::new(2),
+  1663→            NodeType::Phantom,
+  1664→            NodePayload::Phantom(PhantomNode {
+  1665→                purpose: "new".to_string(),
+  1666→            }),
+  1667→            pp(),
+  1668→        )
+  1669→        .unwrap();
+  1670→        new.add_edge_with_id(
+  1671→            EdgeId::new(1),
+  1672→            NodeId::new(0),
+  1673→            NodeId::new(2),
+  1674→            EdgeKind::ControlFlow,
+  1675→        )
+  1676→        .unwrap();
+  1677→
+  1678→        let script = compute_edit_script(&old, &new);
+  1679→
+  1680→        // Verify ordering: removals before modifications before additions
+  1681→        let mut saw_modification = false;
+  1682→        let mut saw_addition = false;
+  1683→        for entry in &script {
+  1684→            match entry {
+  1685→                DiffEntry::EdgeAdded(_) | DiffEntry::NodeAdded(_) | DiffEntry::RegionAdded(_) => {
+  1686→                    saw_addition = true;
+  1687→                }
+  1688→                DiffEntry::EdgeModified { .. }
+  1689→                | DiffEntry::NodeModified { .. }
+  1690→                | DiffEntry::RegionModified { .. } => {
+  1691→                    assert!(!saw_addition, "Modification after addition");
+  1692→                    saw_modification = true;
+  1693→                }
+  1694→                DiffEntry::EdgeRemoved(_)
+  1695→                | DiffEntry::NodeRemoved(_)
+  1696→                | DiffEntry::RegionRemoved(_) => {
+  1697→                    assert!(!saw_modification, "Removal after modification");
+  1698→                    assert!(!saw_addition, "Removal after addition");
+  1699→                }
+  1700→            }
+  1701→        }
+  1702→    }
+  1703→
+  1704→    // ── Test 11: DiffEntry classification helpers ──
+  1705→
+  1706→    #[test]
+  1707→    fn test_diff_entry_classification() {
+  1708→        let pp = pp();
+  1709→        let node_data = NodeData {
+  1710→            id: NodeId::new(0),
+  1711→            node_type: NodeType::Computation,
+  1712→            annotation: None,
+  1713→            program_point: pp,
+  1714→            payload: NodePayload::Computation(ComputationNode {
+  1715→                operation: "test".to_string(),
+  1716→                result_type: None,
+  1717→                tail_call: false,
+  1718→            }),
+  1719→        };
+  1720→
+  1721→        let added = DiffEntry::NodeAdded(node_data.clone());
+  1722→        assert!(added.is_addition());
+  1723→        assert!(!added.is_removal());
+  1724→        assert!(!added.is_modification());
+  1725→
+  1726→        let removed = DiffEntry::NodeRemoved(NodeId::new(0));
+  1727→        assert!(!removed.is_addition());
+  1728→        assert!(removed.is_removal());
+  1729→        assert!(!removed.is_modification());
+  1730→
+  1731→        let modified = DiffEntry::NodeModified {
+  1732→            id: NodeId::new(0),
+  1733→            old: node_data.clone(),
+  1734→            new: node_data,
+  1735→        };
+  1736→        assert!(!modified.is_addition());
+  1737→        assert!(!modified.is_removal());
+  1738→        assert!(modified.is_modification());
+  1739→    }
+  1740→
+  1741→    // ── Test 12: DiffStats aggregation ──
+  1742→
+  1743→    #[test]
+  1744→    fn test_diff_stats() {
+  1745→        let stats = DiffStats {
+  1746→            nodes_added: 3,
+  1747→            nodes_removed: 1,
+  1748→            nodes_modified: 2,
+  1749→            edges_added: 4,
+  1750→            edges_removed: 0,
+  1751→            edges_modified: 1,
+  1752→            regions_added: 1,
+  1753→            regions_removed: 0,
+  1754→            regions_modified: 0,
+  1755→        };
+  1756→        assert_eq!(stats.total_changes(), 12);
+  1757→        assert!(!stats.is_empty());
+  1758→
+  1759→        let empty = DiffStats::default();
+  1760→        assert!(empty.is_empty());
+  1761→        assert_eq!(empty.total_changes(), 0);
+  1762→    }
+  1763→
+  1764→    // ── Test 13: Apply diff detects duplicate node ──
+  1765→
+  1766→    #[test]
+  1767→    fn test_apply_diff_duplicate_node() {
+  1768→        let mut scg = SCG::new();
+  1769→        scg.add_node_with_id(
+  1770→            NodeId::new(0),
+  1771→            NodeType::Computation,
+  1772→            NodePayload::Computation(ComputationNode {
+  1773→                operation: "a".to_string(),
+  1774→                result_type: None,
+  1775→                tail_call: false,
+  1776→            }),
+  1777→            pp(),
+  1778→        )
+  1779→        .unwrap();
+  1780→
+  1781→        // Try to add a node that already exists
+  1782→        let diff = SCGDiff::from_entries(vec![DiffEntry::NodeAdded(NodeData {
+  1783→            id: NodeId::new(0),
+  1784→            node_type: NodeType::Phantom,
+  1785→            annotation: None,
+  1786→            program_point: pp(),
+  1787→            payload: NodePayload::Phantom(PhantomNode {
+  1788→                purpose: "dup".to_string(),
+  1789→            }),
+  1790→        })]);
+  1791→
+  1792→        let result = apply_diff(&mut scg, &diff);
+  1793→        assert!(matches!(result, Err(DiffError::DuplicateNode(_))));
+  1794→    }
+  1795→
+  1796→    // ── Test 14: Three-way merge with remove vs modify conflict ──
+  1797→
+  1798→    #[test]
+  1799→    fn test_three_way_merge_remove_vs_modify_conflict() {
+  1800→        let mut base = SCG::new();
+  1801→        base.add_node_with_id(
+  1802→            NodeId::new(0),
+  1803→            NodeType::Computation,
+  1804→            NodePayload::Computation(ComputationNode {
+  1805→                operation: "add".to_string(),
+  1806→                result_type: None,
+  1807→                tail_call: false,
+  1808→            }),
+  1809→            pp(),
+  1810→        )
+  1811→        .unwrap();
+  1812→        base.add_node_with_id(
+  1813→            NodeId::new(1),
+  1814→            NodeType::Phantom,
+  1815→            NodePayload::Phantom(PhantomNode {
+  1816→                purpose: "marker".to_string(),
+  1817→            }),
+  1818→            pp(),
+  1819→        )
+  1820→        .unwrap();
+  1821→
+  1822→        // Ours: removes node 1
+  1823→        let mut ours = SCG::new();
+  1824→        ours.add_node_with_id(
+  1825→            NodeId::new(0),
+  1826→            NodeType::Computation,
+  1827→            NodePayload::Computation(ComputationNode {
+  1828→                operation: "add".to_string(),
+  1829→                result_type: None,
+  1830→                tail_call: false,
+  1831→            }),
+  1832→            pp(),
+  1833→        )
+  1834→        .unwrap();
+  1835→        // NodeId::new(1) is absent — removed
+  1836→
+  1837→        // Theirs: modifies node 1
+  1838→        let mut theirs = SCG::new();
+  1839→        theirs
+  1840→            .add_node_with_id(
+  1841→                NodeId::new(0),
+  1842→                NodeType::Computation,
+  1843→                NodePayload::Computation(ComputationNode {
+  1844→                    operation: "add".to_string(),
+  1845→                    result_type: None,
+  1846→                    tail_call: false,
+  1847→                }),
+  1848→                pp(),
+  1849→            )
+  1850→            .unwrap();
+  1851→        theirs
+  1852→            .add_node_with_id(
+  1853→                NodeId::new(1),
+  1854→                NodeType::Phantom,
+  1855→                NodePayload::Phantom(PhantomNode {
+  1856→                    purpose: "updated_marker".to_string(), // modified
+  1857→                }),
+  1858→                pp(),
+  1859→            )
+  1860→            .unwrap();
+  1861→
+  1862→        let result = three_way_merge(&base, &ours, &theirs);
+  1863→        // Ours removes node 1, theirs modifies it — conflict
+  1864→        assert!(result.is_err());
+  1865→        let conflict = result.unwrap_err();
+  1866→        assert_eq!(conflict.node_conflicts.len(), 1);
+  1867→    }
+  1868→
+  1869→    // ── Test 15: DiffEntry describe() ──
+  1870→
+  1871→    #[test]
+  1872→    fn test_diff_entry_describe() {
+  1873→        let entry = DiffEntry::NodeRemoved(NodeId::new(42));
+  1874→        assert!(entry.describe().contains("NodeId(42)"));
+  1875→        assert!(entry.describe().contains("removed"));
+  1876→
+  1877→        let entry = DiffEntry::EdgeAdded(EdgeData::new(
+  1878→            EdgeId::new(7),
+  1879→            NodeId::new(1),
+  1880→            NodeId::new(2),
+  1881→            EdgeKind::DataFlow,
+  1882→        ));
+  1883→        assert!(entry.describe().contains("added"));
+  1884→    }
+  1885→
+  1886→    // ── Test 16: Empty graphs produce empty diff ──
+  1887→
+  1888→    #[test]
+  1889→    fn test_diff_empty_graphs() {
+  1890→        let scg1 = SCG::new();
+  1891→        let scg2 = SCG::new();
+  1892→        let diff = diff_scg(&scg1, &scg2);
+  1893→        assert!(diff.is_empty());
+  1894→    }
+  1895→
+  1896→    // ── Test 17: MergeConflict display and helpers ──
+  1897→
+  1898→    #[test]
+  1899→    fn test_merge_conflict_helpers() {
+  1900→        let empty = MergeConflict::empty();
+  1901→        assert!(empty.is_empty());
+  1902→        assert_eq!(empty.total_conflicts(), 0);
+  1903→
+  1904→        let conflict = MergeConflict {
+  1905→            node_conflicts: vec![NodeConflict {
+  1906→                id: NodeId::new(0),
+  1907→                base: None,
+  1908→                ours: None,
+  1909→                theirs: None,
+  1910→            }],
+  1911→            edge_conflicts: vec![],
+  1912→            region_conflicts: vec![],
+  1913→        };
+  1914→        assert!(!conflict.is_empty());
+  1915→        assert_eq!(conflict.total_conflicts(), 1);
+  1916→        assert!(conflict.to_string().contains("1 node"));
+  1917→    }
+  1918→}
+  1919→

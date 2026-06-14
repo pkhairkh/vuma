@@ -1,0 +1,2002 @@
+     1→//! Lexer (tokeniser) for the VUMA language frontend.
+     2→//!
+     3→//! Transforms raw source text into a flat stream of [`Token`] values, each
+     4→//! annotated with a [`Span`] and line/column position for error reporting.
+     5→//! The lexer supports **full error recovery**: it never stops on the first
+     6→//! error. Instead, it produces [`TokenKind::Error`] tokens and collects
+     7→//! [`ParseError`] values that can be retrieved later via [`Lexer::errors`].
+     8→//!
+     9→//! # Example
+    10→//!
+    11→//! ```
+    12→//! use vuma_parser::lexer::Lexer;
+    13→//!
+    14→//! let source = "region pool = allocate(1024);";
+    15→//! let mut lexer = Lexer::new(source);
+    16→//! let tokens = lexer.collect_tokens();
+    17→//! for tok in &tokens {
+    18→//!     println!("{:?} at {}:{} — '{}'", tok.kind, tok.line + 1, tok.column + 1, tok.lexeme);
+    19→//! }
+    20→//! ```
+    21→
+    22→use crate::error::{ParseError, ParseErrorKind, Span};
+    23→use serde::{Deserialize, Serialize};
+    24→
+    25→// ---------------------------------------------------------------------------
+    26→// Position
+    27→// ---------------------------------------------------------------------------
+    28→
+    29→/// Source position: byte offset, line (0-based), and column (0-based).
+    30→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    31→pub struct Position {
+    32→    /// Byte offset into the source text.
+    33→    pub offset: usize,
+    34→    /// Line number (0-based).
+    35→    pub line: usize,
+    36→    /// Column number (0-based, measured in Unicode code points).
+    37→    pub column: usize,
+    38→}
+    39→
+    40→impl Position {
+    41→    /// Create a new position.
+    42→    pub fn new(offset: usize, line: usize, column: usize) -> Self {
+    43→        Self {
+    44→            offset,
+    45→            line,
+    46→            column,
+    47→        }
+    48→    }
+    49→
+    50→    /// The initial position (offset 0, line 0, column 0).
+    51→    pub fn zero() -> Self {
+    52→        Self::new(0, 0, 0)
+    53→    }
+    54→}
+    55→
+    56→impl std::fmt::Display for Position {
+    57→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    58→        write!(f, "{}:{}", self.line + 1, self.column + 1)
+    59→    }
+    60→}
+    61→
+    62→// ---------------------------------------------------------------------------
+    63→// Token
+    64→// ---------------------------------------------------------------------------
+    65→
+    66→/// A single lexical token produced by the [`Lexer`].
+    67→#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    68→pub struct Token {
+    69→    /// The classified kind of this token.
+    70→    pub kind: TokenKind,
+    71→    /// The exact source text that was consumed (for strings this is the
+    72→    /// decoded content; for everything else it is the raw source slice).
+    73→    pub lexeme: String,
+    74→    /// Byte-offset span within the original source.
+    75→    pub span: Span,
+    76→    /// Line number where this token starts (0-based).
+    77→    pub line: usize,
+    78→    /// Column number where this token starts (0-based).
+    79→    pub column: usize,
+    80→}
+    81→
+    82→impl Token {
+    83→    /// Convenience constructor.
+    84→    pub fn new(
+    85→        kind: TokenKind,
+    86→        lexeme: impl Into<String>,
+    87→        span: Span,
+    88→        line: usize,
+    89→        column: usize,
+    90→    ) -> Self {
+    91→        Self {
+    92→            kind,
+    93→            lexeme: lexeme.into(),
+    94→            span,
+    95→            line,
+    96→            column,
+    97→        }
+    98→    }
+    99→
+   100→    /// True when this token is the end-of-file sentinel.
+   101→    pub fn is_eof(&self) -> bool {
+   102→        self.kind == TokenKind::Eof
+   103→    }
+   104→}
+   105→
+   106→// ---------------------------------------------------------------------------
+   107→// TokenKind
+   108→// ---------------------------------------------------------------------------
+   109→
+   110→/// Classification of every lexical token in the VUMA language.
+   111→///
+   112→/// The token set covers the full language surface syntax including memory
+   113→/// primitives, concurrency constructs, and verification directives.
+   114→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   115→pub enum TokenKind {
+   116→    // ---- Literals / values ------------------------------------------------
+   117→    /// Integer literal (decimal, hex `0x`, binary `0b`, octal `0o`).
+   118→    Number,
+   119→    /// Hex address literal, e.g. `0xDEADBEEF`.
+   120→    Address,
+   121→    /// Floating-point literal, e.g. `3.14`, `1e10`.
+   122→    Float,
+   123→    /// String literal (double-quoted with escape processing).
+   124→    String,
+   125→    /// Character literal, e.g. `'a'`, `'\n'`.
+   126→    Char,
+   127→    /// Byte string literal, e.g. `b"hello"`.
+   128→    ByteStr,
+   129→    /// Raw string literal, e.g. `r"..."`, `r#"..."#`.
+   130→    RawStr,
+   131→    /// Identifier (variable name, type name, field name).
+   132→    Ident,
+   133→    /// Standalone underscore `_` (wildcard / discard pattern).
+   134→    Underscore,
+   135→
+   136→    // ---- Delimiters -------------------------------------------------------
+   137→    /// `(`
+   138→    LParen,
+   139→    /// `)`
+   140→    RParen,
+   141→    /// `{`
+   142→    LBrace,
+   143→    /// `}`
+   144→    RBrace,
+   145→    /// `[`
+   146→    LBracket,
+   147→    /// `]`
+   148→    RBracket,
+   149→
+   150→    // ---- Operators / punctuation ------------------------------------------
+   151→    /// `+`
+   152→    Plus,
+   153→    /// `-`
+   154→    Minus,
+   155→    /// `*` (also the dereference / pointer prefix operator)
+   156→    Star,
+   157→    /// `/`
+   158→    Slash,
+   159→    /// `%`
+   160→    Percent,
+   161→    /// `&` (bitwise AND / borrow)
+   162→    Ampersand,
+   163→    /// `|`
+   164→    Pipe,
+   165→    /// `^`
+   166→    Caret,
+   167→    /// `~`
+   168→    Tilde,
+   169→    /// `!`
+   170→    Bang,
+   171→    /// `=`
+   172→    Assign,
+   173→    /// `==`
+   174→    EqEq,
+   175→    /// `!=`
+   176→    Ne,
+   177→    /// `<`
+   178→    Lt,
+   179→    /// `<=`
+   180→    Le,
+   181→    /// `>`
+   182→    Gt,
+   183→    /// `>=`
+   184→    Ge,
+   185→    /// `<<`
+   186→    Shl,
+   187→    /// `>>`
+   188→    Shr,
+   189→    /// `&&`
+   190→    AndAnd,
+   191→    /// `||`
+   192→    OrOr,
+   193→    /// `->`
+   194→    Arrow,
+   195→    /// `=>`
+   196→    FatArrow,
+   197→    /// `::`
+   198→    PathSep,
+   199→    /// `:`
+   200→    Colon,
+   201→    /// `;`
+   202→    Semicolon,
+   203→    /// `,`
+   204→    Comma,
+   205→    /// `.`
+   206→    Dot,
+   207→    /// `..`
+   208→    DotDot,
+   209→    /// `...`
+   210→    Ellipsis,
+   211→    /// `..=`
+   212→    DotDotEq,
+   213→    /// `@`
+   214→    Ampersat,
+   215→    /// `#`
+   216→    Hash,
+   217→    /// `$`
+   218→    Dollar,
+   219→    /// `?`
+   220→    Question,
+   221→
+   222→    // ---- Compound assignment operators ------------------------------------
+   223→    /// `+=`
+   224→    PlusEq,
+   225→    /// `-=`
+   226→    MinusEq,
+   227→    /// `*=`
+   228→    StarEq,
+   229→    /// `/=`
+   230→    SlashEq,
+   231→    /// `%=`
+   232→    PercentEq,
+   233→    /// `&=`
+   234→    AmpEq,
+   235→    /// `|=`
+   236→    PipeEq,
+   237→    /// `^=`
+   238→    CaretEq,
+   239→    /// `<<=`
+   240→    ShlEq,
+   241→    /// `>>=`
+   242→    ShrEq,
+   243→
+   244→    // ---- Keywords ---------------------------------------------------------
+   245→    /// `fn`
+   246→    Fn,
+   247→    /// `let`
+   248→    Let,
+   249→    /// `pub`
+   250→    Pub,
+   251→    /// `crate` (used in `pub(crate)`)
+   252→    Crate,
+   253→    /// `ptr`
+   254→    Ptr,
+   255→    /// `region`
+   256→    Region,
+   257→    /// `alloc`
+   258→    Alloc,
+   259→    /// `allocate` (kept for backward compat)
+   260→    Allocate,
+   261→    /// `free`
+   262→    Free,
+   263→    /// `derive`
+   264→    Derive,
+   265→    /// `cast`
+   266→    Cast,
+   267→    /// `read`
+   268→    Read,
+   269→    /// `write`
+   270→    Write,
+   271→    /// `sync`
+   272→    Sync,
+   273→    /// `if`
+   274→    If,
+   275→    /// `else`
+   276→    Else,
+   277→    /// `while`
+   278→    While,
+   279→    /// `for`
+   280→    For,
+   281→    /// `return`
+   282→    Return,
+   283→    /// `struct`
+   284→    Struct,
+   285→    /// `enum`
+   286→    Enum,
+   287→    /// `match`
+   288→    Match,
+   289→    /// `unsafe`
+   290→    Unsafe,
+   291→    /// `safe`
+   292→    Safe,
+   293→    /// `bd`
+   294→    Bd,
+   295→    /// `repd`
+   296→    Repd,
+   297→    /// `capd`
+   298→    Capd,
+   299→    /// `reld`
+   300→    Reld,
+   301→    /// `import`
+   302→    Import,
+   303→    /// `export`
+   304→    Export,
+   305→    /// `mod`
+   306→    Mod,
+   307→    /// `use`
+   308→    Use,
+   309→    /// `self`
+   310→    SelfKw,
+   311→    /// `super`
+   312→    Super,
+   313→    /// `async`
+   314→    Async,
+   315→    /// `await`
+   316→    Await,
+   317→    /// `spawn`
+   318→    Spawn,
+   319→    /// `lock`
+   320→    Lock,
+   321→    /// `unlock`
+   322→    Unlock,
+   323→    /// `channel`
+   324→    Channel,
+   325→    /// `send`
+   326→    Send,
+   327→    /// `recv`
+   328→    Recv,
+   329→    /// `true`
+   330→    True,
+   331→    /// `false`
+   332→    False,
+   333→    /// `null`
+   334→    Null,
+   335→    /// `as`
+   336→    As,
+   337→    /// `sizeof`
+   338→    Sizeof,
+   339→    /// `alignof`
+   340→    Alignof,
+   341→    /// `break`
+   342→    Break,
+   343→    /// `continue`
+   344→    Continue,
+   345→    /// `loop`
+   346→    Loop,
+   347→    /// `where`
+   348→    Where,
+   349→    /// `impl`
+   350→    Impl,
+   351→    /// `trait`
+   352→    Trait,
+   353→    /// `type`
+   354→    Type,
+   355→    /// `const`
+   356→    Const,
+   357→    /// `static`
+   358→    Static,
+   359→    /// `mut`
+   360→    Mut,
+   361→    /// `ref`
+   362→    Ref,
+   363→    /// `Option` type keyword
+   364→    OptionKw,
+   365→    /// `Some` variant keyword
+   366→    SomeKw,
+   367→    /// `None` variant keyword
+   368→    NoneKw,
+   369→    /// `Result` type keyword
+   370→    ResultKw,
+   371→    /// `Ok` variant keyword
+   372→    OkKw,
+   373→    /// `Err` variant keyword
+   374→    ErrKw,
+   375→    /// Format string literal: `f"..."`
+   376→    FormatStr,
+   377→
+   378→    // ---- Doc comments (preserved as tokens) --------------------------------
+   379→    /// `///` outer doc comment
+   380→    DocComment,
+   381→    /// `//!` inner / module doc comment
+   382→    ModuleDoc,
+   383→
+   384→    // ---- Error recovery ---------------------------------------------------
+   385→    /// A lexical error; the lexeme contains the unexpected input.
+   386→    Error,
+   387→
+   388→    // ---- Sentinel ---------------------------------------------------------
+   389→    /// End of input.
+   390→    Eof,
+   391→}
+   392→
+   393→impl std::fmt::Display for TokenKind {
+   394→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   395→        match self {
+   396→            // Literals
+   397→            TokenKind::Number => write!(f, "integer literal"),
+   398→            TokenKind::Address => write!(f, "address literal"),
+   399→            TokenKind::Float => write!(f, "float literal"),
+   400→            TokenKind::String => write!(f, "string literal"),
+   401→            TokenKind::Char => write!(f, "char literal"),
+   402→            TokenKind::ByteStr => write!(f, "byte string literal"),
+   403→            TokenKind::RawStr => write!(f, "raw string literal"),
+   404→            TokenKind::Ident => write!(f, "identifier"),
+   405→            TokenKind::Underscore => write!(f, "'_'"),
+   406→
+   407→            // Delimiters
+   408→            TokenKind::LParen => write!(f, "'('"),
+   409→            TokenKind::RParen => write!(f, "')'"),
+   410→            TokenKind::LBrace => write!(f, "'{{'"),
+   411→            TokenKind::RBrace => write!(f, "'}}'"),
+   412→            TokenKind::LBracket => write!(f, "'['"),
+   413→            TokenKind::RBracket => write!(f, "']'"),
+   414→
+   415→            // Operators / punctuation
+   416→            TokenKind::Plus => write!(f, "'+'"),
+   417→            TokenKind::Minus => write!(f, "'-'"),
+   418→            TokenKind::Star => write!(f, "'*'"),
+   419→            TokenKind::Slash => write!(f, "'/'"),
+   420→            TokenKind::Percent => write!(f, "'%'"),
+   421→            TokenKind::Ampersand => write!(f, "'&'"),
+   422→            TokenKind::Pipe => write!(f, "'|'"),
+   423→            TokenKind::Caret => write!(f, "'^'"),
+   424→            TokenKind::Tilde => write!(f, "'~'"),
+   425→            TokenKind::Bang => write!(f, "'!'"),
+   426→            TokenKind::Assign => write!(f, "'='"),
+   427→            TokenKind::EqEq => write!(f, "'=='"),
+   428→            TokenKind::Ne => write!(f, "'!='"),
+   429→            TokenKind::Lt => write!(f, "'<'"),
+   430→            TokenKind::Le => write!(f, "'<='"),
+   431→            TokenKind::Gt => write!(f, "'>'"),
+   432→            TokenKind::Ge => write!(f, "'>='"),
+   433→            TokenKind::Shl => write!(f, "'<<'"),
+   434→            TokenKind::Shr => write!(f, "'>>'"),
+   435→            TokenKind::AndAnd => write!(f, "'&&'"),
+   436→            TokenKind::OrOr => write!(f, "'||'"),
+   437→            TokenKind::Arrow => write!(f, "'->'"),
+   438→            TokenKind::FatArrow => write!(f, "'=>'"),
+   439→            TokenKind::PathSep => write!(f, "'::'"),
+   440→            TokenKind::Colon => write!(f, "':'"),
+   441→            TokenKind::Semicolon => write!(f, "';'"),
+   442→            TokenKind::Comma => write!(f, "','"),
+   443→            TokenKind::Dot => write!(f, "'.'"),
+   444→            TokenKind::DotDot => write!(f, "'..'"),
+   445→            TokenKind::Ellipsis => write!(f, "'...'"),
+   446→            TokenKind::DotDotEq => write!(f, "'..='"),
+   447→            TokenKind::Ampersat => write!(f, "'@'"),
+   448→            TokenKind::Hash => write!(f, "'#'"),
+   449→            TokenKind::Dollar => write!(f, "'$'"),
+   450→            TokenKind::Question => write!(f, "'?'"),
+   451→
+   452→            // Compound assignment operators
+   453→            TokenKind::PlusEq => write!(f, "'+='"),
+   454→            TokenKind::MinusEq => write!(f, "'-='"),
+   455→            TokenKind::StarEq => write!(f, "'*='"),
+   456→            TokenKind::SlashEq => write!(f, "'/='"),
+   457→            TokenKind::PercentEq => write!(f, "'%='"),
+   458→            TokenKind::AmpEq => write!(f, "'&='"),
+   459→            TokenKind::PipeEq => write!(f, "'|='"),
+   460→            TokenKind::CaretEq => write!(f, "'^='"),
+   461→            TokenKind::ShlEq => write!(f, "'<<='"),
+   462→            TokenKind::ShrEq => write!(f, "'>>='"),
+   463→
+   464→            // Keywords
+   465→            TokenKind::Fn => write!(f, "'fn'"),
+   466→            TokenKind::Let => write!(f, "'let'"),
+   467→            TokenKind::Pub => write!(f, "'pub'"),
+   468→            TokenKind::Crate => write!(f, "'crate'"),
+   469→            TokenKind::Ptr => write!(f, "'ptr'"),
+   470→            TokenKind::Region => write!(f, "'region'"),
+   471→            TokenKind::Alloc => write!(f, "'alloc'"),
+   472→            TokenKind::Allocate => write!(f, "'allocate'"),
+   473→            TokenKind::Free => write!(f, "'free'"),
+   474→            TokenKind::Derive => write!(f, "'derive'"),
+   475→            TokenKind::Cast => write!(f, "'cast'"),
+   476→            TokenKind::Read => write!(f, "'read'"),
+   477→            TokenKind::Write => write!(f, "'write'"),
+   478→            TokenKind::Sync => write!(f, "'sync'"),
+   479→            TokenKind::If => write!(f, "'if'"),
+   480→            TokenKind::Else => write!(f, "'else'"),
+   481→            TokenKind::While => write!(f, "'while'"),
+   482→            TokenKind::For => write!(f, "'for'"),
+   483→            TokenKind::Return => write!(f, "'return'"),
+   484→            TokenKind::Struct => write!(f, "'struct'"),
+   485→            TokenKind::Enum => write!(f, "'enum'"),
+   486→            TokenKind::Match => write!(f, "'match'"),
+   487→            TokenKind::Unsafe => write!(f, "'unsafe'"),
+   488→            TokenKind::Safe => write!(f, "'safe'"),
+   489→            TokenKind::Bd => write!(f, "'bd'"),
+   490→            TokenKind::Repd => write!(f, "'repd'"),
+   491→            TokenKind::Capd => write!(f, "'capd'"),
+   492→            TokenKind::Reld => write!(f, "'reld'"),
+   493→            TokenKind::Import => write!(f, "'import'"),
+   494→            TokenKind::Export => write!(f, "'export'"),
+   495→            TokenKind::Mod => write!(f, "'mod'"),
+   496→            TokenKind::Use => write!(f, "'use'"),
+   497→            TokenKind::SelfKw => write!(f, "'self'"),
+   498→            TokenKind::Super => write!(f, "'super'"),
+   499→            TokenKind::Async => write!(f, "'async'"),
+   500→            TokenKind::Await => write!(f, "'await'"),
+   501→            TokenKind::Spawn => write!(f, "'spawn'"),
+   502→            TokenKind::Lock => write!(f, "'lock'"),
+   503→            TokenKind::Unlock => write!(f, "'unlock'"),
+   504→            TokenKind::Channel => write!(f, "'channel'"),
+   505→            TokenKind::Send => write!(f, "'send'"),
+   506→            TokenKind::Recv => write!(f, "'recv'"),
+   507→            TokenKind::True => write!(f, "'true'"),
+   508→            TokenKind::False => write!(f, "'false'"),
+   509→            TokenKind::Null => write!(f, "'null'"),
+   510→            TokenKind::As => write!(f, "'as'"),
+   511→            TokenKind::Sizeof => write!(f, "'sizeof'"),
+   512→            TokenKind::Alignof => write!(f, "'alignof'"),
+   513→            TokenKind::Break => write!(f, "'break'"),
+   514→            TokenKind::Continue => write!(f, "'continue'"),
+   515→            TokenKind::Loop => write!(f, "'loop'"),
+   516→            TokenKind::Where => write!(f, "'where'"),
+   517→            TokenKind::Impl => write!(f, "'impl'"),
+   518→            TokenKind::Trait => write!(f, "'trait'"),
+   519→            TokenKind::Type => write!(f, "'type'"),
+   520→            TokenKind::Const => write!(f, "'const'"),
+   521→            TokenKind::Static => write!(f, "'static'"),
+   522→            TokenKind::Mut => write!(f, "'mut'"),
+   523→            TokenKind::Ref => write!(f, "'ref'"),
+   524→            TokenKind::OptionKw => write!(f, "'Option'"),
+   525→            TokenKind::SomeKw => write!(f, "'Some'"),
+   526→            TokenKind::NoneKw => write!(f, "'None'"),
+   527→            TokenKind::ResultKw => write!(f, "'Result'"),
+   528→            TokenKind::OkKw => write!(f, "'Ok'"),
+   529→            TokenKind::ErrKw => write!(f, "'Err'"),
+   530→            TokenKind::FormatStr => write!(f, "format string"),
+   531→
+   532→            // Doc comments
+   533→            TokenKind::DocComment => write!(f, "doc comment"),
+   534→            TokenKind::ModuleDoc => write!(f, "module doc comment"),
+   535→
+   536→            // Error / sentinel
+   537→            TokenKind::Error => write!(f, "error"),
+   538→            TokenKind::Eof => write!(f, "end of file"),
+   539→        }
+   540→    }
+   541→}
+   542→
+   543→// ---------------------------------------------------------------------------
+   544→// Keywords table
+   545→// ---------------------------------------------------------------------------
+   546→
+   547→/// Map from keyword text to its [`TokenKind`].
+   548→fn keyword_kind(ident: &str) -> Option<TokenKind> {
+   549→    match ident {
+   550→        // Core
+   551→        "fn" => Some(TokenKind::Fn),
+   552→        "let" => Some(TokenKind::Let),
+   553→        "pub" => Some(TokenKind::Pub),
+   554→        "crate" => Some(TokenKind::Crate),
+   555→        "if" => Some(TokenKind::If),
+   556→        "else" => Some(TokenKind::Else),
+   557→        "while" => Some(TokenKind::While),
+   558→        "for" => Some(TokenKind::For),
+   559→        "return" => Some(TokenKind::Return),
+   560→        "as" => Some(TokenKind::As),
+   561→        "match" => Some(TokenKind::Match),
+   562→        "struct" => Some(TokenKind::Struct),
+   563→        "enum" => Some(TokenKind::Enum),
+   564→        "break" => Some(TokenKind::Break),
+   565→        "continue" => Some(TokenKind::Continue),
+   566→        "loop" => Some(TokenKind::Loop),
+   567→
+   568→        // Type system
+   569→        "type" => Some(TokenKind::Type),
+   570→        "const" => Some(TokenKind::Const),
+   571→        "static" => Some(TokenKind::Static),
+   572→        "mut" => Some(TokenKind::Mut),
+   573→        "ref" => Some(TokenKind::Ref),
+   574→        "where" => Some(TokenKind::Where),
+   575→        "impl" => Some(TokenKind::Impl),
+   576→        "trait" => Some(TokenKind::Trait),
+   577→
+   578→        // Memory primitives
+   579→        "ptr" => Some(TokenKind::Ptr),
+   580→        "region" => Some(TokenKind::Region),
+   581→        "alloc" => Some(TokenKind::Alloc),
+   582→        "allocate" => Some(TokenKind::Allocate),
+   583→        "free" => Some(TokenKind::Free),
+   584→        "derive" => Some(TokenKind::Derive),
+   585→        "cast" => Some(TokenKind::Cast),
+   586→        "read" => Some(TokenKind::Read),
+   587→        "write" => Some(TokenKind::Write),
+   588→
+   589→        // Concurrency / sync
+   590→        "sync" => Some(TokenKind::Sync),
+   591→        "async" => Some(TokenKind::Async),
+   592→        "await" => Some(TokenKind::Await),
+   593→        "spawn" => Some(TokenKind::Spawn),
+   594→        "lock" => Some(TokenKind::Lock),
+   595→        "unlock" => Some(TokenKind::Unlock),
+   596→        "channel" => Some(TokenKind::Channel),
+   597→        "send" => Some(TokenKind::Send),
+   598→        "recv" => Some(TokenKind::Recv),
+   599→
+   600→        // Safety
+   601→        "unsafe" => Some(TokenKind::Unsafe),
+   602→        "safe" => Some(TokenKind::Safe),
+   603→
+   604→        // Domain directives
+   605→        "bd" => Some(TokenKind::Bd),
+   606→        "repd" => Some(TokenKind::Repd),
+   607→        "capd" => Some(TokenKind::Capd),
+   608→        "reld" => Some(TokenKind::Reld),
+   609→
+   610→        // Modules
+   611→        "import" => Some(TokenKind::Import),
+   612→        "export" => Some(TokenKind::Export),
+   613→        "mod" => Some(TokenKind::Mod),
+   614→        "use" => Some(TokenKind::Use),
+   615→        "self" => Some(TokenKind::SelfKw),
+   616→        "super" => Some(TokenKind::Super),
+   617→
+   618→        // Booleans / null
+   619→        "true" => Some(TokenKind::True),
+   620→        "false" => Some(TokenKind::False),
+   621→        "null" => Some(TokenKind::Null),
+   622→
+   623→        // Type operators
+   624→        "sizeof" => Some(TokenKind::Sizeof),
+   625→        "alignof" => Some(TokenKind::Alignof),
+   626→
+   627→        // Option/Result sugar
+   628→        "Option" => Some(TokenKind::OptionKw),
+   629→        "Some" => Some(TokenKind::SomeKw),
+   630→        "None" => Some(TokenKind::NoneKw),
+   631→        "Result" => Some(TokenKind::ResultKw),
+   632→        "Ok" => Some(TokenKind::OkKw),
+   633→        "Err" => Some(TokenKind::ErrKw),
+   634→
+   635→        _ => None,
+   636→    }
+   637→}
+   638→
+   639→// ---------------------------------------------------------------------------
+   640→// Lexer
+   641→// ---------------------------------------------------------------------------
+   642→
+   643→/// A streaming lexer that converts source text into [`Token`] values.
+   644→///
+   645→/// The lexer is *pull*-based: the caller invokes [`Lexer::next_token`]
+   646→/// repeatedly until a token with [`TokenKind::Eof`] is returned.
+   647→///
+   648→/// **Error recovery**: the lexer never panics or returns `Err`. When it
+   649→/// encounters invalid input it produces [`TokenKind::Error`] tokens and
+   650→/// records the error internally. Call [`Lexer::errors`] or
+   651→/// [`Lexer::take_errors`] to retrieve accumulated errors.
+   652→///
+   653→/// Whitespace and non-doc comments are silently skipped. Doc comments
+   654→/// (`///` and `//!`) are emitted as tokens for downstream tooling.
+   655→pub struct Lexer<'src> {
+   656→    /// Full source text.
+   657→    source: &'src str,
+   658→    /// Characters yet to be consumed.
+   659→    chars: std::iter::Peekable<std::str::Chars<'src>>,
+   660→    /// Current byte offset into `source`.
+   661→    offset: usize,
+   662→    /// Current line number (0-based).
+   663→    line: usize,
+   664→    /// Current column number (0-based).
+   665→    column: usize,
+   666→    /// Lookahead token already consumed but not yet handed to the caller.
+   667→    peeked: Option<Token>,
+   668→    /// Cached EOF token used as a safe fallback in [`peek`] when the
+   669→    /// peeked buffer is unexpectedly empty (defensive guard against panic).
+   670→    eof_token: Token,
+   671→    /// Accumulated lexical errors (for error recovery).
+   672→    errors: Vec<ParseError>,
+   673→}
+   674→
+   675→impl<'src> Lexer<'src> {
+   676→    /// Create a new lexer over the given source text.
+   677→    pub fn new(source: &'src str) -> Self {
+   678→        Self {
+   679→            source,
+   680→            chars: source.chars().peekable(),
+   681→            offset: 0,
+   682→            line: 0,
+   683→            column: 0,
+   684→            peeked: None,
+   685→            eof_token: Token::new(TokenKind::Eof, "", Span::new(0, 0), 0, 0),
+   686→            errors: Vec::new(),
+   687→        }
+   688→    }
+   689→
+   690→    // -- public API ----------------------------------------------------------
+   691→
+   692→    /// Consume and return the next token from the source.
+   693→    ///
+   694→    /// On end of input a token with kind [`TokenKind::Eof`] is returned.
+   695→    /// Lexical errors are reported via [`TokenKind::Error`] tokens and
+   696→    /// collected internally (see [`Lexer::errors`]).
+   697→    pub fn next_token(&mut self) -> Token {
+   698→        if let Some(tok) = self.peeked.take() {
+   699→            return tok;
+   700→        }
+   701→        self.advance()
+   702→    }
+   703→
+   704→    /// Peek at the next token without consuming it.
+   705→    ///
+   706→    /// Successive calls to `peek` return the same token until
+   707→    /// [`Lexer::next_token`] is called.
+   708→    pub fn peek(&mut self) -> &Token {
+   709→        if self.peeked.is_none() {
+   710→            self.peeked = Some(self.advance());
+   711→        }
+   712→        // Defensive: if `peeked` is still `None` after the branch above
+   713→        // (should never happen), fall back to the cached EOF token instead
+   714→        // of panicking.
+   715→        self.peeked.as_ref().unwrap_or(&self.eof_token)
+   716→    }
+   717→
+   718→    /// Consume all remaining tokens and return them (including the final Eof).
+   719→    pub fn collect_tokens(&mut self) -> Vec<Token> {
+   720→        let mut tokens = Vec::new();
+   721→        loop {
+   722→            let tok = self.next_token();
+   723→            let is_eof = tok.is_eof();
+   724→            tokens.push(tok);
+   725→            if is_eof {
+   726→                break;
+   727→            }
+   728→        }
+   729→        tokens
+   730→    }
+   731→
+   732→    /// Return the accumulated lexical errors.
+   733→    pub fn errors(&self) -> &[ParseError] {
+   734→        &self.errors
+   735→    }
+   736→
+   737→    /// Take all accumulated errors, leaving the internal buffer empty.
+   738→    pub fn take_errors(&mut self) -> Vec<ParseError> {
+   739→        std::mem::take(&mut self.errors)
+   740→    }
+   741→
+   742→    /// Return the source text being lexed.
+   743→    pub fn source(&self) -> &'src str {
+   744→        self.source
+   745→    }
+   746→
+   747→    // -- core advance --------------------------------------------------------
+   748→
+   749→    /// Core token production (bypasses peeked buffer).
+   750→    fn advance(&mut self) -> Token {
+   751→        // Loop: skip whitespace and non-doc comments until we find a real
+   752→        // token or a doc-comment token.
+   753→        loop {
+   754→            self.skip_whitespace();
+   755→
+   756→            let start = self.offset;
+   757→            let line = self.line;
+   758→            let column = self.column;
+   759→
+   760→            let ch = match self.chars.peek() {
+   761→                Some(&c) => c,
+   762→                None => return self.eof_token(start, line, column),
+   763→            };
+   764→
+   765→            // ---- Comment handling ----
+   766→            if ch == '/' {
+   767→                let second = self.peek_next(1);
+   768→                if second == Some('/') {
+   769→                    // `//` — line comment or doc comment
+   770→                    self.bump(); // consume first /
+   771→                    self.bump(); // consume second /
+   772→                    let third = self.chars.peek().copied();
+   773→                    if third == Some('/') {
+   774→                        // `///` outer doc comment — emit as token
+   775→                        self.bump(); // consume third /
+   776→                        self.consume_to_eol();
+   777→                        return self.make_token(TokenKind::DocComment, start, line, column);
+   778→                    } else if third == Some('!') {
+   779→                        // `//!` module doc comment — emit as token
+   780→                        self.bump(); // consume !
+   781→                        self.consume_to_eol();
+   782→                        return self.make_token(TokenKind::ModuleDoc, start, line, column);
+   783→                    } else {
+   784→                        // Regular line comment — skip
+   785→                        self.consume_to_eol();
+   786→                        continue; // loop back for next token
+   787→                    }
+   788→                } else if second == Some('*') {
+   789→                    // `/* */` block comment — skip
+   790→                    self.bump(); // consume /
+   791→                    self.bump(); // consume *
+   792→                    self.skip_block_comment(start);
+   793→                    continue; // loop back
+   794→                } else {
+   795→                    // Just `/` — the division operator; fall through to main match
+   796→                    break;
+   797→                }
+   798→            }
+   799→
+   800→            // Not whitespace, not a comment — lex the token.
+   801→            break;
+   802→        }
+   803→
+   804→        self.lex_token()
+   805→    }
+   806→
+   807→    /// Lex a single token starting at the current position.
+   808→    fn lex_token(&mut self) -> Token {
+   809→        let start = self.offset;
+   810→        let line = self.line;
+   811→        let column = self.column;
+   812→
+   813→        let ch = match self.chars.peek() {
+   814→            Some(&c) => c,
+   815→            None => return self.eof_token(start, line, column),
+   816→        };
+   817→
+   818→        let kind = match ch {
+   819→            // ---- Delimiters ----
+   820→            '(' => {
+   821→                self.bump();
+   822→                TokenKind::LParen
+   823→            }
+   824→            ')' => {
+   825→                self.bump();
+   826→                TokenKind::RParen
+   827→            }
+   828→            '{' => {
+   829→                self.bump();
+   830→                TokenKind::LBrace
+   831→            }
+   832→            '}' => {
+   833→                self.bump();
+   834→                TokenKind::RBrace
+   835→            }
+   836→            '[' => {
+   837→                self.bump();
+   838→                TokenKind::LBracket
+   839→            }
+   840→            ']' => {
+   841→                self.bump();
+   842→                TokenKind::RBracket
+   843→            }
+   844→
+   845→            // ---- Simple operators ----
+   846→            '+' => return self.lex_plus(start, line, column),
+   847→            '*' => return self.lex_star(start, line, column),
+   848→            '/' => return self.lex_slash(start, line, column),
+   849→            '%' => return self.lex_percent(start, line, column),
+   850→            '^' => return self.lex_caret(start, line, column),
+   851→            '~' => {
+   852→                self.bump();
+   853→                TokenKind::Tilde
+   854→            }
+   855→            '@' => {
+   856→                self.bump();
+   857→                TokenKind::Ampersat
+   858→            }
+   859→            '#' => {
+   860→                self.bump();
+   861→                TokenKind::Hash
+   862→            }
+   863→            '$' => {
+   864→                self.bump();
+   865→                TokenKind::Dollar
+   866→            }
+   867→            '?' => {
+   868→                self.bump();
+   869→                TokenKind::Question
+   870→            }
+   871→            ';' => {
+   872→                self.bump();
+   873→                TokenKind::Semicolon
+   874→            }
+   875→            ',' => {
+   876→                self.bump();
+   877→                TokenKind::Comma
+   878→            }
+   879→
+   880→            // ---- Multi-char operators ----
+   881→            '-' => return self.lex_minus(start, line, column),
+   882→            '!' => return self.lex_bang(start, line, column),
+   883→            '=' => return self.lex_eq(start, line, column),
+   884→            '<' => return self.lex_lt(start, line, column),
+   885→            '>' => return self.lex_gt(start, line, column),
+   886→            '&' => return self.lex_ampersand(start, line, column),
+   887→            '|' => return self.lex_pipe(start, line, column),
+   888→            ':' => return self.lex_colon(start, line, column),
+   889→            '.' => return self.lex_dot(start, line, column),
+   890→
+   891→            // ---- Literals ----
+   892→            '0'..='9' => return self.lex_number(start, line, column),
+   893→            '"' => return self.lex_string(start, line, column),
+   894→            '\'' => return self.lex_char(start, line, column),
+   895→
+   896→            // Byte-string prefix `b"…"`
+   897→            'b' => {
+   898→                if self.peek_next(1) == Some('"') {
+   899→                    self.bump(); // consume 'b'
+   900→                    return self.lex_byte_string(start, line, column);
+   901→                }
+   902→                return self.lex_ident(start, line, column);
+   903→            }
+   904→
+   905→            // Raw-string prefix `r"…"` or `r#"…"#`
+   906→            'r' => {
+   907→                let second = self.peek_next(1);
+   908→                if second == Some('"') || second == Some('#') {
+   909→                    self.bump(); // consume 'r'
+   910→                    return self.lex_raw_string(start, line, column);
+   911→                }
+   912→                return self.lex_ident(start, line, column);
+   913→            }
+   914→
+   915→            // Format-string prefix `f"…"`
+   916→            'f' => {
+   917→                if self.peek_next(1) == Some('"') {
+   918→                    self.bump(); // consume 'f'
+   919→                    return self.lex_format_string(start, line, column);
+   920→                }
+   921→                return self.lex_ident(start, line, column);
+   922→            }
+   923→
+   924→            // ---- Identifier, keyword, or underscore ----
+   925→            '_' => {
+   926→                return self.lex_ident(start, line, column);
+   927→            }
+   928→            c if c.is_ascii_alphabetic() => {
+   929→                return self.lex_ident(start, line, column);
+   930→            }
+   931→
+   932→            // ---- Unknown character ----
+   933→            _ => {
+   934→                self.bump();
+   935→                self.push_error(
+   936→                    format!("unexpected character '{}'", ch),
+   937→                    Span::new(start, self.offset),
+   938→                );
+   939→                TokenKind::Error
+   940→            }
+   941→        };
+   942→
+   943→        self.make_token(kind, start, line, column)
+   944→    }
+   945→
+   946→    // -- operator helpers ----------------------------------------------------
+   947→
+   948→    fn lex_plus(&mut self, start: usize, line: usize, column: usize) -> Token {
+   949→        self.bump(); // consume '+'
+   950→        match self.chars.peek() {
+   951→            Some(&'=') => {
+   952→                self.bump();
+   953→                self.make_token(TokenKind::PlusEq, start, line, column)
+   954→            }
+   955→            _ => self.make_token(TokenKind::Plus, start, line, column),
+   956→        }
+   957→    }
+   958→
+   959→    fn lex_minus(&mut self, start: usize, line: usize, column: usize) -> Token {
+   960→        self.bump(); // consume '-'
+   961→        match self.chars.peek() {
+   962→            Some(&'>') => {
+   963→                self.bump();
+   964→                self.make_token(TokenKind::Arrow, start, line, column)
+   965→            }
+   966→            Some(&'=') => {
+   967→                self.bump();
+   968→                self.make_token(TokenKind::MinusEq, start, line, column)
+   969→            }
+   970→            _ => self.make_token(TokenKind::Minus, start, line, column),
+   971→        }
+   972→    }
+   973→
+   974→    fn lex_star(&mut self, start: usize, line: usize, column: usize) -> Token {
+   975→        self.bump(); // consume '*'
+   976→        match self.chars.peek() {
+   977→            Some(&'=') => {
+   978→                self.bump();
+   979→                self.make_token(TokenKind::StarEq, start, line, column)
+   980→            }
+   981→            _ => self.make_token(TokenKind::Star, start, line, column),
+   982→        }
+   983→    }
+   984→
+   985→    fn lex_percent(&mut self, start: usize, line: usize, column: usize) -> Token {
+   986→        self.bump(); // consume '%'
+   987→        match self.chars.peek() {
+   988→            Some(&'=') => {
+   989→                self.bump();
+   990→                self.make_token(TokenKind::PercentEq, start, line, column)
+   991→            }
+   992→            _ => self.make_token(TokenKind::Percent, start, line, column),
+   993→        }
+   994→    }
+   995→
+   996→    fn lex_slash(&mut self, start: usize, line: usize, column: usize) -> Token {
+   997→        self.bump(); // consume '/'
+   998→        match self.chars.peek() {
+   999→            Some(&'=') => {
+  1000→                self.bump();
+  1001→                self.make_token(TokenKind::SlashEq, start, line, column)
+  1002→            }
+  1003→            _ => self.make_token(TokenKind::Slash, start, line, column),
+  1004→        }
+  1005→    }
+  1006→
+  1007→    fn lex_caret(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1008→        self.bump(); // consume '^'
+  1009→        match self.chars.peek() {
+  1010→            Some(&'=') => {
+  1011→                self.bump();
+  1012→                self.make_token(TokenKind::CaretEq, start, line, column)
+  1013→            }
+  1014→            _ => self.make_token(TokenKind::Caret, start, line, column),
+  1015→        }
+  1016→    }
+  1017→
+  1018→    fn lex_bang(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1019→        self.bump(); // consume '!'
+  1020→        match self.chars.peek() {
+  1021→            Some(&'=') => {
+  1022→                self.bump();
+  1023→                self.make_token(TokenKind::Ne, start, line, column)
+  1024→            }
+  1025→            _ => self.make_token(TokenKind::Bang, start, line, column),
+  1026→        }
+  1027→    }
+  1028→
+  1029→    fn lex_eq(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1030→        self.bump(); // consume '='
+  1031→        match self.chars.peek() {
+  1032→            Some(&'=') => {
+  1033→                self.bump();
+  1034→                self.make_token(TokenKind::EqEq, start, line, column)
+  1035→            }
+  1036→            Some(&'>') => {
+  1037→                self.bump();
+  1038→                self.make_token(TokenKind::FatArrow, start, line, column)
+  1039→            }
+  1040→            _ => self.make_token(TokenKind::Assign, start, line, column),
+  1041→        }
+  1042→    }
+  1043→
+  1044→    fn lex_lt(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1045→        self.bump(); // consume '<'
+  1046→        match self.chars.peek() {
+  1047→            Some(&'=') => {
+  1048→                self.bump();
+  1049→                self.make_token(TokenKind::Le, start, line, column)
+  1050→            }
+  1051→            Some(&'<') => {
+  1052→                self.bump(); // consume second '<'
+  1053→                if self.chars.peek() == Some(&'=') {
+  1054→                    self.bump();
+  1055→                    self.make_token(TokenKind::ShlEq, start, line, column)
+  1056→                } else {
+  1057→                    self.make_token(TokenKind::Shl, start, line, column)
+  1058→                }
+  1059→            }
+  1060→            _ => self.make_token(TokenKind::Lt, start, line, column),
+  1061→        }
+  1062→    }
+  1063→
+  1064→    fn lex_gt(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1065→        self.bump(); // consume '>'
+  1066→        match self.chars.peek() {
+  1067→            Some(&'=') => {
+  1068→                self.bump();
+  1069→                self.make_token(TokenKind::Ge, start, line, column)
+  1070→            }
+  1071→            Some(&'>') => {
+  1072→                self.bump(); // consume second '>'
+  1073→                if self.chars.peek() == Some(&'=') {
+  1074→                    self.bump();
+  1075→                    self.make_token(TokenKind::ShrEq, start, line, column)
+  1076→                } else {
+  1077→                    self.make_token(TokenKind::Shr, start, line, column)
+  1078→                }
+  1079→            }
+  1080→            _ => self.make_token(TokenKind::Gt, start, line, column),
+  1081→        }
+  1082→    }
+  1083→
+  1084→    fn lex_ampersand(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1085→        self.bump(); // consume '&'
+  1086→        match self.chars.peek() {
+  1087→            Some(&'&') => {
+  1088→                self.bump();
+  1089→                self.make_token(TokenKind::AndAnd, start, line, column)
+  1090→            }
+  1091→            Some(&'=') => {
+  1092→                self.bump();
+  1093→                self.make_token(TokenKind::AmpEq, start, line, column)
+  1094→            }
+  1095→            _ => self.make_token(TokenKind::Ampersand, start, line, column),
+  1096→        }
+  1097→    }
+  1098→
+  1099→    fn lex_pipe(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1100→        self.bump(); // consume '|'
+  1101→        match self.chars.peek() {
+  1102→            Some(&'|') => {
+  1103→                self.bump();
+  1104→                self.make_token(TokenKind::OrOr, start, line, column)
+  1105→            }
+  1106→            Some(&'=') => {
+  1107→                self.bump();
+  1108→                self.make_token(TokenKind::PipeEq, start, line, column)
+  1109→            }
+  1110→            _ => self.make_token(TokenKind::Pipe, start, line, column),
+  1111→        }
+  1112→    }
+  1113→
+  1114→    fn lex_colon(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1115→        self.bump(); // consume ':'
+  1116→        match self.chars.peek() {
+  1117→            Some(&':') => {
+  1118→                self.bump();
+  1119→                self.make_token(TokenKind::PathSep, start, line, column)
+  1120→            }
+  1121→            _ => self.make_token(TokenKind::Colon, start, line, column),
+  1122→        }
+  1123→    }
+  1124→
+  1125→    fn lex_dot(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1126→        self.bump(); // consume '.'
+  1127→        match self.chars.peek() {
+  1128→            Some(&'.') => {
+  1129→                self.bump(); // consume second '.'
+  1130→                match self.chars.peek() {
+  1131→                    Some(&'.') => {
+  1132→                        self.bump();
+  1133→                        self.make_token(TokenKind::Ellipsis, start, line, column)
+  1134→                    }
+  1135→                    Some(&'=') => {
+  1136→                        self.bump();
+  1137→                        self.make_token(TokenKind::DotDotEq, start, line, column)
+  1138→                    }
+  1139→                    _ => self.make_token(TokenKind::DotDot, start, line, column),
+  1140→                }
+  1141→            }
+  1142→            _ => self.make_token(TokenKind::Dot, start, line, column),
+  1143→        }
+  1144→    }
+  1145→
+  1146→    // -- literal helpers -----------------------------------------------------
+  1147→
+  1148→    /// Lex a numeric literal (integer or float).
+  1149→    ///
+  1150→    /// Handles: decimal, `0x` hex, `0b` binary, `0o` octal, float with
+  1151→    /// `.` and/or exponent `e`/`E`.  Underscore separators are allowed.
+  1152→    fn lex_number(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1153→        let first = self.chars.peek().copied();
+  1154→        debug_assert!(first.is_some_and(|c| c.is_ascii_digit()));
+  1155→
+  1156→        if first == Some('0') {
+  1157→            let second = self.peek_next(1);
+  1158→            match second {
+  1159→                Some('x') | Some('X') => {
+  1160→                    // Hex prefix — only if followed by at least one hex digit
+  1161→                    let third = self.peek_next(2);
+  1162→                    if third.is_some_and(|c| c.is_ascii_hexdigit() || c == '_') {
+  1163→                        self.bump(); // consume '0'
+  1164→                        self.bump(); // consume 'x'/'X'
+  1165→                        return self.lex_hex_digits(start, line, column);
+  1166→                    }
+  1167→                    // `0x` without digits -> treat `0` as integer
+  1168→                    self.bump(); // consume '0'
+  1169→                    return self.make_token(TokenKind::Number, start, line, column);
+  1170→                }
+  1171→                Some('b') | Some('B') => {
+  1172→                    let third = self.peek_next(2);
+  1173→                    if third.is_some_and(|c| c == '0' || c == '1' || c == '_') {
+  1174→                        self.bump();
+  1175→                        self.bump(); // consume '0b'
+  1176→                        return self.lex_binary_digits(start, line, column);
+  1177→                    }
+  1178→                    self.bump(); // consume '0'
+  1179→                    self.consume_decimal_digits();
+  1180→                    return self.check_float_or_int(start, line, column);
+  1181→                }
+  1182→                Some('o') | Some('O') => {
+  1183→                    let third = self.peek_next(2);
+  1184→                    if third.is_some_and(|c| ('0'..='7').contains(&c) || c == '_') {
+  1185→                        self.bump();
+  1186→                        self.bump(); // consume '0o'
+  1187→                        return self.lex_octal_digits(start, line, column);
+  1188→                    }
+  1189→                    self.bump(); // consume '0'
+  1190→                    self.consume_decimal_digits();
+  1191→                    return self.check_float_or_int(start, line, column);
+  1192→                }
+  1193→                Some('e') | Some('E') => {
+  1194→                    // 0e10 — float with exponent
+  1195→                    self.bump(); // consume '0'
+  1196→                    self.lex_exponent();
+  1197→                    return self.make_token(TokenKind::Float, start, line, column);
+  1198→                }
+  1199→                Some('.') => {
+  1200→                    // 0.xxx — float
+  1201→                    let third = self.peek_next(2);
+  1202→                    if third.is_some_and(|c| c.is_ascii_digit()) {
+  1203→                        self.bump(); // consume '0'
+  1204→                        self.bump(); // consume '.'
+  1205→                        self.consume_decimal_digits();
+  1206→                        self.lex_exponent();
+  1207→                        return self.make_token(TokenKind::Float, start, line, column);
+  1208→                    }
+  1209→                    // 0. -> integer 0 then dot
+  1210→                    self.bump(); // consume '0'
+  1211→                    return self.make_token(TokenKind::Number, start, line, column);
+  1212→                }
+  1213→                _ => {
+  1214→                    // Plain 0, or 007 etc.
+  1215→                    self.bump(); // consume '0'
+  1216→                    self.consume_decimal_digits();
+  1217→                    return self.check_float_or_int(start, line, column);
+  1218→                }
+  1219→            }
+  1220→        }
+  1221→
+  1222→        // Non-zero decimal start
+  1223→        self.consume_decimal_digits();
+  1224→        self.check_float_or_int(start, line, column)
+  1225→    }
+  1226→
+  1227→    /// After consuming the integer part, check for a float suffix (`.` or `e`).
+  1228→    fn check_float_or_int(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1229→        if self.chars.peek() == Some(&'.') {
+  1230→            let next = self.peek_next(1);
+  1231→            if next.is_some_and(|c| c.is_ascii_digit()) {
+  1232→                self.bump(); // consume '.'
+  1233→                self.consume_decimal_digits();
+  1234→                self.lex_exponent();
+  1235→                return self.make_token(TokenKind::Float, start, line, column);
+  1236→            }
+  1237→            // `.` not followed by a digit — integer followed by Dot/DotDot
+  1238→        }
+  1239→        if self.chars.peek() == Some(&'e') || self.chars.peek() == Some(&'E') {
+  1240→            self.lex_exponent();
+  1241→            return self.make_token(TokenKind::Float, start, line, column);
+  1242→        }
+  1243→        self.make_token(TokenKind::Number, start, line, column)
+  1244→    }
+  1245→
+  1246→    fn consume_decimal_digits(&mut self) {
+  1247→        while let Some(&c) = self.chars.peek() {
+  1248→            if c.is_ascii_digit() || c == '_' {
+  1249→                self.bump();
+  1250→            } else {
+  1251→                break;
+  1252→            }
+  1253→        }
+  1254→    }
+  1255→
+  1256→    fn lex_hex_digits(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1257→        let digits_start = self.offset;
+  1258→        while let Some(&c) = self.chars.peek() {
+  1259→            if c.is_ascii_hexdigit() || c == '_' {
+  1260→                self.bump();
+  1261→            } else {
+  1262→                break;
+  1263→            }
+  1264→        }
+  1265→        if self.offset == digits_start {
+  1266→            self.push_error("empty hex digits after '0x'", Span::new(start, self.offset));
+  1267→            return self.make_token(TokenKind::Error, start, line, column);
+  1268→        }
+  1269→        self.make_token(TokenKind::Address, start, line, column)
+  1270→    }
+  1271→
+  1272→    fn lex_binary_digits(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1273→        let digits_start = self.offset;
+  1274→        while let Some(&c) = self.chars.peek() {
+  1275→            if c == '0' || c == '1' || c == '_' {
+  1276→                self.bump();
+  1277→            } else {
+  1278→                break;
+  1279→            }
+  1280→        }
+  1281→        if self.offset == digits_start {
+  1282→            self.push_error(
+  1283→                "empty binary digits after '0b'",
+  1284→                Span::new(start, self.offset),
+  1285→            );
+  1286→            return self.make_token(TokenKind::Error, start, line, column);
+  1287→        }
+  1288→        self.make_token(TokenKind::Number, start, line, column)
+  1289→    }
+  1290→
+  1291→    fn lex_octal_digits(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1292→        let digits_start = self.offset;
+  1293→        while let Some(&c) = self.chars.peek() {
+  1294→            if ('0'..='7').contains(&c) || c == '_' {
+  1295→                self.bump();
+  1296→            } else {
+  1297→                break;
+  1298→            }
+  1299→        }
+  1300→        if self.offset == digits_start {
+  1301→            self.push_error(
+  1302→                "empty octal digits after '0o'",
+  1303→                Span::new(start, self.offset),
+  1304→            );
+  1305→            return self.make_token(TokenKind::Error, start, line, column);
+  1306→        }
+  1307→        self.make_token(TokenKind::Number, start, line, column)
+  1308→    }
+  1309→
+  1310→    /// Consume an optional exponent part: `[eE][+-]?[0-9_]+`.
+  1311→    fn lex_exponent(&mut self) {
+  1312→        if self.chars.peek() == Some(&'e') || self.chars.peek() == Some(&'E') {
+  1313→            self.bump(); // consume 'e'/'E'
+  1314→            if self.chars.peek() == Some(&'+') || self.chars.peek() == Some(&'-') {
+  1315→                self.bump(); // consume sign
+  1316→            }
+  1317→            while let Some(&c) = self.chars.peek() {
+  1318→                if c.is_ascii_digit() || c == '_' {
+  1319→                    self.bump();
+  1320→                } else {
+  1321→                    break;
+  1322→                }
+  1323→            }
+  1324→        }
+  1325→    }
+  1326→
+  1327→    /// Lex a double-quoted string literal with escape processing.
+  1328→    fn lex_string(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1329→        self.bump(); // consume opening "
+  1330→        let mut decoded = String::new();
+  1331→
+  1332→        loop {
+  1333→            match self.chars.peek() {
+  1334→                Some(&'"') => {
+  1335→                    self.bump(); // consume closing "
+  1336→                    break;
+  1337→                }
+  1338→                Some(&'\\') => {
+  1339→                    self.bump(); // consume backslash
+  1340→                    match self.chars.peek() {
+  1341→                        Some(&'n') => {
+  1342→                            self.bump();
+  1343→                            decoded.push('\n');
+  1344→                        }
+  1345→                        Some(&'t') => {
+  1346→                            self.bump();
+  1347→                            decoded.push('\t');
+  1348→                        }
+  1349→                        Some(&'r') => {
+  1350→                            self.bump();
+  1351→                            decoded.push('\r');
+  1352→                        }
+  1353→                        Some(&'\\') => {
+  1354→                            self.bump();
+  1355→                            decoded.push('\\');
+  1356→                        }
+  1357→                        Some(&'"') => {
+  1358→                            self.bump();
+  1359→                            decoded.push('"');
+  1360→                        }
+  1361→                        Some(&'0') => {
+  1362→                            self.bump();
+  1363→                            decoded.push('\0');
+  1364→                        }
+  1365→                        Some(&'x') => {
+  1366→                            self.bump(); // consume 'x'
+  1367→                            let h1 = self.chars.peek().and_then(|c| c.to_digit(16));
+  1368→                            if let Some(h1) = h1 {
+  1369→                                self.bump();
+  1370→                                let h2 = self.chars.peek().and_then(|c| c.to_digit(16));
+  1371→                                if let Some(h2) = h2 {
+  1372→                                    self.bump();
+  1373→                                    decoded.push(char::from((h1 * 16 + h2) as u8));
+  1374→                                } else {
+  1375→                                    self.push_error(
+  1376→                                        "incomplete hex escape in string",
+  1377→                                        Span::new(self.offset.saturating_sub(2), self.offset),
+  1378→                                    );
+  1379→                                }
+  1380→                            } else {
+  1381→                                self.push_error(
+  1382→                                    "incomplete hex escape in string",
+  1383→                                    Span::new(self.offset.saturating_sub(1), self.offset),
+  1384→                                );
+  1385→                            }
+  1386→                        }
+  1387→                        Some(&'u') => {
+  1388→                            // Unicode escape: \u{XXXX}
+  1389→                            self.bump(); // consume 'u'
+  1390→                            if self.chars.peek() == Some(&'{') {
+  1391→                                self.bump(); // consume '{'
+  1392→                                let mut hex_str = String::new();
+  1393→                                while let Some(&c) = self.chars.peek() {
+  1394→                                    if c.is_ascii_hexdigit() {
+  1395→                                        self.bump();
+  1396→                                        hex_str.push(c);
+  1397→                                    } else {
+  1398→                                        break;
+  1399→                                    }
+  1400→                                }
+  1401→                                if self.chars.peek() == Some(&'}') {
+  1402→                                    self.bump(); // consume '}'
+  1403→                                    if let Ok(code_point) = u32::from_str_radix(&hex_str, 16) {
+  1404→                                        if let Some(ch) = char::from_u32(code_point) {
+  1405→                                            decoded.push(ch);
+  1406→                                        } else {
+  1407→                                            self.push_error(
+  1408→                                                "invalid unicode code point in string",
+  1409→                                                Span::new(start, self.offset),
+  1410→                                            );
+  1411→                                        }
+  1412→                                    } else {
+  1413→                                        self.push_error(
+  1414→                                            "invalid unicode escape in string",
+  1415→                                            Span::new(start, self.offset),
+  1416→                                        );
+  1417→                                    }
+  1418→                                } else {
+  1419→                                    self.push_error(
+  1420→                                        "expected '}' after unicode escape",
+  1421→                                        Span::new(start, self.offset),
+  1422→                                    );
+  1423→                                }
+  1424→                            } else {
+  1425→                                self.push_error(
+  1426→                                    "expected '{' after \\u escape",
+  1427→                                    Span::new(self.offset.saturating_sub(1), self.offset),
+  1428→                                );
+  1429→                            }
+  1430→                        }
+  1431→                        Some(&c) => {
+  1432→                            self.bump();
+  1433→                            decoded.push(c);
+  1434→                        }
+  1435→                        None => {
+  1436→                            self.push_error(
+  1437→                                "unterminated escape in string literal",
+  1438→                                Span::new(start, self.offset),
+  1439→                            );
+  1440→                            return self.make_token_with_lexeme(
+  1441→                                TokenKind::Error,
+  1442→                                decoded,
+  1443→                                start,
+  1444→                                line,
+  1445→                                column,
+  1446→                            );
+  1447→                        }
+  1448→                    }
+  1449→                }
+  1450→                Some(&'\n') => {
+  1451→                    self.push_error(
+  1452→                        "unterminated string literal (newline)",
+  1453→                        Span::new(start, self.offset),
+  1454→                    );
+  1455→                    return self.make_token_with_lexeme(
+  1456→                        TokenKind::Error,
+  1457→                        decoded,
+  1458→                        start,
+  1459→                        line,
+  1460→                        column,
+  1461→                    );
+  1462→                }
+  1463→                Some(&c) => {
+  1464→                    self.bump();
+  1465→                    decoded.push(c);
+  1466→                }
+  1467→                None => {
+  1468→                    self.push_error("unterminated string literal", Span::new(start, self.offset));
+  1469→                    return self.make_token_with_lexeme(
+  1470→                        TokenKind::Error,
+  1471→                        decoded,
+  1472→                        start,
+  1473→                        line,
+  1474→                        column,
+  1475→                    );
+  1476→                }
+  1477→            }
+  1478→        }
+  1479→
+  1480→        self.make_token_with_lexeme(TokenKind::String, decoded, start, line, column)
+  1481→    }
+  1482→
+  1483→    /// Lex a character literal: `'c'` or `'\n'` etc.
+  1484→    fn lex_char(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1485→        self.bump(); // consume opening '
+  1486→
+  1487→        let decoded = if self.chars.peek() == Some(&'\\') {
+  1488→            self.bump(); // consume backslash
+  1489→            match self.chars.peek() {
+  1490→                Some(&'n') => {
+  1491→                    self.bump();
+  1492→                    Some('\n')
+  1493→                }
+  1494→                Some(&'t') => {
+  1495→                    self.bump();
+  1496→                    Some('\t')
+  1497→                }
+  1498→                Some(&'r') => {
+  1499→                    self.bump();
+  1500→                    Some('\r')
+  1501→                }
+  1502→                Some(&'\\') => {
+  1503→                    self.bump();
+  1504→                    Some('\\')
+  1505→                }
+  1506→                Some(&'\'') => {
+  1507→                    self.bump();
+  1508→                    Some('\'')
+  1509→                }
+  1510→                Some(&'0') => {
+  1511→                    self.bump();
+  1512→                    Some('\0')
+  1513→                }
+  1514→                Some(&'x') => {
+  1515→                    self.bump(); // consume 'x'
+  1516→                    let h1 = self.chars.peek().and_then(|c| c.to_digit(16));
+  1517→                    if let Some(h1) = h1 {
+  1518→                        self.bump();
+  1519→                        let h2 = self.chars.peek().and_then(|c| c.to_digit(16));
+  1520→                        if let Some(h2) = h2 {
+  1521→                            self.bump();
+  1522→                            Some(char::from((h1 * 16 + h2) as u8))
+  1523→                        } else {
+  1524→                            self.push_error(
+  1525→                                "incomplete hex escape in char literal",
+  1526→                                Span::new(self.offset.saturating_sub(2), self.offset),
+  1527→                            );
+  1528→                            None
+  1529→                        }
+  1530→                    } else {
+  1531→                        self.push_error(
+  1532→                            "incomplete hex escape in char literal",
+  1533→                            Span::new(self.offset.saturating_sub(1), self.offset),
+  1534→                        );
+  1535→                        None
+  1536→                    }
+  1537→                }
+  1538→                Some(&c) => {
+  1539→                    self.bump();
+  1540→                    Some(c)
+  1541→                }
+  1542→                None => {
+  1543→                    self.push_error(
+  1544→                        "unterminated escape in char literal",
+  1545→                        Span::new(start, self.offset),
+  1546→                    );
+  1547→                    None
+  1548→                }
+  1549→            }
+  1550→        } else if let Some(&c) = self.chars.peek() {
+  1551→            self.bump();
+  1552→            Some(c)
+  1553→        } else {
+  1554→            self.push_error("unterminated char literal", Span::new(start, self.offset));
+  1555→            None
+  1556→        };
+  1557→
+  1558→        // Expect closing '
+  1559→        if self.chars.peek() == Some(&'\'') {
+  1560→            self.bump();
+  1561→        } else {
+  1562→            self.push_error(
+  1563→                "expected closing '\\'' in char literal",
+  1564→                Span::new(start, self.offset),
+  1565→            );
+  1566→        }
+  1567→
+  1568→        let lexeme = decoded.map(|c| c.to_string()).unwrap_or_default();
+  1569→        self.make_token_with_lexeme(TokenKind::Char, lexeme, start, line, column)
+  1570→    }
+  1571→
+  1572→    /// Lex a byte string literal: `b"…"`.
+  1573→    fn lex_byte_string(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1574→        // 'b' already consumed; expect opening "
+  1575→        if self.chars.peek() != Some(&'"') {
+  1576→            self.push_error(
+  1577→                "expected '\"' after 'b' in byte string",
+  1578→                Span::new(start, self.offset),
+  1579→            );
+  1580→            return self.make_token(TokenKind::Error, start, line, column);
+  1581→        }
+  1582→        self.bump(); // consume opening "
+  1583→
+  1584→        while let Some(&c) = self.chars.peek() {
+  1585→            match c {
+  1586→                '"' => {
+  1587→                    self.bump();
+  1588→                    break;
+  1589→                }
+  1590→                '\\' => {
+  1591→                    self.bump(); // consume backslash
+  1592→                    if self.chars.peek().is_some() {
+  1593→                        self.bump();
+  1594→                    }
+  1595→                }
+  1596→                '\n' => {
+  1597→                    self.push_error(
+  1598→                        "unterminated byte string literal (newline)",
+  1599→                        Span::new(start, self.offset),
+  1600→                    );
+  1601→                    break;
+  1602→                }
+  1603→                _ => {
+  1604→                    self.bump();
+  1605→                }
+  1606→            }
+  1607→        }
+  1608→
+  1609→        self.make_token(TokenKind::ByteStr, start, line, column)
+  1610→    }
+  1611→
+  1612→    /// Lex a raw string literal: `r"…"`, `r#"…"#`, `r##"…"##`, etc.
+  1613→    fn lex_raw_string(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1614→        // 'r' already consumed; count '#' delimiters
+  1615→        let mut num_hashes: usize = 0;
+  1616→        while self.chars.peek() == Some(&'#') {
+  1617→            self.bump();
+  1618→            num_hashes += 1;
+  1619→        }
+  1620→
+  1621→        // Expect opening "
+  1622→        if self.chars.peek() != Some(&'"') {
+  1623→            self.push_error(
+  1624→                "expected '\"' after raw string prefix",
+  1625→                Span::new(start, self.offset),
+  1626→            );
+  1627→            return self.make_token(TokenKind::Error, start, line, column);
+  1628→        }
+  1629→        self.bump(); // consume opening "
+  1630→
+  1631→        // Read until closing `"` followed by exactly `num_hashes` `#` chars
+  1632→        loop {
+  1633→            match self.chars.peek() {
+  1634→                Some(&'"') => {
+  1635→                    self.bump(); // consume '"'
+  1636→                    let mut closing_hashes: usize = 0;
+  1637→                    while closing_hashes < num_hashes && self.chars.peek() == Some(&'#') {
+  1638→                        self.bump();
+  1639→                        closing_hashes += 1;
+  1640→                    }
+  1641→                    if closing_hashes == num_hashes {
+  1642→                        break; // found the end
+  1643→                    }
+  1644→                    // Not enough closing hashes — keep reading
+  1645→                }
+  1646→                Some(_) => {
+  1647→                    self.bump();
+  1648→                }
+  1649→                None => {
+  1650→                    self.push_error(
+  1651→                        "unterminated raw string literal",
+  1652→                        Span::new(start, self.offset),
+  1653→                    );
+  1654→                    break;
+  1655→                }
+  1656→            }
+  1657→        }
+  1658→
+  1659→        self.make_token(TokenKind::RawStr, start, line, column)
+  1660→    }
+  1661→
+  1662→    /// Lex a format string: `f"…{expr}…"`
+  1663→    ///
+  1664→    /// The 'f' prefix has already been consumed. The content (between the
+  1665→    /// quotes) is stored in the lexeme, including `{` and `}` markers.
+  1666→    /// The parser is responsible for splitting into parts.
+  1667→    fn lex_format_string(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1668→        // 'f' already consumed; expect opening "
+  1669→        if self.chars.peek() != Some(&'"') {
+  1670→            self.push_error(
+  1671→                "expected '\"' after format string prefix 'f'",
+  1672→                Span::new(start, self.offset),
+  1673→            );
+  1674→            return self.make_token(TokenKind::Error, start, line, column);
+  1675→        }
+  1676→        self.bump(); // consume opening "
+  1677→
+  1678→        // Read until closing ", handling escape sequences and { } braces
+  1679→        loop {
+  1680→            match self.chars.peek() {
+  1681→                Some(&'"') => {
+  1682→                    self.bump(); // consume closing "
+  1683→                    break;
+  1684→                }
+  1685→                Some('\\') => {
+  1686→                    self.bump(); // consume backslash
+  1687→                    if self.chars.peek().is_some() {
+  1688→                        self.bump(); // consume escaped character
+  1689→                    }
+  1690→                }
+  1691→                Some(&'{') => {
+  1692→                    self.bump(); // consume {
+  1693→                                 // If {{, it's an escaped brace, not an interpolation
+  1694→                    if self.chars.peek() == Some(&'}') {
+  1695→                        // Empty {} — just consume the } and continue
+  1696→                        self.bump();
+  1697→                    }
+  1698→                    // Otherwise the } will be consumed as part of the expression
+  1699→                }
+  1700→                Some(&'}') => {
+  1701→                    self.bump(); // consume }
+  1702→                }
+  1703→                Some(_) => {
+  1704→                    self.bump();
+  1705→                }
+  1706→                None => {
+  1707→                    self.push_error(
+  1708→                        "unterminated format string literal",
+  1709→                        Span::new(start, self.offset),
+  1710→                    );
+  1711→                    break;
+  1712→                }
+  1713→            }
+  1714→        }
+  1715→
+  1716→        self.make_token(TokenKind::FormatStr, start, line, column)
+  1717→    }
+  1718→
+  1719→    /// Lex an identifier or keyword.
+  1720→    fn lex_ident(&mut self, start: usize, line: usize, column: usize) -> Token {
+  1721→        self.bump(); // consume first character
+  1722→        while let Some(&c) = self.chars.peek() {
+  1723→            if c.is_ascii_alphanumeric() || c == '_' {
+  1724→                self.bump();
+  1725→            } else {
+  1726→                break;
+  1727→            }
+  1728→        }
+  1729→        let text = &self.source[start..self.offset];
+  1730→        // Special case: a standalone `_` is the Underscore token.
+  1731→        if text == "_" {
+  1732→            return self.make_token(TokenKind::Underscore, start, line, column);
+  1733→        }
+  1734→        let kind = keyword_kind(text).unwrap_or(TokenKind::Ident);
+  1735→        self.make_token(kind, start, line, column)
+  1736→    }
+  1737→
+  1738→    // -- whitespace / comment helpers ----------------------------------------
+  1739→
+  1740→    /// Skip whitespace characters (space, tab, carriage return, newline).
+  1741→    fn skip_whitespace(&mut self) {
+  1742→        while let Some(&c) = self.chars.peek() {
+  1743→            if c.is_whitespace() {
+  1744→                self.bump();
+  1745→            } else {
+  1746→                break;
+  1747→            }
+  1748→        }
+  1749→    }
+  1750→
+  1751→    /// Skip characters until end of line (or EOF).
+  1752→    fn consume_to_eol(&mut self) {
+  1753→        while let Some(&c) = self.chars.peek() {
+  1754→            if c == '\n' {
+  1755→                break;
+  1756→            }
+  1757→            self.bump();
+  1758→        }
+  1759→    }
+  1760→
+  1761→    /// Skip a block comment `/* ... */`, supporting nesting.
+  1762→    /// `/*` has already been consumed.  On unterminated comments, push an
+  1763→    /// error but do not stop lexing.
+  1764→    fn skip_block_comment(&mut self, comment_start: usize) {
+  1765→        let mut depth: usize = 1;
+  1766→        while depth > 0 {
+  1767→            match self.chars.peek() {
+  1768→                Some(&'/') => {
+  1769→                    let second = self.peek_next(1);
+  1770→                    if second == Some('*') {
+  1771→                        self.bump();
+  1772→                        self.bump(); // consume /*
+  1773→                        depth += 1;
+  1774→                    } else {
+  1775→                        self.bump();
+  1776→                    }
+  1777→                }
+  1778→                Some(&'*') => {
+  1779→                    let second = self.peek_next(1);
+  1780→                    if second == Some('/') {
+  1781→                        self.bump();
+  1782→                        self.bump(); // consume */
+  1783→                        depth -= 1;
+  1784→                    } else {
+  1785→                        self.bump();
+  1786→                    }
+  1787→                }
+  1788→                Some(_) => {
+  1789→                    self.bump();
+  1790→                }
+  1791→                None => {
+  1792→                    self.push_error(
+  1793→                        "unterminated block comment",
+  1794→                        Span::new(comment_start, self.offset),
+  1795→                    );
+  1796→                    break;
+  1797→                }
+  1798→            }
+  1799→        }
+  1800→    }
+  1801→
+  1802→    // -- character helpers ---------------------------------------------------
+  1803→
+  1804→    /// Consume one character, advancing the offset, line, and column.
+  1805→    fn bump(&mut self) {
+  1806→        if let Some(c) = self.chars.next() {
+  1807→            self.offset += c.len_utf8();
+  1808→            if c == '\n' {
+  1809→                self.line += 1;
+  1810→                self.column = 0;
+  1811→            } else {
+  1812→                self.column += 1;
+  1813→            }
+  1814→        }
+  1815→    }
+  1816→
+  1817→    /// Peek at the n-th unconsumed character (0 = current).
+  1818→    ///
+  1819→    /// Uses a clone of the iterator so it does not disturb the lexer state.
+  1820→    fn peek_next(&self, n: usize) -> Option<char> {
+  1821→        let mut clone = self.chars.clone();
+  1822→        for _ in 0..n {
+  1823→            clone.next();
+  1824→        }
+  1825→        clone.peek().copied()
+  1826→    }
+  1827→
+  1828→    // -- token construction helpers ------------------------------------------
+  1829→
+  1830→    /// Build a token whose lexeme is `source[start..offset]`.
+  1831→    fn make_token(&self, kind: TokenKind, start: usize, line: usize, column: usize) -> Token {
+  1832→        let lexeme = self.source[start..self.offset].to_string();
+  1833→        Token::new(kind, lexeme, Span::new(start, self.offset), line, column)
+  1834→    }
+  1835→
+  1836→    /// Build a token with an explicit lexeme (used for decoded strings).
+  1837→    fn make_token_with_lexeme(
+  1838→        &self,
+  1839→        kind: TokenKind,
+  1840→        lexeme: String,
+  1841→        start: usize,
+  1842→        line: usize,
+  1843→        column: usize,
+  1844→    ) -> Token {
+  1845→        Token::new(kind, lexeme, Span::new(start, self.offset), line, column)
+  1846→    }
+  1847→
+  1848→    /// Build the EOF sentinel token.
+  1849→    fn eof_token(&self, start: usize, line: usize, column: usize) -> Token {
+  1850→        Token::new(
+  1851→            TokenKind::Eof,
+  1852→            String::new(),
+  1853→            Span::new(start, start),
+  1854→            line,
+  1855→            column,
+  1856→        )
+  1857→    }
+  1858→
+  1859→    /// Record a lexical error.
+  1860→    fn push_error(&mut self, msg: impl Into<String>, span: Span) {
+  1861→        self.errors
+  1862→            .push(ParseError::new(msg, span, ParseErrorKind::UnexpectedToken));
+  1863→    }
+  1864→}
+  1865→
+  1866→// ---------------------------------------------------------------------------
+  1867→// Tests
+  1868→// ---------------------------------------------------------------------------
+  1869→
+  1870→#[cfg(test)]
+  1871→mod tests {
+  1872→    use super::*;
+  1873→
+  1874→    /// Helper: lex the source and return (tokens, errors).
+  1875→    fn lex(source: &str) -> (Vec<Token>, Vec<ParseError>) {
+  1876→        let mut lexer = Lexer::new(source);
+  1877→        let tokens = lexer.collect_tokens();
+  1878→        let errors = lexer.take_errors();
+  1879→        (tokens, errors)
+  1880→    }
+  1881→
+  1882→    /// Helper: extract just the token kinds (excluding Eof).
+  1883→    fn kinds(tokens: &[Token]) -> Vec<TokenKind> {
+  1884→        tokens
+  1885→            .iter()
+  1886→            .filter(|t| !t.is_eof())
+  1887→            .map(|t| t.kind)
+  1888→            .collect()
+  1889→    }
+  1890→
+  1891→    // ---- Test 1: Simple program ----
+  1892→    #[test]
+  1893→    fn lex_simple_program() {
+  1894→        let source = "region pool = allocate(1024);";
+  1895→        let (tokens, _) = lex(source);
+  1896→        assert_eq!(
+  1897→            kinds(&tokens),
+  1898→            vec![
+  1899→                TokenKind::Region,
+  1900→                TokenKind::Ident,
+  1901→                TokenKind::Assign,
+  1902→                TokenKind::Allocate,
+  1903→                TokenKind::LParen,
+  1904→                TokenKind::Number,
+  1905→                TokenKind::RParen,
+  1906→                TokenKind::Semicolon,
+  1907→            ]
+  1908→        );
+  1909→    }
+  1910→
+  1911→    // ---- Test 2: All keywords ----
+  1912→    #[test]
+  1913→    fn lex_all_keywords() {
+  1914→        let source = "fn let ptr region alloc allocate free derive cast read write \
+  1915→                      sync if else while for return struct enum match unsafe safe \
+  1916→                      bd repd capd reld import export mod use self super \
+  1917→                      async await spawn lock unlock channel send recv \
+  1918→                      true false null as sizeof alignof \
+  1919→                      break continue where impl trait type const static mut ref";
+  1920→        let (tokens, _) = lex(source);
+  1921→        assert_eq!(
+  1922→            kinds(&tokens),
+  1923→            vec![
+  1924→                TokenKind::Fn,
+  1925→                TokenKind::Let,
+  1926→                TokenKind::Ptr,
+  1927→                TokenKind::Region,
+  1928→                TokenKind::Alloc,
+  1929→                TokenKind::Allocate,
+  1930→                TokenKind::Free,
+  1931→                TokenKind::Derive,
+  1932→                TokenKind::Cast,
+  1933→                TokenKind::Read,
+  1934→                TokenKind::Write,
+  1935→                TokenKind::Sync,
+  1936→                TokenKind::If,
+  1937→                TokenKind::Else,
+  1938→                TokenKind::While,
+  1939→                TokenKind::For,
+  1940→                TokenKind::Return,
+  1941→                TokenKind::Struct,
+  1942→                TokenKind::Enum,
+  1943→                TokenKind::Match,
+  1944→                TokenKind::Unsafe,
+  1945→                TokenKind::Safe,
+  1946→                TokenKind::Bd,
+  1947→                TokenKind::Repd,
+  1948→                TokenKind::Capd,
+  1949→                TokenKind::Reld,
+  1950→                TokenKind::Import,
+  1951→                TokenKind::Export,
+  1952→                TokenKind::Mod,
+  1953→                TokenKind::Use,
+  1954→                TokenKind::SelfKw,
+  1955→                TokenKind::Super,
+  1956→                TokenKind::Async,
+  1957→                TokenKind::Await,
+  1958→                TokenKind::Spawn,
+  1959→                TokenKind::Lock,
+  1960→                TokenKind::Unlock,
+  1961→                TokenKind::Channel,
+  1962→                TokenKind::Send,
+  1963→                TokenKind::Recv,
+  1964→                TokenKind::True,
+  1965→                TokenKind::False,
+  1966→                TokenKind::Null,
+  1967→                TokenKind::As,
+  1968→                TokenKind::Sizeof,
+  1969→                TokenKind::Alignof,
+  1970→                TokenKind::Break,
+  1971→                TokenKind::Continue,
+  1972→                TokenKind::Where,
+  1973→                TokenKind::Impl,
+  1974→                TokenKind::Trait,
+  1975→                TokenKind::Type,
+  1976→                TokenKind::Const,
+  1977→                TokenKind::Static,
+  1978→                TokenKind::Mut,
+  1979→                TokenKind::Ref,
+  1980→            ]
+  1981→        );
+  1982→    }
+  1983→
+  1984→    // ---- Test 3: Integer literals ----
+  1985→    #[test]
+  1986→    fn lex_integer_literals() {
+  1987→        let source = "0 42 0xFF 0b1010 0o777 1_000_000";
+  1988→        let (tokens, errors) = lex(source);
+  1989→        assert!(errors.is_empty(), "errors: {:?}", errors);
+  1990→        let kinds = kinds(&tokens);
+  1991→        assert_eq!(kinds[0], TokenKind::Number); // 0
+  1992→        assert_eq!(kinds[1], TokenKind::Number); // 42
+  1993→        assert_eq!(kinds[2], TokenKind::Address); // 0xFF (hex -> address)
+  1994→        assert_eq!(kinds[3], TokenKind::Number); // 0b1010
+  1995→        assert_eq!(kinds[4], TokenKind::Number); // 0o777
+  1996→        assert_eq!(kinds[5], TokenKind::Number); // 1_000_000
+  1997→        assert_eq!(tokens[1].lexeme, "42");
+  1998→        assert_eq!(tokens[2].lexeme, "0xFF");
+  1999→        assert_eq!(tokens[3].lexeme, "0b1010");
+  2000→        assert_eq!(tokens[4].lexeme, "0o777");
+
+[showing lines 1-2000 of 2969; use offset=2001 with limit to continue reading]

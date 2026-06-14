@@ -287,6 +287,12 @@ pub struct ParseError {
     /// An optional "did you mean?" suggestion (e.g. "fn" when the user typed
     /// "fun").
     pub suggestion: Option<String>,
+    /// 1-based line number where the error starts (populated when source text
+    /// is available for offset resolution).
+    pub line: Option<u32>,
+    /// 1-based column number where the error starts (populated when source
+    /// text is available for offset resolution).
+    pub column: Option<u32>,
 }
 
 impl ParseError {
@@ -297,7 +303,39 @@ impl ParseError {
             span,
             kind,
             suggestion: None,
+            line: None,
+            column: None,
         }
+    }
+
+    /// Construct a parse error with pre-computed line/column information.
+    pub fn with_location(
+        message: impl Into<String>,
+        span: Span,
+        kind: ParseErrorKind,
+        line: u32,
+        column: u32,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            kind,
+            suggestion: None,
+            line: Some(line),
+            column: Some(column),
+        }
+    }
+
+    /// Resolve and populate `line` / `column` from the given source text.
+    ///
+    /// If the fields are already populated, this is a no-op.
+    pub fn resolve_location(&mut self, source: &str, file: Option<&str>) {
+        if self.line.is_some() && self.column.is_some() {
+            return;
+        }
+        let loc = offset_to_location(source, self.span.start, file);
+        self.line = Some(loc.line as u32 + 1); // convert 0-based to 1-based
+        self.column = Some(loc.column as u32 + 1);
     }
 
     /// Attach a "did you mean?" suggestion to this error.

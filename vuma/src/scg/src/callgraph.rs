@@ -141,7 +141,7 @@ impl CallGraph {
 
     /// Find the FunctionEntry node that encloses the given node by walking
     /// backwards through ControlFlow edges.
-    fn find_enclosing_function(&self, scg: &SCG, node_id: NodeId) -> Option<NodeId> {
+    pub fn find_enclosing_function(&self, scg: &SCG, node_id: NodeId) -> Option<NodeId> {
         // BFS backwards from node_id, looking for a FunctionEntry
         let mut visited = HashSet::new();
         let mut queue = std::collections::VecDeque::new();

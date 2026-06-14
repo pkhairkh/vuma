@@ -57,6 +57,7 @@ pub mod node;
 pub mod query;
 pub mod region;
 pub mod serialize;
+pub mod structured_output;
 pub mod transform;
 
 // Re-export the primary public API at the crate root for convenience.
@@ -85,14 +86,15 @@ pub use region::{
 
 // -- Query engine --
 pub use query::{
-    execute, find_access_nodes_to_region, find_derivation_chains, DerivationChain, QueryResult,
-    SCGQuery,
+    execute, find_access_nodes_to_region, find_derivation_chains, DerivationChain, FunctionInfo,
+    QueryResult, SCGQuery,
 };
 
 // -- Diff engine --
 pub use diff::{
-    apply_diff, compute_edit_script, diff_scg, three_way_merge, DiffEntry, DiffError, DiffStats,
-    EdgeConflict, MergeConflict, NodeConflict, RegionConflict, SCGDiff,
+    apply_diff, compute_edit_script, diff_scg, scg_diff, three_way_merge, AffectedFunctions,
+    DiffEntry, DiffError, DiffStats, EdgeConflict, LlmDiff, LlmDiffChange, MergeConflict,
+    NodeConflict, RegionConflict, SCGDiff,
 };
 
 // -- Dominance analysis --
@@ -117,6 +119,12 @@ pub use transform::{
     ConstantFolding, DeadCodeElimination, DeadRegionElimination, InliningPass,
     LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass, StrengthReduction,
     TailCallOptDetection, VerificationPass,
+};
+
+// -- Structured output for LLMs --
+pub use structured_output::{
+    LlmEdge, LlmFunction, LlmNode, LlmRegion, LlmScgJson, LlmSourceLocation,
+    LlmSummary,
 };
 
 #[cfg(test)]

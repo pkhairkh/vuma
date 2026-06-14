@@ -1,0 +1,1015 @@
+     1→//! Loop Detection on SCG
+     2→//!
+     3→//! This module provides algorithms for detecting natural loops, computing
+     4→//! loop nesting hierarchies, and identifying infinite loops in the SCG.
+     5→//!
+     6→//! # Key Concepts
+     7→//!
+     8→//! - **Natural Loop**: A loop with a single entry point (header) that dominates
+     9→//!   all nodes in the loop body. Detected via back-edges in the CFG.
+    10→//! - **Back-edge**: An edge from a node to one of its dominators. Every
+    11→//!   back-edge defines a natural loop.
+    12→//! - **Loop Nesting Tree**: A hierarchy showing how loops are nested within
+    13→//!   each other, with depth information for optimization passes.
+    14→//! - **Infinite Loop**: A loop with no exit edges, meaning execution cannot
+    15→//!   escape once the loop is entered.
+    16→//!
+    17→//! # Algorithm
+    18→//!
+    19→//! Natural loops are detected using a CFG-only dominator tree:
+    20→//! 1. Build a control-flow subgraph (only `EdgeKind::ControlFlow` edges).
+    21→//! 2. Compute the dominator tree on this subgraph using the iterative
+    22→//!    Cooper-Harvey-Kennedy algorithm.
+    23→//! 3. Find all back-edges (edges where the target dominates the source).
+    24→//! 4. For each back-edge, compute the natural loop body by walking predecessors
+    25→//!    from the back-edge source until reaching the header.
+    26→//! 5. Compute loop exits (nodes in the body with successors outside the body).
+    27→//! 6. Build the nesting tree by analyzing header/body containment.
+    28→//!
+    29→//! # Why a Separate Dominator Computation?
+    30→//!
+    31→//! The general-purpose [`crate::dominance::compute_dominators`] in the `dominance` module
+    32→//! operates on **all** edges (including `DataFlow`, `Derivation`, etc.).
+    33→//! Loop detection must reason about control-flow reachability only: a
+    34→//! DataFlow edge from outside a loop into the loop body does **not** mean
+    35→//! there is a control path that bypasses the loop header. Computing
+    36→//! dominators on the CFG subgraph ensures correct back-edge identification.
+    37→
+    38→use hashbrown::{HashMap, HashSet};
+    39→use serde::{Deserialize, Serialize};
+    40→
+    41→use crate::edge::EdgeKind;
+    42→use crate::graph::SCG;
+    43→use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
+    44→
+    45→// ─── Natural Loop ─────────────────────────────────────────────────────────
+    46→
+    47→/// A natural loop in the SCG.
+    48→///
+    49→/// A natural loop is defined by a back-edge from `backedge_source` to `header`,
+    50→/// where `header` dominates `backedge_source`. The loop body includes all nodes
+    51→/// on paths from `header` to `backedge_source` that do not leave the loop.
+    52→#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    53→pub struct NaturalLoop {
+    54→    /// The loop header — the unique entry point that dominates all body nodes.
+    55→    pub header: NodeId,
+    56→    /// The source of the back-edge that defines this loop.
+    57→    pub backedge_source: NodeId,
+    58→    /// The set of nodes in the loop body (including header and backedge_source).
+    59→    pub body: HashSet<NodeId>,
+    60→    /// The set of exit nodes — body nodes that have successors outside the loop.
+    61→    pub exits: HashSet<NodeId>,
+    62→    /// The nesting depth (0 = outermost, higher = more deeply nested).
+    63→    pub depth: u32,
+    64→}
+    65→
+    66→impl NaturalLoop {
+    67→    /// Creates a new natural loop with the given header and back-edge source.
+    68→    pub fn new(header: NodeId, backedge_source: NodeId) -> Self {
+    69→        Self {
+    70→            header,
+    71→            backedge_source,
+    72→            body: HashSet::new(),
+    73→            exits: HashSet::new(),
+    74→            depth: 0,
+    75→        }
+    76→    }
+    77→
+    78→    /// Returns `true` if the given node is inside this loop's body.
+    79→    pub fn contains(&self, node: &NodeId) -> bool {
+    80→        self.body.contains(node)
+    81→    }
+    82→
+    83→    /// Returns the number of nodes in the loop body.
+    84→    pub fn body_size(&self) -> usize {
+    85→        self.body.len()
+    86→    }
+    87→
+    88→    /// Returns `true` if this loop has at least one exit.
+    89→    pub fn has_exit(&self) -> bool {
+    90→        !self.exits.is_empty()
+    91→    }
+    92→}
+    93→
+    94→// ─── Loop Nesting Tree ────────────────────────────────────────────────────
+    95→
+    96→/// A tree representing the nesting hierarchy of natural loops.
+    97→///
+    98→/// Each loop has a parent (the immediately enclosing loop) and zero or more
+    99→/// children (loops directly nested within it).
+   100→#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+   101→pub struct LoopNestingTree {
+   102→    /// All natural loops in the tree.
+   103→    pub loops: Vec<NaturalLoop>,
+   104→    /// Map from loop index to parent loop index (None = root loop).
+   105→    pub parent: HashMap<usize, Option<usize>>,
+   106→}
+   107→
+   108→impl LoopNestingTree {
+   109→    /// Creates a new empty nesting tree.
+   110→    pub fn new() -> Self {
+   111→        Self {
+   112→            loops: Vec::new(),
+   113→            parent: HashMap::new(),
+   114→        }
+   115→    }
+   116→
+   117→    /// Returns the number of loops in the tree.
+   118→    pub fn len(&self) -> usize {
+   119→        self.loops.len()
+   120→    }
+   121→
+   122→    /// Returns `true` if the tree contains no loops.
+   123→    pub fn is_empty(&self) -> bool {
+   124→        self.loops.is_empty()
+   125→    }
+   126→
+   127→    /// Returns the root loops (loops with no parent).
+   128→    pub fn root_loops(&self) -> Vec<&NaturalLoop> {
+   129→        self.loops
+   130→            .iter()
+   131→            .enumerate()
+   132→            .filter(|(i, _)| self.parent.get(i) == Some(&None))
+   133→            .map(|(_, l)| l)
+   134→            .collect()
+   135→    }
+   136→
+   137→    /// Returns the children of the loop at the given index.
+   138→    pub fn children(&self, loop_idx: usize) -> Vec<usize> {
+   139→        self.parent
+   140→            .iter()
+   141→            .filter_map(|(&child, &parent)| {
+   142→                if parent == Some(loop_idx) {
+   143→                    Some(child)
+   144→                } else {
+   145→                    None
+   146→                }
+   147→            })
+   148→            .collect()
+   149→    }
+   150→
+   151→    /// Returns the depth of the loop at the given index.
+   152→    pub fn depth(&self, loop_idx: usize) -> u32 {
+   153→        self.loops.get(loop_idx).map(|l| l.depth).unwrap_or(0)
+   154→    }
+   155→}
+   156→
+   157→impl Default for LoopNestingTree {
+   158→    fn default() -> Self {
+   159→        Self::new()
+   160→    }
+   161→}
+   162→
+   163→// ─── Loop Detector ────────────────────────────────────────────────────────
+   164→
+   165→/// Detector for natural loops, loop nesting, and infinite loops in the SCG.
+   166→///
+   167→/// Uses a CFG-only dominator tree to identify back-edges and compute natural
+   168→/// loop bodies. This ensures that DataFlow and other non-control edges do not
+   169→/// interfere with loop detection.
+   170→pub struct LoopDetector;
+   171→
+   172→impl LoopDetector {
+   173→    /// Detects all natural loops in the given SCG.
+   174→    ///
+   175→    /// A natural loop is identified by each back-edge (an edge where the target
+   176→    /// dominates the source in the CFG). The loop body is computed by walking
+   177→    /// predecessors from the back-edge source until reaching the header.
+   178→    ///
+   179→    /// # Algorithm
+   180→    ///
+   181→    /// 1. Build the CFG adjacency lists (only `ControlFlow` edges).
+   182→    /// 2. Compute the dominator tree on the CFG subgraph.
+   183→    /// 3. Find all back-edges by checking if each CF edge's target dominates
+   184→    ///    its source.
+   185→    /// 4. For each back-edge, compute the loop body using the standard natural
+   186→    ///    loop algorithm (walk CF predecessors from backedge_source to header).
+   187→    /// 5. Compute exit nodes (body nodes with CF successors outside the body).
+   188→    pub fn detect_natural_loops(scg: &SCG) -> Vec<NaturalLoop> {
+   189→        let mut loops = Vec::new();
+   190→
+   191→        // We need an entry node. Find a reasonable one:
+   192→        // Use FunctionEntry nodes, or fall back to nodes with no CF predecessors.
+   193→        let entry_nodes = Self::find_entry_nodes(scg);
+   194→        if entry_nodes.is_empty() {
+   195→            return loops;
+   196→        }
+   197→
+   198→        // Build CFG-only adjacency lists.
+   199→        let (cf_succs, cf_preds) = Self::build_cf_adjacency(scg);
+   200→
+   201→        // Compute dominator tree on the CFG subgraph from the first entry.
+   202→        let dom_tree = Self::compute_cfg_dominators(&cf_succs, &cf_preds, entry_nodes[0]);
+   203→
+   204→        // Find all back-edges: CF edges where the target dominates the source.
+   205→        let back_edges = Self::find_back_edges(&cf_succs, &dom_tree);
+   206→
+   207→        for (source, header) in back_edges {
+   208→            // Skip if we already have a loop with the same header and source.
+   209→            if loops
+   210→                .iter()
+   211→                .any(|l: &NaturalLoop| l.header == header && l.backedge_source == source)
+   212→            {
+   213→                continue;
+   214→            }
+   215→
+   216→            let mut loop_ = NaturalLoop::new(header, source);
+   217→            loop_.body.insert(header);
+   218→            loop_.body.insert(source);
+   219→
+   220→            // Compute loop body: walk CF predecessors from source until we reach header.
+   221→            let mut stack = vec![source];
+   222→            while let Some(node) = stack.pop() {
+   223→                if let Some(preds) = cf_preds.get(&node) {
+   224→                    for &pred in preds {
+   225→                        if !loop_.body.contains(&pred) {
+   226→                            loop_.body.insert(pred);
+   227→                            stack.push(pred);
+   228→                        }
+   229→                    }
+   230→                }
+   231→            }
+   232→
+   233→            // Compute exit nodes: body nodes with CF successors outside the loop.
+   234→            for &node in &loop_.body {
+   235→                if let Some(succs) = cf_succs.get(&node) {
+   236→                    for &succ in succs {
+   237→                        if !loop_.body.contains(&succ) {
+   238→                            loop_.exits.insert(node);
+   239→                            break;
+   240→                        }
+   241→                    }
+   242→                }
+   243→            }
+   244→
+   245→            loops.push(loop_);
+   246→        }
+   247→
+   248→        loops
+   249→    }
+   250→
+   251→    /// Detects the loop nesting tree for all natural loops in the SCG.
+   252→    ///
+   253→    /// The nesting tree shows which loops are contained within other loops.
+   254→    /// A loop B is nested within loop A if B's header is in A's body.
+   255→    pub fn detect_loop_nesting(scg: &SCG) -> LoopNestingTree {
+   256→        let mut natural_loops = Self::detect_natural_loops(scg);
+   257→        if natural_loops.is_empty() {
+   258→            return LoopNestingTree::new();
+   259→        }
+   260→
+   261→        // Assign initial depth of 0 to all loops.
+   262→        for loop_ in &mut natural_loops {
+   263→            loop_.depth = 0;
+   264→        }
+   265→
+   266→        let mut parent_map: HashMap<usize, Option<usize>> = HashMap::new();
+   267→
+   268→        // Determine nesting: loop i is nested in loop j if header of i
+   269→        // is in the body of j, and j's body is the smallest containing body.
+   270→        for i in 0..natural_loops.len() {
+   271→            let mut best_parent: Option<usize> = None;
+   272→            let mut best_parent_size = usize::MAX;
+   273→
+   274→            for j in 0..natural_loops.len() {
+   275→                if i == j {
+   276→                    continue;
+   277→                }
+   278→                // If loop i's header is in loop j's body, j is a potential parent.
+   279→                if natural_loops[j].body.contains(&natural_loops[i].header) {
+   280→                    // Prefer the smallest body (most immediate enclosing loop).
+   281→                    if natural_loops[j].body_size() < best_parent_size {
+   282→                        best_parent_size = natural_loops[j].body_size();
+   283→                        best_parent = Some(j);
+   284→                    }
+   285→                }
+   286→            }
+   287→
+   288→            parent_map.insert(i, best_parent);
+   289→
+   290→            // Set depth: parent's depth + 1.
+   291→            if let Some(parent_idx) = best_parent {
+   292→                natural_loops[i].depth = natural_loops[parent_idx].depth + 1;
+   293→            }
+   294→        }
+   295→
+   296→        LoopNestingTree {
+   297→            loops: natural_loops,
+   298→            parent: parent_map,
+   299→        }
+   300→    }
+   301→
+   302→    /// Detects infinite loops in the SCG.
+   303→    ///
+   304→    /// An infinite loop is a natural loop with no exit edges. Once entered,
+   305→    /// execution cannot escape.
+   306→    pub fn detect_infinite_loops(scg: &SCG) -> Vec<NodeId> {
+   307→        let loops = Self::detect_natural_loops(scg);
+   308→        loops
+   309→            .iter()
+   310→            .filter(|l| !l.has_exit())
+   311→            .map(|l| l.header)
+   312→            .collect()
+   313→    }
+   314→
+   315→    /// Finds nodes that are loop-invariant within the given loop.
+   316→    ///
+   317→    /// A node is loop-invariant if:
+   318→    /// - It is a computation (no side effects).
+   319→    /// - All of its data-flow predecessors are defined outside the loop.
+   320→    ///
+   321→    /// This is the key analysis for Loop Invariant Code Motion (LICM).
+   322→    pub fn loop_invariant_nodes(loop_: &NaturalLoop, scg: &SCG) -> Vec<NodeId> {
+   323→        let body_set = &loop_.body;
+   324→        let mut invariant = Vec::new();
+   325→
+   326→        for &node_id in &loop_.body {
+   327→            if let Some(node) = scg.get_node(node_id) {
+   328→                // Skip nodes with side effects.
+   329→                if matches!(
+   330→                    node.node_type,
+   331→                    NodeType::Effect
+   332→                        | NodeType::Allocation
+   333→                        | NodeType::Deallocation
+   334→                        | NodeType::Access
+   335→                        | NodeType::Control
+   336→                        | NodeType::Phantom
+   337→                        | NodeType::VTable
+   338→                        | NodeType::ClosureEnv
+   339→                ) {
+   340→                    continue;
+   341→                }
+   342→
+   343→                // Check all data-flow predecessors are outside the loop.
+   344→                let mut all_outside = true;
+   345→                if let Some(preds) = scg.predecessors(node_id) {
+   346→                    for pred in preds {
+   347→                        let is_df = scg.edges().any(|e| {
+   348→                            e.source == pred
+   349→                                && e.target == node_id
+   350→                                && matches!(e.kind, EdgeKind::DataFlow)
+   351→                        });
+   352→                        if is_df && body_set.contains(&pred) {
+   353→                            all_outside = false;
+   354→                            break;
+   355→                        }
+   356→                    }
+   357→                }
+   358→
+   359→                if all_outside {
+   360→                    invariant.push(node_id);
+   361→                }
+   362→            }
+   363→        }
+   364→
+   365→        invariant
+   366→    }
+   367→
+   368→    // ─── Internal Helpers ───────────────────────────────────────────────
+   369→
+   370→    /// Finds entry nodes for the SCG (FunctionEntry or nodes with no CF predecessors).
+   371→    fn find_entry_nodes(scg: &SCG) -> Vec<NodeId> {
+   372→        let mut entries: Vec<NodeId> = scg
+   373→            .nodes()
+   374→            .filter(|n| {
+   375→                if let NodePayload::Control(ctrl) = &n.payload {
+   376→                    ctrl.kind == ControlKind::FunctionEntry
+   377→                } else {
+   378→                    false
+   379→                }
+   380→            })
+   381→            .map(|n| n.id)
+   382→            .collect();
+   383→
+   384→        if entries.is_empty() {
+   385→            // Fallback: use nodes with no CF predecessors.
+   386→            let (_, cf_preds) = Self::build_cf_adjacency(scg);
+   387→            for node in scg.nodes() {
+   388→                let has_preds = cf_preds.get(&node.id).is_some_and(|p| !p.is_empty());
+   389→                if !has_preds {
+   390→                    entries.push(node.id);
+   391→                }
+   392→            }
+   393→        }
+   394→
+   395→        entries
+   396→    }
+   397→
+   398→    /// Builds adjacency lists for the CFG subgraph (ControlFlow edges only).
+   399→    ///
+   400→    /// Returns `(succs, preds)` where `succs[n]` is the list of CF successors
+   401→    /// of node `n`, and `preds[n]` is the list of CF predecessors.
+   402→    fn build_cf_adjacency(
+   403→        scg: &SCG,
+   404→    ) -> (HashMap<NodeId, Vec<NodeId>>, HashMap<NodeId, Vec<NodeId>>) {
+   405→        let mut succs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+   406→        let mut preds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+   407→
+   408→        for edge in scg.edges() {
+   409→            if matches!(edge.kind, EdgeKind::ControlFlow) {
+   410→                succs.entry(edge.source).or_default().push(edge.target);
+   411→                preds.entry(edge.target).or_default().push(edge.source);
+   412→            }
+   413→        }
+   414→
+   415→        (succs, preds)
+   416→    }
+   417→
+   418→    /// Computes the dominator tree on the CFG subgraph using the iterative
+   419→    /// Cooper-Harvey-Kennedy algorithm.
+   420→    ///
+   421→    /// This is a simple, correct algorithm that computes immediate dominators
+   422→    /// by iterating to a fixpoint. It operates on the CFG adjacency lists
+   423→    /// directly, ensuring that only ControlFlow edges are considered.
+   424→    ///
+   425→    /// # Complexity
+   426→    ///
+   427→    /// O(N * D * iter) where N is the number of reachable nodes, D is the
+   428→    /// average number of predecessors, and iter is the number of iterations
+   429→    /// to convergence (typically very few, 2-5 in practice).
+   430→    fn compute_cfg_dominators(
+   431→        cf_succs: &HashMap<NodeId, Vec<NodeId>>,
+   432→        cf_preds: &HashMap<NodeId, Vec<NodeId>>,
+   433→        entry: NodeId,
+   434→    ) -> CfgDomTree {
+   435→        // Step 1: Find all nodes reachable from entry via CF edges.
+   436→        let reachable = {
+   437→            let mut visited = HashSet::new();
+   438→            let mut stack = vec![entry];
+   439→            while let Some(node) = stack.pop() {
+   440→                if visited.insert(node) {
+   441→                    if let Some(succ_list) = cf_succs.get(&node) {
+   442→                        for &succ in succ_list {
+   443→                            if !visited.contains(&succ) {
+   444→                                stack.push(succ);
+   445→                            }
+   446→                        }
+   447→                    }
+   448→                }
+   449→            }
+   450→            visited
+   451→        };
+   452→
+   453→        if reachable.is_empty() {
+   454→            return CfgDomTree {
+   455→                entry,
+   456→                idom: HashMap::new(),
+   457→            };
+   458→        }
+   459→
+   460→        // Step 2: Compute a reverse postorder (RPO) of the CFG.
+   461→        let rpo = Self::reverse_postorder(cf_succs, entry, &reachable);
+   462→
+   463→        // Build RPO index map for the intersect function.
+   464→        let rpo_idx: HashMap<NodeId, usize> =
+   465→            rpo.iter().enumerate().map(|(i, &node)| (node, i)).collect();
+   466→
+   467→        // Step 3: Iterative dominator computation (Cooper-Harvey-Kennedy).
+   468→        let mut idom: HashMap<NodeId, NodeId> = HashMap::new();
+   469→        idom.insert(entry, entry);
+   470→
+   471→        let mut changed = true;
+   472→        while changed {
+   473→            changed = false;
+   474→            for &node in &rpo {
+   475→                if node == entry {
+   476→                    continue;
+   477→                }
+   478→
+   479→                // Find the set of processed predecessors.
+   480→                let pred_list: Vec<NodeId> = cf_preds
+   481→                    .get(&node)
+   482→                    .map(|p| {
+   483→                        p.iter()
+   484→                            .filter(|p| idom.contains_key(*p))
+   485→                            .copied()
+   486→                            .collect()
+   487→                    })
+   488→                    .unwrap_or_default();
+   489→
+   490→                let new_idom = match pred_list.first() {
+   491→                    None => continue, // No processed predecessor; skip.
+   492→                    Some(&first) => first,
+   493→                };
+   494→
+   495→                // Intersect all processed predecessors.
+   496→                let mut new_idom = new_idom;
+   497→                for &pred in &pred_list[1..] {
+   498→                    new_idom = Self::intersect(&idom, new_idom, pred, &rpo_idx);
+   499→                }
+   500→
+   501→                if idom.get(&node) != Some(&new_idom) {
+   502→                    idom.insert(node, new_idom);
+   503→                    changed = true;
+   504→                }
+   505→            }
+   506→        }
+   507→
+   508→        // Remove self-dominance of entry.
+   509→        idom.remove(&entry);
+   510→
+   511→        CfgDomTree { entry, idom }
+   512→    }
+   513→
+   514→    /// Computes the reverse postorder of the CFG from `entry`.
+   515→    fn reverse_postorder(
+   516→        cf_succs: &HashMap<NodeId, Vec<NodeId>>,
+   517→        entry: NodeId,
+   518→        reachable: &HashSet<NodeId>,
+   519→    ) -> Vec<NodeId> {
+   520→        let mut visited = HashSet::new();
+   521→        let mut post_order = Vec::new();
+   522→        let mut stack = vec![(entry, false)];
+   523→
+   524→        while let Some((node, processed)) = stack.pop() {
+   525→            if processed {
+   526→                post_order.push(node);
+   527→                continue;
+   528→            }
+   529→            if !reachable.contains(&node) || visited.contains(&node) {
+   530→                continue;
+   531→            }
+   532→            visited.insert(node);
+   533→            stack.push((node, true));
+   534→            if let Some(succ_list) = cf_succs.get(&node) {
+   535→                for &succ in succ_list.iter().rev() {
+   536→                    if !visited.contains(&succ) && reachable.contains(&succ) {
+   537→                        stack.push((succ, false));
+   538→                    }
+   539→                }
+   540→            }
+   541→        }
+   542→
+   543→        // Reverse postorder = reverse of postorder.
+   544→        post_order.reverse();
+   545→        post_order
+   546→    }
+   547→
+   548→    /// Intersects two nodes in the dominator tree using the RPO-based
+   549→    /// algorithm from Cooper-Harvey-Kennedy.
+   550→    ///
+   551→    /// Walks up the idom chains of both fingers, always advancing the one
+   552→    /// with the higher RPO number, until they meet at their common dominator.
+   553→    fn intersect(
+   554→        idom: &HashMap<NodeId, NodeId>,
+   555→        mut finger1: NodeId,
+   556→        mut finger2: NodeId,
+   557→        rpo_idx: &HashMap<NodeId, usize>,
+   558→    ) -> NodeId {
+   559→        loop {
+   560→            // Walk the finger with the higher RPO number (deeper in the tree).
+   561→            let idx1 = rpo_idx.get(&finger1).copied().unwrap_or(0);
+   562→            let idx2 = rpo_idx.get(&finger2).copied().unwrap_or(0);
+   563→
+   564→            if idx1 > idx2 {
+   565→                finger1 = idom[&finger1];
+   566→            } else if idx2 > idx1 {
+   567→                finger2 = idom[&finger2];
+   568→            } else {
+   569→                // Same RPO index => same node.
+   570→                return finger1;
+   571→            }
+   572→        }
+   573→    }
+   574→
+   575→    /// Finds all back-edges in the CFG: CF edges where the target dominates the source.
+   576→    fn find_back_edges(
+   577→        cf_succs: &HashMap<NodeId, Vec<NodeId>>,
+   578→        dom_tree: &CfgDomTree,
+   579→    ) -> Vec<(NodeId, NodeId)> {
+   580→        let mut back_edges = Vec::new();
+   581→
+   582→        for (&source, succs) in cf_succs {
+   583→            for &target in succs {
+   584→                // A back-edge: target dominates source.
+   585→                if dom_tree.dominates(target, source) {
+   586→                    back_edges.push((source, target));
+   587→                }
+   588→            }
+   589→        }
+   590→
+   591→        back_edges
+   592→    }
+   593→}
+   594→
+   595→// ─── CFG-only Dominator Tree ──────────────────────────────────────────────
+   596→
+   597→/// A simple dominator tree computed on the CFG subgraph only.
+   598→///
+   599→/// Unlike the general [`DominatorTree`] in `dominance`, this only considers
+   600→/// `ControlFlow` edges, which is essential for correct loop detection.
+   601→struct CfgDomTree {
+   602→    #[allow(dead_code)]
+   603→    entry: NodeId,
+   604→    idom: HashMap<NodeId, NodeId>,
+   605→}
+   606→
+   607→impl CfgDomTree {
+   608→    /// Returns `true` if `a` dominates `b` in this dominator tree.
+   609→    ///
+   610→    /// `a` dominates `b` iff `a` is an ancestor of `b` (or equal to `b`)
+   611→    /// in the dominator tree.
+   612→    fn dominates(&self, a: NodeId, b: NodeId) -> bool {
+   613→        if a == b {
+   614→            return true;
+   615→        }
+   616→        // Walk up from b to see if we hit a.
+   617→        let mut current = b;
+   618→        while let Some(&parent) = self.idom.get(&current) {
+   619→            if parent == a {
+   620→                return true;
+   621→            }
+   622→            current = parent;
+   623→        }
+   624→        false
+   625→    }
+   626→}
+   627→
+   628→// ─── Tests ───────────────────────────────────────────────────────────────
+   629→
+   630→#[cfg(test)]
+   631→mod tests {
+   632→    use super::*;
+   633→    use crate::edge::EdgeKind;
+   634→    use crate::graph::SCG;
+   635→    use crate::node::{
+   636→        ComputationNode, ControlKind, ControlNode, NodeId, NodePayload, NodeType, ProgramPoint,
+   637→    };
+   638→
+   639→    fn pp() -> ProgramPoint {
+   640→        ProgramPoint {
+   641→            file: None,
+   642→            line: None,
+   643→            column: None,
+   644→            offset: None,
+   645→        }
+   646→    }
+   647→
+   648→    /// Helper to add a control node.
+   649→    fn add_ctrl(scg: &mut SCG, kind: ControlKind, label: &str) -> NodeId {
+   650→        scg.add_node(
+   651→            NodeType::Control,
+   652→            NodePayload::Control(ControlNode {
+   653→                kind,
+   654→                label: Some(label.to_string()),
+   655→            }),
+   656→            pp(),
+   657→        )
+   658→    }
+   659→
+   660→    /// Helper to add a computation node.
+   661→    fn add_comp(scg: &mut SCG, op: &str) -> NodeId {
+   662→        scg.add_node(
+   663→            NodeType::Computation,
+   664→            NodePayload::Computation(ComputationNode {
+   665→                operation: op.to_string(),
+   666→                result_type: None,
+   667→                tail_call: false,
+   668→            }),
+   669→            pp(),
+   670→        )
+   671→    }
+   672→
+   673→    /// Builds a simple while-loop CFG:
+   674→    ///   entry → header → body → latch → header (back-edge)
+   675→    ///                  ↘ exit
+   676→    fn build_simple_loop() -> (SCG, NodeId, NodeId, NodeId, NodeId) {
+   677→        let mut scg = SCG::new();
+   678→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   679→        let header = add_ctrl(&mut scg, ControlKind::LoopHeader, "while_cond");
+   680→        let body = add_comp(&mut scg, "loop_body");
+   681→        let latch = add_comp(&mut scg, "latch");
+   682→        let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "while_exit");
+   683→
+   684→        scg.add_edge(entry, header, EdgeKind::ControlFlow).unwrap();
+   685→        scg.add_edge(header, body, EdgeKind::ControlFlow).unwrap();
+   686→        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+   687→        scg.add_edge(body, latch, EdgeKind::ControlFlow).unwrap();
+   688→        scg.add_edge(latch, header, EdgeKind::ControlFlow).unwrap(); // back-edge
+   689→
+   690→        (scg, header, body, latch, exit)
+   691→    }
+   692→
+   693→    // ── Test 1: Simple loop detection ──────────────────────────────────
+   694→
+   695→    #[test]
+   696→    fn test_detect_simple_loop() {
+   697→        let (scg, header, body, latch, _exit) = build_simple_loop();
+   698→        let loops = LoopDetector::detect_natural_loops(&scg);
+   699→        assert_eq!(loops.len(), 1, "should detect exactly one natural loop");
+   700→
+   701→        let loop_ = &loops[0];
+   702→        assert_eq!(loop_.header, header, "header should be the LoopHeader node");
+   703→        assert!(loop_.body.contains(&header), "header in body");
+   704→        assert!(loop_.body.contains(&body), "body node in body");
+   705→        assert!(loop_.body.contains(&latch), "latch in body");
+   706→        assert!(
+   707→            loop_.exits.contains(&header),
+   708→            "header should be an exit (has edge to exit node)"
+   709→        );
+   710→    }
+   711→
+   712→    // ── Test 2: No loops in linear CFG ─────────────────────────────────
+   713→
+   714→    #[test]
+   715→    fn test_detect_no_loops() {
+   716→        let mut scg = SCG::new();
+   717→        let n1 = add_comp(&mut scg, "a");
+   718→        let n2 = add_comp(&mut scg, "b");
+   719→        scg.add_edge(n1, n2, EdgeKind::ControlFlow).unwrap();
+   720→
+   721→        let loops = LoopDetector::detect_natural_loops(&scg);
+   722→        assert!(loops.is_empty(), "linear CFG should have no loops");
+   723→    }
+   724→
+   725→    // ── Test 3: Nested loops ───────────────────────────────────────────
+   726→
+   727→    #[test]
+   728→    fn test_detect_nested_loops() {
+   729→        let mut scg = SCG::new();
+   730→
+   731→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   732→        let header1 = add_ctrl(&mut scg, ControlKind::LoopHeader, "outer_header");
+   733→        let inner_header = add_ctrl(&mut scg, ControlKind::LoopHeader, "inner_header");
+   734→        let inner_body = add_comp(&mut scg, "inner_body");
+   735→        let inner_latch = add_comp(&mut scg, "inner_latch");
+   736→        let inner_exit = add_ctrl(&mut scg, ControlKind::LoopExit, "inner_exit");
+   737→        let outer_body = add_comp(&mut scg, "outer_body");
+   738→        let outer_latch = add_comp(&mut scg, "outer_latch");
+   739→        let outer_exit = add_ctrl(&mut scg, ControlKind::LoopExit, "outer_exit");
+   740→
+   741→        scg.add_edge(entry, header1, EdgeKind::ControlFlow).unwrap();
+   742→        scg.add_edge(header1, inner_header, EdgeKind::ControlFlow)
+   743→            .unwrap();
+   744→        scg.add_edge(header1, outer_exit, EdgeKind::ControlFlow)
+   745→            .unwrap();
+   746→        scg.add_edge(inner_header, inner_body, EdgeKind::ControlFlow)
+   747→            .unwrap();
+   748→        scg.add_edge(inner_header, inner_exit, EdgeKind::ControlFlow)
+   749→            .unwrap();
+   750→        scg.add_edge(inner_body, inner_latch, EdgeKind::ControlFlow)
+   751→            .unwrap();
+   752→        scg.add_edge(inner_latch, inner_header, EdgeKind::ControlFlow)
+   753→            .unwrap(); // inner back-edge
+   754→        scg.add_edge(inner_exit, outer_body, EdgeKind::ControlFlow)
+   755→            .unwrap();
+   756→        scg.add_edge(outer_body, outer_latch, EdgeKind::ControlFlow)
+   757→            .unwrap();
+   758→        scg.add_edge(outer_latch, header1, EdgeKind::ControlFlow)
+   759→            .unwrap(); // outer back-edge
+   760→
+   761→        let loops = LoopDetector::detect_natural_loops(&scg);
+   762→        assert_eq!(loops.len(), 2, "should detect two natural loops");
+   763→
+   764→        let headers: Vec<NodeId> = loops.iter().map(|l| l.header).collect();
+   765→        assert!(
+   766→            headers.contains(&header1),
+   767→            "outer loop header should be detected"
+   768→        );
+   769→        assert!(
+   770→            headers.contains(&inner_header),
+   771→            "inner loop header should be detected"
+   772→        );
+   773→    }
+   774→
+   775→    // ── Test 4: Loop nesting tree (single loop) ────────────────────────
+   776→
+   777→    #[test]
+   778→    fn test_loop_nesting_tree() {
+   779→        let (scg, _header, _body, _latch, _exit) = build_simple_loop();
+   780→        let tree = LoopDetector::detect_loop_nesting(&scg);
+   781→        assert_eq!(tree.len(), 1);
+   782→        assert!(tree.root_loops().len() >= 1);
+   783→        assert_eq!(tree.root_loops()[0].depth, 0);
+   784→    }
+   785→
+   786→    // ── Test 5: Loop nesting tree (nested loops) ───────────────────────
+   787→
+   788→    #[test]
+   789→    fn test_loop_nesting_tree_nested() {
+   790→        let mut scg = SCG::new();
+   791→
+   792→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   793→        let outer_h = add_ctrl(&mut scg, ControlKind::LoopHeader, "outer");
+   794→        let inner_h = add_ctrl(&mut scg, ControlKind::LoopHeader, "inner");
+   795→        let inner_body = add_comp(&mut scg, "ib");
+   796→        let outer_body = add_comp(&mut scg, "ob");
+   797→        let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
+   798→
+   799→        scg.add_edge(entry, outer_h, EdgeKind::ControlFlow).unwrap();
+   800→        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow)
+   801→            .unwrap();
+   802→        scg.add_edge(outer_h, exit, EdgeKind::ControlFlow).unwrap();
+   803→        scg.add_edge(inner_h, inner_body, EdgeKind::ControlFlow)
+   804→            .unwrap();
+   805→        scg.add_edge(inner_h, outer_body, EdgeKind::ControlFlow)
+   806→            .unwrap();
+   807→        scg.add_edge(inner_body, inner_h, EdgeKind::ControlFlow)
+   808→            .unwrap(); // inner back-edge
+   809→        scg.add_edge(outer_body, outer_h, EdgeKind::ControlFlow)
+   810→            .unwrap(); // outer back-edge
+   811→
+   812→        let tree = LoopDetector::detect_loop_nesting(&scg);
+   813→        assert_eq!(tree.len(), 2);
+   814→
+   815→        let outer_idx = tree
+   816→            .loops
+   817→            .iter()
+   818→            .position(|l| l.header == outer_h)
+   819→            .expect("outer loop should exist");
+   820→        let inner_idx = tree
+   821→            .loops
+   822→            .iter()
+   823→            .position(|l| l.header == inner_h)
+   824→            .expect("inner loop should exist");
+   825→
+   826→        // Inner loop should be nested inside outer loop.
+   827→        assert_eq!(tree.parent[&inner_idx], Some(outer_idx));
+   828→        assert_eq!(tree.loops[inner_idx].depth, tree.loops[outer_idx].depth + 1);
+   829→    }
+   830→
+   831→    // ── Test 6: Infinite loop detection ────────────────────────────────
+   832→
+   833→    #[test]
+   834→    fn test_infinite_loop_detection() {
+   835→        let mut scg = SCG::new();
+   836→
+   837→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   838→        let header = add_ctrl(&mut scg, ControlKind::LoopHeader, "infinite");
+   839→        let body = add_comp(&mut scg, "spin");
+   840→
+   841→        scg.add_edge(entry, header, EdgeKind::ControlFlow).unwrap();
+   842→        scg.add_edge(header, body, EdgeKind::ControlFlow).unwrap();
+   843→        // No exit edge from header; only back-edge.
+   844→        scg.add_edge(body, header, EdgeKind::ControlFlow).unwrap(); // back-edge
+   845→
+   846→        let infinite = LoopDetector::detect_infinite_loops(&scg);
+   847→        assert_eq!(infinite.len(), 1, "should detect one infinite loop");
+   848→        assert_eq!(infinite[0], header);
+   849→    }
+   850→
+   851→    // ── Test 7: Loop with exit is not infinite ─────────────────────────
+   852→
+   853→    #[test]
+   854→    fn test_infinite_loop_empty() {
+   855→        let (scg, ..) = build_simple_loop();
+   856→        let infinite = LoopDetector::detect_infinite_loops(&scg);
+   857→        // The simple loop has an exit, so it should not be infinite.
+   858→        assert!(infinite.is_empty(), "loop with exit is not infinite");
+   859→    }
+   860→
+   861→    // ── Test 8: Loop-invariant nodes ───────────────────────────────────
+   862→
+   863→    #[test]
+   864→    fn test_loop_invariant_nodes() {
+   865→        let mut scg = SCG::new();
+   866→
+   867→        // Build a loop with an invariant computation defined outside.
+   868→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   869→        // Constant defined outside the loop.
+   870→        let constant = add_comp(&mut scg, "const_42");
+   871→        let header = add_ctrl(&mut scg, ControlKind::LoopHeader, "header");
+   872→        let loop_body = add_comp(&mut scg, "add");
+   873→        let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
+   874→
+   875→        scg.add_edge(entry, constant, EdgeKind::ControlFlow)
+   876→            .unwrap();
+   877→        scg.add_edge(constant, header, EdgeKind::ControlFlow)
+   878→            .unwrap();
+   879→        scg.add_edge(header, loop_body, EdgeKind::ControlFlow)
+   880→            .unwrap();
+   881→        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+   882→        scg.add_edge(loop_body, header, EdgeKind::ControlFlow)
+   883→            .unwrap(); // back-edge
+   884→        scg.add_edge(constant, loop_body, EdgeKind::DataFlow)
+   885→            .unwrap(); // invariant input from outside
+   886→
+   887→        let loops = LoopDetector::detect_natural_loops(&scg);
+   888→        assert!(!loops.is_empty(), "should detect at least one loop");
+   889→
+   890→        // loop_body depends on constant (outside the loop via DataFlow), so
+   891→        // it is loop-invariant.
+   892→        let invariant = LoopDetector::loop_invariant_nodes(&loops[0], &scg);
+   893→        assert!(
+   894→            invariant.contains(&loop_body),
+   895→            "loop_body should be loop-invariant since all DF preds are outside"
+   896→        );
+   897→    }
+   898→
+   899→    // ── Test 9: Non-invariant nodes ────────────────────────────────────
+   900→
+   901→    #[test]
+   902→    fn test_loop_invariant_none() {
+   903→        let mut scg = SCG::new();
+   904→
+   905→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   906→        let header = add_ctrl(&mut scg, ControlKind::LoopHeader, "header");
+   907→        let body1 = add_comp(&mut scg, "b1");
+   908→        let body2 = add_comp(&mut scg, "b2");
+   909→        let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
+   910→
+   911→        scg.add_edge(entry, header, EdgeKind::ControlFlow).unwrap();
+   912→        scg.add_edge(header, body1, EdgeKind::ControlFlow).unwrap();
+   913→        scg.add_edge(header, exit, EdgeKind::ControlFlow).unwrap();
+   914→        scg.add_edge(body1, body2, EdgeKind::ControlFlow).unwrap();
+   915→        scg.add_edge(body2, header, EdgeKind::ControlFlow).unwrap(); // back-edge
+   916→                                                                     // body2 depends on body1 (inside the loop) via DataFlow.
+   917→        scg.add_edge(body1, body2, EdgeKind::DataFlow).unwrap();
+   918→
+   919→        let loops = LoopDetector::detect_natural_loops(&scg);
+   920→        assert!(!loops.is_empty());
+   921→
+   922→        let invariant = LoopDetector::loop_invariant_nodes(&loops[0], &scg);
+   923→        // body1 has no data-flow predecessors inside the loop, so it IS invariant.
+   924→        assert!(invariant.contains(&body1), "body1 should be loop-invariant");
+   925→        // body2 depends on body1 (inside loop), so not invariant.
+   926→        assert!(
+   927→            !invariant.contains(&body2),
+   928→            "body2 should NOT be loop-invariant (depends on body1 via DataFlow)"
+   929→        );
+   930→    }
+   931→
+   932→    // ── Test 10: NaturalLoop struct helpers ─────────────────────────────
+   933→
+   934→    #[test]
+   935→    fn test_natural_loop_contains() {
+   936→        let mut loop_ = NaturalLoop::new(NodeId::new(1), NodeId::new(5));
+   937→        loop_.body.insert(NodeId::new(1));
+   938→        loop_.body.insert(NodeId::new(2));
+   939→        loop_.body.insert(NodeId::new(5));
+   940→        assert!(loop_.contains(&NodeId::new(1)));
+   941→        assert!(loop_.contains(&NodeId::new(5)));
+   942→        assert!(!loop_.contains(&NodeId::new(99)));
+   943→        assert_eq!(loop_.body_size(), 3);
+   944→        assert!(!loop_.has_exit());
+   945→        loop_.exits.insert(NodeId::new(1));
+   946→        assert!(loop_.has_exit());
+   947→    }
+   948→
+   949→    // ── Test 11: LoopNestingTree defaults ──────────────────────────────
+   950→
+   951→    #[test]
+   952→    fn test_loop_nesting_tree_default() {
+   953→        let tree = LoopNestingTree::default();
+   954→        assert!(tree.is_empty());
+   955→        assert_eq!(tree.len(), 0);
+   956→    }
+   957→
+   958→    // ── Test 12: DataFlow edges do not affect loop detection ───────────
+   959→
+   960→    #[test]
+   961→    fn test_dataflow_edges_dont_create_false_loops() {
+   962→        let mut scg = SCG::new();
+   963→
+   964→        // Build a DAG with DataFlow edges but no back-edges.
+   965→        let a = add_comp(&mut scg, "a");
+   966→        let b = add_comp(&mut scg, "b");
+   967→        let c = add_comp(&mut scg, "c");
+   968→
+   969→        scg.add_edge(a, b, EdgeKind::ControlFlow).unwrap();
+   970→        scg.add_edge(b, c, EdgeKind::ControlFlow).unwrap();
+   971→        // DataFlow from c back to a — this should NOT create a loop
+   972→        // because it's not a ControlFlow edge.
+   973→        scg.add_edge(c, a, EdgeKind::DataFlow).unwrap();
+   974→
+   975→        let loops = LoopDetector::detect_natural_loops(&scg);
+   976→        assert!(
+   977→            loops.is_empty(),
+   978→            "DataFlow back-edge should not create a natural loop"
+   979→        );
+   980→    }
+   981→
+   982→    // ── Test 13: LoopNestingTree children helper ───────────────────────
+   983→
+   984→    #[test]
+   985→    fn test_nesting_tree_children() {
+   986→        let mut scg = SCG::new();
+   987→
+   988→        let entry = add_ctrl(&mut scg, ControlKind::FunctionEntry, "entry");
+   989→        let outer_h = add_ctrl(&mut scg, ControlKind::LoopHeader, "outer");
+   990→        let inner_h = add_ctrl(&mut scg, ControlKind::LoopHeader, "inner");
+   991→        let inner_body = add_comp(&mut scg, "ib");
+   992→        let outer_body = add_comp(&mut scg, "ob");
+   993→        let exit = add_ctrl(&mut scg, ControlKind::LoopExit, "exit");
+   994→
+   995→        scg.add_edge(entry, outer_h, EdgeKind::ControlFlow).unwrap();
+   996→        scg.add_edge(outer_h, inner_h, EdgeKind::ControlFlow)
+   997→            .unwrap();
+   998→        scg.add_edge(outer_h, exit, EdgeKind::ControlFlow).unwrap();
+   999→        scg.add_edge(inner_h, inner_body, EdgeKind::ControlFlow)
+  1000→            .unwrap();
+  1001→        scg.add_edge(inner_h, outer_body, EdgeKind::ControlFlow)
+  1002→            .unwrap();
+  1003→        scg.add_edge(inner_body, inner_h, EdgeKind::ControlFlow)
+  1004→            .unwrap();
+  1005→        scg.add_edge(outer_body, outer_h, EdgeKind::ControlFlow)
+  1006→            .unwrap();
+  1007→
+  1008→        let tree = LoopDetector::detect_loop_nesting(&scg);
+  1009→        let outer_idx = tree.loops.iter().position(|l| l.header == outer_h).unwrap();
+  1010→
+  1011→        let children = tree.children(outer_idx);
+  1012→        assert_eq!(children.len(), 1, "outer loop should have one child");
+  1013→    }
+  1014→}
+  1015→

@@ -1,0 +1,1211 @@
+     1→//! Abstract Syntax Tree types for the VUMA language frontend.
+     2→//!
+     3→//! The AST is the central data structure produced by the parser. Every node
+     4→//! carries an optional [`Span`] so that downstream passes (type checking,
+     5→//! SCG generation, error reporting) can trace back to the original source.
+     6→//!
+     7→//! Design principles:
+     8→//! - **Minimal**: only the constructs needed for a memory-oriented,
+     9→//!   AI-consumable language.
+    10→//! - **Explicit**: allocation, free, cast, and region operations are
+    11→//!   first-class statements rather than library calls.
+    12→//! - **Spanned**: every node can point back to its source location.
+    13→
+    14→use crate::error::Span;
+    15→use serde::{Deserialize, Serialize};
+    16→
+    17→// ---------------------------------------------------------------------------
+    18→// Visibility
+    19→// ---------------------------------------------------------------------------
+    20→
+    21→/// Visibility modifier for items.
+    22→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+    23→pub enum Visibility {
+    24→    /// Default (private) visibility — no modifier.
+    25→    #[default]
+    26→    Private,
+    27→    /// `pub` — public visibility.
+    28→    Public,
+    29→    /// `pub(crate)` — visible within the current crate.
+    30→    PublicCrate,
+    31→    /// `pub(super)` — visible in the parent module.
+    32→    PublicSuper,
+    33→    /// `pub(in path)` — visible in the specified path.
+    34→    PublicIn(String),
+    35→}
+    36→
+    37→impl std::fmt::Display for Visibility {
+    38→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    39→        match self {
+    40→            Visibility::Private => write!(f, ""),
+    41→            Visibility::Public => write!(f, "pub"),
+    42→            Visibility::PublicCrate => write!(f, "pub(crate)"),
+    43→            Visibility::PublicSuper => write!(f, "pub(super)"),
+    44→            Visibility::PublicIn(path) => write!(f, "pub(in {})", path),
+    45→        }
+    46→    }
+    47→}
+    48→
+    49→// ---------------------------------------------------------------------------
+    50→// Attributes
+    51→// ---------------------------------------------------------------------------
+    52→
+    53→/// An outer attribute: `#[attr]` or `#[attr = value]` or `#[attr(key = value)]`
+    54→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    55→pub struct Attribute {
+    56→    /// Whether this is an inner attribute (`#![...]`) or outer (`#[...]`).
+    57→    pub is_inner: bool,
+    58→    /// The attribute path/name (e.g. `inline`, `derive`, `cfg`).
+    59→    pub name: String,
+    60→    /// Optional single value: `#[inline(always)]` or `#[cfg(test)]`.
+    61→    /// Stored as a string; structured parsing is left to later passes.
+    62→    pub value: Option<AttrValue>,
+    63→    /// Source span.
+    64→    pub span: Span,
+    65→}
+    66→
+    67→/// The value part of an attribute.
+    68→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    69→pub enum AttrValue {
+    70→    /// A single identifier or literal: `#[inline(always)]` → `always`
+    71→    Single(String),
+    72→    /// Key-value pairs: `#[derive(Debug)]`, `#[cfg(test)]`, `#[allow(dead_code)]`
+    73→    List(Vec<String>),
+    74→    /// Key = value: `#[repr(C)]` → the `C` part
+    75→    KeyValue {
+    76→        /// Attribute key.
+    77→        key: String,
+    78→        /// Attribute value.
+    79→        value: String,
+    80→    },
+    81→}
+    82→
+    83→// ---------------------------------------------------------------------------
+    84→// Program
+    85→// ---------------------------------------------------------------------------
+    86→
+    87→/// The root of every VUMA compilation unit.
+    88→#[derive(Debug, Clone, Serialize, Deserialize)]
+    89→pub struct Program {
+    90→    /// Top-level items (function definitions, region declarations, imports, …).
+    91→    pub items: Vec<Item>,
+    92→    /// Span covering the entire source file.
+    93→    pub span: Span,
+    94→}
+    95→
+    96→// ---------------------------------------------------------------------------
+    97→// Items (top-level declarations)
+    98→// ---------------------------------------------------------------------------
+    99→
+   100→/// A top-level declaration within a [`Program`].
+   101→#[derive(Debug, Clone, Serialize, Deserialize)]
+   102→pub enum Item {
+   103→    /// Function definition: `fn name(params) -> T { … }`
+   104→    FnDef(FnDef),
+   105→    /// Struct definition: `struct Name { field: Type, … }`
+   106→    StructDef(StructDef),
+   107→    /// Enum definition: `enum Name { Variant, … }`
+   108→    EnumDef(EnumDef),
+   109→    /// Region declaration: `region name = allocate(size);`
+   110→    RegionDef(RegionDef),
+   111→    /// Import declaration: `import "path";`
+   112→    Import(Import),
+   113→    /// Export declaration: `export name;`
+   114→    Export(Export),
+   115→    /// Constant definition: `const name: T = value;`
+   116→    Const(ConstDef),
+   117→    /// Static definition: `static name: T = value;`
+   118→    Static(StaticDef),
+   119→    /// Module declaration: `module name { items }`
+   120→    ModuleDef(ModuleDef),
+   121→    /// Trait definition: `trait Name<T> { … }`
+   122→    TraitDef(TraitDef),
+   123→    /// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
+   124→    ImplBlock(ImplBlock),
+   125→    /// Top-level statement (assignment, expression, free, etc.) that
+   126→    /// appears outside of any function body.
+   127→    Stmt(Stmt),
+   128→}
+   129→
+   130→/// Function definition.
+   131→#[derive(Debug, Clone, Serialize, Deserialize)]
+   132→pub struct FnDef {
+   133→    /// Visibility modifier.
+   134→    pub visibility: Visibility,
+   135→    /// Outer attributes.
+   136→    pub attrs: Vec<Attribute>,
+   137→    /// Function name.
+   138→    pub name: String,
+   139→    /// Generic type parameters with optional bounds.
+   140→    pub type_params: Vec<TypeParam>,
+   141→    /// Formal parameters: (name, optional type annotation).
+   142→    pub params: Vec<Param>,
+   143→    /// Optional return type annotation.
+   144→    pub return_type: Option<Type>,
+   145→    /// Function body.
+   146→    pub body: Block,
+   147→    /// Whether this is an async function.
+   148→    pub is_async: bool,
+   149→    /// Optional where clause.
+   150→    pub where_clause: Option<WhereClause>,
+   151→    /// Source span.
+   152→    pub span: Span,
+   153→}
+   154→
+   155→/// A single function parameter.
+   156→#[derive(Debug, Clone, Serialize, Deserialize)]
+   157→pub struct Param {
+   158→    /// Parameter name.
+   159→    pub name: String,
+   160→    /// Optional type annotation.
+   161→    pub ty: Option<Type>,
+   162→    /// Source span.
+   163→    pub span: Span,
+   164→}
+   165→
+   166→/// Struct definition.
+   167→#[derive(Debug, Clone, Serialize, Deserialize)]
+   168→pub struct StructDef {
+   169→    /// Visibility modifier.
+   170→    pub visibility: Visibility,
+   171→    /// Outer attributes.
+   172→    pub attrs: Vec<Attribute>,
+   173→    /// Struct name.
+   174→    pub name: String,
+   175→    /// Generic type parameters with optional bounds.
+   176→    pub type_params: Vec<TypeParam>,
+   177→    /// Fields: (name, type).
+   178→    pub fields: Vec<StructField>,
+   179→    /// Optional where clause.
+   180→    pub where_clause: Option<WhereClause>,
+   181→    /// Source span.
+   182→    pub span: Span,
+   183→}
+   184→
+   185→/// A single field in a struct definition.
+   186→#[derive(Debug, Clone, Serialize, Deserialize)]
+   187→pub struct StructField {
+   188→    /// Field name.
+   189→    pub name: String,
+   190→    /// Field type.
+   191→    pub ty: Type,
+   192→    /// Source span.
+   193→    pub span: Span,
+   194→}
+   195→
+   196→/// Enum definition.
+   197→#[derive(Debug, Clone, Serialize, Deserialize)]
+   198→pub struct EnumDef {
+   199→    /// Visibility modifier.
+   200→    pub visibility: Visibility,
+   201→    /// Outer attributes.
+   202→    pub attrs: Vec<Attribute>,
+   203→    /// Enum name.
+   204→    pub name: String,
+   205→    /// Generic type parameters with optional bounds.
+   206→    pub type_params: Vec<TypeParam>,
+   207→    /// Enum variants.
+   208→    pub variants: Vec<EnumVariant>,
+   209→    /// Optional where clause.
+   210→    pub where_clause: Option<WhereClause>,
+   211→    /// Source span.
+   212→    pub span: Span,
+   213→}
+   214→
+   215→/// A single variant in an enum definition.
+   216→#[derive(Debug, Clone, Serialize, Deserialize)]
+   217→pub struct EnumVariant {
+   218→    /// Variant name.
+   219→    pub name: String,
+   220→    /// Optional payload type.
+   221→    pub payload: Option<Type>,
+   222→    /// Source span.
+   223→    pub span: Span,
+   224→}
+   225→
+   226→/// Region (memory arena) declaration.
+   227→#[derive(Debug, Clone, Serialize, Deserialize)]
+   228→pub struct RegionDef {
+   229→    /// Region name.
+   230→    pub name: String,
+   231→    /// Size expression (bytes to allocate).
+   232→    pub size_expr: Expr,
+   233→    /// Source span.
+   234→    pub span: Span,
+   235→}
+   236→
+   237→/// Import declaration.
+   238→#[derive(Debug, Clone, Serialize, Deserialize)]
+   239→pub struct Import {
+   240→    /// Module path (string).
+   241→    pub path: String,
+   242→    /// Optional specific symbols to import.
+   243→    pub symbols: Vec<String>,
+   244→    /// Source span.
+   245→    pub span: Span,
+   246→}
+   247→
+   248→/// Export declaration.
+   249→#[derive(Debug, Clone, Serialize, Deserialize)]
+   250→pub struct Export {
+   251→    /// Name being exported.
+   252→    pub name: String,
+   253→    /// Source span.
+   254→    pub span: Span,
+   255→}
+   256→
+   257→/// Constant definition.
+   258→#[derive(Debug, Clone, Serialize, Deserialize)]
+   259→pub struct ConstDef {
+   260→    /// Visibility modifier.
+   261→    pub visibility: Visibility,
+   262→    /// Outer attributes.
+   263→    pub attrs: Vec<Attribute>,
+   264→    /// Constant name.
+   265→    pub name: String,
+   266→    /// Optional type annotation.
+   267→    pub ty: Option<Type>,
+   268→    /// Constant value expression.
+   269→    pub value: Expr,
+   270→    /// Source span.
+   271→    pub span: Span,
+   272→}
+   273→
+   274→/// Static definition: `static name: T = value;`
+   275→#[derive(Debug, Clone, Serialize, Deserialize)]
+   276→pub struct StaticDef {
+   277→    /// Visibility modifier.
+   278→    pub visibility: Visibility,
+   279→    /// Outer attributes.
+   280→    pub attrs: Vec<Attribute>,
+   281→    /// Static name.
+   282→    pub name: String,
+   283→    /// Optional type annotation.
+   284→    pub ty: Option<Type>,
+   285→    /// Static value expression.
+   286→    pub value: Expr,
+   287→    /// Source span.
+   288→    pub span: Span,
+   289→}
+   290→
+   291→/// Module declaration.
+   292→#[derive(Debug, Clone, Serialize, Deserialize)]
+   293→pub struct ModuleDef {
+   294→    /// Module name.
+   295→    pub name: String,
+   296→    /// Items inside the module.
+   297→    pub items: Vec<Item>,
+   298→    /// Source span.
+   299→    pub span: Span,
+   300→}
+   301→
+   302→// ---------------------------------------------------------------------------
+   303→// Trait & Impl definitions
+   304→// ---------------------------------------------------------------------------
+   305→
+   306→/// Trait definition: `trait Name<T> { … }`
+   307→#[derive(Debug, Clone, Serialize, Deserialize)]
+   308→pub struct TraitDef {
+   309→    /// Visibility modifier.
+   310→    pub visibility: Visibility,
+   311→    /// Outer attributes.
+   312→    pub attrs: Vec<Attribute>,
+   313→    /// Trait name.
+   314→    pub name: String,
+   315→    /// Generic type parameters with optional bounds.
+   316→    pub type_params: Vec<TypeParam>,
+   317→    /// Associated type declarations.
+   318→    pub associated_types: Vec<String>,
+   319→    /// Associated constant declarations.
+   320→    pub associated_consts: Vec<AssocConst>,
+   321→    /// Required method signatures (no body).
+   322→    pub required_methods: Vec<FnDef>,
+   323→    /// Provided method implementations (with body).
+   324→    pub provided_methods: Vec<FnDef>,
+   325→    /// Optional where clause.
+   326→    pub where_clause: Option<WhereClause>,
+   327→    /// Source span.
+   328→    pub span: Span,
+   329→}
+   330→
+   331→/// Associated constant in a trait: `const NAME: Type [= expr];`
+   332→#[derive(Debug, Clone, Serialize, Deserialize)]
+   333→pub struct AssocConst {
+   334→    /// Constant name.
+   335→    pub name: String,
+   336→    /// Type annotation.
+   337→    pub ty: Type,
+   338→    /// Optional default value.
+   339→    pub value: Option<Expr>,
+   340→    /// Source span.
+   341→    pub span: Span,
+   342→}
+   343→
+   344→/// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
+   345→#[derive(Debug, Clone, Serialize, Deserialize)]
+   346→pub struct ImplBlock {
+   347→    /// Outer attributes on this impl block.
+   348→    pub attrs: Vec<Attribute>,
+   349→    /// Generic type parameters on the impl itself: `impl<T> …`
+   350→    pub type_params: Vec<TypeParam>,
+   351→    /// Optional trait name being implemented.
+   352→    pub trait_name: Option<String>,
+   353→    /// The target type for the impl.
+   354→    pub target_type: Type,
+   355→    /// Method implementations.
+   356→    pub methods: Vec<FnDef>,
+   357→    /// Optional where clause.
+   358→    pub where_clause: Option<WhereClause>,
+   359→    /// Source span.
+   360→    pub span: Span,
+   361→}
+   362→
+   363→// ---------------------------------------------------------------------------
+   364→// Type parameters & Where clauses
+   365→// ---------------------------------------------------------------------------
+   366→
+   367→/// A type parameter with optional trait bounds.
+   368→#[derive(Debug, Clone, Serialize, Deserialize)]
+   369→pub struct TypeParam {
+   370→    /// Parameter name.
+   371→    pub name: String,
+   372→    /// Trait bounds on this parameter.
+   373→    pub bounds: Vec<Type>,
+   374→}
+   375→
+   376→/// A where clause with predicates.
+   377→#[derive(Debug, Clone, Serialize, Deserialize)]
+   378→pub struct WhereClause {
+   379→    /// Individual predicates.
+   380→    pub predicates: Vec<WherePredicate>,
+   381→}
+   382→
+   383→/// A single where predicate: `T: Trait + AnotherTrait`
+   384→#[derive(Debug, Clone, Serialize, Deserialize)]
+   385→pub struct WherePredicate {
+   386→    /// The type name being constrained.
+   387→    pub type_name: String,
+   388→    /// Trait bounds.
+   389→    pub bounds: Vec<Type>,
+   390→}
+   391→
+   392→// ---------------------------------------------------------------------------
+   393→// Block
+   394→// ---------------------------------------------------------------------------
+   395→
+   396→/// A sequential block of statements enclosed in `{ … }`.
+   397→#[derive(Debug, Clone, Serialize, Deserialize)]
+   398→pub struct Block {
+   399→    /// Statements in execution order.
+   400→    pub statements: Vec<Stmt>,
+   401→    /// Source span (including braces).
+   402→    pub span: Span,
+   403→}
+   404→
+   405→// ---------------------------------------------------------------------------
+   406→// Statements
+   407→// ---------------------------------------------------------------------------
+   408→
+   409→/// A single statement within a [`Block`].
+   410→#[derive(Debug, Clone, Serialize, Deserialize)]
+   411→pub enum Stmt {
+   412→    /// Variable binding: `let name [: T] = expr;`
+   413→    Let(LetStmt),
+   414→    /// Assignment: `name = expr;`  or  `*name = expr;`
+   415→    Assign(AssignStmt),
+   416→    /// Compound assignment: `name += expr;`, `name -= expr;`, etc.
+   417→    CompoundAssign(CompoundAssignStmt),
+   418→    /// Memory allocation: `allocate(expr)` — typically inside a `region` decl.
+   419→    Allocate(AllocateStmt),
+   420→    /// Memory deallocation: `free(expr);`
+   421→    Free(FreeStmt),
+   422→    /// Memory access / dereference: `*expr`  or  `(*expr).field`
+   423→    Access(AccessStmt),
+   424→    /// Type cast: `expr as Type`
+   425→    Cast(CastStmt),
+   426→    /// Conditional: `if expr { … } else { … }`
+   427→    If(IfStmt),
+   428→    /// Loop: `while expr { … }`
+   429→    While(WhileStmt),
+   430→    /// For loop: `for name in expr { … }`
+   431→    For(ForStmt),
+   432→    /// Infinite loop: `loop { … }`
+   433→    Loop(LoopStmt),
+   434→    /// An unsafe block (`unsafe { ... }`)
+   435→    UnsafeBlock {
+   436→        /// Block body.
+   437→        body: Block,
+   438→        /// Source span.
+   439→        span: Span,
+   440→    },
+   441→    /// Pattern match: `match expr { arms }`
+   442→    Match(MatchStmt),
+   443→    /// Sync block: `sync { … }`
+   444→    Sync(SyncBlock),
+   445→    /// Return: `return [expr];`
+   446→    Return(ReturnStmt),
+   447→    /// Break: `break;` or `break expr;`
+   448→    Break(BreakStmt),
+   449→    /// Continue: `continue;`
+   450→    Continue(ContinueStmt),
+   451→    /// BD directive: `bd(name, expr)`, `repd(name, expr)`, `capd(name, expr)`, `reld(name, expr)`
+   452→    BdDirective(BdDirectiveStmt),
+   453→    /// Expression statement: `expr;`
+   454→    Expr(ExprStmt),
+   455→}
+   456→
+   457→/// `let` binding statement.
+   458→#[derive(Debug, Clone, Serialize, Deserialize)]
+   459→pub struct LetStmt {
+   460→    /// Bound variable name.
+   461→    pub name: String,
+   462→    /// Optional type annotation.
+   463→    pub ty: Option<Type>,
+   464→    /// Initializer expression.
+   465→    pub value: Expr,
+   466→    /// Source span.
+   467→    pub span: Span,
+   468→}
+   469→
+   470→/// Assignment statement.
+   471→///
+   472→/// The target may be a simple variable or a dereference expression.
+   473→#[derive(Debug, Clone, Serialize, Deserialize)]
+   474→pub struct AssignStmt {
+   475→    /// The assignment target (variable, deref, field, or index).
+   476→    pub target: AssignTarget,
+   477→    /// The value to assign.
+   478→    pub value: Expr,
+   479→    /// Source span.
+   480→    pub span: Span,
+   481→}
+   482→
+   483→/// What is being assigned to.
+   484→#[derive(Debug, Clone, Serialize, Deserialize)]
+   485→pub enum AssignTarget {
+   486→    /// Simple variable: `x = …`
+   487→    Var {
+   488→        /// Variable name.
+   489→        name: String,
+   490→        /// Source span.
+   491→        span: Span,
+   492→    },
+   493→    /// Dereference: `*ptr = …`
+   494→    Deref {
+   495→        /// The dereferenced expression.
+   496→        expr: Box<Expr>,
+   497→        /// Source span.
+   498→        span: Span,
+   499→    },
+   500→    /// Field access after dereference: `(*ptr).field = …`
+   501→    DerefField {
+   502→        /// The dereferenced expression.
+   503→        expr: Box<Expr>,
+   504→        /// Field name.
+   505→        field: String,
+   506→        /// Source span.
+   507→        span: Span,
+   508→    },
+   509→    /// Offset write: `ptr[offset] = …`
+   510→    Index {
+   511→        /// The indexed expression.
+   512→        expr: Box<Expr>,
+   513→        /// The index expression.
+   514→        index: Box<Expr>,
+   515→        /// Source span.
+   516→        span: Span,
+   517→    },
+   518→}
+   519→
+   520→/// `allocate(size)` statement.
+   521→#[derive(Debug, Clone, Serialize, Deserialize)]
+   522→pub struct AllocateStmt {
+   523→    /// The size (in bytes) to allocate.
+   524→    pub size: Expr,
+   525→    /// Source span.
+   526→    pub span: Span,
+   527→}
+   528→
+   529→/// `free(ptr)` statement.
+   530→#[derive(Debug, Clone, Serialize, Deserialize)]
+   531→pub struct FreeStmt {
+   532→    /// The pointer / region to deallocate.
+   533→    pub ptr: Expr,
+   534→    /// Source span.
+   535→    pub span: Span,
+   536→}
+   537→
+   538→/// Standalone access / dereference statement (rare; usually embedded
+   539→/// within an expression).
+   540→#[derive(Debug, Clone, Serialize, Deserialize)]
+   541→pub struct AccessStmt {
+   542→    /// The expression being accessed / dereferenced.
+   543→    pub expr: Expr,
+   544→    /// Source span.
+   545→    pub span: Span,
+   546→}
+   547→
+   548→/// Standalone cast statement.
+   549→#[derive(Debug, Clone, Serialize, Deserialize)]
+   550→pub struct CastStmt {
+   551→    /// The expression being cast.
+   552→    pub expr: Expr,
+   553→    /// The target type.
+   554→    pub target_type: Type,
+   555→    /// Source span.
+   556→    pub span: Span,
+   557→}
+   558→
+   559→/// `if` statement.
+   560→#[derive(Debug, Clone, Serialize, Deserialize)]
+   561→pub struct IfStmt {
+   562→    /// The condition expression.
+   563→    pub condition: Expr,
+   564→    /// Block executed when condition is true.
+   565→    pub then_block: Block,
+   566→    /// Optional else block (may contain another if).
+   567→    pub else_block: Option<Block>,
+   568→    /// Source span.
+   569→    pub span: Span,
+   570→}
+   571→
+   572→/// `while` loop.
+   573→#[derive(Debug, Clone, Serialize, Deserialize)]
+   574→pub struct WhileStmt {
+   575→    /// Loop condition.
+   576→    pub condition: Expr,
+   577→    /// Loop body.
+   578→    pub body: Block,
+   579→    /// Source span.
+   580→    pub span: Span,
+   581→}
+   582→
+   583→/// `for` loop: `for name in iter { body }`
+   584→#[derive(Debug, Clone, Serialize, Deserialize)]
+   585→pub struct ForStmt {
+   586→    /// Iterator variable name.
+   587→    pub name: String,
+   588→    /// Iterable expression.
+   589→    pub iter: Expr,
+   590→    /// Loop body.
+   591→    pub body: Block,
+   592→    /// Source span.
+   593→    pub span: Span,
+   594→}
+   595→
+   596→/// Infinite `loop { body }`
+   597→#[derive(Debug, Clone, Serialize, Deserialize)]
+   598→pub struct LoopStmt {
+   599→    /// Loop body.
+   600→    pub body: Block,
+   601→    /// Source span.
+   602→    pub span: Span,
+   603→}
+   604→
+   605→/// `match` statement.
+   606→#[derive(Debug, Clone, Serialize, Deserialize)]
+   607→pub struct MatchStmt {
+   608→    /// Expression being matched.
+   609→    pub subject: Expr,
+   610→    /// Match arms.
+   611→    pub arms: Vec<MatchArm>,
+   612→    /// Source span.
+   613→    pub span: Span,
+   614→}
+   615→
+   616→/// A single arm of a `match` statement.
+   617→#[derive(Debug, Clone, Serialize, Deserialize)]
+   618→pub struct MatchArm {
+   619→    /// Pattern (simple string for now; can be extended to full patterns).
+   620→    pub pattern: MatchPattern,
+   621→    /// Optional guard expression: `x if x > 0 => ...`
+   622→    pub guard: Option<Expr>,
+   623→    /// Arm body (expression).
+   624→    pub body: Expr,
+   625→    /// Source span.
+   626→    pub span: Span,
+   627→}
+   628→
+   629→/// A match pattern (simplified for VUMA).
+   630→#[derive(Debug, Clone, Serialize, Deserialize)]
+   631→pub enum MatchPattern {
+   632→    /// Wildcard: `_`
+   633→    Wildcard(Span),
+   634→    /// Literal pattern.
+   635→    Lit {
+   636→        /// The literal value to match.
+   637→        value: Lit,
+   638→        /// Source span.
+   639→        span: Span,
+   640→    },
+   641→    /// Identifier / variant name pattern.
+   642→    Ident {
+   643→        /// The identifier or variant name.
+   644→        name: String,
+   645→        /// Source span.
+   646→        span: Span,
+   647→    },
+   648→    /// Struct-like pattern: `Name { field, … }`
+   649→    Struct {
+   650→        /// Struct name.
+   651→        name: String,
+   652→        /// Field names to match.
+   653→        fields: Vec<String>,
+   654→        /// Source span.
+   655→        span: Span,
+   656→    },
+   657→    /// Enum variant pattern: `Some(v)` or `None`
+   658→    Enum {
+   659→        /// Variant name.
+   660→        name: String,
+   661→        /// Optional binding for the variant payload.
+   662→        binding: Option<String>,
+   663→        /// Source span.
+   664→        span: Span,
+   665→    },
+   666→    /// Range pattern: `1..=10`
+   667→    Range {
+   668→        /// Range start literal.
+   669→        start: Lit,
+   670→        /// Range end literal.
+   671→        end: Lit,
+   672→        /// Source span.
+   673→        span: Span,
+   674→    },
+   675→    /// Or-pattern: `1 | 2 | 3`
+   676→    Or {
+   677→        /// Alternative patterns.
+   678→        patterns: Vec<MatchPattern>,
+   679→        /// Source span.
+   680→        span: Span,
+   681→    },
+   682→}
+   683→
+   684→/// `sync { … }` block for synchronized access.
+   685→#[derive(Debug, Clone, Serialize, Deserialize)]
+   686→pub struct SyncBlock {
+   687→    /// Body of the sync block.
+   688→    pub body: Block,
+   689→    /// Source span.
+   690→    pub span: Span,
+   691→}
+   692→
+   693→/// `return` statement.
+   694→#[derive(Debug, Clone, Serialize, Deserialize)]
+   695→pub struct ReturnStmt {
+   696→    /// Optional return value expression.
+   697→    pub value: Option<Expr>,
+   698→    /// Source span.
+   699→    pub span: Span,
+   700→}
+   701→
+   702→/// `break` statement.
+   703→#[derive(Debug, Clone, Serialize, Deserialize)]
+   704→pub struct BreakStmt {
+   705→    /// Optional break value (for loop expressions).
+   706→    pub value: Option<Expr>,
+   707→    /// Source span.
+   708→    pub span: Span,
+   709→}
+   710→
+   711→/// `continue` statement.
+   712→#[derive(Debug, Clone, Serialize, Deserialize)]
+   713→pub struct ContinueStmt {
+   714→    /// Source span.
+   715→    pub span: Span,
+   716→}
+   717→
+   718→/// Compound assignment statement: `target op= value;`
+   719→#[derive(Debug, Clone, Serialize, Deserialize)]
+   720→pub struct CompoundAssignStmt {
+   721→    /// The target being assigned to.
+   722→    pub target: AssignTarget,
+   723→    /// The compound operator.
+   724→    pub op: CompoundOp,
+   725→    /// The right-hand side value.
+   726→    pub value: Expr,
+   727→    /// Source span.
+   728→    pub span: Span,
+   729→}
+   730→
+   731→/// Compound assignment operators.
+   732→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   733→pub enum CompoundOp {
+   734→    /// `+=`
+   735→    Add,
+   736→    /// `-=`
+   737→    Sub,
+   738→    /// `*=`
+   739→    Mul,
+   740→    /// `/=`
+   741→    Div,
+   742→    /// `%=`
+   743→    Mod,
+   744→    /// `&=`
+   745→    BitAnd,
+   746→    /// `|=`
+   747→    BitOr,
+   748→    /// `^=`
+   749→    BitXor,
+   750→    /// `<<=`
+   751→    Shl,
+   752→    /// `>>=`
+   753→    Shr,
+   754→}
+   755→
+   756→/// BD (behavioral domain) directive statement.
+   757→#[derive(Debug, Clone, Serialize, Deserialize)]
+   758→pub struct BdDirectiveStmt {
+   759→    /// The directive kind: `bd`, `repd`, `capd`, or `reld`.
+   760→    pub kind: BdDirectiveKind,
+   761→    /// The domain name.
+   762→    pub name: String,
+   763→    /// Optional expression argument.
+   764→    pub expr: Option<Expr>,
+   765→    /// Source span.
+   766→    pub span: Span,
+   767→}
+   768→
+   769→/// Kind of BD directive.
+   770→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   771→pub enum BdDirectiveKind {
+   772→    /// `bd` — base domain annotation
+   773→    Bd,
+   774→    /// `repd` — representation domain
+   775→    Repd,
+   776→    /// `capd` — capability domain
+   777→    Capd,
+   778→    /// `reld` — relational domain
+   779→    Reld,
+   780→}
+   781→
+   782→/// Expression used as a statement (side-effecting call, etc.).
+   783→#[derive(Debug, Clone, Serialize, Deserialize)]
+   784→pub struct ExprStmt {
+   785→    /// The expression being evaluated for its side effects.
+   786→    pub expr: Expr,
+   787→    /// Source span.
+   788→    pub span: Span,
+   789→}
+   790→
+   791→// ---------------------------------------------------------------------------
+   792→// Expressions
+   793→// ---------------------------------------------------------------------------
+   794→
+   795→/// A typed expression tree.
+   796→///
+   797→/// Operator precedence is resolved by the parser; the AST encodes the
+   798→/// result directly via nested `Box<Expr>`.
+   799→#[derive(Debug, Clone, Serialize, Deserialize)]
+   800→pub enum Expr {
+   801→    /// Variable reference.
+   802→    Var {
+   803→        /// The variable name.
+   804→        name: String,
+   805→        /// Source span.
+   806→        span: Span,
+   807→    },
+   808→    /// Literal value.
+   809→    Lit {
+   810→        /// The literal value.
+   811→        value: Lit,
+   812→        /// Source span.
+   813→        span: Span,
+   814→    },
+   815→    /// Binary operation: `lhs op rhs`
+   816→    BinOp {
+   817→        /// The binary operator.
+   818→        op: BinOp,
+   819→        /// Left-hand side operand.
+   820→        lhs: Box<Expr>,
+   821→        /// Right-hand side operand.
+   822→        rhs: Box<Expr>,
+   823→        /// Source span.
+   824→        span: Span,
+   825→    },
+   826→    /// Unary operation: `op expr`
+   827→    UnOp {
+   828→        /// The unary operator.
+   829→        op: UnOp,
+   830→        /// The operand expression.
+   831→        expr: Box<Expr>,
+   832→        /// Source span.
+   833→        span: Span,
+   834→    },
+   835→    /// Function call: `callee(args)`
+   836→    Call {
+   837→        /// The callee expression.
+   838→        callee: Box<Expr>,
+   839→        /// Arguments passed to the callee.
+   840→        args: Vec<Expr>,
+   841→        /// Source span.
+   842→        span: Span,
+   843→    },
+   844→    /// Address-of: `@expr`
+   845→    AddressOf {
+   846→        /// The expression whose address is taken.
+   847→        expr: Box<Expr>,
+   848→        /// Source span.
+   849→        span: Span,
+   850→    },
+   851→    /// Dereference: `*expr`
+   852→    Deref {
+   853→        /// The expression being dereferenced.
+   854→        expr: Box<Expr>,
+   855→        /// Source span.
+   856→        span: Span,
+   857→    },
+   858→    /// Pointer offset: `ptr + offset` (sugar for pointer arithmetic)
+   859→    Offset {
+   860→        /// The base pointer expression.
+   861→        base: Box<Expr>,
+   862→        /// The byte offset expression.
+   863→        offset: Box<Expr>,
+   864→        /// Source span.
+   865→        span: Span,
+   866→    },
+   867→    /// Type cast: `expr as Type`
+   868→    Cast {
+   869→        /// The expression being cast.
+   870→        expr: Box<Expr>,
+   871→        /// The target type.
+   872→        target_type: Type,
+   873→        /// Source span.
+   874→        span: Span,
+   875→    },
+   876→    /// Index access: `expr[index]`
+   877→    Index {
+   878→        /// The expression being indexed.
+   879→        expr: Box<Expr>,
+   880→        /// The index expression.
+   881→        index: Box<Expr>,
+   882→        /// Source span.
+   883→        span: Span,
+   884→    },
+   885→    /// Struct literal: `TypeName { field: value, … }`
+   886→    StructInit {
+   887→        /// Struct type name.
+   888→        name: String,
+   889→        /// Field-value pairs.
+   890→        fields: Vec<(String, Expr)>,
+   891→        /// Source span.
+   892→        span: Span,
+   893→    },
+   894→    /// Field access: `expr.field`
+   895→    FieldAccess {
+   896→        /// The expression whose field is accessed.
+   897→        expr: Box<Expr>,
+   898→        /// Field name.
+   899→        field: String,
+   900→        /// Source span.
+   901→        span: Span,
+   902→    },
+   903→    /// Namespace / associated function access: `expr::name`
+   904→    NamespaceAccess {
+   905→        /// The namespace expression.
+   906→        expr: Box<Expr>,
+   907→        /// The associated name.
+   908→        name: String,
+   909→        /// Source span.
+   910→        span: Span,
+   911→    },
+   912→    /// Pointer derive: `derive(ptr, region)`
+   913→    Derive {
+   914→        /// The source pointer.
+   915→        ptr: Box<Expr>,
+   916→        /// The region expression.
+   917→        region: Box<Expr>,
+   918→        /// Source span.
+   919→        span: Span,
+   920→    },
+   921→    /// `sizeof(Type)`
+   922→    Sizeof {
+   923→        /// The type whose size is queried.
+   924→        ty: Type,
+   925→        /// Source span.
+   926→        span: Span,
+   927→    },
+   928→    /// `alignof(Type)`
+   929→    Alignof {
+   930→        /// The type whose alignment is queried.
+   931→        ty: Type,
+   932→        /// Source span.
+   933→        span: Span,
+   934→    },
+   935→    /// Type ascription: `expr: Type`
+   936→    TypeAscription {
+   937→        /// The ascribed expression.
+   938→        expr: Box<Expr>,
+   939→        /// The type annotation.
+   940→        ty: Type,
+   941→        /// Source span.
+   942→        span: Span,
+   943→    },
+   944→    /// Async block: `async { … }`
+   945→    Async {
+   946→        /// The async block body.
+   947→        body: Block,
+   948→        /// Source span.
+   949→        span: Span,
+   950→    },
+   951→    /// Spawn expression: `spawn expr`
+   952→    Spawn {
+   953→        /// The expression to spawn as a concurrent task.
+   954→        expr: Box<Expr>,
+   955→        /// Source span.
+   956→        span: Span,
+   957→    },
+   958→    /// Allocate expression: `allocate(size)` used as an expression
+   959→    Allocate {
+   960→        /// The size in bytes to allocate.
+   961→        size: Box<Expr>,
+   962→        /// Source span.
+   963→        span: Span,
+   964→    },
+   965→    /// Null literal: `null`
+   966→    Null {
+   967→        /// Source span.
+   968→        span: Span,
+   969→    },
+   970→    /// Range expression: `start..end`
+   971→    Range {
+   972→        /// Range start (inclusive).
+   973→        start: Box<Expr>,
+   974→        /// Range end (exclusive).
+   975→        end: Box<Expr>,
+   976→        /// Source span.
+   977→        span: Span,
+   978→    },
+   979→    /// Format string: `f"hello {name} world"`
+   980→    FormatStr {
+   981→        /// Parts of the format string.
+   982→        parts: Vec<FormatStrPart>,
+   983→        /// Source span.
+   984→        span: Span,
+   985→    },
+   986→    /// Closure: `|args| expr` or `|args| { stmts }`
+   987→    Closure {
+   988→        /// Closure parameters.
+   989→        params: Vec<Param>,
+   990→        /// Closure body (expression or block).
+   991→        body: ClosureBody,
+   992→        /// How the closure captures its environment.
+   993→        capture_kind: CaptureKind,
+   994→        /// Source span.
+   995→        span: Span,
+   996→    },
+   997→    /// Await expression: `expr.await`
+   998→    Await {
+   999→        /// The expression being awaited.
+  1000→        expr: Box<Expr>,
+  1001→        /// Source span.
+  1002→        span: Span,
+  1003→    },
+  1004→    /// An uninitialized binding (`let x;`).
+  1005→    Uninitialized {
+  1006→        /// Source span.
+  1007→        span: Span,
+  1008→    },
+  1009→}
+  1010→
+  1011→// ---------------------------------------------------------------------------
+  1012→// Format string parts
+  1013→// ---------------------------------------------------------------------------
+  1014→
+  1015→/// A part of a format string — either a literal text segment or an interpolated expression.
+  1016→#[derive(Debug, Clone, Serialize, Deserialize)]
+  1017→pub enum FormatStrPart {
+  1018→    /// Literal text segment.
+  1019→    Lit(String),
+  1020→    /// Interpolated expression.
+  1021→    Expr(Expr),
+  1022→}
+  1023→
+  1024→// ---------------------------------------------------------------------------
+  1025→// Closure types
+  1026→// ---------------------------------------------------------------------------
+  1027→
+  1028→/// The body of a closure — either a single expression or a block.
+  1029→#[derive(Debug, Clone, Serialize, Deserialize)]
+  1030→pub enum ClosureBody {
+  1031→    /// Single expression body: `|x| x + 1`
+  1032→    Expr(Box<Expr>),
+  1033→    /// Block body: `|x| { let y = x + 1; y }`
+  1034→    Block(Block),
+  1035→}
+  1036→
+  1037→/// How a closure captures variables from its environment.
+  1038→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+  1039→pub enum CaptureKind {
+  1040→    /// `move` closure — takes ownership of captured variables.
+  1041→    Move,
+  1042→    /// `ref` closure — captures by reference.
+  1043→    Ref,
+  1044→    /// Auto-determined capture mode (default).
+  1045→    Auto,
+  1046→}
+  1047→
+  1048→// ---------------------------------------------------------------------------
+  1049→// Binary / Unary operators
+  1050→// ---------------------------------------------------------------------------
+  1051→
+  1052→/// Binary operators.
+  1053→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+  1054→pub enum BinOp {
+  1055→    /// `+`
+  1056→    Add,
+  1057→    /// `-`
+  1058→    Sub,
+  1059→    /// `*`
+  1060→    Mul,
+  1061→    /// `/`
+  1062→    Div,
+  1063→    /// `%`
+  1064→    Mod,
+  1065→    /// `==`
+  1066→    Eq,
+  1067→    /// `!=`
+  1068→    Ne,
+  1069→    /// `<`
+  1070→    Lt,
+  1071→    /// `<=`
+  1072→    Le,
+  1073→    /// `>`
+  1074→    Gt,
+  1075→    /// `>=`
+  1076→    Ge,
+  1077→    /// `&&`
+  1078→    And,
+  1079→    /// `||`
+  1080→    Or,
+  1081→    /// `&` (bitwise AND)
+  1082→    BitAnd,
+  1083→    /// `|` (bitwise OR)
+  1084→    BitOr,
+  1085→    /// `^` (bitwise XOR)
+  1086→    BitXor,
+  1087→    /// `<<` (left shift)
+  1088→    Shl,
+  1089→    /// `>>` (right shift)
+  1090→    Shr,
+  1091→}
+  1092→
+  1093→/// Unary operators.
+  1094→#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+  1095→pub enum UnOp {
+  1096→    /// `-` (numeric negation)
+  1097→    Neg,
+  1098→    /// `!` (logical not)
+  1099→    Not,
+  1100→    /// `*` (dereference — when used as a unary prefix)
+  1101→    Deref,
+  1102→    /// `~` (bitwise NOT)
+  1103→    BitNot,
+  1104→}
+  1105→
+  1106→// ---------------------------------------------------------------------------
+  1107→// Literals
+  1108→// ---------------------------------------------------------------------------
+  1109→
+  1110→/// A literal value embedded directly in the source.
+  1111→#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+  1112→pub enum Lit {
+  1113→    /// Integer literal (e.g. `42`, `0`).
+  1114→    Int(i64),
+  1115→    /// Floating-point literal (e.g. `3.14`).
+  1116→    /// NOTE: the lexer currently does not produce float tokens; this
+  1117→    /// variant exists for future extension.
+  1118→    Float(f64),
+  1119→    /// String literal.
+  1120→    String(String),
+  1121→    /// Boolean literal (`true` / `false`).
+  1122→    Bool(bool),
+  1123→    /// Hex address literal (e.g. `0xDEADBEEF`).
+  1124→    Address(u64),
+  1125→}
+  1126→
+  1127→// ---------------------------------------------------------------------------
+  1128→// Types
+  1129→// ---------------------------------------------------------------------------
+  1130→
+  1131→/// Type annotation (optional in many positions).
+  1132→///
+  1133→/// The type system covers primitive types, pointer types, region-annotated
+  1134→/// types, struct types, generic type applications, and BD annotations.
+  1135→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  1136→pub enum Type {
+  1137→    /// Base domain type (from the BD subsystem).
+  1138→    /// Examples: `u8`, `u32`, `i64`, `bool`, `void`.
+  1139→    BDBase(String),
+  1140→    /// Pointer type: `*T`
+  1141→    Ptr(Box<Type>),
+  1142→    /// Region-annotated pointer: `*T @ region`
+  1143→    RegionPtr {
+  1144→        /// The pointed-to type.
+  1145→        inner: Box<Type>,
+  1146→        /// Region name annotation.
+  1147→        region: String,
+  1148→    },
+  1149→    /// Fixed-size array: `[T; N]`
+  1150→    Array {
+  1151→        /// Element type.
+  1152→        element: Box<Type>,
+  1153→        /// Number of elements.
+  1154→        size: usize,
+  1155→    },
+  1156→    /// Struct type: named collection of typed fields.
+  1157→    Struct {
+  1158→        /// Struct name.
+  1159→        name: String,
+  1160→        /// Ordered field (name, type) pairs.
+  1161→        fields: Vec<(String, Type)>,
+  1162→    },
+  1163→    /// Generic type application: `Name<T1, T2, …>`
+  1164→    Generic {
+  1165→        /// Type name.
+  1166→        name: String,
+  1167→        /// Generic arguments.
+  1168→        args: Vec<Type>,
+  1169→    },
+  1170→    /// Function type: `(params) -> return_type`
+  1171→    Func {
+  1172→        /// Parameter types.
+  1173→        params: Vec<Type>,
+  1174→        /// Optional return type.
+  1175→        return_type: Option<Box<Type>>,
+  1176→    },
+  1177→    /// BD annotation type: `#bd(Name)`
+  1178→    BdAnnot {
+  1179→        /// BD annotation name.
+  1180→        name: String,
+  1181→    },
+  1182→}
+  1183→
+  1184→impl std::fmt::Display for Type {
+  1185→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  1186→        match self {
+  1187→            Type::BDBase(name) => write!(f, "{}", name),
+  1188→            Type::Ptr(inner) => write!(f, "*{}", inner),
+  1189→            Type::RegionPtr { inner, region } => write!(f, "*{} @ {}", inner, region),
+  1190→            Type::Array { element, size } => write!(f, "[{}; {}]", element, size),
+  1191→            Type::Struct { name, .. } => write!(f, "{}", name),
+  1192→            Type::Generic { name, args } => {
+  1193→                let a: Vec<String> = args.iter().map(|t| t.to_string()).collect();
+  1194→                write!(f, "{}<{}>", name, a.join(", "))
+  1195→            }
+  1196→            Type::Func {
+  1197→                params,
+  1198→                return_type,
+  1199→            } => {
+  1200→                let p: Vec<String> = params.iter().map(|t| t.to_string()).collect();
+  1201→                write!(f, "({})", p.join(", "))?;
+  1202→                if let Some(rt) = return_type {
+  1203→                    write!(f, " -> {}", rt)?;
+  1204→                }
+  1205→                Ok(())
+  1206→            }
+  1207→            Type::BdAnnot { name } => write!(f, "#bd({})", name),
+  1208→        }
+  1209→    }
+  1210→}
+  1211→

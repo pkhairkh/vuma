@@ -78,12 +78,16 @@ pub enum CompileTarget {
     /// Generic Linux user-space on AArch64.
     #[default]
     Linux,
+    /// WebAssembly 32-bit (WASI preview 1).
+    /// Produces a `.wasm` binary executable with `wasmer`, `wasmtime`, or Node.js.
+    Wasm32,
 }
 
 impl fmt::Display for CompileTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CompileTarget::Linux => write!(f, "linux"),
+            CompileTarget::Wasm32 => write!(f, "wasm32"),
         }
     }
 }
@@ -185,6 +189,7 @@ impl CompileConfig {
     fn emit_config(&self) -> EmitConfig {
         match self.target {
             CompileTarget::Linux => EmitConfig::linux_elf(),
+            CompileTarget::Wasm32 => EmitConfig::wasm_binary(),
         }
     }
 }
@@ -1384,7 +1389,7 @@ fn scg_type_to_name(ty: &ScgType) -> &'static str {
 /// - **Cast nodes**: `from_type` / `to_type` are updated if they couldn't
 ///   previously be parsed by `parse_scg_type`.
 /// - **Computation nodes**: `result_type` is set if it was previously `None`.
-fn refine_scg_types_with_bd(scg: &mut SCG, bd_results: &[(NodeId, BD)]) {
+pub fn refine_scg_types_with_bd(scg: &mut SCG, bd_results: &[(NodeId, BD)]) {
     let bd_map: HashMap<NodeId, &BD> = bd_results.iter().map(|(id, bd)| (*id, bd)).collect();
 
     let node_ids: Vec<_> = scg.node_ids().collect();
@@ -1475,7 +1480,7 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 ///    patterns (loops).
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
-fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
+pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
     let edge_idx = EdgeIndex::build(scg);
     let mut consumed: HashSet<NodeId> = HashSet::new();
     let mut scg_nodes: Vec<ScgNode> = Vec::new();
@@ -2035,6 +2040,70 @@ fn read_u64_le_or_be(bytes: &[u8], le: bool) -> u64 {
     }
 }
 
+/// Compile VUMA source code to a `.wasm` binary.
+///
+/// This is the primary API for LLM sandbox integration.  An LLM can
+/// generate VUMA source, compile it to Wasm, and execute it safely in
+/// a sandboxed environment using `wasmer`, `wasmtime`, or Node.js.
+///
+/// The produced `.wasm` module:
+/// - Imports `wasi_snapshot_preview1.fd_write` and `.proc_exit`
+/// - Exports `main`, `_start`, and runtime print helpers
+/// - Has a `_start` entry point that calls `main()` and passes the
+///   return value to `proc_exit`
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use vuma::pipeline::compile_to_wasm;
+///
+/// let source = "fn main() -> i32 { return 42; }";
+/// let wasm_binary = compile_to_wasm(source).expect("compilation failed");
+/// // wasm_binary is a valid .wasm module that exits with code 42
+/// ```
+pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
+    // ── Stage 1: Parse ────────────────────────────────────────────
+    let ast = match parse_source(source) {
+        Ok(ast) => ast,
+        Err(e) => return Err(vec![e]),
+    };
+
+    // ── Stage 2: AST → SCG ───────────────────────────────────────
+    let mut scg = match ast_to_scg(&ast) {
+        Ok(scg) => scg,
+        Err(e) => return Err(vec![e]),
+    };
+
+    // ── Stage 3: SCG Transforms (lightweight — no verification) ──
+    let _ = run_scg_transforms(&mut scg, &CompileConfig {
+        target: CompileTarget::Wasm32,
+        opt_level: OptLevel::O1,
+        verification_level: VerificationLevel::None,
+        entry_name: "main".to_string(),
+        debug_info: false,
+        stop_on_first_error: true,
+        max_inline_size: 50,
+    });
+
+    // ── Stage 4: IR Lowering ─────────────────────────────────────
+    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let mut ir_builder = IRBuilder::new();
+    let ir_program = match ir_builder.build(&codegen_scg) {
+        Ok(ir) => ir,
+        Err(e) => return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]),
+    };
+
+    // ── Stage 5: Compile IR → Wasm ──────────────────────────────
+    let wasm_bytes = match vuma_codegen::compile_to_wasm(&ir_program.functions) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]);
+        }
+    };
+
+    Ok(wasm_bytes)
+}
+
 /// Incremental compilation: only re-run stages affected by changes
 /// since the last compilation.
 ///
@@ -2103,7 +2172,7 @@ fn ast_to_scg(ast: &AstProgram) -> Result<SCG, VumaError> {
 }
 
 /// Run SCG transformation passes based on the optimisation level.
-fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipelineResult> {
+pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipelineResult> {
     let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
 
     match config.opt_level {

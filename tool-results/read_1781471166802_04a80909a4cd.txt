@@ -1,0 +1,876 @@
+     1→# VUMA Project Glossary
+     2→
+     3→This document defines every term used across the VUMA project. Each entry
+     4→includes the term, its pronunciation when non-obvious, a detailed definition
+     5→of at least 50 words, and cross-references to related terms. This glossary is
+     6→the single source of truth for terminology; all other documents should use
+     7→terms as defined here.
+     8→
+     9→---
+    10→
+    11→## Project Core Terms
+    12→
+    13→### SCG
+    14→
+    15→**Pronunciation:** /ɛs-siː-dʒiː/ (spell out: S-C-G)
+    16→
+    17→**Semantic Computation Graph** — The primary representation of a program in the
+    18→VUMA framework. The SCG is a directed, acyclic graph where nodes represent
+    19→computational operations (function application, type construction, effect
+    20→execution, resource allocation, memory access, deallocation, control flow, type
+    21→casts, and phantom markers for analysis), edges represent data flow, control
+    22→flow, derivation, and annotation relationships between operations, annotations
+    23→carry type information, constraints, invariants, and metadata attached to nodes
+    24→and edges, and regions delineate scopes, phases, security boundaries, and
+    25→deployment targets within the graph. The SCG is not derived from source code —
+    26→it *is* the program. Any textual or visual representation is a projection of the
+    27→SCG. Two programs with the same semantics have the same SCG, regardless of how
+    28→they were constructed (unique canonical form). The SCG is compositional
+    29→(subgraphs combine through formally defined composition operators),
+    30→transformable (semantics-preserving graph transformations are provably correct
+    31→by construction), and queryable (the IVE can ask arbitrary questions about
+    32→program properties through the SCG query engine). The SCG is implemented in the
+    33→`vuma-scg` crate and defines node types (`NodeType` enum with variants
+    34→Computation, Allocation, Deallocation, Access, Cast, Effect, Control, Phantom),
+    35→edge types (`EdgeKind` with DataFlow, ControlFlow, Derivation, Annotation),
+    36→and region types (`SCGRegion` with `DeploymentTarget`).
+    37→
+    38→**See also:** IVE, Projection, BD, COR, MSG
+    39→
+    40→---
+    41→
+    42→### IVE
+    43→
+    44→**Pronunciation:** /aɪv/ (rhymes with "hive")
+    45→
+    46→**Inference and Verification Engine** — The unified reasoning system that
+    47→replaces the traditional compiler's type checker, borrow checker, and static
+    48→analyzer. The IVE operates on the SCG and performs four core functions: (1) type
+    49→inference, deriving all types from SCG structure without requiring human
+    50→annotation by propagating Behavioral Descriptors through the graph; (2)
+    51→constraint inference, deriving temporal constraints, resource flow constraints,
+    52→security boundaries, and complexity bounds from program structure; (3)
+    53→verification, constructing formal proofs or counterexamples for properties that
+    54→cannot be inferred, checking the five VUMA global invariants (liveness,
+    55→exclusivity, interpretation, origin, cleanup) against the Memory State Graph;
+    56→and (4) gradual verification, maintaining a "verification debt" of properties
+    57→believed true but not yet proven, and continuously working to reduce this debt.
+    58→The IVE is the reasoning heart of the VUMA framework — it is what makes
+    59→verified-unsafe memory access possible, because it proves safety through global
+    60→reasoning rather than local restriction. The IVE is implemented in the
+    61→`vuma-ive` crate with per-invariant modules (`liveness.rs`, `exclusivity.rs`,
+    62→`interpretation.rs`, `origin.rs`, `cleanup.rs`), an inference engine
+    63→(`inference.rs`), a constraint system (`constraint.rs`), debt tracking
+    64→(`debt.rs`), and an invariant aggregator that runs all passes and produces
+    65→unified results (`invariant_aggregator.rs`).
+    66→
+    67→**See also:** SCG, VUMA, MSG, Verification Debt, Verification Confidence
+    68→
+    69→---
+    70→
+    71→### COR
+    72→
+    73→**Pronunciation:** /kɔːr/ (rhymes with "more")
+    74→
+    75→**Continuous Optimization Runtime** — The runtime system that replaces the
+    76→traditional compile-link-run pipeline. The COR maintains the SCG in an
+    77→always-compiled state: edits trigger incremental recompilation of affected
+    78→subgraphs, eliminating the concept of "build time." The COR performs
+    79→profile-guided optimization by collecting runtime profile data (including
+    80→hardware PMU counters for cycle count, instruction count, cache misses, and
+    81→branch misses) and feeding it back to the IVE for optimization decisions. It
+    82→supports speculative optimization (pre-optimizing likely execution paths with
+    83→transparent fallback via a snapshot-and-rollback mechanism) and adaptive
+    84→deployment (moving computation between nodes in a distributed system based on
+    85→latency, cost, and availability). The COR includes a deployment manager with
+    86→hot-swap support (6-phase state machine: Idle, PreparingShadow,
+    87→AwaitingSafePoint, Swapping, Completed, Failed), delta deployment (block-level
+    88→binary diffing for minimal transfer), and version logging with rollback
+    89→capability. The COR treats the SCG's region annotations as guidance for
+    90→deployment topology decisions and is implemented in the `vuma-cor` crate.
+    91→
+    92→**See also:** SCG, IVE, Projection
+    93→
+    94→---
+    95→
+    96→### BD
+    97→
+    98→**Pronunciation:** /biː-diː/ (spell out: B-D)
+    99→
+   100→**Behavioral Descriptor** — A triple `(RepD, CapD, RelD)` that describes data
+   101→by what it *does* rather than what it *is called*. The BD replaces traditional
+   102→nominal types in the VUMA framework. Where a traditional type bundles memory
+   103→layout, valid operations, and relationships into a single nominal category, the
+   104→BD decomposes these into three orthogonal dimensions that can each vary
+   105→independently. The IVE infers and verifies all three components of a BD from
+   106→program structure, function signatures, and execution context. The programmer
+   107→can add explicit descriptors as optional refinements, but they are never
+   108→mandatory annotations. Two values with the same BD are interchangeable
+   109→regardless of their nominal "type name," and two values with different BDs are
+   110→distinct even if they share a name. The BD is implemented as a struct in the
+   111→`vuma-bd` crate (`descriptor::BD`) with fields for each component, plus methods
+   112→for compatibility checking (`compatible()`), refinement ordering (`refines()`),
+   113→and composition. The crate also provides a context solver for BD inference and
+   114→a unification engine for BD compatibility.
+   115→
+   116→**See also:** RepD, CapD, RelD, IVE
+   117→
+   118→---
+   119→
+   120→### RepD
+   121→
+   122→**Pronunciation:** /rɛp-diː/ (rhymes with "step-dee")
+   123→
+   124→**Representation Descriptor** — The component of a Behavioral Descriptor that
+   125→specifies the physical layout of data in memory: size, alignment, field offsets,
+   126→and bit-level structure. A RepD is not a type; it is a *memory map*. Multiple
+   127→RepDs can describe the same memory at different granularities simultaneously —
+   128→a 128-byte region can be described as `bytes[128]`, as `float32[32]`, or as
+   129→`struct { header: uint32; payload: bytes[124] }`. The RepD does not choose
+   130→among these; it enumerates all valid interpretations. This multi-view capability
+   131→is what enables zero-copy interoperation and eliminates type-conversion bugs,
+   132→because there is no conversion — only a shift in perspective verified by the
+   133→IVE. The RepD is implemented as an enum in `vuma-bd::repd::RepD` with variants
+   134→for byte-level, pointer, struct, array, and primitive representations, along
+   135→with compatibility and refinement queries in `repd_compat.rs`. In the VUMA
+   136→standard library, RepD is used to annotate the memory layout of primitive types
+   137→like `Ptr<T>`, `RegionPtr<T>`, `Slice<T>`, `VumaResult<T, E>`, `VumaOption<T>`,
+   138→and `Range`.
+   139→
+   140→**See also:** BD, CapD, RelD, VUMA, Interpretation
+   141→
+   142→---
+   143→
+   144→### CapD
+   145→
+   146→**Pronunciation:** /kæp-diː/ (rhymes with "map-dee")
+   147→
+   148→**Capability Descriptor** — The component of a Behavioral Descriptor that
+   149→specifies what operations are valid on data in a given context. A CapD enumerates
+   150→permissions: read, write, iterate, send over network, persist to disk, execute
+   151→as code, derive pointer from, compare for equality, hash, serialize. A CapD is
+   152→a set of *permissions*, not a type class. The same data can have different
+   153→capabilities in different contexts — a buffer is readable and writable during
+   154→processing but only readable during transmission. CapD captures this
+   155→context-dependence natively, enabling polymorphism through capability matching:
+   156→any value with the required capabilities satisfies the constraint, regardless
+   157→of its nominal type. The CapD forms a lattice (implemented in
+   158→`vuma-bd::capd_lattice`) where the join is union and the meet is intersection,
+   159→with a sub-capability ordering. The CapD is implemented as a struct in
+   160→`vuma-bd::capd::CapD` with a bitflag-based `Capability` enum and methods for
+   161→strengthening, weakening, union, intersection, and sub-capability checking.
+   162→
+   163→**See also:** BD, RepD, RelD, Capability Calculi
+   164→
+   165→---
+   166→
+   167→### RelD
+   168→
+   169→**Pronunciation:** /rɛl-diː/ (rhymes with "tell-dee")
+   170→
+   171→**Relational Descriptor** — The component of a Behavioral Descriptor that
+   172→specifies relationships between data values: temporal co-occurrence, structural
+   173→containment, dependency ordering, semantic equivalence, and security-level flow.
+   174→A RelD captures the web of relationships that nominal types express through
+   175→inheritance hierarchies and trait implementations, but with far greater
+   176→expressiveness. For example, a RelD can express: "this value is semantically
+   177→equivalent to that value but represented differently" (a database row and a
+   178→protobuf message describing the same entity), or "this value must not outlive
+   179→that value" (a slice and its backing buffer), or "this value's security level
+   180→is derived from the maximum security level of its sources" (a computed result
+   181→combining public and secret inputs). The RelD is implemented as a struct in
+   182→`vuma-bd::reld::RelD` with a `Relation` enum for relationship kinds
+   183→(Containment, Liveness, Aliasing, DataFlow, RegionBound, Ownership) and methods
+   184→for composition, refinement, and intersection, with a separate refinement
+   185→engine in `reld_refine.rs`.
+   186→
+   187→**See also:** BD, RepD, CapD
+   188→
+   189→---
+   190→
+   191→### VUMA
+   192→
+   193→**Pronunciation:** /vuːmɑː/ (rhymes with "llama" with a v)
+   194→
+   195→**Verified-Unsafe Memory Access** — The memory model at the core of this
+   196→project, which permits unrestricted raw memory access (pointers, addresses,
+   197→manual allocation, arbitrary casts) and establishes safety through global
+   198→verification rather than local restriction. In the VUMA model, all data access
+   199→is pointer-based. There are no "safe references" and "unsafe pointers" — there
+   200→are only addresses, and the IVE verifies that every access through every address
+   201→is valid at the point of access. The memory model has three primitives: Address
+   202→(a numeric value identifying a location, implemented as `vuma_core::address::Address`),
+   203→Region (a contiguous range of addresses with allocation status, ownership
+   204→context, and access history, implemented as `vuma_core::region::Region`), and
+   205→Access (a read or write operation targeting an address, verified by the IVE
+   206→before execution, implemented as `vuma_core::access::Access`). VUMA inverts the
+   207→safety model: instead of "restrict by default, permit with explicit unsafe
+   208→blocks," it proposes "permit by default, verify by global reasoning, flag only
+   209→what cannot be proven safe." The VUMA core is implemented in the `vuma` crate
+   210→with modules for regions, addresses, accesses, derivations, synchronization,
+   211→the Memory State Graph, and SCG-to-MSG conversion.
+   212→
+   213→**See also:** IVE, MSG, Liveness, Exclusivity, Interpretation, Origin, Cleanup
+   214→
+   215→---
+   216→
+   217→### MSG
+   218→
+   219→**Pronunciation:** /ɛm-ɛs-dʒiː/ (spell out: M-S-G)
+   220→
+   221→**Memory State Graph** — The IVE's formal model of the program's entire memory
+   222→behavior. The MSG captures every allocation point and the region it creates,
+   223→every pointer derivation and the path from allocation to dereference, every
+   224→deallocation point and the region it destroys, every concurrent access and the
+   225→synchronization that orders it, and every cast or reinterpretation and the
+   226→representation descriptors involved. The IVE proves global memory invariants
+   227→(liveness, exclusivity, interpretation, origin, cleanup) against the MSG. The
+   228→MSG is the data structure that makes VUMA possible — it is the comprehensive
+   229→model against which all memory safety proofs are constructed. The MSG is
+   230→implemented as `vuma_core::msg::MSG` with an incremental update mechanism
+   231→(`vuma_core::msg_incremental`) that supports delta computation and application
+   232→for efficient incremental verification when the SCG changes. The MSG is
+   233→constructed from the SCG via `vuma_core::scg_to_msg::scg_to_msg()`, which
+   234→performs a topological walk of SCG nodes and creates the corresponding regions,
+   235→derivations, accesses, and synchronization edges.
+   236→
+   237→**See also:** VUMA, IVE, Liveness, Exclusivity, Interpretation, Origin, Cleanup
+   238→
+   239→---
+   240→
+   241→### Projection
+   242→
+   243→**Pronunciation:** /prəˈdʒɛkʃən/
+   244→
+   245→A view of the SCG rendered for human consumption. Projections come in four
+   246→forms: (1) Textual projections — traditional code-like views customized to the
+   247→viewer's role (systems programmer, domain expert, security auditor); (2) Visual
+   248→projections — dataflow diagrams, call graphs, state machines, memory layout
+   249→views that are live and interactive; (3) Conversational projections — natural
+   250→language dialogue where the human describes intent and the system translates it
+   251→into SCG modifications; and (4) Diff projections — change descriptions in human
+   252→terms ("the authentication flow now requires 2FA for admin accounts") rather
+   253→than line-level diffs. Projections are bidirectional: changes to the projection
+   254→are propagated back to the SCG and validated by the IVE before being applied.
+   255→The projection system is implemented in the `vuma-projection` crate with
+   256→modules for textual, visual, conversational, and diff projections, plus a
+   257→bidirectional synchronization engine.
+   258→
+   259→**See also:** SCG, IVE
+   260→
+   261→---
+   262→
+   263→### Outcome Space
+   264→
+   265→**Pronunciation:** /ˈaʊtkʌm speɪs/
+   266→
+   267→The complete set of possible outcomes of a computation, including all failure
+   268→modes. In the VUMA framework, the type of a function includes its complete
+   269→outcome space — not just `Result<T, E>` with a generic error type, but a
+   270→structured enumeration of every possible outcome with its conditions and
+   271→handlers. The IVE verifies that every outcome is handled, either explicitly by
+   272→the programmer or implicitly by a verified safe default. As the program executes
+   273→and invariants are established, the outcome space shrinks — for example, after
+   274→authentication succeeds, the "unauthorized" outcome is removed from the
+   275→possibility space for subsequent operations. The VUMA standard library provides
+   276→`VumaResult<T, E>` and `VumaOption<T>` types with embedded Behavioral
+   277→Descriptors that track the outcome space, enabling the IVE to reason about
+   278→which outcomes are possible at each program point and verify that all are
+   279→handled appropriately.
+   280→
+   281→**See also:** IVE, BD, CapD
+   282→
+   283→---
+   284→
+   285→### Verification Debt
+   286→
+   287→**Pronunciation:** /ˌvɛrɪfɪˈkeɪʃən dɛt/
+   288→
+   289→Properties believed true but not yet formally proven by the IVE. The IVE
+   290→maintains verification debt as a prioritized work list: it continuously works
+   291→to reduce debt, prioritizing properties that affect correctness and security.
+   292→The concept mirrors technical debt in software engineering, but applies to
+   293→formal guarantees rather than code quality. Verification debt is acceptable in
+   294→practice because not all properties need to be proven at all times — but the
+   295→system tracks and communicates the current debt level so that stakeholders can
+   296→make informed decisions about risk. In the codebase, verification debt is
+   297→tracked by the `vuma_ive::debt::VerificationDebt` struct, which maintains a
+   298→list of `DebtItem` entries with priorities, statuses, and descriptions. Code
+   299→that has not yet been verified by the IVE is marked with `// IVE-TODO`
+   300→annotations, which are the code-level representation of verification debt.
+   301→
+   302→**See also:** IVE, Verification Confidence, IVE-TODO
+   303→
+   304→---
+   305→
+   306→### Verification Confidence
+   307→
+   308→**Pronunciation:** /ˌvɛrɪfɪˈkeɪʃən ˈkɒnfɪdəns/
+   309→
+   310→A tiered assessment of proof strength assigned to each verified property by the
+   311→IVE: (1) **Proven safe** — the IVE has constructed a formal proof, represented
+   312→by `VerificationStatus::ProvenSafe` with the proof steps and evidence; (2)
+   313→**Probably safe given stated assumptions** — the IVE has proven safety
+   314→conditional on assumptions that it cannot verify but are documented and tracked,
+   315→represented by `VerificationStatus::ProbablySafe` with the list of assumptions;
+   316→(3) **Unverified** — the IVE has not yet been able to establish safety,
+   317→represented by `VerificationStatus::Unverified` with the reason why verification
+   318→could not be completed. Deployment policies can require minimum confidence
+   319→levels for different environments, allowing the system to gracefully degrade
+   320→when full verification is not achievable. The verification confidence levels are
+   321→defined in `vuma_ive::result::VerificationStatus` and are used throughout the
+   322→verification pipeline to communicate proof strength to the programmer and the
+   323→runtime.
+   324→
+   325→**See also:** IVE, Verification Debt, VUMA
+   326→
+   327→---
+   328→
+   329→## Verification Invariant Terms
+   330→
+   331→### Liveness
+   332→
+   333→**Pronunciation:** /ˈlaɪvnəs/
+   334→
+   335→The VUMA invariant requiring that every memory access targets a region that is
+   336→allocated at that program point. The IVE proves liveness by tracking allocation
+   337→and deallocation events through the MSG and verifying that no execution path
+   338→leads to a dereference of a freed or unallocated region. If the IVE cannot
+   339→prove liveness for a specific access, it flags that access and provides the
+   340→execution path that leads to the potential use-after-free. Liveness is the first
+   341→of the five VUMA global invariants and corresponds to the elimination of
+   342→use-after-free bugs. The liveness verification pass is implemented in
+   343→`vuma_ive::liveness::LivenessVerifier`, which performs a forward dataflow
+   344→analysis over the MSG tracking resource events (allocate, access, free) and
+   345→checking that every access is preceded by an allocation and not followed by a
+   346→deallocation at the same program point. The pass produces a
+   347→`LivenessVerificationResult` with either proof obligations satisfied or
+   348→specific `LivenessViolation` entries containing the offending address, program
+   349→point, and execution path.
+   350→
+   351→**See also:** VUMA, MSG, Exclusivity, Origin, Cleanup
+   352→
+   353→---
+   354→
+   355→### Exclusivity
+   356→
+   357→**Pronunciation:** /ˌɛkskluːˈsɪvɪti/
+   358→
+   359→The VUMA invariant requiring that every write access does not overlap with a
+   360→simultaneous read or write access through a different address. The IVE proves
+   361→exclusivity by analyzing concurrent access patterns through the MSG, verifying
+   362→that either accesses are properly ordered by synchronization (happens-before
+   363→edges, atomic operations, mutex acquisitions) or that they target non-overlapping
+   364→regions. If the IVE cannot prove exclusivity, it flags the potential data race
+   365→and provides the concurrent execution paths. Exclusivity is the second VUMA
+   366→invariant and corresponds to the elimination of data races. The exclusivity
+   367→verification pass is implemented in `vuma_ive::exclusivity::ExclusivityVerifier`,
+   368→which constructs an interference graph of concurrent accesses and checks for
+   369→conflicts. The pass considers synchronization edges (represented as
+   370→`vuma_core::sync::SyncEdge` with orderings like HappensBefore, AcquireRelease,
+   371→SequentiallyConsistent) that establish ordering between accesses. ARM64 barrier
+   372→instructions (DMB, DSB, ISB) and atomic instructions (LDXR/STXR, CAS) are
+   373→modeled as synchronization edges by the IVE.
+   374→
+   375→**See also:** VUMA, MSG, Liveness, Interpretation, DMB, DSB, LDXR, STXR
+   376→
+   377→---
+   378→
+   379→### Interpretation
+   380→
+   381→**Pronunciation:** /ɪnˌtɜːprɪˈteɪʃən/
+   382→
+   383→The VUMA invariant requiring that every memory access interprets the target
+   384→bytes according to a valid representation descriptor (RepD). If the IVE cannot
+   385→prove the interpretation is valid (for example, reading uninitialized memory as
+   386→a pointer, or interpreting a floating-point bit pattern as an integer when the
+   387→subsequent operations require an integer), it flags the access. Interpretation
+   388→is the third VUMA invariant and ensures that the bytes at any accessed address
+   389→are meaningful under the operation being performed, eliminating type confusion
+   390→and uninitialized-memory bugs. The interpretation verification pass is
+   391→implemented in `vuma_ive::interpretation::InterpretationVerifier`, which traces
+   392→write-read pairs across the MSG and verifies that the RepD at the write point
+   393→is compatible with the RepD expected at the read point. The pass uses the
+   394→`repd_compat` module from `vuma-bd` to check RepD compatibility, and produces
+   395→`InterpretationViolation` entries with the write-read pair and the incompatible
+   396→RepDs when violations are found.
+   397→
+   398→**See also:** VUMA, MSG, RepD, Liveness
+   399→
+   400→---
+   401→
+   402→### Origin
+   403→
+   404→**Pronunciation:** /ˈɒrɪdʒɪn/
+   405→
+   406→The VUMA invariant requiring that every address can be traced back to a valid
+   407→allocation point through a well-formed derivation chain. If an address is
+   408→computed through arithmetic that the IVE cannot trace to an allocation (for
+   409→example, a hardcoded constant like `0xDEADBEEF`, or a value read from an
+   410→untrusted source without validation), the IVE flags the computation. Origin is
+   411→the fourth VUMA invariant and prevents the creation of "phantom pointers" that
+   412→point to memory the program never allocated, which could corrupt arbitrary
+   413→process memory. The origin verification pass uses taint analysis: each source
+   414→of pointer values is assigned a trust level, and the IVE verifies that every
+   415→pointer used in an access operation has a trust level that meets the required
+   416→threshold. The origin verification is implemented in
+   417→`vuma_ive::origin` and supported by the proof infrastructure in
+   418→`vuma_proof::origin_proofs`, which provides `OriginProof`, `DerivationChainProof`,
+   419→taint labels, and proof tactics for establishing origin.
+   420→
+   421→**See also:** VUMA, MSG, Liveness, Cleanup, Derivation Chain
+   422→
+   423→---
+   424→
+   425→### Cleanup
+   426→
+   427→**Pronunciation:** /ˈkliːnʌp/
+   428→
+   429→The VUMA invariant requiring that every allocated region is eventually freed,
+   430→or explicitly marked as intentionally leaked (for example, a long-lived arena
+   431→or a global static). If the IVE detects a potential leak, it flags the
+   432→allocation. Cleanup is the fifth VUMA invariant and corresponds to the
+   433→elimination of memory leaks. The "explicitly marked as intentionally leaked"
+   434→exception accommodates patterns where memory is intentionally never freed
+   435→(program-lifetime arenas, static globals), distinguishing them from accidental
+   436→leaks. The cleanup verification pass is implemented in
+   437→`vuma_ive::cleanup::CleanupVerifier`, which constructs a cleanup graph tracking
+   438→allocation-deallocation pairs and verifies that every allocation has a matching
+   439→deallocation on all execution paths. The pass produces `CleanupViolation`
+   440→entries with the specific `ViolationKind` (Leaked, PartialLeak, DoubleFree) and
+   441→the offending allocation's program point. The proof infrastructure in
+   442→`vuma_proof::cleanup_proofs` provides formal proof objects for cleanup
+   443→verification results.
+   444→
+   445→**See also:** VUMA, MSG, Liveness, Origin
+   446→
+   447→---
+   448→
+   449→## ARM64 / AArch64 Terms
+   450→
+   451→### AAPCS64
+   452→
+   453→**Pronunciation:** /æpks-sɪkstiː-fɔːr/ (spell out acronym)
+   454→
+   455→**ARM Architecture Procedure Call Standard for 64-bit** — The ABI (Application
+   456→Binary Interface) that governs how functions are called on ARM64 processors.
+   457→AAPCS64 defines which registers are used for arguments (x0–x7 for integer/pointer
+   458→arguments, v0–v7 for floating-point/SIMD arguments), which registers are
+   459→caller-saved (x0–x18, excluding SP and XZR) vs. callee-saved (x19–x28), stack
+   460→frame layout with 16-byte stack alignment, and return value conventions (x0 for
+   461→scalar returns, x8 for indirect result locations). VUMA codegen must comply with
+   462→AAPCS64 to interoperate with C libraries and the operating system. The
+   463→register classification is implemented in `vuma_codegen::arm64::Register` with
+   464→methods `is_callee_saved()`, `is_caller_saved()`, `arg_register(index)`, and
+   465→`arg_index()`. The codegen's register allocator (`vuma_codegen::regalloc`) must
+   466→respect AAPCS64 calling conventions when allocating registers for function calls.
+   467→
+   468→**See also:** Cortex-A76, Register
+   469→
+   470→---
+   471→
+   472→### DMB
+   473→
+   474→**Pronunciation:** /diː-ɛm-biː/ (spell out)
+   475→
+   476→**Data Memory Barrier** — An ARM64 instruction that ensures that all explicit
+   477→memory accesses before the DMB complete before any explicit memory accesses
+   478→after the DMB are observed. DMB is used to enforce ordering between memory
+   479→operations in multi-processor or DMA scenarios. DMB accepts a barrier option
+   480→that specifies the shareability domain: `SY` (full system), `ISH` (inner
+   481→shareable), `OSH` (outer shareable), plus load/store variants (`ISHLD`,
+   482→`ISHST`, `OSHLD`, `OSHST`, `LD`, `ST`). In VUMA, the IVE must understand DMB
+   483→semantics to correctly verify the exclusivity invariant across concurrent
+   484→access patterns. DMB does not cause a pipeline flush; it only orders memory
+   485→operations as observed by other observers. The DMB instruction is represented
+   486→as `Instruction::DMB { option: BarrierOption }` in the codegen, with encoding
+   487→implemented in the `Instruction::encode()` method.
+   488→
+   489→**See also:** DSB, ISB, Exclusivity, BarrierOption
+   490→
+   491→---
+   492→
+   493→### DSB
+   494→
+   495→**Pronunciation:** /diː-ɛs-biː/ (spell out)
+   496→
+   497→**Data Synchronization Barrier** — An ARM64 instruction stronger than DMB: it
+   498→ensures that all explicit memory accesses before the DSB complete before any
+   499→instruction after the DSB is executed. DSB is required when the CPU must wait
+   500→for memory operations to be truly complete (for example, after writing to a
+   501→device register before reading a status register). In VUMA, DSB is used in
+   502→device-driver code and in memory-mapped I/O scenarios where
+   503→the IVE must model device-visible memory ordering. The DSB instruction is
+   504→represented as `Instruction::DSB { option: BarrierOption }` in the codegen and
+   505→accepts the same barrier options as DMB (`SY`, `ISH`, `OSH`, and their load/store
+   506→variants). The DSB is modeled as a full memory fence in the MSG's synchronization
+   507→model, creating happens-before edges between all preceding and subsequent memory
+   508→operations.
+   509→
+   510→**See also:** DMB, ISB
+   511→
+   512→---
+   513→
+   514→### ISB
+   515→
+   516→**Pronunciation:** /aɪ-ɛs-biː/ (spell out)
+   517→
+   518→**Instruction Synchronization Barrier** — An ARM64 instruction that flushes the
+   519→processor pipeline so that all instructions after the ISB are fetched from the
+   520→instruction cache or memory after the ISB completes. ISB is required after
+   521→writing to system registers (such as the SCTLR, TLB entries, or branch predictor
+   522→settings) to ensure the change takes effect before subsequent instructions
+   523→execute. In VUMA, ISB is relevant for context-switching code and low-level
+   524→system programming. The ISB instruction is represented as
+   525→`Instruction::ISB` (no operands) in the codegen. The IVE models ISB as a
+   526→full execution barrier that also implies DSB semantics, ensuring all prior
+   527→memory and system register writes are visible before subsequent instructions
+   528→execute.
+   529→
+   530→**See also:** DMB, DSB
+   531→
+   532→---
+   533→
+   534→### LDXR
+   535→
+   536→**Pronunciation:** /ɛl-diː-ɛks-ɑːr/ (spell out)
+   537→
+   538→**Load Exclusive Register** — An ARM64 instruction that loads a value from
+   539→memory and tags the memory address for exclusive access monitoring. LDXR is one
+   540→half of the ARM64 exclusive access pair (with STXR) that implements lock-free
+   541→atomic operations. The hardware tracks whether the tagged address has been
+   542→written to by another agent between the LDXR and the subsequent STXR. In VUMA,
+   543→LDXR/STXR pairs are the codegen target for atomic compare-and-swap operations
+   544→(the fallback path when ARMv8.1-LSE CAS is not available), and the IVE must
+   545→understand their semantics to verify the exclusivity invariant for lock-free
+   546→data structures. The LDXR instruction is represented as `Instruction::LDXR {
+   547→rt, rn }` in the codegen, encoding as a 32-bit word with the base register (Rn)
+   548→and destination register (Rt). The exclusive monitor is modeled in the MSG as
+   549→a special synchronization edge that provides conditional ordering.
+   550→
+   551→**See also:** STXR, CAS, Exclusivity
+   552→
+   553→---
+   554→
+   555→### STXR
+   556→
+   557→**Pronunciation:** /ɛs-tiː-ɛks-ɑːr/ (spell out)
+   558→
+   559→**Store Exclusive Register** — An ARM64 instruction that attempts to store a
+   560→value to memory, succeeding only if the target address has not been written to
+   561→by another agent since the corresponding LDXR. STXR returns a status value in
+   562→a register: 0 indicates success, 1 indicates failure (the exclusive monitor was
+   563→lost). In VUMA, STXR is the codegen target for the store side of atomic
+   564→compare-and-swap. Failed STXR operations typically cause a retry loop, and the
+   565→IVE must verify that such loops eventually succeed (a liveness property) and
+   566→that the retry logic correctly handles the failure case. The STXR instruction
+   567→is represented as `Instruction::STXR { rs, rt, rn }` in the codegen, with the
+   568→status register (Rs), value register (Rt), and base address register (Rn).
+   569→
+   570→**See also:** LDXR, CAS, Liveness, Exclusivity
+   571→
+   572→---
+   573→
+   574→### CAS
+   575→
+   576→**Pronunciation:** /siː-eɪ-ɛs/ (spell out)
+   577→
+   578→**Compare and Swap** — An ARM64 atomic instruction (ARMv8.1-LSE) that
+   579→atomically compares the value at a memory address with an expected value and,
+   580→if they match, replaces it with a new value. CAS is the single-instruction
+   581→equivalent of the LDXR/STXR loop pair, providing better performance on
+   582→ARMv8.1-capable processors. CAS variants
+   583→include acquire (`CASA`), release (`CASL`), and acquire-release (`CASAL`)
+   584→ordering semantics. In VUMA, the codegen prefers CAS over LDXR/STXR when the
+   585→target supports ARMv8.1-LSE, falling back to LDXR/STXR otherwise. The CAS
+   586→instruction is represented as `Instruction::CAS { rs, rt, rn }` in the codegen.
+   587→The IVE models CAS as an atomic operation that provides both exclusivity and
+   588→happens-before ordering, making it the strongest synchronization primitive
+   589→available in the ARM64 instruction set.
+   590→
+   591→**See also:** LDXR, STXR, Exclusivity
+   592→
+   593→---
+   594→
+   595→### Cortex-A76
+   596→
+   597→**Pronunciation:** /ˈkɔːtɛks eɪ sɛvənti-sɪks/
+   598→
+   599→An ARM-compatible 64-bit out-of-order, superscalar CPU core implementing the
+   600→ARMv8.2-A architecture. It features a 4-wide decode pipeline, branch prediction,
+   601→and a deep reorder buffer that allows significant instruction-level parallelism.
+   602→For VUMA, the Cortex-A76's memory model (weakly ordered with multi-copy atomicity)
+   603→is the target for the IVE's exclusivity verification, and its instruction set
+   604→(including ARMv8.1-LSE atomic instructions like CAS, LDADD, and STLXR) is the
+   605→target for the ARM64 codegen backend. The Cortex-A76 supports the AAPCS64
+   606→calling convention and has 31 general-purpose registers (X0–X30), the stack
+   607→pointer (SP), and the zero register (XZR).
+   608→
+   609→**See also:** BCM2712, AAPCS64
+   610→
+   611→---
+   612→
+   613→## Hardware Terms
+   614→
+   615→### BCM2712
+   616→
+   617→**Pronunciation:** /biː-siː-ɛm tuː-θɜːtiːn/ (spell out)
+   618→
+   619→A system-on-chip (SoC) containing a quad-core ARM Cortex-A76 processor clocked
+   620→at 2.4 GHz, a VideoCore VII GPU, and a comprehensive set of peripherals
+   621→including PCIe 2.0, USB 3.0, Gigabit Ethernet, and extended GPIO. The BCM2712
+   622→is a supported hardware target for VUMA codegen and verification: ARM64
+   623→assembly output must execute correctly on this SoC, and the IVE must model its
+   624→memory model, cache hierarchy, and peripheral address map.
+   625→
+   626→**See also:** Cortex-A76, GPIO, UART
+   627→
+   628→---
+   629→
+   630→### GPIO
+   631→
+   632→**Pronunciation:** /dʒiː-piː-aɪ-oʊ/ (spell out)
+   633→
+   634→**General-Purpose Input/Output** — Configurable digital pins that can be used
+   635→for a wide variety of hardware interfacing tasks. A typical board exposes a
+   636→40-pin GPIO header, with pins supporting digital I/O, PWM, I2C, SPI, and UART
+   637→protocols. In VUMA, GPIO access is performed through memory-mapped I/O: the SoC
+   638→maps GPIO registers into the physical address space. The IVE must model these
+   639→as device memory with specific ordering requirements (DSB after writes, DMB
+   640→before reads).
+   641→
+   642→**See also:** BCM2712, UART, DMB
+   643→
+   644→---
+   645→
+   646→### UART
+   647→
+   648→**Pronunciation:** /juː-ɑːrt/ (rhymes with "part")
+   649→
+   650→**Universal Asynchronous Receiver-Transmitter** — The serial communication
+   651→peripheral used for console I/O and debug output. In VUMA, UART output is the
+   652→first I/O capability implemented, providing a way to print verification results
+   653→and program output before more complex drivers (USB, Ethernet) are available.
+   654→UART registers are memory-mapped and accessed with device memory ordering
+   655→semantics.
+   656→
+   657→**See also:** BCM2712, GPIO
+   658→
+   659→---
+   660→
+   661→## Type Theory Terms
+   662→
+   663→### Nominal Types
+   664→
+   665→**Pronunciation:** /ˈnɒmɪnəl taɪps/
+   666→
+   667→Types defined by their *name* and explicit declaration. Two nominal types are
+   668→considered distinct even if they have identical structure — for example,
+   669→`struct UserId(u64)` and `struct OrderId(u64)` are different types in Rust
+   670→despite having the same memory layout, because they have different names.
+   671→Nominal typing is the dominant paradigm in mainstream languages (C, Java, Rust,
+   672→Swift) because it aligns with how humans categorize the world. In VUMA, nominal
+   673→types are superseded by Behavioral Descriptors, which define data by what it
+   674→*does* (representation, capabilities, relationships) rather than by what it is
+   675→*called*. This means that two values with different names but the same BD are
+   676→interchangeable, and two values with the same name but different BDs are
+   677→distinct — a more flexible and precise system than nominal typing alone.
+   678→
+   679→**See also:** Structural Types, Behavioral Types, BD
+   680→
+   681→---
+   682→
+   683→### Structural Types
+   684→
+   685→**Pronunciation:** /ˈstrʌktʃərəl taɪps/
+   686→
+   687→Types defined by their *structure* rather than their name. Two structural types
+   688→are considered equivalent if they have the same shape, regardless of what they
+   689→are called. TypeScript interfaces, Go structural typing for interfaces, and ML
+   690→record types are examples. Structural typing is more flexible than nominal
+   691→typing for interoperation (any value with the right shape satisfies the
+   692→interface), but it can accidentally equate types that happen to share structure
+   693→but have different semantic intent. VUMA's Behavioral Descriptors generalize
+   694→structural types: instead of comparing shape, they compare capabilities and
+   695→relationships, capturing the useful properties of structural typing while
+   696→avoiding accidental equivalence through the RelD component that captures
+   697→semantic relationships.
+   698→
+   699→**See also:** Nominal Types, Behavioral Types, CapD, RelD
+   700→
+   701→---
+   702→
+   703→### Behavioral Types
+   704→
+   705→**Pronunciation:** /bɪˈheɪvjərəl taɪps/
+   706→
+   707→A type formalism that describes the *behavior* of a component — the sequence
+   708→and conditions of interactions it may engage in — rather than just its data
+   709→layout. Behavioral types originate in concurrency theory (session types,
+   710→behavioral contracts) and specify communication protocols, ordering constraints,
+   711→and resource usage patterns. VUMA's Behavioral Descriptors are a form of
+   712→behavioral type that extends the concept from communication protocols to all
+   713→properties of data: what operations are valid (CapD), what memory layout is used
+   714→(RepD), and what relationships exist with other data (RelD). This makes VUMA's
+   715→type system a full behavioral type system, not just a data classification system,
+   716→enabling the IVE to reason about behavioral properties like protocol compliance
+   717→and resource usage patterns in addition to memory safety.
+   718→
+   719→**See also:** Nominal Types, Structural Types, BD, CapD
+   720→
+   721→---
+   722→
+   723→### Capability Calculi
+   724→
+   725→**Pronunciation:** /ˌkeɪpəˈbɪlɪti ˈkælkjʊlaɪ/
+   726→
+   727→A family of formal calculi that model capabilities as first-class, unforgeable
+   728→tokens that grant specific access rights. Capability calculi (such as the
+   729→object-capability model, capability-based security, and the calculus of
+   730→capabilities) provide formal foundations for reasoning about which components
+   731→can access which resources. VUMA's CapD system draws on capability calculi
+   732→theory: a CapD is essentially a capability set, and the IVE verifies that no
+   733→operation exceeds the capabilities granted to its inputs. The key difference
+   734→from traditional capability systems is that VUMA capabilities are *inferred* by
+   735→the IVE rather than explicitly managed by the programmer, reducing the
+   736→cognitive burden while maintaining the formal guarantees. The CapD lattice
+   737→structure (join = union, meet = intersection, sub-capability ordering) is
+   738→implemented in `vuma-bd::capd_lattice` and provides the algebraic foundation
+   739→for capability reasoning.
+   740→
+   741→**See also:** CapD, BD, IVE
+   742→
+   743→---
+   744→
+   745→## Additional Project Terms
+   746→
+   747→### Derivation Chain
+   748→
+   749→**Pronunciation:** /dɛrɪˈveɪʃən tʃeɪn/
+   750→
+   751→The sequence of operations by which a pointer is computed from an original
+   752→allocation. For example, if `base = allocate(bytes[1024])`, `offset = base +
+   753→64`, and `field_ptr = offset as *Header`, then the derivation chain for
+   754→`field_ptr` is `[base, offset, field_ptr]`. The IVE tracks derivation chains
+   755→through the MSG to verify the origin invariant (every address traces back to an
+   756→allocation) and to verify that derived pointers remain within the bounds of
+   757→their originating region. Derivation chains are modeled in the MSG as
+   758→`vuma_core::derivation::Derivation` entries with kinds (Direct, Offset, Cast,
+   759→Index) and provenance ranges (base address + size from the original allocation).
+   760→The SCG query engine (`vuma_scg::query::find_derivation_chains`) can compute
+   761→derivation chains from any node to its ancestors, and the proof infrastructure
+   762→(`vuma_proof::origin_proofs::DerivationChainProof`) provides formal proof
+   763→objects for derivation chain well-formedness.
+   764→
+   765→**See also:** MSG, Origin, VUMA, Derivation
+   766→
+   767→---
+   768→
+   769→### Region (SCG)
+   770→
+   771→**Pronunciation:** /ˈriːdʒən/
+   772→
+   773→A subgraph of the SCG that delineates a scope, phase, security boundary, or
+   774→deployment target. SCG regions are the unit of composition, optimization, and
+   775→deployment. The COR uses region annotations to guide adaptive deployment
+   776→decisions (moving computation between nodes based on latency and cost
+   777→constraints). In the VUMA memory model, a Region is also a contiguous range of
+   778→addresses with associated metadata (allocation status, ownership context, access
+   779→history). The dual usage is intentional: SCG regions correspond to ownership
+   780→contexts, and memory regions are the physical manifestation of those contexts.
+   781→SCG regions are implemented as `vuma_scg::region::SCGRegion` with a
+   782→`DeploymentTarget` enum (Heap, Stack, Global, Mmap, Gpu, Device) and a set of
+   783→node IDs. Memory regions are implemented as `vuma_core::region::Region` with
+   784→`RegionId`, base address, size, `RegionStatus` (Allocated, Freed, Stack, Device,
+   785→Static), and program points for allocation and deallocation.
+   786→
+   787→**See also:** SCG, COR, MSG
+   788→
+   789→---
+   790→
+   791→### VUMA-VERIFIED
+   792→
+   793→**Pronunciation:** /ˈvuːmɑː ˈvɛrɪfaɪd/
+   794→
+   795→A code annotation comment (`// VUMA-VERIFIED`) used in the VUMA Rust codebase
+   796→to mark methods and functions whose safety has been formally verified by the
+   797→IVE. This comment replaces the `unsafe` keyword in semantic intent: where Rust
+   798→would require an `unsafe` block to acknowledge that the programmer takes
+   799→responsibility for safety, `// VUMA-VERIFIED` indicates that the IVE has taken
+   800→that responsibility and proven safety. No VUMA stdlib code should contain bare
+   801→`unsafe` blocks — all raw memory access should be either `// VUMA-VERIFIED` or
+   802→`// IVE-TODO`. The annotation must include a brief description of what was
+   803→verified: `// VUMA-VERIFIED: IVE proves this dereference targets a live,
+   804→aligned region`. The CI pipeline scans for `unsafe` blocks without the required
+   805→annotations and rejects any PR that introduces an un-annotated `unsafe` block.
+   806→
+   807→**See also:** IVE-TODO, VUMA, Verification Confidence
+   808→
+   809→---
+   810→
+   811→### IVE-TODO
+   812→
+   813→**Pronunciation:** /aɪv tuːˈduː/
+   814→
+   815→A code annotation comment (`// IVE-TODO`) used in the VUMA Rust codebase to
+   816→mark methods and functions where IVE verification has not yet been implemented.
+   817→This is the equivalent of Rust's `unsafe` block in terms of acknowledging that
+   818→safety has not been formally proven, but it carries a different connotation: it
+   819→is a *temporary* state, not an accepted risk. The project tracks IVE-TODO items
+   820→as verification debt that must be resolved before stable releases. The annotation
+   821→must include a brief description of what needs to be verified:
+   822→`// IVE-TODO: verify origin and liveness for this pointer arithmetic`. The
+   823→CI pipeline scans for bare `unsafe` blocks and rejects any that lack either
+   824→`// VUMA-VERIFIED` or `// IVE-TODO` annotations. The verification debt tracker
+   825→(`vuma_ive::debt::VerificationDebt`) maintains a list of all IVE-TODO items
+   826→with their priorities and statuses, enabling the project to track progress
+   827→toward full verification coverage.
+   828→
+   829→**See also:** VUMA-VERIFIED, Verification Debt, IVE
+   830→
+   831→---
+   832→
+   833→### Invariant Aggregator
+   834→
+   835→**Pronunciation:** /ɪnˈvɛəriənt ˈæɡrɪɡeɪtər/
+   836→
+   837→The IVE component that runs all verification passes and produces a unified
+   838→verification summary. The aggregator executes each invariant check (liveness,
+   839→exclusivity, interpretation, origin, cleanup) against the MSG and combines the
+   840→results into an `AggregatedResult` with an `OverallVerdict` (AllPassed,
+   841→PartialPass, Failed), per-invariant deltas (`InvariantDelta` showing what
+   842→changed since the last verification run), and a `DiagnosticsReport` with
+   843→actionable information. The aggregator is implemented in
+   844→`vuma_ive::invariant_aggregator::InvariantAggregator` and is the primary entry
+   845→point for running full verification. It also supports incremental verification
+   846→by comparing the current verification state against a previous snapshot and
+   847→only re-running the invariant checks that are affected by the changes.
+   848→
+   849→**See also:** IVE, MSG, Liveness, Exclusivity, Interpretation, Origin, Cleanup
+   850→
+   851→---
+   852→
+   853→### Proof Object
+   854→
+   855→**Pronunciation:** /pruːf ˈɒbdʒɛkt/
+   856→
+   857→A structured representation of a formal proof constructed by the IVE during
+   858→verification. A proof object contains a goal (the property being proven), a
+   859→sequence of proof steps (each applying an inference rule to derive a new fact
+   860→from previous facts), and a conclusion (the final derived fact that establishes
+   861→the goal). Proof objects are checked by the `vuma_proof::checker::ProofChecker`,
+   862→which verifies that each step follows from previous steps using the stated
+   863→inference rules and detects circular reasoning. When a proof cannot be
+   864→constructed, the IVE generates a `CounterExample` from `vuma_proof::counterexample`
+   865→that describes a minimal execution trace demonstrating the violation, helping
+   866→the programmer understand and fix the issue.
+   867→
+   868→**See also:** IVE, Verification Confidence, CounterExample
+   869→
+   870→---
+   871→
+   872→*This glossary is maintained as part of the VUMA project documentation. To add
+   873→a term, submit a PR with the term added in alphabetical order, following the
+   874→format above. Every term must have a definition of at least 50 words and at
+   875→least one "See also" cross-reference.*
+   876→
