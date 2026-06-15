@@ -1,0 +1,2002 @@
+     1→//! # Multi-Backend Trait Architecture
+     2→//!
+     3→//! Defines the `TargetInfo` and `Backend` traits that allow VUMA to target
+     4→//! multiple instruction set architectures. Each ISA implements these traits
+     5→//! to provide target-specific information and code generation.
+     6→
+     7→use crate::arm32::Arm32Backend;
+     8→use crate::ir::{size_of_with_ptr_width, alignment_of_with_ptr_width, IRFunction, IRInstr, IRType};
+     9→use crate::loongarch64::LoongArch64Backend;
+    10→use crate::mips64::Mips64Backend;
+    11→use crate::ppc64::PPC64Backend;
+    12→use crate::riscv64::RiscV64Backend;
+    13→use crate::x86_64::X86_64Backend;
+    14→use std::collections::HashMap;
+    15→use std::fmt;
+    16→
+    17→// ---------------------------------------------------------------------------
+    18→// Endianness
+    19→// ---------------------------------------------------------------------------
+    20→
+    21→/// Byte order of the target architecture.
+    22→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    23→pub enum Endianness {
+    24→    /// Least-significant byte first (AArch64, RISC-V, x86_64, LoongArch).
+    25→    Little,
+    26→    /// Most-significant byte first (MIPS64 big-endian, PPC64 big-endian).
+    27→    Big,
+    28→    /// Bi-endian — the ISA supports both but the default is big-endian (PPC64).
+    29→    Bi,
+    30→}
+    31→
+    32→// ---------------------------------------------------------------------------
+    33→// OutputFormat
+    34→// ---------------------------------------------------------------------------
+    35→
+    36→/// The output binary format produced by the backend.
+    37→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    38→pub enum OutputFormat {
+    39→    /// 64-bit ELF (AArch64, RISC-V64, x86_64, LoongArch64, MIPS64, PPC64).
+    40→    Elf64,
+    41→    /// 32-bit ELF (ARM32).
+    42→    Elf32,
+    43→    /// WebAssembly binary module (.wasm).
+    44→    WasmBinary,
+    45→    /// Raw binary blob (bare-metal, no headers).
+    46→    RawBinary,
+    47→}
+    48→
+    49→// ---------------------------------------------------------------------------
+    50→// PhysicalReg
+    51→// ---------------------------------------------------------------------------
+    52→
+    53→/// A physical register identified by class and index.
+    54→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    55→pub struct PhysicalReg {
+    56→    /// Register class.
+    57→    pub class: RegClass,
+    58→    /// Register index within its class (0-based).
+    59→    pub index: u32,
+    60→}
+    61→
+    62→impl PhysicalReg {
+    63→    /// Creates a new physical register identifier with the given class and index.
+    64→    pub fn new(class: RegClass, index: u32) -> Self {
+    65→        Self { class, index }
+    66→    }
+    67→}
+    68→
+    69→impl fmt::Display for PhysicalReg {
+    70→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    71→        write!(f, "{:?}:{}", self.class, self.index)
+    72→    }
+    73→}
+    74→
+    75→// ---------------------------------------------------------------------------
+    76→// RegClass
+    77→// ---------------------------------------------------------------------------
+    78→
+    79→/// Classification of physical registers.
+    80→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    81→pub enum RegClass {
+    82→    /// General-purpose integer registers (X0-X30 on ARM64, RAX-R15 on x86_64, etc.)
+    83→    Gpr,
+    84→    /// SIMD / floating-point registers (V0-V31 on ARM64, XMM0-XMM15 on x86_64, etc.)
+    85→    SimdFp,
+    86→    /// Condition register fields (PPC64 CR0-CR7).
+    87→    Condition,
+    88→    /// Special-purpose register (TOC pointer on PPC64, etc.)
+    89→    Special,
+    90→}
+    91→
+    92→// ---------------------------------------------------------------------------
+    93→// FrameType
+    94→// ---------------------------------------------------------------------------
+    95→
+    96→/// The kind of stack frame slot.
+    97→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+    98→pub enum FrameSlotKind {
+    99→    /// Spill slot for a register that was evicted.
+   100→    Spill,
+   101→    /// Local variable storage.
+   102→    Local,
+   103→    /// Outgoing argument that doesn't fit in registers.
+   104→    OutgoingArg,
+   105→    /// Incoming stack argument from the caller.
+   106→    IncomingArg,
+   107→}
+   108→
+   109→// ---------------------------------------------------------------------------
+   110→// RelocationEntry
+   111→// ---------------------------------------------------------------------------
+   112→
+   113→/// A relocation entry for patching encoded code at link time.
+   114→///
+   115→/// Each entry records a byte offset within the function's encoded output where
+   116→/// a symbolic reference must be resolved, the name of the target symbol, and
+   117→/// the ISA-specific relocation type (e.g., `"R_X86_64_PLT32"`, `"R_X86_64_64"`).
+   118→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   119→pub struct RelocationEntry {
+   120→    /// Byte offset within the function's encoded code where the relocation applies.
+   121→    pub offset: u64,
+   122→    /// Name of the target symbol.
+   123→    pub symbol: String,
+   124→    /// Relocation type (ISA-specific, e.g., "R_X86_64_PLT32", "R_X86_64_64").
+   125→    pub reloc_type: String,
+   126→}
+   127→
+   128→// ---------------------------------------------------------------------------
+   129→// AllocatedInstruction
+   130→// ---------------------------------------------------------------------------
+   131→
+   132→/// A single instruction after register allocation, with physical registers assigned.
+   133→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   134→pub struct AllocatedInstruction {
+   135→    /// Opcode name (for debugging / disassembly).
+   136→    pub opcode: String,
+   137→    /// Physical registers read by this instruction.
+   138→    pub reads: Vec<PhysicalReg>,
+   139→    /// Physical registers written by this instruction.
+   140→    pub writes: Vec<PhysicalReg>,
+   141→    /// Encoded bytes (filled in during encoding phase).
+   142→    pub encoded: Vec<u8>,
+   143→}
+   144→
+   145→// ---------------------------------------------------------------------------
+   146→// AllocatedBlock
+   147→// ---------------------------------------------------------------------------
+   148→
+   149→/// A basic block after register allocation.
+   150→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   151→pub struct AllocatedBlock {
+   152→    /// Block label.
+   153→    pub label: String,
+   154→    /// Allocated instructions in order.
+   155→    pub instructions: Vec<AllocatedInstruction>,
+   156→    /// Byte offset of this block in the final code section.
+   157→    pub code_offset: usize,
+   158→}
+   159→
+   160→// ---------------------------------------------------------------------------
+   161→// Wasm-specific metadata (used only by the Wasm32 backend)
+   162→// ---------------------------------------------------------------------------
+   163→
+   164→/// A Wasm value type, stored as a simple enum for serialization.
+   165→#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   166→pub enum WasmValueType {
+   167→    I32,
+   168→    I64,
+   169→    F32,
+   170→    F64,
+   171→}
+   172→
+   173→/// A Wasm function type (parameter types → result types).
+   174→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   175→pub struct WasmFuncType {
+   176→    /// Parameter types.
+   177→    pub params: Vec<WasmValueType>,
+   178→    /// Result types.
+   179→    pub results: Vec<WasmValueType>,
+   180→}
+   181→
+   182→/// A Wasm local declaration: `count` locals of type `ty`.
+   183→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   184→pub struct WasmLocalDecl {
+   185→    /// Number of consecutive locals of this type.
+   186→    pub count: u32,
+   187→    /// Type of these locals.
+   188→    pub ty: WasmValueType,
+   189→}
+   190→
+   191→// ---------------------------------------------------------------------------
+   192→// AllocatedFunction
+   193→// ---------------------------------------------------------------------------
+   194→
+   195→/// A function after register allocation.
+   196→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   197→pub struct AllocatedFunction {
+   198→    /// Function name.
+   199→    pub name: String,
+   200→    /// Allocated blocks in layout order.
+   201→    pub blocks: Vec<AllocatedBlock>,
+   202→    /// Total frame size in bytes (including callee-saved save area).
+   203→    pub frame_size: usize,
+   204→    /// Set of callee-saved physical registers used.
+   205→    pub callee_saved: Vec<PhysicalReg>,
+   206→    /// Number of spill slots.
+   207→    pub spill_slots: usize,
+   208→    /// Byte size of the encoded function body.
+   209→    pub code_size: usize,
+   210→    /// Relocation entries for this function.
+   211→    #[serde(default)]
+   212→    pub relocations: Vec<RelocationEntry>,
+   213→
+   214→    // ── Wasm-specific metadata ──────────────────────────────────────
+   215→    /// Wasm function type (params → results), used by the Wasm32 backend
+   216→    /// to emit the type section.  `None` for non-Wasm targets.
+   217→    #[serde(default)]
+   218→    pub wasm_func_type: Option<WasmFuncType>,
+   219→    /// Wasm local declarations (count, type) beyond function parameters.
+   220→    /// `None` for non-Wasm targets.
+   221→    #[serde(default)]
+   222→    pub wasm_locals: Option<Vec<WasmLocalDecl>>,
+   223→}
+   224→
+   225→// ---------------------------------------------------------------------------
+   226→// AllocatedProgram
+   227→// ---------------------------------------------------------------------------
+   228→
+   229→/// A complete program after register allocation.
+   230→#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+   231→pub struct AllocatedProgram {
+   232→    /// Allocated functions.
+   233→    pub functions: Vec<AllocatedFunction>,
+   234→    /// Total code section size in bytes.
+   235→    pub total_code_size: usize,
+   236→    /// Total data section size in bytes.
+   237→    pub total_data_size: usize,
+   238→}
+   239→
+   240→// ---------------------------------------------------------------------------
+   241→// BackendError
+   242→// ---------------------------------------------------------------------------
+   243→
+   244→/// Error type for backend operations.
+   245→#[derive(Debug, Clone, thiserror::Error)]
+   246→pub enum BackendError {
+   247→    /// The requested feature is not supported by this ISA.
+   248→    #[error("[{isa}] unsupported feature: {feature}")]
+   249→    UnsupportedFeature {
+   250→        /// ISA identifier (e.g., "aarch64", "x86_64").
+   251→        isa: &'static str,
+   252→        /// Description of the unsupported feature.
+   253→        feature: String,
+   254→    },
+   255→
+   256→    /// Register allocation failed.
+   257→    #[error("[{isa}] register allocation failed: {reason}")]
+   258→    RegisterAllocFailed {
+   259→        /// ISA identifier.
+   260→        isa: &'static str,
+   261→        /// Reason for the allocation failure.
+   262→        reason: String,
+   263→    },
+   264→
+   265→    /// Instruction encoding failed.
+   266→    #[error("[{isa}] encoding error: {reason}")]
+   267→    EncodingError {
+   268→        /// ISA identifier.
+   269→        isa: &'static str,
+   270→        /// Reason for the encoding failure.
+   271→        reason: String,
+   272→    },
+   273→
+   274→    /// Invalid instruction for this target.
+   275→    #[error("[{isa}] invalid instruction: {details}")]
+   276→    InvalidInstruction {
+   277→        /// ISA identifier.
+   278→        isa: &'static str,
+   279→        /// Details about why the instruction is invalid.
+   280→        details: String,
+   281→    },
+   282→
+   283→    /// ELF / binary emission error.
+   284→    #[error("[{isa}] emission error: {reason}")]
+   285→    EmissionError {
+   286→        /// ISA identifier.
+   287→        isa: &'static str,
+   288→        /// Reason for the emission failure.
+   289→        reason: String,
+   290→    },
+   291→
+   292→    /// The target cannot handle this type.
+   293→    #[error("[{isa}] unsupported type: {ty}")]
+   294→    UnsupportedType {
+   295→        /// ISA identifier.
+   296→        isa: &'static str,
+   297→        /// The unsupported type name.
+   298→        ty: String,
+   299→    },
+   300→
+   301→    /// Unresolved relocation — a symbol referenced by a relocation entry
+   302→    /// could not be found in the program's symbol table.
+   303→    #[error("[{isa}] unresolved relocation: symbol '{symbol}' referenced in function '{function}' at offset 0x{offset:X} (relocation type: {reloc_type})")]
+   304→    UnresolvedRelocation {
+   305→        /// ISA identifier.
+   306→        isa: &'static str,
+   307→        /// Name of the unresolved symbol.
+   308→        symbol: String,
+   309→        /// Name of the function containing the reference.
+   310→        function: String,
+   311→        /// Byte offset within the function where the relocation applies.
+   312→        offset: u64,
+   313→        /// Relocation type string (e.g., "R_AARCH64_CALL26").
+   314→        reloc_type: String,
+   315→    },
+   316→
+   317→    /// Generic backend error.
+   318→    #[error("[{isa}] {message}")]
+   319→    Other {
+   320→        /// ISA identifier.
+   321→        isa: &'static str,
+   322→        /// Error message.
+   323→        message: String,
+   324→    },
+   325→}
+   326→
+   327→// ---------------------------------------------------------------------------
+   328→// TargetInfo trait
+   329→// ---------------------------------------------------------------------------
+   330→
+   331→/// Target-specific information needed during code generation.
+   332→///
+   333→/// This trait provides a data-driven interface for query target properties.
+   334→/// It must be implementable for ALL supported ISAs, including fundamentally
+   335→/// different architectures like Wasm (stack machine, no registers) and
+   336→/// MIPS (branch delay slots).
+   337→///
+   338→/// # Object Safety
+   339→///
+   340→/// This trait is object-safe: all methods take `&self` and return only
+   341→/// owned types or references with `'static` lifetime.
+   342→pub trait TargetInfo: Send + Sync + 'static {
+   343→    // === Identity ===
+   344→
+   345→    /// ISA name in lowercase (e.g., "aarch64", "riscv64", "wasm32").
+   346→    fn isa_name(&self) -> &'static str;
+   347→
+   348→    /// LLVM-style target triple (e.g., "aarch64-unknown-linux-gnu").
+   349→    fn target_triple(&self) -> &'static str;
+   350→
+   351→    /// ELF `e_machine` value.  Returns 0 for non-ELF targets (Wasm).
+   352→    fn elf_machine_type(&self) -> u16;
+   353→
+   354→    /// Default base address for the .text section.
+   355→    fn default_base_address(&self) -> u64;
+   356→
+   357→    // === Data model ===
+   358→
+   359→    /// Pointer width in bytes (4 for 32-bit, 8 for 64-bit).
+   360→    fn pointer_width(&self) -> usize;
+   361→
+   362→    /// Size in bytes of `ty` on this target.
+   363→    fn size_of(&self, ty: &IRType) -> usize;
+   364→
+   365→    /// Natural alignment in bytes of `ty` on this target.
+   366→    fn alignment_of(&self, ty: &IRType) -> usize;
+   367→
+   368→    /// Byte order of this target.
+   369→    fn endianness(&self) -> Endianness;
+   370→
+   371→    // === Register architecture ===
+   372→
+   373→    /// Whether this target has registers at all.  `false` for Wasm (stack machine).
+   374→    fn has_registers(&self) -> bool;
+   375→
+   376→    /// Number of general-purpose registers.  0 for Wasm.
+   377→    fn num_gp_regs(&self) -> usize;
+   378→
+   379→    /// Number of SIMD/FP registers.  0 for Wasm.
+   380→    fn num_simd_fp_regs(&self) -> usize;
+   381→
+   382→    /// Whether the ISA has a hardwired-zero register (RISC-V x0, LoongArch r0).
+   383→    fn has_hardwired_zero(&self) -> bool;
+   384→
+   385→    /// Whether the ISA uses a link register (ARM, RISC-V, MIPS, PPC) rather than
+   386→    /// pushing the return address on the stack (x86_64).
+   387→    fn has_link_register(&self) -> bool;
+   388→
+   389→    /// Whether branches have delay slots (MIPS only).
+   390→    fn has_branch_delay_slots(&self) -> bool;
+   391→
+   392→    /// Whether this ISA uses a TOC (Table of Contents) pointer (PPC64 r2).
+   393→    fn has_toc_pointer(&self) -> bool;
+   394→
+   395→    /// Whether this ISA has dedicated condition register fields (PPC64 CR0-CR7).
+   396→    fn has_condition_registers(&self) -> bool;
+   397→
+   398→    // === Calling convention ===
+   399→
+   400→    /// Name of the calling convention (e.g., "aapcs64", "lp64d", "systemv").
+   401→    fn calling_convention_name(&self) -> &'static str;
+   402→
+   403→    /// Number of integer argument registers.
+   404→    fn num_int_arg_regs(&self) -> usize;
+   405→
+   406→    /// Number of FP/SIMD argument registers.
+   407→    fn num_fp_arg_regs(&self) -> usize;
+   408→
+   409→    /// Required stack alignment in bytes.
+   410→    fn stack_alignment(&self) -> usize;
+   411→
+   412→    // === Instruction encoding ===
+   413→
+   414→    /// Alignment requirement for instructions in bytes (4 for fixed-width RISCs,
+   415→    /// 1 for x86_64 and Wasm).
+   416→    fn instruction_alignment(&self) -> usize;
+   417→
+   418→    /// Minimum and maximum instruction width in bytes.
+   419→    /// - Fixed-width 32-bit ISAs: (4, 4)
+   420→    /// - x86_64: (1, 15)
+   421→    /// - RISC-V with RVC: (2, 4)
+   422→    /// - Wasm: (1, ~) but typically (1, 15)
+   423→    fn instruction_width_range(&self) -> (usize, usize);
+   424→
+   425→    // === Output format ===
+   426→
+   427→    /// Binary format produced by this backend.
+   428→    fn output_format(&self) -> OutputFormat;
+   429→}
+   430→
+   431→// ---------------------------------------------------------------------------
+   432→// Backend trait
+   433→// ---------------------------------------------------------------------------
+   434→
+   435→/// A code generation backend for a specific target architecture.
+   436→///
+   437→/// Each supported ISA implements this trait, providing register allocation,
+   438→/// instruction encoding, program emission, and disassembly.
+   439→///
+   440→/// # Object Safety
+   441→///
+   442→/// This trait is object-safe.
+   443→pub trait Backend: Send + Sync + 'static {
+   444→    /// Returns a reference to this backend's target info.
+   445→    fn target_info(&self) -> &dyn TargetInfo;
+   446→
+   447→    /// Allocate physical registers for an IR function.
+   448→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError>;
+   449→
+   450→    /// Encode a single allocated function into machine code bytes.
+   451→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError>;
+   452→
+   453→    /// Encode an entire allocated program into its final binary form
+   454→    /// (ELF, .wasm, raw binary, etc.).
+   455→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError>;
+   456→
+   457→    /// Returns the bytes for a minimal return stub (e.g., `RET` on ARM64,
+   458→    /// `mov eax, 0; ret` on x86_64, `end` on Wasm).
+   459→    fn return_stub(&self) -> Vec<u8>;
+   460→
+   461→    /// Returns a trampoline that jumps to `entry_addr`.
+   462→    fn trampoline(&self, entry_addr: u64) -> Vec<u8>;
+   463→
+   464→    /// Disassemble `bytes` starting at virtual address `addr`.
+   465→    fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String>;
+   466→
+   467→    /// Human-readable name of this backend.
+   468→    fn name(&self) -> &'static str;
+   469→}
+   470→
+   471→// ---------------------------------------------------------------------------
+   472→// BackendKind
+   473→// ---------------------------------------------------------------------------
+   474→
+   475→/// Enumeration of all supported backend architectures.
+   476→#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+   477→pub enum BackendKind {
+   478→    /// ARM 64-bit (AArch64).
+   479→    AArch64,
+   480→    /// RISC-V 64-bit.
+   481→    RiscV64,
+   482→    /// WebAssembly 32-bit.
+   483→    Wasm32,
+   484→    /// LoongArch 64-bit.
+   485→    LoongArch64,
+   486→    /// x86-64.
+   487→    X86_64,
+   488→    /// ARM 32-bit.
+   489→    Arm32,
+   490→    /// MIPS 64-bit.
+   491→    Mips64,
+   492→    /// PowerPC 64-bit.
+   493→    PowerPC64,
+   494→}
+   495→
+   496→impl BackendKind {
+   497→    /// Returns the ISA name string for this backend kind.
+   498→    pub fn isa_name(&self) -> &'static str {
+   499→        match self {
+   500→            BackendKind::AArch64 => "aarch64",
+   501→            BackendKind::RiscV64 => "riscv64",
+   502→            BackendKind::Wasm32 => "wasm32",
+   503→            BackendKind::LoongArch64 => "loongarch64",
+   504→            BackendKind::X86_64 => "x86_64",
+   505→            BackendKind::Arm32 => "arm32",
+   506→            BackendKind::Mips64 => "mips64",
+   507→            BackendKind::PowerPC64 => "ppc64",
+   508→        }
+   509→    }
+   510→}
+   511→
+   512→impl fmt::Display for BackendKind {
+   513→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   514→        f.write_str(self.isa_name())
+   515→    }
+   516→}
+   517→
+   518→// ---------------------------------------------------------------------------
+   519→// AArch64 TargetInfo implementation (wrapping existing ARM64 logic)
+   520→// ---------------------------------------------------------------------------
+   521→
+   522→/// AArch64 (ARM64) target information.
+   523→///
+   524→/// Provides the data model, register counts, and calling convention details
+   525→/// for the AArch64 architecture under the AAPCS64 ABI.
+   526→pub struct AArch64TargetInfo;
+   527→
+   528→impl TargetInfo for AArch64TargetInfo {
+   529→    fn isa_name(&self) -> &'static str {
+   530→        "aarch64"
+   531→    }
+   532→    fn target_triple(&self) -> &'static str {
+   533→        "aarch64-unknown-linux-gnu"
+   534→    }
+   535→    fn elf_machine_type(&self) -> u16 {
+   536→        183
+   537→    } // EM_AARCH64
+   538→    fn default_base_address(&self) -> u64 {
+   539→        0x400000
+   540→    }
+   541→    fn pointer_width(&self) -> usize {
+   542→        8
+   543→    }
+   544→
+   545→    fn size_of(&self, ty: &IRType) -> usize {
+   546→        size_of_with_ptr_width(ty, 8) // ARM64 LP64: 8-byte pointers
+   547→    }
+   548→
+   549→    fn alignment_of(&self, ty: &IRType) -> usize {
+   550→        alignment_of_with_ptr_width(ty, 8) // ARM64 LP64: 8-byte pointers
+   551→    }
+   552→
+   553→    fn endianness(&self) -> Endianness {
+   554→        Endianness::Little
+   555→    }
+   556→    fn has_registers(&self) -> bool {
+   557→        true
+   558→    }
+   559→    fn num_gp_regs(&self) -> usize {
+   560→        31
+   561→    } // X0-X30 (SP/XZR are special)
+   562→    fn num_simd_fp_regs(&self) -> usize {
+   563→        32
+   564→    } // V0-V31
+   565→    fn has_hardwired_zero(&self) -> bool {
+   566→        true
+   567→    } // XZR
+   568→    fn has_link_register(&self) -> bool {
+   569→        true
+   570→    } // X30 (LR)
+   571→    fn has_branch_delay_slots(&self) -> bool {
+   572→        false
+   573→    }
+   574→    fn has_toc_pointer(&self) -> bool {
+   575→        false
+   576→    }
+   577→    fn has_condition_registers(&self) -> bool {
+   578→        false
+   579→    }
+   580→    fn calling_convention_name(&self) -> &'static str {
+   581→        "aapcs64"
+   582→    }
+   583→    fn num_int_arg_regs(&self) -> usize {
+   584→        8
+   585→    } // X0-X7
+   586→    fn num_fp_arg_regs(&self) -> usize {
+   587→        8
+   588→    } // V0-V7
+   589→    fn stack_alignment(&self) -> usize {
+   590→        16
+   591→    }
+   592→    fn instruction_alignment(&self) -> usize {
+   593→        4
+   594→    }
+   595→    fn instruction_width_range(&self) -> (usize, usize) {
+   596→        (4, 4)
+   597→    }
+   598→    fn output_format(&self) -> OutputFormat {
+   599→        OutputFormat::Elf64
+   600→    }
+   601→}
+   602→
+   603→// ---------------------------------------------------------------------------
+   604→// RISC-V64 TargetInfo
+   605→// ---------------------------------------------------------------------------
+   606→
+   607→/// RISC-V 64-bit target information (RV64GC, LP64D ABI).
+   608→pub struct RiscV64TargetInfo;
+   609→
+   610→impl TargetInfo for RiscV64TargetInfo {
+   611→    fn isa_name(&self) -> &'static str {
+   612→        "riscv64"
+   613→    }
+   614→    fn target_triple(&self) -> &'static str {
+   615→        "riscv64-unknown-linux-gnu"
+   616→    }
+   617→    fn elf_machine_type(&self) -> u16 {
+   618→        243
+   619→    } // EM_RISCV
+   620→    fn default_base_address(&self) -> u64 {
+   621→        0x10000
+   622→    }
+   623→    fn pointer_width(&self) -> usize {
+   624→        8
+   625→    }
+   626→    fn size_of(&self, ty: &IRType) -> usize {
+   627→        size_of_with_ptr_width(ty, 8)
+   628→    }
+   629→    fn alignment_of(&self, ty: &IRType) -> usize {
+   630→        alignment_of_with_ptr_width(ty, 8)
+   631→    }
+   632→    fn endianness(&self) -> Endianness {
+   633→        Endianness::Little
+   634→    }
+   635→    fn has_registers(&self) -> bool {
+   636→        true
+   637→    }
+   638→    fn num_gp_regs(&self) -> usize {
+   639→        32
+   640→    } // x0-x31
+   641→    fn num_simd_fp_regs(&self) -> usize {
+   642→        32
+   643→    } // f0-f31
+   644→    fn has_hardwired_zero(&self) -> bool {
+   645→        true
+   646→    } // x0
+   647→    fn has_link_register(&self) -> bool {
+   648→        true
+   649→    } // x1 (ra)
+   650→    fn has_branch_delay_slots(&self) -> bool {
+   651→        false
+   652→    }
+   653→    fn has_toc_pointer(&self) -> bool {
+   654→        false
+   655→    }
+   656→    fn has_condition_registers(&self) -> bool {
+   657→        false
+   658→    }
+   659→    fn calling_convention_name(&self) -> &'static str {
+   660→        "lp64d"
+   661→    }
+   662→    fn num_int_arg_regs(&self) -> usize {
+   663→        8
+   664→    } // a0-a7
+   665→    fn num_fp_arg_regs(&self) -> usize {
+   666→        8
+   667→    } // fa0-fa7
+   668→    fn stack_alignment(&self) -> usize {
+   669→        16
+   670→    }
+   671→    fn instruction_alignment(&self) -> usize {
+   672→        2
+   673→    } // RVC allows 16-bit alignment
+   674→    fn instruction_width_range(&self) -> (usize, usize) {
+   675→        (2, 4)
+   676→    } // RVC + 32-bit
+   677→    fn output_format(&self) -> OutputFormat {
+   678→        OutputFormat::Elf64
+   679→    }
+   680→}
+   681→
+   682→// ---------------------------------------------------------------------------
+   683→// Wasm32 TargetInfo
+   684→// ---------------------------------------------------------------------------
+   685→
+   686→/// WebAssembly 32-bit target information (stack machine, no registers).
+   687→pub struct Wasm32TargetInfo;
+   688→
+   689→impl TargetInfo for Wasm32TargetInfo {
+   690→    fn isa_name(&self) -> &'static str {
+   691→        "wasm32"
+   692→    }
+   693→    fn target_triple(&self) -> &'static str {
+   694→        "wasm32-unknown-unknown"
+   695→    }
+   696→    fn elf_machine_type(&self) -> u16 {
+   697→        0
+   698→    } // Not ELF
+   699→    fn default_base_address(&self) -> u64 {
+   700→        0
+   701→    } // Linear memory base
+   702→    fn pointer_width(&self) -> usize {
+   703→        4
+   704→    }
+   705→    fn size_of(&self, ty: &IRType) -> usize {
+   706→        size_of_with_ptr_width(ty, 4) // 32-bit pointers in wasm32
+   707→    }
+   708→    fn alignment_of(&self, ty: &IRType) -> usize {
+   709→        alignment_of_with_ptr_width(ty, 4)
+   710→    }
+   711→    fn endianness(&self) -> Endianness {
+   712→        Endianness::Little
+   713→    }
+   714→    fn has_registers(&self) -> bool {
+   715→        false
+   716→    } // Stack machine!
+   717→    fn num_gp_regs(&self) -> usize {
+   718→        0
+   719→    }
+   720→    fn num_simd_fp_regs(&self) -> usize {
+   721→        0
+   722→    }
+   723→    fn has_hardwired_zero(&self) -> bool {
+   724→        false
+   725→    }
+   726→    fn has_link_register(&self) -> bool {
+   727→        false
+   728→    }
+   729→    fn has_branch_delay_slots(&self) -> bool {
+   730→        false
+   731→    }
+   732→    fn has_toc_pointer(&self) -> bool {
+   733→        false
+   734→    }
+   735→    fn has_condition_registers(&self) -> bool {
+   736→        false
+   737→    }
+   738→    fn calling_convention_name(&self) -> &'static str {
+   739→        "wasm-stack"
+   740→    }
+   741→    fn num_int_arg_regs(&self) -> usize {
+   742→        0
+   743→    } // Stack-based calling
+   744→    fn num_fp_arg_regs(&self) -> usize {
+   745→        0
+   746→    }
+   747→    fn stack_alignment(&self) -> usize {
+   748→        8
+   749→    } // Wasm stack alignment
+   750→    fn instruction_alignment(&self) -> usize {
+   751→        1
+   752→    }
+   753→    fn instruction_width_range(&self) -> (usize, usize) {
+   754→        (1, 15)
+   755→    }
+   756→    fn output_format(&self) -> OutputFormat {
+   757→        OutputFormat::WasmBinary
+   758→    }
+   759→}
+   760→
+   761→// ---------------------------------------------------------------------------
+   762→// LoongArch64 TargetInfo
+   763→// ---------------------------------------------------------------------------
+   764→
+   765→/// LoongArch 64-bit target information (LP64 ABI).
+   766→pub struct LoongArch64TargetInfo;
+   767→
+   768→impl TargetInfo for LoongArch64TargetInfo {
+   769→    fn isa_name(&self) -> &'static str {
+   770→        "loongarch64"
+   771→    }
+   772→    fn target_triple(&self) -> &'static str {
+   773→        "loongarch64-unknown-linux-gnu"
+   774→    }
+   775→    fn elf_machine_type(&self) -> u16 {
+   776→        258
+   777→    } // EM_LOONGARCH
+   778→    fn default_base_address(&self) -> u64 {
+   779→        0x120000000
+   780→    }
+   781→    fn pointer_width(&self) -> usize {
+   782→        8
+   783→    }
+   784→    fn size_of(&self, ty: &IRType) -> usize {
+   785→        size_of_with_ptr_width(ty, 8)
+   786→    }
+   787→    fn alignment_of(&self, ty: &IRType) -> usize {
+   788→        alignment_of_with_ptr_width(ty, 8)
+   789→    }
+   790→    fn endianness(&self) -> Endianness {
+   791→        Endianness::Little
+   792→    }
+   793→    fn has_registers(&self) -> bool {
+   794→        true
+   795→    }
+   796→    fn num_gp_regs(&self) -> usize {
+   797→        32
+   798→    } // r0-r31
+   799→    fn num_simd_fp_regs(&self) -> usize {
+   800→        32
+   801→    } // f0-f31
+   802→    fn has_hardwired_zero(&self) -> bool {
+   803→        true
+   804→    } // r0
+   805→    fn has_link_register(&self) -> bool {
+   806→        true
+   807→    } // r1 (ra)
+   808→    fn has_branch_delay_slots(&self) -> bool {
+   809→        false
+   810→    }
+   811→    fn has_toc_pointer(&self) -> bool {
+   812→        false
+   813→    }
+   814→    fn has_condition_registers(&self) -> bool {
+   815→        false
+   816→    }
+   817→    fn calling_convention_name(&self) -> &'static str {
+   818→        "lp64"
+   819→    }
+   820→    fn num_int_arg_regs(&self) -> usize {
+   821→        8
+   822→    } // a0-a7 (r4-r11)
+   823→    fn num_fp_arg_regs(&self) -> usize {
+   824→        8
+   825→    } // fa0-fa7
+   826→    fn stack_alignment(&self) -> usize {
+   827→        16
+   828→    }
+   829→    fn instruction_alignment(&self) -> usize {
+   830→        4
+   831→    }
+   832→    fn instruction_width_range(&self) -> (usize, usize) {
+   833→        (4, 4)
+   834→    }
+   835→    fn output_format(&self) -> OutputFormat {
+   836→        OutputFormat::Elf64
+   837→    }
+   838→}
+   839→
+   840→// ---------------------------------------------------------------------------
+   841→// x86_64 TargetInfo
+   842→// ---------------------------------------------------------------------------
+   843→
+   844→/// x86-64 target information (SystemV ABI).
+   845→pub struct X86_64TargetInfo;
+   846→
+   847→impl TargetInfo for X86_64TargetInfo {
+   848→    fn isa_name(&self) -> &'static str {
+   849→        "x86_64"
+   850→    }
+   851→    fn target_triple(&self) -> &'static str {
+   852→        "x86_64-unknown-linux-gnu"
+   853→    }
+   854→    fn elf_machine_type(&self) -> u16 {
+   855→        62
+   856→    } // EM_X86_64
+   857→    fn default_base_address(&self) -> u64 {
+   858→        0x400000
+   859→    }
+   860→    fn pointer_width(&self) -> usize {
+   861→        8
+   862→    }
+   863→    fn size_of(&self, ty: &IRType) -> usize {
+   864→        size_of_with_ptr_width(ty, 8)
+   865→    }
+   866→    fn alignment_of(&self, ty: &IRType) -> usize {
+   867→        alignment_of_with_ptr_width(ty, 8)
+   868→    }
+   869→    fn endianness(&self) -> Endianness {
+   870→        Endianness::Little
+   871→    }
+   872→    fn has_registers(&self) -> bool {
+   873→        true
+   874→    }
+   875→    fn num_gp_regs(&self) -> usize {
+   876→        16
+   877→    } // RAX-R15
+   878→    fn num_simd_fp_regs(&self) -> usize {
+   879→        16
+   880→    } // XMM0-XMM15
+   881→    fn has_hardwired_zero(&self) -> bool {
+   882→        false
+   883→    } // No hardwired zero reg
+   884→    fn has_link_register(&self) -> bool {
+   885→        false
+   886→    } // Return addr pushed on stack
+   887→    fn has_branch_delay_slots(&self) -> bool {
+   888→        false
+   889→    }
+   890→    fn has_toc_pointer(&self) -> bool {
+   891→        false
+   892→    }
+   893→    fn has_condition_registers(&self) -> bool {
+   894→        false
+   895→    }
+   896→    fn calling_convention_name(&self) -> &'static str {
+   897→        "systemv"
+   898→    }
+   899→    fn num_int_arg_regs(&self) -> usize {
+   900→        6
+   901→    } // RDI, RSI, RDX, RCX, R8, R9
+   902→    fn num_fp_arg_regs(&self) -> usize {
+   903→        8
+   904→    } // XMM0-XMM7
+   905→    fn stack_alignment(&self) -> usize {
+   906→        16
+   907→    }
+   908→    fn instruction_alignment(&self) -> usize {
+   909→        1
+   910→    } // Variable-length
+   911→    fn instruction_width_range(&self) -> (usize, usize) {
+   912→        (1, 15)
+   913→    }
+   914→    fn output_format(&self) -> OutputFormat {
+   915→        OutputFormat::Elf64
+   916→    }
+   917→}
+   918→
+   919→// ---------------------------------------------------------------------------
+   920→// ARM32 TargetInfo
+   921→// ---------------------------------------------------------------------------
+   922→
+   923→/// ARM 32-bit target information (AAPCS).
+   924→pub struct Arm32TargetInfo;
+   925→
+   926→impl TargetInfo for Arm32TargetInfo {
+   927→    fn isa_name(&self) -> &'static str {
+   928→        "arm32"
+   929→    }
+   930→    fn target_triple(&self) -> &'static str {
+   931→        "arm-unknown-linux-gnueabihf"
+   932→    }
+   933→    fn elf_machine_type(&self) -> u16 {
+   934→        40
+   935→    } // EM_ARM
+   936→    fn default_base_address(&self) -> u64 {
+   937→        0x10000
+   938→    }
+   939→    fn pointer_width(&self) -> usize {
+   940→        4
+   941→    }
+   942→    fn size_of(&self, ty: &IRType) -> usize {
+   943→        match ty {
+   944→            IRType::I64 | IRType::U64 => 8,
+   945→            _ => size_of_with_ptr_width(ty, 4), // 32-bit pointers
+   946→        }
+   947→    }
+   948→    fn alignment_of(&self, ty: &IRType) -> usize {
+   949→        match ty {
+   950→            IRType::I64 | IRType::U64 => 4, // ARM32 aligns i64 to 4
+   951→            _ => alignment_of_with_ptr_width(ty, 4),
+   952→        }
+   953→    }
+   954→    fn endianness(&self) -> Endianness {
+   955→        Endianness::Little
+   956→    }
+   957→    fn has_registers(&self) -> bool {
+   958→        true
+   959→    }
+   960→    fn num_gp_regs(&self) -> usize {
+   961→        16
+   962→    } // R0-R15
+   963→    fn num_simd_fp_regs(&self) -> usize {
+   964→        32
+   965→    } // D0-D31
+   966→    fn has_hardwired_zero(&self) -> bool {
+   967→        false
+   968→    }
+   969→    fn has_link_register(&self) -> bool {
+   970→        true
+   971→    } // R14 (LR)
+   972→    fn has_branch_delay_slots(&self) -> bool {
+   973→        false
+   974→    }
+   975→    fn has_toc_pointer(&self) -> bool {
+   976→        false
+   977→    }
+   978→    fn has_condition_registers(&self) -> bool {
+   979→        false
+   980→    }
+   981→    fn calling_convention_name(&self) -> &'static str {
+   982→        "aapcs"
+   983→    }
+   984→    fn num_int_arg_regs(&self) -> usize {
+   985→        4
+   986→    } // R0-R3
+   987→    fn num_fp_arg_regs(&self) -> usize {
+   988→        16
+   989→    } // D0-D15 (AAPCS VFP)
+   990→    fn stack_alignment(&self) -> usize {
+   991→        8
+   992→    }
+   993→    fn instruction_alignment(&self) -> usize {
+   994→        2
+   995→    } // Thumb allows 16-bit
+   996→    fn instruction_width_range(&self) -> (usize, usize) {
+   997→        (2, 4)
+   998→    }
+   999→    fn output_format(&self) -> OutputFormat {
+  1000→        OutputFormat::Elf32
+  1001→    }
+  1002→}
+  1003→
+  1004→// ---------------------------------------------------------------------------
+  1005→// MIPS64 TargetInfo
+  1006→// ---------------------------------------------------------------------------
+  1007→
+  1008→/// MIPS 64-bit target information (N64 ABI, big-endian).
+  1009→pub struct Mips64TargetInfo;
+  1010→
+  1011→impl TargetInfo for Mips64TargetInfo {
+  1012→    fn isa_name(&self) -> &'static str {
+  1013→        "mips64"
+  1014→    }
+  1015→    fn target_triple(&self) -> &'static str {
+  1016→        "mips64-unknown-linux-gnuabi64"
+  1017→    }
+  1018→    fn elf_machine_type(&self) -> u16 {
+  1019→        8
+  1020→    } // EM_MIPS
+  1021→    fn default_base_address(&self) -> u64 {
+  1022→        0x120000000
+  1023→    }
+  1024→    fn pointer_width(&self) -> usize {
+  1025→        8
+  1026→    }
+  1027→    fn size_of(&self, ty: &IRType) -> usize {
+  1028→        size_of_with_ptr_width(ty, 8)
+  1029→    }
+  1030→    fn alignment_of(&self, ty: &IRType) -> usize {
+  1031→        alignment_of_with_ptr_width(ty, 8)
+  1032→    }
+  1033→    fn endianness(&self) -> Endianness {
+  1034→        Endianness::Big
+  1035→    }
+  1036→    fn has_registers(&self) -> bool {
+  1037→        true
+  1038→    }
+  1039→    fn num_gp_regs(&self) -> usize {
+  1040→        32
+  1041→    } // $0-$31
+  1042→    fn num_simd_fp_regs(&self) -> usize {
+  1043→        32
+  1044→    } // $f0-$f31
+  1045→    fn has_hardwired_zero(&self) -> bool {
+  1046→        true
+  1047→    } // $zero ($0)
+  1048→    fn has_link_register(&self) -> bool {
+  1049→        true
+  1050→    } // $ra ($31)
+  1051→    fn has_branch_delay_slots(&self) -> bool {
+  1052→        true
+  1053→    } // THE defining feature
+  1054→    fn has_toc_pointer(&self) -> bool {
+  1055→        false
+  1056→    }
+  1057→    fn has_condition_registers(&self) -> bool {
+  1058→        false
+  1059→    }
+  1060→    fn calling_convention_name(&self) -> &'static str {
+  1061→        "n64"
+  1062→    }
+  1063→    fn num_int_arg_regs(&self) -> usize {
+  1064→        8
+  1065→    } // $a0-$a7 (N64 ABI: $4-$11, $8-$11 are $a4-$a7)
+  1066→    fn num_fp_arg_regs(&self) -> usize {
+  1067→        8
+  1068→    } // $f12-$f19 (N64 FP args)
+  1069→    fn stack_alignment(&self) -> usize {
+  1070→        16
+  1071→    }
+  1072→    fn instruction_alignment(&self) -> usize {
+  1073→        4
+  1074→    }
+  1075→    fn instruction_width_range(&self) -> (usize, usize) {
+  1076→        (4, 4)
+  1077→    }
+  1078→    fn output_format(&self) -> OutputFormat {
+  1079→        OutputFormat::Elf64
+  1080→    }
+  1081→}
+  1082→
+  1083→// ---------------------------------------------------------------------------
+  1084→// PowerPC64 TargetInfo
+  1085→// ---------------------------------------------------------------------------
+  1086→
+  1087→/// PowerPC 64-bit target information (ELFv2 ABI, big-endian by default).
+  1088→pub struct PowerPC64TargetInfo;
+  1089→
+  1090→impl TargetInfo for PowerPC64TargetInfo {
+  1091→    fn isa_name(&self) -> &'static str {
+  1092→        "ppc64"
+  1093→    }
+  1094→    fn target_triple(&self) -> &'static str {
+  1095→        "powerpc64le-unknown-linux-gnu"
+  1096→    }
+  1097→    fn elf_machine_type(&self) -> u16 {
+  1098→        21
+  1099→    } // EM_PPC64
+  1100→    fn default_base_address(&self) -> u64 {
+  1101→        0x10000000
+  1102→    }
+  1103→    fn pointer_width(&self) -> usize {
+  1104→        8
+  1105→    }
+  1106→    fn size_of(&self, ty: &IRType) -> usize {
+  1107→        size_of_with_ptr_width(ty, 8)
+  1108→    }
+  1109→    fn alignment_of(&self, ty: &IRType) -> usize {
+  1110→        alignment_of_with_ptr_width(ty, 8)
+  1111→    }
+  1112→    fn endianness(&self) -> Endianness {
+  1113→        Endianness::Bi
+  1114→    } // Bi-endian
+  1115→    fn has_registers(&self) -> bool {
+  1116→        true
+  1117→    }
+  1118→    fn num_gp_regs(&self) -> usize {
+  1119→        32
+  1120→    } // R0-R31
+  1121→    fn num_simd_fp_regs(&self) -> usize {
+  1122→        64
+  1123→    } // 32 FPR + 32 VMX (VSX overlaps)
+  1124→    fn has_hardwired_zero(&self) -> bool {
+  1125→        false
+  1126→    } // R0 is NOT hardwired zero (it's volatile)
+  1127→    fn has_link_register(&self) -> bool {
+  1128→        true
+  1129→    } // LR (SPR)
+  1130→    fn has_branch_delay_slots(&self) -> bool {
+  1131→        false
+  1132→    }
+  1133→    fn has_toc_pointer(&self) -> bool {
+  1134→        true
+  1135→    } // R2 = TOC
+  1136→    fn has_condition_registers(&self) -> bool {
+  1137→        true
+  1138→    } // CR0-CR7
+  1139→    fn calling_convention_name(&self) -> &'static str {
+  1140→        "elfv2"
+  1141→    }
+  1142→    fn num_int_arg_regs(&self) -> usize {
+  1143→        8
+  1144→    } // R3-R10
+  1145→    fn num_fp_arg_regs(&self) -> usize {
+  1146→        13
+  1147→    } // F1-F13
+  1148→    fn stack_alignment(&self) -> usize {
+  1149→        16
+  1150→    }
+  1151→    fn instruction_alignment(&self) -> usize {
+  1152→        4
+  1153→    }
+  1154→    fn instruction_width_range(&self) -> (usize, usize) {
+  1155→        (4, 4)
+  1156→    }
+  1157→    fn output_format(&self) -> OutputFormat {
+  1158→        OutputFormat::Elf64
+  1159→    }
+  1160→}
+  1161→
+  1162→// ---------------------------------------------------------------------------
+  1163→// AArch64 Mnemonic Decoder
+  1164→// ---------------------------------------------------------------------------
+  1165→
+  1166→/// Decode a 32-bit AArch64 instruction word into a human-readable mnemonic.
+  1167→///
+  1168→/// Covers the most common AArch64 instructions: ADD, SUB, MOV, LDR, STR, B,
+  1169→/// BL, RET, CMP, B.cond, STP, LDP, NOP, MUL, SDIV, UDIV, AND, ORR, EOR,
+  1170→/// plus several additional frequently-encountered encodings.
+  1171→fn decode_aarch64(word: u32) -> String {
+  1172→    let rd = word & 0x1F;
+  1173→    let rn = (word >> 5) & 0x1F;
+  1174→    let rt = rd; // alias for load/store destination
+  1175→    let rm = (word >> 16) & 0x1F;
+  1176→    let imm12 = (word >> 10) & 0xFFF;
+  1177→    let cond = word & 0xF;
+  1178→
+  1179→    // NOP: d503201f
+  1180→    if word == 0xD503201F {
+  1181→        return "nop".to_string();
+  1182→    }
+  1183→
+  1184→    // RET: d65f03c0
+  1185→    if word == 0xD65F03C0 {
+  1186→        return "ret".to_string();
+  1187→    }
+  1188→
+  1189→    let _top8 = word >> 24;
+  1190→    let _top10 = word >> 22;
+  1191→
+  1192→    // --- ADD/SUB (immediate): 100100xx ...
+  1193→    if (word >> 23) & 0x1FF == 0b1_0010_0010 {
+  1194→        // ADD Xd, Xn, #imm12
+  1195→        return format!("add x{}, x{}, #{}", rd, rn, imm12);
+  1196→    }
+  1197→    if (word >> 23) & 0x1FF == 0b1_1010_0010 {
+  1198→        // SUB Xd, Xn, #imm12
+  1199→        return format!("sub x{}, x{}, #{}", rd, rn, imm12);
+  1200→    }
+  1201→
+  1202→    // --- ADD (shifted register): 1_00_0101_1_xxx ...
+  1203→    if (word >> 24) & 0xFF == 0b1000_1011 {
+  1204→        // ADD Xd, Xn, Xm
+  1205→        return format!("add x{}, x{}, x{}", rd, rn, rm);
+  1206→    }
+  1207→
+  1208→    // --- SUB (shifted register): 1_00_0101_1_xxx ... with S=1 at bit30
+  1209→    if (word >> 24) & 0xFF == 0b1101_0110 {
+  1210→        // SUB Xd, Xn, Xm (bit 30 set = sub)
+  1211→        return format!("sub x{}, x{}, x{}", rd, rn, rm);
+  1212→    }
+  1213→
+  1214→    // --- AND (shifted register): 1_00_0101_0_00_xxx
+  1215→    if (word >> 24) & 0xFE == 0b1000_1010 {
+  1216→        // Check bit 21-15: opcode[31:21] = 10001010_000
+  1217→        if (word >> 21) & 0x7FF == 0b10001010000 {
+  1218→            return format!("and x{}, x{}, x{}", rd, rn, rm);
+  1219→        }
+  1220→    }
+  1221→
+  1222→    // --- ORR (shifted register): 1_01_0101_0_00_xxx
+  1223→    if (word >> 21) & 0x7FF == 0b10101010000 {
+  1224→        return format!("orr x{}, x{}, x{}", rd, rn, rm);
+  1225→    }
+  1226→
+  1227→    // --- EOR (shifted register): 1_10_0101_0_00_xxx
+  1228→    if (word >> 21) & 0x7FF == 0b11001010000 {
+  1229→        return format!("eor x{}, x{}, x{}", rd, rn, rm);
+  1230→    }
+  1231→
+  1232→    // --- MOV (register): alias for ORR Xd, XZR, Xm
+  1233→    // ORR Xd, XZR, Xm: 10101010_000_rm_000000_xzr_rd
+  1234→    // More general: ORR with Rn=XZR(31)
+  1235→    if (word >> 21) & 0x7FF == 0b10101010000 && rn == 31 {
+  1236→        return format!("mov x{}, x{}", rd, rm);
+  1237→    }
+  1238→
+  1239→    // --- MUL: MADD Xd, Xn, Xm, XZR
+  1240→    // Encoding: 1_00_1101_1_000_Rm_0_01111_Rn_Rd
+  1241→    if (word >> 21) & 0x7FF == 0b10011011000 && ((word >> 10) & 0x1F) == 0b01111 {
+  1242→        return format!("mul x{}, x{}, x{}", rd, rn, rm);
+  1243→    }
+  1244→
+  1245→    // --- SDIV: 1_00_1101_1_0100_00000_00001_Rn_Rd  (actually 1_00_1101_0100_Rm_00001_Rn_Rd)
+  1246→    if (word >> 21) & 0x7FF == 0b10011010100 && (word >> 10) & 0x1F == 0b00001 {
+  1247→        return format!("sdiv x{}, x{}, x{}", rd, rn, rm);
+  1248→    }
+  1249→
+  1250→    // --- UDIV: 1_00_1101_0000_Rm_00001_Rn_Rd
+  1251→    if (word >> 21) & 0x7FF == 0b10011010000 && (word >> 10) & 0x1F == 0b00001 {
+  1252→        return format!("udiv x{}, x{}, x{}", rd, rn, rm);
+  1253→    }
+  1254→
+  1255→    // --- CMP (immediate): SUBS XZR, Xn, #imm12
+  1256→    // 11100001_00_xxx_xxx_xxx_xxx_xxx_11111_xxx
+  1257→    if (word >> 23) & 0x1FF == 0b1_1110_0010 && rd == 31 {
+  1258→        return format!("cmp x{}, #{}", rn, imm12);
+  1259→    }
+  1260→
+  1261→    // --- CMP (register): SUBS XZR, Xn, Xm
+  1262→    if (word >> 21) & 0x7FF == 0b11101011000 && rd == 31 {
+  1263→        return format!("cmp x{}, x{}", rn, rm);
+  1264→    }
+  1265→
+  1266→    // --- B.cond: 0101010x xxxxxxxxxx xxxxxx cond
+  1267→    if (word >> 24) & 0xFF == 0x54 {
+  1268→        let cond_name = match cond {
+  1269→            0 => "eq",
+  1270→            1 => "ne",
+  1271→            2 => "cs",
+  1272→            3 => "cc",
+  1273→            4 => "mi",
+  1274→            5 => "pl",
+  1275→            6 => "vs",
+  1276→            7 => "vc",
+  1277→            8 => "hi",
+  1278→            9 => "ls",
+  1279→            10 => "ge",
+  1280→            11 => "lt",
+  1281→            12 => "gt",
+  1282→            13 => "le",
+  1283→            14 => "al",
+  1284→            _ => "??",
+  1285→        };
+  1286→        let imm19 = (word >> 5) & 0x7FFFF;
+  1287→        let offset = ((imm19 as i32) << 13) >> 11; // sign-extend and *4
+  1288→        return format!("b.{} {:+}", cond_name, offset);
+  1289→    }
+  1290→
+  1291→    // --- B (unconditional): 000101xx xxxxxxxxxxxxxxxxxxxx
+  1292→    if (word >> 26) & 0x3F == 0b000101 {
+  1293→        let imm26 = word & 0x3FFFFFF;
+  1294→        let offset = ((imm26 as i32) << 6) >> 4; // sign-extend and *4
+  1295→        return format!("b {:+}", offset);
+  1296→    }
+  1297→
+  1298→    // --- BL: 100101xx xxxxxxxxxxxxxxxxxxxx
+  1299→    if (word >> 26) & 0x3F == 0b100101 {
+  1300→        let imm26 = word & 0x3FFFFFF;
+  1301→        let offset = ((imm26 as i32) << 6) >> 4;
+  1302→        return format!("bl {:+}", offset);
+  1303→    }
+  1304→
+  1305→    // --- LDR (unsigned offset): 11111001_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+  1306→    if (word >> 22) & 0x3FF == 0b1111100101 {
+  1307→        let imm12_raw = (word >> 10) & 0xFFF;
+  1308→        let offset = imm12_raw * 8; // scale by 8 for 64-bit
+  1309→        return format!("ldr x{}, [x{}, #{}]", rt, rn, offset);
+  1310→    }
+  1311→
+  1312→    // --- STR (unsigned offset): 11111000_01_xxx_xxx_xxx_xxx_xxx_xn_rt
+  1313→    if (word >> 22) & 0x3FF == 0b1111100001 {
+  1314→        let imm12_raw = (word >> 10) & 0xFFF;
+  1315→        let offset = imm12_raw * 8;
+  1316→        return format!("str x{}, [x{}, #{}]", rt, rn, offset);
+  1317→    }
+  1318→
+  1319→    // --- LDP (signed offset, 64-bit): 101_0100_110_xxx_xxx_xxx_xxx_xxx_xn_rt2
+  1320→    if (word >> 22) & 0x3FF == 0b1010100110 {
+  1321→        let rt2 = (word >> 10) & 0x1F;
+  1322→        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+  1323→        let offset = imm7 * 8;
+  1324→        return format!("ldp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+  1325→    }
+  1326→
+  1327→    // --- STP (signed offset, 64-bit): 101_0100_010_xxx_xxx_xxx_xxx_xxx_xn_rt2
+  1328→    if (word >> 22) & 0x3FF == 0b1010100010 {
+  1329→        let rt2 = (word >> 10) & 0x1F;
+  1330→        let imm7 = ((word >> 15) & 0x7F) as i8 as i32;
+  1331→        let offset = imm7 * 8;
+  1332→        return format!("stp x{}, x{}, [x{}, #{}]", rt, rt2, rn, offset);
+  1333→    }
+  1334→
+  1335→    // --- MOVZ: 110100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+  1336→    if (word >> 23) & 0x1FF == 0b110100101 {
+  1337→        let hw = (word >> 21) & 0x3;
+  1338→        let imm16 = (word >> 5) & 0xFFFF;
+  1339→        return format!("movz x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+  1340→    }
+  1341→
+  1342→    // --- MOVK: 111100101_ww_xxx_xxx_xxx_xxx_xxx_xn_rd
+  1343→    if (word >> 23) & 0x1FF == 0b111100101 {
+  1344→        let hw = (word >> 21) & 0x3;
+  1345→        let imm16 = (word >> 5) & 0xFFFF;
+  1346→        return format!("movk x{}, #{}{}, LSL #{}", rd, imm16, "", hw * 16);
+  1347→    }
+  1348→
+  1349→    format!(".word {:08x}", word)
+  1350→}
+  1351→
+  1352→// ---------------------------------------------------------------------------
+  1353→// AArch64 Backend implementation
+  1354→// ---------------------------------------------------------------------------
+  1355→
+  1356→/// AArch64 (ARM64) code generation backend.
+  1357→///
+  1358→/// Wraps the existing ARM64 emitter, register allocator, and instruction
+  1359→/// encoding behind the `Backend` trait.
+  1360→pub struct AArch64Backend {
+  1361→    target_info: AArch64TargetInfo,
+  1362→}
+  1363→
+  1364→impl AArch64Backend {
+  1365→    /// Create a new AArch64 backend.
+  1366→    pub fn new() -> Self {
+  1367→        Self {
+  1368→            target_info: AArch64TargetInfo,
+  1369→        }
+  1370→    }
+  1371→}
+  1372→
+  1373→impl Default for AArch64Backend {
+  1374→    fn default() -> Self {
+  1375→        Self::new()
+  1376→    }
+  1377→}
+  1378→
+  1379→/// Compute the stack frame size for an IR function.
+  1380→///
+  1381→/// Replicates the private `compute_frame_size` function in `emit.rs`:
+  1382→/// sums `Alloc` instruction sizes and rounds up to 16-byte alignment.
+  1383→/// NOTE: Does NOT include 16 bytes for FP/LR pair (handled by prologue separately).
+  1384→fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
+  1385→    let mut total: u32 = 0; // Alloc sizes only; FP/LR handled separately
+  1386→    for block in &func.blocks {
+  1387→        for instr in &block.instructions {
+  1388→            if let IRInstr::Alloc { size, .. } = instr {
+  1389→                let aligned = (*size).div_ceil(16) * 16;
+  1390→                total += aligned;
+  1391→            }
+  1392→        }
+  1393→    }
+  1394→    // Round up to 16-byte alignment
+  1395→    total = (total + 15) & !15;
+  1396→    total as usize
+  1397→}
+  1398→
+  1399→/// Build an ELF64 binary for AArch64 Linux with 2 LOAD segments.
+  1400→///
+  1401→/// Segment 1: PF_R | PF_X — contains .text (code)
+  1402→/// Segment 2: PF_R | PF_W — contains .data + stack space (writable)
+  1403→///
+  1404→/// The two segments are separated by page alignment (4KB) to ensure
+  1405→/// the kernel maps them with different permissions. Without this,
+  1406→/// a single PF_R|PF_W|PF_X segment is insecure and may cause
+  1407→/// QEMU/Linux to reject the executable.
+  1408→fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
+  1409→    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+  1410→
+  1411→    let elf_header_size: u64 = 64;
+  1412→    let phdr_size: u64 = 56;
+  1413→    let num_phdrs: u64 = 2;
+  1414→    let phdr_end = elf_header_size + num_phdrs * phdr_size;
+  1415→    // Page-align the text segment start in the file.  The kernel's ELF
+  1416→    // loader mmap()s each LOAD segment, and the file offset must be
+  1417→    // congruent with the virtual address modulo the page size.  The
+  1418→    // simplest way to guarantee this is to place the text at a
+  1419→    // page-aligned file offset, with vaddr = base_addr.
+  1420→    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+  1421→    let text_size = code.len() as u64;
+  1422→
+  1423→    // The data segment starts on the next page after the text.
+  1424→    let text_file_end = text_offset + text_size;
+  1425→    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+  1426→    let data_offset = data_vaddr - base_addr; // file offset for data segment
+  1427→    let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
+  1428→    let entry_point = base_addr + text_offset;
+  1429→
+  1430→    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
+  1431→
+  1432→    // --- e_ident ---
+  1433→    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
+  1434→    elf.push(2); // ELFCLASS64
+  1435→    elf.push(1); // ELFDATA2LSB
+  1436→    elf.push(1); // EV_CURRENT
+  1437→    elf.push(3); // ELFOSABI_LINUX
+  1438→    elf.push(0); // padding
+  1439→    elf.extend_from_slice(&[0u8; 7]); // padding
+  1440→
+  1441→    // --- ELF header fields ---
+  1442→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+  1443→    elf.extend_from_slice(&183u16.to_le_bytes()); // e_machine = EM_AARCH64
+  1444→    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+  1445→    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+  1446→    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+  1447→    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+  1448→    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+  1449→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+  1450→    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+  1451→    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
+  1452→    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+  1453→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+  1454→    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+  1455→
+  1456→    // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
+  1457→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1458→    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+  1459→    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+  1460→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+  1461→    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+  1462→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
+  1463→    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+  1464→    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+  1465→
+  1466→    // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
+  1467→    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+  1468→    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+  1469→    elf.extend_from_slice(&data_offset.to_le_bytes()); // p_offset
+  1470→    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
+  1471→    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
+  1472→    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
+  1473→    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
+  1474→    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+  1475→
+  1476→    // --- .text section ---
+  1477→    // Pad to page-aligned text_offset
+  1478→    while (elf.len() as u64) < text_offset {
+  1479→        elf.push(0);
+  1480→    }
+  1481→    elf.extend_from_slice(code);
+  1482→
+  1483→    // --- Pad to data segment offset (if needed) ---
+  1484→    while (elf.len() as u64) < data_offset {
+  1485→        elf.push(0);
+  1486→    }
+  1487→
+  1488→    // No file data for the .data segment (it's BSS-like, zero-initialized)
+  1489→
+  1490→    elf
+  1491→}
+  1492→
+  1493→/// Build ARM64 runtime I/O functions using Linux SVC syscalls.
+  1494→///
+  1495→/// Provides:
+  1496→/// - `__vuma_print_hex`: Print X0 as 8 hex digits to stdout (FD=1)
+  1497→///   Uses sys_write (X8=64) via SVC #0.
+  1498→///   Saves/restores X1,X2,X3,X8,X9,X10 on stack.
+  1499→///
+  1500→/// - `__vuma_print_int`: Print X0 as a decimal integer to stdout (FD=1)
+  1501→///   Converts digit-by-digit into a stack buffer, then sys_write.
+  1502→///
+  1503→/// - `__vuma_print_newline`: Print a newline character to stdout.
+  1504→///
+  1505→/// All functions follow AAPCS64: X0 is the argument, X1-X7 are caller-saved,
+  1506→/// X8 is the indirect result register / syscall number, X19-X28 are callee-saved.
+  1507→fn build_aarch64_runtime() -> Vec<u8> {
+  1508→    let mut code = Vec::new();
+  1509→
+  1510→    // ── __vuma_print_hex ──
+  1511→    // Input: X0 = 64-bit value to print as 8 hex digits
+  1512→    // Clobbers: X1, X2, X3, X8, X9, X10
+  1513→    // Stack frame: 48 bytes (8 for pair save + 8 for hex chars + 32 padding)
+  1514→
+  1515→    // Prologue: save callee-saved and link register
+  1516→    // STP X29, X30, [SP, #-48]!  (pre-indexed, 48-byte frame)
+  1517→    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
+  1518→    // ADD X29, SP, #0
+  1519→    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+  1520→
+  1521→    // Save X9, X10 on stack at [SP, #16]
+  1522→    // STP X9, X10, [SP, #16]
+  1523→    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
+  1524→
+  1525→    // Save X1, X2 on stack at [SP, #32]
+  1526→    // STP X1, X2, [SP, #32]
+  1527→    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
+  1528→
+  1529→    // Save X3, X8 on stack at [SP, #40]  (offset 40 = 5*8)
+  1530→    // Wait, 40 = 5*8 but STP needs offset/8 for signed-offset. 40/8 = 5.
+  1531→    // STP X3, X8, [SP, #40]
+  1532→    code.extend_from_slice(&0xA9052C63u32.to_le_bytes());
+  1533→
+  1534→    // Hex lookup table: we'll use ADD + LDRB pattern.
+  1535→    // Instead, compute hex digit directly:
+  1536→    // For each nibble: digit = nibble; if digit < 10 then char = digit + '0' else char = digit - 10 + 'a'
+  1537→
+  1538→    // We'll write 8 hex chars starting at SP+16 (reuse save area after we load saves)
+  1539→    // Actually, let's use SP+16 as the char buffer (8 bytes).
+  1540→    // First, save the important regs, then overwrite the buffer area.
+  1541→
+  1542→    // Process 8 nibbles from most significant to least significant
+  1543→    // X0 = value, iterate 8 times shifting right by 28, 24, 20, ..., 4, 0
+  1544→
+  1545→    // X9 = char buffer pointer = SP
+  1546→    // X10 = loop counter (0..8)
+  1547→
+  1548→    // ADD X9, SP, #16  (buffer starts at SP+16)
+  1549→    code.extend_from_slice(&0x910043E9u32.to_le_bytes());
+  1550→    // MOV X10, #0
+  1551→    code.extend_from_slice(&0xD280001Au32.to_le_bytes());
+  1552→    // MOV X3, #0  (bit shift amount, starts at 28)
+  1553→    code.extend_from_slice(&0xD280003Du32.to_le_bytes()); // MOVZ X3, #28>>4... wait
+  1554→    // MOV X3, #28
+  1555→    code.extend_from_slice(&0xD2800383u32.to_le_bytes()); // MOVZ X3, #28
+  1556→
+  1557→    // Loop label:
+  1558→    let loop_offset = code.len();
+  1559→
+  1560→    // Extract nibble: X2 = (X0 >> X3) & 0xF
+  1561→    // LSR X2, X0, X3
+  1562→    code.extend_from_slice(&0x9AC02482u32.to_le_bytes()); // LSR X2, X0, X3
+  1563→    // AND X2, X2, #0xF
+  1564→    code.extend_from_slice(&0x92400C42u32.to_le_bytes()); // AND X2, X2, #15
+  1565→
+  1566→    // Convert nibble to hex char:
+  1567→    // if X2 < 10: char = X2 + 48 ('0')
+  1568→    // else: char = X2 - 10 + 97 ('a')
+  1569→    // CMP X2, #10
+  1570→    code.extend_from_slice(&0xF100141Fu32.to_le_bytes()); // CMP X2, #10? No...
+  1571→    // CMP X2, #10: use ADD X1, X2, #0 then CMP... Actually:
+  1572→    // SUB X1, X2, #10 → if < 10, result is negative (borrow set)
+  1573→    // Let's use: CMP X2, #9; B.GT hex_alpha
+  1574→    // CMP X2, #9
+  1575→    code.extend_from_slice(&0xF100129Fu32.to_le_bytes()); // CMP X2, #9
+  1576→
+  1577→    // ADD X1, X2, #48  (default: '0' + digit)
+  1578→    code.extend_from_slice(&0x91000C41u32.to_le_bytes()); // ADD X1, X2, #48
+  1579→
+  1580→    // B.GT hex_alpha (placeholder, will be +1 instruction)
+  1581→    code.extend_from_slice(&0x54000069u32.to_le_bytes()); // B.GT +4*2 = +8 bytes
+  1582→
+  1583→    // B store_char
+  1584→    code.extend_from_slice(&0x14000002u32.to_le_bytes()); // B +2 instructions
+  1585→
+  1586→    // hex_alpha: ADD X1, X2, #87  (87 = 97-10, so digit-10+'a')
+  1587→    code.extend_from_slice(&0x91002AC1u32.to_le_bytes()); // ADD X1, X2, #87
+  1588→
+  1589→    // store_char: STRB W1, [X9, X10]
+  1590→    // STRB W1, [X9, X10] — register offset
+  1591→    code.extend_from_slice(&0x382A6821u32.to_le_bytes()); // STRB W1, [X9, X10]
+  1592→
+  1593→    // Increment: SUB X3, X3, #4; ADD X10, X10, #1; CMP X10, #8; B.LT loop
+  1594→    code.extend_from_slice(&0xD1000863u32.to_le_bytes()); // SUB X3, X3, #4
+  1595→    code.extend_from_slice(&0x9100054Au32.to_le_bytes()); // ADD X10, X10, #1
+  1596→    code.extend_from_slice(&0xF100151Fu32.to_le_bytes()); // CMP X10, #8
+  1597→
+  1598→    // Calculate branch back to loop start
+  1599→    let current_pos = code.len() as i64;
+  1600→    let loop_start = loop_offset as i64;
+  1601→    let back_offset = (loop_start - current_pos) / 4 - 1; // B.LT is relative to PC+4
+  1602→    let bcond = 0x5400000Bu32 | ((back_offset as u32) & 0x7FFFF); // B.LT
+  1603→    code.extend_from_slice(&bcond.to_le_bytes());
+  1604→
+  1605→    // ── sys_write(1, buf, 8) ──
+  1606→    // MOV X0, #1  (stdout fd)
+  1607→    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOVZ X0, #1
+  1608→    // ADD X1, SP, #16  (buffer pointer)
+  1609→    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
+  1610→    // MOV X2, #8  (length)
+  1611→    code.extend_from_slice(&0xD2800102u32.to_le_bytes()); // MOVZ X2, #8
+  1612→    // MOV X8, #64  (sys_write)
+  1613→    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOVZ X8, #64
+  1614→    // SVC #0
+  1615→    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
+  1616→
+  1617→    // Restore registers
+  1618→    // LDP X9, X10, [SP, #16]
+  1619→    code.extend_from_slice(&0xA94127E9u32.to_le_bytes());
+  1620→    // LDP X1, X2, [SP, #32]
+  1621→    code.extend_from_slice(&0xA9420441u32.to_le_bytes());
+  1622→    // LDP X3, X8, [SP, #40]
+  1623→    code.extend_from_slice(&0xA9452C63u32.to_le_bytes());
+  1624→    // LDP X29, X30, [SP], #48  (post-indexed load)
+  1625→    code.extend_from_slice(&0xA8C37BFDu32.to_le_bytes());
+  1626→
+  1627→    // RET
+  1628→    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+  1629→
+  1630→    // ── __vuma_print_int ──
+  1631→    // Input: X0 = 64-bit signed integer to print as decimal
+  1632→    // Strategy: Divide by 10 repeatedly, push digits onto stack, then write.
+  1633→    // X9 = digit count, X10 = buffer pointer (SP-based)
+  1634→    // Stack frame: 64 bytes (16 for save pair + 48 for digit buffer)
+  1635→
+  1636→    // STP X29, X30, [SP, #-64]!
+  1637→    code.extend_from_slice(&0xA9C27BFDu32.to_le_bytes());
+  1638→    // ADD X29, SP, #0
+  1639→    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+  1640→    // STP X9, X10, [SP, #16]
+  1641→    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
+  1642→    // STP X1, X2, [SP, #32]
+  1643→    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
+  1644→    // STP X3, X8, [SP, #48]
+  1645→    code.extend_from_slice(&0xA9030463u32.to_le_bytes());
+  1646→
+  1647→    // Handle negative numbers
+  1648→    // CMP X0, #0
+  1649→    code.extend_from_slice(&0xB100001Fu32.to_le_bytes());
+  1650→    // B.GE positive
+  1651→    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE +4
+  1652→
+  1653→    // Print '-' for negative
+  1654→    // MOV X1, #45  ('-')
+  1655→    code.extend_from_slice(&0xD28005A1u32.to_le_bytes()); // MOVZ X1, #45
+  1656→    // STRB W1, [SP, #16]
+  1657→    code.extend_from_slice(&0x390013E1u32.to_le_bytes());
+  1658→    // sys_write(1, SP+16, 1)
+  1659→    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
+  1660→    code.extend_from_slice(&0x910043E1u32.to_le_bytes()); // ADD X1, SP, #16
+  1661→    code.extend_from_slice(&0xD2800022u32.to_le_bytes()); // MOV X2, #1
+  1662→    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
+  1663→    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
+  1664→
+  1665→    // Negate X0
+  1666→    // NEG X0, X0 = SUB X0, XZR, X0
+  1667→    code.extend_from_slice(&0xCB0003E0u32.to_le_bytes()); // SUB X0, XZR, X0
+  1668→
+  1669→    // positive: convert digits
+  1670→    // X9 = digit count = 0
+  1671→    code.extend_from_slice(&0xD2800019u32.to_le_bytes()); // MOVZ X9, #0
+  1672→    // X10 = buffer pointer = SP + 17 (leave room for potential '-')
+  1673→    code.extend_from_slice(&0x910047EAu32.to_le_bytes()); // ADD X10, SP, #17
+  1674→
+  1675→    // div_loop: UDIV X2, X0, #10; MSUB X1, X2, #10, X0; add '0'; push; X0 = X2
+  1676→    let div_loop_start = code.len();
+  1677→
+  1678→    // CBZ X0, done_digits
+  1679→    code.extend_from_slice(&0xB4000080u32.to_le_bytes()); // CBZ X0, done_digits (+16 bytes = 4 instr)
+  1680→
+  1681→    // UDIV X2, X0, #10  → but UDIV takes 2 regs, no immediate.
+  1682→    // MOV X1, #10
+  1683→    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
+  1684→    // UDIV X2, X0, X1
+  1685→    code.extend_from_slice(&0x9AC10802u32.to_le_bytes()); // UDIV X2, X0, X1
+  1686→    // MSUB X3, X2, X1, X0  → X3 = X0 - X2 * X1 = remainder
+  1687→    code.extend_from_slice(&0x9B017C43u32.to_le_bytes()); // MSUB X3, X2, X1, X0
+  1688→    // ADD X3, X3, #48  ('0')
+  1689→    code.extend_from_slice(&0x91001863u32.to_le_bytes()); // ADD X3, X3, #48
+  1690→    // STRB W3, [X10, X9]  — store digit at buffer[count]
+  1691→    code.extend_from_slice(&0x382B6863u32.to_le_bytes()); // STRB W3, [X10, X9]
+  1692→    // ADD X9, X9, #1
+  1693→    code.extend_from_slice(&0x91000529u32.to_le_bytes()); // ADD X9, X9, #1
+  1694→    // MOV X0, X2  (quotient becomes new value)
+  1695→    code.extend_from_slice(&0xAA0203E0u32.to_le_bytes()); // MOV X0, X2
+  1696→    // B div_loop
+  1697→    let cur = code.len() as i64;
+  1698→    let back = (div_loop_start as i64 - cur as i64) / 4 - 1;
+  1699→    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
+  1700→
+  1701→    // done_digits: digits are in reverse order in buffer.
+  1702→    // Reverse them in-place using X1 and X3 as temp pointers.
+  1703→    // CBZ X9, write_digits  (if count == 0, print "0")
+  1704→    code.extend_from_slice(&0xB4000039u32.to_le_bytes()); // CBZ X9, write_digits (+6 instr = 24 bytes)
+  1705→
+  1706→    // If count == 0, print "0"
+  1707→    // MOV X1, #48  ('0')
+  1708→    code.extend_from_slice(&0xD2800601u32.to_le_bytes()); // MOVZ X1, #48
+  1709→    // STRB W1, [X10]
+  1710→    code.extend_from_slice(&0x39001501u32.to_le_bytes());
+  1711→    // MOV X9, #1
+  1712→    code.extend_from_slice(&0xD2800039u32.to_le_bytes());
+  1713→    // B write_digits
+  1714→    code.extend_from_slice(&0x14000003u32.to_le_bytes()); // B +3
+  1715→
+  1716→    // Reverse digits in buffer[X10..X10+X9]
+  1717→    // X1 = left index = 0, X3 = right index = X9 - 1
+  1718→    // SUB X3, X9, #1
+  1719→    code.extend_from_slice(&0xD1000563u32.to_le_bytes()); // SUB X3, X9, #1
+  1720→    // MOV X1, #0
+  1721→    code.extend_from_slice(&0xD2800001u32.to_le_bytes()); // MOVZ X1, #0
+  1722→
+  1723→    // rev_loop: CMP X1, X3; B.GE rev_done
+  1724→    let rev_loop = code.len();
+  1725→    code.extend_from_slice(&0xEB03003Fu32.to_le_bytes()); // CMP X1, X3
+  1726→    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE rev_done (+4)
+  1727→
+  1728→    // Load bytes: LDRB W2, [X10, X1]; LDRB W8, [X10, X3]
+  1729→    code.extend_from_slice(&0x386B6822u32.to_le_bytes()); // LDRB W2, [X10, X1]
+  1730→    code.extend_from_slice(&0x386B6C68u32.to_le_bytes()); // LDRB W8, [X10, X3]
+  1731→    // STRB W8, [X10, X1]; STRB W2, [X10, X3] (swap)
+  1732→    code.extend_from_slice(&0x382B6828u32.to_le_bytes()); // STRB W8, [X10, X1]
+  1733→    code.extend_from_slice(&0x382B6842u32.to_le_bytes()); // STRB W2, [X10, X3]
+  1734→    // ADD X1, X1, #1; SUB X3, X3, #1
+  1735→    code.extend_from_slice(&0x91000421u32.to_le_bytes()); // ADD X1, X1, #1
+  1736→    code.extend_from_slice(&0xD1000463u32.to_le_bytes()); // SUB X3, X3, #1
+  1737→    // B rev_loop
+  1738→    let cur = code.len() as i64;
+  1739→    let back = (rev_loop as i64 - cur as i64) / 4 - 1;
+  1740→    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
+  1741→
+  1742→    // write_digits: sys_write(1, X10, X9)
+  1743→    // rev_done:
+  1744→    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
+  1745→    code.extend_from_slice(&0xAA0A03E1u32.to_le_bytes()); // MOV X1, X10
+  1746→    code.extend_from_slice(&0xAA0903E2u32.to_le_bytes()); // MOV X2, X9
+  1747→    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
+  1748→    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
+  1749→
+  1750→    // Restore and return
+  1751→    code.extend_from_slice(&0xA94127E9u32.to_le_bytes()); // LDP X9, X10, [SP, #16]
+  1752→    code.extend_from_slice(&0xA9420441u32.to_le_bytes()); // LDP X1, X2, [SP, #32]
+  1753→    code.extend_from_slice(&0xA9430463u32.to_le_bytes()); // LDP X3, X8, [SP, #48]
+  1754→    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes()); // LDP X29, X30, [SP], #64
+  1755→    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes()); // RET
+  1756→
+  1757→    // ── __vuma_print_newline ──
+  1758→    // Simple: write '\n' to stdout
+  1759→    // STP X29, X30, [SP, #-16]!
+  1760→    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
+  1761→    // ADD X29, SP, #0
+  1762→    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+  1763→
+  1764→    // MOV X1, #10  ('\n')
+  1765→    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
+  1766→    // STRB W1, [SP, #16]  (use the 16 bytes we just freed)
+  1767→    // Actually, use stack at SP+16 which is the pre-indexed area...
+  1768→    // Better: use [SP, #0] since we already pushed 16 bytes
+  1769→    code.extend_from_slice(&0x3900001Fu32.to_le_bytes()); // STRB W1, [SP, #0]... no, that's the saved FP/LR area
+  1770→    // Use the area after our frame: we allocated 16 bytes for FP/LR.
+  1771→    // Put '\n' at [SP, #0]... no, that's where FP/LR are stored.
+  1772→    // Let's put it at a safe location. Actually, the STP wrote X29, X30 at [SP].
+  1773→    // Let's use X9 as scratch to hold the char, and a buffer on the stack.
+  1774→
+  1775→    // Actually, simplest: put the newline byte on the stack right at the frame.
+  1776→    // We'll use the save area as buffer. We already saved FP/LR there.
+  1777→    // Let's use a different approach: just write from a register-indirect with SP offset.
+  1778→
+  1779→    // MOV W1, #10  (already done above)
+  1780→    // STRB W1, [SP]   ← this overwrites saved FP/LR! Bad.
+  1781→    // Instead, let's use X9 as temp storage.
+  1782→
+  1783→    // Let me redo this more carefully.
+  1784→    // We'll save X9 too.
+  1785→    // Actually, let's just make a 32-byte frame to have room.
+  1786→
+  1787→    // Let me restart the newline function from scratch in the code buffer.
+  1788→    // Find the start of __vuma_print_newline by looking for the last STP.
+  1789→    // The simplest approach: use a dedicated stack frame.
+  1790→
+  1791→    // I'll overwrite the last few instructions I emitted for newline.
+  1792→    // Since this is getting complex, let me just build it cleanly.
+  1793→    // Remove the partial newline code and redo it.
+  1794→    let newline_start_offset = code.len() - 7 * 4; // remove 7 instructions back
+  1795→
+  1796→    code.truncate(newline_start_offset);
+  1797→
+  1798→    // __vuma_print_newline: clean implementation
+  1799→    // STP X29, X30, [SP, #-32]!  (32-byte frame: 16 for save, 16 for buffer)
+  1800→    code.extend_from_slice(&0xA9BE7BFDu32.to_le_bytes());
+  1801→    // ADD X29, SP, #0
+  1802→    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
+  1803→
+  1804→    // Store '\n' at SP+16 (safe area, not overlapping saved regs)
+  1805→    // MOV W1, #10
+  1806→    code.extend_from_slice(&0x52800141u32.to_le_bytes()); // MOVZ W1, #10
+  1807→    // STRB W1, [SP, #16]
+  1808→    code.extend_from_slice(&0x390021E1u32.to_le_bytes());
+  1809→
+  1810→    // sys_write(1, SP+16, 1)
+  1811→    // MOV X0, #1
+  1812→    code.extend_from_slice(&0xD2800020u32.to_le_bytes());
+  1813→    // ADD X1, SP, #16
+  1814→    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
+  1815→    // MOV X2, #1
+  1816→    code.extend_from_slice(&0xD2800022u32.to_le_bytes());
+  1817→    // MOV X8, #64
+  1818→    code.extend_from_slice(&0xD2800808u32.to_le_bytes());
+  1819→    // SVC #0
+  1820→    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
+  1821→
+  1822→    // LDP X29, X30, [SP], #32
+  1823→    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes());
+  1824→    // RET
+  1825→    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+  1826→
+  1827→    code
+  1828→}
+  1829→
+  1830→impl Backend for AArch64Backend {
+  1831→    fn target_info(&self) -> &dyn TargetInfo {
+  1832→        &self.target_info
+  1833→    }
+  1834→
+  1835→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+  1836→        // Use the existing Emitter to emit the function, which internally
+  1837→        // performs register allocation and instruction encoding.
+  1838→        let mut emitter = crate::emit::Emitter::new();
+  1839→        let code = emitter
+  1840→            .emit_function(func)
+  1841→            .map_err(|e| BackendError::RegisterAllocFailed {
+  1842→                isa: "aarch64",
+  1843→                reason: e.to_string(),
+  1844→            })?;
+  1845→
+  1846→        let func_name = func.name.clone();
+  1847→        let frame_size = aarch64_compute_frame_size(func);
+  1848→
+  1849→        // Convert each 32-bit ARM64 instruction word into an AllocatedInstruction
+  1850→        // with its little-endian encoded bytes.
+  1851→        let instructions: Vec<AllocatedInstruction> = code
+  1852→            .iter()
+  1853→            .enumerate()
+  1854→            .map(|(i, &word)| AllocatedInstruction {
+  1855→                opcode: format!("arm64_{}", i),
+  1856→                reads: vec![],
+  1857→                writes: vec![],
+  1858→                encoded: word.to_le_bytes().to_vec(),
+  1859→            })
+  1860→            .collect();
+  1861→
+  1862→        let code_size = instructions.len() * 4;
+  1863→
+  1864→        // Capture relocations from the Emitter so encode_program can patch BL offsets.
+  1865→        let relocations = emitter.relocations().to_vec();
+  1866→
+  1867→        Ok(AllocatedFunction {
+  1868→            name: func_name,
+  1869→            blocks: vec![AllocatedBlock {
+  1870→                label: "entry".to_string(),
+  1871→                instructions,
+  1872→                code_offset: 0,
+  1873→            }],
+  1874→            frame_size,
+  1875→            callee_saved: vec![],
+  1876→            spill_slots: 0,
+  1877→            code_size,
+  1878→            relocations,
+  1879→            wasm_func_type: None,
+  1880→            wasm_locals: None,
+  1881→        })
+  1882→    }
+  1883→
+  1884→    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+  1885→        let mut bytes = Vec::new();
+  1886→        for block in &func.blocks {
+  1887→            for instr in &block.instructions {
+  1888→                bytes.extend_from_slice(&instr.encoded);
+  1889→            }
+  1890→        }
+  1891→        Ok(bytes)
+  1892→    }
+  1893→
+  1894→    fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+  1895→        // ── ARM64 Linux static executable ──
+  1896→        //
+  1897→        // Layout:
+  1898→        //   _start:  BL main           ; call main (result in X0)
+  1899→        //            MOV X0, X0         ; (nop, keep result)
+  1900→        //            MOV X8, #93        ; sys_exit_group
+  1901→        //            SVC #0             ; syscall
+  1902→        //   <functions...>
+  1903→        //   <runtime: print_hex, print_int using SVC sys_write>
+  1904→        //
+  1905→        // The _start stub is 4 instructions = 16 bytes.
+  1906→        // After that come all user functions.
+  1907→        // After user functions come the runtime I/O functions.
+  1908→
+  1909→        const R_AARCH64_CALL26: &str = "R_AARCH64_CALL26";
+  1910→
+  1911→        // ── _start stub ──
+  1912→        // BL <main>      — offset 0, needs relocation
+  1913→        // NOP            — offset 4 (keep X0 as return value)
+  1914→        // MOV X8, #93    — offset 8 (sys_exit_group = 93 on AArch64 Linux)
+  1915→        // SVC #0         — offset 12
+  1916→
+  1917→        let start_stub_size: usize = 16; // 4 × 4-byte instructions
+  1918→
+  1919→        // ── Build runtime I/O code ──
+  1920→        // print_hex: X0 = value to print as 8 hex digits to stdout
+  1921→        //   Uses SVC #0 with X8=64 (sys_write), fd=1 (stdout)
+  1922→        //   Converts each nibble to hex char, writes to stack buffer, then sys_write.
+  1923→        let runtime_code = build_aarch64_runtime();
+  1924→
+  1925→        // ── Compute function offsets ──
+  1926→        // _start stub comes first, then user functions, then runtime.
+  1927→        let mut func_offsets: HashMap<String, usize> = HashMap::new();
+  1928→        let mut current_offset: usize = start_stub_size; // after _start
+  1929→
+  1930→        for func in &program.functions {
+  1931→            func_offsets.insert(func.name.clone(), current_offset);
+  1932→            let func_size: usize = func.blocks.iter()
+  1933→                .flat_map(|b| b.instructions.iter())
+  1934→                .map(|i| i.encoded.len())
+  1935→                .sum();
+  1936→            current_offset += func_size;
+  1937→        }
+  1938→
+  1939→        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
+  1940→        let runtime_offsets_start = current_offset;
+  1941→        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
+  1942→        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
+  1943→        // Both print_hex and print_int start at same offset (single combined runtime)
+  1944→        // Actually, let's put them sequentially:
+  1945→        // We'll just embed the runtime as a single blob and not reference individual offsets
+  1946→        // since user code calls them via BL with relocation.
+  1947→
+  1948→        // ── Build _start stub bytes ──
+  1949→        let mut start_stub = Vec::with_capacity(start_stub_size);
+  1950→
+  1951→        // BL <main> — placeholder, will be patched
+  1952→        // BL encoding: 1 0 0 1 0 1 imm26
+  1953→        start_stub.extend_from_slice(&0x94000000u32.to_le_bytes()); // BL #0
+  1954→
+  1955→        // NOP (MOV X0, X0)
+  1956→        start_stub.extend_from_slice(&0xAA0003E0u32.to_le_bytes()); // MOV X0, X0
+  1957→
+  1958→        // MOV X8, #93 (sys_exit_group)
+  1959→        // MOVZ X8, #93 = 0xD2800BA8
+  1960→        start_stub.extend_from_slice(&0xD2800BA8u32.to_le_bytes());
+  1961→
+  1962→        // SVC #0
+  1963→        start_stub.extend_from_slice(&0xD4000001u32.to_le_bytes());
+  1964→
+  1965→        // ── Patch _start BL to main ──
+  1966→        let main_key = func_offsets.keys()
+  1967→            .find(|k| *k == "main" || k.starts_with("fn_main"))
+  1968→            .cloned();
+  1969→        if let Some(ref key) = main_key {
+  1970→            let main_offset = func_offsets[key];
+  1971→            // BL offset = (target - pc) / 4, where pc = address of BL instruction
+  1972→            // BL is at offset 0 within all_code, but in the final binary it's at
+  1973→            // start_stub_size_into_elf = text_offset_in_elf.
+  1974→            // For the BL encoding, imm26 = (target - bl_addr) / 4
+  1975→            // bl_addr = 0 (relative to start of all_code = _start)
+  1976→            // target = main_offset (relative to start of all_code)
+  1977→            let bl_offset = (main_offset as i64) / 4;
+  1978→            // Mask to 26 bits (signed)
+  1979→            let imm26 = (bl_offset as u32) & 0x03FFFFFF;
+  1980→            let bl_word: u32 = 0x94000000 | imm26;
+  1981→            start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
+  1982→        }
+  1983→
+  1984→        // ── Concatenate all code ──
+  1985→        let mut all_code = start_stub;
+  1986→        for func in &program.functions {
+  1987→            for block in &func.blocks {
+  1988→                for instr in &block.instructions {
+  1989→                    all_code.extend_from_slice(&instr.encoded);
+  1990→                }
+  1991→            }
+  1992→        }
+  1993→
+  1994→        // Append runtime I/O code
+  1995→        all_code.extend_from_slice(&runtime_code);
+  1996→
+  1997→        // ── Patch BL relocations ──
+  1998→        // Each function's relocations are relative to the start of that function's code.
+  1999→        // We need to adjust them by the _start stub size + preceding functions' sizes.
+  2000→        let mut func_code_offset: usize = start_stub_size;
+
+[showing lines 1-2000 of 2475; use offset=2001 with limit to continue reading]

@@ -68,8 +68,8 @@ use vuma_ive::verification::VerificationInput;
 use vuma_ive::{AggregatedResult, InvariantAggregator, InvariantKind, VerificationLevel};
 use vuma_parser::{to_scg::AstToScg, ParseError, Parser};
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode, DeploymentTarget,
-    EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCGRegion, SCG,
+    AccessMode, AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode,
+    DeploymentTarget, EdgeKind, NodePayload, NodeType, ProgramPoint, RegionId, SCGRegion, SCG,
 };
 
 // ===========================================================================
@@ -1457,7 +1457,7 @@ pub fn build_trivial_scg() -> SCG {
     let comp_id = scg.add_node(
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
-            operation: "write_buffer".to_string(),
+            kind: ComputationKind::Other("write_buffer".to_string()),
             result_type: None,
             tail_call: false,
         }),
@@ -1729,7 +1729,7 @@ pub fn build_leaked_allocation_scg() -> SCG {
     let comp_id = scg.add_node(
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
-            operation: "use_leaked_buf".to_string(),
+            kind: ComputationKind::Other("use_leaked_buf".to_string()),
             result_type: None,
             tail_call: false,
         }),
@@ -1777,7 +1777,7 @@ pub fn build_multi_region_scg() -> SCG {
     let comp1_id = scg.add_node(
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
-            operation: "process_region1".to_string(),
+            kind: ComputationKind::Other("process_region1".to_string()),
             result_type: None,
             tail_call: false,
         }),
@@ -1822,7 +1822,7 @@ pub fn build_multi_region_scg() -> SCG {
     let comp2_id = scg.add_node(
         NodeType::Computation,
         NodePayload::Computation(ComputationNode {
-            operation: "process_region2".to_string(),
+            kind: ComputationKind::Other("process_region2".to_string()),
             result_type: None,
             tail_call: false,
         }),

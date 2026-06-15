@@ -396,11 +396,7 @@ fn test_infer_security_level() {
     );
     let computation = scg.add_node(
         NodeType::Computation,
-        NodePayload::Computation(ComputationNode {
-            operation: "parse_int".to_string(),
-            result_type: Some("i32".to_string()),
-            tail_call: false,
-        }),
+        NodePayload::Computation(ComputationNode::new("parse_int", Some("i32".to_string()), false)),
         pp(),
     );
 
@@ -544,11 +540,7 @@ fn test_infer_temporal_relation() {
     );
     let computation = scg.add_node(
         NodeType::Computation,
-        NodePayload::Computation(ComputationNode {
-            operation: "add".to_string(),
-            result_type: Some("i32".to_string()),
-            tail_call: false,
-        }),
+        NodePayload::Computation(ComputationNode::new("add", Some("i32".to_string()), false)),
         pp(),
     );
 
@@ -659,11 +651,7 @@ fn test_bd_vs_rust_type() {
     );
     let add_node = scg.add_node(
         NodeType::Computation,
-        NodePayload::Computation(ComputationNode {
-            operation: "add".to_string(),
-            result_type: Some("i32".to_string()),
-            tail_call: false,
-        }),
+        NodePayload::Computation(ComputationNode::new("add", Some("i32".to_string()), false)),
         pp(),
     );
 

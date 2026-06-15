@@ -347,7 +347,7 @@ fn test_full_pipeline_parse_to_elf() {
 /// Test: Parse sha256d.vuma through the full pipeline for AArch64.
 #[test]
 fn test_full_pipeline_sha256d_aarch64() {
-    let sha256d_source = include_str!("../../../../examples/sha256d.vuma");
+    let sha256d_source = include_str!("../../../examples/sha256d.vuma");
 
     // Parse the source
     let mut parser = Parser::new(sha256d_source);
@@ -422,7 +422,7 @@ fn test_full_pipeline_sha256d_aarch64() {
 /// Test: sha256d compiled for all 8 backends — each must produce valid output.
 #[test]
 fn test_full_pipeline_sha256d_all_backends() {
-    let sha256d_source = include_str!("../../../../examples/sha256d.vuma");
+    let sha256d_source = include_str!("../../../examples/sha256d.vuma");
 
     // Parse + AST → SCG (shared front-end)
     let mut parser = Parser::new(sha256d_source);

@@ -90,6 +90,14 @@ pub mod property_tests;
 pub mod abi_conformance;
 #[cfg(test)]
 pub mod final_integration;
+#[cfg(test)]
+pub mod diagnostics_integration;
+#[cfg(test)]
+pub mod dwarf_ffi_integration;
+#[cfg(test)]
+pub mod sha256d_backends;
+#[cfg(test)]
+pub mod regression;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

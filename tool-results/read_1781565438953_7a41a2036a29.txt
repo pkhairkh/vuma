@@ -1,0 +1,602 @@
+  1400→  1400→        ty: Option<IRType>,
+  1401→  1401→    },
+  1402→  1402→
+  1403→  1403→    // ── Comparison ──────────────────────────────────────────────────
+  1404→  1404→    /// Comparison: `dst = cmp kind lhs rhs` — produces 1 or 0.
+  1405→  1405→    Cmp {
+  1406→  1406→        /// Comparison kind.
+  1407→  1407→        kind: CmpKind,
+  1408→  1408→        /// Destination register (boolean result).
+  1409→  1409→        dst: IRValue,
+  1410→  1410→        /// Left-hand side operand.
+  1411→  1411→        lhs: IRValue,
+  1412→  1412→        /// Right-hand side operand.
+  1413→  1413→        rhs: IRValue,
+  1414→  1414→        /// Type of the operands (determines 32-bit vs 64-bit comparison).
+  1415→  1415→        /// `None` defaults to 64-bit (X register) behavior.
+  1416→  1416→        ty: Option<IRType>,
+  1417→  1417→    },
+  1418→  1418→
+  1419→  1419→    // ── Atomic operations ──────────────────────────────────────────────
+  1420→  1420→    /// Atomic load: `dst = atomic_load addr`
+  1421→  1421→    ///
+  1422→  1422→    /// Emits target-specific acquire-load instructions:
+  1423→  1423→    /// - AArch64: `LDAXR`
+  1424→  1424→    /// - x86_64: `LOCK` prefix or plain `MOV` (x86 is already atomic for aligned loads)
+  1425→  1425→    /// - RISC-V: `LR.D`
+  1426→  1426→    AtomicLoad {
+  1427→  1427→        /// Destination register.
+  1428→  1428→        dst: IRValue,
+  1429→  1429→        /// Source address register.
+  1430→  1430→        addr: IRValue,
+  1431→  1431→        /// Type of the value being loaded (determines access size).
+  1432→  1432→        ty: IRType,
+  1433→  1433→    },
+  1434→  1434→
+  1435→  1435→    /// Atomic store: `atomic_store value, addr`
+  1436→  1436→    ///
+  1437→  1437→    /// Emits target-specific release-store instructions:
+  1438→  1438→    /// - AArch64: `STLXR`
+  1439→  1439→    /// - x86_64: `LOCK` prefix or plain `MOV`
+  1440→  1440→    /// - RISC-V: `SC.D`
+  1441→  1441→    AtomicStore {
+  1442→  1442→        /// Value to store.
+  1443→  1443→        value: IRValue,
+  1444→  1444→        /// Target address register.
+  1445→  1445→        addr: IRValue,
+  1446→  1446→        /// Type of the value being stored.
+  1447→  1447→        ty: IRType,
+  1448→  1448→    },
+  1449→  1449→
+  1450→  1450→    /// Atomic compare-and-swap: `dst = atomic_cas addr, expected, desired`
+  1451→  1451→    ///
+  1452→  1452→    /// Returns the old value at `addr`. If the old value equals `expected`,
+  1453→  1453→    /// the new value `desired` is written. The `dst` receives the old value
+  1454→  1454→    /// so the caller can check whether the swap succeeded.
+  1455→  1455→    ///
+  1456→  1456→    /// Emits target-specific LL/SC or CMPXCHG sequences:
+  1457→  1457→    /// - AArch64: `LDAXR` / `CMP` / `B.NE` / `STLXR` loop
+  1458→  1458→    /// - x86_64: `LOCK CMPXCHG`
+  1459→  1459→    /// - RISC-V: `LR.D` / `BNE` / `SC.D` loop
+  1460→  1460→    AtomicCas {
+  1461→  1461→        /// Destination register (receives the old value at addr).
+  1462→  1462→        dst: IRValue,
+  1463→  1463→        /// Target address register.
+  1464→  1464→        addr: IRValue,
+  1465→  1465→        /// Expected value.
+  1466→  1466→        expected: IRValue,
+  1467→  1467→        /// Desired new value.
+  1468→  1468→        desired: IRValue,
+  1469→  1469→        /// Type of the value (determines access size).
+  1470→  1470→        ty: IRType,
+  1471→  1471→    },
+  1472→  1472→
+  1473→  1473→    // ── Instruction-level control flow ───────────────────────────────
+  1474→  1474→    /// Return from the current function with optional values.
+  1475→  1475→    Ret {
+  1476→  1476→        /// Return value registers.
+  1477→  1477→        values: Vec<IRValue>,
+  1478→  1478→    },
+  1479→  1479→    /// Unconditional branch to a label.
+  1480→  1480→    Branch {
+  1481→  1481→        /// Target label.
+  1482→  1482→        target: String,
+  1483→  1483→    },
+  1484→  1484→    /// Conditional branch: if `cond` is non-zero, go to `true_target`;
+  1485→  1485→    /// otherwise go to `false_target`.
+  1486→  1486→    CondBranch {
+  1487→  1487→        /// Condition value.
+  1488→  1488→        cond: IRValue,
+  1489→  1489→        /// Label to branch to when condition is true.
+  1490→  1490→        true_target: String,
+  1491→  1491→        /// Label to branch to when condition is false.
+  1492→  1492→        false_target: String,
+  1493→  1493→    },
+  1494→  1494→
+  1495→  1495→    // ── Constant-time security operations ───────────────────────────
+  1496→  1496→    /// Constant-time conditional select: `dst = ct_select(cond, a, b)`.
+  1497→  1497→    ///
+  1498→  1498→    /// Returns `a` if `cond != 0`, else `b`, using only bitwise operations
+  1499→  1499→    /// (no branches) to prevent timing side-channel attacks.
+  1500→  1500→    ///
+  1501→  1501→    /// Lowered to: `(a & mask) | (b & ~mask)` where `mask = -(cond != 0)`.
+  1502→  1502→    CtSelect {
+  1503→  1503→        /// Destination register.
+  1504→  1504→        dst: IRValue,
+  1505→  1505→        /// Condition value.
+  1506→  1506→        cond: IRValue,
+  1507→  1507→        /// Value selected when condition is true.
+  1508→  1508→        true_val: IRValue,
+  1509→  1509→        /// Value selected when condition is false.
+  1510→  1510→        false_val: IRValue,
+  1511→  1511→        /// Type of the result (determines 32-bit vs 64-bit encoding).
+  1512→  1512→        /// `None` defaults to 64-bit (X register) behavior.
+  1513→  1513→        ty: Option<IRType>,
+  1514→  1514→    },
+  1515→  1515→
+  1516→  1516→    /// Constant-time equality check: `dst = ct_eq(a, b)`.
+  1517→  1517→    ///
+  1518→  1518→    /// Returns 1 if `a == b`, else 0, using only bitwise operations
+  1519→  1519→    /// (no branches) to prevent timing side-channel attacks.
+  1520→  1520→    ///
+  1521→  1521→    /// Lowered to: XOR-based comparison with constant-time result.
+  1522→  1522→    CtEq {
+  1523→  1523→        /// Destination register (boolean result: 1 or 0).
+  1524→  1524→        dst: IRValue,
+  1525→  1525→        /// Left-hand side operand.
+  1526→  1526→        lhs: IRValue,
+  1527→  1527→        /// Right-hand side operand.
+  1528→  1528→        rhs: IRValue,
+  1529→  1529→        /// Type of the operands (determines 32-bit vs 64-bit comparison).
+  1530→  1530→        /// `None` defaults to 64-bit (X register) behavior.
+  1531→  1531→        ty: Option<IRType>,
+  1532→  1532→    },
+  1533→  1533→}
+  1534→  1534→
+  1535→  1535→impl IRInstr {
+  1536→  1536→    /// Returns the set of virtual-register IDs that this instruction defines
+  1537→  1537→    /// (writes to).
+  1538→  1538→    pub fn defined_regs(&self) -> Vec<u32> {
+  1539→  1539→        match self {
+  1540→  1540→            IRInstr::Load { dst, .. }
+  1541→  1541→            | IRInstr::BinOp { dst, .. }
+  1542→  1542→            | IRInstr::UnaryOp { dst, .. }
+  1543→  1543→            | IRInstr::Alloc { dst, .. }
+  1544→  1544→            | IRInstr::Cast { dst, .. }
+  1545→  1545→            | IRInstr::Phi { dst, .. }
+  1546→  1546→            | IRInstr::GetAddress { dst, .. }
+  1547→  1547→            | IRInstr::Offset { dst, .. }
+  1548→  1548→            | IRInstr::Select { dst, .. } => dst.as_register().into_iter().collect(),
+  1549→  1549→            IRInstr::Call { dst, .. } => dst
+  1550→  1550→                .as_ref()
+  1551→  1551→                .and_then(|v| v.as_register())
+  1552→  1552→                .into_iter()
+  1553→  1553→                .collect(),
+  1554→  1554→            IRInstr::Add { dst, .. }
+  1555→  1555→            | IRInstr::Sub { dst, .. }
+  1556→  1556→            | IRInstr::Mul { dst, .. }
+  1557→  1557→            | IRInstr::Div { dst, .. }
+  1558→  1558→            | IRInstr::Cmp { dst, .. }
+  1559→  1559→            | IRInstr::CtSelect { dst, .. }
+  1560→  1560→            | IRInstr::CtEq { dst, .. }
+  1561→  1561→            | IRInstr::AtomicLoad { dst, .. }
+  1562→  1562→            | IRInstr::AtomicCas { dst, .. } => dst.as_register().into_iter().collect(),
+  1563→  1563→            IRInstr::Store { .. }
+  1564→  1564→            | IRInstr::Free { .. }
+  1565→  1565→            | IRInstr::Ret { .. }
+  1566→  1566→            | IRInstr::Branch { .. }
+  1567→  1567→            | IRInstr::CondBranch { .. }
+  1568→  1568→            | IRInstr::AtomicStore { .. } => vec![],
+  1569→  1569→        }
+  1570→  1570→    }
+  1571→  1571→
+  1572→  1572→    /// Returns the set of virtual-register IDs that this instruction uses
+  1573→  1573→    /// (reads from).
+  1574→  1574→    pub fn used_regs(&self) -> Vec<u32> {
+  1575→  1575→        match self {
+  1576→  1576→            IRInstr::Load { addr, .. } => addr.as_register().into_iter().collect(),
+  1577→  1577→            IRInstr::Store { value, addr, .. } => {
+  1578→  1578→                let mut r = value.as_register().into_iter().collect::<Vec<_>>();
+  1579→  1579→                r.extend(addr.as_register());
+  1580→  1580→                r
+  1581→  1581→            }
+  1582→  1582→            IRInstr::BinOp { lhs, rhs, .. }
+  1583→  1583→            | IRInstr::Add { lhs, rhs, .. }
+  1584→  1584→            | IRInstr::Sub { lhs, rhs, .. }
+  1585→  1585→            | IRInstr::Mul { lhs, rhs, .. }
+  1586→  1586→            | IRInstr::Div { lhs, rhs, .. }
+  1587→  1587→            | IRInstr::Cmp { lhs, rhs, .. } => {
+  1588→  1588→                let mut r = lhs.as_register().into_iter().collect::<Vec<_>>();
+  1589→  1589→                r.extend(rhs.as_register());
+  1590→  1590→                r
+  1591→  1591→            }
+  1592→  1592→            IRInstr::UnaryOp { operand, .. } => operand.as_register().into_iter().collect(),
+  1593→  1593→            IRInstr::Call { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
+  1594→  1594→            IRInstr::Alloc { .. } | IRInstr::GetAddress { .. } => vec![],
+  1595→  1595→            IRInstr::Free { ptr } => ptr.as_register().into_iter().collect(),
+  1596→  1596→            IRInstr::Cast { src, .. } => src.as_register().into_iter().collect(),
+  1597→  1597→            IRInstr::Phi { incoming, .. } => incoming
+  1598→  1598→                .iter()
+  1599→  1599→                .filter_map(|(v, _)| v.as_register())
+  1600→  1600→                .collect(),
+  1601→  1601→            IRInstr::Offset { base, offset, .. } => {
+  1602→  1602→                let mut r = base.as_register().into_iter().collect::<Vec<_>>();
+  1603→  1603→                r.extend(offset.as_register());
+  1604→  1604→                r
+  1605→  1605→            }
+  1606→  1606→            IRInstr::Select {
+  1607→  1607→                cond,
+  1608→  1608→                true_val,
+  1609→  1609→                false_val, ty: _,
+  1610→  1610→                ..
+  1611→  1611→            } => {
+  1612→  1612→                let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
+  1613→  1613→                r.extend(true_val.as_register());
+  1614→  1614→                r.extend(false_val.as_register());
+  1615→  1615→                r
+  1616→  1616→            }
+  1617→  1617→            IRInstr::Ret { values } => values.iter().filter_map(|v| v.as_register()).collect(),
+  1618→  1618→            IRInstr::Branch { .. } => vec![],
+  1619→  1619→            IRInstr::CondBranch { cond, .. } => cond.as_register().into_iter().collect(),
+  1620→  1620→            IRInstr::CtSelect {
+  1621→  1621→                cond,
+  1622→  1622→                true_val,
+  1623→  1623→                false_val,
+  1624→  1624→                ..
+  1625→  1625→            } => {
+  1626→  1626→                let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
+  1627→  1627→                r.extend(true_val.as_register());
+  1628→  1628→                r.extend(false_val.as_register());
+  1629→  1629→                r
+  1630→  1630→            }
+  1631→  1631→            IRInstr::CtEq { lhs, rhs, .. } => {
+  1632→  1632→                let mut r = lhs.as_register().into_iter().collect::<Vec<_>>();
+  1633→  1633→                r.extend(rhs.as_register());
+  1634→  1634→                r
+  1635→  1635→            }
+  1636→  1636→            IRInstr::AtomicLoad { addr, .. } => addr.as_register().into_iter().collect(),
+  1637→  1637→            IRInstr::AtomicStore { value, addr, .. } => {
+  1638→  1638→                let mut r = value.as_register().into_iter().collect::<Vec<_>>();
+  1639→  1639→                r.extend(addr.as_register());
+  1640→  1640→                r
+  1641→  1641→            }
+  1642→  1642→            IRInstr::AtomicCas { addr, expected, desired, .. } => {
+  1643→  1643→                let mut r = addr.as_register().into_iter().collect::<Vec<_>>();
+  1644→  1644→                r.extend(expected.as_register());
+  1645→  1645→                r.extend(desired.as_register());
+  1646→  1646→                r
+  1647→  1647→            }
+  1648→  1648→        }
+  1649→  1649→    }
+  1650→  1650→}
+  1651→  1651→
+  1652→  1652→impl fmt::Display for IRInstr {
+  1653→  1653→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1654→  1654→        match self {
+  1655→  1655→            IRInstr::Load { dst, addr, offset, ty } => {
+  1656→  1656→                if *offset != 0 {
+  1657→  1657→                    write!(f, "{} = load [{} + {}] ({})", dst, addr, offset, ty)
+  1658→  1658→                } else {
+  1659→  1659→                    write!(f, "{} = load {} ({})", dst, addr, ty)
+  1660→  1660→                }
+  1661→  1661→            }
+  1662→  1662→            IRInstr::Store { value, addr, offset, ty } => {
+  1663→  1663→                if *offset != 0 {
+  1664→  1664→                    write!(f, "store {}, [{} + {}] ({})", value, addr, offset, ty)
+  1665→  1665→                } else {
+  1666→  1666→                    write!(f, "store {}, {} ({})", value, addr, ty)
+  1667→  1667→                }
+  1668→  1668→            }
+  1669→  1669→            IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+  1670→  1670→                write!(f, "{} = {} {}, {}", dst, op, lhs, rhs)
+  1671→  1671→            }
+  1672→  1672→            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
+  1673→  1673→                write!(f, "{} = {} {}", dst, op, operand)
+  1674→  1674→            }
+  1675→  1675→            IRInstr::Call { dst, func, args, is_extern } => {
+  1676→  1676→                let args_str = args
+  1677→  1677→                    .iter()
+  1678→  1678→                    .map(|a| format!("{}", a))
+  1679→  1679→                    .collect::<Vec<_>>()
+  1680→  1680→                    .join(", ");
+  1681→  1681→                let prefix = if *is_extern { "extern call" } else { "call" };
+  1682→  1682→                match dst {
+  1683→  1683→                    Some(d) => write!(f, "{} = {} @{}({})", d, prefix, func, args_str),
+  1684→  1684→                    None => write!(f, "{} @{}({})", prefix, func, args_str),
+  1685→  1685→                }
+  1686→  1686→            }
+  1687→  1687→            IRInstr::Alloc { dst, size } => write!(f, "{} = alloc {}", dst, size),
+  1688→  1688→            IRInstr::Free { ptr } => write!(f, "free {}", ptr),
+  1689→  1689→            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+  1690→  1690→                match (from_ty, to_ty) {
+  1691→  1691→                    (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+  1692→  1692→                    _ => write!(f, "{} = {} {}", dst, kind, src),
+  1693→  1693→                }
+  1694→  1694→            }
+  1695→  1695→            IRInstr::Phi { dst, incoming } => {
+  1696→  1696→                let pairs = incoming
+  1697→  1697→                    .iter()
+  1698→  1698→                    .map(|(v, b)| format!("[{}, @{}]", v, b))
+  1699→  1699→                    .collect::<Vec<_>>()
+  1700→  1700→                    .join(", ");
+  1701→  1701→                write!(f, "{} = phi {}", dst, pairs)
+  1702→  1702→            }
+  1703→  1703→            IRInstr::GetAddress { dst, name } => {
+  1704→  1704→                write!(f, "{} = getaddress @{}", dst, name)
+  1705→  1705→            }
+  1706→  1706→            IRInstr::Offset { dst, base, offset } => {
+  1707→  1707→                write!(f, "{} = offset {}, {}", dst, base, offset)
+  1708→  1708→            }
+  1709→  1709→            IRInstr::Select {
+  1710→  1710→                dst,
+  1711→  1711→                cond,
+  1712→  1712→                true_val,
+  1713→  1713→                false_val, ty: _,
+  1714→  1714→            } => {
+  1715→  1715→                write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
+  1716→  1716→            }
+  1717→  1717→            IRInstr::Add { dst, lhs, rhs, ty: _ } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
+  1718→  1718→            IRInstr::Sub { dst, lhs, rhs, ty: _ } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
+  1719→  1719→            IRInstr::Mul { dst, lhs, rhs, ty: _ } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
+  1720→  1720→            IRInstr::Div { dst, lhs, rhs, ty: _ } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
+  1721→  1721→            IRInstr::Cmp {
+  1722→  1722→                kind,
+  1723→  1723→                dst,
+  1724→  1724→                lhs,
+  1725→  1725→                rhs, ty: _,
+  1726→  1726→            } => {
+  1727→  1727→                write!(f, "{} = {} {}, {}", dst, kind, lhs, rhs)
+  1728→  1728→            }
+  1729→  1729→            IRInstr::Ret { values } => {
+  1730→  1730→                let vals_str = values
+  1731→  1731→                    .iter()
+  1732→  1732→                    .map(|v| format!("{}", v))
+  1733→  1733→                    .collect::<Vec<_>>()
+  1734→  1734→                    .join(", ");
+  1735→  1735→                write!(f, "ret {}", vals_str)
+  1736→  1736→            }
+  1737→  1737→            IRInstr::Branch { target } => write!(f, "br @{}", target),
+  1738→  1738→            IRInstr::CondBranch {
+  1739→  1739→                cond,
+  1740→  1740→                true_target,
+  1741→  1741→                false_target,
+  1742→  1742→            } => {
+  1743→  1743→                write!(f, "br {}, @{}, @{}", cond, true_target, false_target)
+  1744→  1744→            }
+  1745→  1745→            IRInstr::CtSelect {
+  1746→  1746→                dst,
+  1747→  1747→                cond,
+  1748→  1748→                true_val,
+  1749→  1749→                false_val,
+  1750→  1750→                ty: _,
+  1751→  1751→            } => {
+  1752→  1752→                write!(
+  1753→  1753→                    f,
+  1754→  1754→                    "{} = ct_select {}, {}, {}",
+  1755→  1755→                    dst, cond, true_val, false_val
+  1756→  1756→                )
+  1757→  1757→            }
+  1758→  1758→            IRInstr::CtEq {
+  1759→  1759→                dst,
+  1760→  1760→                lhs,
+  1761→  1761→                rhs,
+  1762→  1762→                ty: _,
+  1763→  1763→            } => {
+  1764→  1764→                write!(f, "{} = ct_eq {}, {}", dst, lhs, rhs)
+  1765→  1765→            }
+  1766→  1766→            IRInstr::AtomicLoad { dst, addr, ty } => {
+  1767→  1767→                write!(f, "{} = atomic_load {} ({})", dst, addr, ty)
+  1768→  1768→            }
+  1769→  1769→            IRInstr::AtomicStore { value, addr, ty } => {
+  1770→  1770→                write!(f, "atomic_store {}, {} ({})", value, addr, ty)
+  1771→  1771→            }
+  1772→  1772→            IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+  1773→  1773→                write!(f, "{} = atomic_cas {}, {}, {} ({})", dst, addr, expected, desired, ty)
+  1774→  1774→            }
+  1775→  1775→        }
+  1776→  1776→    }
+  1777→  1777→}
+  1778→  1778→
+  1779→  1779→// ---------------------------------------------------------------------------
+  1780→  1780→// IR Terminator
+  1781→  1781→// ---------------------------------------------------------------------------
+  1782→  1782→
+  1783→  1783→/// A block terminator — the last "instruction" in an `IRBlock` that transfers
+  1784→  1784→/// control flow.
+  1785→  1785→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1786→  1786→pub enum IRTerminator {
+  1787→  1787→    /// Unconditional jump to a label.
+  1788→  1788→    Jump(String),
+  1789→  1789→    /// Conditional branch: if `cond` is non-zero, go to `true_block`;
+  1790→  1790→    /// otherwise go to `false_block`.
+  1791→  1791→    Branch {
+  1792→  1792→        /// Condition value; branches to `true_block` if non-zero.
+  1793→  1793→        cond: IRValue,
+  1794→  1794→        /// Target block label when the condition is true.
+  1795→  1795→        true_block: String,
+  1796→  1796→        /// Target block label when the condition is false.
+  1797→  1797→        false_block: String,
+  1798→  1798→    },
+  1799→  1799→    /// Return from the current function with optional values.
+  1800→  1800→    Return(Vec<IRValue>),
+  1801→  1801→    /// Unreachable code marker (e.g. after a diverging call).
+  1802→  1802→    Unreachable,
+  1803→  1803→    /// Switch dispatch: branch to one of several targets based on the
+  1804→  1804→    /// discriminator value, or fall through to `default`.
+  1805→  1805→    Switch {
+  1806→  1806→        /// Discriminator value.
+  1807→  1807→        discr: IRValue,
+  1808→  1808→        /// (value, target_label) pairs.
+  1809→  1809→        targets: Vec<(i64, String)>,
+  1810→  1810→        /// Default target if no value matches.
+  1811→  1811→        default: String,
+  1812→  1812→    },
+  1813→  1813→    /// Invoke: call a function that may throw, with separate normal and
+  1814→  1814→    /// unwind continuations.
+  1815→  1815→    Invoke {
+  1816→  1816→        /// Destination register for the return value.
+  1817→  1817→        dst: Option<IRValue>,
+  1818→  1818→        /// Function name.
+  1819→  1819→        func: String,
+  1820→  1820→        /// Arguments.
+  1821→  1821→        args: Vec<IRValue>,
+  1822→  1822→        /// Normal continuation label.
+  1823→  1823→        normal: String,
+  1824→  1824→        /// Unwind (exception) continuation label.
+  1825→  1825→        unwind: String,
+  1826→  1826→    },
+  1827→  1827→    /// Tail call: jump to the callee, reusing the current stack frame.
+  1828→  1828→    TailCall {
+  1829→  1829→        /// Function name.
+  1830→  1830→        func: String,
+  1831→  1831→        /// Arguments.
+  1832→  1832→        args: Vec<IRValue>,
+  1833→  1833→    },
+  1834→  1834→    /// Resume unwinding with the given exception value.
+  1835→  1835→    Resume {
+  1836→  1836→        /// Exception value to resume with.
+  1837→  1837→        value: IRValue,
+  1838→  1838→    },
+  1839→  1839→}
+  1840→  1840→
+  1841→  1841→impl IRTerminator {
+  1842→  1842→    /// Returns the labels of all successor blocks referenced by this terminator.
+  1843→  1843→    pub fn successor_labels(&self) -> Vec<&str> {
+  1844→  1844→        match self {
+  1845→  1845→            IRTerminator::Jump(target) => vec![target],
+  1846→  1846→            IRTerminator::Branch {
+  1847→  1847→                true_block,
+  1848→  1848→                false_block,
+  1849→  1849→                ..
+  1850→  1850→            } => vec![true_block, false_block],
+  1851→  1851→            IRTerminator::Return(_) | IRTerminator::Unreachable => vec![],
+  1852→  1852→            IRTerminator::Switch {
+  1853→  1853→                targets, default, ..
+  1854→  1854→            } => {
+  1855→  1855→                let mut labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
+  1856→  1856→                labels.push(default);
+  1857→  1857→                labels
+  1858→  1858→            }
+  1859→  1859→            IRTerminator::Invoke { normal, unwind, .. } => vec![normal, unwind],
+  1860→  1860→            IRTerminator::TailCall { .. } | IRTerminator::Resume { .. } => vec![],
+  1861→  1861→        }
+  1862→  1862→    }
+  1863→  1863→}
+  1864→  1864→
+  1865→  1865→impl fmt::Display for IRTerminator {
+  1866→  1866→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  1867→  1867→        match self {
+  1868→  1868→            IRTerminator::Jump(target) => write!(f, "jump @{}", target),
+  1869→  1869→            IRTerminator::Branch {
+  1870→  1870→                cond,
+  1871→  1871→                true_block,
+  1872→  1872→                false_block,
+  1873→  1873→            } => {
+  1874→  1874→                write!(f, "br {}, @{}, @{}", cond, true_block, false_block)
+  1875→  1875→            }
+  1876→  1876→            IRTerminator::Return(vals) => {
+  1877→  1877→                let vals_str = vals
+  1878→  1878→                    .iter()
+  1879→  1879→                    .map(|v| format!("{}", v))
+  1880→  1880→                    .collect::<Vec<_>>()
+  1881→  1881→                    .join(", ");
+  1882→  1882→                write!(f, "ret {}", vals_str)
+  1883→  1883→            }
+  1884→  1884→            IRTerminator::Unreachable => write!(f, "unreachable"),
+  1885→  1885→            IRTerminator::Switch {
+  1886→  1886→                discr,
+  1887→  1887→                targets,
+  1888→  1888→                default,
+  1889→  1889→            } => {
+  1890→  1890→                let pairs = targets
+  1891→  1891→                    .iter()
+  1892→  1892→                    .map(|(v, l)| format!("{}: @{}", v, l))
+  1893→  1893→                    .collect::<Vec<_>>()
+  1894→  1894→                    .join(", ");
+  1895→  1895→                write!(f, "switch {}, [{}] default @{}", discr, pairs, default)
+  1896→  1896→            }
+  1897→  1897→            IRTerminator::Invoke {
+  1898→  1898→                dst,
+  1899→  1899→                func,
+  1900→  1900→                args,
+  1901→  1901→                normal,
+  1902→  1902→                unwind,
+  1903→  1903→            } => {
+  1904→  1904→                let args_str = args
+  1905→  1905→                    .iter()
+  1906→  1906→                    .map(|a| format!("{}", a))
+  1907→  1907→                    .collect::<Vec<_>>()
+  1908→  1908→                    .join(", ");
+  1909→  1909→                match dst {
+  1910→  1910→                    Some(d) => write!(
+  1911→  1911→                        f,
+  1912→  1912→                        "invoke {} = @{}({}) normal @{} unwind @{}",
+  1913→  1913→                        d, func, args_str, normal, unwind
+  1914→  1914→                    ),
+  1915→  1915→                    None => write!(
+  1916→  1916→                        f,
+  1917→  1917→                        "invoke @{}({}) normal @{} unwind @{}",
+  1918→  1918→                        func, args_str, normal, unwind
+  1919→  1919→                    ),
+  1920→  1920→                }
+  1921→  1921→            }
+  1922→  1922→            IRTerminator::TailCall { func, args } => {
+  1923→  1923→                let args_str = args
+  1924→  1924→                    .iter()
+  1925→  1925→                    .map(|a| format!("{}", a))
+  1926→  1926→                    .collect::<Vec<_>>()
+  1927→  1927→                    .join(", ");
+  1928→  1928→                write!(f, "tailcall @{}({})", func, args_str)
+  1929→  1929→            }
+  1930→  1930→            IRTerminator::Resume { value } => write!(f, "resume {}", value),
+  1931→  1931→        }
+  1932→  1932→    }
+  1933→  1933→}
+  1934→  1934→
+  1935→  1935→// ---------------------------------------------------------------------------
+  1936→  1936→// IRBlock
+  1937→  1937→// ---------------------------------------------------------------------------
+  1938→  1938→
+  1939→  1939→/// A basic block within an IR function.
+  1940→  1940→///
+  1941→  1941→/// Execution enters at the top and falls through each instruction.  The block
+  1942→  1942→/// always ends with exactly one terminator.
+  1943→  1943→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1944→  1944→pub struct IRBlock {
+  1945→  1945→    /// Block label (used as a branch target).
+  1946→  1946→    pub label: String,
+  1947→  1947→    /// Ordered instructions in this block.
+  1948→  1948→    pub instructions: Vec<IRInstr>,
+  1949→  1949→    /// The terminating control-flow instruction.
+  1950→  1950→    pub terminator: IRTerminator,
+  1951→  1951→    /// Labels of predecessor blocks (populated after CFG construction).
+  1952→  1952→    pub predecessors: HashSet<String>,
+  1953→  1953→    /// Labels of successor blocks (populated after CFG construction).
+  1954→  1954→    pub successors: HashSet<String>,
+  1955→  1955→    /// Source line number for this block (1-based; 0 = no info).
+  1956→  1956→    ///
+  1957→  1957→    /// When debug info is enabled, the emitter uses this field to emit
+  1958→  1958→    /// `.debug_line` entries mapping block addresses back to source lines.
+  1959→  1959→    pub source_line: u32,
+  1960→  1960→}
+  1961→  1961→
+  1962→  1962→impl IRBlock {
+  1963→  1963→    /// Create a new empty block with the given label and an `Unreachable`
+  1964→  1964→    /// terminator placeholder (callers should replace it).
+  1965→  1965→    pub fn new(label: impl Into<String>) -> Self {
+  1966→  1966→        Self {
+  1967→  1967→            label: label.into(),
+  1968→  1968→            instructions: Vec::new(),
+  1969→  1969→            terminator: IRTerminator::Unreachable,
+  1970→  1970→            predecessors: HashSet::new(),
+  1971→  1971→            successors: HashSet::new(),
+  1972→  1972→            source_line: 0,
+  1973→  1973→        }
+  1974→  1974→    }
+  1975→  1975→
+  1976→  1976→    /// Append an instruction to this block.
+  1977→  1977→    pub fn push(&mut self, instr: IRInstr) {
+  1978→  1978→        self.instructions.push(instr);
+  1979→  1979→    }
+  1980→  1980→
+  1981→  1981→    /// Returns the number of instructions in this block.
+  1982→  1982→    pub fn len(&self) -> usize {
+  1983→  1983→        self.instructions.len()
+  1984→  1984→    }
+  1985→  1985→
+  1986→  1986→    /// Returns `true` if this block has no instructions.
+  1987→  1987→    pub fn is_empty(&self) -> bool {
+  1988→  1988→        self.instructions.is_empty()
+  1989→  1989→    }
+  1990→  1990→
+  1991→  1991→    /// Update the successor set from the current terminator.
+  1992→  1992→    pub fn update_successors_from_terminator(&mut self) {
+  1993→  1993→        self.successors.clear();
+  1994→  1994→        for label in self.terminator.successor_labels() {
+  1995→  1995→            self.successors.insert(label.to_string());
+  1996→  1996→        }
+  1997→  1997→    }
+  1998→  1998→}
+  1999→  1999→
+
+[showing lines 1400-1999 of 2002; use offset=2000 with limit to continue reading]

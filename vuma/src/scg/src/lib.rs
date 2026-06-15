@@ -64,9 +64,9 @@ pub mod transform;
 
 // -- Node types --
 pub use node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode,
-    ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, VTableNode,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationKind,
+    ComputationNode, ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId,
+    NodePayload, NodeType, PhantomNode, ProgramPoint, VTableNode,
 };
 
 // -- Edge types --

@@ -2023,7 +2023,8 @@ mod tests {
     fn test_signum() {
         assert_eq!(signum(42.0), 1.0);
         assert_eq!(signum(-42.0), -1.0);
-        assert_eq!(signum(0.0), 0.0);
+        assert_eq!(signum(0.0), 1.0); // Rust signum: +0.0 has positive sign
+        assert_eq!(signum(-0.0), -1.0); // -0.0 has negative sign
         assert!(signum(f64::NAN).is_nan());
     }
 
@@ -2220,5 +2221,860 @@ mod tests {
         assert!(capd.has(CapFlag::Read));
         assert!(capd.has(CapFlag::Compare));
         assert!(!capd.has(CapFlag::Write));
+    }
+
+    // =======================================================================
+    // Comprehensive additional tests for expanded math module
+    // =======================================================================
+
+    // --- Comprehensive trigonometric f64 tests ---
+
+    #[test]
+    fn test_sin_comprehensive() {
+        let tol = 1e-10;
+        // sin(0) = 0
+        assert!((sin(0.0) - 0.0).abs() < tol);
+        // sin(PI/2) ≈ 1
+        assert!((sin(PI / 2.0) - 1.0).abs() < tol);
+        // sin(PI) ≈ 0
+        assert!((sin(PI) - 0.0).abs() < tol);
+        // sin(3*PI/2) ≈ -1
+        assert!((sin(3.0 * PI / 2.0) - (-1.0)).abs() < tol);
+        // sin(-PI/2) ≈ -1
+        assert!((sin(-PI / 2.0) - (-1.0)).abs() < tol);
+        // sin(PI/6) ≈ 0.5
+        assert!((sin(PI / 6.0) - 0.5).abs() < tol);
+    }
+
+    #[test]
+    fn test_cos_comprehensive() {
+        let tol = 1e-10;
+        // cos(0) = 1
+        assert!((cos(0.0) - 1.0).abs() < tol);
+        // cos(PI/3) ≈ 0.5
+        assert!((cos(PI / 3.0) - 0.5).abs() < tol);
+        // cos(PI/2) ≈ 0
+        assert!((cos(PI / 2.0) - 0.0).abs() < tol);
+        // cos(PI) ≈ -1
+        assert!((cos(PI) - (-1.0)).abs() < tol);
+        // cos(-PI) ≈ -1
+        assert!((cos(-PI) - (-1.0)).abs() < tol);
+        // cos(2*PI) ≈ 1
+        assert!((cos(2.0 * PI) - 1.0).abs() < tol);
+    }
+
+    #[test]
+    fn test_tan_comprehensive() {
+        let tol = 1e-10;
+        // tan(0) = 0
+        assert!((tan(0.0) - 0.0).abs() < tol);
+        // tan(PI/4) ≈ 1
+        assert!((tan(PI / 4.0) - 1.0).abs() < tol);
+        // tan(-PI/4) ≈ -1
+        assert!((tan(-PI / 4.0) - (-1.0)).abs() < tol);
+    }
+
+    #[test]
+    fn test_sin_cos_identity() {
+        // sin²(x) + cos²(x) = 1 for various x
+        let tol = 1e-10;
+        for x in [0.0, 0.5, 1.0, PI / 4.0, PI / 2.0, PI, 2.0 * PI, -1.0] {
+            let sum_sq = sin(x) * sin(x) + cos(x) * cos(x);
+            assert!((sum_sq - 1.0).abs() < tol, "sin²({}) + cos²({}) = {}", x, x, sum_sq);
+        }
+    }
+
+    #[test]
+    fn test_atan2_comprehensive() {
+        let tol = 1e-10;
+        // Quadrant I
+        assert!((atan2(1.0, 1.0) - PI / 4.0).abs() < tol);
+        // Quadrant II
+        assert!((atan2(1.0, -1.0) - 3.0 * PI / 4.0).abs() < tol);
+        // Quadrant III
+        assert!((atan2(-1.0, -1.0) - (-3.0 * PI / 4.0)).abs() < tol);
+        // Quadrant IV
+        assert!((atan2(-1.0, 1.0) - (-PI / 4.0)).abs() < tol);
+        // Positive y-axis
+        assert!((atan2(1.0, 0.0) - PI / 2.0).abs() < tol);
+        // Negative y-axis
+        assert!((atan2(-1.0, 0.0) - (-PI / 2.0)).abs() < tol);
+    }
+
+    #[test]
+    fn test_sinh_cosh_tanh_comprehensive() {
+        let tol = 1e-10;
+        // sinh(0) = 0, cosh(0) = 1, tanh(0) = 0
+        assert!((sinh(0.0) - 0.0).abs() < tol);
+        assert!((cosh(0.0) - 1.0).abs() < tol);
+        assert!((tanh(0.0) - 0.0).abs() < tol);
+        // tanh(x) = sinh(x)/cosh(x)
+        for x in [0.5, 1.0, 2.0, -1.0] {
+            let expected = sinh(x) / cosh(x);
+            assert!((tanh(x) - expected).abs() < tol);
+        }
+        // cosh²(x) - sinh²(x) = 1
+        for x in [0.5, 1.0, 2.0] {
+            let diff = cosh(x) * cosh(x) - sinh(x) * sinh(x);
+            assert!((diff - 1.0).abs() < tol);
+        }
+    }
+
+    #[test]
+    fn test_trig_infinity() {
+        // sin/cos of infinity should be NaN
+        assert!(sin(f64::INFINITY).is_nan());
+        assert!(sin(f64::NEG_INFINITY).is_nan());
+        assert!(cos(f64::INFINITY).is_nan());
+        assert!(cos(f64::NEG_INFINITY).is_nan());
+        assert!(tan(f64::INFINITY).is_nan());
+        assert!(tan(f64::NEG_INFINITY).is_nan());
+    }
+
+    // --- Comprehensive exponential/logarithmic f64 tests ---
+
+    #[test]
+    fn test_sqrt_comprehensive() {
+        let tol = 1e-10;
+        assert!((sqrt(4.0) - 2.0).abs() < tol);
+        assert!((sqrt(9.0) - 3.0).abs() < tol);
+        assert!((sqrt(2.0) - SQRT_2).abs() < tol);
+        assert!((sqrt(0.25) - 0.5).abs() < tol);
+        assert!((sqrt(0.0) - 0.0).abs() < tol);
+        assert!((sqrt(1.0) - 1.0).abs() < tol);
+        // sqrt of negative is NaN
+        assert!(sqrt(-1.0).is_nan());
+        assert!(sqrt(-0.001).is_nan());
+    }
+
+    #[test]
+    fn test_cbrt_comprehensive() {
+        let tol = 1e-10;
+        assert!((cbrt(27.0) - 3.0).abs() < tol);
+        assert!((cbrt(-8.0) - (-2.0)).abs() < tol);
+        assert!((cbrt(0.0) - 0.0).abs() < tol);
+        assert!((cbrt(1.0) - 1.0).abs() < tol);
+        assert!((cbrt(-1.0) - (-1.0)).abs() < tol);
+        assert!((cbrt(0.125) - 0.5).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp_comprehensive() {
+        let tol = 1e-10;
+        assert!((exp(0.0) - 1.0).abs() < tol);
+        assert!((exp(1.0) - E).abs() < tol);
+        assert!((exp(-1.0) - (1.0 / E)).abs() < tol);
+        assert!((exp(2.0) - E * E).abs() < 1e-9);
+        // exp of large negative approaches 0
+        assert!(exp(-100.0) < 1e-40);
+        // exp of -inf is 0
+        assert_eq!(exp(f64::NEG_INFINITY), 0.0);
+        // exp of +inf is +inf
+        assert_eq!(exp(f64::INFINITY), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_exp2_comprehensive() {
+        let tol = 1e-10;
+        assert!((exp2(0.0) - 1.0).abs() < tol);
+        assert!((exp2(1.0) - 2.0).abs() < tol);
+        assert!((exp2(2.0) - 4.0).abs() < tol);
+        assert!((exp2(3.0) - 8.0).abs() < tol);
+        assert!((exp2(10.0) - 1024.0).abs() < tol);
+        assert!((exp2(-1.0) - 0.5).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp_m1_comprehensive() {
+        let tol = 1e-10;
+        assert!((exp_m1(0.0) - 0.0).abs() < tol);
+        // For small x, exp_m1(x) ≈ x + x²/2
+        let x = 0.001;
+        assert!((exp_m1(x) - (x + x * x / 2.0)).abs() < 1e-9);
+        // exp_m1(1) = e - 1
+        assert!((exp_m1(1.0) - (E - 1.0)).abs() < tol);
+    }
+
+    #[test]
+    fn test_ln_comprehensive() {
+        let tol = 1e-10;
+        assert!((ln(1.0) - 0.0).abs() < tol);
+        assert!((ln(E) - 1.0).abs() < tol);
+        assert!((ln(E * E) - 2.0).abs() < 1e-9);
+        // ln of 0 is -inf
+        assert_eq!(ln(0.0), f64::NEG_INFINITY);
+        // ln of negative is NaN
+        assert!(ln(-1.0).is_nan());
+    }
+
+    #[test]
+    fn test_log2_comprehensive() {
+        let tol = 1e-10;
+        assert!((log2(1.0) - 0.0).abs() < tol);
+        assert!((log2(2.0) - 1.0).abs() < tol);
+        assert!((log2(4.0) - 2.0).abs() < tol);
+        assert!((log2(8.0) - 3.0).abs() < tol);
+        assert!((log2(1024.0) - 10.0).abs() < tol);
+        assert!((log2(0.5) - (-1.0)).abs() < tol);
+    }
+
+    #[test]
+    fn test_log10_comprehensive() {
+        let tol = 1e-10;
+        assert!((log10(1.0) - 0.0).abs() < tol);
+        assert!((log10(10.0) - 1.0).abs() < tol);
+        assert!((log10(100.0) - 2.0).abs() < tol);
+        assert!((log10(1000.0) - 3.0).abs() < tol);
+        assert!((log10(0.1) - (-1.0)).abs() < tol);
+    }
+
+    #[test]
+    fn test_ln_1p_comprehensive() {
+        let tol = 1e-10;
+        assert!((ln_1p(0.0) - 0.0).abs() < tol);
+        // ln_1p(E-1) should be close to 1.0
+        assert!((ln_1p(E - 1.0) - 1.0).abs() < 1e-8);
+        // For small x, ln_1p(x) ≈ x
+        let x = 1e-10;
+        assert!((ln_1p(x) - x).abs() < 1e-15);
+        // ln_1p(-1.0) = -inf
+        assert_eq!(ln_1p(-1.0), f64::NEG_INFINITY);
+        // ln_1p(< -1.0) = NaN
+        assert!(ln_1p(-2.0).is_nan());
+    }
+
+    #[test]
+    fn test_pow_comprehensive() {
+        let tol = 1e-10;
+        assert!((pow(2.0, 3.0) - 8.0).abs() < tol);
+        assert!((pow(4.0, 0.5) - 2.0).abs() < tol);
+        assert!((pow(10.0, 0.0) - 1.0).abs() < tol);
+        assert!((pow(0.0, 5.0) - 0.0).abs() < tol);
+        assert!((pow(1.0, 100.0) - 1.0).abs() < tol);
+        assert!((pow(2.0, -1.0) - 0.5).abs() < tol);
+    }
+
+    #[test]
+    fn test_powi_comprehensive() {
+        let tol = 1e-10;
+        assert!((powi(2.0, 3) - 8.0).abs() < tol);
+        assert!((powi(3.0, 0) - 1.0).abs() < tol);
+        assert!((powi(2.0, -1) - 0.5).abs() < tol);
+        assert!((powi(5.0, 2) - 25.0).abs() < tol);
+        assert!((powi(10.0, 6) - 1000000.0).abs() < tol);
+        assert!((powi(0.0, 0) - 1.0).abs() < tol);
+    }
+
+    // --- Comprehensive rounding f64 tests ---
+
+    #[test]
+    fn test_floor_comprehensive() {
+        assert_eq!(floor(3.7), 3.0);
+        assert_eq!(floor(3.0), 3.0);
+        assert_eq!(floor(-3.7), -4.0);
+        assert_eq!(floor(-3.0), -3.0);
+        assert_eq!(floor(0.0), 0.0);
+        assert_eq!(floor(0.1), 0.0);
+        assert_eq!(floor(-0.1), -1.0);
+        assert_eq!(floor(999.999), 999.0);
+    }
+
+    #[test]
+    fn test_ceil_comprehensive() {
+        assert_eq!(ceil(3.2), 4.0);
+        assert_eq!(ceil(3.0), 3.0);
+        assert_eq!(ceil(-3.2), -3.0);
+        assert_eq!(ceil(-3.0), -3.0);
+        assert_eq!(ceil(0.0), 0.0);
+        assert_eq!(ceil(0.1), 1.0);
+        assert_eq!(ceil(-0.1), 0.0);
+        assert_eq!(ceil(999.001), 1000.0);
+    }
+
+    #[test]
+    fn test_round_comprehensive() {
+        assert_eq!(round(3.5), 4.0);
+        assert_eq!(round(3.4), 3.0);
+        assert_eq!(round(3.6), 4.0);
+        assert_eq!(round(-3.5), -4.0);
+        assert_eq!(round(-3.4), -3.0);
+        assert_eq!(round(0.5), 1.0);
+        assert_eq!(round(-0.5), -1.0);
+        assert_eq!(round(0.0), 0.0);
+        assert_eq!(round(2.5), 3.0); // rounds half away from zero
+    }
+
+    #[test]
+    fn test_trunc_comprehensive() {
+        assert_eq!(trunc(3.7), 3.0);
+        assert_eq!(trunc(3.0), 3.0);
+        assert_eq!(trunc(-3.7), -3.0);
+        assert_eq!(trunc(-3.0), -3.0);
+        assert_eq!(trunc(0.0), 0.0);
+        assert_eq!(trunc(0.9), 0.0);
+        assert_eq!(trunc(-0.9), 0.0);
+    }
+
+    #[test]
+    fn test_fract_comprehensive() {
+        let tol = 1e-10;
+        assert!((fract(3.7) - 0.7).abs() < tol);
+        assert!((fract(-3.7) - (-0.7)).abs() < tol);
+        assert!((fract(0.0) - 0.0).abs() < tol);
+        assert!((fract(1.0) - 0.0).abs() < tol);
+        assert!((fract(-1.0) - 0.0).abs() < tol);
+        assert!((fract(0.5) - 0.5).abs() < tol);
+    }
+
+    #[test]
+    fn test_rounding_infinity() {
+        // floor/ceil/round/trunc of ±∞ should be ±∞
+        assert_eq!(floor(f64::INFINITY), f64::INFINITY);
+        assert_eq!(floor(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert_eq!(ceil(f64::INFINITY), f64::INFINITY);
+        assert_eq!(ceil(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert_eq!(round(f64::INFINITY), f64::INFINITY);
+        assert_eq!(round(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert_eq!(trunc(f64::INFINITY), f64::INFINITY);
+        assert_eq!(trunc(f64::NEG_INFINITY), f64::NEG_INFINITY);
+    }
+
+    // --- Comprehensive classification f64 tests ---
+
+    #[test]
+    fn test_is_nan_comprehensive() {
+        assert!(is_nan(f64::NAN));
+        assert!(!is_nan(0.0));
+        assert!(!is_nan(1.0));
+        assert!(!is_nan(-1.0));
+        assert!(!is_nan(f64::INFINITY));
+        assert!(!is_nan(f64::NEG_INFINITY));
+        assert!(!is_nan(1e100));
+        assert!(!is_nan(-1e100));
+    }
+
+    #[test]
+    fn test_is_infinite_comprehensive() {
+        assert!(is_infinite(f64::INFINITY));
+        assert!(is_infinite(f64::NEG_INFINITY));
+        assert!(!is_infinite(0.0));
+        assert!(!is_infinite(1.0));
+        assert!(!is_infinite(-1.0));
+        assert!(!is_infinite(f64::NAN));
+        assert!(!is_infinite(1e308));
+    }
+
+    #[test]
+    fn test_is_finite_comprehensive() {
+        assert!(is_finite(0.0));
+        assert!(is_finite(1.0));
+        assert!(is_finite(-1.0));
+        assert!(is_finite(1e100));
+        assert!(is_finite(-1e100));
+        assert!(is_finite(f64::MIN_POSITIVE));
+        assert!(!is_finite(f64::INFINITY));
+        assert!(!is_finite(f64::NEG_INFINITY));
+        assert!(!is_finite(f64::NAN));
+    }
+
+    #[test]
+    fn test_is_normal_comprehensive() {
+        assert!(is_normal(1.0));
+        assert!(is_normal(-1.0));
+        assert!(is_normal(1e100));
+        assert!(is_normal(f64::MIN_POSITIVE));
+        // Zero is not normal
+        assert!(!is_normal(0.0));
+        // Infinity is not normal
+        assert!(!is_normal(f64::INFINITY));
+        // NaN is not normal
+        assert!(!is_normal(f64::NAN));
+        // Subnormals are not normal
+        assert!(!is_normal(f64::MIN_POSITIVE / 2.0));
+    }
+
+    #[test]
+    fn test_signum_comprehensive() {
+        assert_eq!(signum(42.0), 1.0);
+        assert_eq!(signum(-5.0), -1.0);
+        assert_eq!(signum(0.0), 1.0); // +0.0 has positive sign per IEEE 754
+        assert_eq!(signum(-0.0), -1.0); // -0.0 has negative sign per IEEE 754
+        assert_eq!(signum(0.001), 1.0);
+        assert_eq!(signum(-0.001), -1.0);
+        assert_eq!(signum(f64::INFINITY), 1.0);
+        assert_eq!(signum(f64::NEG_INFINITY), -1.0);
+        assert!(signum(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_copysign_comprehensive() {
+        assert_eq!(copysign(3.0, 1.0), 3.0);
+        assert_eq!(copysign(3.0, -1.0), -3.0);
+        assert_eq!(copysign(-3.0, 1.0), 3.0);
+        assert_eq!(copysign(-3.0, -1.0), -3.0);
+        assert_eq!(copysign(0.0, -1.0), -0.0);
+        assert_eq!(copysign(0.0, 1.0), 0.0);
+        // copysign with magnitude 5 and sign of -2 => -5
+        assert_eq!(copysign(5.0, -2.0), -5.0);
+    }
+
+    #[test]
+    fn test_min_of_max_of_comprehensive() {
+        // Basic comparisons
+        assert_eq!(min_of(1.0, 2.0), 1.0);
+        assert_eq!(max_of(1.0, 2.0), 2.0);
+        // Equal values
+        assert_eq!(min_of(5.0, 5.0), 5.0);
+        assert_eq!(max_of(5.0, 5.0), 5.0);
+        // Negative values
+        assert_eq!(min_of(-5.0, -3.0), -5.0);
+        assert_eq!(max_of(-5.0, -3.0), -3.0);
+        // Mixed signs
+        assert_eq!(min_of(-1.0, 1.0), -1.0);
+        assert_eq!(max_of(-1.0, 1.0), 1.0);
+        // Zero comparisons
+        assert_eq!(min_of(0.0, 1.0), 0.0);
+        assert_eq!(max_of(0.0, -1.0), 0.0);
+    }
+
+    // --- Comprehensive constants tests ---
+
+    #[test]
+    fn test_pi_constant() {
+        let tol = 1e-10;
+        assert!((PI - 3.14159265358979323846).abs() < tol);
+        // PI is approximately 3.14159
+        assert!((PI - 3.14159).abs() < 0.00001);
+    }
+
+    #[test]
+    fn test_e_constant() {
+        let tol = 1e-10;
+        assert!((E - 2.71828182845904523536).abs() < tol);
+        // E is approximately 2.71828
+        assert!((E - 2.71828).abs() < 0.00001);
+    }
+
+    #[test]
+    fn test_tau_constant() {
+        let tol = 1e-10;
+        assert!((TAU - 2.0 * PI).abs() < tol);
+        assert!((TAU - 6.283185307179586).abs() < tol);
+    }
+
+    #[test]
+    fn test_log_constants() {
+        let tol = 1e-10;
+        // LN_2 = ln(2)
+        assert!((LN_2 - ln(2.0)).abs() < tol);
+        // LN_10 = ln(10)
+        assert!((LN_10 - ln(10.0)).abs() < tol);
+        // LOG2_E = log2(e) = 1/ln(2)
+        assert!((LOG2_E - 1.0 / LN_2).abs() < tol);
+        // LOG10_E = log10(e) = 1/ln(10)
+        assert!((LOG10_E - 1.0 / LN_10).abs() < tol);
+    }
+
+    #[test]
+    fn test_sqrt_constant() {
+        let tol = 1e-10;
+        assert!((SQRT_2 - sqrt(2.0)).abs() < tol);
+        assert!((FRAC_1_SQRT_2 - 1.0 / SQRT_2).abs() < tol);
+        // SQRT_2² = 2
+        assert!((SQRT_2 * SQRT_2 - 2.0).abs() < tol);
+    }
+
+    #[test]
+    fn test_all_f32_constants() {
+        let tol32 = 1e-5f32;
+        assert!((PI_F32 - std::f32::consts::PI).abs() < tol32);
+        assert!((TAU_F32 - std::f32::consts::TAU).abs() < tol32);
+        assert!((E_F32 - std::f32::consts::E).abs() < tol32);
+        assert!((LN_2_F32 - std::f32::consts::LN_2).abs() < tol32);
+        assert!((LN_10_F32 - std::f32::consts::LN_10).abs() < tol32);
+        assert!((LOG2_E_F32 - std::f32::consts::LOG2_E).abs() < tol32);
+        assert!((LOG10_E_F32 - std::f32::consts::LOG10_E).abs() < tol32);
+        assert!((SQRT_2_F32 - std::f32::consts::SQRT_2).abs() < tol32);
+        assert!((FRAC_1_SQRT_2_F32 - std::f32::consts::FRAC_1_SQRT_2).abs() < tol32);
+        // Verify TAU = 2*PI for f32
+        assert!((TAU_F32 - 2.0f32 * PI_F32).abs() < tol32);
+    }
+
+    // --- Comprehensive f32 trigonometric tests ---
+
+    #[test]
+    fn test_sin_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((sin_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((sin_f32(PI_F32 / 2.0f32) - 1.0f32).abs() < tol);
+        assert!((sin_f32(PI_F32) - 0.0f32).abs() < tol);
+        assert!((sin_f32(-PI_F32 / 2.0f32) - (-1.0f32)).abs() < tol);
+    }
+
+    #[test]
+    fn test_cos_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((cos_f32(0.0f32) - 1.0f32).abs() < tol);
+        assert!((cos_f32(PI_F32) - (-1.0f32)).abs() < tol);
+        assert!((cos_f32(PI_F32 / 2.0f32) - 0.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_tan_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((tan_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((tan_f32(PI_F32 / 4.0f32) - 1.0f32).abs() < tol);
+        assert!((tan_f32(-PI_F32 / 4.0f32) - (-1.0f32)).abs() < tol);
+    }
+
+    #[test]
+    fn test_asin_acos_atan_f32() {
+        let tol = 1e-5f32;
+        assert!((asin_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((asin_f32(1.0f32) - PI_F32 / 2.0f32).abs() < tol);
+        assert!((acos_f32(1.0f32) - 0.0f32).abs() < tol);
+        assert!((acos_f32(0.0f32) - PI_F32 / 2.0f32).abs() < tol);
+        assert!((atan_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((atan_f32(1.0f32) - PI_F32 / 4.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_atan2_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((atan2_f32(1.0f32, 1.0f32) - PI_F32 / 4.0f32).abs() < tol);
+        assert!((atan2_f32(1.0f32, 0.0f32) - PI_F32 / 2.0f32).abs() < tol);
+        assert!((atan2_f32(0.0f32, -1.0f32) - PI_F32).abs() < tol);
+        assert!((atan2_f32(-1.0f32, 0.0f32) - (-PI_F32 / 2.0f32)).abs() < tol);
+    }
+
+    #[test]
+    fn test_sinh_cosh_tanh_f32() {
+        let tol = 1e-5f32;
+        assert!((sinh_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((cosh_f32(0.0f32) - 1.0f32).abs() < tol);
+        assert!((tanh_f32(0.0f32) - 0.0f32).abs() < tol);
+        // tanh(x) should approach 1 for large x
+        assert!((tanh_f32(10.0f32) - 1.0f32).abs() < 0.001f32);
+        assert!((tanh_f32(-10.0f32) - (-1.0f32)).abs() < 0.001f32);
+    }
+
+    #[test]
+    fn test_trig_f32_out_of_range() {
+        // asin/acos with |x| > 1 should return NaN
+        assert!(asin_f32(2.0f32).is_nan());
+        assert!(asin_f32(-2.0f32).is_nan());
+        assert!(acos_f32(2.0f32).is_nan());
+        assert!(acos_f32(-2.0f32).is_nan());
+    }
+
+    // --- Comprehensive f32 exponential/logarithmic tests ---
+
+    #[test]
+    fn test_sqrt_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((sqrt_f32(4.0f32) - 2.0f32).abs() < tol);
+        assert!((sqrt_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((sqrt_f32(1.0f32) - 1.0f32).abs() < tol);
+        assert!((sqrt_f32(9.0f32) - 3.0f32).abs() < tol);
+        assert!(sqrt_f32(-1.0f32).is_nan());
+    }
+
+    #[test]
+    fn test_cbrt_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((cbrt_f32(27.0f32) - 3.0f32).abs() < tol);
+        assert!((cbrt_f32(-8.0f32) - (-2.0f32)).abs() < tol);
+        assert!((cbrt_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((cbrt_f32(1.0f32) - 1.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((exp_f32(0.0f32) - 1.0f32).abs() < tol);
+        assert!((exp_f32(1.0f32) - E_F32).abs() < tol);
+        assert!((exp_f32(-1.0f32) - 1.0f32 / E_F32).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp2_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((exp2_f32(0.0f32) - 1.0f32).abs() < tol);
+        assert!((exp2_f32(1.0f32) - 2.0f32).abs() < tol);
+        assert!((exp2_f32(3.0f32) - 8.0f32).abs() < tol);
+        assert!((exp2_f32(-1.0f32) - 0.5f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp_m1_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((exp_m1_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((exp_m1_f32(1.0f32) - (E_F32 - 1.0f32)).abs() < tol);
+    }
+
+    #[test]
+    fn test_ln_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((ln_f32(1.0f32) - 0.0f32).abs() < tol);
+        assert!((ln_f32(E_F32) - 1.0f32).abs() < tol);
+        assert_eq!(ln_f32(0.0f32), f32::NEG_INFINITY);
+        assert!(ln_f32(-1.0f32).is_nan());
+    }
+
+    #[test]
+    fn test_log2_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((log2_f32(1.0f32) - 0.0f32).abs() < tol);
+        assert!((log2_f32(2.0f32) - 1.0f32).abs() < tol);
+        assert!((log2_f32(8.0f32) - 3.0f32).abs() < tol);
+        assert!((log2_f32(1024.0f32) - 10.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_log10_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((log10_f32(1.0f32) - 0.0f32).abs() < tol);
+        assert!((log10_f32(10.0f32) - 1.0f32).abs() < tol);
+        assert!((log10_f32(100.0f32) - 2.0f32).abs() < tol);
+        assert!((log10_f32(1000.0f32) - 3.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_ln_1p_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((ln_1p_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((ln_1p_f32(E_F32 - 1.0f32) - 1.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_pow_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((pow_f32(2.0f32, 3.0f32) - 8.0f32).abs() < tol);
+        assert!((pow_f32(4.0f32, 0.5f32) - 2.0f32).abs() < tol);
+        assert!((pow_f32(10.0f32, 0.0f32) - 1.0f32).abs() < tol);
+        assert!((pow_f32(2.0f32, -1.0f32) - 0.5f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_powi_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((powi_f32(2.0f32, 3) - 8.0f32).abs() < tol);
+        assert!((powi_f32(3.0f32, 0) - 1.0f32).abs() < tol);
+        assert!((powi_f32(2.0f32, -1) - 0.5f32).abs() < tol);
+        assert!((powi_f32(5.0f32, 2) - 25.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_exp_log_f32_roundtrip() {
+        let tol = 1e-5f32;
+        for x in [0.5f32, 1.0f32, 2.0f32, 5.0f32] {
+            assert!((ln_f32(exp_f32(x)) - x).abs() < tol);
+            assert!((log2_f32(exp2_f32(x)) - x).abs() < tol);
+        }
+    }
+
+    // --- Comprehensive f32 rounding tests ---
+
+    #[test]
+    fn test_floor_f32_comprehensive() {
+        assert_eq!(floor_f32(3.7f32), 3.0f32);
+        assert_eq!(floor_f32(-3.7f32), -4.0f32);
+        assert_eq!(floor_f32(0.0f32), 0.0f32);
+        assert_eq!(floor_f32(3.0f32), 3.0f32);
+        assert_eq!(floor_f32(-0.1f32), -1.0f32);
+    }
+
+    #[test]
+    fn test_ceil_f32_comprehensive() {
+        assert_eq!(ceil_f32(3.2f32), 4.0f32);
+        assert_eq!(ceil_f32(-3.2f32), -3.0f32);
+        assert_eq!(ceil_f32(0.0f32), 0.0f32);
+        assert_eq!(ceil_f32(3.0f32), 3.0f32);
+        assert_eq!(ceil_f32(0.1f32), 1.0f32);
+    }
+
+    #[test]
+    fn test_round_f32_comprehensive() {
+        assert_eq!(round_f32(3.5f32), 4.0f32);
+        assert_eq!(round_f32(3.4f32), 3.0f32);
+        assert_eq!(round_f32(-3.5f32), -4.0f32);
+        assert_eq!(round_f32(0.0f32), 0.0f32);
+        assert_eq!(round_f32(2.5f32), 3.0f32);
+    }
+
+    #[test]
+    fn test_trunc_f32_comprehensive() {
+        assert_eq!(trunc_f32(3.7f32), 3.0f32);
+        assert_eq!(trunc_f32(-3.7f32), -3.0f32);
+        assert_eq!(trunc_f32(0.0f32), 0.0f32);
+        assert_eq!(trunc_f32(0.9f32), 0.0f32);
+        assert_eq!(trunc_f32(-0.9f32), 0.0f32);
+    }
+
+    #[test]
+    fn test_fract_f32_comprehensive() {
+        let tol = 1e-5f32;
+        assert!((fract_f32(3.7f32) - 0.7f32).abs() < tol);
+        assert!((fract_f32(-3.7f32) - (-0.7f32)).abs() < tol);
+        assert!((fract_f32(0.0f32) - 0.0f32).abs() < tol);
+        assert!((fract_f32(1.0f32) - 0.0f32).abs() < tol);
+    }
+
+    #[test]
+    fn test_rounding_f32_nan() {
+        assert!(floor_f32(f32::NAN).is_nan());
+        assert!(ceil_f32(f32::NAN).is_nan());
+        assert!(round_f32(f32::NAN).is_nan());
+        assert!(trunc_f32(f32::NAN).is_nan());
+        assert!(fract_f32(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_rounding_f32_infinity() {
+        assert_eq!(floor_f32(f32::INFINITY), f32::INFINITY);
+        assert_eq!(ceil_f32(f32::INFINITY), f32::INFINITY);
+        assert_eq!(floor_f32(f32::NEG_INFINITY), f32::NEG_INFINITY);
+        assert_eq!(ceil_f32(f32::NEG_INFINITY), f32::NEG_INFINITY);
+    }
+
+    // --- Comprehensive f32 comparison tests ---
+
+    #[test]
+    fn test_min_of_f32_comprehensive() {
+        assert_eq!(min_of_f32(1.0f32, 2.0f32), 1.0f32);
+        assert_eq!(min_of_f32(2.0f32, 1.0f32), 1.0f32);
+        assert_eq!(min_of_f32(-5.0f32, 3.0f32), -5.0f32);
+        assert_eq!(min_of_f32(5.0f32, 5.0f32), 5.0f32);
+    }
+
+    #[test]
+    fn test_max_of_f32_comprehensive() {
+        assert_eq!(max_of_f32(1.0f32, 2.0f32), 2.0f32);
+        assert_eq!(max_of_f32(2.0f32, 1.0f32), 2.0f32);
+        assert_eq!(max_of_f32(-5.0f32, 3.0f32), 3.0f32);
+        assert_eq!(max_of_f32(5.0f32, 5.0f32), 5.0f32);
+    }
+
+    #[test]
+    fn test_min_max_f32_nan() {
+        // min_of/max_of should return the non-NaN value
+        assert_eq!(min_of_f32(f32::NAN, 1.0f32), 1.0f32);
+        assert_eq!(min_of_f32(1.0f32, f32::NAN), 1.0f32);
+        assert_eq!(max_of_f32(f32::NAN, 1.0f32), 1.0f32);
+        assert_eq!(max_of_f32(1.0f32, f32::NAN), 1.0f32);
+    }
+
+    // --- Comprehensive f32 classification tests ---
+
+    #[test]
+    fn test_is_nan_f32_comprehensive() {
+        assert!(is_nan_f32(f32::NAN));
+        assert!(!is_nan_f32(0.0f32));
+        assert!(!is_nan_f32(1.0f32));
+        assert!(!is_nan_f32(-1.0f32));
+        assert!(!is_nan_f32(f32::INFINITY));
+        assert!(!is_nan_f32(f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn test_is_infinite_f32_comprehensive() {
+        assert!(is_infinite_f32(f32::INFINITY));
+        assert!(is_infinite_f32(f32::NEG_INFINITY));
+        assert!(!is_infinite_f32(0.0f32));
+        assert!(!is_infinite_f32(1.0f32));
+        assert!(!is_infinite_f32(f32::NAN));
+    }
+
+    #[test]
+    fn test_is_finite_f32_comprehensive() {
+        assert!(is_finite_f32(0.0f32));
+        assert!(is_finite_f32(1.0f32));
+        assert!(is_finite_f32(-1.0f32));
+        assert!(is_finite_f32(1e30f32));
+        assert!(!is_finite_f32(f32::INFINITY));
+        assert!(!is_finite_f32(f32::NEG_INFINITY));
+        assert!(!is_finite_f32(f32::NAN));
+    }
+
+    #[test]
+    fn test_is_normal_f32_comprehensive() {
+        assert!(is_normal_f32(1.0f32));
+        assert!(is_normal_f32(-1.0f32));
+        assert!(!is_normal_f32(0.0f32));
+        assert!(!is_normal_f32(f32::INFINITY));
+        assert!(!is_normal_f32(f32::NAN));
+        // Subnormals are not normal
+        assert!(!is_normal_f32(f32::MIN_POSITIVE / 2.0f32));
+    }
+
+    #[test]
+    fn test_signum_f32_comprehensive() {
+        assert_eq!(signum_f32(42.0f32), 1.0f32);
+        assert_eq!(signum_f32(-5.0f32), -1.0f32);
+        assert_eq!(signum_f32(0.0f32), 1.0f32); // +0.0 has positive sign per IEEE 754
+        assert_eq!(signum_f32(-0.0f32), -1.0f32); // -0.0 has negative sign per IEEE 754
+        assert_eq!(signum_f32(f32::INFINITY), 1.0f32);
+        assert_eq!(signum_f32(f32::NEG_INFINITY), -1.0f32);
+        assert!(signum_f32(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_copysign_f32_comprehensive() {
+        assert_eq!(copysign_f32(3.0f32, 1.0f32), 3.0f32);
+        assert_eq!(copysign_f32(3.0f32, -1.0f32), -3.0f32);
+        assert_eq!(copysign_f32(-3.0f32, 1.0f32), 3.0f32);
+        assert_eq!(copysign_f32(-3.0f32, -1.0f32), -3.0f32);
+        assert_eq!(copysign_f32(5.0f32, -2.0f32), -5.0f32);
+    }
+
+    // --- Comprehensive integer arithmetic tests ---
+
+    #[test]
+    fn test_abs_comprehensive() {
+        assert_eq!(abs(0), 0);
+        assert_eq!(abs(1), 1);
+        assert_eq!(abs(-1), 1);
+        assert_eq!(abs(42), 42);
+        assert_eq!(abs(-42), 42);
+        assert_eq!(abs(i64::MAX), i64::MAX);
+        // i64::MIN wraps
+        assert_eq!(abs(i64::MIN), i64::MIN);
+    }
+
+    #[test]
+    fn test_min_comprehensive() {
+        assert_eq!(min(1, 2), 1);
+        assert_eq!(min(2, 1), 1);
+        assert_eq!(min(-1, 1), -1);
+        assert_eq!(min(0, 0), 0);
+        assert_eq!(min(i64::MIN, i64::MAX), i64::MIN);
+    }
+
+    #[test]
+    fn test_max_comprehensive() {
+        assert_eq!(max(1, 2), 2);
+        assert_eq!(max(2, 1), 2);
+        assert_eq!(max(-1, 1), 1);
+        assert_eq!(max(0, 0), 0);
+        assert_eq!(max(i64::MIN, i64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn test_clamp_comprehensive() {
+        // Within range
+        assert_eq!(clamp(5, 0, 10), 5);
+        // Below range
+        assert_eq!(clamp(-5, 0, 10), 0);
+        // Above range
+        assert_eq!(clamp(15, 0, 10), 10);
+        // At boundaries
+        assert_eq!(clamp(0, 0, 10), 0);
+        assert_eq!(clamp(10, 0, 10), 10);
+        // Singleton range
+        assert_eq!(clamp(42, 7, 7), 7);
+        assert_eq!(clamp(7, 7, 7), 7);
+        // Negative range
+        assert_eq!(clamp(-5, -10, -1), -5);
+        assert_eq!(clamp(-15, -10, -1), -10);
     }
 }

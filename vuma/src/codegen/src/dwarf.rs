@@ -421,6 +421,14 @@ impl DwarfBuilder {
         self.min_inst_length
     }
 
+    /// Returns a reference to the CIE (Common Information Entry), if set.
+    ///
+    /// Returns `None` if no CIE has been configured (via `set_cie_aarch64`,
+    /// `set_cie_for_backend`, etc.).
+    pub fn cie(&self) -> Option<&CommonInformationEntry> {
+        self.cie.as_ref()
+    }
+
     /// Record the top-level compilation unit.
     pub fn add_compile_unit(&mut self, source_file: &str, producer: &str) {
         self.source_file = source_file.to_string();

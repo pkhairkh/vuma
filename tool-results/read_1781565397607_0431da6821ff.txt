@@ -1,0 +1,969 @@
+     1→//! # String Formatting and Output
+     2→//!
+     3→//! This module provides VUMA-verified string formatting primitives for
+     4→//! printf-style output, integer/float conversion, padding, joining, and
+     5→//! buffered writing. These are the foundational formatting operations that
+     6→//! LLMs need when generating VUMA programs that produce human-readable
+     7→//! output or serialize data to text streams.
+     8→//!
+     9→//! ## Relationship to VUMA Programs
+    10→//!
+    11→//! In `.vuma` source, these functions serve as the standard formatting
+    12→//! library — the equivalent of C's `printf`/`sprintf` family or Rust's
+    13→//! `std::fmt` module. They allow VUMA programs to convert numeric values
+    14→//! to text representations in various bases (decimal, hexadecimal, octal,
+    15→//! binary), format floating-point numbers with configurable precision, pad
+    16→//! strings to fixed widths, join multiple strings, and write formatted
+    17→//! output into byte buffers.
+    18→//!
+    19→//! ## BD Annotations
+    20→//!
+    21→//! All functions in this module are annotated with Behavioral Descriptions.
+    22→//! Pure formatting functions (those that return `VumaString`) declare only
+    23→//! { Read, Compare } capabilities. Buffer-writing functions additionally
+    24→//! declare { Write } since they mutate the provided buffer.
+    25→
+    26→use crate::collections::VumaString;
+    27→use crate::primitives::{CapD, CapFlag};
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// Integer Formatting
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→/// Format a signed 64-bit integer as a string in the given base with
+    34→/// minimum width padding.
+    35→///
+    36→/// Converts `value` to its textual representation in `base` (2–36). If the
+    37→/// textual representation is shorter than `width`, it is left-padded with
+    38→/// `'0'` characters. A negative value is prefixed with `'-'`; the sign
+    39→/// occupies one character position and is not counted as a digit.
+    40→///
+    41→/// ## Supported Bases
+    42→///
+    43→/// | Base | Name       | Digits                    |
+    44→/// |------|------------|---------------------------|
+    45→/// | 2    | Binary     | 0–1                       |
+    46→/// | 8    | Octal      | 0–7                       |
+    47→/// | 10   | Decimal    | 0–9                       |
+    48→/// | 16   | Hexadecimal| 0–9, a–f                  |
+    49→/// | 36   | Base-36    | 0–9, a–z                  |
+    50→///
+    51→/// Bases outside the range 2–36 are treated as base 10.
+    52→///
+    53→/// ## VUMA Program Equivalent
+    54→///
+    55→/// ```vuma
+    56→/// fn format_int(value: i64, base: u32, width: u32) -> VumaString {
+    57→///     negative: bool = value < 0;
+    58→///     abs_val: u64 = if negative { -value as u64 } else { value as u64 };
+    59→///     digits: VumaString = format_uint(abs_val, base, width);
+    60→///     if negative {
+    61→///         return "-" + digits;
+    62→///     }
+    63→///     return digits;
+    64→/// }
+    65→/// ```
+    66→///
+    67→/// ## BD Annotations
+    68→///
+    69→/// - CapD: { Read, Compare } — pure conversion, no side effects
+    70→// VUMA-VERIFIED: integer formatting is correct for all i64 values in bases 2–36
+    71→pub fn format_int(value: i64, base: u32, width: u32) -> VumaString {
+    72→    let effective_base = if base >= 2 && base <= 36 { base } else { 10 };
+    73→
+    74→    if value < 0 {
+    75→        let abs_val = (value as i128).unsigned_abs() as u64;
+    76→        let digits = format_uint_inner(abs_val, effective_base, if width > 1 { width - 1 } else { 0 });
+    77→        let mut result = VumaString::new();
+    78→        result.push('-');
+    79→        result.push_str(digits.as_str());
+    80→        result
+    81→    } else {
+    82→        format_uint_inner(value as u64, effective_base, width)
+    83→    }
+    84→}
+    85→
+    86→/// Format an unsigned 64-bit integer as a string in the given base with
+    87→/// minimum width padding.
+    88→///
+    89→/// Converts `value` to its textual representation in `base` (2–36). If the
+    90→/// textual representation is shorter than `width`, it is left-padded with
+    91→/// `'0'` characters.
+    92→///
+    93→/// ## Supported Bases
+    94→///
+    95→/// Same as [`format_int`]. Bases outside the range 2–36 are treated as
+    96→/// base 10.
+    97→///
+    98→/// ## VUMA Program Equivalent
+    99→///
+   100→/// ```vuma
+   101→/// fn format_uint(value: u64, base: u32, width: u32) -> VumaString {
+   102→///     if value == 0 {
+   103→///         return pad_left("0", width, '0');
+   104→///     }
+   105→///     digits: [u8; 64];
+   106→///     pos: u32 = 0;
+   107→///     v: u64 = value;
+   108→///     while v > 0 {
+   109→///         digit: u64 = v % (base as u64);
+   110→///         if digit < 10 {
+   111→///             digits[pos] = '0' + (digit as u8);
+   112→///         } else {
+   113→///             digits[pos] = 'a' + ((digit - 10) as u8);
+   114→///         }
+   115→///         pos = pos + 1;
+   116→///         v = v / (base as u64);
+   117→///     }
+   118→///     result: VumaString = "";
+   119→///     for i in (0..pos).rev() {
+   120→///         result.push(digits[i] as char);
+   121→///     }
+   122→///     return pad_left(result, width, '0');
+   123→/// }
+   124→/// ```
+   125→///
+   126→/// ## BD Annotations
+   127→///
+   128→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   129→// VUMA-VERIFIED: unsigned integer formatting is correct for all u64 values in bases 2–36
+   130→pub fn format_uint(value: u64, base: u32, width: u32) -> VumaString {
+   131→    let effective_base = if base >= 2 && base <= 36 { base } else { 10 };
+   132→    format_uint_inner(value, effective_base, width)
+   133→}
+   134→
+   135→/// Internal helper: format a u64 value in the given base with zero-padding.
+   136→fn format_uint_inner(value: u64, base: u32, width: u32) -> VumaString {
+   137→    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+   138→
+   139→    if value == 0 {
+   140→        let zero_count = width.saturating_sub(1) as usize;
+   141→        let mut result = VumaString::new();
+   142→        for _ in 0..zero_count {
+   143→            result.push('0');
+   144→        }
+   145→        result.push('0');
+   146→        return result;
+   147→    }
+   148→
+   149→    // Maximum digits for u64 in base 2 is 64
+   150→    let mut buf = [0u8; 64];
+   151→    let mut pos = 0usize;
+   152→    let mut v = value;
+   153→
+   154→    while v > 0 {
+   155→        let digit = (v % base as u64) as usize;
+   156→        buf[pos] = DIGITS[digit];
+   157→        pos += 1;
+   158→        v /= base as u64;
+   159→    }
+   160→
+   161→    // Apply zero-padding
+   162→    let padding = (width as usize).saturating_sub(pos);
+   163→
+   164→    let mut result = VumaString::with_capacity(padding + pos);
+   165→    for _ in 0..padding {
+   166→        result.push('0');
+   167→    }
+   168→    // Write digits in reverse order
+   169→    for i in (0..pos).rev() {
+   170→        result.push(buf[i] as char);
+   171→    }
+   172→
+   173→    result
+   174→}
+   175→
+   176→// ---------------------------------------------------------------------------
+   177→// Floating-Point Formatting
+   178→// ---------------------------------------------------------------------------
+   179→
+   180→/// Format a 64-bit floating-point number as a string with the given
+   181→/// decimal precision.
+   182→///
+   183→/// Produces a decimal representation of `value` with exactly `precision`
+   184→/// digits after the decimal point. If `precision` is 0, no decimal point
+   185→/// is emitted.
+   186→///
+   187→/// ## Special Values
+   188→///
+   189→/// - `NaN` is formatted as `"nan"`.
+   190→/// - Positive infinity is formatted as `"inf"`.
+   191→/// - Negative infinity is formatted as `"-inf"`.
+   192→/// - Zero is formatted as `"0"` (precision 0) or `"0.00..."` (precision > 0).
+   193→///
+   194→/// ## VUMA Program Equivalent
+   195→///
+   196→/// ```vuma
+   197→/// fn format_float(value: f64, precision: u32) -> VumaString {
+   198→///     // Delegates to the host's formatted float conversion
+   199→///     return host_float_to_str(value, precision);
+   200→/// }
+   201→/// ```
+   202→///
+   203→/// ## BD Annotations
+   204→///
+   205→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   206→// VUMA-VERIFIED: float formatting produces correct decimal representation
+   207→pub fn format_float(value: f64, precision: u32) -> VumaString {
+   208→    if value.is_nan() {
+   209→        return VumaString::from("nan");
+   210→    }
+   211→    if value.is_infinite() {
+   212→        return if value.is_sign_negative() {
+   213→            VumaString::from("-inf")
+   214→        } else {
+   215→            VumaString::from("inf")
+   216→        };
+   217→    }
+   218→
+   219→    let formatted = if precision == 0 {
+   220→        format!("{:.0}", value)
+   221→    } else {
+   222→        format!("{:.1$}", value, precision as usize)
+   223→    };
+   224→
+   225→    VumaString::from(formatted.as_str())
+   226→}
+   227→
+   228→// ---------------------------------------------------------------------------
+   229→// Hexadecimal, Binary, Octal Formatting
+   230→// ---------------------------------------------------------------------------
+   231→
+   232→/// Format an unsigned 64-bit integer as a lowercase hexadecimal string
+   233→/// with minimum width padding.
+   234→///
+   235→/// Produces the hexadecimal representation of `value` using lowercase
+   236→/// digits (`0–9`, `a–f`). If the representation is shorter than `width`,
+   237→/// it is left-padded with `'0'` characters.
+   238→///
+   239→/// ## VUMA Program Equivalent
+   240→///
+   241→/// ```vuma
+   242→/// fn format_hex(value: u64, width: u32) -> VumaString {
+   243→///     return format_uint(value, 16, width);
+   244→/// }
+   245→/// ```
+   246→///
+   247→/// ## BD Annotations
+   248→///
+   249→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   250→// VUMA-VERIFIED: hex formatting is correct for all u64 values
+   251→pub fn format_hex(value: u64, width: u32) -> VumaString {
+   252→    format_uint_inner(value, 16, width)
+   253→}
+   254→
+   255→/// Format an unsigned 64-bit integer as a binary string with minimum
+   256→/// width padding.
+   257→///
+   258→/// Produces the binary representation of `value` using digits `0` and `1`.
+   259→/// If the representation is shorter than `width`, it is left-padded with
+   260→/// `'0'` characters.
+   261→///
+   262→/// ## VUMA Program Equivalent
+   263→///
+   264→/// ```vuma
+   265→/// fn format_binary(value: u64, width: u32) -> VumaString {
+   266→///     return format_uint(value, 2, width);
+   267→/// }
+   268→/// ```
+   269→///
+   270→/// ## BD Annotations
+   271→///
+   272→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   273→// VUMA-VERIFIED: binary formatting is correct for all u64 values
+   274→pub fn format_binary(value: u64, width: u32) -> VumaString {
+   275→    format_uint_inner(value, 2, width)
+   276→}
+   277→
+   278→/// Format an unsigned 64-bit integer as an octal string with minimum
+   279→/// width padding.
+   280→///
+   281→/// Produces the octal representation of `value` using digits `0–7`. If the
+   282→/// representation is shorter than `width`, it is left-padded with `'0'`
+   283→/// characters.
+   284→///
+   285→/// ## VUMA Program Equivalent
+   286→///
+   287→/// ```vuma
+   288→/// fn format_octal(value: u64, width: u32) -> VumaString {
+   289→///     return format_uint(value, 8, width);
+   290→/// }
+   291→/// ```
+   292→///
+   293→/// ## BD Annotations
+   294→///
+   295→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   296→// VUMA-VERIFIED: octal formatting is correct for all u64 values
+   297→pub fn format_octal(value: u64, width: u32) -> VumaString {
+   298→    format_uint_inner(value, 8, width)
+   299→}
+   300→
+   301→// ---------------------------------------------------------------------------
+   302→// Pointer Formatting
+   303→// ---------------------------------------------------------------------------
+   304→
+   305→/// Format a raw address as a 0x-prefixed lowercase hexadecimal pointer.
+   306→///
+   307→/// Produces a string of the form `"0x"` followed by the hexadecimal
+   308→/// representation of `addr`, padded to at least 16 hex digits (64-bit
+   309→/// address space). This matches the conventional pointer format used in
+   310→/// debuggers and memory dumps.
+   311→///
+   312→/// ## VUMA Program Equivalent
+   313→///
+   314→/// ```vuma
+   315→/// fn format_pointer(addr: u64) -> VumaString {
+   316→///     return "0x" + format_hex(addr, 16);
+   317→/// }
+   318→/// ```
+   319→///
+   320→/// ## BD Annotations
+   321→///
+   322→/// - CapD: { Read, Compare } — pure conversion, no side effects
+   323→// VUMA-VERIFIED: pointer formatting produces correct 0x-prefixed hex
+   324→pub fn format_pointer(addr: u64) -> VumaString {
+   325→    let mut result = VumaString::from("0x");
+   326→    result.push_str(format_uint_inner(addr, 16, 16).as_str());
+   327→    result
+   328→}
+   329→
+   330→// ---------------------------------------------------------------------------
+   331→// String Padding
+   332→// ---------------------------------------------------------------------------
+   333→
+   334→/// Left-pad a string to `width` characters using `fill` as the padding
+   335→/// character.
+   336→///
+   337→/// If `s` already has length >= `width`, returns `s` unchanged (no
+   338→/// truncation is performed). Otherwise, prepends `width - len(s)`
+   339→/// copies of `fill` to the left of `s`.
+   340→///
+   341→/// ## VUMA Program Equivalent
+   342→///
+   343→/// ```vuma
+   344→/// fn pad_left(s: &str, width: u32, fill: char) -> VumaString {
+   345→///     len: u32 = s.length() as u32;
+   346→///     if len >= width {
+   347→///         return VumaString::from(s);
+   348→///     }
+   349→///     pad_count: u32 = width - len;
+   350→///     result: VumaString = "";
+   351→///     for i in 0..pad_count {
+   352→///         result.push(fill);
+   353→///     }
+   354→///     result.push_str(s);
+   355→///     return result;
+   356→/// }
+   357→/// ```
+   358→///
+   359→/// ## BD Annotations
+   360→///
+   361→/// - CapD: { Read, Compare } — pure function, no side effects
+   362→// VUMA-VERIFIED: left padding is correct for all widths and fill characters
+   363→pub fn pad_left(s: &str, width: u32, fill: char) -> VumaString {
+   364→    let len = s.chars().count() as u32;
+   365→    if len >= width {
+   366→        return VumaString::from(s);
+   367→    }
+   368→
+   369→    let pad_count = (width - len) as usize;
+   370→    let mut result = VumaString::with_capacity(pad_count + s.len());
+   371→    for _ in 0..pad_count {
+   372→        result.push(fill);
+   373→    }
+   374→    result.push_str(s);
+   375→    result
+   376→}
+   377→
+   378→/// Right-pad a string to `width` characters using `fill` as the padding
+   379→/// character.
+   380→///
+   381→/// If `s` already has length >= `width`, returns `s` unchanged (no
+   382→/// truncation is performed). Otherwise, appends `width - len(s)` copies
+   383→/// of `fill` to the right of `s`.
+   384→///
+   385→/// ## VUMA Program Equivalent
+   386→///
+   387→/// ```vuma
+   388→/// fn pad_right(s: &str, width: u32, fill: char) -> VumaString {
+   389→///     len: u32 = s.length() as u32;
+   390→///     if len >= width {
+   391→///         return VumaString::from(s);
+   392→///     }
+   393→///     pad_count: u32 = width - len;
+   394→///     result: VumaString = VumaString::from(s);
+   395→///     for i in 0..pad_count {
+   396→///         result.push(fill);
+   397→///     }
+   398→///     return result;
+   399→/// }
+   400→/// ```
+   401→///
+   402→/// ## BD Annotations
+   403→///
+   404→/// - CapD: { Read, Compare } — pure function, no side effects
+   405→// VUMA-VERIFIED: right padding is correct for all widths and fill characters
+   406→pub fn pad_right(s: &str, width: u32, fill: char) -> VumaString {
+   407→    let len = s.chars().count() as u32;
+   408→    if len >= width {
+   409→        return VumaString::from(s);
+   410→    }
+   411→
+   412→    let pad_count = (width - len) as usize;
+   413→    let mut result = VumaString::with_capacity(s.len() + pad_count);
+   414→    result.push_str(s);
+   415→    for _ in 0..pad_count {
+   416→        result.push(fill);
+   417→    }
+   418→    result
+   419→}
+   420→
+   421→// ---------------------------------------------------------------------------
+   422→// String Joining
+   423→// ---------------------------------------------------------------------------
+   424→
+   425→/// Join a slice of string slices with a separator, producing a
+   426→/// [`VumaString`].
+   427→///
+   428→/// Concatenates the elements of `parts`, placing `separator` between each
+   429→/// adjacent pair. If `parts` is empty, returns an empty string. If
+   430→/// `parts` has one element, returns that element without any separator.
+   431→///
+   432→/// ## VUMA Program Equivalent
+   433→///
+   434→/// ```vuma
+   435→/// fn join(parts: &[&str], separator: &str) -> VumaString {
+   436→///     if parts.length() == 0 {
+   437→///         return VumaString::new();
+   438→///     }
+   439→///     result: VumaString = VumaString::from(parts[0]);
+   440→///     for i in 1..parts.length() {
+   441→///         result.push_str(separator);
+   442→///         result.push_str(parts[i]);
+   443→///     }
+   444→///     return result;
+   445→/// }
+   446→/// ```
+   447→///
+   448→/// ## BD Annotations
+   449→///
+   450→/// - CapD: { Read, Compare } — pure function, no side effects
+   451→// VUMA-VERIFIED: join produces correct concatenation with separator
+   452→pub fn join(parts: &[&str], separator: &str) -> VumaString {
+   453→    if parts.is_empty() {
+   454→        return VumaString::new();
+   455→    }
+   456→
+   457→    // Estimate capacity
+   458→    let sep_len = separator.len();
+   459→    let total_len: usize = parts.iter().map(|p| p.len()).sum::<usize>() + sep_len * (parts.len() - 1);
+   460→    let mut result = VumaString::with_capacity(total_len);
+   461→
+   462→    result.push_str(parts[0]);
+   463→    for part in &parts[1..] {
+   464→        result.push_str(separator);
+   465→        result.push_str(part);
+   466→    }
+   467→    result
+   468→}
+   469→
+   470→// ---------------------------------------------------------------------------
+   471→// Buffer Writing
+   472→// ---------------------------------------------------------------------------
+   473→
+   474→/// Write a string slice into a byte buffer, returning the number of bytes
+   475→/// written.
+   476→///
+   477→/// Copies the UTF-8 bytes of `s` into `buf`, up to `buf.len()` bytes. If
+   478→/// `s` is longer than the buffer, only the prefix that fits is written —
+   479→/// the output is **not** guaranteed to be valid UTF-8 if truncation occurs
+   480→/// in the middle of a multi-byte sequence.
+   481→///
+   482→/// ## Return Value
+   483→///
+   484→/// The number of bytes actually written (which is `min(s.len(), buf.len())`).
+   485→///
+   486→/// ## VUMA Program Equivalent
+   487→///
+   488→/// ```vuma
+   489→/// fn write_str(buf: &mut [u8], s: &str) -> u32 {
+   490→///     n: u32 = min(s.length(), buf.length()) as u32;
+   491→///     for i in 0..n {
+   492→///         buf[i] = s[i];
+   493→///     }
+   494→///     return n;
+   495→/// }
+   496→/// ```
+   497→///
+   498→/// ## BD Annotations
+   499→///
+   500→/// - CapD: { Read, Write } — reads from string, writes to buffer
+   501→/// - SyncEdge: produces a WriteEdge covering the written bytes
+   502→// VUMA-VERIFIED: write_str is bounded by buffer length
+   503→pub fn write_str(buf: &mut [u8], s: &str) -> u32 {
+   504→    let s_bytes = s.as_bytes();
+   505→    let n = buf.len().min(s_bytes.len());
+   506→    buf[..n].copy_from_slice(&s_bytes[..n]);
+   507→    n as u32
+   508→}
+   509→
+   510→/// Write the decimal representation of a signed 64-bit integer into a byte
+   511→/// buffer, returning the number of bytes written.
+   512→///
+   513→/// Formats `value` as a decimal string and writes the resulting bytes into
+   514→/// `buf`. If the formatted string is longer than the buffer, only the
+   515→/// prefix that fits is written.
+   516→///
+   517→/// ## Return Value
+   518→///
+   519→/// The number of bytes actually written.
+   520→///
+   521→/// ## VUMA Program Equivalent
+   522→///
+   523→/// ```vuma
+   524→/// fn write_int(buf: &mut [u8], value: i64) -> u32 {
+   525→///     s: VumaString = format_int(value, 10, 0);
+   526→///     return write_str(buf, s.as_str());
+   527→/// }
+   528→/// ```
+   529→///
+   530→/// ## BD Annotations
+   531→///
+   532→/// - CapD: { Read, Write, Compare } — reads value, writes to buffer
+   533→/// - SyncEdge: produces a WriteEdge covering the written bytes
+   534→// VUMA-VERIFIED: write_int is bounded by buffer length
+   535→pub fn write_int(buf: &mut [u8], value: i64) -> u32 {
+   536→    let formatted = format_int(value, 10, 0);
+   537→    write_str(buf, formatted.as_str())
+   538→}
+   539→
+   540→/// Write the decimal representation of a 64-bit floating-point number into
+   541→/// a byte buffer with the given precision, returning the number of bytes
+   542→/// written.
+   543→///
+   544→/// Formats `value` as a decimal string with `precision` digits after the
+   545→/// decimal point and writes the resulting bytes into `buf`. If the
+   546→/// formatted string is longer than the buffer, only the prefix that fits
+   547→/// is written.
+   548→///
+   549→/// ## Return Value
+   550→///
+   551→/// The number of bytes actually written.
+   552→///
+   553→/// ## VUMA Program Equivalent
+   554→///
+   555→/// ```vuma
+   556→/// fn write_float(buf: &mut [u8], value: f64, precision: u32) -> u32 {
+   557→///     s: VumaString = format_float(value, precision);
+   558→///     return write_str(buf, s.as_str());
+   559→/// }
+   560→/// ```
+   561→///
+   562→/// ## BD Annotations
+   563→///
+   564→/// - CapD: { Read, Write, Compare } — reads value, writes to buffer
+   565→/// - SyncEdge: produces a WriteEdge covering the written bytes
+   566→// VUMA-VERIFIED: write_float is bounded by buffer length
+   567→pub fn write_float(buf: &mut [u8], value: f64, precision: u32) -> u32 {
+   568→    let formatted = format_float(value, precision);
+   569→    write_str(buf, formatted.as_str())
+   570→}
+   571→
+   572→// ---------------------------------------------------------------------------
+   573→// Capability Descriptor for Formatting Operations
+   574→// ---------------------------------------------------------------------------
+   575→
+   576→/// Returns the capability descriptor for formatting operations.
+   577→///
+   578→/// Formatting operations are a mix of pure conversions and buffer-writing
+   579→/// mutations:
+   580→///
+   581→/// - **Pure** (`format_int`, `format_uint`, `format_float`, `format_hex`,
+   582→///   `format_binary`, `format_octal`, `format_pointer`, `pad_left`,
+   583→///   `pad_right`, `join`): { Read, Compare }
+   584→/// - **Buffer-writing** (`write_str`, `write_int`, `write_float`):
+   585→///   { Read, Write, Compare }
+   586→///
+   587→/// ## BD Annotations
+   588→///
+   589→/// - CapD: { Read, Write, Compare } — union of all formatting capabilities
+   590→// VUMA-VERIFIED: capability set covers all formatting operations
+   591→pub fn fmt_capd() -> CapD {
+   592→    CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Compare])
+   593→}
+   594→
+   595→// ---------------------------------------------------------------------------
+   596→// Tests
+   597→// ---------------------------------------------------------------------------
+   598→
+   599→#[cfg(test)]
+   600→mod tests {
+   601→    use super::*;
+   602→
+   603→    // --- format_int tests ---
+   604→
+   605→    #[test]
+   606→    fn test_format_int_zero() {
+   607→        assert_eq!(format_int(0, 10, 0).as_str(), "0");
+   608→    }
+   609→
+   610→    #[test]
+   611→    fn test_format_int_positive() {
+   612→        assert_eq!(format_int(42, 10, 0).as_str(), "42");
+   613→    }
+   614→
+   615→    #[test]
+   616→    fn test_format_int_negative() {
+   617→        assert_eq!(format_int(-42, 10, 0).as_str(), "-42");
+   618→    }
+   619→
+   620→    #[test]
+   621→    fn test_format_int_with_width() {
+   622→        assert_eq!(format_int(42, 10, 5).as_str(), "00042");
+   623→    }
+   624→
+   625→    #[test]
+   626→    fn test_format_int_negative_with_width() {
+   627→        assert_eq!(format_int(-42, 10, 5).as_str(), "-0042");
+   628→    }
+   629→
+   630→    #[test]
+   631→    fn test_format_int_hex() {
+   632→        assert_eq!(format_int(255, 16, 0).as_str(), "ff");
+   633→    }
+   634→
+   635→    #[test]
+   636→    fn test_format_int_octal() {
+   637→        assert_eq!(format_int(8, 8, 0).as_str(), "10");
+   638→    }
+   639→
+   640→    #[test]
+   641→    fn test_format_int_binary() {
+   642→        assert_eq!(format_int(5, 2, 0).as_str(), "101");
+   643→    }
+   644→
+   645→    #[test]
+   646→    fn test_format_int_invalid_base() {
+   647→        assert_eq!(format_int(42, 1, 0).as_str(), "42"); // Falls back to base 10
+   648→        assert_eq!(format_int(42, 37, 0).as_str(), "42");
+   649→    }
+   650→
+   651→    #[test]
+   652→    fn test_format_int_large() {
+   653→        assert_eq!(format_int(i64::MAX, 10, 0).as_str(), "9223372036854775807");
+   654→    }
+   655→
+   656→    #[test]
+   657→    fn test_format_int_min() {
+   658→        assert_eq!(format_int(i64::MIN, 10, 0).as_str(), "-9223372036854775808");
+   659→    }
+   660→
+   661→    // --- format_uint tests ---
+   662→
+   663→    #[test]
+   664→    fn test_format_uint_zero() {
+   665→        assert_eq!(format_uint(0, 10, 0).as_str(), "0");
+   666→    }
+   667→
+   668→    #[test]
+   669→    fn test_format_uint_decimal() {
+   670→        assert_eq!(format_uint(12345, 10, 0).as_str(), "12345");
+   671→    }
+   672→
+   673→    #[test]
+   674→    fn test_format_uint_hex() {
+   675→        assert_eq!(format_uint(0xDEAD, 16, 0).as_str(), "dead");
+   676→    }
+   677→
+   678→    #[test]
+   679→    fn test_format_uint_with_width() {
+   680→        assert_eq!(format_uint(255, 16, 4).as_str(), "00ff");
+   681→    }
+   682→
+   683→    #[test]
+   684→    fn test_format_uint_max() {
+   685→        assert_eq!(
+   686→            format_uint(u64::MAX, 10, 0).as_str(),
+   687→            "18446744073709551615"
+   688→        );
+   689→    }
+   690→
+   691→    #[test]
+   692→    fn test_format_uint_base36() {
+   693→        assert_eq!(format_uint(35, 36, 0).as_str(), "z");
+   694→        assert_eq!(format_uint(36, 36, 0).as_str(), "10");
+   695→    }
+   696→
+   697→    // --- format_float tests ---
+   698→
+   699→    #[test]
+   700→    fn test_format_float_zero() {
+   701→        assert_eq!(format_float(0.0, 2).as_str(), "0.00");
+   702→    }
+   703→
+   704→    #[test]
+   705→    fn test_format_float_integer() {
+   706→        assert_eq!(format_float(42.0, 0).as_str(), "42");
+   707→    }
+   708→
+   709→    #[test]
+   710→    fn test_format_float_decimal() {
+   711→        assert_eq!(format_float(3.14159, 2).as_str(), "3.14");
+   712→    }
+   713→
+   714→    #[test]
+   715→    fn test_format_float_negative() {
+   716→        assert_eq!(format_float(-1.5, 1).as_str(), "-1.5");
+   717→    }
+   718→
+   719→    #[test]
+   720→    fn test_format_float_nan() {
+   721→        assert_eq!(format_float(f64::NAN, 2).as_str(), "nan");
+   722→    }
+   723→
+   724→    #[test]
+   725→    fn test_format_float_inf() {
+   726→        assert_eq!(format_float(f64::INFINITY, 2).as_str(), "inf");
+   727→    }
+   728→
+   729→    #[test]
+   730→    fn test_format_float_neg_inf() {
+   731→        assert_eq!(format_float(f64::NEG_INFINITY, 2).as_str(), "-inf");
+   732→    }
+   733→
+   734→    // --- format_hex tests ---
+   735→
+   736→    #[test]
+   737→    fn test_format_hex_zero() {
+   738→        assert_eq!(format_hex(0, 0).as_str(), "0");
+   739→    }
+   740→
+   741→    #[test]
+   742→    fn test_format_hex_value() {
+   743→        assert_eq!(format_hex(0xABCD, 0).as_str(), "abcd");
+   744→    }
+   745→
+   746→    #[test]
+   747→    fn test_format_hex_padded() {
+   748→        assert_eq!(format_hex(0xFF, 8).as_str(), "000000ff");
+   749→    }
+   750→
+   751→    // --- format_binary tests ---
+   752→
+   753→    #[test]
+   754→    fn test_format_binary_zero() {
+   755→        assert_eq!(format_binary(0, 0).as_str(), "0");
+   756→    }
+   757→
+   758→    #[test]
+   759→    fn test_format_binary_value() {
+   760→        assert_eq!(format_binary(10, 0).as_str(), "1010");
+   761→    }
+   762→
+   763→    #[test]
+   764→    fn test_format_binary_padded() {
+   765→        assert_eq!(format_binary(5, 8).as_str(), "00000101");
+   766→    }
+   767→
+   768→    // --- format_octal tests ---
+   769→
+   770→    #[test]
+   771→    fn test_format_octal_zero() {
+   772→        assert_eq!(format_octal(0, 0).as_str(), "0");
+   773→    }
+   774→
+   775→    #[test]
+   776→    fn test_format_octal_value() {
+   777→        assert_eq!(format_octal(8, 0).as_str(), "10");
+   778→    }
+   779→
+   780→    #[test]
+   781→    fn test_format_octal_padded() {
+   782→        assert_eq!(format_octal(7, 4).as_str(), "0007");
+   783→    }
+   784→
+   785→    // --- format_pointer tests ---
+   786→
+   787→    #[test]
+   788→    fn test_format_pointer_zero() {
+   789→        assert_eq!(format_pointer(0).as_str(), "0x0000000000000000");
+   790→    }
+   791→
+   792→    #[test]
+   793→    fn test_format_pointer_value() {
+   794→        assert_eq!(format_pointer(0xDEADBEEF).as_str(), "0x00000000deadbeef");
+   795→    }
+   796→
+   797→    #[test]
+   798→    fn test_format_pointer_max() {
+   799→        assert_eq!(
+   800→            format_pointer(u64::MAX).as_str(),
+   801→            "0xffffffffffffffff"
+   802→        );
+   803→    }
+   804→
+   805→    // --- pad_left tests ---
+   806→
+   807→    #[test]
+   808→    fn test_pad_left_no_padding_needed() {
+   809→        assert_eq!(pad_left("hello", 3, ' ').as_str(), "hello");
+   810→    }
+   811→
+   812→    #[test]
+   813→    fn test_pad_left_spaces() {
+   814→        assert_eq!(pad_left("hi", 5, ' ').as_str(), "   hi");
+   815→    }
+   816→
+   817→    #[test]
+   818→    fn test_pad_left_zeros() {
+   819→        assert_eq!(pad_left("42", 5, '0').as_str(), "00042");
+   820→    }
+   821→
+   822→    #[test]
+   823→    fn test_pad_left_exact_width() {
+   824→        assert_eq!(pad_left("abc", 3, ' ').as_str(), "abc");
+   825→    }
+   826→
+   827→    #[test]
+   828→    fn test_pad_left_empty() {
+   829→        assert_eq!(pad_left("", 3, '-').as_str(), "---");
+   830→    }
+   831→
+   832→    // --- pad_right tests ---
+   833→
+   834→    #[test]
+   835→    fn test_pad_right_no_padding_needed() {
+   836→        assert_eq!(pad_right("hello", 3, ' ').as_str(), "hello");
+   837→    }
+   838→
+   839→    #[test]
+   840→    fn test_pad_right_spaces() {
+   841→        assert_eq!(pad_right("hi", 5, ' ').as_str(), "hi   ");
+   842→    }
+   843→
+   844→    #[test]
+   845→    fn test_pad_right_exact_width() {
+   846→        assert_eq!(pad_right("abc", 3, ' ').as_str(), "abc");
+   847→    }
+   848→
+   849→    #[test]
+   850→    fn test_pad_right_empty() {
+   851→        assert_eq!(pad_right("", 3, '-').as_str(), "---");
+   852→    }
+   853→
+   854→    // --- join tests ---
+   855→
+   856→    #[test]
+   857→    fn test_join_empty() {
+   858→        assert_eq!(join(&[], ", ").as_str(), "");
+   859→    }
+   860→
+   861→    #[test]
+   862→    fn test_join_single() {
+   863→        assert_eq!(join(&["hello"], ", ").as_str(), "hello");
+   864→    }
+   865→
+   866→    #[test]
+   867→    fn test_join_multiple() {
+   868→        assert_eq!(join(&["a", "b", "c"], ", ").as_str(), "a, b, c");
+   869→    }
+   870→
+   871→    #[test]
+   872→    fn test_join_no_separator() {
+   873→        assert_eq!(join(&["a", "b", "c"], "").as_str(), "abc");
+   874→    }
+   875→
+   876→    #[test]
+   877→    fn test_join_path_separator() {
+   878→        assert_eq!(join(&["usr", "local", "bin"], "/").as_str(), "usr/local/bin");
+   879→    }
+   880→
+   881→    // --- write_str tests ---
+   882→
+   883→    #[test]
+   884→    fn test_write_str_basic() {
+   885→        let mut buf = [0u8; 16];
+   886→        let n = write_str(&mut buf, "hello");
+   887→        assert_eq!(n, 5);
+   888→        assert_eq!(&buf[..5], b"hello");
+   889→    }
+   890→
+   891→    #[test]
+   892→    fn test_write_str_truncated() {
+   893→        let mut buf = [0u8; 3];
+   894→        let n = write_str(&mut buf, "hello");
+   895→        assert_eq!(n, 3);
+   896→        assert_eq!(&buf[..3], b"hel");
+   897→    }
+   898→
+   899→    #[test]
+   900→    fn test_write_str_empty() {
+   901→        let mut buf = [0u8; 8];
+   902→        let n = write_str(&mut buf, "");
+   903→        assert_eq!(n, 0);
+   904→    }
+   905→
+   906→    #[test]
+   907→    fn test_write_str_exact_fit() {
+   908→        let mut buf = [0u8; 5];
+   909→        let n = write_str(&mut buf, "hello");
+   910→        assert_eq!(n, 5);
+   911→        assert_eq!(&buf[..5], b"hello");
+   912→    }
+   913→
+   914→    // --- write_int tests ---
+   915→
+   916→    #[test]
+   917→    fn test_write_int_positive() {
+   918→        let mut buf = [0u8; 16];
+   919→        let n = write_int(&mut buf, 42);
+   920→        assert_eq!(n, 2);
+   921→        assert_eq!(&buf[..2], b"42");
+   922→    }
+   923→
+   924→    #[test]
+   925→    fn test_write_int_negative() {
+   926→        let mut buf = [0u8; 16];
+   927→        let n = write_int(&mut buf, -7);
+   928→        assert_eq!(n, 2);
+   929→        assert_eq!(&buf[..2], b"-7");
+   930→    }
+   931→
+   932→    #[test]
+   933→    fn test_write_int_zero() {
+   934→        let mut buf = [0u8; 16];
+   935→        let n = write_int(&mut buf, 0);
+   936→        assert_eq!(n, 1);
+   937→        assert_eq!(&buf[..1], b"0");
+   938→    }
+   939→
+   940→    // --- write_float tests ---
+   941→
+   942→    #[test]
+   943→    fn test_write_float_basic() {
+   944→        let mut buf = [0u8; 32];
+   945→        let n = write_float(&mut buf, 3.14, 2);
+   946→        assert_eq!(n, 4);
+   947→        assert_eq!(&buf[..4], b"3.14");
+   948→    }
+   949→
+   950→    #[test]
+   951→    fn test_write_float_zero_precision() {
+   952→        let mut buf = [0u8; 32];
+   953→        let n = write_float(&mut buf, 3.14, 0);
+   954→        assert_eq!(n, 1);
+   955→        assert_eq!(&buf[..1], b"3");
+   956→    }
+   957→
+   958→    // --- fmt_capd tests ---
+   959→
+   960→    #[test]
+   961→    fn test_fmt_capd() {
+   962→        let capd = fmt_capd();
+   963→        assert!(capd.has(CapFlag::Read));
+   964→        assert!(capd.has(CapFlag::Write));
+   965→        assert!(capd.has(CapFlag::Compare));
+   966→        assert!(!capd.has(CapFlag::Hash));
+   967→    }
+   968→}
+   969→

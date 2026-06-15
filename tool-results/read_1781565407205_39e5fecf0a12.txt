@@ -1,0 +1,876 @@
+     1→     1→//! # ELF Validation Tests
+     2→     2→//!
+     3→     3→//! Validates that the ELF binaries produced by every native backend are
+     4→     4→//! well-formed and could be loaded by the Linux kernel.  Each backend
+     5→     5→//! compiles a minimal `fn add(a, b) -> i64 { a + b }` program through
+     6→     6→//! the full SCG → IR → register-allocation → encode_program pipeline,
+     7→     7→//! and the resulting bytes are parsed as an ELF file.
+     8→     8→//!
+     9→     9→//! # Test Matrix
+    10→    10→//!
+    11→    11→//! | # | Backend       | ELF Class | Endianness | EM_* value | Tests                       |
+    12→    12→//! |---|---------------|-----------|------------|------------|-----------------------------|
+    13→    13→//! | 1 | x86_64        | ELFCLASS64 | LE        | 62         | header, phdr, section       |
+    14→    14→//! | 2 | AArch64       | ELFCLASS64 | LE        | 183        | header, phdr, section       |
+    15→    15→//! | 3 | RISC-V 64     | ELFCLASS64 | LE        | 243        | header, phdr, section       |
+    16→    16→//! | 4 | ARM32         | ELFCLASS32 | LE        | 40         | header, phdr, section       |
+    17→    17→//! | 5 | MIPS64        | ELFCLASS64 | BE        | 8          | header, phdr, section       |
+    18→    18→//! | 6 | PPC64         | ELFCLASS64 | BE        | 21         | header, phdr, section       |
+    19→    19→//! | 7 | LoongArch64   | ELFCLASS64 | LE        | 258        | header, phdr, section       |
+    20→    20→
+    21→    21→use vuma_codegen::{
+    22→    22→    backend::{AllocatedProgram, Backend, Endianness, OutputFormat},
+    23→    23→    ir::BinOpKind,
+    24→    24→    scg_to_ir::{
+    25→    25→        ComputationNode, IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement,
+    26→    26→        ScgType,
+    27→    27→    },
+    28→    28→    AArch64Backend, Arm32Backend, LoongArch64Backend, Mips64Backend, PPC64Backend, RiscV64Backend,
+    29→    29→    X86_64Backend,
+    30→    30→};
+    31→    31→
+    32→    32→// ===========================================================================
+    33→    33→// ELF Constants
+    34→    34→// ===========================================================================
+    35→    35→
+    36→    36→const ELFMAG: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+    37→    37→const ELFCLASS32: u8 = 1;
+    38→    38→const ELFCLASS64: u8 = 2;
+    39→    39→const ELFDATA2LSB: u8 = 1; // Little-endian
+    40→    40→const ELFDATA2MSB: u8 = 2; // Big-endian
+    41→    41→const ET_EXEC: u16 = 2;
+    42→    42→const PT_LOAD: u32 = 1;
+    43→    43→
+    44→    44→// EM_* machine types
+    45→    45→const EM_X86_64: u16 = 62;
+    46→    46→const EM_AARCH64: u16 = 183;
+    47→    47→const EM_RISCV: u16 = 243;
+    48→    48→const EM_ARM: u16 = 40;
+    49→    49→const EM_MIPS: u16 = 8;
+    50→    50→const EM_PPC64: u16 = 21;
+    51→    51→const EM_LOONGARCH: u16 = 258;
+    52→    52→
+    53→    53→// ===========================================================================
+    54→    54→// Parsed ELF structures
+    55→    55→// ===========================================================================
+    56→    56→
+    57→    57→/// Parsed ELF header (supports both 32-bit and 64-bit).
+    58→    58→struct ElfHeader {
+    59→    59→    ei_class: u8,
+    60→    60→    ei_data: u8,
+    61→    61→    e_type: u16,
+    62→    62→    e_machine: u16,
+    63→    63→    e_entry: u64,
+    64→    64→    e_phoff: u64,
+    65→    65→    e_shoff: u64,
+    66→    66→    e_flags: u32,
+    67→    67→    e_ehsize: u16,
+    68→    68→    e_phentsize: u16,
+    69→    69→    e_phnum: u16,
+    70→    70→    e_shentsize: u16,
+    71→    71→    e_shnum: u16,
+    72→    72→    e_shstrndx: u16,
+    73→    73→}
+    74→    74→
+    75→    75→/// Parsed ELF program header (supports both 32-bit and 64-bit).
+    76→    76→struct ElfPhdr {
+    77→    77→    p_type: u32,
+    78→    78→    p_flags: u32,
+    79→    79→    p_offset: u64,
+    80→    80→    p_vaddr: u64,
+    81→    81→    p_paddr: u64,
+    82→    82→    p_filesz: u64,
+    83→    83→    p_memsz: u64,
+    84→    84→    p_align: u64,
+    85→    85→}
+    86→    86→
+    87→    87→/// Parsed ELF section header (supports both 32-bit and 64-bit).
+    88→    88→struct ElfShdr {
+    89→    89→    sh_name: u32,
+    90→    90→    sh_type: u32,
+    91→    91→    sh_flags: u64,
+    92→    92→    sh_addr: u64,
+    93→    93→    sh_offset: u64,
+    94→    94→    sh_size: u64,
+    95→    95→    sh_link: u32,
+    96→    96→    sh_info: u32,
+    97→    97→    sh_addralign: u64,
+    98→    98→    sh_entsize: u64,
+    99→    99→}
+   100→   100→
+   101→   101→/// Fully parsed ELF file.
+   102→   102→struct ElfFile {
+   103→   103→    header: ElfHeader,
+   104→   104→    phdrs: Vec<ElfPhdr>,
+   105→   105→    shdrs: Vec<ElfShdr>,
+   106→   106→}
+   107→   107→
+   108→   108→impl ElfFile {
+   109→   109→    /// Parse an ELF file from raw bytes.
+   110→   110→    fn parse(bytes: &[u8]) -> Self {
+   111→   111→        assert!(bytes.len() >= 16, "ELF too short for e_ident");
+   112→   112→        assert_eq!(&bytes[0..4], &ELFMAG, "ELF magic mismatch");
+   113→   113→
+   114→   114→        let ei_class = bytes[4];
+   115→   115→        let ei_data = bytes[5];
+   116→   116→
+   117→   117→        let is_le = ei_data == ELFDATA2LSB;
+   118→   118→        let is_64 = ei_class == ELFCLASS64;
+   119→   119→
+   120→   120→        // Helper closures to read multi-byte values with correct endianness.
+   121→   121→        let read_u16 = |b: &[u8]| -> u16 {
+   122→   122→            if is_le {
+   123→   123→                u16::from_le_bytes([b[0], b[1]])
+   124→   124→            } else {
+   125→   125→                u16::from_be_bytes([b[0], b[1]])
+   126→   126→            }
+   127→   127→        };
+   128→   128→
+   129→   129→        let read_u32 = |b: &[u8]| -> u32 {
+   130→   130→            if is_le {
+   131→   131→                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+   132→   132→            } else {
+   133→   133→                u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+   134→   134→            }
+   135→   135→        };
+   136→   136→
+   137→   137→        let read_u64 = |b: &[u8]| -> u64 {
+   138→   138→            if is_le {
+   139→   139→                u64::from_le_bytes([
+   140→   140→                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+   141→   141→                ])
+   142→   142→            } else {
+   143→   143→                u64::from_be_bytes([
+   144→   144→                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+   145→   145→                ])
+   146→   146→            }
+   147→   147→        };
+   148→   148→
+   149→   149→        let header = if is_64 {
+   150→   150→            // ELF64 header is 64 bytes
+   151→   151→            assert!(
+   152→   152→                bytes.len() >= 64,
+   153→   153→                "ELF64 header requires at least 64 bytes, got {}",
+   154→   154→                bytes.len()
+   155→   155→            );
+   156→   156→            ElfHeader {
+   157→   157→                ei_class,
+   158→   158→                ei_data,
+   159→   159→                e_type: read_u16(&bytes[16..18]),
+   160→   160→                e_machine: read_u16(&bytes[18..20]),
+   161→   161→                e_entry: read_u64(&bytes[24..32]),
+   162→   162→                e_phoff: read_u64(&bytes[32..40]),
+   163→   163→                e_shoff: read_u64(&bytes[40..48]),
+   164→   164→                e_flags: read_u32(&bytes[48..52]),
+   165→   165→                e_ehsize: read_u16(&bytes[52..54]),
+   166→   166→                e_phentsize: read_u16(&bytes[54..56]),
+   167→   167→                e_phnum: read_u16(&bytes[56..58]),
+   168→   168→                e_shentsize: read_u16(&bytes[58..60]),
+   169→   169→                e_shnum: read_u16(&bytes[60..62]),
+   170→   170→                e_shstrndx: read_u16(&bytes[62..64]),
+   171→   171→            }
+   172→   172→        } else {
+   173→   173→            // ELF32 header is 52 bytes
+   174→   174→            assert!(
+   175→   175→                bytes.len() >= 52,
+   176→   176→                "ELF32 header requires at least 52 bytes, got {}",
+   177→   177→                bytes.len()
+   178→   178→            );
+   179→   179→            ElfHeader {
+   180→   180→                ei_class,
+   181→   181→                ei_data,
+   182→   182→                e_type: read_u16(&bytes[16..18]),
+   183→   183→                e_machine: read_u16(&bytes[18..20]),
+   184→   184→                e_entry: read_u32(&bytes[24..28]) as u64,
+   185→   185→                e_phoff: read_u32(&bytes[28..32]) as u64,
+   186→   186→                e_shoff: read_u32(&bytes[32..36]) as u64,
+   187→   187→                e_flags: read_u32(&bytes[36..40]),
+   188→   188→                e_ehsize: read_u16(&bytes[40..42]),
+   189→   189→                e_phentsize: read_u16(&bytes[42..44]),
+   190→   190→                e_phnum: read_u16(&bytes[44..46]),
+   191→   191→                e_shentsize: read_u16(&bytes[46..48]),
+   192→   192→                e_shnum: read_u16(&bytes[48..50]),
+   193→   193→                e_shstrndx: read_u16(&bytes[50..52]),
+   194→   194→            }
+   195→   195→        };
+   196→   196→
+   197→   197→        // Parse program headers
+   198→   198→        let mut phdrs = Vec::new();
+   199→   199→        for i in 0..header.e_phnum as usize {
+   200→   200→            let off = header.e_phoff as usize + i * header.e_phentsize as usize;
+   201→   201→            if is_64 {
+   202→   202→                // ELF64 Phdr: 56 bytes
+   203→   203→                assert!(
+   204→   204→                    off + 56 <= bytes.len(),
+   205→   205→                    "ELF64 program header {} at offset {} extends past end",
+   206→   206→                    i,
+   207→   207→                    off
+   208→   208→                );
+   209→   209→                phdrs.push(ElfPhdr {
+   210→   210→                    p_type: read_u32(&bytes[off..off + 4]),
+   211→   211→                    p_flags: read_u32(&bytes[off + 4..off + 8]),
+   212→   212→                    p_offset: read_u64(&bytes[off + 8..off + 16]),
+   213→   213→                    p_vaddr: read_u64(&bytes[off + 16..off + 24]),
+   214→   214→                    p_paddr: read_u64(&bytes[off + 24..off + 32]),
+   215→   215→                    p_filesz: read_u64(&bytes[off + 32..off + 40]),
+   216→   216→                    p_memsz: read_u64(&bytes[off + 40..off + 48]),
+   217→   217→                    p_align: read_u64(&bytes[off + 48..off + 56]),
+   218→   218→                });
+   219→   219→            } else {
+   220→   220→                // ELF32 Phdr: 32 bytes
+   221→   221→                // Layout: p_type(4), p_offset(4), p_vaddr(4), p_paddr(4),
+   222→   222→                //         p_filesz(4), p_memsz(4), p_flags(4), p_align(4)
+   223→   223→                assert!(
+   224→   224→                    off + 32 <= bytes.len(),
+   225→   225→                    "ELF32 program header {} at offset {} extends past end",
+   226→   226→                    i,
+   227→   227→                    off
+   228→   228→                );
+   229→   229→                phdrs.push(ElfPhdr {
+   230→   230→                    p_type: read_u32(&bytes[off..off + 4]),
+   231→   231→                    p_offset: read_u32(&bytes[off + 4..off + 8]) as u64,
+   232→   232→                    p_vaddr: read_u32(&bytes[off + 8..off + 12]) as u64,
+   233→   233→                    p_paddr: read_u32(&bytes[off + 12..off + 16]) as u64,
+   234→   234→                    p_filesz: read_u32(&bytes[off + 16..off + 20]) as u64,
+   235→   235→                    p_memsz: read_u32(&bytes[off + 20..off + 24]) as u64,
+   236→   236→                    p_flags: read_u32(&bytes[off + 24..off + 28]),
+   237→   237→                    p_align: read_u32(&bytes[off + 28..off + 32]) as u64,
+   238→   238→                });
+   239→   239→            }
+   240→   240→        }
+   241→   241→
+   242→   242→        // Parse section headers (if any exist)
+   243→   243→        let mut shdrs = Vec::new();
+   244→   244→        if header.e_shoff != 0 && header.e_shnum > 0 {
+   245→   245→            for i in 0..header.e_shnum as usize {
+   246→   246→                let off = header.e_shoff as usize + i * header.e_shentsize as usize;
+   247→   247→                if is_64 {
+   248→   248→                    // ELF64 Shdr: 64 bytes
+   249→   249→                    if off + 64 > bytes.len() {
+   250→   250→                        break;
+   251→   251→                    }
+   252→   252→                    shdrs.push(ElfShdr {
+   253→   253→                        sh_name: read_u32(&bytes[off..off + 4]),
+   254→   254→                        sh_type: read_u32(&bytes[off + 4..off + 8]),
+   255→   255→                        sh_flags: read_u64(&bytes[off + 8..off + 16]),
+   256→   256→                        sh_addr: read_u64(&bytes[off + 16..off + 24]),
+   257→   257→                        sh_offset: read_u64(&bytes[off + 24..off + 32]),
+   258→   258→                        sh_size: read_u64(&bytes[off + 32..off + 40]),
+   259→   259→                        sh_link: read_u32(&bytes[off + 40..off + 44]),
+   260→   260→                        sh_info: read_u32(&bytes[off + 44..off + 48]),
+   261→   261→                        sh_addralign: read_u64(&bytes[off + 48..off + 56]),
+   262→   262→                        sh_entsize: read_u64(&bytes[off + 56..off + 64]),
+   263→   263→                    });
+   264→   264→                } else {
+   265→   265→                    // ELF32 Shdr: 40 bytes
+   266→   266→                    if off + 40 > bytes.len() {
+   267→   267→                        break;
+   268→   268→                    }
+   269→   269→                    shdrs.push(ElfShdr {
+   270→   270→                        sh_name: read_u32(&bytes[off..off + 4]),
+   271→   271→                        sh_type: read_u32(&bytes[off + 4..off + 8]),
+   272→   272→                        sh_flags: read_u32(&bytes[off + 8..off + 12]) as u64,
+   273→   273→                        sh_addr: read_u32(&bytes[off + 12..off + 16]) as u64,
+   274→   274→                        sh_offset: read_u32(&bytes[off + 16..off + 20]) as u64,
+   275→   275→                        sh_size: read_u32(&bytes[off + 20..off + 24]) as u64,
+   276→   276→                        sh_link: read_u32(&bytes[off + 24..off + 28]),
+   277→   277→                        sh_info: read_u32(&bytes[off + 28..off + 32]),
+   278→   278→                        sh_addralign: read_u32(&bytes[off + 32..off + 36]) as u64,
+   279→   279→                        sh_entsize: read_u32(&bytes[off + 36..off + 40]) as u64,
+   280→   280→                    });
+   281→   281→                }
+   282→   282→            }
+   283→   283→        }
+   284→   284→
+   285→   285→        ElfFile {
+   286→   286→            header,
+   287→   287→            phdrs,
+   288→   288→            shdrs,
+   289→   289→        }
+   290→   290→    }
+   291→   291→}
+   292→   292→
+   293→   293→// ===========================================================================
+   294→   294→// Helpers
+   295→   295→// ===========================================================================
+   296→   296→
+   297→   297→/// Build a minimal codegen SCG with a single `fn main(a, b) -> i64 { a + b }`.
+   298→   298→fn make_add_scg() -> Scg {
+   299→   299→    Scg {
+   300→   300→        nodes: vec![ScgNode::Function(ScgFunction {
+   301→   301→            name: "main".to_string(),
+   302→   302→            params: vec![
+   303→   303→                ScgParam {
+   304→   304→                    name: "a".to_string(),
+   305→   305→                    ty: ScgType::I64,
+   306→   306→                },
+   307→   307→                ScgParam {
+   308→   308→                    name: "b".to_string(),
+   309→   309→                    ty: ScgType::I64,
+   310→   310→                },
+   311→   311→            ],
+   312→   312→            results: vec![ScgType::I64],
+   313→   313→            body: vec![
+   314→   314→                ScgStatement::Computation(ComputationNode {
+   315→   315→                    dst: "result".to_string(),
+   316→   316→                    op: BinOpKind::Add,
+   317→   317→                    lhs: ScgExpr::Var("a".to_string()),
+   318→   318→                    rhs: ScgExpr::Var("b".to_string()),
+   319→   319→                    tail_call: false,
+   320→   320→                }),
+   321→   321→                ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
+   322→   322→            ],
+   323→   323→        })],
+   324→   324→    }
+   325→   325→}
+   326→   326→
+   327→   327→/// Compile an SCG through a given backend and return the ELF bytes.
+   328→   328→fn compile_to_elf(scg: &Scg, backend: &dyn Backend) -> Vec<u8> {
+   329→   329→    let mut builder = IRBuilder::new();
+   330→   330→    let ir_program = builder.build(scg).expect("IRBuilder should succeed");
+   331→   331→
+   332→   332→    let mut allocated_functions = Vec::new();
+   333→   333→    for func in &ir_program.functions {
+   334→   334→        let allocated = backend
+   335→   335→            .allocate_registers(func)
+   336→   336→            .expect("register allocation should succeed");
+   337→   337→        allocated_functions.push(allocated);
+   338→   338→    }
+   339→   339→
+   340→   340→    let program = AllocatedProgram {
+   341→   341→        functions: allocated_functions,
+   342→   342→        total_code_size: 0,
+   343→   343→        total_data_size: 0,
+   344→   344→    };
+   345→   345→
+   346→   346→    backend
+   347→   347→        .encode_program(&program)
+   348→   348→        .expect("encode_program should succeed")
+   349→   349→}
+   350→   350→
+   351→   351→// ===========================================================================
+   352→   352→// Validation helpers
+   353→   353→// ===========================================================================
+   354→   354→
+   355→   355→/// Validate the ELF header for a given target configuration.
+   356→   356→fn validate_elf_header(
+   357→   357→    elf: &ElfFile,
+   358→   358→    expected_class: u8,
+   359→   359→    expected_data: u8,
+   360→   360→    expected_machine: u16,
+   361→   361→    backend_name: &str,
+   362→   362→) {
+   363→   363→    // ── e_ident[EI_CLASS] ──
+   364→   364→    assert_eq!(
+   365→   365→        elf.header.ei_class, expected_class,
+   366→   366→        "[{}] e_ident[EI_CLASS]: expected {}, got {}",
+   367→   367→        backend_name, expected_class, elf.header.ei_class
+   368→   368→    );
+   369→   369→
+   370→   370→    // ── e_ident[EI_DATA] ──
+   371→   371→    assert_eq!(
+   372→   372→        elf.header.ei_data, expected_data,
+   373→   373→        "[{}] e_ident[EI_DATA]: expected {} ({}), got {}",
+   374→   374→        backend_name,
+   375→   375→        expected_data,
+   376→   376→        if expected_data == ELFDATA2LSB {
+   377→   377→            "LE"
+   378→   378→        } else {
+   379→   379→            "BE"
+   380→   380→        },
+   381→   381→        elf.header.ei_data
+   382→   382→    );
+   383→   383→
+   384→   384→    // ── e_type = ET_EXEC ──
+   385→   385→    assert_eq!(
+   386→   386→        elf.header.e_type, ET_EXEC,
+   387→   387→        "[{}] e_type: expected ET_EXEC (2), got {}",
+   388→   388→        backend_name, elf.header.e_type
+   389→   389→    );
+   390→   390→
+   391→   391→    // ── e_machine ──
+   392→   392→    assert_eq!(
+   393→   393→        elf.header.e_machine, expected_machine,
+   394→   394→        "[{}] e_machine: expected {}, got {}",
+   395→   395→        backend_name, expected_machine, elf.header.e_machine
+   396→   396→    );
+   397→   397→
+   398→   398→    // ── e_entry != 0 ──
+   399→   399→    assert_ne!(
+   400→   400→        elf.header.e_entry, 0,
+   401→   401→        "[{}] e_entry should be non-zero",
+   402→   402→        backend_name
+   403→   403→    );
+   404→   404→
+   405→   405→    // ── e_phoff != 0 ──
+   406→   406→    assert_ne!(
+   407→   407→        elf.header.e_phoff, 0,
+   408→   408→        "[{}] e_phoff should be non-zero",
+   409→   409→        backend_name
+   410→   410→    );
+   411→   411→
+   412→   412→    // ── e_ehsize ──
+   413→   413→    let expected_ehsize: u16 = if expected_class == ELFCLASS64 { 64 } else { 52 };
+   414→   414→    assert_eq!(
+   415→   415→        elf.header.e_ehsize, expected_ehsize,
+   416→   416→        "[{}] e_ehsize: expected {}, got {}",
+   417→   417→        backend_name, expected_ehsize, elf.header.e_ehsize
+   418→   418→    );
+   419→   419→
+   420→   420→    // ── e_phentsize ──
+   421→   421→    let expected_phentsize: u16 = if expected_class == ELFCLASS64 { 56 } else { 32 };
+   422→   422→    assert_eq!(
+   423→   423→        elf.header.e_phentsize, expected_phentsize,
+   424→   424→        "[{}] e_phentsize: expected {}, got {}",
+   425→   425→        backend_name, expected_phentsize, elf.header.e_phentsize
+   426→   426→    );
+   427→   427→}
+   428→   428→
+   429→   429→/// Validate program headers: at least one PT_LOAD segment with valid fields.
+   430→   430→fn validate_program_headers(elf: &ElfFile, total_bytes: usize, backend_name: &str) {
+   431→   431→    assert!(
+   432→   432→        !elf.phdrs.is_empty(),
+   433→   433→        "[{}] should have at least one program header",
+   434→   434→        backend_name
+   435→   435→    );
+   436→   436→
+   437→   437→    // Must have at least one PT_LOAD segment
+   438→   438→    let load_segments: Vec<&ElfPhdr> = elf
+   439→   439→        .phdrs
+   440→   440→        .iter()
+   441→   441→        .filter(|p| p.p_type == PT_LOAD)
+   442→   442→        .collect();
+   443→   443→    assert!(
+   444→   444→        !load_segments.is_empty(),
+   445→   445→        "[{}] should have at least one PT_LOAD segment",
+   446→   446→        backend_name
+   447→   447→    );
+   448→   448→
+   449→   449→    for (i, phdr) in load_segments.iter().enumerate() {
+   450→   450→        // p_offset and p_filesz should be within file bounds
+   451→   451→        assert!(
+   452→   452→            phdr.p_offset as usize <= total_bytes,
+   453→   453→            "[{}] PT_LOAD[{}]: p_offset ({}) exceeds file size ({})",
+   454→   454→            backend_name,
+   455→   455→            i,
+   456→   456→            phdr.p_offset,
+   457→   457→            total_bytes
+   458→   458→        );
+   459→   459→        assert!(
+   460→   460→            phdr.p_offset as usize + phdr.p_filesz as usize <= total_bytes,
+   461→   461→            "[{}] PT_LOAD[{}]: p_offset ({}) + p_filesz ({}) exceeds file size ({})",
+   462→   462→            backend_name,
+   463→   463→            i,
+   464→   464→            phdr.p_offset,
+   465→   465→            phdr.p_filesz,
+   466→   466→            total_bytes
+   467→   467→        );
+   468→   468→
+   469→   469→        // p_vaddr should be reasonable (not 0)
+   470→   470→        assert_ne!(
+   471→   471→            phdr.p_vaddr, 0,
+   472→   472→            "[{}] PT_LOAD[{}]: p_vaddr should be non-zero",
+   473→   473→            backend_name, i
+   474→   474→        );
+   475→   475→
+   476→   476→        // p_memsz >= p_filesz (segment in memory is at least as large as in file)
+   477→   477→        assert!(
+   478→   478→            phdr.p_memsz >= phdr.p_filesz,
+   479→   479→            "[{}] PT_LOAD[{}]: p_memsz ({}) should be >= p_filesz ({})",
+   480→   480→            backend_name,
+   481→   481→            i,
+   482→   482→            phdr.p_memsz,
+   483→   483→            phdr.p_filesz
+   484→   484→        );
+   485→   485→
+   486→   486→        // p_align should be a power of 2 (or 0/1 for no alignment)
+   487→   487→        if phdr.p_align > 1 {
+   488→   488→            assert_eq!(
+   489→   489→                phdr.p_align & (phdr.p_align - 1),
+   490→   490→                0,
+   491→   491→                "[{}] PT_LOAD[{}]: p_align ({}) should be a power of 2",
+   492→   492→                backend_name,
+   493→   493→                i,
+   494→   494→                phdr.p_align
+   495→   495→            );
+   496→   496→        }
+   497→   497→
+   498→   498→        // Executable PT_LOAD segments should contain the entry point
+   499→   499→        if phdr.p_flags & 1 != 0 {
+   500→   500→            // PF_X
+   501→   501→            let entry = elf.header.e_entry;
+   502→   502→            assert!(
+   503→   503→                entry >= phdr.p_vaddr && entry < phdr.p_vaddr + phdr.p_memsz,
+   504→   504→                "[{}] PT_LOAD[{}] (executable): entry point ({:#x}) should be within segment [{:#x}, {:#x})",
+   505→   505→                backend_name,
+   506→   506→                i,
+   507→   507→                entry,
+   508→   508→                phdr.p_vaddr,
+   509→   509→                phdr.p_vaddr + phdr.p_memsz
+   510→   510→            );
+   511→   511→        }
+   512→   512→    }
+   513→   513→}
+   514→   514→
+   515→   515→/// Validate section headers (if any exist) for consistency.
+   516→   516→fn validate_section_headers(elf: &ElfFile, total_bytes: usize, backend_name: &str) {
+   517→   517→    if elf.shdrs.is_empty() {
+   518→   518→        // No section headers — this is valid for minimal ELF files (e_shnum = 0)
+   519→   519→        return;
+   520→   520→    }
+   521→   521→
+   522→   522→    for (i, shdr) in elf.shdrs.iter().enumerate() {
+   523→   523→        // sh_offset + sh_size should not exceed file size for non-BSS sections
+   524→   524→        // SHT_NOBITS = 8 (BSS-like, no file content)
+   525→   525→        if shdr.sh_type != 8 {
+   526→   526→            assert!(
+   527→   527→                shdr.sh_offset as usize + shdr.sh_size as usize <= total_bytes,
+   528→   528→                "[{}] section[{}]: sh_offset ({}) + sh_size ({}) exceeds file size ({})",
+   529→   529→                backend_name,
+   530→   530→                i,
+   531→   531→                shdr.sh_offset,
+   532→   532→                shdr.sh_size,
+   533→   533→                total_bytes
+   534→   534→            );
+   535→   535→        }
+   536→   536→
+   537→   537→        // sh_addralign should be 0 or a power of 2
+   538→   538→        if shdr.sh_addralign > 1 {
+   539→   539→            assert_eq!(
+   540→   540→                shdr.sh_addralign & (shdr.sh_addralign - 1),
+   541→   541→                0,
+   542→   542→                "[{}] section[{}]: sh_addralign ({}) should be a power of 2",
+   543→   543→                backend_name,
+   544→   544→                i,
+   545→   545→                shdr.sh_addralign
+   546→   546→            );
+   547→   547→        }
+   548→   548→    }
+   549→   549→}
+   550→   550→
+   551→   551→/// Run all ELF validation checks for a given backend.
+   552→   552→fn validate_elf_for_backend(
+   553→   553→    elf_bytes: &[u8],
+   554→   554→    expected_class: u8,
+   555→   555→    expected_data: u8,
+   556→   556→    expected_machine: u16,
+   557→   557→    backend_name: &str,
+   558→   558→) {
+   559→   559→    let elf = ElfFile::parse(elf_bytes);
+   560→   560→
+   561→   561→    validate_elf_header(&elf, expected_class, expected_data, expected_machine, backend_name);
+   562→   562→    validate_program_headers(&elf, elf_bytes.len(), backend_name);
+   563→   563→    validate_section_headers(&elf, elf_bytes.len(), backend_name);
+   564→   564→}
+   565→   565→
+   566→   566→// ===========================================================================
+   567→   567→// Per-backend tests
+   568→   568→// ===========================================================================
+   569→   569→
+   570→   570→// ---- x86_64 ----
+   571→   571→
+   572→   572→#[test]
+   573→   573→fn test_elf_validation_x86_64() {
+   574→   574→    let scg = make_add_scg();
+   575→   575→    let backend = X86_64Backend::new();
+   576→   576→    let elf_bytes = compile_to_elf(&scg, &backend);
+   577→   577→
+   578→   578→    validate_elf_for_backend(
+   579→   579→        &elf_bytes,
+   580→   580→        ELFCLASS64,
+   581→   581→        ELFDATA2LSB,
+   582→   582→        EM_X86_64,
+   583→   583→        "x86_64",
+   584→   584→    );
+   585→   585→}
+   586→   586→
+   587→   587→// ---- AArch64 ----
+   588→   588→
+   589→   589→#[test]
+   590→   590→fn test_elf_validation_aarch64() {
+   591→   591→    let scg = make_add_scg();
+   592→   592→    let backend = AArch64Backend::new();
+   593→   593→    let elf_bytes = compile_to_elf(&scg, &backend);
+   594→   594→
+   595→   595→    validate_elf_for_backend(
+   596→   596→        &elf_bytes,
+   597→   597→        ELFCLASS64,
+   598→   598→        ELFDATA2LSB,
+   599→   599→        EM_AARCH64,
+   600→   600→        "aarch64",
+   601→   601→    );
+   602→   602→}
+   603→   603→
+   604→   604→// ---- RISC-V 64 ----
+   605→   605→
+   606→   606→#[test]
+   607→   607→fn test_elf_validation_riscv64() {
+   608→   608→    let scg = make_add_scg();
+   609→   609→    let backend = RiscV64Backend::new();
+   610→   610→    let elf_bytes = compile_to_elf(&scg, &backend);
+   611→   611→
+   612→   612→    validate_elf_for_backend(
+   613→   613→        &elf_bytes,
+   614→   614→        ELFCLASS64,
+   615→   615→        ELFDATA2LSB,
+   616→   616→        EM_RISCV,
+   617→   617→        "riscv64",
+   618→   618→    );
+   619→   619→}
+   620→   620→
+   621→   621→// ---- ARM32 ----
+   622→   622→
+   623→   623→#[test]
+   624→   624→fn test_elf_validation_arm32() {
+   625→   625→    let scg = make_add_scg();
+   626→   626→    let backend = Arm32Backend::new();
+   627→   627→    let elf_bytes = compile_to_elf(&scg, &backend);
+   628→   628→
+   629→   629→    validate_elf_for_backend(
+   630→   630→        &elf_bytes,
+   631→   631→        ELFCLASS32,
+   632→   632→        ELFDATA2LSB,
+   633→   633→        EM_ARM,
+   634→   634→        "arm32",
+   635→   635→    );
+   636→   636→}
+   637→   637→
+   638→   638→// ---- MIPS64 ----
+   639→   639→
+   640→   640→#[test]
+   641→   641→fn test_elf_validation_mips64() {
+   642→   642→    let scg = make_add_scg();
+   643→   643→    let backend = Mips64Backend::new();
+   644→   644→    let elf_bytes = compile_to_elf(&scg, &backend);
+   645→   645→
+   646→   646→    validate_elf_for_backend(
+   647→   647→        &elf_bytes,
+   648→   648→        ELFCLASS64,
+   649→   649→        ELFDATA2MSB,
+   650→   650→        EM_MIPS,
+   651→   651→        "mips64",
+   652→   652→    );
+   653→   653→}
+   654→   654→
+   655→   655→// ---- PPC64 ----
+   656→   656→
+   657→   657→#[test]
+   658→   658→fn test_elf_validation_ppc64() {
+   659→   659→    let scg = make_add_scg();
+   660→   660→    let backend = PPC64Backend::new();
+   661→   661→    let elf_bytes = compile_to_elf(&scg, &backend);
+   662→   662→
+   663→   663→    validate_elf_for_backend(
+   664→   664→        &elf_bytes,
+   665→   665→        ELFCLASS64,
+   666→   666→        ELFDATA2MSB,
+   667→   667→        EM_PPC64,
+   668→   668→        "ppc64",
+   669→   669→    );
+   670→   670→}
+   671→   671→
+   672→   672→// ---- LoongArch64 ----
+   673→   673→
+   674→   674→#[test]
+   675→   675→fn test_elf_validation_loongarch64() {
+   676→   676→    let scg = make_add_scg();
+   677→   677→    let backend = LoongArch64Backend::new();
+   678→   678→    let elf_bytes = compile_to_elf(&scg, &backend);
+   679→   679→
+   680→   680→    validate_elf_for_backend(
+   681→   681→        &elf_bytes,
+   682→   682→        ELFCLASS64,
+   683→   683→        ELFDATA2LSB,
+   684→   684→        EM_LOONGARCH,
+   685→   685→        "loongarch64",
+   686→   686→    );
+   687→   687→}
+   688→   688→
+   689→   689→// ===========================================================================
+   690→   690→// Cross-backend consistency checks
+   691→   691→// ===========================================================================
+   692→   692→
+   693→   693→/// Verify that every native backend produces ELF magic at offset 0.
+   694→   694→#[test]
+   695→   695→fn test_all_backends_produce_elf_magic() {
+   696→   696→    let scg = make_add_scg();
+   697→   697→
+   698→   698→    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+   699→   699→        ("x86_64", Box::new(X86_64Backend::new())),
+   700→   700→        ("aarch64", Box::new(AArch64Backend::new())),
+   701→   701→        ("riscv64", Box::new(RiscV64Backend::new())),
+   702→   702→        ("arm32", Box::new(Arm32Backend::new())),
+   703→   703→        ("mips64", Box::new(Mips64Backend::new())),
+   704→   704→        ("ppc64", Box::new(PPC64Backend::new())),
+   705→   705→        ("loongarch64", Box::new(LoongArch64Backend::new())),
+   706→   706→    ];
+   707→   707→
+   708→   708→    for (name, backend) in backends {
+   709→   709→        let elf_bytes = compile_to_elf(&scg, &*backend);
+   710→   710→        assert!(
+   711→   711→            elf_bytes.len() >= 16,
+   712→   712→            "[{}] ELF output should be at least 16 bytes, got {}",
+   713→   713→            name,
+   714→   714→            elf_bytes.len()
+   715→   715→        );
+   716→   716→        assert_eq!(
+   717→   717→            &elf_bytes[0..4],
+   718→   718→            &ELFMAG,
+   719→   719→            "[{}] ELF magic bytes incorrect",
+   720→   720→            name
+   721→   721→        );
+   722→   722→    }
+   723→   723→}
+   724→   724→
+   725→   725→/// Verify that every native backend produces ET_EXEC as the ELF type.
+   726→   726→#[test]
+   727→   727→fn test_all_backends_produce_et_exec() {
+   728→   728→    let scg = make_add_scg();
+   729→   729→
+   730→   730→    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+   731→   731→        ("x86_64", Box::new(X86_64Backend::new())),
+   732→   732→        ("aarch64", Box::new(AArch64Backend::new())),
+   733→   733→        ("riscv64", Box::new(RiscV64Backend::new())),
+   734→   734→        ("arm32", Box::new(Arm32Backend::new())),
+   735→   735→        ("mips64", Box::new(Mips64Backend::new())),
+   736→   736→        ("ppc64", Box::new(PPC64Backend::new())),
+   737→   737→        ("loongarch64", Box::new(LoongArch64Backend::new())),
+   738→   738→    ];
+   739→   739→
+   740→   740→    for (name, backend) in backends {
+   741→   741→        let elf_bytes = compile_to_elf(&scg, &*backend);
+   742→   742→        let elf = ElfFile::parse(&elf_bytes);
+   743→   743→        assert_eq!(
+   744→   744→            elf.header.e_type, ET_EXEC,
+   745→   745→            "[{}] e_type should be ET_EXEC (2)",
+   746→   746→            name
+   747→   747→        );
+   748→   748→    }
+   749→   749→}
+   750→   750→
+   751→   751→/// Verify that every native backend produces at least one PT_LOAD segment.
+   752→   752→#[test]
+   753→   753→fn test_all_backends_have_pt_load() {
+   754→   754→    let scg = make_add_scg();
+   755→   755→
+   756→   756→    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+   757→   757→        ("x86_64", Box::new(X86_64Backend::new())),
+   758→   758→        ("aarch64", Box::new(AArch64Backend::new())),
+   759→   759→        ("riscv64", Box::new(RiscV64Backend::new())),
+   760→   760→        ("arm32", Box::new(Arm32Backend::new())),
+   761→   761→        ("mips64", Box::new(Mips64Backend::new())),
+   762→   762→        ("ppc64", Box::new(PPC64Backend::new())),
+   763→   763→        ("loongarch64", Box::new(LoongArch64Backend::new())),
+   764→   764→    ];
+   765→   765→
+   766→   766→    for (name, backend) in backends {
+   767→   767→        let elf_bytes = compile_to_elf(&scg, &*backend);
+   768→   768→        let elf = ElfFile::parse(&elf_bytes);
+   769→   769→        let has_load = elf.phdrs.iter().any(|p| p.p_type == PT_LOAD);
+   770→   770→        assert!(
+   771→   771→            has_load,
+   772→   772→            "[{}] should have at least one PT_LOAD segment",
+   773→   773→            name
+   774→   774→        );
+   775→   775→    }
+   776→   776→}
+   777→   777→
+   778→   778→/// Verify that every native backend's TargetInfo matches the ELF it produces.
+   779→   779→#[test]
+   780→   780→fn test_all_backends_target_info_matches_elf() {
+   781→   781→    let scg = make_add_scg();
+   782→   782→
+   783→   783→    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+   784→   784→        ("x86_64", Box::new(X86_64Backend::new())),
+   785→   785→        ("aarch64", Box::new(AArch64Backend::new())),
+   786→   786→        ("riscv64", Box::new(RiscV64Backend::new())),
+   787→   787→        ("arm32", Box::new(Arm32Backend::new())),
+   788→   788→        ("mips64", Box::new(Mips64Backend::new())),
+   789→   789→        ("ppc64", Box::new(PPC64Backend::new())),
+   790→   790→        ("loongarch64", Box::new(LoongArch64Backend::new())),
+   791→   791→    ];
+   792→   792→
+   793→   793→    for (name, backend) in backends {
+   794→   794→        let info = backend.target_info();
+   795→   795→        let elf_bytes = compile_to_elf(&scg, &*backend);
+   796→   796→        let elf = ElfFile::parse(&elf_bytes);
+   797→   797→
+   798→   798→        // e_machine should match TargetInfo::elf_machine_type()
+   799→   799→        assert_eq!(
+   800→   800→            elf.header.e_machine,
+   801→   801→            info.elf_machine_type(),
+   802→   802→            "[{}] e_machine ({}) should match TargetInfo::elf_machine_type ({})",
+   803→   803→            name,
+   804→   804→            elf.header.e_machine,
+   805→   805→            info.elf_machine_type()
+   806→   806→        );
+   807→   807→
+   808→   808→        // EI_CLASS should match OutputFormat
+   809→   809→        let expected_class = match info.output_format() {
+   810→   810→            OutputFormat::Elf64 => ELFCLASS64,
+   811→   811→            OutputFormat::Elf32 => ELFCLASS32,
+   812→   812→            _ => panic!("[{}] unexpected output format", name),
+   813→   813→        };
+   814→   814→        assert_eq!(
+   815→   815→            elf.header.ei_class, expected_class,
+   816→   816→            "[{}] EI_CLASS should match output format",
+   817→   817→            name
+   818→   818→        );
+   819→   819→
+   820→   820→        // EI_DATA should match endianness
+   821→   821→        let expected_data = match info.endianness() {
+   822→   822→            Endianness::Little => ELFDATA2LSB,
+   823→   823→            Endianness::Big | Endianness::Bi => ELFDATA2MSB,
+   824→   824→        };
+   825→   825→        assert_eq!(
+   826→   826→            elf.header.ei_data, expected_data,
+   827→   827→            "[{}] EI_DATA should match endianness",
+   828→   828→            name
+   829→   829→        );
+   830→   830→    }
+   831→   831→}
+   832→   832→
+   833→   833→/// Verify that every native backend's entry point is non-zero and within
+   834→   834→/// a PT_LOAD segment.
+   835→   835→#[test]
+   836→   836→fn test_all_backends_entry_point_valid() {
+   837→   837→    let scg = make_add_scg();
+   838→   838→
+   839→   839→    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+   840→   840→        ("x86_64", Box::new(X86_64Backend::new())),
+   841→   841→        ("aarch64", Box::new(AArch64Backend::new())),
+   842→   842→        ("riscv64", Box::new(RiscV64Backend::new())),
+   843→   843→        ("arm32", Box::new(Arm32Backend::new())),
+   844→   844→        ("mips64", Box::new(Mips64Backend::new())),
+   845→   845→        ("ppc64", Box::new(PPC64Backend::new())),
+   846→   846→        ("loongarch64", Box::new(LoongArch64Backend::new())),
+   847→   847→    ];
+   848→   848→
+   849→   849→    for (name, backend) in backends {
+   850→   850→        let elf_bytes = compile_to_elf(&scg, &*backend);
+   851→   851→        let elf = ElfFile::parse(&elf_bytes);
+   852→   852→
+   853→   853→        assert_ne!(
+   854→   854→            elf.header.e_entry, 0,
+   855→   855→            "[{}] entry point should be non-zero",
+   856→   856→            name
+   857→   857→        );
+   858→   858→
+   859→   859→        // Entry point must fall within some PT_LOAD segment
+   860→   860→        let entry_in_segment = elf
+   861→   861→            .phdrs
+   862→   862→            .iter()
+   863→   863→            .filter(|p| p.p_type == PT_LOAD)
+   864→   864→            .any(|p| {
+   865→   865→                elf.header.e_entry >= p.p_vaddr
+   866→   866→                    && elf.header.e_entry < p.p_vaddr + p.p_memsz
+   867→   867→            });
+   868→   868→        assert!(
+   869→   869→            entry_in_segment,
+   870→   870→            "[{}] entry point ({:#x}) must be within a PT_LOAD segment",
+   871→   871→            name,
+   872→   872→            elf.header.e_entry
+   873→   873→        );
+   874→   874→    }
+   875→   875→}
+   876→   876→

@@ -1,0 +1,746 @@
+     1→     1→//! # ABI Conformance Testing
+     2→     2→//!
+     3→     3→//! Verifies that each backend follows its platform's calling convention by:
+     4→     4→//! 1. Creating IR functions with varying argument counts
+     5→     5→//! 2. Running `allocate_registers` on each backend
+     6→     6→//! 3. Checking the generated code uses correct registers via:
+     7→     7→//!    - TargetInfo trait (calling convention metadata)
+     8→     8→//!    - AllocatedFunction register assignments
+     9→     9→//!    - Disassembled output verification
+    10→    10→//!
+    11→    11→//! ## Calling Conventions Tested
+    12→    12→//!
+    13→    13→//! | Backend      | ABI          | Integer Args        | Return  | Address |
+    14→    14→//! |--------------|--------------|---------------------|---------|---------|
+    15→    15→//! | x86_64       | System V     | RDI,RSI,RDX,RCX,R8,R9 | RAX   | 8 bytes |
+    16→    16→//! | AArch64      | AAPCS64      | X0-X7               | X0      | 8 bytes |
+    17→    17→//! | RISC-V 64    | RV64G LP64D  | A0-A7 (x10-x17)    | A0      | 8 bytes |
+    18→    18→//! | ARM32        | AAPCS        | R0-R3               | R0      | 4 bytes |
+    19→    19→//! | MIPS64       | N64          | $a0-$a7 ($4-$11)    | $v0     | 8 bytes |
+    20→    20→//! | PPC64        | ELFv2        | R3-R10              | R3      | 8 bytes |
+    21→    21→//! | LoongArch64  | LP64         | $a0-$a7 ($r4-$r11)  | $a0     | 8 bytes |
+    22→    22→//! | Wasm32       | Stack machine | (stack params)     | (stack) | 4 bytes |
+    23→    23→
+    24→    24→use vuma_codegen::backend::{
+    25→    25→    create_backend, BackendKind, Endianness, OutputFormat, RegClass, TargetInfo,
+    26→    26→};
+    27→    27→use vuma_codegen::ir::{
+    28→    28→    IRFunction, IRInstr, IRTerminator, IRType, IRValue,
+    29→    29→};
+    30→    30→
+    31→    31→// ===========================================================================
+    32→    32→// Helpers
+    33→    33→// ===========================================================================
+    34→    34→
+    35→    35→/// Build a simple IR function named `name` with `n` i64 parameters that
+    36→    36→/// returns the first parameter (or 0 if no params).
+    37→    37→///
+    38→    38→/// The function body simply returns `params[0]` if available, otherwise
+    39→    39→/// an immediate 0.  This is sufficient to exercise the calling convention
+    40→    40→/// for argument passing and return-value placement.
+    41→    41→fn make_func_with_n_args(name: &str, n: usize) -> IRFunction {
+    42→    42→    let mut func = IRFunction::new(name);
+    43→    43→    // Register parameters as vregs 0..n
+    44→    44→    for i in 0..n {
+    45→    45→        func.param_types.push(IRType::I64);
+    46→    46→        func.params.push(IRValue::Register(i as u32));
+    47→    47→        func.vregs.insert(i as u32, vuma_codegen::ir::VirtualRegister::named(i as u32, format!("a{}", i)));
+    48→    48→    }
+    49→    49→    func.result_types.push(IRType::I64);
+    50→    50→    func.results.push(IRValue::Register(n as u32));
+    51→    51→
+    52→    52→    // Return the first parameter (or 0)
+    53→    53→    let ret_val = if n > 0 {
+    54→    54→        IRValue::Register(0)
+    55→    55→    } else {
+    56→    56→        IRValue::Immediate(0)
+    57→    57→    };
+    58→    58→    func.current_block().terminator = IRTerminator::Return(vec![ret_val]);
+    59→    59→    func
+    60→    60→}
+    61→    61→
+    62→    62→/// Build a function that calls another function with `n` i64 arguments.
+    63→    63→/// This exercises argument *passing* in the calling convention.
+    64→    64→fn make_func_with_call_n_args(n: usize) -> IRFunction {
+    65→    65→    let mut func = IRFunction::new("caller");
+    66→    66→    // vreg 0 = the call result
+    67→    67→    func.vregs.insert(0, vuma_codegen::ir::VirtualRegister::anonymous(0));
+    68→    68→
+    69→    69→    // Build argument values: all immediates 1..=n
+    70→    70→    let args: Vec<IRValue> = (1..=n as i64).map(IRValue::Immediate).collect();
+    71→    71→
+    72→    72→    func.current_block().instructions.push(IRInstr::Call {
+    73→    73→        dst: Some(IRValue::Register(0)),
+    74→    74→        func: "callee".to_string(),
+    75→    75→        args,
+    76→    76→        is_extern: false,
+    77→    77→    });
+    78→    78→    func.current_block().terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+    79→    79→    func
+    80→    80→}
+    81→    81→
+    82→    82→// ===========================================================================
+    83→    83→// TargetInfo-based calling convention validation
+    84→    84→// ===========================================================================
+    85→    85→
+    86→    86→/// Validate that every TargetInfo reports internally-consistent calling
+    87→    87→/// convention properties.
+    88→    88→fn validate_cc_info(info: &dyn TargetInfo) {
+    89→    89→    let isa = info.isa_name();
+    90→    90→
+    91→    91→    // num_int_arg_regs must be consistent with has_registers
+    92→    92→    if !info.has_registers() {
+    93→    93→        assert_eq!(
+    94→    94→            info.num_int_arg_regs(), 0,
+    95→    95→            "{}: has_registers=false but num_int_arg_regs={}",
+    96→    96→            isa, info.num_int_arg_regs()
+    97→    97→        );
+    98→    98→    } else {
+    99→    99→        assert!(
+   100→   100→            info.num_int_arg_regs() > 0,
+   101→   101→            "{}: register-based ISA must have at least 1 integer arg register",
+   102→   102→            isa
+   103→   103→        );
+   104→   104→    }
+   105→   105→
+   106→   106→    // calling_convention_name must be non-empty
+   107→   107→    assert!(
+   108→   108→        !info.calling_convention_name().is_empty(),
+   109→   109→        "{}: calling convention name must not be empty",
+   110→   110→        isa
+   111→   111→    );
+   112→   112→
+   113→   113→    // stack_alignment must be a power of 2
+   114→   114→    let sa = info.stack_alignment();
+   115→   115→    assert!(sa > 0 && sa.is_power_of_two(),
+   116→   116→        "{}: stack alignment {} must be a positive power of 2", isa, sa);
+   117→   117→
+   118→   118→    // pointer_width must match output format
+   119→   119→    match info.output_format() {
+   120→   120→        OutputFormat::Elf32 => assert_eq!(info.pointer_width(), 4,
+   121→   121→            "{}: Elf32 output must have 4-byte pointers", isa),
+   122→   122→        OutputFormat::Elf64 => assert_eq!(info.pointer_width(), 8,
+   123→   123→            "{}: Elf64 output must have 8-byte pointers", isa),
+   124→   124→        OutputFormat::WasmBinary => assert_eq!(info.pointer_width(), 4,
+   125→   125→            "{}: Wasm32 must have 4-byte pointers", isa),
+   126→   126→        OutputFormat::RawBinary => {} // no constraint
+   127→   127→    }
+   128→   128→}
+   129→   129→
+   130→   130→// ===========================================================================
+   131→   131→// Per-backend ABI tests
+   132→   132→// ===========================================================================
+   133→   133→
+   134→   134→// -- x86_64: System V AMD64 ABI --
+   135→   135→#[test]
+   136→   136→fn test_x86_64_abi_target_info() {
+   137→   137→    let backend = create_backend(BackendKind::X86_64).unwrap();
+   138→   138→    let info = backend.target_info();
+   139→   139→    assert_eq!(info.isa_name(), "x86_64");
+   140→   140→    assert_eq!(info.calling_convention_name(), "systemv");
+   141→   141→    assert_eq!(info.num_int_arg_regs(), 6, "System V: 6 integer arg regs (RDI,RSI,RDX,RCX,R8,R9)");
+   142→   142→    assert_eq!(info.num_fp_arg_regs(), 8, "System V: 8 FP arg regs (XMM0-XMM7)");
+   143→   143→    assert_eq!(info.pointer_width(), 8);
+   144→   144→    assert_eq!(info.stack_alignment(), 16);
+   145→   145→    assert!(!info.has_link_register(), "x86_64 pushes return address on stack");
+   146→   146→    validate_cc_info(info);
+   147→   147→}
+   148→   148→
+   149→   149→#[test]
+   150→   150→fn test_x86_64_abi_allocation() {
+   151→   151→    let backend = create_backend(BackendKind::X86_64).unwrap();
+   152→   152→    // Test with 6 args (all fit in registers)
+   153→   153→    let func = make_func_with_n_args("test_6args", 6);
+   154→   154→    let allocated = backend.allocate_registers(&func);
+   155→   155→    assert!(allocated.is_ok(), "6-arg function should allocate on x86_64");
+   156→   156→    let af = allocated.unwrap();
+   157→   157→    assert!(!af.blocks.is_empty(), "allocated function must have blocks");
+   158→   158→
+   159→   159→    // Test with 8 args (2 must go on stack)
+   160→   160→    let func = make_func_with_n_args("test_8args", 8);
+   161→   161→    let allocated = backend.allocate_registers(&func);
+   162→   162→    assert!(allocated.is_ok(), "8-arg function should allocate on x86_64");
+   163→   163→}
+   164→   164→
+   165→   165→// -- AArch64: AAPCS64 --
+   166→   166→#[test]
+   167→   167→fn test_aarch64_abi_target_info() {
+   168→   168→    let backend = create_backend(BackendKind::AArch64).unwrap();
+   169→   169→    let info = backend.target_info();
+   170→   170→    assert_eq!(info.isa_name(), "aarch64");
+   171→   171→    assert_eq!(info.calling_convention_name(), "aapcs64");
+   172→   172→    assert_eq!(info.num_int_arg_regs(), 8, "AAPCS64: 8 integer arg regs (X0-X7)");
+   173→   173→    assert_eq!(info.num_fp_arg_regs(), 8, "AAPCS64: 8 FP arg regs (V0-V7)");
+   174→   174→    assert_eq!(info.pointer_width(), 8);
+   175→   175→    assert_eq!(info.stack_alignment(), 16);
+   176→   176→    assert!(info.has_link_register(), "AArch64 uses X30 (LR) as link register");
+   177→   177→    assert!(info.has_hardwired_zero(), "AArch64 has XZR");
+   178→   178→    validate_cc_info(info);
+   179→   179→}
+   180→   180→
+   181→   181→#[test]
+   182→   182→fn test_aarch64_abi_allocation() {
+   183→   183→    let backend = create_backend(BackendKind::AArch64).unwrap();
+   184→   184→    // Test with 8 args (all fit in X0-X7)
+   185→   185→    let func = make_func_with_n_args("test_8args", 8);
+   186→   186→    let allocated = backend.allocate_registers(&func);
+   187→   187→    assert!(allocated.is_ok(), "8-arg function should allocate on AArch64");
+   188→   188→
+   189→   189→    // Test with 10 args (2 must go on stack)
+   190→   190→    let func = make_func_with_n_args("test_10args", 10);
+   191→   191→    let allocated = backend.allocate_registers(&func);
+   192→   192→    assert!(allocated.is_ok(), "10-arg function should allocate on AArch64");
+   193→   193→}
+   194→   194→
+   195→   195→// -- RISC-V 64: RV64G LP64D --
+   196→   196→#[test]
+   197→   197→fn test_riscv64_abi_target_info() {
+   198→   198→    let backend = create_backend(BackendKind::RiscV64).unwrap();
+   199→   199→    let info = backend.target_info();
+   200→   200→    assert_eq!(info.isa_name(), "riscv64");
+   201→   201→    assert_eq!(info.calling_convention_name(), "lp64d");
+   202→   202→    assert_eq!(info.num_int_arg_regs(), 8, "RV64G: 8 integer arg regs (A0-A7, x10-x17)");
+   203→   203→    assert_eq!(info.num_fp_arg_regs(), 8, "RV64G: 8 FP arg regs (FA0-FA7, f10-f17)");
+   204→   204→    assert_eq!(info.pointer_width(), 8);
+   205→   205→    assert_eq!(info.stack_alignment(), 16);
+   206→   206→    assert!(info.has_link_register(), "RISC-V uses x1 (ra) as link register");
+   207→   207→    assert!(info.has_hardwired_zero(), "RISC-V has x0 (zero)");
+   208→   208→    assert!(!info.has_branch_delay_slots(), "RISC-V does NOT have branch delay slots");
+   209→   209→    validate_cc_info(info);
+   210→   210→}
+   211→   211→
+   212→   212→#[test]
+   213→   213→fn test_riscv64_abi_allocation() {
+   214→   214→    let backend = create_backend(BackendKind::RiscV64).unwrap();
+   215→   215→    let func = make_func_with_n_args("test_8args", 8);
+   216→   216→    let allocated = backend.allocate_registers(&func);
+   217→   217→    assert!(allocated.is_ok(), "8-arg function should allocate on RISC-V 64");
+   218→   218→
+   219→   219→    let func = make_func_with_n_args("test_10args", 10);
+   220→   220→    let allocated = backend.allocate_registers(&func);
+   221→   221→    assert!(allocated.is_ok(), "10-arg function should allocate on RISC-V 64");
+   222→   222→}
+   223→   223→
+   224→   224→// -- ARM32: AAPCS --
+   225→   225→#[test]
+   226→   226→fn test_arm32_abi_target_info() {
+   227→   227→    let backend = create_backend(BackendKind::Arm32).unwrap();
+   228→   228→    let info = backend.target_info();
+   229→   229→    assert_eq!(info.isa_name(), "arm32");
+   230→   230→    assert_eq!(info.calling_convention_name(), "aapcs");
+   231→   231→    assert_eq!(info.num_int_arg_regs(), 4, "AAPCS: 4 integer arg regs (R0-R3)");
+   232→   232→    assert_eq!(info.num_fp_arg_regs(), 16, "AAPCS VFP: 16 FP arg regs (D0-D15)");
+   233→   233→    assert_eq!(info.pointer_width(), 4, "ARM32 has 32-bit pointers");
+   234→   234→    assert_eq!(info.stack_alignment(), 8, "AAPCS: 8-byte stack alignment");
+   235→   235→    assert_eq!(info.output_format(), OutputFormat::Elf32);
+   236→   236→    assert!(info.has_link_register(), "ARM32 uses R14 (LR) as link register");
+   237→   237→    validate_cc_info(info);
+   238→   238→}
+   239→   239→
+   240→   240→#[test]
+   241→   241→fn test_arm32_abi_allocation() {
+   242→   242→    let backend = create_backend(BackendKind::Arm32).unwrap();
+   243→   243→    // Test with 4 args (all fit in R0-R3)
+   244→   244→    let func = make_func_with_n_args("test_4args", 4);
+   245→   245→    let allocated = backend.allocate_registers(&func);
+   246→   246→    assert!(allocated.is_ok(), "4-arg function should allocate on ARM32");
+   247→   247→
+   248→   248→    // Test with 6 args (2 must go on stack)
+   249→   249→    let func = make_func_with_n_args("test_6args", 6);
+   250→   250→    let allocated = backend.allocate_registers(&func);
+   251→   251→    assert!(allocated.is_ok(), "6-arg function should allocate on ARM32");
+   252→   252→}
+   253→   253→
+   254→   254→// -- MIPS64: N64 ABI --
+   255→   255→#[test]
+   256→   256→fn test_mips64_abi_target_info() {
+   257→   257→    let backend = create_backend(BackendKind::Mips64).unwrap();
+   258→   258→    let info = backend.target_info();
+   259→   259→    assert_eq!(info.isa_name(), "mips64");
+   260→   260→    assert_eq!(info.calling_convention_name(), "n64");
+   261→   261→    assert_eq!(info.num_int_arg_regs(), 8, "N64: 8 integer arg regs ($a0-$a7, $4-$11)");
+   262→   262→    assert_eq!(info.num_fp_arg_regs(), 8, "N64: 8 FP arg regs ($f12-$f19)");
+   263→   263→    assert_eq!(info.pointer_width(), 8);
+   264→   264→    assert_eq!(info.stack_alignment(), 16);
+   265→   265→    assert!(info.has_link_register(), "MIPS uses $31 ($ra) as link register");
+   266→   266→    assert!(info.has_hardwired_zero(), "MIPS has $0 (zero)");
+   267→   267→    assert!(info.has_branch_delay_slots(), "MIPS has branch delay slots");
+   268→   268→    assert_eq!(info.endianness(), Endianness::Big);
+   269→   269→    validate_cc_info(info);
+   270→   270→}
+   271→   271→
+   272→   272→#[test]
+   273→   273→fn test_mips64_abi_allocation() {
+   274→   274→    let backend = create_backend(BackendKind::Mips64).unwrap();
+   275→   275→    let func = make_func_with_n_args("test_8args", 8);
+   276→   276→    let allocated = backend.allocate_registers(&func);
+   277→   277→    assert!(allocated.is_ok(), "8-arg function should allocate on MIPS64");
+   278→   278→
+   279→   279→    let func = make_func_with_n_args("test_10args", 10);
+   280→   280→    let allocated = backend.allocate_registers(&func);
+   281→   281→    assert!(allocated.is_ok(), "10-arg function should allocate on MIPS64");
+   282→   282→}
+   283→   283→
+   284→   284→// -- PPC64: ELFv2 ABI --
+   285→   285→#[test]
+   286→   286→fn test_ppc64_abi_target_info() {
+   287→   287→    let backend = create_backend(BackendKind::PowerPC64).unwrap();
+   288→   288→    let info = backend.target_info();
+   289→   289→    assert_eq!(info.isa_name(), "ppc64");
+   290→   290→    assert_eq!(info.calling_convention_name(), "elfv2");
+   291→   291→    assert_eq!(info.num_int_arg_regs(), 8, "ELFv2: 8 integer arg regs (R3-R10)");
+   292→   292→    assert_eq!(info.num_fp_arg_regs(), 13, "ELFv2: 13 FP arg regs (F1-F13)");
+   293→   293→    assert_eq!(info.pointer_width(), 8);
+   294→   294→    assert_eq!(info.stack_alignment(), 16);
+   295→   295→    assert!(info.has_link_register(), "PPC64 uses LR (SPR) as link register");
+   296→   296→    assert!(info.has_toc_pointer(), "PPC64 has TOC pointer in R2");
+   297→   297→    assert!(info.has_condition_registers(), "PPC64 has CR0-CR7");
+   298→   298→    validate_cc_info(info);
+   299→   299→}
+   300→   300→
+   301→   301→#[test]
+   302→   302→fn test_ppc64_abi_allocation() {
+   303→   303→    let backend = create_backend(BackendKind::PowerPC64).unwrap();
+   304→   304→    let func = make_func_with_n_args("test_8args", 8);
+   305→   305→    let allocated = backend.allocate_registers(&func);
+   306→   306→    assert!(allocated.is_ok(), "8-arg function should allocate on PPC64");
+   307→   307→
+   308→   308→    let func = make_func_with_n_args("test_10args", 10);
+   309→   309→    let allocated = backend.allocate_registers(&func);
+   310→   310→    assert!(allocated.is_ok(), "10-arg function should allocate on PPC64");
+   311→   311→}
+   312→   312→
+   313→   313→// -- LoongArch64: LP64 ABI --
+   314→   314→#[test]
+   315→   315→fn test_loongarch64_abi_target_info() {
+   316→   316→    let backend = create_backend(BackendKind::LoongArch64).unwrap();
+   317→   317→    let info = backend.target_info();
+   318→   318→    assert_eq!(info.isa_name(), "loongarch64");
+   319→   319→    assert_eq!(info.calling_convention_name(), "lp64");
+   320→   320→    assert_eq!(info.num_int_arg_regs(), 8, "LP64: 8 integer arg regs ($a0-$a7, $r4-$r11)");
+   321→   321→    assert_eq!(info.num_fp_arg_regs(), 8, "LP64: 8 FP arg regs ($fa0-$fa7)");
+   322→   322→    assert_eq!(info.pointer_width(), 8);
+   323→   323→    assert_eq!(info.stack_alignment(), 16);
+   324→   324→    assert!(info.has_link_register(), "LoongArch uses $r1 (ra) as link register");
+   325→   325→    assert!(info.has_hardwired_zero(), "LoongArch has $r0 (zero)");
+   326→   326→    validate_cc_info(info);
+   327→   327→}
+   328→   328→
+   329→   329→#[test]
+   330→   330→fn test_loongarch64_abi_allocation() {
+   331→   331→    let backend = create_backend(BackendKind::LoongArch64).unwrap();
+   332→   332→    let func = make_func_with_n_args("test_8args", 8);
+   333→   333→    let allocated = backend.allocate_registers(&func);
+   334→   334→    assert!(allocated.is_ok(), "8-arg function should allocate on LoongArch64");
+   335→   335→
+   336→   336→    let func = make_func_with_n_args("test_10args", 10);
+   337→   337→    let allocated = backend.allocate_registers(&func);
+   338→   338→    assert!(allocated.is_ok(), "10-arg function should allocate on LoongArch64");
+   339→   339→}
+   340→   340→
+   341→   341→// -- Wasm32: Stack machine --
+   342→   342→#[test]
+   343→   343→fn test_wasm32_abi_target_info() {
+   344→   344→    let backend = create_backend(BackendKind::Wasm32).unwrap();
+   345→   345→    let info = backend.target_info();
+   346→   346→    assert_eq!(info.isa_name(), "wasm32");
+   347→   347→    assert_eq!(info.calling_convention_name(), "wasm-stack");
+   348→   348→    assert_eq!(info.num_int_arg_regs(), 0, "Wasm32: no register args (stack machine)");
+   349→   349→    assert_eq!(info.num_fp_arg_regs(), 0, "Wasm32: no FP register args");
+   350→   350→    assert_eq!(info.pointer_width(), 4, "Wasm32 has 32-bit pointers");
+   351→   351→    assert!(!info.has_registers(), "Wasm32 is a stack machine");
+   352→   352→    assert!(!info.has_link_register(), "Wasm32 has no link register");
+   353→   353→    assert_eq!(info.output_format(), OutputFormat::WasmBinary);
+   354→   354→    validate_cc_info(info);
+   355→   355→}
+   356→   356→
+   357→   357→// ===========================================================================
+   358→   358→// Cross-backend ABI consistency checks
+   359→   359→// ===========================================================================
+   360→   360→
+   361→   361→/// Verify that every backend can allocate a function with 0 args (minimal).
+   362→   362→#[test]
+   363→   363→fn test_all_backends_zero_args() {
+   364→   364→    for kind in [
+   365→   365→        BackendKind::AArch64,
+   366→   366→        BackendKind::X86_64,
+   367→   367→        BackendKind::RiscV64,
+   368→   368→        BackendKind::Arm32,
+   369→   369→        BackendKind::Mips64,
+   370→   370→        BackendKind::PowerPC64,
+   371→   371→        BackendKind::LoongArch64,
+   372→   372→    ] {
+   373→   373→        let backend = create_backend(kind).unwrap();
+   374→   374→        let func = make_func_with_n_args("zero_arg_func", 0);
+   375→   375→        let result = backend.allocate_registers(&func);
+   376→   376→        assert!(
+   377→   377→            result.is_ok(),
+   378→   378→            "{}: 0-arg function allocation should succeed, got: {:?}",
+   379→   379→            kind.isa_name(),
+   380→   380→            result.err()
+   381→   381→        );
+   382→   382→    }
+   383→   383→}
+   384→   384→
+   385→   385→/// Verify that every backend can allocate a function with arguments
+   386→   386→/// exceeding the register count (stack args needed).
+   387→   387→#[test]
+   388→   388→fn test_all_backends_stack_args() {
+   389→   389→    for kind in [
+   390→   390→        BackendKind::AArch64,
+   391→   391→        BackendKind::X86_64,
+   392→   392→        BackendKind::RiscV64,
+   393→   393→        BackendKind::Arm32,
+   394→   394→        BackendKind::Mips64,
+   395→   395→        BackendKind::PowerPC64,
+   396→   396→        BackendKind::LoongArch64,
+   397→   397→    ] {
+   398→   398→        let backend = create_backend(kind).unwrap();
+   399→   399→        let info = backend.target_info();
+   400→   400→        // Use more args than the platform has registers
+   401→   401→        let n_args = info.num_int_arg_regs() + 4;
+   402→   402→        let func = make_func_with_n_args("stack_arg_func", n_args);
+   403→   403→        let result = backend.allocate_registers(&func);
+   404→   404→        assert!(
+   405→   405→            result.is_ok(),
+   406→   406→            "{}: {}-arg function (exceeds {} arg regs) should allocate, got: {:?}",
+   407→   407→            kind.isa_name(),
+   408→   408→            n_args,
+   409→   409→            info.num_int_arg_regs(),
+   410→   410→            result.err()
+   411→   411→        );
+   412→   412→    }
+   413→   413→}
+   414→   414→
+   415→   415→/// Verify that every backend can handle a function that calls another
+   416→   416→/// function with many arguments.
+   417→   417→#[test]
+   418→   418→fn test_all_backends_call_with_args() {
+   419→   419→    for kind in [
+   420→   420→        BackendKind::AArch64,
+   421→   421→        BackendKind::X86_64,
+   422→   422→        BackendKind::RiscV64,
+   423→   423→        BackendKind::Arm32,
+   424→   424→        BackendKind::Mips64,
+   425→   425→        BackendKind::PowerPC64,
+   426→   426→        BackendKind::LoongArch64,
+   427→   427→    ] {
+   428→   428→        let backend = create_backend(kind).unwrap();
+   429→   429→        let func = make_func_with_call_n_args(4);
+   430→   430→        let result = backend.allocate_registers(&func);
+   431→   431→        assert!(
+   432→   432→            result.is_ok(),
+   433→   433→            "{}: call with 4 args should allocate, got: {:?}",
+   434→   434→            kind.isa_name(),
+   435→   435→            result.err()
+   436→   436→        );
+   437→   437→    }
+   438→   438→}
+   439→   439→
+   440→   440→/// Verify that every backend can encode a function with arguments.
+   441→   441→#[test]
+   442→   442→fn test_all_backends_encode() {
+   443→   443→    for kind in [
+   444→   444→        BackendKind::AArch64,
+   445→   445→        BackendKind::X86_64,
+   446→   446→        BackendKind::RiscV64,
+   447→   447→        BackendKind::Arm32,
+   448→   448→        BackendKind::Mips64,
+   449→   449→        BackendKind::PowerPC64,
+   450→   450→        BackendKind::LoongArch64,
+   451→   451→    ] {
+   452→   452→        let backend = create_backend(kind).unwrap();
+   453→   453→        let func = make_func_with_n_args("encode_test", 4);
+   454→   454→        let allocated = backend.allocate_registers(&func);
+   455→   455→        assert!(
+   456→   456→            allocated.is_ok(),
+   457→   457→            "{}: allocation should succeed, got: {:?}",
+   458→   458→            kind.isa_name(),
+   459→   459→            allocated.err()
+   460→   460→        );
+   461→   461→        let af = allocated.unwrap();
+   462→   462→        let encoded = backend.encode_function(&af);
+   463→   463→        assert!(
+   464→   464→            encoded.is_ok(),
+   465→   465→            "{}: encoding should succeed, got: {:?}",
+   466→   466→            kind.isa_name(),
+   467→   467→            encoded.err()
+   468→   468→        );
+   469→   469→        let bytes = encoded.unwrap();
+   470→   470→        assert!(
+   471→   471→            !bytes.is_empty(),
+   472→   472→            "{}: encoded bytes must not be empty",
+   473→   473→            kind.isa_name()
+   474→   474→        );
+   475→   475→    }
+   476→   476→}
+   477→   477→
+   478→   478→/// Verify disassembly output for a simple function on each backend.
+   479→   479→#[test]
+   480→   480→fn test_all_backends_disasm() {
+   481→   481→    for kind in [
+   482→   482→        BackendKind::AArch64,
+   483→   483→        BackendKind::X86_64,
+   484→   484→        BackendKind::RiscV64,
+   485→   485→        BackendKind::Arm32,
+   486→   486→        BackendKind::Mips64,
+   487→   487→        BackendKind::PowerPC64,
+   488→   488→        BackendKind::LoongArch64,
+   489→   489→    ] {
+   490→   490→        let backend = create_backend(kind).unwrap();
+   491→   491→        let func = make_func_with_n_args("disasm_test", 2);
+   492→   492→        let allocated = backend.allocate_registers(&func);
+   493→   493→        if let Ok(af) = allocated {
+   494→   494→            if let Ok(bytes) = backend.encode_function(&af) {
+   495→   495→                let lines = backend.disassemble(&bytes, 0x400000);
+   496→   496→                // Disassembly may or may not produce meaningful output,
+   497→   497→                // but it should not panic and should return a Vec<String>
+   498→   498→                assert!(
+   499→   499→                    !lines.is_empty() || bytes.is_empty(),
+   500→   500→                    "{}: disassembly should produce output for non-empty code",
+   501→   501→                    kind.isa_name()
+   502→   502→                );
+   503→   503→            }
+   504→   504→        }
+   505→   505→    }
+   506→   506→}
+   507→   507→
+   508→   508→// ===========================================================================
+   509→   509→// Register-specific checks for allocated functions
+   510→   510→// ===========================================================================
+   511→   511→
+   512→   512→/// Check that the return value from a function uses the correct register class.
+   513→   513→/// For all register-based backends, the return value should be in a GPR.
+   514→   514→///
+   515→   515→/// Some backends populate the `reads`/`writes` fields of AllocatedInstruction;
+   516→   516→/// others may leave them empty. This test validates that backends which DO
+   517→   517→/// populate these fields use GPRs for integer return values.
+   518→   518→#[test]
+   519→   519→fn test_all_backends_return_in_gpr() {
+   520→   520→    for kind in [
+   521→   521→        BackendKind::AArch64,
+   522→   522→        BackendKind::X86_64,
+   523→   523→        BackendKind::RiscV64,
+   524→   524→        BackendKind::Arm32,
+   525→   525→        BackendKind::Mips64,
+   526→   526→        BackendKind::PowerPC64,
+   527→   527→        BackendKind::LoongArch64,
+   528→   528→    ] {
+   529→   529→        let backend = create_backend(kind).unwrap();
+   530→   530→        let func = make_func_with_n_args("ret_test", 1);
+   531→   531→        if let Ok(af) = backend.allocate_registers(&func) {
+   532→   532→            // Collect all register writes across all instructions
+   533→   533→            let all_writes: Vec<_> = af.blocks.iter()
+   534→   534→                .flat_map(|b| b.instructions.iter())
+   535→   535→                .flat_map(|i| i.writes.iter())
+   536→   536→                .collect();
+   537→   537→
+   538→   538→            // If the backend populates writes, verify that at least one GPR is used
+   539→   539→            // for a function returning i64. If writes are empty, the backend uses
+   540→   540→            // a different encoding strategy (direct machine code), which is fine.
+   541→   541→            if !all_writes.is_empty() {
+   542→   542→                let has_gpr_writes: Vec<_> = all_writes.iter()
+   543→   543→                    .filter(|r| r.class == RegClass::Gpr)
+   544→   544→                    .collect();
+   545→   545→                assert!(
+   546→   546→                    !has_gpr_writes.is_empty(),
+   547→   547→                    "{}: function returning i64 must write to at least one GPR",
+   548→   548→                    kind.isa_name()
+   549→   549→                );
+   550→   550→            }
+   551→   551→            // Regardless, the encoded output should be non-empty
+   552→   552→            if let Ok(bytes) = backend.encode_function(&af) {
+   553→   553→                assert!(!bytes.is_empty(), "{}: encoded output must not be empty", kind.isa_name());
+   554→   554→            }
+   555→   555→        }
+   556→   556→    }
+   557→   557→}
+   558→   558→
+   559→   559→/// Verify that x86_64 can allocate and encode a function with 6 args,
+   560→   560→/// all fitting in the 6 System V integer arg registers (RDI, RSI, RDX, RCX, R8, R9).
+   561→   561→#[test]
+   562→   562→fn test_x86_64_arg_register_indices() {
+   563→   563→    let backend = create_backend(BackendKind::X86_64).unwrap();
+   564→   564→    let func = make_func_with_n_args("x86_args", 6);
+   565→   565→    let af = backend.allocate_registers(&func).unwrap();
+   566→   566→
+   567→   567→    // The function should be allocatable and encodable
+   568→   568→    let encoded = backend.encode_function(&af).unwrap();
+   569→   569→    assert!(!encoded.is_empty(), "x86_64: encoded function must not be empty");
+   570→   570→
+   571→   571→    // Collect all GPR registers that appear in the allocated function
+   572→   572→    let gpr_reads: Vec<u32> = af.blocks.iter()
+   573→   573→        .flat_map(|b| b.instructions.iter())
+   574→   574→        .flat_map(|i| i.reads.iter())
+   575→   575→        .filter(|r| r.class == RegClass::Gpr)
+   576→   576→        .map(|r| r.index)
+   577→   577→        .collect();
+   578→   578→
+   579→   579→    // If the backend populates reads, verify GPRs are used
+   580→   580→    if !gpr_reads.is_empty() {
+   581→   581→        // x86_64 GPR indices: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7,
+   582→   582→        // R8=8, R9=9, R10=10, R11=11, R12=12, R13=13, R14=14, R15=15
+   583→   583→        for idx in &gpr_reads {
+   584→   584→            assert!(*idx <= 15, "x86_64: GPR index {} must be <= 15", idx);
+   585→   585→        }
+   586→   586→    }
+   587→   587→}
+   588→   588→
+   589→   589→/// Verify that AArch64 uses X0-X7 for argument passing.
+   590→   590→#[test]
+   591→   591→fn test_aarch64_arg_register_range() {
+   592→   592→    let backend = create_backend(BackendKind::AArch64).unwrap();
+   593→   593→    let func = make_func_with_n_args("a64_args", 8);
+   594→   594→    let af = backend.allocate_registers(&func).unwrap();
+   595→   595→
+   596→   596→    let gpr_indices: Vec<u32> = af.blocks.iter()
+   597→   597→        .flat_map(|b| b.instructions.iter())
+   598→   598→        .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
+   599→   599→        .filter(|r| r.class == RegClass::Gpr)
+   600→   600→        .map(|r| r.index)
+   601→   601→        .collect();
+   602→   602→
+   603→   603→    // All GPR indices should be in the range 0..=30 for AArch64
+   604→   604→    for idx in &gpr_indices {
+   605→   605→        assert!(
+   606→   606→            *idx <= 30,
+   607→   607→            "AArch64: GPR index {} must be <= 30 (X0-X30)",
+   608→   608→            idx
+   609→   609→        );
+   610→   610→    }
+   611→   611→}
+   612→   612→
+   613→   613→/// Verify that ARM32 uses R0-R3 for the first 4 arguments.
+   614→   614→#[test]
+   615→   615→fn test_arm32_arg_register_range() {
+   616→   616→    let backend = create_backend(BackendKind::Arm32).unwrap();
+   617→   617→    let func = make_func_with_n_args("arm32_args", 4);
+   618→   618→    let af = backend.allocate_registers(&func).unwrap();
+   619→   619→
+   620→   620→    let gpr_indices: Vec<u32> = af.blocks.iter()
+   621→   621→        .flat_map(|b| b.instructions.iter())
+   622→   622→        .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
+   623→   623→        .filter(|r| r.class == RegClass::Gpr)
+   624→   624→        .map(|r| r.index)
+   625→   625→        .collect();
+   626→   626→
+   627→   627→    // All GPR indices should be in the range 0..=15 for ARM32
+   628→   628→    for idx in &gpr_indices {
+   629→   629→        assert!(
+   630→   630→            *idx <= 15,
+   631→   631→            "ARM32: GPR index {} must be <= 15 (R0-R15)",
+   632→   632→            idx
+   633→   633→        );
+   634→   634→    }
+   635→   635→}
+   636→   636→
+   637→   637→/// Verify that PPC64 has the TOC register (R2) in Special class.
+   638→   638→#[test]
+   639→   639→fn test_ppc64_toc_register() {
+   640→   640→    let backend = create_backend(BackendKind::PowerPC64).unwrap();
+   641→   641→    let info = backend.target_info();
+   642→   642→    assert!(info.has_toc_pointer(), "PPC64 must have TOC pointer in R2");
+   643→   643→
+   644→   644→    // Verify the backend can allocate a function (TOC is handled internally)
+   645→   645→    let func = make_func_with_n_args("ppc_toc_test", 2);
+   646→   646→    let result = backend.allocate_registers(&func);
+   647→   647→    assert!(result.is_ok(), "PPC64 allocation should handle TOC properly");
+   648→   648→}
+   649→   649→
+   650→   650→// ===========================================================================
+   651→   651→// Comprehensive calling convention data validation
+   652→   652→// ===========================================================================
+   653→   653→
+   654→   654→/// Verify that all 8 backends report consistent ABI data.
+   655→   655→#[test]
+   656→   656→fn test_all_backends_abi_data() {
+   657→   657→    let cases = vec![
+   658→   658→        (BackendKind::X86_64,       "systemv",     6,  8, 8, 16, 8),
+   659→   659→        (BackendKind::AArch64,      "aapcs64",     8,  8, 8, 16, 8),
+   660→   660→        (BackendKind::RiscV64,      "lp64d",       8,  8, 8, 16, 8),
+   661→   661→        (BackendKind::Arm32,        "aapcs",       4, 16, 4,  8, 4),
+   662→   662→        (BackendKind::Mips64,       "n64",         8,  8, 8, 16, 8),
+   663→   663→        (BackendKind::PowerPC64,    "elfv2",       8, 13, 8, 16, 8),
+   664→   664→        (BackendKind::LoongArch64,  "lp64",        8,  8, 8, 16, 8),
+   665→   665→        (BackendKind::Wasm32,       "wasm-stack",  0,  0, 4,  8, 4),
+   666→   666→    ];
+   667→   667→
+   668→   668→    for (kind, cc_name, int_regs, fp_regs, ptr_width, stack_align, addr_size) in cases {
+   669→   669→        let backend = create_backend(kind).unwrap();
+   670→   670→        let info = backend.target_info();
+   671→   671→        assert_eq!(
+   672→   672→            info.calling_convention_name(), cc_name,
+   673→   673→            "{}: calling convention name mismatch",
+   674→   674→            kind.isa_name()
+   675→   675→        );
+   676→   676→        assert_eq!(
+   677→   677→            info.num_int_arg_regs(), int_regs,
+   678→   678→            "{}: integer arg register count mismatch",
+   679→   679→            kind.isa_name()
+   680→   680→        );
+   681→   681→        assert_eq!(
+   682→   682→            info.num_fp_arg_regs(), fp_regs,
+   683→   683→            "{}: FP arg register count mismatch",
+   684→   684→            kind.isa_name()
+   685→   685→        );
+   686→   686→        assert_eq!(
+   687→   687→            info.pointer_width(), ptr_width,
+   688→   688→            "{}: pointer width mismatch",
+   689→   689→            kind.isa_name()
+   690→   690→        );
+   691→   691→        assert_eq!(
+   692→   692→            info.stack_alignment(), stack_align,
+   693→   693→            "{}: stack alignment mismatch",
+   694→   694→            kind.isa_name()
+   695→   695→        );
+   696→   696→        // Address size equals pointer width for all supported targets
+   697→   697→        assert_eq!(
+   698→   698→            info.pointer_width(), addr_size,
+   699→   699→            "{}: address size must equal pointer width",
+   700→   700→            kind.isa_name()
+   701→   701→        );
+   702→   702→    }
+   703→   703→}
+   704→   704→
+   705→   705→/// Verify that all register-based backends can successfully encode a program.
+   706→   706→#[test]
+   707→   707→fn test_all_backends_full_program() {
+   708→   708→    for kind in [
+   709→   709→        BackendKind::AArch64,
+   710→   710→        BackendKind::X86_64,
+   711→   711→        BackendKind::RiscV64,
+   712→   712→        BackendKind::Arm32,
+   713→   713→        BackendKind::Mips64,
+   714→   714→        BackendKind::PowerPC64,
+   715→   715→        BackendKind::LoongArch64,
+   716→   716→    ] {
+   717→   717→        let backend = create_backend(kind).unwrap();
+   718→   718→
+   719→   719→        let func1 = make_func_with_n_args("func1", 3);
+   720→   720→        let func2 = make_func_with_n_args("func2", 1);
+   721→   721→
+   722→   722→        let af1 = backend.allocate_registers(&func1).unwrap();
+   723→   723→        let af2 = backend.allocate_registers(&func2).unwrap();
+   724→   724→
+   725→   725→        let program = vuma_codegen::backend::AllocatedProgram {
+   726→   726→            functions: vec![af1, af2],
+   727→   727→            total_code_size: 0,
+   728→   728→            total_data_size: 0,
+   729→   729→        };
+   730→   730→
+   731→   731→        let result = backend.encode_program(&program);
+   732→   732→        assert!(
+   733→   733→            result.is_ok(),
+   734→   734→            "{}: full program encoding should succeed, got: {:?}",
+   735→   735→            kind.isa_name(),
+   736→   736→            result.err()
+   737→   737→        );
+   738→   738→        let binary = result.unwrap();
+   739→   739→        assert!(
+   740→   740→            !binary.is_empty(),
+   741→   741→            "{}: encoded program must not be empty",
+   742→   742→            kind.isa_name()
+   743→   743→        );
+   744→   744→    }
+   745→   745→}
+   746→   746→

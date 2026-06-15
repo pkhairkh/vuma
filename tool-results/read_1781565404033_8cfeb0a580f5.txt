@@ -1,0 +1,2002 @@
+     1→//! # DWARF Debug Info Generation
+     2→//!
+     3→//! Produces DWARF version 4 debug information sections for all VUMA
+     4→//! backends.  The emitted sections can be appended to an ELF binary so that
+     5→//! tools such as `readelf`, `objdump`, and `gdb` can decode the program's
+     6→//! structure, function boundaries, local variables, source-line mapping,
+     7→//! and call frame information for stack unwinding.
+     8→//!
+     9→//! ## Sections Generated
+    10→//!
+    11→//! | Section          | Contents                                          |
+    12→//! |------------------|---------------------------------------------------|
+    13→//! | `.debug_abbrev`  | Abbreviation tables (tag + attribute encodings)   |
+    14→//! | `.debug_info`    | Compilation unit DIEs (subprograms, variables)    |
+    15→//! | `.debug_line`    | Line-number program (DWARF standard opcodes)      |
+    16→//! | `.debug_frame`   | Call frame information (CIE + FDE entries)        |
+    17→//!
+    18→//! ## Multi-Backend Support
+    19→//!
+    20→//! The `DwarfBuilder` is parameterised by address size to support all
+    21→//! eight VUMA backends:
+    22→//!
+    23→//! | Backend      | Address Size | Min Inst Length |
+    24→//! |--------------|-------------|-----------------|
+    25→//! | x86_64       | 8 bytes     | 1               |
+    26→//! | AArch64      | 8 bytes     | 4               |
+    27→//! | RISC-V 64    | 8 bytes     | 2               |
+    28→//! | ARM32        | 4 bytes     | 2               |
+    29→//! | MIPS64       | 8 bytes     | 4               |
+    30→//! | PPC64        | 8 bytes     | 4               |
+    31→//! | LoongArch64  | 8 bytes     | 4               |
+    32→//! | Wasm32       | 4 bytes     | 1               |
+    33→//!
+    34→//! ## DWARF v4 Encoding
+    35→//!
+    36→//! - Abbreviation codes: `DW_TAG_COMPILE_UNIT`, `DW_TAG_SUBPROGRAM`,
+    37→//!   `DW_TAG_VARIABLE`
+    38→//! - Attributes: `DW_AT_NAME`, `DW_AT_LOW_PC`, `DW_AT_HIGH_PC`,
+    39→//!   `DW_AT_TYPE`, `DW_AT_LOCATION`
+    40→//! - Forms: `DW_FORM_STRING`, `DW_FORM_ADDR`, `DW_FORM_DATA4`,
+    41→//!   `DW_FORM_EXPRLOC`
+    42→//! - Line-number opcodes: `DW_LNS_COPY`, `DW_LNS_ADVANCE_PC`,
+    43→//!   `DW_LNS_ADVANCE_LINE`, `DW_LNS_SET_FILE`, `DW_LNE_END_SEQUENCE`
+    44→//! - Call frame: CIE with DW_CFA_def_cfa / DW_CFA_offset,
+    45→//!   FDE per function with initial_location and address_range
+    46→
+    47→// ---------------------------------------------------------------------------
+    48→// DWARF5 Constants
+    49→// ---------------------------------------------------------------------------
+    50→
+    51→/// DWARF version number (4 — widely supported by GDB, LLDB, readelf).
+    52→const DWARF_VERSION: u16 = 4;
+    53→
+    54→/// Default address size for 64-bit targets.
+    55→const ADDRESS_SIZE_64: u8 = 8;
+    56→/// Address size for 32-bit targets.
+    57→const ADDRESS_SIZE_32: u8 = 4;
+    58→
+    59→// -- Tags --
+    60→
+    61→/// Tag for a compilation unit.
+    62→const DW_TAG_COMPILE_UNIT: u16 = 0x11;
+    63→/// Tag for a subprogram (function).
+    64→const DW_TAG_SUBPROGRAM: u16 = 0x2E;
+    65→/// Tag for a variable.
+    66→const DW_TAG_VARIABLE: u16 = 0x34;
+    67→
+    68→// -- Attributes --
+    69→
+    70→/// Name attribute.
+    71→const DW_AT_NAME: u16 = 0x03;
+    72→/// Low PC (start address) attribute.
+    73→const DW_AT_LOW_PC: u16 = 0x11;
+    74→/// High PC (end address) attribute.
+    75→const DW_AT_HIGH_PC: u16 = 0x12;
+    76→/// Language attribute.
+    77→const DW_AT_LANGUAGE: u16 = 0x13;
+    78→/// Producer attribute.
+    79→const DW_AT_PRODUCER: u16 = 0x25;
+    80→/// Type attribute.
+    81→const DW_AT_TYPE: u16 = 0x49;
+    82→/// Location attribute.
+    83→const DW_AT_LOCATION: u16 = 0x02;
+    84→/// Statement list attribute (offset into .debug_line).
+    85→const DW_AT_STMT_LIST: u16 = 0x10;
+    86→
+    87→// -- Forms --
+    88→
+    89→/// Null form (terminator).
+    90→const DW_FORM_NONE: u16 = 0x00;
+    91→/// Inline null-terminated string.
+    92→const DW_FORM_STRING: u16 = 0x08;
+    93→/// Address (8 bytes for 64-bit).
+    94→const DW_FORM_ADDR: u16 = 0x01;
+    95→/// 4-byte unsigned data.
+    96→const DW_FORM_DATA4: u16 = 0x06;
+    97→/// 2-byte unsigned data.
+    98→const DW_FORM_DATA2: u16 = 0x05;
+    99→/// Expression location (ULEB128 length + bytes).
+   100→const DW_FORM_EXPRLOC: u16 = 0x18;
+   101→/// 4-byte offset into .debug_line.
+   102→const DW_FORM_SEC_OFFSET: u16 = 0x17;
+   103→
+   104→// -- Children --
+   105→
+   106→/// DIE has children.
+   107→const DW_CHILDREN_YES: u8 = 0x01;
+   108→/// DIE has no children.
+   109→const DW_CHILDREN_NO: u8 = 0x00;
+   110→
+   111→// -- Line Number Standard Opcodes --
+   112→
+   113→/// Copy current row to matrix.
+   114→const DW_LNS_COPY: u8 = 0x01;
+   115→/// Advance PC by operation advance * minimum_instruction_length.
+   116→const DW_LNS_ADVANCE_PC: u8 = 0x02;
+   117→/// Advance line by signed LEB128 increment.
+   118→const DW_LNS_ADVANCE_LINE: u8 = 0x03;
+   119→/// Set the file register to the value in the unsigned LEB128 operand.
+   120→const DW_LNS_SET_FILE: u8 = 0x04;
+   121→
+   122→// -- Line Number Extended Opcodes --
+   123→
+   124→/// End sequence of line number entries.
+   125→const DW_LNE_END_SEQUENCE: u8 = 0x01;
+   126→
+   127→// -- Language codes --
+   128→
+   129→/// VUMA user language code (reserved range 0x8001–0xFFFF).
+   130→const DW_LANG_VUMA: u16 = 0x8001;
+   131→
+   132→// -- Call Frame Information (CFI) constants --
+   133→
+   134→/// CFI opcode: advance location by 1 * code_alignment_factor.
+   135→#[allow(dead_code)]
+   136→const DW_CFA_ADVANCE_LOC: u8 = 0x40;
+   137→/// CFI opcode: define CFA rule (register + offset).
+   138→const DW_CFA_DEF_CFA: u8 = 0x0C;
+   139→/// CFI opcode: offset — register saved at CFA + offset.
+   140→const DW_CFA_OFFSET: u8 = 0x80;
+   141→/// CFI opcode: restore register to initial state.
+   142→#[allow(dead_code)]
+   143→const DW_CFA_RESTORE: u8 = 0xC0;
+   144→/// CFI extended opcode: def_cfa_offset — change CFA offset only.
+   145→#[allow(dead_code)]
+   146→const DW_CFA_DEF_CFA_OFFSET: u8 = 0x0E;
+   147→
+   148→/// CIE augmentation string (empty — no augmentation).
+   149→#[allow(dead_code)]
+   150→const CIE_AUGMENTATION: &[u8] = b"";
+   151→
+   152→/// DWARF CIE identifier (0xFFFFFFFF for 64-bit DWARF, 0xFFFFFFFF for 32-bit).
+   153→const CIE_ID_32: u32 = 0xFFFFFFFF;
+   154→/// DWARF CIE identifier for 64-bit DWARF format.
+   155→#[allow(dead_code)]
+   156→const CIE_ID_64: u64 = 0xFFFFFFFFFFFFFFFF;
+   157→
+   158→/// Frame version for DWARF v4.
+   159→const DW_CIE_VERSION: u8 = 1;
+   160→
+   161→// ---------------------------------------------------------------------------
+   162→// Debug Info Data Structures
+   163→// ---------------------------------------------------------------------------
+   164→
+   165→/// A recorded subprogram (function boundary).
+   166→#[derive(Debug, Clone)]
+   167→pub struct Subprogram {
+   168→    /// Function name.
+   169→    pub name: String,
+   170→    /// Byte offset (relative to text section start) where the function begins.
+   171→    pub start_offset: u64,
+   172→    /// Byte offset (relative to text section start) where the function ends.
+   173→    pub end_offset: u64,
+   174→}
+   175→
+   176→/// A recorded local variable.
+   177→#[derive(Debug, Clone)]
+   178→pub struct Variable {
+   179→    /// Variable name.
+   180→    pub name: String,
+   181→    /// DWARF type name (e.g. "int", "i64").
+   182→    pub type_name: String,
+   183→    /// Stack offset for the variable (used in the DW_OP_fbreg expression).
+   184→    pub offset: i32,
+   185→    /// Register number the variable is in (AArch64 register encoding, 0–31).
+   186→    pub register: u8,
+   187→}
+   188→
+   189→/// A line-number table entry.
+   190→#[derive(Debug, Clone)]
+   191→pub struct LineEntry {
+   192→    /// Byte offset within the text section.
+   193→    pub offset: u64,
+   194→    /// Source file index (1-based in the file table).
+   195→    pub file: u32,
+   196→    /// Line number (1-based).
+   197→    pub line: u32,
+   198→    /// Column number (0 = no column info).
+   199→    pub column: u32,
+   200→}
+   201→
+   202→/// A register saved in the prologue (used for `.debug_frame` generation).
+   203→#[derive(Debug, Clone)]
+   204→pub struct SavedRegister {
+   205→    /// DWARF register number (architecture-specific encoding).
+   206→    pub reg: u8,
+   207→    /// Offset from the CFA where the register is saved.
+   208→    pub cfa_offset: i32,
+   209→}
+   210→
+   211→/// A Frame Description Entry (FDE) for a single function.
+   212→///
+   213→/// Each FDE describes the call frame for one function, referencing the
+   214→/// Common Information Entry (CIE) that shares the prologue pattern.
+   215→#[derive(Debug, Clone)]
+   216→pub struct FrameDescriptorEntry {
+   217→    /// Byte offset of this function within the text section.
+   218→    pub initial_location: u64,
+   219→    /// Size of the function in bytes.
+   220→    pub address_range: u64,
+   221→}
+   222→
+   223→/// A Common Information Entry (CIE) shared across all FDEs.
+   224→///
+   225→/// The CIE describes the prologue pattern that is common to all functions
+   226→/// in the compilation unit: which register is the frame pointer, which
+   227→/// registers are saved, and the stack pointer offset.
+   228→#[derive(Debug, Clone)]
+   229→pub struct CommonInformationEntry {
+   230→    /// DWARF register number for the stack pointer (CFA base register).
+   231→    /// e.g. 31 for AArch64 SP (x31), 7 for x86_64 RSP.
+   232→    pub cfa_reg: u8,
+   233→    /// Offset of the CFA from the stack pointer register.
+   234→    /// e.g. 0 means CFA = SP, 16 means CFA = SP + 16.
+   235→    pub cfa_offset: u32,
+   236→    /// Registers saved in the prologue and their offsets from CFA.
+   237→    /// e.g. SavedRegister { reg: 30, cfa_offset: -8 } for AArch64 LR (x30).
+   238→    pub saved_regs: Vec<SavedRegister>,
+   239→    /// Code alignment factor (minimum instruction length in bytes).
+   240→    pub code_alignment_factor: u8,
+   241→    /// Data alignment factor (byte size of a stack slot, typically -4 or -8).
+   242→    pub data_alignment_factor: i8,
+   243→    /// Return address register number (e.g. 30 for AArch64 LR).
+   244→    pub return_address_reg: u8,
+   245→}
+   246→
+   247→// ---------------------------------------------------------------------------
+   248→// DwarfBuilder
+   249→// ---------------------------------------------------------------------------
+   250→
+   251→/// Accumulates debug information during codegen and emits DWARF v4 sections.
+   252→///
+   253→/// The builder is parameterised by address size (4 for ARM32/Wasm32,
+   254→/// 8 for all 64-bit targets) and minimum instruction length to correctly
+   255→/// generate DWARF sections for each supported backend.
+   256→///
+   257→/// # Example
+   258→///
+   259→/// ```
+   260→/// use vuma_codegen::dwarf::DwarfBuilder;
+   261→///
+   262→/// let mut db = DwarfBuilder::new(); // defaults to 64-bit, min_inst_length=4
+   263→/// db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+   264→/// db.add_subprogram("main", 0, 64);
+   265→/// db.add_variable("x", "i64", -8, 0);
+   266→/// db.add_line_entry(0, 1, 1, 0);
+   267→/// db.add_line_entry(16, 1, 2, 4);
+   268→/// db.set_cie_aarch64();
+   269→/// db.add_fde("main", 0, 64);
+   270→/// let sections = db.emit_debug_sections();
+   271→/// assert!(!sections.debug_abbrev.is_empty());
+   272→/// assert!(!sections.debug_info.is_empty());
+   273→/// assert!(!sections.debug_line.is_empty());
+   274→/// assert!(!sections.debug_frame.is_empty());
+   275→/// ```
+   276→///
+   277→/// For 32-bit targets:
+   278→///
+   279→/// ```
+   280→/// use vuma_codegen::dwarf::DwarfBuilder;
+   281→///
+   282→/// let mut db = DwarfBuilder::new_32bit(2); // ARM32: 4-byte addr, min_inst=2
+   283→/// db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+   284→/// db.add_subprogram("main", 0, 32);
+   285→/// db.set_cie_arm32();
+   286→/// db.add_fde("main", 0, 32);
+   287→/// let sections = db.emit_debug_sections();
+   288→/// assert!(!sections.debug_info.is_empty());
+   289→/// assert!(!sections.debug_frame.is_empty());
+   290→/// ```
+   291→#[derive(Debug, Clone)]
+   292→pub struct DwarfBuilder {
+   293→    /// Source file path for the compilation unit.
+   294→    source_file: String,
+   295→    /// Producer string (compiler name + version).
+   296→    producer: String,
+   297→    /// Recorded subprograms.
+   298→    subprograms: Vec<Subprogram>,
+   299→    /// Recorded local variables.
+   300→    variables: Vec<Variable>,
+   301→    /// Recorded line-number entries.
+   302→    line_entries: Vec<LineEntry>,
+   303→    /// Common Information Entry for call frame info.
+   304→    cie: Option<CommonInformationEntry>,
+   305→    /// Frame Description Entries (one per function).
+   306→    fdes: Vec<FrameDescriptorEntry>,
+   307→    /// Address size in bytes: 4 for ARM32/Wasm32, 8 for all 64-bit targets.
+   308→    address_size: u8,
+   309→    /// Minimum instruction length in bytes for the target.
+   310→    min_inst_length: u8,
+   311→}
+   312→
+   313→/// The four DWARF debug sections emitted by [`DwarfBuilder::emit_debug_sections`].
+   314→#[derive(Debug, Clone)]
+   315→pub struct DebugSections {
+   316→    /// `.debug_abbrev` — abbreviation table.
+   317→    pub debug_abbrev: Vec<u8>,
+   318→    /// `.debug_info` — compilation unit DIEs.
+   319→    pub debug_info: Vec<u8>,
+   320→    /// `.debug_line` — line number program.
+   321→    pub debug_line: Vec<u8>,
+   322→    /// `.debug_frame` — call frame information (CIE + FDEs).
+   323→    pub debug_frame: Vec<u8>,
+   324→}
+   325→
+   326→impl DwarfBuilder {
+   327→    /// Create a new `DwarfBuilder` for 64-bit targets (default).
+   328→    ///
+   329→    /// Uses 8-byte address size and 4-byte minimum instruction length
+   330→    /// (suitable for AArch64, MIPS64, PPC64, LoongArch64).
+   331→    pub fn new() -> Self {
+   332→        Self {
+   333→            source_file: String::new(),
+   334→            producer: String::new(),
+   335→            subprograms: Vec::new(),
+   336→            variables: Vec::new(),
+   337→            line_entries: Vec::new(),
+   338→            cie: None,
+   339→            fdes: Vec::new(),
+   340→            address_size: ADDRESS_SIZE_64,
+   341→            min_inst_length: 4,
+   342→        }
+   343→    }
+   344→
+   345→    /// Create a new `DwarfBuilder` for 32-bit targets.
+   346→    ///
+   347→    /// Uses 4-byte address size and the given minimum instruction length.
+   348→    ///
+   349→    /// # Arguments
+   350→    /// * `min_inst_length` - Minimum instruction length for the target
+   351→    ///   (2 for ARM32, 1 for Wasm32)
+   352→    pub fn new_32bit(min_inst_length: u8) -> Self {
+   353→        Self {
+   354→            source_file: String::new(),
+   355→            producer: String::new(),
+   356→            subprograms: Vec::new(),
+   357→            variables: Vec::new(),
+   358→            line_entries: Vec::new(),
+   359→            cie: None,
+   360→            fdes: Vec::new(),
+   361→            address_size: ADDRESS_SIZE_32,
+   362→            min_inst_length,
+   363→        }
+   364→    }
+   365→
+   366→    /// Create a `DwarfBuilder` with explicit address size and min instruction length.
+   367→    ///
+   368→    /// This is the most flexible constructor, allowing any combination
+   369→    /// of address size and instruction length.
+   370→    pub fn with_config(address_size: u8, min_inst_length: u8) -> Self {
+   371→        Self {
+   372→            source_file: String::new(),
+   373→            producer: String::new(),
+   374→            subprograms: Vec::new(),
+   375→            variables: Vec::new(),
+   376→            line_entries: Vec::new(),
+   377→            cie: None,
+   378→            fdes: Vec::new(),
+   379→            address_size,
+   380→            min_inst_length,
+   381→        }
+   382→    }
+   383→
+   384→    /// Create a `DwarfBuilder` configured for a specific backend.
+   385→    ///
+   386→    /// Selects the correct address size and minimum instruction length
+   387→    /// for each supported ISA:
+   388→    ///
+   389→    /// | Backend      | address_size | min_inst_length |
+   390→    /// |--------------|-------------|-----------------|
+   391→    /// | x86_64       | 8           | 1               |
+   392→    /// | AArch64      | 8           | 4               |
+   393→    /// | RISC-V 64    | 8           | 2               |
+   394→    /// | ARM32        | 4           | 2               |
+   395→    /// | MIPS64       | 8           | 4               |
+   396→    /// | PPC64        | 8           | 4               |
+   397→    /// | LoongArch64  | 8           | 4               |
+   398→    /// | Wasm32       | 4           | 1               |
+   399→    pub fn for_backend(backend: crate::backend::BackendKind) -> Self {
+   400→        use crate::backend::BackendKind;
+   401→        let (addr_size, min_inst) = match backend {
+   402→            BackendKind::X86_64       => (8, 1),
+   403→            BackendKind::AArch64      => (8, 4),
+   404→            BackendKind::RiscV64      => (8, 2),
+   405→            BackendKind::Arm32        => (4, 2),
+   406→            BackendKind::Mips64       => (8, 4),
+   407→            BackendKind::PowerPC64    => (8, 4),
+   408→            BackendKind::LoongArch64  => (8, 4),
+   409→            BackendKind::Wasm32       => (4, 1),
+   410→        };
+   411→        Self::with_config(addr_size, min_inst)
+   412→    }
+   413→
+   414→    /// Returns the address size configured for this builder.
+   415→    pub fn address_size(&self) -> u8 {
+   416→        self.address_size
+   417→    }
+   418→
+   419→    /// Returns the minimum instruction length configured for this builder.
+   420→    pub fn min_inst_length(&self) -> u8 {
+   421→        self.min_inst_length
+   422→    }
+   423→
+   424→    /// Record the top-level compilation unit.
+   425→    pub fn add_compile_unit(&mut self, source_file: &str, producer: &str) {
+   426→        self.source_file = source_file.to_string();
+   427→        self.producer = producer.to_string();
+   428→    }
+   429→
+   430→    /// Record a subprogram (function boundary).
+   431→    ///
+   432→    /// `start_offset` and `end_offset` are byte offsets relative to the
+   433→    /// beginning of the text section.
+   434→    pub fn add_subprogram(&mut self, name: &str, start_offset: u64, end_offset: u64) {
+   435→        self.subprograms.push(Subprogram {
+   436→            name: name.to_string(),
+   437→            start_offset,
+   438→            end_offset,
+   439→        });
+   440→    }
+   441→
+   442→    /// Record a local variable.
+   443→    ///
+   444→    /// `offset` is the stack offset (negative for below the frame pointer).
+   445→    /// `register` is the AArch64 register encoding number (0–31).
+   446→    pub fn add_variable(&mut self, name: &str, type_name: &str, offset: i32, register: u8) {
+   447→        self.variables.push(Variable {
+   448→            name: name.to_string(),
+   449→            type_name: type_name.to_string(),
+   450→            offset,
+   451→            register,
+   452→        });
+   453→    }
+   454→
+   455→    /// Record a line-number table entry.
+   456→    ///
+   457→    /// `offset` is the byte offset within the text section.
+   458→    /// `file` is a 1-based file index.
+   459→    /// `line` is a 1-based line number.
+   460→    /// `column` is a 0-based column number (0 = whole line).
+   461→    pub fn add_line_entry(&mut self, offset: u64, file: u32, line: u32, column: u32) {
+   462→        self.line_entries.push(LineEntry {
+   463→            offset,
+   464→            file,
+   465→            line,
+   466→            column,
+   467→        });
+   468→    }
+   469→
+   470→    /// Set the CIE for AArch64 (ARM64) targets.
+   471→    ///
+   472→    /// AArch64 calling convention: SP is register 31, LR is register 30,
+   473→    /// FP is register 29.  The prologue saves LR and FP on the stack.
+   474→    pub fn set_cie_aarch64(&mut self) {
+   475→        self.cie = Some(CommonInformationEntry {
+   476→            cfa_reg: 31,       // SP (x31)
+   477→            cfa_offset: 0,    // CFA = SP at function entry
+   478→            saved_regs: vec![
+   479→                SavedRegister { reg: 29, cfa_offset: -16 }, // FP (x29) at CFA-16
+   480→                SavedRegister { reg: 30, cfa_offset: -8 },  // LR (x30) at CFA-8
+   481→            ],
+   482→            code_alignment_factor: 4, // 4-byte instructions
+   483→            data_alignment_factor: -8, // 8-byte stack slots, negative for grows-down
+   484→            return_address_reg: 30,   // LR (x30)
+   485→        });
+   486→    }
+   487→
+   488→    /// Set the CIE for x86_64 targets.
+   489→    ///
+   490→    /// x86_64 calling convention: RSP is register 7, RBP is register 6.
+   491→    /// The prologue pushes RBP and saves RSP-based CFA.
+   492→    pub fn set_cie_x86_64(&mut self) {
+   493→        self.cie = Some(CommonInformationEntry {
+   494→            cfa_reg: 7,        // RSP
+   495→            cfa_offset: 8,    // CFA = RSP + 8 (return address on stack)
+   496→            saved_regs: vec![
+   497→                SavedRegister { reg: 6, cfa_offset: -16 }, // RBP at CFA-16
+   498→            ],
+   499→            code_alignment_factor: 1, // variable-length instructions
+   500→            data_alignment_factor: -8,
+   501→            return_address_reg: 16,   // RIP (return address)
+   502→        });
+   503→    }
+   504→
+   505→    /// Set the CIE for RISC-V 64 targets.
+   506→    ///
+   507→    /// RISC-V calling convention: SP is register 2, RA is register 1,
+   508→    /// FP (s0) is register 8.  The prologue saves RA and s0 on the stack.
+   509→    pub fn set_cie_riscv64(&mut self) {
+   510→        self.cie = Some(CommonInformationEntry {
+   511→            cfa_reg: 2,        // SP (x2)
+   512→            cfa_offset: 0,    // CFA = SP at function entry
+   513→            saved_regs: vec![
+   514→                SavedRegister { reg: 1, cfa_offset: -8 },  // RA (x1) at CFA-8
+   515→                SavedRegister { reg: 8, cfa_offset: -16 }, // s0/fp (x8) at CFA-16
+   516→            ],
+   517→            code_alignment_factor: 2, // 2-byte minimum instruction length
+   518→            data_alignment_factor: -8,
+   519→            return_address_reg: 1,    // RA (x1)
+   520→        });
+   521→    }
+   522→
+   523→    /// Set the CIE for ARM32 targets.
+   524→    ///
+   525→    /// ARM32 calling convention: SP is register 13, LR is register 14,
+   526→    /// FP is register 11.  The prologue pushes LR and FP.
+   527→    pub fn set_cie_arm32(&mut self) {
+   528→        self.cie = Some(CommonInformationEntry {
+   529→            cfa_reg: 13,       // SP (r13)
+   530→            cfa_offset: 0,    // CFA = SP at function entry
+   531→            saved_regs: vec![
+   532→                SavedRegister { reg: 11, cfa_offset: -8 }, // FP (r11) at CFA-8
+   533→                SavedRegister { reg: 14, cfa_offset: -4 }, // LR (r14) at CFA-4
+   534→            ],
+   535→            code_alignment_factor: 2, // 2-byte instructions (Thumb) or 4 (ARM)
+   536→            data_alignment_factor: -4, // 4-byte stack slots
+   537→            return_address_reg: 14,   // LR (r14)
+   538→        });
+   539→    }
+   540→
+   541→    /// Set the CIE for MIPS64 targets.
+   542→    pub fn set_cie_mips64(&mut self) {
+   543→        self.cie = Some(CommonInformationEntry {
+   544→            cfa_reg: 29,       // SP ($sp)
+   545→            cfa_offset: 0,
+   546→            saved_regs: vec![
+   547→                SavedRegister { reg: 31, cfa_offset: -8 }, // RA ($ra) at CFA-8
+   548→                SavedRegister { reg: 30, cfa_offset: -16 }, // FP ($fp) at CFA-16
+   549→            ],
+   550→            code_alignment_factor: 4,
+   551→            data_alignment_factor: -8,
+   552→            return_address_reg: 31, // RA ($ra)
+   553→        });
+   554→    }
+   555→
+   556→    /// Set the CIE for PPC64 targets.
+   557→    pub fn set_cie_ppc64(&mut self) {
+   558→        self.cie = Some(CommonInformationEntry {
+   559→            cfa_reg: 1,        // R1 (SP)
+   560→            cfa_offset: 0,
+   561→            saved_regs: vec![
+   562→                SavedRegister { reg: 65, cfa_offset: -8 }, // LR (saved in LR save word)
+   563→            ],
+   564→            code_alignment_factor: 4,
+   565→            data_alignment_factor: -8,
+   566→            return_address_reg: 65, // LR
+   567→        });
+   568→    }
+   569→
+   570→    /// Set the CIE for LoongArch64 targets.
+   571→    pub fn set_cie_loongarch64(&mut self) {
+   572→        self.cie = Some(CommonInformationEntry {
+   573→            cfa_reg: 3,        // $sp (r3)
+   574→            cfa_offset: 0,
+   575→            saved_regs: vec![
+   576→                SavedRegister { reg: 1, cfa_offset: -8 },  // $ra (r1) at CFA-8
+   577→                SavedRegister { reg: 22, cfa_offset: -16 }, // $fp (r22) at CFA-16
+   578→            ],
+   579→            code_alignment_factor: 4,
+   580→            data_alignment_factor: -8,
+   581→            return_address_reg: 1, // $ra (r1)
+   582→        });
+   583→    }
+   584→
+   585→    /// Set the CIE for a specific backend using the `BackendKind` enum.
+   586→    ///
+   587→    /// Automatically selects the correct CIE configuration based on the
+   588→    /// target architecture.
+   589→    pub fn set_cie_for_backend(&mut self, backend: crate::backend::BackendKind) {
+   590→        use crate::backend::BackendKind;
+   591→        match backend {
+   592→            BackendKind::AArch64 => self.set_cie_aarch64(),
+   593→            BackendKind::X86_64 => self.set_cie_x86_64(),
+   594→            BackendKind::RiscV64 => self.set_cie_riscv64(),
+   595→            BackendKind::Arm32 => self.set_cie_arm32(),
+   596→            BackendKind::Mips64 => self.set_cie_mips64(),
+   597→            BackendKind::PowerPC64 => self.set_cie_ppc64(),
+   598→            BackendKind::LoongArch64 => self.set_cie_loongarch64(),
+   599→            BackendKind::Wasm32 => {
+   600→                // Wasm32 doesn't use .debug_frame — stack unwinding is
+   601→                // handled by the Wasm runtime. Set a minimal CIE.
+   602→                self.cie = Some(CommonInformationEntry {
+   603→                    cfa_reg: 0,
+   604→                    cfa_offset: 0,
+   605→                    saved_regs: vec![],
+   606→                    code_alignment_factor: 1,
+   607→                    data_alignment_factor: -4,
+   608→                    return_address_reg: 0,
+   609→                });
+   610→            }
+   611→        }
+   612→    }
+   613→
+   614→    /// Set a custom CIE.
+   615→    pub fn set_cie(&mut self, cie: CommonInformationEntry) {
+   616→        self.cie = Some(cie);
+   617→    }
+   618→
+   619→    /// Record a Frame Description Entry (FDE) for a function.
+   620→    ///
+   621→    /// `initial_location` is the byte offset of the function within the
+   622→    /// text section. `address_range` is the size of the function in bytes.
+   623→    pub fn add_fde(&mut self, _name: &str, initial_location: u64, address_range: u64) {
+   624→        self.fdes.push(FrameDescriptorEntry {
+   625→            initial_location,
+   626→            address_range,
+   627→        });
+   628→    }
+   629→
+   630→    /// Emit all four DWARF debug sections.
+   631→    ///
+   632→    /// Returns a [`DebugSections`] containing `.debug_abbrev`, `.debug_info`,
+   633→    /// `.debug_line`, and `.debug_frame`.
+   634→    pub fn emit_debug_sections(&self) -> DebugSections {
+   635→        let debug_abbrev = self.emit_debug_abbrev();
+   636→        let debug_line = self.emit_debug_line();
+   637→        let debug_info = self.emit_debug_info(&debug_abbrev, &debug_line);
+   638→        let debug_frame = self.emit_debug_frame();
+   639→        DebugSections {
+   640→            debug_abbrev,
+   641→            debug_info,
+   642→            debug_line,
+   643→            debug_frame,
+   644→        }
+   645→    }
+   646→
+   647→    // -----------------------------------------------------------------------
+   648→    // .debug_abbrev
+   649→    // -----------------------------------------------------------------------
+   650→
+   651→    /// Emit the `.debug_abbrev` section.
+   652→    ///
+   653→    /// Contains three abbreviation entries:
+   654→    /// - Abbrev 1: `DW_TAG_COMPILE_UNIT` (has children)
+   655→    ///   - `DW_AT_NAME` / `DW_FORM_STRING`
+   656→    ///   - `DW_AT_LANGUAGE` / `DW_FORM_DATA2`
+   657→    ///   - `DW_AT_PRODUCER` / `DW_FORM_STRING`
+   658→    ///   - `DW_AT_LOW_PC` / `DW_FORM_ADDR`
+   659→    ///   - `DW_AT_HIGH_PC` / `DW_FORM_DATA4`
+   660→    ///   - `DW_AT_STMT_LIST` / `DW_FORM_SEC_OFFSET`
+   661→    ///
+   662→    /// - Abbrev 2: `DW_TAG_SUBPROGRAM` (has children)
+   663→    ///   - `DW_AT_NAME` / `DW_FORM_STRING`
+   664→    ///   - `DW_AT_LOW_PC` / `DW_FORM_ADDR`
+   665→    ///   - `DW_AT_HIGH_PC` / `DW_FORM_DATA4`
+   666→    ///
+   667→    /// - Abbrev 3: `DW_TAG_VARIABLE` (no children)
+   668→    ///   - `DW_AT_NAME` / `DW_FORM_STRING`
+   669→    ///   - `DW_AT_TYPE` / `DW_FORM_STRING`
+   670→    ///   - `DW_AT_LOCATION` / `DW_FORM_EXPRLOC`
+   671→    fn emit_debug_abbrev(&self) -> Vec<u8> {
+   672→        let mut buf = Vec::new();
+   673→
+   674→        // Abbrev 1: DW_TAG_COMPILE_UNIT
+   675→        encode_uleb128(&mut buf, 1); // abbreviation code
+   676→        encode_uleb128(&mut buf, DW_TAG_COMPILE_UNIT as u64);
+   677→        buf.push(DW_CHILDREN_YES);
+   678→        // DW_AT_NAME, DW_FORM_STRING
+   679→        encode_uleb128(&mut buf, DW_AT_NAME as u64);
+   680→        encode_uleb128(&mut buf, DW_FORM_STRING as u64);
+   681→        // DW_AT_LANGUAGE, DW_FORM_DATA2
+   682→        encode_uleb128(&mut buf, DW_AT_LANGUAGE as u64);
+   683→        encode_uleb128(&mut buf, DW_FORM_DATA2 as u64);
+   684→        // DW_AT_PRODUCER, DW_FORM_STRING
+   685→        encode_uleb128(&mut buf, DW_AT_PRODUCER as u64);
+   686→        encode_uleb128(&mut buf, DW_FORM_STRING as u64);
+   687→        // DW_AT_LOW_PC, DW_FORM_ADDR
+   688→        encode_uleb128(&mut buf, DW_AT_LOW_PC as u64);
+   689→        encode_uleb128(&mut buf, DW_FORM_ADDR as u64);
+   690→        // DW_AT_HIGH_PC, DW_FORM_DATA4
+   691→        encode_uleb128(&mut buf, DW_AT_HIGH_PC as u64);
+   692→        encode_uleb128(&mut buf, DW_FORM_DATA4 as u64);
+   693→        // DW_AT_STMT_LIST, DW_FORM_SEC_OFFSET
+   694→        encode_uleb128(&mut buf, DW_AT_STMT_LIST as u64);
+   695→        encode_uleb128(&mut buf, DW_FORM_SEC_OFFSET as u64);
+   696→        // Terminator
+   697→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   698→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   699→
+   700→        // Abbrev 2: DW_TAG_SUBPROGRAM
+   701→        encode_uleb128(&mut buf, 2);
+   702→        encode_uleb128(&mut buf, DW_TAG_SUBPROGRAM as u64);
+   703→        buf.push(DW_CHILDREN_YES);
+   704→        // DW_AT_NAME, DW_FORM_STRING
+   705→        encode_uleb128(&mut buf, DW_AT_NAME as u64);
+   706→        encode_uleb128(&mut buf, DW_FORM_STRING as u64);
+   707→        // DW_AT_LOW_PC, DW_FORM_ADDR
+   708→        encode_uleb128(&mut buf, DW_AT_LOW_PC as u64);
+   709→        encode_uleb128(&mut buf, DW_FORM_ADDR as u64);
+   710→        // DW_AT_HIGH_PC, DW_FORM_DATA4
+   711→        encode_uleb128(&mut buf, DW_AT_HIGH_PC as u64);
+   712→        encode_uleb128(&mut buf, DW_FORM_DATA4 as u64);
+   713→        // Terminator
+   714→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   715→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   716→
+   717→        // Abbrev 3: DW_TAG_VARIABLE
+   718→        encode_uleb128(&mut buf, 3);
+   719→        encode_uleb128(&mut buf, DW_TAG_VARIABLE as u64);
+   720→        buf.push(DW_CHILDREN_NO);
+   721→        // DW_AT_NAME, DW_FORM_STRING
+   722→        encode_uleb128(&mut buf, DW_AT_NAME as u64);
+   723→        encode_uleb128(&mut buf, DW_FORM_STRING as u64);
+   724→        // DW_AT_TYPE, DW_FORM_STRING (simplified: type name as string)
+   725→        encode_uleb128(&mut buf, DW_AT_TYPE as u64);
+   726→        encode_uleb128(&mut buf, DW_FORM_STRING as u64);
+   727→        // DW_AT_LOCATION, DW_FORM_EXPRLOC
+   728→        encode_uleb128(&mut buf, DW_AT_LOCATION as u64);
+   729→        encode_uleb128(&mut buf, DW_FORM_EXPRLOC as u64);
+   730→        // Terminator
+   731→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   732→        encode_uleb128(&mut buf, DW_FORM_NONE as u64);
+   733→
+   734→        // End of abbreviation table
+   735→        encode_uleb128(&mut buf, 0);
+   736→
+   737→        buf
+   738→    }
+   739→
+   740→    // -----------------------------------------------------------------------
+   741→    // .debug_info
+   742→    // -----------------------------------------------------------------------
+   743→
+   744→    /// Emit the `.debug_info` section.
+   745→    ///
+   746→    /// Contains a single compilation unit DIE with nested subprogram and
+   747→    /// variable DIEs.
+   748→    fn emit_debug_info(&self, _debug_abbrev: &[u8], _debug_line: &[u8]) -> Vec<u8> {
+   749→        let mut die_buf = Vec::new();
+   750→
+   751→        // -- Compile Unit DIE (abbrev 1) --
+   752→        encode_uleb128(&mut die_buf, 1); // abbrev code
+   753→                                         // DW_AT_NAME (DW_FORM_STRING)
+   754→        write_null_string(&mut die_buf, &self.source_file);
+   755→        // DW_AT_LANGUAGE (DW_FORM_DATA2)
+   756→        die_buf.extend_from_slice(&DW_LANG_VUMA.to_le_bytes());
+   757→        // DW_AT_PRODUCER (DW_FORM_STRING)
+   758→        write_null_string(&mut die_buf, &self.producer);
+   759→        // DW_AT_LOW_PC (DW_FORM_ADDR)
+   760→        let cu_low_pc = self
+   761→            .subprograms
+   762→            .iter()
+   763→            .map(|s| s.start_offset)
+   764→            .min()
+   765→            .unwrap_or(0);
+   766→        write_address(&mut die_buf, cu_low_pc, self.address_size);
+   767→        // DW_AT_HIGH_PC (DW_FORM_DATA4) — offset from low_pc
+   768→        let cu_high_pc: u32 = self
+   769→            .subprograms
+   770→            .iter()
+   771→            .map(|s| s.end_offset)
+   772→            .max()
+   773→            .unwrap_or(0) as u32
+   774→            - cu_low_pc as u32;
+   775→        die_buf.extend_from_slice(&cu_high_pc.to_le_bytes());
+   776→        // DW_AT_STMT_LIST (DW_FORM_SEC_OFFSET) — offset into .debug_line
+   777→        die_buf.extend_from_slice(&0u32.to_le_bytes());
+   778→
+   779→        // -- Subprogram DIEs (abbrev 2) --
+   780→        for sub in &self.subprograms {
+   781→            encode_uleb128(&mut die_buf, 2); // abbrev code
+   782→                                             // DW_AT_NAME (DW_FORM_STRING)
+   783→            write_null_string(&mut die_buf, &sub.name);
+   784→            // DW_AT_LOW_PC (DW_FORM_ADDR)
+   785→            write_address(&mut die_buf, sub.start_offset, self.address_size);
+   786→            // DW_AT_HIGH_PC (DW_FORM_DATA4) — offset from low_pc
+   787→            let size = (sub.end_offset - sub.start_offset) as u32;
+   788→            die_buf.extend_from_slice(&size.to_le_bytes());
+   789→
+   790→            // -- Variable DIEs (abbrev 3) — nested inside subprogram --
+   791→            for var in &self.variables {
+   792→                encode_uleb128(&mut die_buf, 3); // abbrev code
+   793→                                                 // DW_AT_NAME (DW_FORM_STRING)
+   794→                write_null_string(&mut die_buf, &var.name);
+   795→                // DW_AT_TYPE (DW_FORM_STRING)
+   796→                write_null_string(&mut die_buf, &var.type_name);
+   797→                // DW_AT_LOCATION (DW_FORM_EXPRLOC)
+   798→                // DW_OP_fbreg <offset>  =  0x91 + signed LEB128
+   799→                let expr = build_fbreg_expr(var.offset);
+   800→                encode_uleb128(&mut die_buf, expr.len() as u64);
+   801→                die_buf.extend_from_slice(&expr);
+   802→            }
+   803→
+   804→            // Null terminator for subprogram children
+   805→            encode_uleb128(&mut die_buf, 0);
+   806→        }
+   807→
+   808→        // Null terminator for compile_unit children
+   809→        encode_uleb128(&mut die_buf, 0);
+   810→
+   811→        // Now build the full .debug_info section with the compilation unit
+   812→        // header.
+   813→        //
+   814→        // DWARF v4 .debug_info header:
+   815→        //   unit_length       : 4 bytes
+   816→        //   version           : 2 bytes (4)
+   817→        //   debug_abbrev_offset: 4 bytes
+   818→        //   address_size      : 1 byte
+   819→        let mut buf = Vec::new();
+   820→
+   821→        let unit_length = (die_buf.len() as u32)
+   822→            // header fields after the unit_length itself:
+   823→            + 2  // version
+   824→            + 4  // debug_abbrev_offset
+   825→            + 1; // address_size
+   826→        buf.extend_from_slice(&unit_length.to_le_bytes());
+   827→        // Version
+   828→        buf.extend_from_slice(&DWARF_VERSION.to_le_bytes());
+   829→        // Debug abbrev offset (always 0 — we have a single abbrev table)
+   830→        buf.extend_from_slice(&0u32.to_le_bytes());
+   831→        // Address size
+   832→        buf.push(self.address_size);
+   833→
+   834→        // DIE data
+   835→        buf.extend_from_slice(&die_buf);
+   836→
+   837→        buf
+   838→    }
+   839→
+   840→    // -----------------------------------------------------------------------
+   841→    // .debug_line
+   842→    // -----------------------------------------------------------------------
+   843→
+   844→    /// Emit the `.debug_line` section containing a DWARF v4 line-number program.
+   845→    fn emit_debug_line(&self) -> Vec<u8> {
+   846→        let mut program = Vec::new();
+   847→
+   848→        // Sort line entries by offset for a well-formed program.
+   849→        let mut entries = self.line_entries.clone();
+   850→        entries.sort_by_key(|e| e.offset);
+   851→
+   852→        // Default_is_stmt: true (beginning of a statement)
+   853→        let default_is_stmt: u8 = 1;
+   854→        // Line base: -5 (standard DWARF range)
+   855→        let line_base: i8 = -5;
+   856→        // Line range: 14 (standard DWARF value)
+   857→        let line_range: u8 = 14;
+   858→        // Opcode base: 13 (standard DWARF value)
+   859→        let opcode_base: u8 = 13;
+   860→        // Standard opcode lengths for opcodes 1..12
+   861→        let standard_opcode_lengths: [u8; 12] = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
+   862→        // Minimum instruction length: target-dependent
+   863→        let min_inst_length = self.min_inst_length;
+   864→
+   865→        // -- Build line program opcodes --
+   866→        let mut current_line: i32 = 1;
+   867→        let mut current_file: u32 = 1;
+   868→        let mut current_offset: u64 = 0;
+   869→
+   870→        for entry in &entries {
+   871→            // Set file if different
+   872→            if entry.file != current_file {
+   873→                program.push(DW_LNS_SET_FILE);
+   874→                encode_uleb128(&mut program, entry.file as u64);
+   875→                current_file = entry.file;
+   876→            }
+   877→
+   878→            // Advance line if different
+   879→            let line_diff = (entry.line as i32) - current_line;
+   880→            if line_diff != 0 {
+   881→                program.push(DW_LNS_ADVANCE_LINE);
+   882→                encode_sleb128(&mut program, i64::from(line_diff));
+   883→                current_line = entry.line as i32;
+   884→            }
+   885→
+   886→            // Advance PC
+   887→            if entry.offset > current_offset {
+   888→                let addr_advance = entry.offset - current_offset;
+   889→                // DW_LNS_ADVANCE_PC advances by the operand * min_inst_length
+   890→                let op_advance = addr_advance / (min_inst_length as u64);
+   891→                if op_advance > 0 {
+   892→                    program.push(DW_LNS_ADVANCE_PC);
+   893→                    encode_uleb128(&mut program, op_advance);
+   894→                }
+   895→                current_offset = entry.offset;
+   896→            }
+   897→
+   898→            // Copy current row
+   899→            program.push(DW_LNS_COPY);
+   900→        }
+   901→
+   902→        // End sequence: advance PC to end and emit DW_LNE_END_SEQUENCE
+   903→        let end_addr = entries.last().map(|e| e.end_offset()).unwrap_or(0);
+   904→        if end_addr > current_offset {
+   905→            let op_advance = (end_addr - current_offset) / (min_inst_length as u64);
+   906→            if op_advance > 0 {
+   907→                program.push(DW_LNS_ADVANCE_PC);
+   908→                encode_uleb128(&mut program, op_advance);
+   909→            }
+   910→        }
+   911→        // DW_LNE_END_SEQUENCE: extended opcode
+   912→        let ext_opcode_bytes = [DW_LNE_END_SEQUENCE];
+   913→        encode_uleb128(&mut program, (ext_opcode_bytes.len() as u64) + 1); // length (includes sub-opcode)
+   914→        program.push(DW_LNE_END_SEQUENCE);
+   915→
+   916→        // -- Build DWARF v4 directory and file tables --
+   917→        //
+   918→        // DWARF v4 uses a simple null-terminated list format:
+   919→        //   include_directories: sequence of null-terminated strings,
+   920→        //       terminated by a single null byte (empty string).
+   921→        //   file_names: sequence of entries, each containing:
+   922→        //       name (null-terminated string),
+   923→        //       directory index (ULEB128),
+   924→        //       time of last modification (ULEB128),
+   925→        //       length in bytes (ULEB128),
+   926→        //     terminated by a single null byte.
+   927→
+   928→        let directory_table = b".\0"; // one directory: "."
+   929→
+   930→        let mut file_table = Vec::new();
+   931→        // File entry: name, dir_index, time, size
+   932→        file_table.extend_from_slice(self.source_file.as_bytes());
+   933→        file_table.push(0); // null-terminated name
+   934→        encode_uleb128(&mut file_table, 0); // directory index 0
+   935→        encode_uleb128(&mut file_table, 0); // time (unknown)
+   936→        encode_uleb128(&mut file_table, 0); // size (unknown)
+   937→
+   938→        // -- Assemble the DWARF v4 line number program header --
+   939→        let mut header = Vec::new();
+   940→
+   941→        // Version (2 bytes)
+   942→        header.extend_from_slice(&DWARF_VERSION.to_le_bytes());
+   943→
+   944→        // Header length — will be filled after we know the size
+   945→        let header_before_length_field = header.len();
+   946→        // Placeholder for 4-byte header length
+   947→        header.extend_from_slice(&0u32.to_le_bytes());
+   948→
+   949→        // Minimum instruction length
+   950→        header.push(min_inst_length);
+   951→        // Default is_stmt
+   952→        header.push(default_is_stmt);
+   953→        // Line base
+   954→        header.push(line_base as u8);
+   955→        // Line range
+   956→        header.push(line_range);
+   957→        // Opcode base
+   958→        header.push(opcode_base);
+   959→        // Standard opcode lengths
+   960→        header.extend_from_slice(&standard_opcode_lengths);
+   961→
+   962→        // Include directories (DWARF v4 format)
+   963→        header.extend_from_slice(directory_table);
+   964→        header.push(0); // terminator (empty string)
+   965→
+   966→        // File names (DWARF v4 format)
+   967→        header.extend_from_slice(&file_table);
+   968→        header.push(0); // terminator (empty string = null byte)
+   969→
+   970→        // Fix up header_length (bytes after the header_length field itself)
+   971→        let header_length = (header.len() - header_before_length_field - 4) as u32;
+   972→        let hl_offset = header_before_length_field;
+   973→        header[hl_offset..hl_offset + 4].copy_from_slice(&header_length.to_le_bytes());
+   974→
+   975→        // -- Assemble full .debug_line section --
+   976→        let mut buf = Vec::new();
+   977→
+   978→        // Unit length (4 bytes) — total length of the rest of the unit
+   979→        let unit_length = (header.len() + program.len()) as u32;
+   980→        buf.extend_from_slice(&unit_length.to_le_bytes());
+   981→        buf.extend_from_slice(&header);
+   982→        buf.extend_from_slice(&program);
+   983→
+   984→        buf
+   985→    }
+   986→
+   987→    // -----------------------------------------------------------------------
+   988→    // .debug_frame
+   989→    // -----------------------------------------------------------------------
+   990→
+   991→    /// Emit the `.debug_frame` section containing a CIE and FDEs.
+   992→    ///
+   993→    /// The `.debug_frame` section describes how to unwind the stack at every
+   994→    /// point in the program.  It consists of:
+   995→    ///
+   996→    /// 1. A **Common Information Entry (CIE)** that describes the prologue
+   997→    ///    pattern shared by all functions: which register is the CFA base,
+   998→    ///    which registers are saved, and the alignment factors.
+   999→    ///
+  1000→    /// 2. One **Frame Description Entry (FDE)** per function, referencing the
+  1001→    ///    CIE and specifying the function's address range.
+  1002→    ///
+  1003→    /// If no CIE has been configured (via `set_cie_aarch64`, etc.), this
+  1004→    /// method returns an empty section.
+  1005→    fn emit_debug_frame(&self) -> Vec<u8> {
+  1006→        let cie_ref = match &self.cie {
+  1007→            Some(c) => c,
+  1008→            None => return Vec::new(),
+  1009→        };
+  1010→
+  1011→        let mut buf = Vec::new();
+  1012→
+  1013→        // ---- CIE (Common Information Entry) ----
+  1014→        //
+  1015→        // Format (DWARF v4, .debug_frame):
+  1016→        //   length            : 4 bytes (32-bit DWARF) — length of remaining CIE data
+  1017→        //   CIE_id            : 4 bytes (0xFFFFFFFF)
+  1018→        //   version           : 1 byte  (1 for DWARF v4 CFI)
+  1019→        //   augmentation      : null-terminated string ("")
+  1020→        //   address_size      : 1 byte  (not in DWARF v2; present in v4)
+  1021→        //   segment_size      : 1 byte  (not in DWARF v2; present in v4)
+  1022→        //   code_alignment    : ULEB128
+  1023→        //   data_alignment    : SLEB128
+  1024→        //   return_address_reg: ULEB128
+  1025→        //   initial_instructions: CFI instructions
+  1026→
+  1027→        let mut cie_body = Vec::new();
+  1028→
+  1029→        // Version
+  1030→        cie_body.push(DW_CIE_VERSION);
+  1031→
+  1032→        // Augmentation string (empty)
+  1033→        cie_body.push(0);
+  1034→
+  1035→        // Address size (DWARF v4 .debug_frame)
+  1036→        cie_body.push(self.address_size);
+  1037→
+  1038→        // Segment selector size (0)
+  1039→        cie_body.push(0);
+  1040→
+  1041→        // Code alignment factor
+  1042→        encode_uleb128(&mut cie_body, cie_ref.code_alignment_factor as u64);
+  1043→
+  1044→        // Data alignment factor
+  1045→        encode_sleb128(&mut cie_body, cie_ref.data_alignment_factor as i64);
+  1046→
+  1047→        // Return address register
+  1048→        encode_uleb128(&mut cie_body, cie_ref.return_address_reg as u64);
+  1049→
+  1050→        // Initial CFI instructions for the CIE:
+  1051→        // DW_CFA_def_cfa: defines CFA = register + offset
+  1052→        cie_body.push(DW_CFA_DEF_CFA);
+  1053→        encode_uleb128(&mut cie_body, cie_ref.cfa_reg as u64);
+  1054→        encode_uleb128(&mut cie_body, cie_ref.cfa_offset as u64);
+  1055→
+  1056→        // DW_CFA_offset for each saved register
+  1057→        for saved in &cie_ref.saved_regs {
+  1058→            // DW_CFA_offset encodes: (opcode | reg) + ULEB128(offset / data_alignment)
+  1059→            // The opcode is (DW_CFA_OFFSET | (reg & 0x3F))
+  1060→            // The offset factored by data_alignment_factor.
+  1061→            // Since data_alignment_factor is negative (e.g., -8), we need
+  1062→            // offset / |data_alignment_factor| as a positive ULEB128.
+  1063→            let abs_data_align = cie_ref.data_alignment_factor.unsigned_abs() as i32;
+  1064→            let factored_offset = if abs_data_align != 0 {
+  1065→                saved.cfa_offset.abs() / abs_data_align
+  1066→            } else {
+  1067→                saved.cfa_offset.abs()
+  1068→            };
+  1069→            let reg_low6 = saved.reg & 0x3F;
+  1070→            cie_body.push(DW_CFA_OFFSET | reg_low6);
+  1071→            encode_uleb128(&mut cie_body, factored_offset as u64);
+  1072→        }
+  1073→
+  1074→        // Compute CIE length: everything after the length field itself
+  1075→        // length (4) + CIE_id (4) are not counted in the length field
+  1076→        let cie_length = (cie_body.len() + 4) as u32; // +4 for CIE_id
+  1077→
+  1078→        // Write CIE to output
+  1079→        buf.extend_from_slice(&cie_length.to_le_bytes());
+  1080→        // CIE_id = 0xFFFFFFFF (32-bit DWARF)
+  1081→        buf.extend_from_slice(&CIE_ID_32.to_le_bytes());
+  1082→        // CIE body
+  1083→        buf.extend_from_slice(&cie_body);
+  1084→
+  1085→        // ---- FDEs (Frame Description Entries) ----
+  1086→        //
+  1087→        // Format (DWARF v4, .debug_frame):
+  1088→        //   length            : 4 bytes
+  1089→        //   CIE_pointer       : 4 bytes (offset from start of .debug_frame to CIE)
+  1090→        //   initial_location  : address_size bytes
+  1091→        //   address_range     : address_size bytes
+  1092→        //   instructions      : CFI instructions (if any per-function overrides)
+  1093→
+  1094→        let cie_offset_from_start: u32 = 0; // CIE is the first entry
+  1095→
+  1096→        for fde in &self.fdes {
+  1097→            let mut fde_body = Vec::new();
+  1098→
+  1099→            // CIE pointer (offset to the CIE from the beginning of .debug_frame)
+  1100→            fde_body.extend_from_slice(&cie_offset_from_start.to_le_bytes());
+  1101→
+  1102→            // Initial location (address-size dependent)
+  1103→            write_address(&mut fde_body, fde.initial_location, self.address_size);
+  1104→
+  1105→            // Address range (address-size dependent)
+  1106→            write_address(&mut fde_body, fde.address_range, self.address_size);
+  1107→
+  1108→            // Per-function CFI instructions (none for now — the CIE covers
+  1109→            // the prologue pattern and GDB/LLDB can infer the rest from
+  1110→            // the default CFA rule). Future work: emit DW_CFA_advance_loc
+  1111→            // and DW_CFA_def_cfa_offset for dynamic frame size changes
+  1112→            // within the function body.
+  1113→
+  1114→            // Compute FDE length: everything after the length field itself
+  1115→            // length (4) not counted
+  1116→            let fde_length = fde_body.len() as u32;
+  1117→
+  1118→            // Write FDE to output
+  1119→            buf.extend_from_slice(&fde_length.to_le_bytes());
+  1120→            buf.extend_from_slice(&fde_body);
+  1121→        }
+  1122→
+  1123→        buf
+  1124→    }
+  1125→}
+  1126→
+  1127→// ---------------------------------------------------------------------------
+  1128→// Encoding helpers
+  1129→// ---------------------------------------------------------------------------
+  1130→
+  1131→impl Default for DwarfBuilder {
+  1132→    fn default() -> Self {
+  1133→        Self::new()
+  1134→    }
+  1135→}
+  1136→
+  1137→/// Encode an unsigned LEB128 value into `buf`.
+  1138→fn encode_uleb128(buf: &mut Vec<u8>, mut value: u64) {
+  1139→    loop {
+  1140→        let mut byte = (value & 0x7F) as u8;
+  1141→        value >>= 7;
+  1142→        if value != 0 {
+  1143→            byte |= 0x80;
+  1144→        }
+  1145→        buf.push(byte);
+  1146→        if value == 0 {
+  1147→            break;
+  1148→        }
+  1149→    }
+  1150→}
+  1151→
+  1152→/// Encode a signed LEB128 value into `buf`.
+  1153→fn encode_sleb128(buf: &mut Vec<u8>, mut value: i64) {
+  1154→    loop {
+  1155→        let mut byte = (value & 0x7F) as u8;
+  1156→        value >>= 7;
+  1157→        let sign_bit_set = (byte & 0x40) != 0;
+  1158→        let done = value == 0 || (value == -1 && sign_bit_set);
+  1159→        if !done {
+  1160→            byte |= 0x80;
+  1161→        }
+  1162→        buf.push(byte);
+  1163→        if done {
+  1164→            break;
+  1165→        }
+  1166→    }
+  1167→}
+  1168→
+  1169→/// Write a null-terminated string into `buf`.
+  1170→fn write_null_string(buf: &mut Vec<u8>, s: &str) {
+  1171→    buf.extend_from_slice(s.as_bytes());
+  1172→    buf.push(0);
+  1173→}
+  1174→
+  1175→/// Write an address value into `buf` with the given address size (4 or 8 bytes).
+  1176→fn write_address(buf: &mut Vec<u8>, addr: u64, address_size: u8) {
+  1177→    match address_size {
+  1178→        4 => buf.extend_from_slice(&(addr as u32).to_le_bytes()),
+  1179→        _ => buf.extend_from_slice(&addr.to_le_bytes()),
+  1180→    }
+  1181→}
+  1182→
+  1183→/// Build a `DW_OP_fbreg <offset>` expression.
+  1184→///
+  1185→/// `DW_OP_fbreg` (0x91) followed by a signed LEB128 offset.
+  1186→fn build_fbreg_expr(offset: i32) -> Vec<u8> {
+  1187→    let mut expr = vec![0x91]; // DW_OP_fbreg
+  1188→    encode_sleb128(&mut expr, offset as i64);
+  1189→    expr
+  1190→}
+  1191→
+  1192→// ---------------------------------------------------------------------------
+  1193→// LineEntry helper
+  1194→// ---------------------------------------------------------------------------
+  1195→
+  1196→impl LineEntry {
+  1197→    /// Compute a reasonable end-offset for this line entry.
+  1198→    ///
+  1199→    /// For the last entry, we use the offset + 4 (one instruction).
+  1200→    fn end_offset(&self) -> u64 {
+  1201→        self.offset + 4
+  1202→    }
+  1203→}
+  1204→
+  1205→// ---------------------------------------------------------------------------
+  1206→// ELF Integration
+  1207→// ---------------------------------------------------------------------------
+  1208→
+  1209→/// Section header type for DWARF debug info sections (progbits).
+  1210→const SHT_PROGBITS: u32 = 1;
+  1211→
+  1212→/// Append DWARF debug sections to an ELF binary.
+  1213→///
+  1214→/// Given an existing ELF binary and the debug sections, this function inserts
+  1215→/// the four debug sections (`.debug_abbrev`, `.debug_info`, `.debug_line`,
+  1216→/// `.debug_frame`) into the ELF, updates the section header table, and patches
+  1217→/// the section header string table and section count.
+  1218→///
+  1219→/// If `.debug_frame` is empty (no CIE configured), it is simply omitted from
+  1220→/// the ELF, keeping the binary compact.
+  1221→///
+  1222→/// This is a simplified integration that appends sections before the section
+  1223→/// headers. It assumes the input ELF was produced by `emit_elf` with
+  1224→/// section headers enabled.
+  1225→pub fn append_debug_sections_to_elf(elf: &mut Vec<u8>, debug: &DebugSections) {
+  1226→    // Parse the ELF header to find section header table location and count.
+  1227→    if elf.len() < 64 {
+  1228→        return;
+  1229→    }
+  1230→
+  1231→    let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap_or([0; 8]));
+  1232→    let e_shentsize = u16::from_le_bytes(elf[58..60].try_into().unwrap_or([0; 2])) as u64;
+  1233→    let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap_or([0; 2])) as usize;
+  1234→    let e_shstrndx = u16::from_le_bytes(elf[62..64].try_into().unwrap_or([0; 2])) as usize;
+  1235→
+  1236→    if e_shoff == 0 || e_shnum == 0 || e_shentsize == 0 {
+  1237→        return;
+  1238→    }
+  1239→
+  1240→    // Read the .shstrtab section to find its data.
+  1241→    let shstrtab_shdr_offset = e_shoff as usize + e_shstrndx * e_shentsize as usize;
+  1242→    if shstrtab_shdr_offset + 64 > elf.len() {
+  1243→        return;
+  1244→    }
+  1245→    let shstrtab_offset = u64::from_le_bytes(
+  1246→        elf[shstrtab_shdr_offset + 24..shstrtab_shdr_offset + 32]
+  1247→            .try_into()
+  1248→            .unwrap_or([0; 8]),
+  1249→    ) as usize;
+  1250→    let shstrtab_size = u64::from_le_bytes(
+  1251→        elf[shstrtab_shdr_offset + 32..shstrtab_shdr_offset + 40]
+  1252→            .try_into()
+  1253→            .unwrap_or([0; 8]),
+  1254→    ) as usize;
+  1255→
+  1256→    // Build new shstrtab with debug section names appended.
+  1257→    let mut new_shstrtab = elf[shstrtab_offset..shstrtab_offset + shstrtab_size].to_vec();
+  1258→
+  1259→    // Record name offsets
+  1260→    let debug_abbrev_name_off = new_shstrtab.len() as u32;
+  1261→    new_shstrtab.extend_from_slice(b".debug_abbrev\0");
+  1262→    let debug_info_name_off = new_shstrtab.len() as u32;
+  1263→    new_shstrtab.extend_from_slice(b".debug_info\0");
+  1264→    let debug_line_name_off = new_shstrtab.len() as u32;
+  1265→    new_shstrtab.extend_from_slice(b".debug_line\0");
+  1266→    let debug_frame_name_off = new_shstrtab.len() as u32;
+  1267→    new_shstrtab.extend_from_slice(b".debug_frame\0");
+  1268→
+  1269→    // The new sections will be appended right before the section header table.
+  1270→    let new_sections_start = e_shoff as usize;
+  1271→
+  1272→    // Compute aligned sizes for debug sections.
+  1273→    let debug_abbrev_aligned = align_up(debug.debug_abbrev.len() as u64, 8) as usize;
+  1274→    let debug_info_aligned = align_up(debug.debug_info.len() as u64, 8) as usize;
+  1275→    let debug_line_aligned = align_up(debug.debug_line.len() as u64, 8) as usize;
+  1276→    let debug_frame_aligned = align_up(debug.debug_frame.len() as u64, 8) as usize;
+  1277→    let new_shstrtab_aligned = align_up(new_shstrtab.len() as u64, 8) as usize;
+  1278→
+  1279→    // Count how many debug sections we'll add (debug_frame may be empty).
+  1280→    let include_debug_frame = !debug.debug_frame.is_empty();
+  1281→    let num_new_sections = if include_debug_frame { 4 } else { 3 };
+  1282→
+  1283→    // Build section data to insert.
+  1284→    let mut new_section_data = Vec::new();
+  1285→
+  1286→    let debug_abbrev_file_offset = new_sections_start + new_section_data.len();
+  1287→    new_section_data.extend_from_slice(&debug.debug_abbrev);
+  1288→    let pad = debug_abbrev_aligned - debug.debug_abbrev.len();
+  1289→    new_section_data.extend_from_slice(&vec![0u8; pad]);
+  1290→
+  1291→    let debug_info_file_offset = new_sections_start + new_section_data.len();
+  1292→    new_section_data.extend_from_slice(&debug.debug_info);
+  1293→    let pad = debug_info_aligned - debug.debug_info.len();
+  1294→    new_section_data.extend_from_slice(&vec![0u8; pad]);
+  1295→
+  1296→    let debug_line_file_offset = new_sections_start + new_section_data.len();
+  1297→    new_section_data.extend_from_slice(&debug.debug_line);
+  1298→    let pad = debug_line_aligned - debug.debug_line.len();
+  1299→    new_section_data.extend_from_slice(&vec![0u8; pad]);
+  1300→
+  1301→    let debug_frame_file_offset = if include_debug_frame {
+  1302→        let off = new_sections_start + new_section_data.len();
+  1303→        new_section_data.extend_from_slice(&debug.debug_frame);
+  1304→        let pad = debug_frame_aligned - debug.debug_frame.len();
+  1305→        new_section_data.extend_from_slice(&vec![0u8; pad]);
+  1306→        Some(off)
+  1307→    } else {
+  1308→        None
+  1309→    };
+  1310→
+  1311→    // Replace the old shstrtab with the new one.
+  1312→    let new_shstrtab_file_offset = new_sections_start + new_section_data.len();
+  1313→    new_section_data.extend_from_slice(&new_shstrtab);
+  1314→    let pad = new_shstrtab_aligned - new_shstrtab.len();
+  1315→    new_section_data.extend_from_slice(&vec![0u8; pad]);
+  1316→
+  1317→    // Now insert the new section data before the section headers.
+  1318→    let old_shdrs: Vec<u8> = elf.drain(e_shoff as usize..).collect();
+  1319→
+  1320→    // Insert debug section data.
+  1321→    elf.extend_from_slice(&new_section_data);
+  1322→
+  1323→    // Compute the new section header table offset.
+  1324→    let new_e_shoff = elf.len() as u64;
+  1325→
+  1326→    // Build new section headers: copy old ones, add debug section headers,
+  1327→    // and update the .shstrtab header.
+  1328→    let mut new_shdrs = old_shdrs;
+  1329→
+  1330→    // Update the .shstrtab section header to point to the new data.
+  1331→    let shstrtab_shdr_start = e_shstrndx * 64;
+  1332→    if shstrtab_shdr_start + 64 <= new_shdrs.len() {
+  1333→        // sh_offset (bytes 24-31)
+  1334→        new_shdrs[shstrtab_shdr_start + 24..shstrtab_shdr_start + 32]
+  1335→            .copy_from_slice(&new_shstrtab_file_offset.to_le_bytes());
+  1336→        // sh_size (bytes 32-39)
+  1337→        new_shdrs[shstrtab_shdr_start + 32..shstrtab_shdr_start + 40]
+  1338→            .copy_from_slice(&(new_shstrtab.len() as u64).to_le_bytes());
+  1339→    }
+  1340→
+  1341→    // Add section headers for the debug sections.
+  1342→    let new_num_shdrs = e_shnum + num_new_sections;
+  1343→
+  1344→    // .debug_abbrev section header
+  1345→    let mut sh = new_shdr(
+  1346→        SHT_PROGBITS,
+  1347→        0, // no flags
+  1348→        0, // no virtual address
+  1349→        debug_abbrev_file_offset as u64,
+  1350→        debug.debug_abbrev.len() as u64,
+  1351→        0,
+  1352→        0,
+  1353→        1,
+  1354→        0,
+  1355→    );
+  1356→    sh.name = debug_abbrev_name_off;
+  1357→    write_filled_shdr(&mut new_shdrs, &sh);
+  1358→
+  1359→    // .debug_info section header
+  1360→    let mut sh = new_shdr(
+  1361→        SHT_PROGBITS,
+  1362→        0,
+  1363→        0,
+  1364→        debug_info_file_offset as u64,
+  1365→        debug.debug_info.len() as u64,
+  1366→        0,
+  1367→        0,
+  1368→        1,
+  1369→        0,
+  1370→    );
+  1371→    sh.name = debug_info_name_off;
+  1372→    write_filled_shdr(&mut new_shdrs, &sh);
+  1373→
+  1374→    // .debug_line section header
+  1375→    let mut sh = new_shdr(
+  1376→        SHT_PROGBITS,
+  1377→        0,
+  1378→        0,
+  1379→        debug_line_file_offset as u64,
+  1380→        debug.debug_line.len() as u64,
+  1381→        0,
+  1382→        0,
+  1383→        1,
+  1384→        0,
+  1385→    );
+  1386→    sh.name = debug_line_name_off;
+  1387→    write_filled_shdr(&mut new_shdrs, &sh);
+  1388→
+  1389→    // .debug_frame section header (only if we have frame data)
+  1390→    if let Some(frame_offset) = debug_frame_file_offset {
+  1391→        let mut sh = new_shdr(
+  1392→            SHT_PROGBITS,
+  1393→            0,
+  1394→            0,
+  1395→            frame_offset as u64,
+  1396→            debug.debug_frame.len() as u64,
+  1397→            0,
+  1398→            0,
+  1399→            4, // debug_frame typically has 4-byte alignment
+  1400→            0,
+  1401→        );
+  1402→        sh.name = debug_frame_name_off;
+  1403→        write_filled_shdr(&mut new_shdrs, &sh);
+  1404→    }
+  1405→
+  1406→    // Append section headers.
+  1407→    elf.extend_from_slice(&new_shdrs);
+  1408→
+  1409→    // Update the ELF header: e_shoff and e_shnum.
+  1410→    elf[40..48].copy_from_slice(&new_e_shoff.to_le_bytes());
+  1411→    elf[60..62].copy_from_slice(&(new_num_shdrs as u16).to_le_bytes());
+  1412→    // e_shstrndx stays the same — the .shstrtab section index hasn't changed.
+  1413→}
+  1414→
+  1415→// ---------------------------------------------------------------------------
+  1416→// ELF helper structs (duplicated from emit.rs to keep dwarf.rs self-contained)
+  1417→// ---------------------------------------------------------------------------
+  1418→
+  1419→/// A filled-in section header, ready to be serialized.
+  1420→struct FilledShdr {
+  1421→    name: u32,
+  1422→    sh_type: u32,
+  1423→    sh_flags: u64,
+  1424→    sh_addr: u64,
+  1425→    sh_offset: u64,
+  1426→    sh_size: u64,
+  1427→    sh_link: u32,
+  1428→    sh_info: u32,
+  1429→    sh_addralign: u64,
+  1430→    sh_entsize: u64,
+  1431→}
+  1432→
+  1433→#[allow(clippy::too_many_arguments)]
+  1434→fn new_shdr(
+  1435→    sh_type: u32,
+  1436→    sh_flags: u64,
+  1437→    sh_addr: u64,
+  1438→    sh_offset: u64,
+  1439→    sh_size: u64,
+  1440→    sh_link: u32,
+  1441→    sh_info: u32,
+  1442→    sh_addralign: u64,
+  1443→    sh_entsize: u64,
+  1444→) -> FilledShdr {
+  1445→    FilledShdr {
+  1446→        name: 0,
+  1447→        sh_type,
+  1448→        sh_flags,
+  1449→        sh_addr,
+  1450→        sh_offset,
+  1451→        sh_size,
+  1452→        sh_link,
+  1453→        sh_info,
+  1454→        sh_addralign,
+  1455→        sh_entsize,
+  1456→    }
+  1457→}
+  1458→
+  1459→fn write_filled_shdr(buf: &mut Vec<u8>, sh: &FilledShdr) {
+  1460→    buf.extend_from_slice(&sh.name.to_le_bytes());
+  1461→    buf.extend_from_slice(&sh.sh_type.to_le_bytes());
+  1462→    buf.extend_from_slice(&sh.sh_flags.to_le_bytes());
+  1463→    buf.extend_from_slice(&sh.sh_addr.to_le_bytes());
+  1464→    buf.extend_from_slice(&sh.sh_offset.to_le_bytes());
+  1465→    buf.extend_from_slice(&sh.sh_size.to_le_bytes());
+  1466→    buf.extend_from_slice(&sh.sh_link.to_le_bytes());
+  1467→    buf.extend_from_slice(&sh.sh_info.to_le_bytes());
+  1468→    buf.extend_from_slice(&sh.sh_addralign.to_le_bytes());
+  1469→    buf.extend_from_slice(&sh.sh_entsize.to_le_bytes());
+  1470→}
+  1471→
+  1472→/// Round `value` up to the nearest multiple of `alignment`.
+  1473→fn align_up(value: u64, alignment: u64) -> u64 {
+  1474→    value.div_ceil(alignment) * alignment
+  1475→}
+  1476→
+  1477→// ---------------------------------------------------------------------------
+  1478→// ULEB128 / SLEB128 decoding helpers (for tests)
+  1479→// ---------------------------------------------------------------------------
+  1480→
+  1481→/// Decode a ULEB128 value from `buf` starting at `offset`.
+  1482→/// Returns (value, bytes_consumed).
+  1483→#[cfg(test)]
+  1484→fn decode_uleb128(buf: &[u8], offset: usize) -> (u64, usize) {
+  1485→    let mut value: u64 = 0;
+  1486→    let mut shift: u32 = 0;
+  1487→    let mut i = offset;
+  1488→    loop {
+  1489→        let byte = buf[i];
+  1490→        value |= ((byte & 0x7F) as u64) << shift;
+  1491→        shift += 7;
+  1492→        i += 1;
+  1493→        if (byte & 0x80) == 0 {
+  1494→            break;
+  1495→        }
+  1496→    }
+  1497→    (value, i - offset)
+  1498→}
+  1499→
+  1500→/// Decode a SLEB128 value from `buf` starting at `offset`.
+  1501→/// Returns (value, bytes_consumed).
+  1502→#[cfg(test)]
+  1503→fn decode_sleb128(buf: &[u8], offset: usize) -> (i64, usize) {
+  1504→    let mut value: i64 = 0;
+  1505→    let mut shift: u32 = 0;
+  1506→    let mut i = offset;
+  1507→    let mut byte: u8;
+  1508→    loop {
+  1509→        byte = buf[i];
+  1510→        value |= ((byte & 0x7F) as i64) << shift;
+  1511→        shift += 7;
+  1512→        i += 1;
+  1513→        if (byte & 0x80) == 0 {
+  1514→            break;
+  1515→        }
+  1516→    }
+  1517→    // Sign extend
+  1518→    if shift < 64 && (byte & 0x40) != 0 {
+  1519→        value |= !0 << shift;
+  1520→    }
+  1521→    (value, i - offset)
+  1522→}
+  1523→
+  1524→// ---------------------------------------------------------------------------
+  1525→// Tests
+  1526→// ---------------------------------------------------------------------------
+  1527→
+  1528→#[cfg(test)]
+  1529→mod tests {
+  1530→    use super::*;
+  1531→
+  1532→    /// Helper: create a DwarfBuilder with a compile unit and one subprogram.
+  1533→    fn make_simple_builder() -> DwarfBuilder {
+  1534→        let mut db = DwarfBuilder::new();
+  1535→        db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+  1536→        db.add_subprogram("main", 0, 64);
+  1537→        db
+  1538→    }
+  1539→
+  1540→    // -- Test 1: Debug abbrev has correct abbreviation codes --
+  1541→    #[test]
+  1542→    fn test_debug_abbrev_abbrev_codes() {
+  1543→        let db = make_simple_builder();
+  1544→        let sections = db.emit_debug_sections();
+  1545→        let abbrev = &sections.debug_abbrev;
+  1546→
+  1547→        // First abbreviation code should be 1
+  1548→        let (code1, n1) = decode_uleb128(abbrev, 0);
+  1549→        assert_eq!(code1, 1, "first abbreviation code should be 1");
+  1550→        // It should be DW_TAG_COMPILE_UNIT
+  1551→        let (tag1, _) = decode_uleb128(abbrev, n1);
+  1552→        assert_eq!(
+  1553→            tag1, DW_TAG_COMPILE_UNIT as u64,
+  1554→            "first tag should be DW_TAG_COMPILE_UNIT"
+  1555→        );
+  1556→    }
+  1557→
+  1558→    // -- Test 2: Debug info has correct DWARF version --
+  1559→    #[test]
+  1560→    fn test_debug_info_version() {
+  1561→        let db = make_simple_builder();
+  1562→        let sections = db.emit_debug_sections();
+  1563→        let info = &sections.debug_info;
+  1564→
+  1565→        // .debug_info starts with: unit_length (4 bytes) + version (2 bytes)
+  1566→        assert!(info.len() > 6, "debug_info must have at least 6 bytes");
+  1567→        let version = u16::from_le_bytes([info[4], info[5]]);
+  1568→        assert_eq!(version, DWARF_VERSION, "DWARF version should be 4");
+  1569→    }
+  1570→
+  1571→    // -- Test 3: Debug info compilation unit is present --
+  1572→    #[test]
+  1573→    fn test_debug_info_compile_unit_present() {
+  1574→        let db = make_simple_builder();
+  1575→        let sections = db.emit_debug_sections();
+  1576→        let info = &sections.debug_info;
+  1577→
+  1578→        // DWARF v4 header: unit_length(4) + version(2) + debug_abbrev_offset(4) + address_size(1) = 11 bytes
+  1579→        let header_size = 11;
+  1580→        assert!(
+  1581→            info.len() > header_size,
+  1582→            "debug_info must have DIEs after header"
+  1583→        );
+  1584→        let (abbrev_code, _) = decode_uleb128(info, header_size);
+  1585→        assert_eq!(
+  1586→            abbrev_code, 1,
+  1587→            "first DIE should be DW_TAG_COMPILE_UNIT (abbrev 1)"
+  1588→        );
+  1589→    }
+  1590→
+  1591→    // -- Test 4: Subprogram entries are correct --
+  1592→    #[test]
+  1593→    fn test_subprogram_entries() {
+  1594→        let mut db = DwarfBuilder::new();
+  1595→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1596→        db.add_subprogram("foo", 0, 32);
+  1597→        db.add_subprogram("bar", 32, 96);
+  1598→        let sections = db.emit_debug_sections();
+  1599→        let info = &sections.debug_info;
+  1600→
+  1601→        // Check that both function names appear in the debug_info section.
+  1602→        let info_str = String::from_utf8_lossy(info);
+  1603→        assert!(info_str.contains("foo"), "debug_info should contain 'foo'");
+  1604→        assert!(info_str.contains("bar"), "debug_info should contain 'bar'");
+  1605→    }
+  1606→
+  1607→    // -- Test 5: Debug line has correct DWARF version --
+  1608→    #[test]
+  1609→    fn test_debug_line_version() {
+  1610→        let mut db = DwarfBuilder::new();
+  1611→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1612→        db.add_line_entry(0, 1, 1, 0);
+  1613→        let sections = db.emit_debug_sections();
+  1614→        let line = &sections.debug_line;
+  1615→
+  1616→        // .debug_line starts with: unit_length (4 bytes) + version (2 bytes)
+  1617→        assert!(line.len() > 6, "debug_line must have at least 6 bytes");
+  1618→        let version = u16::from_le_bytes([line[4], line[5]]);
+  1619→        assert_eq!(version, DWARF_VERSION, "line program version should be 4");
+  1620→    }
+  1621→
+  1622→    // -- Test 6: Line number program is well-formed (has DW_LNE_END_SEQUENCE) --
+  1623→    #[test]
+  1624→    fn test_line_program_end_sequence() {
+  1625→        let mut db = DwarfBuilder::new();
+  1626→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1627→        db.add_line_entry(0, 1, 1, 0);
+  1628→        db.add_line_entry(8, 1, 2, 0);
+  1629→        let sections = db.emit_debug_sections();
+  1630→        let line = &sections.debug_line;
+  1631→
+  1632→        // The line program must end with DW_LNE_END_SEQUENCE.
+  1633→        // Search for the extended opcode from the end.
+  1634→        let mut found_end_seq = false;
+  1635→        for i in (0..line.len()).rev() {
+  1636→            if line[i] == DW_LNE_END_SEQUENCE {
+  1637→                // Check that the byte before is the length of the extended opcode (1)
+  1638→                if i > 0 {
+  1639→                    let (len, _) = decode_uleb128(line, i - 1);
+  1640→                    // The length could be encoded as a single byte
+  1641→                    // The DW_LNE_END_SEQUENCE takes 1 byte, so length = 1
+  1642→                    if len == 1 {
+  1643→                        found_end_seq = true;
+  1644→                        break;
+  1645→                    }
+  1646→                }
+  1647→            }
+  1648→        }
+  1649→        assert!(
+  1650→            found_end_seq,
+  1651→            "line program must contain DW_LNE_END_SEQUENCE"
+  1652→        );
+  1653→    }
+  1654→
+  1655→    // -- Test 7: Line program contains DW_LNS_COPY opcodes --
+  1656→    #[test]
+  1657→    fn test_line_program_has_copy_opcodes() {
+  1658→        let mut db = DwarfBuilder::new();
+  1659→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1660→        db.add_line_entry(0, 1, 1, 0);
+  1661→        db.add_line_entry(8, 1, 2, 0);
+  1662→        let sections = db.emit_debug_sections();
+  1663→        let line = &sections.debug_line;
+  1664→
+  1665→        // Search for DW_LNS_COPY opcode in the line program.
+  1666→        assert!(
+  1667→            line.iter().any(|&b| b == DW_LNS_COPY),
+  1668→            "line program must contain DW_LNS_COPY opcodes"
+  1669→        );
+  1670→    }
+  1671→
+  1672→    // -- Test 8: Integration with ELF emission --
+  1673→    #[test]
+  1674→    fn test_elf_debug_section_integration() {
+  1675→        use crate::emit::{emit_elf, EmitConfig};
+  1676→        use crate::ir::{IRFunction, IRTerminator};
+  1677→
+  1678→        // Create a minimal function.
+  1679→        let mut func = IRFunction::new("main");
+  1680→        func.current_block().terminator = IRTerminator::Return(vec![]);
+  1681→
+  1682→        let config = EmitConfig::linux_elf();
+  1683→        let mut elf = emit_elf(&[func], &[], &config).unwrap();
+  1684→
+  1685→        // Build debug info.
+  1686→        let mut db = DwarfBuilder::new();
+  1687→        db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+  1688→        db.add_subprogram("main", 0, 32);
+  1689→        db.add_line_entry(0, 1, 1, 0);
+  1690→        db.set_cie_aarch64(); // Set CIE so .debug_frame is emitted
+  1691→        db.add_fde("main", 0, 32);
+  1692→        let sections = db.emit_debug_sections();
+  1693→
+  1694→        // Append debug sections to ELF.
+  1695→        append_debug_sections_to_elf(&mut elf, &sections);
+  1696→
+  1697→        // Verify ELF is still valid.
+  1698→        assert_eq!(
+  1699→            &elf[0..4],
+  1700→            &[0x7f, b'E', b'L', b'F'],
+  1701→            "ELF magic must be intact"
+  1702→        );
+  1703→        assert!(elf.len() > 64, "ELF must be larger than header");
+  1704→
+  1705→        // Verify section count increased (8 original + 4 debug = 12).
+  1706→        let e_shnum = u16::from_le_bytes([elf[60], elf[61]]);
+  1707→        assert_eq!(
+  1708→            e_shnum, 12,
+  1709→            "expected 12 section headers (8 original + 4 debug)"
+  1710→        );
+  1711→
+  1712→        // Verify debug section names are in the section header string table.
+  1713→        let elf_str = String::from_utf8_lossy(&elf);
+  1714→        assert!(
+  1715→            elf_str.contains(".debug_abbrev"),
+  1716→            "ELF must contain .debug_abbrev section name"
+  1717→        );
+  1718→        assert!(
+  1719→            elf_str.contains(".debug_info"),
+  1720→            "ELF must contain .debug_info section name"
+  1721→        );
+  1722→        assert!(
+  1723→            elf_str.contains(".debug_line"),
+  1724→            "ELF must contain .debug_line section name"
+  1725→        );
+  1726→        assert!(
+  1727→            elf_str.contains(".debug_frame"),
+  1728→            "ELF must contain .debug_frame section name"
+  1729→        );
+  1730→    }
+  1731→
+  1732→    // -- Test 9: Variable location expression (DW_OP_fbreg) --
+  1733→    #[test]
+  1734→    fn test_variable_location_expr() {
+  1735→        let expr = build_fbreg_expr(-8);
+  1736→        assert_eq!(expr[0], 0x91, "first byte should be DW_OP_fbreg");
+  1737→        let (offset, _) = decode_sleb128(&expr, 1);
+  1738→        assert_eq!(offset, -8, "fbreg offset should be -8");
+  1739→    }
+  1740→
+  1741→    // -- Test 10: ULEB128 / SLEB128 round-trip --
+  1742→    #[test]
+  1743→    fn test_leb128_roundtrip() {
+  1744→        // ULEB128
+  1745→        let mut buf = Vec::new();
+  1746→        encode_uleb128(&mut buf, 0);
+  1747→        assert_eq!(buf, vec![0]);
+  1748→
+  1749→        let mut buf = Vec::new();
+  1750→        encode_uleb128(&mut buf, 127);
+  1751→        assert_eq!(buf, vec![127]);
+  1752→
+  1753→        let mut buf = Vec::new();
+  1754→        encode_uleb128(&mut buf, 128);
+  1755→        assert_eq!(buf, vec![0x80, 0x01]);
+  1756→
+  1757→        let (val, n) = decode_uleb128(&[0x80, 0x01], 0);
+  1758→        assert_eq!(val, 128);
+  1759→        assert_eq!(n, 2);
+  1760→
+  1761→        // SLEB128
+  1762→        let mut buf = Vec::new();
+  1763→        encode_sleb128(&mut buf, -1);
+  1764→        let (val, _) = decode_sleb128(&buf, 0);
+  1765→        assert_eq!(val, -1);
+  1766→
+  1767→        let mut buf = Vec::new();
+  1768→        encode_sleb128(&mut buf, -128);
+  1769→        let (val, _) = decode_sleb128(&buf, 0);
+  1770→        assert_eq!(val, -128);
+  1771→
+  1772→        let mut buf = Vec::new();
+  1773→        encode_sleb128(&mut buf, 63);
+  1774→        let (val, _) = decode_sleb128(&buf, 0);
+  1775→        assert_eq!(val, 63);
+  1776→    }
+  1777→
+  1778→    // -- Test 11: Empty builder still produces valid sections --
+  1779→    #[test]
+  1780→    fn test_empty_builder() {
+  1781→        let db = DwarfBuilder::new();
+  1782→        let sections = db.emit_debug_sections();
+  1783→        // All sections should be non-empty even with no data recorded.
+  1784→        assert!(
+  1785→            !sections.debug_abbrev.is_empty(),
+  1786→            "debug_abbrev should not be empty"
+  1787→        );
+  1788→        assert!(
+  1789→            !sections.debug_info.is_empty(),
+  1790→            "debug_info should not be empty"
+  1791→        );
+  1792→        assert!(
+  1793→            !sections.debug_line.is_empty(),
+  1794→            "debug_line should not be empty"
+  1795→        );
+  1796→    }
+  1797→
+  1798→    // -- Test 12: DWARF v4 debug_info header has correct layout --
+  1799→    #[test]
+  1800→    fn test_debug_info_v4_header() {
+  1801→        let db = make_simple_builder();
+  1802→        let sections = db.emit_debug_sections();
+  1803→        let info = &sections.debug_info;
+  1804→
+  1805→        // DWARF v4 header: unit_length(4) + version(2) + debug_abbrev_offset(4) + address_size(1)
+  1806→        assert!(info.len() > 11, "debug_info must have at least 11 bytes");
+  1807→        // version at offset 4 should be 4
+  1808→        let version = u16::from_le_bytes([info[4], info[5]]);
+  1809→        assert_eq!(version, 4, "DWARF version should be 4");
+  1810→        // debug_abbrev_offset at offset 6 should be 0
+  1811→        let abbrev_off = u32::from_le_bytes([info[6], info[7], info[8], info[9]]);
+  1812→        assert_eq!(abbrev_off, 0, "debug_abbrev_offset should be 0");
+  1813→        // address_size at offset 10 should be 8 (64-bit)
+  1814→        assert_eq!(info[10], 8, "address_size should be 8 for 64-bit builder");
+  1815→    }
+  1816→
+  1817→    // -- Test 13: Debug info address size matches builder config --
+  1818→    #[test]
+  1819→    fn test_debug_info_address_size() {
+  1820→        let db = make_simple_builder();
+  1821→        let sections = db.emit_debug_sections();
+  1822→        let info = &sections.debug_info;
+  1823→
+  1824→        // DWARF v4 header: unit_length(4) + version(2) + debug_abbrev_offset(4) + address_size(1)
+  1825→        assert!(info.len() > 11, "debug_info must have at least 11 bytes");
+  1826→        assert_eq!(
+  1827→            info[10], 8,
+  1828→            "address size should be 8 for 64-bit builder (default)"
+  1829→        );
+  1830→
+  1831→        // Test 32-bit builder
+  1832→        let mut db32 = DwarfBuilder::new_32bit(2);
+  1833→        db32.add_compile_unit("test.vuma", "vuma-codegen");
+  1834→        db32.add_subprogram("main", 0, 32);
+  1835→        let sections32 = db32.emit_debug_sections();
+  1836→        let info32 = &sections32.debug_info;
+  1837→        assert!(info32.len() > 11, "32-bit debug_info must have at least 11 bytes");
+  1838→        assert_eq!(
+  1839→            info32[10], 4,
+  1840→            "address size should be 4 for 32-bit builder"
+  1841→        );
+  1842→    }
+  1843→
+  1844→    // -- Test 14: Line program contains DW_LNS_ADVANCE_LINE --
+  1845→    #[test]
+  1846→    fn test_line_program_advance_line() {
+  1847→        let mut db = DwarfBuilder::new();
+  1848→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1849→        db.add_line_entry(0, 1, 1, 0);
+  1850→        db.add_line_entry(8, 1, 5, 0); // line jump from 1 to 5
+  1851→        let sections = db.emit_debug_sections();
+  1852→        let line = &sections.debug_line;
+  1853→
+  1854→        assert!(
+  1855→            line.iter().any(|&b| b == DW_LNS_ADVANCE_LINE),
+  1856→            "line program must contain DW_LNS_ADVANCE_LINE for line jumps"
+  1857→        );
+  1858→    }
+  1859→
+  1860→    // -- Test 15: Debug info contains source file name --
+  1861→    #[test]
+  1862→    fn test_debug_info_source_file() {
+  1863→        let db = make_simple_builder();
+  1864→        let sections = db.emit_debug_sections();
+  1865→        let info_str = String::from_utf8_lossy(&sections.debug_info);
+  1866→        assert!(
+  1867→            info_str.contains("test.vuma"),
+  1868→            "debug_info should contain the source file name"
+  1869→        );
+  1870→    }
+  1871→
+  1872→    // -- Test 16: for_backend creates correct address sizes --
+  1873→    #[test]
+  1874→    fn test_for_backend_address_sizes() {
+  1875→        use crate::backend::BackendKind;
+  1876→
+  1877→        // 64-bit backends should have address_size = 8
+  1878→        for kind in [
+  1879→            BackendKind::AArch64,
+  1880→            BackendKind::X86_64,
+  1881→            BackendKind::RiscV64,
+  1882→            BackendKind::Mips64,
+  1883→            BackendKind::PowerPC64,
+  1884→            BackendKind::LoongArch64,
+  1885→        ] {
+  1886→            let db = DwarfBuilder::for_backend(kind);
+  1887→            assert_eq!(
+  1888→                db.address_size(), 8,
+  1889→                "{:?}: 64-bit backend should have address_size=8", kind
+  1890→            );
+  1891→        }
+  1892→
+  1893→        // 32-bit backends should have address_size = 4
+  1894→        for kind in [BackendKind::Arm32, BackendKind::Wasm32] {
+  1895→            let db = DwarfBuilder::for_backend(kind);
+  1896→            assert_eq!(
+  1897→                db.address_size(), 4,
+  1898→                "{:?}: 32-bit backend should have address_size=4", kind
+  1899→            );
+  1900→        }
+  1901→    }
+  1902→
+  1903→    // -- Test 17: for_backend creates correct min_inst_length --
+  1904→    #[test]
+  1905→    fn test_for_backend_min_inst_length() {
+  1906→        use crate::backend::BackendKind;
+  1907→
+  1908→        assert_eq!(DwarfBuilder::for_backend(BackendKind::X86_64).min_inst_length(), 1);
+  1909→        assert_eq!(DwarfBuilder::for_backend(BackendKind::AArch64).min_inst_length(), 4);
+  1910→        assert_eq!(DwarfBuilder::for_backend(BackendKind::RiscV64).min_inst_length(), 2);
+  1911→        assert_eq!(DwarfBuilder::for_backend(BackendKind::Arm32).min_inst_length(), 2);
+  1912→        assert_eq!(DwarfBuilder::for_backend(BackendKind::Mips64).min_inst_length(), 4);
+  1913→        assert_eq!(DwarfBuilder::for_backend(BackendKind::PowerPC64).min_inst_length(), 4);
+  1914→        assert_eq!(DwarfBuilder::for_backend(BackendKind::LoongArch64).min_inst_length(), 4);
+  1915→        assert_eq!(DwarfBuilder::for_backend(BackendKind::Wasm32).min_inst_length(), 1);
+  1916→    }
+  1917→
+  1918→    // -- Test 18: DWARF v4 debug_line section has correct version --
+  1919→    #[test]
+  1920→    fn test_debug_line_v4_version() {
+  1921→        let mut db = DwarfBuilder::new_32bit(2);
+  1922→        db.add_compile_unit("test.vuma", "vuma-codegen");
+  1923→        db.add_line_entry(0, 1, 1, 0);
+  1924→        let sections = db.emit_debug_sections();
+  1925→        let line = &sections.debug_line;
+  1926→
+  1927→        // .debug_line header: unit_length(4) + version(2)
+  1928→        assert!(line.len() > 6, "debug_line must have at least 6 bytes");
+  1929→        let version = u16::from_le_bytes([line[4], line[5]]);
+  1930→        assert_eq!(version, 4, "debug_line version should be 4 (DWARF v4)");
+  1931→    }
+  1932→
+  1933→    // -- Test 19: 32-bit debug_info addresses are 4 bytes --
+  1934→    #[test]
+  1935→    fn test_32bit_debug_info_addresses() {
+  1936→        let mut db32 = DwarfBuilder::new_32bit(2);
+  1937→        db32.add_compile_unit("test.vuma", "vuma-codegen");
+  1938→        db32.add_subprogram("main", 0x100, 0x200);
+  1939→        let sections32 = db32.emit_debug_sections();
+  1940→        let info32 = &sections32.debug_info;
+  1941→
+  1942→        // DWARF v4 header is 11 bytes
+  1943→        assert!(info32.len() > 11, "32-bit debug_info must have DIEs after header");
+  1944→        let (abbrev_code, _) = decode_uleb128(info32, 11);
+  1945→        assert_eq!(abbrev_code, 1, "first DIE should be compile unit");
+  1946→
+  1947→        // Verify that 4-byte addresses produce smaller sections than 8-byte
+  1948→        let mut db64 = DwarfBuilder::new();
+  1949→        db64.add_compile_unit("test.vuma", "vuma-codegen");
+  1950→        db64.add_subprogram("main", 0x100, 0x200);
+  1951→        let sections64 = db64.emit_debug_sections();
+  1952→
+  1953→        // 64-bit sections should be larger due to 8-byte addresses
+  1954→        assert!(
+  1955→            sections64.debug_info.len() > sections32.debug_info.len(),
+  1956→            "64-bit debug_info should be larger than 32-bit (8-byte vs 4-byte addresses)"
+  1957→        );
+  1958→    }
+  1959→
+  1960→    // -- Test 20: with_config allows arbitrary configuration --
+  1961→    #[test]
+  1962→    fn test_with_config() {
+  1963→        let db = DwarfBuilder::with_config(4, 1);
+  1964→        assert_eq!(db.address_size(), 4);
+  1965→        assert_eq!(db.min_inst_length(), 1);
+  1966→
+  1967→        let db2 = DwarfBuilder::with_config(8, 2);
+  1968→        assert_eq!(db2.address_size(), 8);
+  1969→        assert_eq!(db2.min_inst_length(), 2);
+  1970→    }
+  1971→
+  1972→    // -- Test 21: .debug_frame section with CIE and FDE --
+  1973→    #[test]
+  1974→    fn test_debug_frame_section() {
+  1975→        let mut db = DwarfBuilder::new();
+  1976→        db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+  1977→        db.add_subprogram("main", 0, 64);
+  1978→        db.set_cie_aarch64();
+  1979→        db.add_fde("main", 0, 64);
+  1980→        let sections = db.emit_debug_sections();
+  1981→        let frame = &sections.debug_frame;
+  1982→
+  1983→        assert!(!frame.is_empty(), "debug_frame should not be empty when CIE is set");
+  1984→
+  1985→        // First 4 bytes: CIE length
+  1986→        let cie_length = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+  1987→        assert!(cie_length > 0, "CIE length should be positive");
+  1988→
+  1989→        // Next 4 bytes: CIE_id = 0xFFFFFFFF
+  1990→        let cie_id = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+  1991→        assert_eq!(cie_id, 0xFFFFFFFF, "CIE_id should be 0xFFFFFFFF");
+  1992→    }
+  1993→
+  1994→    // -- Test 22: debug_frame is empty without CIE --
+  1995→    #[test]
+  1996→    fn test_debug_frame_empty_without_cie() {
+  1997→        let db = DwarfBuilder::new();
+  1998→        let sections = db.emit_debug_sections();
+  1999→        assert!(
+  2000→            sections.debug_frame.is_empty(),
+
+[showing lines 1-2000 of 2050; use offset=2001 with limit to continue reading]

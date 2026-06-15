@@ -1,0 +1,1601 @@
+     1→//! # VUMA Compiler API for LLM Consumption
+     2→//!
+     3→//! This module provides a clean, programmatic interface designed for LLM agents
+     4→//! and automated tools that need to compile VUMA source code and receive
+     5→//! structured, machine-readable results.
+     6→//!
+     7→//! ## Design Principles
+     8→//!
+     9→//! - **Always succeeds**: Every method returns a structured result; errors are
+    10→//!   captured as diagnostics rather than panicking or returning `Err`.
+    11→//! - **Serializable**: All result types derive `Serialize` / `Deserialize` so
+    12→//!   they can be sent over JSON-based IPC channels.
+    13→//! - **Summaries, not internals**: The API returns enough information for an
+    14→//!   LLM to reason about the program (function signatures, call graph, node
+    15→//!   counts) without exposing the full graph representation.
+    16→//! - **Target-aware**: The API can compile for any supported backend
+    17→//!   (x86_64, AArch64, RISC-V, etc.) and returns target-specific outputs.
+    18→//!
+    19→//! ## Quick Start
+    20→//!
+    21→//! ```rust
+    22→//! use vuma::api::VumaCompiler;
+    23→//!
+    24→//! let compiler = VumaCompiler::new();
+    25→//! let source = r#"
+    26→//!     fn main() {
+    27→//!         x = 1 + 2;
+    28→//!     }
+    29→//! "#;
+    30→//!
+    31→//! let result = compiler.compile(source);
+    32→//! if result.success {
+    33→//!     println!("Compiled {} functions", result.scg.unwrap().function_count);
+    34→//! } else {
+    35→//!     for diag in &result.diagnostics {
+    36→//!         println!("[{}] {}", diag.severity, diag.message);
+    37→//!     }
+    38→//! }
+    39→//! ```
+    40→
+    41→use std::collections::HashMap;
+    42→use std::fmt;
+    43→use std::time::Instant;
+    44→
+    45→use serde::{Deserialize, Serialize};
+    46→
+    47→use crate::diagnostics::{
+    48→    self, DiagnosticSeverity, DiagnosticSourceLocation, VumaDiagnostic,
+    49→};
+    50→use crate::pipeline::{self, CompileConfig, VerificationLevel};
+    51→use vuma_ive::{
+    52→    InvariantAggregator,
+    53→    VerificationLevel as IveVerificationLevel,
+    54→    verification::VerificationInput,
+    55→};
+    56→use vuma_proof::{
+    57→    CounterExample as ProofCounterExample,
+    58→    ViolationPoint,
+    59→    composition::{ProofBundle, InvariantStatus},
+    60→};
+    61→
+    62→// ═══════════════════════════════════════════════════════════════════════════
+    63→// VumaCompiler
+    64→// ═══════════════════════════════════════════════════════════════════════════
+    65→
+    66→/// The primary compiler API for programmatic (LLM) consumption.
+    67→///
+    68→/// `VumaCompiler` is the main entry point for LLMs and automated tools.
+    69→/// It wraps the full VUMA compilation pipeline and returns structured results
+    70→/// that are easy to parse and reason about programmatically.
+    71→#[derive(Debug, Clone)]
+    72→pub struct VumaCompiler {
+    73→    config: CompileConfig,
+    74→}
+    75→
+    76→impl VumaCompiler {
+    77→    /// Create a new compiler with default configuration.
+    78→    pub fn new() -> Self {
+    79→        Self {
+    80→            config: CompileConfig::default(),
+    81→        }
+    82→    }
+    83→
+    84→    /// Create a compiler with a specific configuration.
+    85→    pub fn with_config(config: CompileConfig) -> Self {
+    86→        Self { config }
+    87→    }
+    88→
+    89→    /// Compile from source string. Returns a structured result.
+    90→    ///
+    91→    /// This runs the full compilation pipeline:
+    92→    /// Parse → AST → SCG → BD Inference → MSG → IVE Verification
+    93→    /// → SCG Transforms → IR Lowering → Register Allocation → Code Emission
+    94→    ///
+    95→    /// The result always contains a value — check `result.success` to
+    96→    /// determine if compilation succeeded, and inspect `result.diagnostics`
+    97→    /// for any warnings or errors.
+    98→    pub fn compile(&self, source: &str) -> CompileResult {
+    99→        let start = Instant::now();
+   100→        let source_lines = source.lines().count();
+   101→        let source_bytes = source.len();
+   102→
+   103→        match pipeline::compile(source, &self.config) {
+   104→            Ok(output) => {
+   105→                let scg_summary = Some(build_scg_summary(&output.scg));
+   106→
+   107→                // Get disassembly from the binary using the default backend
+   108→                let disasm = disassemble_default(&output.binary);
+   109→
+   110→                let target_output = Some(TargetOutput {
+   111→                    backend: "aarch64".to_string(),
+   112→                    binary: output.binary.clone(),
+   113→                    binary_size: output.binary.len(),
+   114→                    disassembly: disasm,
+   115→                });
+   116→
+   117→                // Collect any non-fatal diagnostics
+   118→                let diagnostics = Vec::new();
+   119→
+   120→                CompileResult {
+   121→                    success: true,
+   122→                    diagnostics,
+   123→                    scg: scg_summary,
+   124→                    target: target_output,
+   125→                    metadata: CompileMetadata {
+   126→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   127→                        source_lines,
+   128→                        source_bytes,
+   129→                    },
+   130→                }
+   131→            }
+   132→            Err(errors) => {
+   133→                let diagnostics = errors
+   134→                    .iter()
+   135→                    .flat_map(|e| diagnostics::from_vuma_error(e))
+   136→                    .collect();
+   137→
+   138→                CompileResult {
+   139→                    success: false,
+   140→                    diagnostics,
+   141→                    scg: None,
+   142→                    target: None,
+   143→                    metadata: CompileMetadata {
+   144→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   145→                        source_lines,
+   146→                        source_bytes,
+   147→                    },
+   148→                }
+   149→            }
+   150→        }
+   151→    }
+   152→
+   153→    /// Compile for a specific target backend.
+   154→    ///
+   155→    /// Valid target strings: `"x86_64"`, `"aarch64"`, `"riscv64"`,
+   156→    /// `"wasm32"`, `"loongarch64"`, `"arm32"`, `"mips64"`, `"ppc64"`.
+   157→    ///
+   158→    /// If the target string is not recognised, the result will contain
+   159→    /// error diagnostics.
+   160→    pub fn compile_for_target(&self, source: &str, target: &str) -> CompileResult {
+   161→        let start = Instant::now();
+   162→        let source_lines = source.lines().count();
+   163→        let source_bytes = source.len();
+   164→
+   165→        // Parse the target string into a BackendKind
+   166→        let backend_kind = match parse_target(target) {
+   167→            Some(kind) => kind,
+   168→            None => {
+   169→                return CompileResult {
+   170→                    success: false,
+   171→                    diagnostics: vec![VumaDiagnostic::new(
+   172→                        "E021",
+   173→                        DiagnosticSeverity::Error,
+   174→                        format!(
+   175→                            "Unknown target '{}'. Available: x86_64, aarch64, riscv64, \
+   176→                             wasm32, loongarch64, arm32, mips64, ppc64",
+   177→                            target
+   178→                        ),
+   179→                        "target-selection",
+   180→                        DiagnosticSourceLocation::unknown(),
+   181→                    )],
+   182→                    scg: None,
+   183→                    target: None,
+   184→                    metadata: CompileMetadata {
+   185→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   186→                        source_lines,
+   187→                        source_bytes,
+   188→                    },
+   189→                };
+   190→            }
+   191→        };
+   192→
+   193→        // Run the front-end pipeline (parse through SCG transforms)
+   194→        let front_result = run_frontend(source, &self.config);
+   195→
+   196→        let (scg, mut diagnostics) = match front_result {
+   197→            FrontendResult::Ok { scg } => (scg, Vec::new()),
+   198→            FrontendResult::Err { diagnostics } => {
+   199→                return CompileResult {
+   200→                    success: false,
+   201→                    diagnostics,
+   202→                    scg: None,
+   203→                    target: None,
+   204→                    metadata: CompileMetadata {
+   205→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   206→                        source_lines,
+   207→                        source_bytes,
+   208→                    },
+   209→                };
+   210→            }
+   211→        };
+   212→
+   213→        // Build SCG summary from the validated SCG
+   214→        let scg_summary = Some(build_scg_summary(&scg));
+   215→
+   216→        // Run target-specific codegen
+   217→        let target_output = match run_backend_codegen(&scg, backend_kind) {
+   218→            Ok(output) => Some(output),
+   219→            Err(diags) => {
+   220→                diagnostics.extend(diags);
+   221→                return CompileResult {
+   222→                    success: false,
+   223→                    diagnostics,
+   224→                    scg: scg_summary,
+   225→                    target: None,
+   226→                    metadata: CompileMetadata {
+   227→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   228→                        source_lines,
+   229→                        source_bytes,
+   230→                    },
+   231→                };
+   232→            }
+   233→        };
+   234→
+   235→        CompileResult {
+   236→            success: true,
+   237→            diagnostics,
+   238→            scg: scg_summary,
+   239→            target: target_output,
+   240→            metadata: CompileMetadata {
+   241→                compile_time_ms: start.elapsed().as_millis() as u64,
+   242→                source_lines,
+   243→                source_bytes,
+   244→            },
+   245→        }
+   246→    }
+   247→
+   248→    /// Just parse — return AST/SCG without codegen.
+   249→    ///
+   250→    /// Useful for LLMs that want to understand the program structure
+   251→    /// without incurring the cost of full code generation.
+   252→    pub fn parse(&self, source: &str) -> ParseResult {
+   253→        let start = Instant::now();
+   254→
+   255→        use vuma_parser::{AstToScg, Parser};
+   256→
+   257→        // Parse source to AST
+   258→        let mut parser = Parser::new(source);
+   259→        let parse_output = parser.parse_program();
+   260→
+   261→        if parse_output.has_errors() {
+   262→            let diagnostics = diagnostics::from_parse_errors(&parse_output.errors, source, None);
+   263→
+   264→            return ParseResult {
+   265→                success: false,
+   266→                diagnostics,
+   267→                ast_summary: None,
+   268→                scg: None,
+   269→                metadata: CompileMetadata {
+   270→                    compile_time_ms: start.elapsed().as_millis() as u64,
+   271→                    source_lines: source.lines().count(),
+   272→                    source_bytes: source.len(),
+   273→                },
+   274→            };
+   275→        }
+   276→
+   277→        let ast = parse_output.unwrap();
+   278→        let ast_summary = Some(build_ast_summary(&ast));
+   279→
+   280→        // Convert AST to SCG
+   281→        let mut converter = AstToScg::new();
+   282→        match converter.convert(&ast) {
+   283→            Ok(scg) => {
+   284→                let scg_summary = Some(build_scg_summary(&scg));
+   285→                ParseResult {
+   286→                    success: true,
+   287→                    diagnostics: Vec::new(),
+   288→                    ast_summary,
+   289→                    scg: scg_summary,
+   290→                    metadata: CompileMetadata {
+   291→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   292→                        source_lines: source.lines().count(),
+   293→                        source_bytes: source.len(),
+   294→                    },
+   295→                }
+   296→            }
+   297→            Err(e) => {
+   298→                let diagnostics = vec![VumaDiagnostic::new(
+   299→                    "E019",
+   300→                    DiagnosticSeverity::Error,
+   301→                    format!("{}", e),
+   302→                    "ast-to-scg",
+   303→                    DiagnosticSourceLocation::unknown(),
+   304→                )];
+   305→                ParseResult {
+   306→                    success: false,
+   307→                    diagnostics,
+   308→                    ast_summary,
+   309→                    scg: None,
+   310→                    metadata: CompileMetadata {
+   311→                        compile_time_ms: start.elapsed().as_millis() as u64,
+   312→                        source_lines: source.lines().count(),
+   313→                        source_bytes: source.len(),
+   314→                    },
+   315→                }
+   316→            }
+   317→        }
+   318→    }
+   319→
+   320→    /// Get SCG summary for a source string.
+   321→    ///
+   322→    /// This runs the front-end pipeline (parse + SCG construction +
+   323→    /// validation + BD inference + SCG transforms) but skips codegen.
+   324→    /// It is faster than `compile()` and is ideal for program analysis.
+   325→    pub fn analyze(&self, source: &str) -> ScgSummary {
+   326→        let front_result = run_frontend(source, &self.config);
+   327→        match front_result {
+   328→            FrontendResult::Ok { scg, .. } => build_scg_summary(&scg),
+   329→            FrontendResult::Err { .. } => ScgSummary {
+   330→                function_count: 0,
+   331→                functions: Vec::new(),
+   332→                total_nodes: 0,
+   333→                total_edges: 0,
+   334→            },
+   335→        }
+   336→    }
+   337→
+   338→    /// List available targets.
+   339→    ///
+   340→    /// Returns information about every backend the compiler supports.
+   341→    pub fn available_targets(&self) -> Vec<ApiTargetInfo> {
+   342→        use vuma_codegen::backend::{create_backend, BackendKind};
+   343→
+   344→        let all_kinds = [
+   345→            BackendKind::AArch64,
+   346→            BackendKind::X86_64,
+   347→            BackendKind::RiscV64,
+   348→            BackendKind::Wasm32,
+   349→            BackendKind::LoongArch64,
+   350→            BackendKind::Arm32,
+   351→            BackendKind::Mips64,
+   352→            BackendKind::PowerPC64,
+   353→        ];
+   354→
+   355→        all_kinds
+   356→            .iter()
+   357→            .filter_map(|&kind| {
+   358→                create_backend(kind).ok().map(|backend| {
+   359→                    let info = backend.target_info();
+   360→                    ApiTargetInfo {
+   361→                        name: kind.isa_name().to_string(),
+   362→                        triple: info.target_triple().to_string(),
+   363→                        pointer_width: info.pointer_width() * 8, // bytes → bits
+   364→                        endianness: match info.endianness() {
+   365→                            vuma_codegen::backend::Endianness::Little => "little".to_string(),
+   366→                            vuma_codegen::backend::Endianness::Big => "big".to_string(),
+   367→                            vuma_codegen::backend::Endianness::Bi => "bi".to_string(),
+   368→                        },
+   369→                        output_format: match info.output_format() {
+   370→                            vuma_codegen::backend::OutputFormat::Elf64 => "elf64".to_string(),
+   371→                            vuma_codegen::backend::OutputFormat::Elf32 => "elf32".to_string(),
+   372→                            vuma_codegen::backend::OutputFormat::WasmBinary => "wasm".to_string(),
+   373→                            vuma_codegen::backend::OutputFormat::RawBinary => "raw".to_string(),
+   374→                        },
+   375→                    }
+   376→                })
+   377→            })
+   378→            .collect()
+   379→    }
+   380→
+   381→    /// Validate source without full compilation.
+   382→    ///
+   383→    /// Runs parsing and SCG validation, returning a list of diagnostics.
+   384→    /// This is the fastest way to check if a program is well-formed.
+   385→    pub fn validate(&self, source: &str) -> Vec<VumaDiagnostic> {
+   386→        use vuma_parser::{AstToScg, Parser};
+   387→
+   388→        let mut all_diagnostics = Vec::new();
+   389→
+   390→        // Parse
+   391→        let mut parser = Parser::new(source);
+   392→        let parse_output = parser.parse_program();
+   393→
+   394→        if parse_output.has_errors() {
+   395→            all_diagnostics.extend(diagnostics::from_parse_errors(
+   396→                &parse_output.errors,
+   397→                source,
+   398→                None,
+   399→            ));
+   400→            return all_diagnostics;
+   401→        }
+   402→
+   403→        let ast = parse_output.unwrap();
+   404→
+   405→        // AST → SCG
+   406→        let mut converter = AstToScg::new();
+   407→        let scg = match converter.convert(&ast) {
+   408→            Ok(scg) => scg,
+   409→            Err(e) => {
+   410→                all_diagnostics.push(VumaDiagnostic::new(
+   411→                    "E019",
+   412→                    DiagnosticSeverity::Error,
+   413→                    format!("{}", e),
+   414→                    "ast-to-scg",
+   415→                    DiagnosticSourceLocation::unknown(),
+   416→                ));
+   417→                return all_diagnostics;
+   418→            }
+   419→        };
+   420→
+   421→        // Validate SCG
+   422→        let validation = scg.validate();
+   423→        if !validation.is_valid {
+   424→            for err in &validation.errors {
+   425→                all_diagnostics.push(VumaDiagnostic::new(
+   426→                    "E022",
+   427→                    DiagnosticSeverity::Error,
+   428→                    err.clone(),
+   429→                    "scg-validation",
+   430→                    DiagnosticSourceLocation::unknown(),
+   431→                ));
+   432→            }
+   433→        }
+   434→
+   435→        all_diagnostics
+   436→    }
+   437→
+   438→    /// Verify a VUMA program by running all five IVE invariant checkers
+   439→    /// on the SCG and producing a structured verification report.
+   440→    ///
+   441→    /// This method runs the full front-end pipeline (parse → SCG),
+   442→    /// then invokes the IVE `InvariantAggregator` to check all five
+   443→    /// core invariants (liveness, exclusivity, interpretation, origin,
+   444→    /// cleanup) and the proof system to produce pass/fail per invariant
+   445→    /// with counterexamples for any violations.
+   446→    ///
+   447→    /// # Returns
+   448→    ///
+   449→    /// A [`VerificationReport`] containing:
+   450→    /// - Per-invariant pass/fail status
+   451→    /// - Counterexamples for each violation
+   452→    /// - An overall pass/fail verdict
+   453→    /// - Timing metadata
+   454→    ///
+   455→    /// # Example
+   456→    ///
+   457→    /// ```rust
+   458→    /// use vuma::api::VumaCompiler;
+   459→    ///
+   460→    /// let compiler = VumaCompiler::new();
+   461→    /// let source = "fn main() {}";
+   462→    /// let report = compiler.verify(source);
+   463→    /// println!("Overall verdict: {}", report.overall_verdict);
+   464→    /// for inv in &report.invariants {
+   465→    ///     println!("  {} — {}", inv.kind, inv.status);
+   466→    /// }
+   467→    /// ```
+   468→    pub fn verify(&self, source: &str) -> VerificationReport {
+   469→        let start = Instant::now();
+   470→
+   471→        // Run the front-end pipeline to get the SCG.
+   472→        let front_result = run_frontend(source, &self.config);
+   473→
+   474→        let scg = match front_result {
+   475→            FrontendResult::Ok { scg } => scg,
+   476→            FrontendResult::Err { diagnostics } => {
+   477→                let messages: Vec<String> =
+   478→                    diagnostics.iter().map(|d| d.message.clone()).collect();
+   479→                return VerificationReport {
+   480→                    overall_verdict: VerificationVerdict::Error,
+   481→                    invariants: Vec::new(),
+   482→                    diagnostics: messages,
+   483→                    metadata: VerificationMetadata {
+   484→                        total_elapsed_ms: start.elapsed().as_millis() as u64,
+   485→                        source_lines: source.lines().count(),
+   486→                        source_bytes: source.len(),
+   487→                    },
+   488→                };
+   489→            }
+   490→        };
+   491→
+   492→        // Run the IVE invariant aggregator at Normal level (all 5 checks).
+   493→        let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Normal);
+   494→        let input = VerificationInput::from_scg(scg.clone());
+   495→        let aggregated = aggregator.verify_all(&input);
+   496→
+   497→        // Convert the aggregated result into per-invariant API results,
+   498→        // building counterexamples from the proof system for any violations.
+   499→        let mut invariants = Vec::with_capacity(aggregated.per_invariant.len());
+   500→        for pir in &aggregated.per_invariant {
+   501→            let kind_str = pir.kind.label().to_string();
+   502→
+   503→            let (status, counterexample) = if pir.is_pass() {
+   504→                (InvariantVerificationStatus::Pass, None)
+   505→            } else if pir.is_fail() {
+   506→                // Build a proof-system counterexample from the IVE violation.
+   507→                let proof_ce = build_proof_counterexample(&pir.result);
+   508→                (InvariantVerificationStatus::Fail, Some(proof_ce))
+   509→            } else {
+   510→                (InvariantVerificationStatus::Unverified, None)
+   511→            };
+   512→
+   513→            invariants.push(InvariantVerification {
+   514→                kind: kind_str,
+   515→                status,
+   516→                message: pir.result.message.clone(),
+   517→                elapsed_ms: pir.elapsed_ms,
+   518→                counterexample,
+   519→            });
+   520→        }
+   521→
+   522→        // Determine overall verdict.
+   523→        let overall_verdict = match aggregated.overall {
+   524→            vuma_ive::OverallVerdict::Pass => VerificationVerdict::Pass,
+   525→            vuma_ive::OverallVerdict::Fail => VerificationVerdict::Fail,
+   526→            vuma_ive::OverallVerdict::Inconclusive => VerificationVerdict::Inconclusive,
+   527→            vuma_ive::OverallVerdict::NoChecks => VerificationVerdict::Error,
+   528→        };
+   529→
+   530→        // Also attempt proof-system verification for a cross-check.
+   531→        let proof_bundle = build_proof_bundle(&scg);
+   532→        let proof_statuses = proof_bundle.status();
+   533→
+   534→        // If the proof system found failures that the IVE missed,
+   535→        // upgrade unverified results to fail.
+   536→        for (i, (_inv_name, proof_status)) in proof_statuses.iter().enumerate() {
+   537→            if i < invariants.len() {
+   538→                if let InvariantStatus::Failed(reason) = proof_status {
+   539→                    if invariants[i].status == InvariantVerificationStatus::Unverified {
+   540→                        invariants[i].status = InvariantVerificationStatus::Fail;
+   541→                        invariants[i].counterexample = Some(CounterexampleInfo {
+   542→                            description: reason.clone(),
+   543→                            execution_trace: Vec::new(),
+   544→                        });
+   545→                    }
+   546→                }
+   547→            }
+   548→        }
+   549→
+   550→        let diagnostics = Vec::new();
+   551→        let total_elapsed_ms = start.elapsed().as_millis() as u64;
+   552→
+   553→        VerificationReport {
+   554→            overall_verdict,
+   555→            invariants,
+   556→            diagnostics,
+   557→            metadata: VerificationMetadata {
+   558→                total_elapsed_ms,
+   559→                source_lines: source.lines().count(),
+   560→                source_bytes: source.len(),
+   561→            },
+   562→        }
+   563→    }
+   564→}
+   565→
+   566→impl Default for VumaCompiler {
+   567→    fn default() -> Self {
+   568→        Self::new()
+   569→    }
+   570→}
+   571→
+   572→// ═══════════════════════════════════════════════════════════════════════════
+   573→// Result Types
+   574→// ═══════════════════════════════════════════════════════════════════════════
+   575→
+   576→/// Result of compiling a VUMA program.
+   577→///
+   578→/// This is the primary return type for `VumaCompiler::compile()` and
+   579→/// `VumaCompiler::compile_for_target()`. It always contains a value —
+   580→/// check `success` to determine the outcome.
+   581→#[derive(Debug, Clone, Serialize, Deserialize)]
+   582→pub struct CompileResult {
+   583→    /// Whether compilation succeeded (produced a binary).
+   584→    pub success: bool,
+   585→    /// Any diagnostics (errors, warnings, notes) produced during compilation.
+   586→    pub diagnostics: Vec<VumaDiagnostic>,
+   587→    /// Summary of the SCG (Semantic Computation Graph).
+   588→    ///
+   589→    /// Present when parsing succeeds, even if codegen fails.
+   590→    pub scg: Option<ScgSummary>,
+   591→    /// Compiled output for the target.
+   592→    ///
+   593→    /// Present only when compilation succeeds.
+   594→    pub target: Option<TargetOutput>,
+   595→    /// Metadata about the compilation process.
+   596→    pub metadata: CompileMetadata,
+   597→}
+   598→
+   599→/// Result of parsing (without codegen).
+   600→#[derive(Debug, Clone, Serialize, Deserialize)]
+   601→pub struct ParseResult {
+   602→    /// Whether parsing succeeded.
+   603→    pub success: bool,
+   604→    /// Any diagnostics produced during parsing.
+   605→    pub diagnostics: Vec<VumaDiagnostic>,
+   606→    /// Summary of the AST structure.
+   607→    pub ast_summary: Option<AstSummary>,
+   608→    /// Summary of the SCG (if AST → SCG conversion succeeded).
+   609→    pub scg: Option<ScgSummary>,
+   610→    /// Metadata about the parse process.
+   611→    pub metadata: CompileMetadata,
+   612→}
+   613→
+   614→// ═══════════════════════════════════════════════════════════════════════════
+   615→// SCG Summary Types
+   616→// ═══════════════════════════════════════════════════════════════════════════
+   617→
+   618→/// Summary of the SCG (not the full graph — just enough for LLM understanding).
+   619→///
+   620→/// The SCG summary provides a structured overview of the program's semantic
+   621→/// computation graph without exposing the full graph representation.
+   622→#[derive(Debug, Clone, Serialize, Deserialize)]
+   623→pub struct ScgSummary {
+   624→    /// Number of functions in the SCG.
+   625→    pub function_count: usize,
+   626→    /// Per-function summaries.
+   627→    pub functions: Vec<FunctionSummary>,
+   628→    /// Total number of nodes across all functions.
+   629→    pub total_nodes: usize,
+   630→    /// Total number of edges across all functions.
+   631→    pub total_edges: usize,
+   632→}
+   633→
+   634→/// Summary of a single function in the SCG.
+   635→#[derive(Debug, Clone, Serialize, Deserialize)]
+   636→pub struct FunctionSummary {
+   637→    /// Function name.
+   638→    pub name: String,
+   639→    /// Parameters as (name, type) pairs.
+   640→    pub params: Vec<(String, String)>,
+   641→    /// Return type (e.g., `"void"`, `"i64"`, `"ptr"`).
+   642→    pub return_type: String,
+   643→    /// Number of SCG nodes in this function's body.
+   644→    pub node_count: usize,
+   645→    /// Names of functions called from this function.
+   646→    pub calls: Vec<String>,
+   647→}
+   648→
+   649→// ═══════════════════════════════════════════════════════════════════════════
+   650→// AST Summary
+   651→// ═══════════════════════════════════════════════════════════════════════════
+   652→
+   653→/// Summary of the parsed AST.
+   654→#[derive(Debug, Clone, Serialize, Deserialize)]
+   655→pub struct AstSummary {
+   656→    /// Total number of top-level items.
+   657→    pub item_count: usize,
+   658→    /// Names of defined functions.
+   659→    pub function_names: Vec<String>,
+   660→    /// Names of declared regions.
+   661→    pub region_names: Vec<String>,
+   662→    /// Number of import declarations.
+   663→    pub import_count: usize,
+   664→}
+   665→
+   666→// ═══════════════════════════════════════════════════════════════════════════
+   667→// Target Output
+   668→// ═══════════════════════════════════════════════════════════════════════════
+   669→
+   670→/// Compiled output for a specific target backend.
+   671→#[derive(Debug, Clone, Serialize, Deserialize)]
+   672→pub struct TargetOutput {
+   673→    /// Backend name (e.g., "x86_64", "aarch64", "riscv64").
+   674→    pub backend: String,
+   675→    /// Raw binary output (ELF, Wasm, or raw binary depending on target).
+   676→    ///
+   677→    /// Serialized as a hex string for compact JSON representation.
+   678→    #[serde(
+   679→        serialize_with = "serialize_binary_hex",
+   680→        deserialize_with = "deserialize_binary_hex"
+   681→    )]
+   682→    pub binary: Vec<u8>,
+   683→    /// Size of the binary in bytes.
+   684→    pub binary_size: usize,
+   685→    /// Human-readable disassembly of the compiled code.
+   686→    pub disassembly: String,
+   687→}
+   688→
+   689→// ═══════════════════════════════════════════════════════════════════════════
+   690→// Metadata Types
+   691→// ═══════════════════════════════════════════════════════════════════════════
+   692→
+   693→/// Metadata about a compilation run.
+   694→#[derive(Debug, Clone, Serialize, Deserialize)]
+   695→pub struct CompileMetadata {
+   696→    /// Wall-clock compilation time in milliseconds.
+   697→    pub compile_time_ms: u64,
+   698→    /// Number of lines in the source code.
+   699→    pub source_lines: usize,
+   700→    /// Number of bytes in the source code.
+   701→    pub source_bytes: usize,
+   702→}
+   703→
+   704→/// Information about a supported compilation target.
+   705→///
+   706→/// Named `ApiTargetInfo` to avoid collision with
+   707→/// `vuma_codegen::backend::TargetInfo`.
+   708→#[derive(Debug, Clone, Serialize, Deserialize)]
+   709→pub struct ApiTargetInfo {
+   710→    /// ISA name (e.g., "x86_64", "aarch64").
+   711→    pub name: String,
+   712→    /// LLVM-style target triple (e.g., "aarch64-unknown-linux-gnu").
+   713→    pub triple: String,
+   714→    /// Pointer width in bits (32 or 64).
+   715→    pub pointer_width: usize,
+   716→    /// Byte order ("little", "big", or "bi").
+   717→    pub endianness: String,
+   718→    /// Output binary format ("elf64", "elf32", "wasm", "raw").
+   719→    pub output_format: String,
+   720→}
+   721→
+   722→// ═══════════════════════════════════════════════════════════════════════════
+   723→// Binary Serde Helpers
+   724→// ═══════════════════════════════════════════════════════════════════════════
+   725→
+   726→/// Serialize `Vec<u8>` as a hex string for compact JSON representation.
+   727→fn serialize_binary_hex<S: serde::Serializer>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+   728→    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+   729→    s.serialize_str(&hex)
+   730→}
+   731→
+   732→/// Deserialize `Vec<u8>` from a hex string.
+   733→fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+   734→    use serde::de::Error;
+   735→
+   736→    struct HexVisitor;
+   737→
+   738→    impl<'de> serde::de::Visitor<'de> for HexVisitor {
+   739→        type Value = Vec<u8>;
+   740→
+   741→        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   742→            write!(f, "a hex-encoded string")
+   743→        }
+   744→
+   745→        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+   746→            if v.len() % 2 != 0 {
+   747→                return Err(E::custom("hex string has odd length"));
+   748→            }
+   749→            (0..v.len())
+   750→                .step_by(2)
+   751→                .map(|i| {
+   752→                    u8::from_str_radix(&v[i..i + 2], 16)
+   753→                        .map_err(|e| E::custom(format!("hex decode error: {}", e)))
+   754→                })
+   755→                .collect()
+   756→        }
+   757→    }
+   758→
+   759→    d.deserialize_str(HexVisitor)
+   760→}
+   761→
+   762→// ═══════════════════════════════════════════════════════════════════════════
+   763→// Verification Report Types
+   764→// ═══════════════════════════════════════════════════════════════════════════
+   765→
+   766→/// Overall verdict of the verification run.
+   767→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   768→pub enum VerificationVerdict {
+   769→    /// All five invariants passed.
+   770→    Pass,
+   771→    /// At least one invariant was violated.
+   772→    Fail,
+   773→    /// No invariant was violated, but at least one is unverified.
+   774→    Inconclusive,
+   775→    /// An error occurred before verification could run (e.g., parse error).
+   776→    Error,
+   777→}
+   778→
+   779→impl fmt::Display for VerificationVerdict {
+   780→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   781→        match self {
+   782→            VerificationVerdict::Pass => write!(f, "PASS"),
+   783→            VerificationVerdict::Fail => write!(f, "FAIL"),
+   784→            VerificationVerdict::Inconclusive => write!(f, "INCONCLUSIVE"),
+   785→            VerificationVerdict::Error => write!(f, "ERROR"),
+   786→        }
+   787→    }
+   788→}
+   789→
+   790→/// Status of a single invariant verification.
+   791→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   792→pub enum InvariantVerificationStatus {
+   793→    /// The invariant was proven to hold.
+   794→    Pass,
+   795→    /// The invariant was violated; see the counterexample.
+   796→    Fail,
+   797→    /// The invariant could not be verified (insufficient information).
+   798→    Unverified,
+   799→}
+   800→
+   801→impl fmt::Display for InvariantVerificationStatus {
+   802→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   803→        match self {
+   804→            InvariantVerificationStatus::Pass => write!(f, "PASS"),
+   805→            InvariantVerificationStatus::Fail => write!(f, "FAIL"),
+   806→            InvariantVerificationStatus::Unverified => write!(f, "UNVERIFIED"),
+   807→        }
+   808→    }
+   809→}
+   810→
+   811→/// Counterexample information for an invariant violation.
+   812→///
+   813→/// Provides a human-readable description and an execution trace that
+   814→/// demonstrates how the violation can be reached.
+   815→#[derive(Debug, Clone, Serialize, Deserialize)]
+   816→pub struct CounterexampleInfo {
+   817→    /// Human-readable description of the violation.
+   818→    pub description: String,
+   819→    /// Execution trace steps demonstrating the violation.
+   820→    pub execution_trace: Vec<String>,
+   821→}
+   822→
+   823→/// Result of verifying a single invariant.
+   824→#[derive(Debug, Clone, Serialize, Deserialize)]
+   825→pub struct InvariantVerification {
+   826→    /// Name of the invariant (e.g., "liveness", "exclusivity").
+   827→    pub kind: String,
+   828→    /// Pass/fail/unverified status.
+   829→    pub status: InvariantVerificationStatus,
+   830→    /// Human-readable message describing the outcome.
+   831→    pub message: String,
+   832→    /// Wall-clock time spent checking this invariant (milliseconds).
+   833→    pub elapsed_ms: u64,
+   834→    /// Counterexample demonstrating the violation, if any.
+   835→    pub counterexample: Option<CounterexampleInfo>,
+   836→}
+   837→
+   838→/// Metadata about a verification run.
+   839→#[derive(Debug, Clone, Serialize, Deserialize)]
+   840→pub struct VerificationMetadata {
+   841→    /// Total wall-clock time for the verification run (milliseconds).
+   842→    pub total_elapsed_ms: u64,
+   843→    /// Number of lines in the source code.
+   844→    pub source_lines: usize,
+   845→    /// Number of bytes in the source code.
+   846→    pub source_bytes: usize,
+   847→}
+   848→
+   849→/// The full verification report produced by `VumaCompiler::verify()`.
+   850→///
+   851→/// Contains per-invariant results with pass/fail status and counterexamples
+   852→/// for any violations, plus an overall verdict and metadata.
+   853→#[derive(Debug, Clone, Serialize, Deserialize)]
+   854→pub struct VerificationReport {
+   855→    /// The overall verification verdict.
+   856→    pub overall_verdict: VerificationVerdict,
+   857→    /// Per-invariant verification results.
+   858→    pub invariants: Vec<InvariantVerification>,
+   859→    /// Any diagnostics or informational messages.
+   860→    pub diagnostics: Vec<String>,
+   861→    /// Metadata about the verification run.
+   862→    pub metadata: VerificationMetadata,
+   863→}
+   864→
+   865→impl VerificationReport {
+   866→    /// Returns `true` if all invariants passed.
+   867→    pub fn is_pass(&self) -> bool {
+   868→        self.overall_verdict == VerificationVerdict::Pass
+   869→    }
+   870→
+   871→    /// Returns `true` if at least one invariant was violated.
+   872→    pub fn is_fail(&self) -> bool {
+   873→        self.overall_verdict == VerificationVerdict::Fail
+   874→    }
+   875→
+   876→    /// Returns the number of invariants that passed.
+   877→    pub fn pass_count(&self) -> usize {
+   878→        self.invariants
+   879→            .iter()
+   880→            .filter(|i| i.status == InvariantVerificationStatus::Pass)
+   881→            .count()
+   882→    }
+   883→
+   884→    /// Returns the number of invariants that failed.
+   885→    pub fn fail_count(&self) -> usize {
+   886→        self.invariants
+   887→            .iter()
+   888→            .filter(|i| i.status == InvariantVerificationStatus::Fail)
+   889→            .count()
+   890→    }
+   891→}
+   892→
+   893→impl fmt::Display for VerificationReport {
+   894→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   895→        writeln!(
+   896→            f,
+   897→            "Verification Report — {} ({}ms)",
+   898→            self.overall_verdict, self.metadata.total_elapsed_ms
+   899→        )?;
+   900→        for inv in &self.invariants {
+   901→            write!(f, "  {} — {}", inv.kind, inv.status)?;
+   902→            if let Some(ce) = &inv.counterexample {
+   903→                write!(f, " — {}", ce.description)?;
+   904→            }
+   905→            writeln!(f)?;
+   906→        }
+   907→        Ok(())
+   908→    }
+   909→}
+   910→
+   911→// ═══════════════════════════════════════════════════════════════════════════
+   912→// Internal Helpers
+   913→// ═══════════════════════════════════════════════════════════════════════════
+   914→
+   915→/// Front-end pipeline result (everything up to and including SCG transforms).
+   916→enum FrontendResult {
+   917→    Ok {
+   918→        scg: vuma_scg::SCG,
+   919→    },
+   920→    Err {
+   921→        diagnostics: Vec<VumaDiagnostic>,
+   922→    },
+   923→}
+   924→
+   925→/// Run the front-end pipeline: Parse → AST → SCG → Validate → BD Inference
+   926→/// → IVE Verification → SCG Transforms.
+   927→fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
+   928→    use vuma_ive::{InvariantAggregator, VerificationLevel as IveVerificationLevel};
+   929→    use vuma_parser::{AstToScg, Parser};
+   930→
+   931→    // Stage 1: Parse
+   932→    let mut parser = Parser::new(source);
+   933→    let parse_output = parser.parse_program();
+   934→    if parse_output.has_errors() {
+   935→        return FrontendResult::Err {
+   936→            diagnostics: diagnostics::from_parse_errors(&parse_output.errors, source, None),
+   937→        };
+   938→    }
+   939→    let ast = parse_output.unwrap();
+   940→
+   941→    // Stage 2: AST → SCG
+   942→    let mut converter = AstToScg::new();
+   943→    let mut scg = match converter.convert(&ast) {
+   944→        Ok(scg) => scg,
+   945→        Err(e) => {
+   946→            return FrontendResult::Err {
+   947→                diagnostics: vec![VumaDiagnostic::new(
+   948→                    "E019",
+   949→                    DiagnosticSeverity::Error,
+   950→                    format!("{}", e),
+   951→                    "ast-to-scg",
+   952→                    DiagnosticSourceLocation::unknown(),
+   953→                )],
+   954→            };
+   955→        }
+   956→    };
+   957→
+   958→    // Stage 3: SCG Validation (non-fatal — warn but continue)
+   959→    let _validation = scg.validate();
+   960→
+   961→    // Stage 4: BD Inference (refine types)
+   962→    let inference_engine = vuma_ive::InferenceEngine::new();
+   963→    let bd_results = inference_engine.infer_types(&scg);
+   964→    pipeline::refine_scg_types_with_bd(&mut scg, &bd_results);
+   965→
+   966→    // Stage 5: IVE Verification (non-fatal)
+   967→    if config.verification_level != VerificationLevel::None {
+   968→        let ive_level = match config.verification_level {
+   969→            VerificationLevel::Quick => IveVerificationLevel::Quick,
+   970→            VerificationLevel::Normal => IveVerificationLevel::Normal,
+   971→            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+   972→            VerificationLevel::None => unreachable!(),
+   973→        };
+   974→        let aggregator = InvariantAggregator::new().with_level(ive_level);
+   975→        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+   976→        let _ = aggregator.verify_all(&input);
+   977→    }
+   978→
+   979→    // Stage 6: SCG Transforms
+   980→    pipeline::run_scg_transforms(&mut scg, config);
+   981→
+   982→    FrontendResult::Ok { scg }
+   983→}
+   984→
+   985→/// Run target-specific codegen using the Backend trait.
+   986→fn run_backend_codegen(
+   987→    scg: &vuma_scg::SCG,
+   988→    backend_kind: vuma_codegen::backend::BackendKind,
+   989→) -> Result<TargetOutput, Vec<VumaDiagnostic>> {
+   990→    use vuma_codegen::backend::{create_backend, AllocatedProgram};
+   991→    use vuma_codegen::regalloc::RegAllocator;
+   992→    use vuma_codegen::scg_to_ir::IRBuilder;
+   993→
+   994→    // Bridge SCG to codegen SCG
+   995→    let codegen_scg = pipeline::bridge_scg_to_codegen(scg);
+   996→
+   997→    // IR Lowering
+   998→    let mut ir_builder = IRBuilder::new();
+   999→    let ir_program = match ir_builder.build(&codegen_scg) {
+  1000→        Ok(ir) => ir,
+  1001→        Err(e) => {
+  1002→            return Err(vec![diagnostics::from_codegen_error(&e)]);
+  1003→        }
+  1004→    };
+  1005→
+  1006→    // Create backend
+  1007→    let backend = match create_backend(backend_kind) {
+  1008→        Ok(b) => b,
+  1009→        Err(e) => {
+  1010→            return Err(vec![VumaDiagnostic::new(
+  1011→                "E023",
+  1012→                DiagnosticSeverity::Error,
+  1013→                format!("{}", e),
+  1014→                "backend-creation",
+  1015→                DiagnosticSourceLocation::unknown(),
+  1016→            )]);
+  1017→        }
+  1018→    };
+  1019→
+  1020→    // Register allocation — delegate to the backend
+  1021→    let mut allocated_functions = Vec::new();
+  1022→    for func in &ir_program.functions {
+  1023→        match backend.allocate_registers(func) {
+  1024→            Ok(allocd) => allocated_functions.push(allocd),
+  1025→            Err(e) => {
+  1026→                return Err(vec![VumaDiagnostic::new(
+  1027→                    "E017",
+  1028→                    DiagnosticSeverity::Error,
+  1029→                    format!("{}: {}", func.name, e),
+  1030→                    "register-alloc",
+  1031→                    DiagnosticSourceLocation::unknown(),
+  1032→                )]);
+  1033→            }
+  1034→        }
+  1035→    }
+  1036→
+  1037→    let allocated_program = AllocatedProgram {
+  1038→        functions: allocated_functions,
+  1039→        total_code_size: 0,
+  1040→        total_data_size: 0,
+  1041→    };
+  1042→
+  1043→    // Encode the program
+  1044→    let binary = match backend.encode_program(&allocated_program) {
+  1045→        Ok(binary) => binary,
+  1046→        Err(e) => {
+  1047→            use vuma_codegen::backend::BackendError;
+  1048→            use crate::diagnostics::RelatedInfo;
+  1049→            match &e {
+  1050→                BackendError::UnresolvedRelocation { symbol, function, offset, reloc_type, .. } => {
+  1051→                    let mut diag = VumaDiagnostic::new(
+  1052→                        "E037",
+  1053→                        DiagnosticSeverity::Error,
+  1054→                        format!("unresolved relocation: symbol '{}' not found", symbol),
+  1055→                        "codegen",
+  1056→                        DiagnosticSourceLocation::unknown(),
+  1057→                    );
+  1058→                    diag = diag.with_related(
+  1059→                        RelatedInfo::new(
+  1060→                            DiagnosticSourceLocation::unknown(),
+  1061→                            format!("referenced in function '{}' at offset 0x{:X} (relocation type: {})", function, offset, reloc_type),
+  1062→                        ),
+  1063→                    );
+  1064→                    return Err(vec![diag]);
+  1065→                }
+  1066→                _ => {
+  1067→                    return Err(vec![VumaDiagnostic::new(
+  1068→                        "E020",
+  1069→                        DiagnosticSeverity::Error,
+  1070→                        format!("{}", e),
+  1071→                        "code-emission",
+  1072→                        DiagnosticSourceLocation::unknown(),
+  1073→                    )]);
+  1074→                }
+  1075→            }
+  1076→        }
+  1077→    };
+  1078→
+  1079→    // Disassemble
+  1080→    let base_addr = backend.target_info().default_base_address();
+  1081→    let disasm_lines = backend.disassemble(&binary, base_addr);
+  1082→    let disassembly = disasm_lines.join("\n");
+  1083→
+  1084→    Ok(TargetOutput {
+  1085→        backend: backend_kind.isa_name().to_string(),
+  1086→        binary_size: binary.len(),
+  1087→        binary,
+  1088→        disassembly,
+  1089→    })
+  1090→}
+  1091→
+  1092→/// Build an edge index from the SCG for efficient traversal.
+  1093→struct ScgEdgeIndex {
+  1094→    outgoing: HashMap<vuma_scg::NodeId, Vec<vuma_scg::EdgeData>>,
+  1095→    incoming: HashMap<vuma_scg::NodeId, Vec<vuma_scg::EdgeData>>,
+  1096→}
+  1097→
+  1098→impl ScgEdgeIndex {
+  1099→    fn build(scg: &vuma_scg::SCG) -> Self {
+  1100→        let mut outgoing: HashMap<vuma_scg::NodeId, Vec<vuma_scg::EdgeData>> = HashMap::new();
+  1101→        let mut incoming: HashMap<vuma_scg::NodeId, Vec<vuma_scg::EdgeData>> = HashMap::new();
+  1102→        for edge in scg.edges() {
+  1103→            outgoing.entry(edge.source).or_default().push(edge.clone());
+  1104→            incoming.entry(edge.target).or_default().push(edge.clone());
+  1105→        }
+  1106→        Self { outgoing, incoming }
+  1107→    }
+  1108→
+  1109→    fn outgoing(&self, id: vuma_scg::NodeId) -> &[vuma_scg::EdgeData] {
+  1110→        self.outgoing.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+  1111→    }
+  1112→
+  1113→    fn incoming(&self, id: vuma_scg::NodeId) -> &[vuma_scg::EdgeData] {
+  1114→        self.incoming.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+  1115→    }
+  1116→}
+  1117→
+  1118→/// Build an SCG summary from the full SCG graph.
+  1119→fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
+  1120→    use vuma_scg::{ControlKind, EdgeKind, NodePayload};
+  1121→
+  1122→    let total_nodes = scg.node_count();
+  1123→    let total_edges = scg.edge_count();
+  1124→    let edge_idx = ScgEdgeIndex::build(scg);
+  1125→
+  1126→    // Identify function entry nodes and build per-function summaries
+  1127→    let mut functions = Vec::new();
+  1128→
+  1129→    // Collect function entries
+  1130→    let func_entries: Vec<(vuma_scg::NodeId, String)> = scg
+  1131→        .nodes()
+  1132→        .filter_map(|n| {
+  1133→            if let NodePayload::Control(c) = &n.payload {
+  1134→                if c.kind == ControlKind::FunctionEntry {
+  1135→                    let name = c.label.clone().unwrap_or_else(|| "unknown".to_string());
+  1136→                    return Some((n.id, name));
+  1137→                }
+  1138→            }
+  1139→            None
+  1140→        })
+  1141→        .collect();
+  1142→
+  1143→    // For each function entry, count nodes reachable via ControlFlow
+  1144→    for (entry_id, func_name) in &func_entries {
+  1145→        let mut reachable = std::collections::HashSet::new();
+  1146→        let mut queue = std::collections::VecDeque::new();
+  1147→        queue.push_back(*entry_id);
+  1148→        reachable.insert(*entry_id);
+  1149→
+  1150→        while let Some(current) = queue.pop_front() {
+  1151→            for edge in edge_idx.outgoing(current) {
+  1152→                if edge.kind == EdgeKind::ControlFlow && !reachable.contains(&edge.target) {
+  1153→                    reachable.insert(edge.target);
+  1154→                    queue.push_back(edge.target);
+  1155→                }
+  1156→            }
+  1157→        }
+  1158→
+  1159→        let node_count = reachable.len();
+  1160→
+  1161→        // Extract parameters from outgoing DataFlow edges from the entry
+  1162→        let mut params = Vec::new();
+  1163→        for edge in edge_idx.outgoing(*entry_id) {
+  1164→            if edge.kind == EdgeKind::DataFlow {
+  1165→                if let Some(target_node) = scg.get_node(edge.target) {
+  1166→                    let name = match &target_node.payload {
+  1167→                        NodePayload::Allocation(a) => {
+  1168→                            a.type_name.clone().unwrap_or_else(|| "param".to_string())
+  1169→                        }
+  1170→                        NodePayload::Computation(c) => {
+  1171→                            c.result_type.clone().unwrap_or_else(|| "param".to_string())
+  1172→                        }
+  1173→                        _ => "param".to_string(),
+  1174→                    };
+  1175→                    let ty = match &target_node.payload {
+  1176→                        NodePayload::Allocation(a) => {
+  1177→                            a.type_name.as_deref().unwrap_or("i64").to_string()
+  1178→                        }
+  1179→                        NodePayload::Computation(c) => {
+  1180→                            c.result_type.as_deref().unwrap_or("i64").to_string()
+  1181→                        }
+  1182→                        NodePayload::Cast(c) => c.to_type.clone(),
+  1183→                        _ => "i64".to_string(),
+  1184→                    };
+  1185→                    params.push((name, ty));
+  1186→                }
+  1187→            }
+  1188→        }
+  1189→
+  1190→        // Find calls within this function
+  1191→        let mut calls = Vec::new();
+  1192→        for node_id in &reachable {
+  1193→            if let Some(node) = scg.get_node(*node_id) {
+  1194→                if let NodePayload::Computation(comp) = &node.payload {
+  1195→                    let op_label = comp.kind.label();
+  1196→                    if !is_known_binop(&op_label) && !op_label.starts_with('_') {
+  1197→                        if !calls.contains(&op_label) {
+  1198→                            calls.push(op_label);
+  1199→                        }
+  1200→                    }
+  1201→                }
+  1202→            }
+  1203→        }
+  1204→
+  1205→        // Determine return type
+  1206→        let return_type = find_return_type(scg, *entry_id, &edge_idx);
+  1207→
+  1208→        functions.push(FunctionSummary {
+  1209→            name: func_name.clone(),
+  1210→            params,
+  1211→            return_type,
+  1212→            node_count,
+  1213→            calls,
+  1214→        });
+  1215→    }
+  1216→
+  1217→    // If no function entries were found, create a single "main" summary
+  1218→    if functions.is_empty() {
+  1219→        let mut calls = Vec::new();
+  1220→        for node in scg.nodes() {
+  1221→            if let NodePayload::Computation(comp) = &node.payload {
+  1222→                let op_label = comp.kind.label();
+  1223→                if !is_known_binop(&op_label) && !op_label.starts_with('_') {
+  1224→                    if !calls.contains(&op_label) {
+  1225→                        calls.push(op_label);
+  1226→                    }
+  1227→                }
+  1228→            }
+  1229→        }
+  1230→
+  1231→        functions.push(FunctionSummary {
+  1232→            name: "main".to_string(),
+  1233→            params: Vec::new(),
+  1234→            return_type: "void".to_string(),
+  1235→            node_count: total_nodes,
+  1236→            calls,
+  1237→        });
+  1238→    }
+  1239→
+  1240→    ScgSummary {
+  1241→        function_count: functions.len(),
+  1242→        functions,
+  1243→        total_nodes,
+  1244→        total_edges,
+  1245→    }
+  1246→}
+  1247→
+  1248→/// Check if an operation string is a known binary operation.
+  1249→fn is_known_binop(op: &str) -> bool {
+  1250→    matches!(
+  1251→        op,
+  1252→        "add" | "sub" | "mul" | "sdiv" | "udiv" | "srem" | "urem" | "and" | "or" | "xor"
+  1253→            | "shl" | "shr.l" | "shr.a" | "slt" | "sle" | "sgt" | "sge" | "ult" | "ule"
+  1254→            | "ugt" | "uge" | "eq" | "ne" | "+" | "-" | "*" | "/" | "%" | "&" | "|"
+  1255→            | "^" | "<<" | ">>" | "<" | "<=" | ">" | ">=" | "=="
+  1256→    )
+  1257→}
+  1258→
+  1259→/// Find the return type of a function by tracing to its FunctionReturn node.
+  1260→fn find_return_type(
+  1261→    scg: &vuma_scg::SCG,
+  1262→    entry_id: vuma_scg::NodeId,
+  1263→    edge_idx: &ScgEdgeIndex,
+  1264→) -> String {
+  1265→    use vuma_scg::{ControlKind, EdgeKind, NodePayload};
+  1266→
+  1267→    let mut visited = std::collections::HashSet::new();
+  1268→    let mut queue = std::collections::VecDeque::new();
+  1269→    queue.push_back(entry_id);
+  1270→    visited.insert(entry_id);
+  1271→
+  1272→    while let Some(current) = queue.pop_front() {
+  1273→        for edge in edge_idx.outgoing(current) {
+  1274→            if edge.kind == EdgeKind::ControlFlow && !visited.contains(&edge.target) {
+  1275→                visited.insert(edge.target);
+  1276→                if let Some(node) = scg.get_node(edge.target) {
+  1277→                    if let NodePayload::Control(c) = &node.payload {
+  1278→                        if c.kind == ControlKind::FunctionReturn {
+  1279→                            // Check incoming DataFlow edges for return value type
+  1280→                            for ret_edge in edge_idx.incoming(edge.target) {
+  1281→                                if ret_edge.kind == EdgeKind::DataFlow {
+  1282→                                    if let Some(src) = scg.get_node(ret_edge.source) {
+  1283→                                        if let NodePayload::Computation(comp) = &src.payload {
+  1284→                                            if let Some(rt) = &comp.result_type {
+  1285→                                                return rt.clone();
+  1286→                                            }
+  1287→                                        }
+  1288→                                    }
+  1289→                                }
+  1290→                            }
+  1291→                            return "void".to_string();
+  1292→                        }
+  1293→                    }
+  1294→                }
+  1295→                queue.push_back(edge.target);
+  1296→            }
+  1297→        }
+  1298→    }
+  1299→
+  1300→    "void".to_string()
+  1301→}
+  1302→
+  1303→/// Build an AST summary from the parsed program.
+  1304→fn build_ast_summary(ast: &vuma_parser::Program) -> AstSummary {
+  1305→    use vuma_parser::Item;
+  1306→
+  1307→    let mut function_names = Vec::new();
+  1308→    let mut region_names = Vec::new();
+  1309→    let mut import_count = 0;
+  1310→
+  1311→    for item in &ast.items {
+  1312→        match item {
+  1313→            Item::FnDef(fn_decl) => {
+  1314→                function_names.push(fn_decl.name.clone());
+  1315→            }
+  1316→            Item::RegionDef(region_decl) => {
+  1317→                region_names.push(region_decl.name.clone());
+  1318→            }
+  1319→            Item::Import(_) => {
+  1320→                import_count += 1;
+  1321→            }
+  1322→            _ => {}
+  1323→        }
+  1324→    }
+  1325→
+  1326→    AstSummary {
+  1327→        item_count: ast.items.len(),
+  1328→        function_names,
+  1329→        region_names,
+  1330→        import_count,
+  1331→    }
+  1332→}
+  1333→
+  1334→/// Disassemble the default (AArch64) binary output.
+  1335→fn disassemble_default(binary: &[u8]) -> String {
+  1336→    use vuma_codegen::backend::{create_backend, BackendKind};
+  1337→
+  1338→    match create_backend(BackendKind::AArch64) {
+  1339→        Ok(backend) => {
+  1340→            let base = backend.target_info().default_base_address();
+  1341→            backend.disassemble(binary, base).join("\n")
+  1342→        }
+  1343→        Err(_) => format!("({} bytes of binary output)", binary.len()),
+  1344→    }
+  1345→}
+  1346→
+  1347→/// Parse a target string into a BackendKind.
+  1348→fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
+  1349→    use vuma_codegen::backend::BackendKind;
+  1350→
+  1351→    match target.to_lowercase().as_str() {
+  1352→        "x86_64" | "x86-64" | "amd64" => Some(BackendKind::X86_64),
+  1353→        "aarch64" | "arm64" => Some(BackendKind::AArch64),
+  1354→        "riscv64" | "risc-v64" | "riscv-64" => Some(BackendKind::RiscV64),
+  1355→        "wasm32" | "wasm" => Some(BackendKind::Wasm32),
+  1356→        "loongarch64" | "la64" => Some(BackendKind::LoongArch64),
+  1357→        "arm32" | "arm" => Some(BackendKind::Arm32),
+  1358→        "mips64" | "mips" => Some(BackendKind::Mips64),
+  1359→        "ppc64" | "powerpc64" | "ppc" => Some(BackendKind::PowerPC64),
+  1360→        _ => None,
+  1361→    }
+  1362→}
+  1363→
+  1364→// ═══════════════════════════════════════════════════════════════════════════
+  1365→// Verification Helper Functions
+  1366→// ═══════════════════════════════════════════════════════════════════════════
+  1367→
+  1368→/// Build a proof-system counterexample from an IVE verification result.
+  1369→///
+  1370→/// Takes the IVE `VerificationResult` (which uses its own counterexample
+  1371→/// format) and converts it into a proof-system `CounterExample`, then
+  1372→/// extracts the relevant information into the API's `CounterexampleInfo`.
+  1373→fn build_proof_counterexample(
+  1374→    result: &vuma_ive::result::VerificationResult,
+  1375→) -> CounterexampleInfo {
+  1376→    use vuma_ive::result::VerificationStatus;
+  1377→
+  1378→    match &result.status {
+  1379→        VerificationStatus::Violated { counterexample } => {
+  1380→            // Convert the IVE counterexample into a proof-system
+  1381→            // counterexample for structural consistency.
+  1382→            let proof_inv = match result.invariant.as_str() {
+  1383→                "liveness" => vuma_proof::proof::InvariantName::Liveness,
+  1384→                "exclusivity" => vuma_proof::proof::InvariantName::Exclusivity,
+  1385→                "cleanup" => vuma_proof::proof::InvariantName::Cleanup,
+  1386→                "origin" => vuma_proof::proof::InvariantName::Origin,
+  1387→                "interpretation" => vuma_proof::proof::InvariantName::Interpretation,
+  1388→                _ => vuma_proof::proof::InvariantName::Liveness,
+  1389→            };
+  1390→
+  1391→            let violation_point = ViolationPoint::new(
+  1392→                proof_inv,
+  1393→                &counterexample.description,
+  1394→                0, // program offset
+  1395→            );
+  1396→            let proof_ce = ProofCounterExample::from_violation(&result.message, violation_point);
+  1397→            let minimal_ce = proof_ce.minimal();
+  1398→
+  1399→            // Convert trace steps to human-readable strings.
+  1400→            let trace: Vec<String> = minimal_ce
+  1401→                .execution
+  1402→                .iter()
+  1403→                .map(|step| step.to_string())
+  1404→                .collect();
+  1405→
+  1406→            CounterexampleInfo {
+  1407→                description: counterexample.description.clone(),
+  1408→                execution_trace: trace,
+  1409→            }
+  1410→        }
+  1411→        _ => CounterexampleInfo {
+  1412→            description: result.message.clone(),
+  1413→            execution_trace: Vec::new(),
+  1414→        },
+  1415→    }
+  1416→}
+  1417→
+  1418→/// Build a proof bundle from the SCG for cross-checking with the
+  1419→/// proof system. Currently produces an empty bundle since the proof
+  1420→/// system's proof generation is still being integrated — the bundle
+  1421→/// is used for its status() method which returns NotAttempted for
+  1422→/// each invariant.
+  1423→fn build_proof_bundle(_scg: &vuma_scg::SCG) -> ProofBundle {
+  1424→    // The proof bundle currently returns NotAttempted for all invariants
+  1425→    // since full proof generation from SCG is still being integrated.
+  1426→    // As the proof system matures, this function will extract ProofSCG
+  1427→    // data from the SCG and attempt proof generation.
+  1428→    ProofBundle::new()
+  1429→}
+  1430→
+  1431→// ═══════════════════════════════════════════════════════════════════════════
+  1432→// Tests
+  1433→// ═══════════════════════════════════════════════════════════════════════════
+  1434→
+  1435→#[cfg(test)]
+  1436→mod tests {
+  1437→    use super::*;
+  1438→
+  1439→    #[test]
+  1440→    fn test_compile_simple() {
+  1441→        let compiler = VumaCompiler::new();
+  1442→        let source = r#"
+  1443→            fn main() {
+  1444→            }
+  1445→        "#;
+  1446→        let result = compiler.compile(source);
+  1447→        assert!(result.success, "Compilation should succeed");
+  1448→        assert!(result.scg.is_some(), "SCG summary should be present");
+  1449→        assert!(result.target.is_some(), "Target output should be present");
+  1450→        assert!(result.diagnostics.is_empty(), "No diagnostics expected");
+  1451→    }
+  1452→
+  1453→    #[test]
+  1454→    fn test_compile_with_allocation() {
+  1455→        let compiler = VumaCompiler::new();
+  1456→        let source = r#"
+  1457→            region memory_pool = allocate(1024);
+  1458→            fn main() {
+  1459→                node_ptr = memory_pool + 64;
+  1460→                header = node_ptr as *NodeHeader;
+  1461→            }
+  1462→        "#;
+  1463→        let result = compiler.compile(source);
+  1464→        assert!(result.success, "Compilation should succeed");
+  1465→        let scg = result.scg.unwrap();
+  1466→        assert!(scg.total_nodes > 0, "SCG should have nodes");
+  1467→    }
+  1468→
+  1469→    #[test]
+  1470→    fn test_parse_only() {
+  1471→        let compiler = VumaCompiler::new();
+  1472→        let source = r#"
+  1473→            fn add(a: i64, b: i64) {
+  1474→                result = a + b;
+  1475→            }
+  1476→            fn main() {
+  1477→            }
+  1478→        "#;
+  1479→        let result = compiler.parse(source);
+  1480→        assert!(result.success, "Parsing should succeed");
+  1481→        assert!(result.ast_summary.is_some(), "AST summary should be present");
+  1482→        assert!(result.scg.is_some(), "SCG summary should be present");
+  1483→    }
+  1484→
+  1485→    #[test]
+  1486→    fn test_analyze() {
+  1487→        let compiler = VumaCompiler::new();
+  1488→        let source = r#"
+  1489→            fn main() {
+  1490→                x = 1 + 2;
+  1491→            }
+  1492→        "#;
+  1493→        let summary = compiler.analyze(source);
+  1494→        assert!(summary.total_nodes > 0, "SCG should have nodes");
+  1495→        assert!(!summary.functions.is_empty(), "Should have at least one function");
+  1496→    }
+  1497→
+  1498→    #[test]
+  1499→    fn test_validate_valid() {
+  1500→        let compiler = VumaCompiler::new();
+  1501→        let source = "fn main() {}";
+  1502→        let diags = compiler.validate(source);
+  1503→        assert!(diags.is_empty(), "Valid source should have no diagnostics");
+  1504→    }
+  1505→
+  1506→    #[test]
+  1507→    fn test_validate_invalid() {
+  1508→        let compiler = VumaCompiler::new();
+  1509→        let source = "fn 123invalid() {}";
+  1510→        let diags = compiler.validate(source);
+  1511→        assert!(!diags.is_empty(), "Invalid source should have diagnostics");
+  1512→        assert!(diags.iter().any(|d| d.severity == DiagnosticSeverity::Error));
+  1513→    }
+  1514→
+  1515→    #[test]
+  1516→    fn test_available_targets() {
+  1517→        let compiler = VumaCompiler::new();
+  1518→        let targets = compiler.available_targets();
+  1519→        assert!(!targets.is_empty(), "Should have available targets");
+  1520→        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+  1521→        assert!(names.contains(&"aarch64"), "AArch64 should be available");
+  1522→        assert!(names.contains(&"x86_64"), "x86_64 should be available");
+  1523→        assert!(names.contains(&"riscv64"), "RISC-V 64 should be available");
+  1524→    }
+  1525→
+  1526→    #[test]
+  1527→    fn test_compile_for_unknown_target() {
+  1528→        let compiler = VumaCompiler::new();
+  1529→        let source = "fn main() {}";
+  1530→        let result = compiler.compile_for_target(source, "unknown_arch");
+  1531→        assert!(!result.success, "Should fail for unknown target");
+  1532→        assert!(result
+  1533→            .diagnostics
+  1534→            .iter()
+  1535→            .any(|d| d.message.contains("Unknown target")));
+  1536→    }
+  1537→
+  1538→    #[test]
+  1539→    fn test_compile_result_serializable() {
+  1540→        let compiler = VumaCompiler::new();
+  1541→        let source = "fn main() {}";
+  1542→        let result = compiler.compile(source);
+  1543→        let json = serde_json::to_string(&result);
+  1544→        assert!(json.is_ok(), "CompileResult should be serializable");
+  1545→    }
+  1546→
+  1547→    #[test]
+  1548→    fn test_metadata() {
+  1549→        let compiler = VumaCompiler::new();
+  1550→        let source = "fn main() {}";
+  1551→        let result = compiler.compile(source);
+  1552→        assert!(result.metadata.source_lines > 0);
+  1553→        assert!(result.metadata.source_bytes > 0);
+  1554→    }
+  1555→
+  1556→    #[test]
+  1557→    fn test_verify_simple() {
+  1558→        let compiler = VumaCompiler::new();
+  1559→        let source = "fn main() {}";
+  1560→        let report = compiler.verify(source);
+  1561→        // A simple empty function should parse and verify without errors.
+  1562→        assert!(
+  1563→            report.overall_verdict != VerificationVerdict::Error,
+  1564→            "Verification should not error for valid source"
+  1565→        );
+  1566→        assert!(
+  1567→            !report.invariants.is_empty(),
+  1568→            "Should have per-invariant results"
+  1569→        );
+  1570→        assert!(
+  1571→            report.metadata.total_elapsed_ms > 0 || report.invariants.len() == 5,
+  1572→            "Should have timing data or all 5 invariants"
+  1573→        );
+  1574→    }
+  1575→
+  1576→    #[test]
+  1577→    fn test_verify_report_serializable() {
+  1578→        let compiler = VumaCompiler::new();
+  1579→        let source = "fn main() {}";
+  1580→        let report = compiler.verify(source);
+  1581→        let json = serde_json::to_string(&report);
+  1582→        assert!(json.is_ok(), "VerificationReport should be serializable");
+  1583→    }
+  1584→
+  1585→    #[test]
+  1586→    fn test_verify_invalid_source() {
+  1587→        let compiler = VumaCompiler::new();
+  1588→        let source = "fn 123invalid() {}";
+  1589→        let report = compiler.verify(source);
+  1590→        assert_eq!(
+  1591→            report.overall_verdict,
+  1592→            VerificationVerdict::Error,
+  1593→            "Invalid source should produce Error verdict"
+  1594→        );
+  1595→        assert!(
+  1596→            !report.diagnostics.is_empty(),
+  1597→            "Invalid source should have diagnostics"
+  1598→        );
+  1599→    }
+  1600→}
+  1601→

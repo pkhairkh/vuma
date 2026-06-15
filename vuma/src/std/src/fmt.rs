@@ -965,4 +965,461 @@ mod tests {
         assert!(capd.has(CapFlag::Compare));
         assert!(!capd.has(CapFlag::Hash));
     }
+
+    // =======================================================================
+    // Comprehensive additional tests for expanded fmt module
+    // =======================================================================
+
+    // --- Comprehensive format_int tests ---
+
+    #[test]
+    fn test_format_int_decimal_basic() {
+        assert_eq!(format_int(42, 10, 0).as_str(), "42");
+        assert_eq!(format_int(-42, 10, 0).as_str(), "-42");
+        assert_eq!(format_int(0, 10, 0).as_str(), "0");
+        assert_eq!(format_int(1, 10, 0).as_str(), "1");
+        assert_eq!(format_int(-1, 10, 0).as_str(), "-1");
+    }
+
+    #[test]
+    fn test_format_int_hex_basic() {
+        assert_eq!(format_int(0xFF, 16, 0).as_str(), "ff");
+        assert_eq!(format_int(0, 16, 0).as_str(), "0");
+        assert_eq!(format_int(10, 16, 0).as_str(), "a");
+        assert_eq!(format_int(16, 16, 0).as_str(), "10");
+    }
+
+    #[test]
+    fn test_format_int_binary_basic() {
+        assert_eq!(format_int(0, 2, 0).as_str(), "0");
+        assert_eq!(format_int(1, 2, 0).as_str(), "1");
+        assert_eq!(format_int(2, 2, 0).as_str(), "10");
+        assert_eq!(format_int(255, 2, 0).as_str(), "11111111");
+    }
+
+    #[test]
+    fn test_format_int_octal_basic() {
+        assert_eq!(format_int(0, 8, 0).as_str(), "0");
+        assert_eq!(format_int(7, 8, 0).as_str(), "7");
+        assert_eq!(format_int(8, 8, 0).as_str(), "10");
+        assert_eq!(format_int(63, 8, 0).as_str(), "77");
+    }
+
+    #[test]
+    fn test_format_int_with_width_comprehensive() {
+        // Zero-padded positive
+        assert_eq!(format_int(42, 10, 5).as_str(), "00042");
+        // Zero-padded negative — sign takes one position
+        assert_eq!(format_int(-42, 10, 5).as_str(), "-0042");
+        // Width equal to length
+        assert_eq!(format_int(42, 10, 2).as_str(), "42");
+        // Width 0
+        assert_eq!(format_int(42, 10, 0).as_str(), "42");
+        // Hex with width
+        assert_eq!(format_int(0xFF, 16, 4).as_str(), "00ff");
+    }
+
+    #[test]
+    fn test_format_int_base36() {
+        assert_eq!(format_int(35, 36, 0).as_str(), "z");
+        assert_eq!(format_int(36, 36, 0).as_str(), "10");
+        assert_eq!(format_int(0, 36, 0).as_str(), "0");
+    }
+
+    #[test]
+    fn test_format_int_invalid_base_comprehensive() {
+        // Base 1 and 37 should fall back to base 10
+        assert_eq!(format_int(42, 1, 0).as_str(), "42");
+        assert_eq!(format_int(42, 37, 0).as_str(), "42");
+        assert_eq!(format_int(42, 0, 0).as_str(), "42");
+    }
+
+    #[test]
+    fn test_format_int_extremes() {
+        assert_eq!(format_int(i64::MAX, 10, 0).as_str(), "9223372036854775807");
+        assert_eq!(format_int(i64::MIN, 10, 0).as_str(), "-9223372036854775808");
+    }
+
+    // --- Comprehensive format_uint tests ---
+
+    #[test]
+    fn test_format_uint_decimal_comprehensive() {
+        assert_eq!(format_uint(0, 10, 0).as_str(), "0");
+        assert_eq!(format_uint(1, 10, 0).as_str(), "1");
+        assert_eq!(format_uint(42, 10, 0).as_str(), "42");
+        assert_eq!(format_uint(999, 10, 0).as_str(), "999");
+    }
+
+    #[test]
+    fn test_format_uint_hex_comprehensive() {
+        assert_eq!(format_uint(0, 16, 0).as_str(), "0");
+        assert_eq!(format_uint(0xDEAD, 16, 0).as_str(), "dead");
+        assert_eq!(format_uint(255, 16, 2).as_str(), "ff");
+        assert_eq!(format_uint(255, 16, 4).as_str(), "00ff");
+        assert_eq!(format_uint(0xBEEF, 16, 0).as_str(), "beef");
+    }
+
+    #[test]
+    fn test_format_uint_with_width_comprehensive() {
+        assert_eq!(format_uint(0, 10, 4).as_str(), "0000");
+        assert_eq!(format_uint(1, 10, 4).as_str(), "0001");
+        assert_eq!(format_uint(42, 10, 5).as_str(), "00042");
+        assert_eq!(format_uint(42, 10, 2).as_str(), "42");
+        // Width smaller than number length
+        assert_eq!(format_uint(12345, 10, 3).as_str(), "12345");
+    }
+
+    #[test]
+    fn test_format_uint_max_comprehensive() {
+        assert_eq!(format_uint(u64::MAX, 10, 0).as_str(), "18446744073709551615");
+        assert_eq!(format_uint(u64::MAX, 16, 0).as_str(), "ffffffffffffffff");
+    }
+
+    #[test]
+    fn test_format_uint_base36_comprehensive() {
+        assert_eq!(format_uint(35, 36, 0).as_str(), "z");
+        assert_eq!(format_uint(36, 36, 0).as_str(), "10");
+        assert_eq!(format_uint(0, 36, 0).as_str(), "0");
+    }
+
+    #[test]
+    fn test_format_uint_binary() {
+        assert_eq!(format_uint(0, 2, 0).as_str(), "0");
+        assert_eq!(format_uint(1, 2, 0).as_str(), "1");
+        assert_eq!(format_uint(10, 2, 0).as_str(), "1010");
+        assert_eq!(format_uint(255, 2, 8).as_str(), "11111111");
+    }
+
+    // --- Comprehensive format_float tests ---
+
+    #[test]
+    fn test_format_float_comprehensive() {
+        assert_eq!(format_float(3.14, 2).as_str(), "3.14");
+        assert_eq!(format_float(0.0, 2).as_str(), "0.00");
+        assert_eq!(format_float(42.0, 0).as_str(), "42");
+        assert_eq!(format_float(-1.5, 1).as_str(), "-1.5");
+        assert_eq!(format_float(0.12345, 3).as_str(), "0.123");
+        assert_eq!(format_float(99.9, 1).as_str(), "99.9");
+    }
+
+    #[test]
+    fn test_format_float_precision() {
+        // Zero precision — no decimal point
+        assert_eq!(format_float(3.14, 0).as_str(), "3");
+        assert_eq!(format_float(0.5, 0).as_str(), "0"); // rounds to 0? Actually 0.5 rounds to 0 or 1?
+        // High precision
+        assert_eq!(format_float(1.0, 5).as_str(), "1.00000");
+        assert_eq!(format_float(3.14159, 4).as_str(), "3.1416");
+    }
+
+    #[test]
+    fn test_format_float_special_comprehensive() {
+        assert_eq!(format_float(f64::NAN, 2).as_str(), "nan");
+        assert_eq!(format_float(f64::INFINITY, 2).as_str(), "inf");
+        assert_eq!(format_float(f64::NEG_INFINITY, 2).as_str(), "-inf");
+        assert_eq!(format_float(f64::NAN, 0).as_str(), "nan");
+        assert_eq!(format_float(f64::INFINITY, 0).as_str(), "inf");
+    }
+
+    #[test]
+    fn test_format_float_negative_comprehensive() {
+        assert_eq!(format_float(-0.5, 1).as_str(), "-0.5");
+        assert_eq!(format_float(-100.0, 0).as_str(), "-100");
+        assert_eq!(format_float(-3.14159, 2).as_str(), "-3.14");
+    }
+
+    // --- Comprehensive format_hex tests ---
+
+    #[test]
+    fn test_format_hex_comprehensive() {
+        assert_eq!(format_hex(0, 0).as_str(), "0");
+        assert_eq!(format_hex(0xDEAD, 4).as_str(), "dead");
+        assert_eq!(format_hex(0xFF, 0).as_str(), "ff");
+        assert_eq!(format_hex(0xFF, 4).as_str(), "00ff");
+        assert_eq!(format_hex(0, 8).as_str(), "00000000");
+        assert_eq!(format_hex(1, 8).as_str(), "00000001");
+        assert_eq!(format_hex(0xABCDEF, 0).as_str(), "abcdef");
+    }
+
+    #[test]
+    fn test_format_hex_max() {
+        assert_eq!(format_hex(u64::MAX, 0).as_str(), "ffffffffffffffff");
+    }
+
+    // --- Comprehensive format_binary tests ---
+
+    #[test]
+    fn test_format_binary_comprehensive() {
+        assert_eq!(format_binary(0, 0).as_str(), "0");
+        assert_eq!(format_binary(1, 0).as_str(), "1");
+        assert_eq!(format_binary(2, 0).as_str(), "10");
+        assert_eq!(format_binary(10, 0).as_str(), "1010");
+        assert_eq!(format_binary(5, 8).as_str(), "00000101");
+        assert_eq!(format_binary(255, 8).as_str(), "11111111");
+        assert_eq!(format_binary(0, 4).as_str(), "0000");
+    }
+
+    // --- Comprehensive format_octal tests ---
+
+    #[test]
+    fn test_format_octal_comprehensive() {
+        assert_eq!(format_octal(0, 0).as_str(), "0");
+        assert_eq!(format_octal(7, 0).as_str(), "7");
+        assert_eq!(format_octal(8, 0).as_str(), "10");
+        assert_eq!(format_octal(63, 0).as_str(), "77");
+        assert_eq!(format_octal(7, 4).as_str(), "0007");
+        assert_eq!(format_octal(0, 4).as_str(), "0000");
+    }
+
+    // --- Comprehensive format_pointer tests ---
+
+    #[test]
+    fn test_format_pointer_comprehensive() {
+        assert_eq!(format_pointer(0).as_str(), "0x0000000000000000");
+        assert_eq!(format_pointer(0xDEADBEEF).as_str(), "0x00000000deadbeef");
+        assert_eq!(format_pointer(u64::MAX).as_str(), "0xffffffffffffffff");
+        assert_eq!(format_pointer(1).as_str(), "0x0000000000000001");
+        assert_eq!(format_pointer(0xFF).as_str(), "0x00000000000000ff");
+    }
+
+    // --- Comprehensive pad_left tests ---
+
+    #[test]
+    fn test_pad_left_comprehensive() {
+        assert_eq!(pad_left("hi", 5, ' ').as_str(), "   hi");
+        assert_eq!(pad_left("42", 5, '0').as_str(), "00042");
+        // No padding needed
+        assert_eq!(pad_left("hello", 3, ' ').as_str(), "hello");
+        // Exact width
+        assert_eq!(pad_left("abc", 3, ' ').as_str(), "abc");
+        // Empty string
+        assert_eq!(pad_left("", 3, '-').as_str(), "---");
+        // Width 0
+        assert_eq!(pad_left("test", 0, ' ').as_str(), "test");
+        // Unicode
+        assert_eq!(pad_left("é", 3, ' ').as_str(), "  é");
+    }
+
+    // --- Comprehensive pad_right tests ---
+
+    #[test]
+    fn test_pad_right_comprehensive() {
+        assert_eq!(pad_right("hi", 5, ' ').as_str(), "hi   ");
+        // No padding needed
+        assert_eq!(pad_right("hello", 3, ' ').as_str(), "hello");
+        // Exact width
+        assert_eq!(pad_right("abc", 3, ' ').as_str(), "abc");
+        // Empty string
+        assert_eq!(pad_right("", 3, '-').as_str(), "---");
+        // Width 0
+        assert_eq!(pad_right("test", 0, ' ').as_str(), "test");
+        // Different fill characters
+        assert_eq!(pad_right("x", 4, '.').as_str(), "x...");
+        assert_eq!(pad_right("x", 4, '*').as_str(), "x***");
+    }
+
+    // --- Comprehensive join tests ---
+
+    #[test]
+    fn test_join_comprehensive() {
+        // Empty
+        assert_eq!(join(&[], ", ").as_str(), "");
+        // Single element
+        assert_eq!(join(&["hello"], ", ").as_str(), "hello");
+        // Two elements with comma
+        assert_eq!(join(&["a", "b"], ",").as_str(), "a,b");
+        // Multiple elements
+        assert_eq!(join(&["a", "b", "c"], ", ").as_str(), "a, b, c");
+        // No separator
+        assert_eq!(join(&["a", "b", "c"], "").as_str(), "abc");
+        // Path separator
+        assert_eq!(join(&["usr", "local", "bin"], "/").as_str(), "usr/local/bin");
+        // Long separator
+        assert_eq!(join(&["x", "y"], " AND ").as_str(), "x AND y");
+        // Single char elements with dash
+        assert_eq!(join(&["1", "2", "3"], "-").as_str(), "1-2-3");
+    }
+
+    // --- Comprehensive write_str tests ---
+
+    #[test]
+    fn test_write_str_comprehensive() {
+        let mut buf = [0u8; 16];
+        let n = write_str(&mut buf, "hello");
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..5], b"hello");
+
+        // Truncation
+        let mut small_buf = [0u8; 3];
+        let n = write_str(&mut small_buf, "hello");
+        assert_eq!(n, 3);
+        assert_eq!(&small_buf[..3], b"hel");
+
+        // Empty string
+        let mut buf2 = [0u8; 8];
+        let n = write_str(&mut buf2, "");
+        assert_eq!(n, 0);
+
+        // Exact fit
+        let mut buf3 = [0u8; 5];
+        let n = write_str(&mut buf3, "hello");
+        assert_eq!(n, 5);
+        assert_eq!(&buf3[..5], b"hello");
+    }
+
+    // --- Comprehensive write_int tests ---
+
+    #[test]
+    fn test_write_int_comprehensive() {
+        // Positive
+        let mut buf = [0u8; 16];
+        let n = write_int(&mut buf, 42);
+        assert_eq!(n, 2);
+        assert_eq!(&buf[..2], b"42");
+
+        // Negative
+        let mut buf2 = [0u8; 16];
+        let n = write_int(&mut buf2, -7);
+        assert_eq!(n, 2);
+        assert_eq!(&buf2[..2], b"-7");
+
+        // Zero
+        let mut buf3 = [0u8; 16];
+        let n = write_int(&mut buf3, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf3[..1], b"0");
+
+        // Large number
+        let mut buf4 = [0u8; 32];
+        let n = write_int(&mut buf4, 1234567890);
+        assert_eq!(n, 10);
+        assert_eq!(&buf4[..10], b"1234567890");
+
+        // Buffer too small
+        let mut small_buf = [0u8; 3];
+        let n = write_int(&mut small_buf, 12345);
+        assert_eq!(n, 3);
+        assert_eq!(&small_buf, b"123");
+    }
+
+    // --- Comprehensive write_float tests ---
+
+    #[test]
+    fn test_write_float_comprehensive() {
+        // Basic
+        let mut buf = [0u8; 32];
+        let n = write_float(&mut buf, 3.14, 2);
+        assert_eq!(n, 4);
+        assert_eq!(&buf[..4], b"3.14");
+
+        // Zero precision
+        let mut buf2 = [0u8; 32];
+        let n = write_float(&mut buf2, 3.14, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf2[..1], b"3");
+
+        // Negative
+        let mut buf3 = [0u8; 32];
+        let n = write_float(&mut buf3, -1.5, 1);
+        assert_eq!(n, 4);
+        assert_eq!(&buf3[..4], b"-1.5");
+
+        // NaN
+        let mut buf4 = [0u8; 32];
+        let n = write_float(&mut buf4, f64::NAN, 2);
+        assert_eq!(n, 3);
+        assert_eq!(&buf4[..3], b"nan");
+
+        // Infinity
+        let mut buf5 = [0u8; 32];
+        let n = write_float(&mut buf5, f64::INFINITY, 2);
+        assert_eq!(n, 3);
+        assert_eq!(&buf5[..3], b"inf");
+
+        // Zero
+        let mut buf6 = [0u8; 32];
+        let n = write_float(&mut buf6, 0.0, 2);
+        assert_eq!(n, 4);
+        assert_eq!(&buf6[..4], b"0.00");
+    }
+
+    // --- Cross-function consistency tests ---
+
+    #[test]
+    fn test_format_int_uint_consistency() {
+        // format_int for non-negative values should match format_uint
+        for val in [0i64, 1, 42, 255, 1000, i64::MAX] {
+            assert_eq!(
+                format_int(val, 10, 0).as_str(),
+                format_uint(val as u64, 10, 0).as_str(),
+                "format_int({}) != format_uint({})", val, val
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_hex_is_uint_base16() {
+        for val in [0u64, 1, 255, 0xDEAD, 0xBEEF, u64::MAX] {
+            assert_eq!(
+                format_hex(val, 0).as_str(),
+                format_uint(val, 16, 0).as_str(),
+                "format_hex({}) != format_uint({}, 16)", val, val
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_binary_is_uint_base2() {
+        for val in [0u64, 1, 5, 10, 255] {
+            assert_eq!(
+                format_binary(val, 0).as_str(),
+                format_uint(val, 2, 0).as_str(),
+                "format_binary({}) != format_uint({}, 2)", val, val
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_octal_is_uint_base8() {
+        for val in [0u64, 7, 8, 63, 255] {
+            assert_eq!(
+                format_octal(val, 0).as_str(),
+                format_uint(val, 8, 0).as_str(),
+                "format_octal({}) != format_uint({}, 8)", val, val
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_int_matches_format_int() {
+        let mut buf = [0u8; 32];
+        for val in [0i64, 42, -7, 1234567890] {
+            buf.fill(0);
+            let n = write_int(&mut buf, val);
+            let formatted = format_int(val, 10, 0);
+            assert_eq!(n as usize, formatted.len());
+            assert_eq!(&buf[..n as usize], formatted.as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_write_float_matches_format_float() {
+        let mut buf = [0u8; 32];
+        for (val, prec) in [(3.14f64, 2u32), (0.0, 2), (-1.5, 1), (42.0, 0)] {
+            buf.fill(0);
+            let n = write_float(&mut buf, val, prec);
+            let formatted = format_float(val, prec);
+            assert_eq!(n as usize, formatted.len());
+            assert_eq!(&buf[..n as usize], formatted.as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_format_pointer_consistency() {
+        // format_pointer should be "0x" + format_hex(addr, 16)
+        for addr in [0u64, 1, 0xFF, 0xDEADBEEF, u64::MAX] {
+            let expected = format!("0x{}", format_hex(addr, 16).as_str());
+            assert_eq!(format_pointer(addr).as_str(), expected);
+        }
+    }
 }

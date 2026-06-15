@@ -1,0 +1,977 @@
+     1→  2100→    }
+     2→  2101→
+     3→  2102→    #[test]
+     4→  2103→    fn location_display() {
+     5→  2104→        let loc = DiagnosticSourceLocation::point("foo.vu", 5, 10);
+     6→  2105→        assert_eq!(loc.to_string(), "foo.vu:5:10");
+     7→  2106→
+     8→  2107→        let loc = DiagnosticSourceLocation::range("foo.vu", 5, 10, 15);
+     9→  2108→        assert_eq!(loc.to_string(), "foo.vu:5:10-5:15");
+    10→  2109→
+    11→  2110→        let loc = DiagnosticSourceLocation::multi_line("foo.vu", 5, 10, 8, 15);
+    12→  2111→        assert_eq!(loc.to_string(), "foo.vu:5:10-8:15");
+    13→  2112→    }
+    14→  2113→
+    15→  2114→    #[test]
+    16→  2115→    fn location_json_roundtrip() {
+    17→  2116→        let loc = DiagnosticSourceLocation::range("test.vu", 3, 1, 8);
+    18→  2117→        let json = serde_json::to_string(&loc).unwrap();
+    19→  2118→        let back: DiagnosticSourceLocation = serde_json::from_str(&json).unwrap();
+    20→  2119→        assert_eq!(loc, back);
+    21→  2120→    }
+    22→  2121→
+    23→  2122→    // -- Suggestion tests ----------------------------------------------------
+    24→  2123→
+    25→  2124→    #[test]
+    26→  2125→    fn suggestion_text_only() {
+    27→  2126→        let s = Suggestion::text("did you mean 'fn'?");
+    28→  2127→        assert_eq!(s.message, "did you mean 'fn'?");
+    29→  2128→        assert!(s.edit_range.is_none());
+    30→  2129→        assert!(s.replacement.is_none());
+    31→  2130→        assert_eq!(s.applicability, SuggestionApplicability::Unspecified);
+    32→  2131→    }
+    33→  2132→
+    34→  2133→    #[test]
+    35→  2134→    fn suggestion_edit() {
+    36→  2135→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+    37→  2136→        let s = Suggestion::edit("Replace 'int' with 'i32'", loc.clone(), "i32");
+    38→  2137→        assert_eq!(s.message, "Replace 'int' with 'i32'");
+    39→  2138→        assert_eq!(s.edit_range, Some(loc));
+    40→  2139→        assert_eq!(s.replacement, Some("i32".to_string()));
+    41→  2140→        assert_eq!(s.applicability, SuggestionApplicability::MachineApplicable);
+    42→  2141→    }
+    43→  2142→
+    44→  2143→    #[test]
+    45→  2144→    fn suggestion_machine_applicable() {
+    46→  2145→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+    47→  2146→        let s = Suggestion::machine_applicable("Add mask", loc, "& 4294967295");
+    48→  2147→        assert_eq!(s.applicability, SuggestionApplicability::MachineApplicable);
+    49→  2148→    }
+    50→  2149→
+    51→  2150→    #[test]
+    52→  2151→    fn suggestion_with_placeholders() {
+    53→  2152→        let s = Suggestion::with_placeholders("replace with appropriate type");
+    54→  2153→        assert_eq!(s.applicability, SuggestionApplicability::HasPlaceholders);
+    55→  2154→    }
+    56→  2155→
+    57→  2156→    #[test]
+    58→  2157→    fn suggestion_json_roundtrip() {
+    59→  2158→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+    60→  2159→        let s = Suggestion::edit("Replace 'int' with 'i32'", loc, "i32");
+    61→  2160→        let json = serde_json::to_string(&s).unwrap();
+    62→  2161→        let back: Suggestion = serde_json::from_str(&json).unwrap();
+    63→  2162→        assert_eq!(s.message, back.message);
+    64→  2163→        assert_eq!(s.replacement, back.replacement);
+    65→  2164→    }
+    66→  2165→
+    67→  2166→    // -- VumaDiagnostic tests -----------------------------------------------
+    68→  2167→
+    69→  2168→    #[test]
+    70→  2169→    fn diagnostic_construction() {
+    71→  2170→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+    72→  2171→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc);
+    73→  2172→        assert_eq!(diag.code, "E002");
+    74→  2173→        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+    75→  2174→        assert_eq!(diag.message, "undefined variable `x`");
+    76→  2175→        assert_eq!(diag.source, "parser");
+    77→  2176→        assert!(diag.related.is_empty());
+    78→  2177→        assert!(diag.suggestions.is_empty());
+    79→  2178→        assert!(diag.chain.is_empty());
+    80→  2179→        assert!(diag.legacy_suggestions.is_empty());
+    81→  2180→    }
+    82→  2181→
+    83→  2182→    #[test]
+    84→  2183→    fn diagnostic_with_suggestion() {
+    85→  2184→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+    86→  2185→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
+    87→  2186→            .with_suggestion("did you mean 'y'?");
+    88→  2187→        assert_eq!(diag.legacy_suggestions.len(), 1);
+    89→  2188→        assert_eq!(diag.legacy_suggestions[0], "did you mean 'y'?");
+    90→  2189→    }
+    91→  2190→
+    92→  2191→    #[test]
+    93→  2192→    fn diagnostic_with_structured_suggestion() {
+    94→  2193→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+    95→  2194→        let edit_loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+    96→  2195→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type mismatch", "parser", loc)
+    97→  2196→            .with_structured_suggestion(Suggestion::edit(
+    98→  2197→                "Replace 'int' with 'i32'",
+    99→  2198→                edit_loc,
+   100→  2199→                "i32",
+   101→  2200→            ));
+   102→  2201→        assert_eq!(diag.suggestions.len(), 1);
+   103→  2202→        assert_eq!(diag.suggestions[0].message, "Replace 'int' with 'i32'");
+   104→  2203→        assert_eq!(diag.suggestions[0].replacement, Some("i32".to_string()));
+   105→  2204→    }
+   106→  2205→
+   107→  2206→    #[test]
+   108→  2207→    fn diagnostic_with_related() {
+   109→  2208→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   110→  2209→        let related_loc = DiagnosticSourceLocation::point("main.vu", 2, 1);
+   111→  2210→        let diag = VumaDiagnostic::new("E004", DiagnosticSeverity::Error, "duplicate definition", "parser", loc)
+   112→  2211→            .with_related(RelatedInfo::new(related_loc, "previous definition here"));
+   113→  2212→        assert_eq!(diag.related.len(), 1);
+   114→  2213→        assert_eq!(diag.related[0].message, "previous definition here");
+   115→  2214→    }
+   116→  2215→
+   117→  2216→    #[test]
+   118→  2217→    fn diagnostic_display() {
+   119→  2218→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   120→  2219→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
+   121→  2220→            .with_suggestion("did you mean 'y'?");
+   122→  2221→        let display = diag.to_string();
+   123→  2222→        assert!(display.contains("error[E002]"));
+   124→  2223→        assert!(display.contains("undefined variable `x`"));
+   125→  2224→        assert!(display.contains("did you mean 'y'?"));
+   126→  2225→    }
+   127→  2226→
+   128→  2227→    #[test]
+   129→  2228→    fn diagnostic_json_output() {
+   130→  2229→        let loc = DiagnosticSourceLocation::range("main.vu", 10, 4, 7);
+   131→  2230→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `foo`", "parser", loc)
+   132→  2231→            .with_suggestion("did you mean `for`?");
+   133→  2232→
+   134→  2233→        let json = diag.to_json();
+   135→  2234→        assert!(json.contains("\"code\":\"E002\""));
+   136→  2235→        assert!(json.contains("\"severity\":\"error\""));
+   137→  2236→        assert!(json.contains("\"message\":\"undefined variable `foo`\""));
+   138→  2237→        assert!(json.contains("\"source\":\"parser\""));
+   139→  2238→        assert!(json.contains("\"start_line\":10"));
+   140→  2239→        assert!(json.contains("\"start_col\":4"));
+   141→  2240→        assert!(json.contains("\"end_line\":10"));
+   142→  2241→        assert!(json.contains("\"end_col\":7"));
+   143→  2242→        assert!(json.contains("did you mean"));
+   144→  2243→
+   145→  2244→        // Verify round-trip.
+   146→  2245→        let back: VumaDiagnostic = serde_json::from_str(&json).unwrap();
+   147→  2246→        assert_eq!(back.code, "E002");
+   148→  2247→        assert_eq!(back.severity, DiagnosticSeverity::Error);
+   149→  2248→        assert_eq!(back.message, "undefined variable `foo`");
+   150→  2249→        assert_eq!(back.source, "parser");
+   151→  2250→        assert_eq!(back.legacy_suggestions.len(), 1);
+   152→  2251→    }
+   153→  2252→
+   154→  2253→    #[test]
+   155→  2254→    fn diagnostics_array_json() {
+   156→  2255→        let loc1 = DiagnosticSourceLocation::point("a.vu", 1, 1);
+   157→  2256→        let loc2 = DiagnosticSourceLocation::point("b.vu", 2, 3);
+   158→  2257→        let diags = vec![
+   159→  2258→            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "syntax error", "parser", loc1),
+   160→  2259→            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "unused variable", "parser", loc2),
+   161→  2260→        ];
+   162→  2261→        let json = diagnostics_to_json(&diags);
+   163→  2262→        assert!(json.starts_with('['));
+   164→  2263→        assert!(json.ends_with(']'));
+   165→  2264→        assert!(json.contains("\"E001\""));
+   166→  2265→        assert!(json.contains("\"W001\""));
+   167→  2266→    }
+   168→  2267→
+   169→  2268→    // -- Error chaining tests ------------------------------------------------
+   170→  2269→
+   171→  2270→    #[test]
+   172→  2271→    fn diagnostic_chain() {
+   173→  2272→        let root = VumaDiagnostic::new(
+   174→  2273→            "E023",
+   175→  2274→            DiagnosticSeverity::Error,
+   176→  2275→            "Unknown type 'int' — did you mean 'i32'?",
+   177→  2276→            "parser",
+   178→  2277→            DiagnosticSourceLocation::unknown(),
+   179→  2278→        );
+   180→  2279→        let diag = VumaDiagnostic::new(
+   181→  2280→            "E003",
+   182→  2281→            DiagnosticSeverity::Error,
+   183→  2282→            "Type mismatch",
+   184→  2283→            "parser",
+   185→  2284→            DiagnosticSourceLocation::unknown(),
+   186→  2285→        ).chain(root);
+   187→  2286→
+   188→  2287→        assert!(diag.has_chain());
+   189→  2288→        assert_eq!(diag.chain.len(), 1);
+   190→  2289→        assert_eq!(diag.immediate_cause().unwrap().code, "E023");
+   191→  2290→        assert_eq!(diag.root_cause().unwrap().code, "E023");
+   192→  2291→    }
+   193→  2292→
+   194→  2293→    #[test]
+   195→  2294→    fn diagnostic_chain_multi_level() {
+   196→  2295→        let root_cause = VumaDiagnostic::new(
+   197→  2296→            "E024",
+   198→  2297→            DiagnosticSeverity::Error,
+   199→  2298→            "Name resolution error for 'int'",
+   200→  2299→            "name-resolution",
+   201→  2300→            DiagnosticSourceLocation::unknown(),
+   202→  2301→        );
+   203→  2302→        let intermediate = VumaDiagnostic::new(
+   204→  2303→            "E023",
+   205→  2304→            DiagnosticSeverity::Error,
+   206→  2305→            "Unknown type 'int' — did you mean 'i32'?",
+   207→  2306→            "parser",
+   208→  2307→            DiagnosticSourceLocation::unknown(),
+   209→  2308→        ).chain(root_cause);
+   210→  2309→        let top = VumaDiagnostic::new(
+   211→  2310→            "E003",
+   212→  2311→            DiagnosticSeverity::Error,
+   213→  2312→            "Type mismatch",
+   214→  2313→            "parser",
+   215→  2314→            DiagnosticSourceLocation::unknown(),
+   216→  2315→        ).chain(intermediate);
+   217→  2316→
+   218→  2317→        assert!(top.has_chain());
+   219→  2318→        assert_eq!(top.immediate_cause().unwrap().code, "E023");
+   220→  2319→        // The root cause is the intermediate's chain's root
+   221→  2320→        assert_eq!(top.root_cause().unwrap().code, "E023");
+   222→  2321→        // But the intermediate has its own chain
+   223→  2322→        assert_eq!(
+   224→  2323→            top.immediate_cause().unwrap().root_cause().unwrap().code,
+   225→  2324→            "E024"
+   226→  2325→        );
+   227→  2326→    }
+   228→  2327→
+   229→  2328→    #[test]
+   230→  2329→    fn diagnostic_no_chain() {
+   231→  2330→        let diag = VumaDiagnostic::new(
+   232→  2331→            "E001",
+   233→  2332→            DiagnosticSeverity::Error,
+   234→  2333→            "Syntax error",
+   235→  2334→            "parser",
+   236→  2335→            DiagnosticSourceLocation::unknown(),
+   237→  2336→        );
+   238→  2337→        assert!(!diag.has_chain());
+   239→  2338→        assert!(diag.immediate_cause().is_none());
+   240→  2339→        assert!(diag.root_cause().is_none());
+   241→  2340→        assert!(diag.causal_chain().is_empty());
+   242→  2341→    }
+   243→  2342→
+   244→  2343→    #[test]
+   245→  2344→    fn diagnostic_chain_display() {
+   246→  2345→        let cause = VumaDiagnostic::new(
+   247→  2346→            "E023",
+   248→  2347→            DiagnosticSeverity::Error,
+   249→  2348→            "Unknown type 'int'",
+   250→  2349→            "parser",
+   251→  2350→            DiagnosticSourceLocation::unknown(),
+   252→  2351→        );
+   253→  2352→        let diag = VumaDiagnostic::new(
+   254→  2353→            "E003",
+   255→  2354→            DiagnosticSeverity::Error,
+   256→  2355→            "Type mismatch",
+   257→  2356→            "parser",
+   258→  2357→            DiagnosticSourceLocation::unknown(),
+   259→  2358→        ).chain(cause);
+   260→  2359→
+   261→  2360→        let display = diag.to_string();
+   262→  2361→        assert!(display.contains("caused by: error[E023]: Unknown type 'int'"));
+   263→  2362→    }
+   264→  2363→
+   265→  2364→    #[test]
+   266→  2365→    fn diagnostic_chain_json() {
+   267→  2366→        let cause = VumaDiagnostic::new(
+   268→  2367→            "E023",
+   269→  2368→            DiagnosticSeverity::Error,
+   270→  2369→            "Unknown type 'int'",
+   271→  2370→            "parser",
+   272→  2371→            DiagnosticSourceLocation::unknown(),
+   273→  2372→        );
+   274→  2373→        let diag = VumaDiagnostic::new(
+   275→  2374→            "E003",
+   276→  2375→            DiagnosticSeverity::Error,
+   277→  2376→            "Type mismatch",
+   278→  2377→            "parser",
+   279→  2378→            DiagnosticSourceLocation::unknown(),
+   280→  2379→        ).chain(cause);
+   281→  2380→
+   282→  2381→        let json = diag.to_json();
+   283→  2382→        assert!(json.contains("\"chain\""));
+   284→  2383→        assert!(json.contains("\"E023\""));
+   285→  2384→
+   286→  2385→        // Verify round-trip
+   287→  2386→        let back: VumaDiagnostic = serde_json::from_str(&json).unwrap();
+   288→  2387→        assert!(back.has_chain());
+   289→  2388→        assert_eq!(back.chain[0].code, "E023");
+   290→  2389→    }
+   291→  2390→
+   292→  2391→    // -- Output format tests -------------------------------------------------
+   293→  2392→
+   294→  2393→    #[test]
+   295→  2394→    fn to_plain_text() {
+   296→  2395→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
+   297→  2396→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
+   298→  2397→            .with_structured_suggestion(Suggestion::edit(
+   299→  2398→                "Replace 'int' with 'i32'",
+   300→  2399→                DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
+   301→  2400→                "i32",
+   302→  2401→            ))
+   303→  2402→            .chain(VumaDiagnostic::new(
+   304→  2403→                "E023",
+   305→  2404→                DiagnosticSeverity::Error,
+   306→  2405→                "Unknown type 'int'",
+   307→  2406→                "parser",
+   308→  2407→                DiagnosticSourceLocation::unknown(),
+   309→  2408→            ));
+   310→  2409→
+   311→  2410→        let plain = diag.to_plain_text();
+   312→  2411→        assert!(plain.contains("error[E003]: Type mismatch"));
+   313→  2412→        assert!(plain.contains("parser at main.vu:5:10-5:15"));
+   314→  2413→        assert!(plain.contains("help: Replace 'int' with 'i32'"));
+   315→  2414→        assert!(plain.contains("→ `i32`"));
+   316→  2415→        assert!(plain.contains("caused by: error[E023]: Unknown type 'int'"));
+   317→  2416→    }
+   318→  2417→
+   319→  2418→    #[test]
+   320→  2419→    fn to_rich_text_contains_ansi() {
+   321→  2420→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
+   322→  2421→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
+   323→  2422→            .with_structured_suggestion(Suggestion::edit(
+   324→  2423→                "Replace 'int' with 'i32'",
+   325→  2424→                DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
+   326→  2425→                "i32",
+   327→  2426→            ));
+   328→  2427→
+   329→  2428→        let rich = diag.to_rich_text();
+   330→  2429→        assert!(rich.contains("\x1b[")); // contains ANSI escape codes
+   331→  2430→        assert!(rich.contains("error"));
+   332→  2431→        assert!(rich.contains("E003"));
+   333→  2432→        assert!(rich.contains("Type mismatch"));
+   334→  2433→        assert!(rich.contains("main.vu"));
+   335→  2434→        assert!(rich.contains("help"));
+   336→  2435→    }
+   337→  2436→
+   338→  2437→    #[test]
+   339→  2438→    fn to_rich_text_warning_color() {
+   340→  2439→        let diag = VumaDiagnostic::new(
+   341→  2440→            "W001",
+   342→  2441→            DiagnosticSeverity::Warning,
+   343→  2442→            "unused variable",
+   344→  2443→            "parser",
+   345→  2444→            DiagnosticSourceLocation::unknown(),
+   346→  2445→        );
+   347→  2446→        let rich = diag.to_rich_text();
+   348→  2447→        assert!(rich.contains("\x1b[33m")); // yellow for warning
+   349→  2448→    }
+   350→  2449→
+   351→  2450→    #[test]
+   352→  2451→    fn to_rich_text_chain() {
+   353→  2452→        let diag = VumaDiagnostic::new(
+   354→  2453→            "E003",
+   355→  2454→            DiagnosticSeverity::Error,
+   356→  2455→            "Type mismatch",
+   357→  2456→            "parser",
+   358→  2457→            DiagnosticSourceLocation::unknown(),
+   359→  2458→        ).chain(VumaDiagnostic::new(
+   360→  2459→            "E023",
+   361→  2460→            DiagnosticSeverity::Error,
+   362→  2461→            "Unknown type 'int'",
+   363→  2462→            "parser",
+   364→  2463→            DiagnosticSourceLocation::unknown(),
+   365→  2464→        ));
+   366→  2465→
+   367→  2466→        let rich = diag.to_rich_text();
+   368→  2467→        assert!(rich.contains("caused by:"));
+   369→  2468→        assert!(rich.contains("E023"));
+   370→  2469→    }
+   371→  2470→
+   372→  2471→    #[test]
+   373→  2472→    fn to_lsp_format() {
+   374→  2473→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
+   375→  2474→        let related_loc = DiagnosticSourceLocation::point("main.vu", 2, 1);
+   376→  2475→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
+   377→  2476→            .with_related(RelatedInfo::new(related_loc, "previous definition here"));
+   378→  2477→
+   379→  2478→        let lsp = diag.to_lsp();
+   380→  2479→        assert_eq!(lsp["severity"], 1); // Error
+   381→  2480→        assert_eq!(lsp["code"], "E003");
+   382→  2481→        assert_eq!(lsp["source"], "parser");
+   383→  2482→        assert_eq!(lsp["message"], "Type mismatch");
+   384→  2483→
+   385→  2484→        // LSP uses 0-based positions
+   386→  2485→        let range = &lsp["range"];
+   387→  2486→        assert_eq!(range["start"]["line"], 4); // 5 - 1
+   388→  2487→        assert_eq!(range["start"]["character"], 9); // 10 - 1
+   389→  2488→        assert_eq!(range["end"]["line"], 4);
+   390→  2489→        assert_eq!(range["end"]["character"], 14); // 15 - 1
+   391→  2490→
+   392→  2491→        // Related information
+   393→  2492→        assert!(lsp["relatedInformation"].is_array());
+   394→  2493→        let related = lsp["relatedInformation"].as_array().unwrap();
+   395→  2494→        assert_eq!(related.len(), 1);
+   396→  2495→        assert_eq!(related[0]["message"], "previous definition here");
+   397→  2496→    }
+   398→  2497→
+   399→  2498→    #[test]
+   400→  2499→    fn to_lsp_warning_tags() {
+   401→  2500→        let diag = unused_variable("x", DiagnosticSourceLocation::point("main.vu", 5, 10));
+   402→  2501→        let lsp = diag.to_lsp();
+   403→  2502→        assert_eq!(lsp["severity"], 2); // Warning
+   404→  2503→        assert!(lsp["tags"].is_array());
+   405→  2504→        let tags = lsp["tags"].as_array().unwrap();
+   406→  2505→        assert!(tags.contains(&serde_json::json!(1))); // Unnecessary
+   407→  2506→    }
+   408→  2507→
+   409→  2508→    #[test]
+   410→  2509→    fn to_lsp_deprecated_tag() {
+   411→  2510→        let diag = deprecated_feature("old_fn", Some("new_fn"), DiagnosticSourceLocation::point("main.vu", 5, 10));
+   412→  2511→        let lsp = diag.to_lsp();
+   413→  2512→        assert_eq!(lsp["severity"], 2); // Warning
+   414→  2513→        let tags = lsp["tags"].as_array().unwrap();
+   415→  2514→        assert!(tags.contains(&serde_json::json!(2))); // Deprecated
+   416→  2515→    }
+   417→  2516→
+   418→  2517→    #[test]
+   419→  2518→    fn to_lsp_code_description() {
+   420→  2519→        let diag = syntax_error("bad syntax", DiagnosticSourceLocation::point("main.vu", 5, 10));
+   421→  2520→        let lsp = diag.to_lsp();
+   422→  2521→        assert!(lsp["codeDescription"]["href"].is_string());
+   423→  2522→        let href = lsp["codeDescription"]["href"].as_str().unwrap();
+   424→  2523→        assert!(href.contains("E001"));
+   425→  2524→    }
+   426→  2525→
+   427→  2526→    // -- DiagnosticSummary tests ---------------------------------------------
+   428→  2527→
+   429→  2528→    #[test]
+   430→  2529→    fn summary_empty() {
+   431→  2530→        let summary = DiagnosticSummary::new();
+   432→  2531→        assert_eq!(summary.total, 0);
+   433→  2532→        assert_eq!(summary.errors, 0);
+   434→  2533→        assert_eq!(summary.warnings, 0);
+   435→  2534→        assert!(!summary.has_errors());
+   436→  2535→        assert!(!summary.has_warnings());
+   437→  2536→    }
+   438→  2537→
+   439→  2538→    #[test]
+   440→  2539→    fn summary_from_diagnostics() {
+   441→  2540→        let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
+   442→  2541→        let diags = vec![
+   443→  2542→            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err1", "parser", loc.clone()),
+   444→  2543→            VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err2", "parser", loc.clone()),
+   445→  2544→            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "warn1", "parser", loc.clone()),
+   446→  2545→            VumaDiagnostic::new("I001", DiagnosticSeverity::Info, "info1", "pipeline", loc.clone()),
+   447→  2546→            VumaDiagnostic::new("W003", DiagnosticSeverity::Hint, "hint1", "codegen", loc),
+   448→  2547→        ];
+   449→  2548→        let summary = DiagnosticSummary::from_diagnostics(&diags);
+   450→  2549→        assert_eq!(summary.total, 5);
+   451→  2550→        assert_eq!(summary.errors, 2);
+   452→  2551→        assert_eq!(summary.warnings, 1);
+   453→  2552→        assert_eq!(summary.infos, 1);
+   454→  2553→        assert_eq!(summary.hints, 1);
+   455→  2554→        assert!(summary.has_errors());
+   456→  2555→        assert!(summary.has_warnings());
+   457→  2556→        assert_eq!(summary.count_for_code("E001"), 1);
+   458→  2557→        assert_eq!(summary.count_for_code("E003"), 1);
+   459→  2558→        assert_eq!(summary.count_for_code("W001"), 1);
+   460→  2559→        assert_eq!(summary.count_for_code("E999"), 0);
+   461→  2560→        assert_eq!(summary.count_for_source("parser"), 3);
+   462→  2561→        assert_eq!(summary.count_for_source("pipeline"), 1);
+   463→  2562→        assert_eq!(summary.count_for_source("codegen"), 1);
+   464→  2563→    }
+   465→  2564→
+   466→  2565→    #[test]
+   467→  2566→    fn summary_by_subcategory() {
+   468→  2567→        let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
+   469→  2568→        let diags = vec![
+   470→  2569→            VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err", "parser", loc.clone()),
+   471→  2570→            VumaDiagnostic::new("E032", DiagnosticSeverity::Error, "err", "codegen", loc.clone()),
+   472→  2571→            VumaDiagnostic::new("E042", DiagnosticSeverity::Error, "err", "ive", loc.clone()),
+   473→  2572→            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "warn", "parser", loc.clone()),
+   474→  2573→            VumaDiagnostic::new("I001", DiagnosticSeverity::Info, "info", "pipeline", loc),
+   475→  2574→        ];
+   476→  2575→        let summary = DiagnosticSummary::from_diagnostics(&diags);
+   477→  2576→        assert_eq!(summary.by_subcategory.get("compilation"), Some(&1));
+   478→  2577→        assert_eq!(summary.by_subcategory.get("codegen"), Some(&1));
+   479→  2578→        assert_eq!(summary.by_subcategory.get("verification"), Some(&1));
+   480→  2579→        assert_eq!(summary.by_subcategory.get("warning"), Some(&1));
+   481→  2580→        assert_eq!(summary.by_subcategory.get("informational"), Some(&1));
+   482→  2581→    }
+   483→  2582→
+   484→  2583→    #[test]
+   485→  2584→    fn summary_display() {
+   486→  2585→        let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
+   487→  2586→        let diags = vec![
+   488→  2587→            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err1", "parser", loc.clone()),
+   489→  2588→            VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err2", "parser", loc),
+   490→  2589→        ];
+   491→  2590→        let summary = DiagnosticSummary::from_diagnostics(&diags);
+   492→  2591→        let display = summary.to_string();
+   493→  2592→        assert!(display.contains("2 total"));
+   494→  2593→        assert!(display.contains("2 errors"));
+   495→  2594→        assert!(display.contains("by code:"));
+   496→  2595→        assert!(display.contains("E001"));
+   497→  2596→    }
+   498→  2597→
+   499→  2598→    #[test]
+   500→  2599→    fn summary_json() {
+   501→  2600→        let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
+   502→  2601→        let diags = vec![
+   503→  2602→            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err", "parser", loc),
+   504→  2603→        ];
+   505→  2604→        let summary = DiagnosticSummary::from_diagnostics(&diags);
+   506→  2605→        let json = summary.to_json();
+   507→  2606→        assert!(json.contains("\"total\":1"));
+   508→  2607→        assert!(json.contains("\"errors\":1"));
+   509→  2608→
+   510→  2609→        // Verify round-trip
+   511→  2610→        let back: DiagnosticSummary = serde_json::from_str(&json).unwrap();
+   512→  2611→        assert_eq!(back.total, 1);
+   513→  2612→        assert_eq!(back.errors, 1);
+   514→  2613→    }
+   515→  2614→
+   516→  2615→    // -- Diagnostic code tests -----------------------------------------------
+   517→  2616→
+   518→  2617→    #[test]
+   519→  2618→    fn codes_for_parse_error_kinds() {
+   520→  2619→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax), "E001");
+   521→  2620→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable), "E002");
+   522→  2621→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedReference), "E002");
+   523→  2622→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::TypeMismatch), "E003");
+   524→  2623→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition), "E004");
+   525→  2624→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken), "E009");
+   526→  2625→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::ExpectedToken), "E010");
+   527→  2626→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon), "E014");
+   528→  2627→    }
+   529→  2628→
+   530→  2629→    #[test]
+   531→  2630→    fn code_descriptions_compilation() {
+   532→  2631→        // E001–E030: Compilation errors
+   533→  2632→        assert_eq!(code_description("E001"), "Syntax error");
+   534→  2633→        assert_eq!(code_description("E002"), "Undefined variable");
+   535→  2634→        assert_eq!(code_description("E003"), "Type mismatch");
+   536→  2635→        assert_eq!(code_description("E004"), "Duplicate definition");
+   537→  2636→        assert_eq!(code_description("E005"), "Invalid argument count");
+   538→  2637→        assert_eq!(code_description("E006"), "Invalid type");
+   539→  2638→        assert_eq!(code_description("E007"), "Missing return");
+   540→  2639→        assert_eq!(code_description("E008"), "Unreachable code");
+   541→  2640→        assert_eq!(code_description("E009"), "Unexpected token");
+   542→  2641→        assert_eq!(code_description("E010"), "Expected token");
+   543→  2642→        assert_eq!(code_description("E011"), "Region error");
+   544→  2643→        assert_eq!(code_description("E012"), "BD annotation error");
+   545→  2644→        assert_eq!(code_description("E013"), "Invalid compound assignment operator");
+   546→  2645→        assert_eq!(code_description("E014"), "Missing semicolon");
+   547→  2646→        assert_eq!(code_description("E015"), "Invalid address literal");
+   548→  2647→        assert_eq!(code_description("E024"), "Name resolution error");
+   549→  2648→        assert_eq!(code_description("E025"), "Circular dependency");
+   550→  2649→        assert_eq!(code_description("E026"), "Invalid assignment target");
+   551→  2650→        assert_eq!(code_description("E027"), "Break/continue outside loop");
+   552→  2651→        assert_eq!(code_description("E028"), "Invalid cast");
+   553→  2652→        assert_eq!(code_description("E029"), "Missing function body");
+   554→  2653→        assert_eq!(code_description("E030"), "Invalid visibility modifier");
+   555→  2654→    }
+   556→  2655→
+   557→  2656→    #[test]
+   558→  2657→    fn code_descriptions_codegen() {
+   559→  2658→        // E031–E040: Codegen errors
+   560→  2659→        assert_eq!(code_description("E031"), "Invalid instruction");
+   561→  2660→        assert_eq!(code_description("E032"), "Register allocation failed");
+   562→  2661→        assert_eq!(code_description("E033"), "Encoding error");
+   563→  2662→        assert_eq!(code_description("E034"), "IR translation error");
+   564→  2663→        assert_eq!(code_description("E035"), "ELF emission error");
+   565→  2664→        assert_eq!(code_description("E036"), "Wasm section not found");
+   566→  2665→        assert_eq!(code_description("E037"), "Relocation error");
+   567→  2666→        assert_eq!(code_description("E038"), "Stack layout error");
+   568→  2667→        assert_eq!(code_description("E039"), "Linker error");
+   569→  2668→        assert_eq!(code_description("E040"), "Target unsupported feature");
+   570→  2669→    }
+   571→  2670→
+   572→  2671→    #[test]
+   573→  2672→    fn code_descriptions_verification() {
+   574→  2673→        // E041–E050: Verification errors
+   575→  2674→        assert_eq!(code_description("E041"), "Invariant violation");
+   576→  2675→        assert_eq!(code_description("E042"), "Proof failure");
+   577→  2676→        assert_eq!(code_description("E043"), "Liveness invariant violated");
+   578→  2677→        assert_eq!(code_description("E044"), "Origin invariant violated");
+   579→  2678→        assert_eq!(code_description("E045"), "Exclusivity invariant violated");
+   580→  2679→        assert_eq!(code_description("E046"), "Interpretation invariant violated");
+   581→  2680→        assert_eq!(code_description("E047"), "Cleanup invariant violated");
+   582→  2681→        assert_eq!(code_description("E048"), "BD inference error");
+   583→  2682→        assert_eq!(code_description("E049"), "Constraint unsatisfiable");
+   584→  2683→        assert_eq!(code_description("E050"), "Verification timeout");
+   585→  2684→    }
+   586→  2685→
+   587→  2686→    #[test]
+   588→  2687→    fn code_descriptions_warnings() {
+   589→  2688→        // W001–W010
+   590→  2689→        assert_eq!(code_description("W001"), "Unused variable");
+   591→  2690→        assert_eq!(code_description("W002"), "Implicit type conversion");
+   592→  2691→        assert_eq!(code_description("W003"), "Large constant (performance hint)");
+   593→  2692→        assert_eq!(code_description("W004"), "Dead code");
+   594→  2693→        assert_eq!(code_description("W005"), "Redundant cast");
+   595→  2694→        assert_eq!(code_description("W006"), "Shadowed variable");
+   596→  2695→        assert_eq!(code_description("W007"), "Unnecessary mut keyword");
+   597→  2696→        assert_eq!(code_description("W008"), "Deprecated feature");
+   598→  2697→        assert_eq!(code_description("W009"), "Unused import");
+   599→  2698→        assert_eq!(code_description("W010"), "Reachable panic");
+   600→  2699→    }
+   601→  2700→
+   602→  2701→    #[test]
+   603→  2702→    fn code_descriptions_informational() {
+   604→  2703→        // I001–I005
+   605→  2704→        assert_eq!(code_description("I001"), "Compilation started");
+   606→  2705→        assert_eq!(code_description("I002"), "Compilation stage completed");
+   607→  2706→        assert_eq!(code_description("I003"), "Optimization applied");
+   608→  2707→        assert_eq!(code_description("I004"), "Verification passed");
+   609→  2708→        assert_eq!(code_description("I005"), "Build artifact produced");
+   610→  2709→    }
+   611→  2710→
+   612→  2711→    #[test]
+   613→  2712→    fn test_code_category() {
+   614→  2713→        assert_eq!(super::code_category("E001"), "error");
+   615→  2714→        assert_eq!(super::code_category("W001"), "warning");
+   616→  2715→        assert_eq!(super::code_category("I001"), "info");
+   617→  2716→        assert_eq!(super::code_category("X001"), "unknown");
+   618→  2717→    }
+   619→  2718→
+   620→  2719→    #[test]
+   621→  2720→    fn test_code_subcategory() {
+   622→  2721→        assert_eq!(super::code_subcategory("E003"), "compilation");
+   623→  2722→        assert_eq!(super::code_subcategory("E030"), "compilation");
+   624→  2723→        assert_eq!(super::code_subcategory("E031"), "codegen");
+   625→  2724→        assert_eq!(super::code_subcategory("E040"), "codegen");
+   626→  2725→        assert_eq!(super::code_subcategory("E041"), "verification");
+   627→  2726→        assert_eq!(super::code_subcategory("E050"), "verification");
+   628→  2727→        assert_eq!(super::code_subcategory("W001"), "warning");
+   629→  2728→        assert_eq!(super::code_subcategory("I003"), "informational");
+   630→  2729→    }
+   631→  2730→
+   632→  2731→    #[test]
+   633→  2732→    fn total_diagnostic_codes() {
+   634→  2733→        // Verify we have 50+ codes with descriptions
+   635→  2734→        let all_codes: Vec<String> = (1..=30)
+   636→  2735→            .map(|n| format!("E{:03}", n))
+   637→  2736→            .chain((31..=40).map(|n| format!("E{:03}", n)))
+   638→  2737→            .chain((41..=50).map(|n| format!("E{:03}", n)))
+   639→  2738→            .chain((1..=10).map(|n| format!("W{:03}", n)))
+   640→  2739→            .chain((1..=5).map(|n| format!("I{:03}", n)))
+   641→  2740→            .collect();
+   642→  2741→
+   643→  2742→        let described = all_codes.iter()
+   644→  2743→            .filter(|code| code_description(code) != "Unknown diagnostic code")
+   645→  2744→            .count();
+   646→  2745→
+   647→  2746→        assert!(described >= 50, "Expected at least 50 diagnostic codes, got {}", described);
+   648→  2747→    }
+   649→  2748→
+   650→  2749→    // -- Convenience constructors --------------------------------------------
+   651→  2750→
+   652→  2751→    #[test]
+   653→  2752→    fn convenience_constructors_compilation() {
+   654→  2753→        let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
+   655→  2754→
+   656→  2755→        let d = syntax_error("bad syntax", loc.clone());
+   657→  2756→        assert_eq!(d.code, "E001");
+   658→  2757→
+   659→  2758→        let d = undefined_variable("x", loc.clone());
+   660→  2759→        assert_eq!(d.code, "E002");
+   661→  2760→        assert!(d.message.contains("x"));
+   662→  2761→
+   663→  2762→        let d = type_mismatch("expected u32", loc.clone());
+   664→  2763→        assert_eq!(d.code, "E003");
+   665→  2764→
+   666→  2765→        let d = duplicate_definition("foo", loc.clone());
+   667→  2766→        assert_eq!(d.code, "E004");
+   668→  2767→
+   669→  2768→        let d = invalid_arg_count(2, 3, loc.clone());
+   670→  2769→        assert_eq!(d.code, "E005");
+   671→  2770→        assert!(d.message.contains("2"));
+   672→  2771→        assert!(d.message.contains("3"));
+   673→  2772→
+   674→  2773→        let d = invalid_type("void not allowed", loc.clone());
+   675→  2774→        assert_eq!(d.code, "E006");
+   676→  2775→
+   677→  2776→        let d = missing_return(loc.clone());
+   678→  2777→        assert_eq!(d.code, "E007");
+   679→  2778→
+   680→  2779→        let d = unreachable_code(loc.clone());
+   681→  2780→        assert_eq!(d.code, "E008");
+   682→  2781→        assert_eq!(d.severity, DiagnosticSeverity::Warning);
+   683→  2782→
+   684→  2783→        let d = name_resolution_error("unknown name", loc.clone());
+   685→  2784→        assert_eq!(d.code, "E024");
+   686→  2785→
+   687→  2786→        let d = circular_dependency("A -> B -> A", loc.clone());
+   688→  2787→        assert_eq!(d.code, "E025");
+   689→  2788→
+   690→  2789→        let d = invalid_assignment_target("literal", loc.clone());
+   691→  2790→        assert_eq!(d.code, "E026");
+   692→  2791→
+   693→  2792→        let d = break_outside_loop(loc.clone());
+   694→  2793→        assert_eq!(d.code, "E027");
+   695→  2794→
+   696→  2795→        let d = invalid_cast("void", "u32", loc.clone());
+   697→  2796→        assert_eq!(d.code, "E028");
+   698→  2797→
+   699→  2798→        let d = missing_function_body("main", loc.clone());
+   700→  2799→        assert_eq!(d.code, "E029");
+   701→  2800→
+   702→  2801→        let d = invalid_visibility("private top-level", loc.clone());
+   703→  2802→        assert_eq!(d.code, "E030");
+   704→  2803→    }
+   705→  2804→
+   706→  2805→    #[test]
+   707→  2806→    fn convenience_constructors_codegen() {
+   708→  2807→        let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
+   709→  2808→
+   710→  2809→        let d = invalid_instruction("bad op", loc.clone());
+   711→  2810→        assert_eq!(d.code, "E031");
+   712→  2811→
+   713→  2812→        let d = register_alloc_failed("spill", loc.clone());
+   714→  2813→        assert_eq!(d.code, "E032");
+   715→  2814→        assert!(!d.suggestions.is_empty());
+   716→  2815→
+   717→  2816→        let d = encoding_error("invalid opcode", loc.clone());
+   718→  2817→        assert_eq!(d.code, "E033");
+   719→  2818→
+   720→  2819→        let d = relocation_error("overflow", loc.clone());
+   721→  2820→        assert_eq!(d.code, "E037");
+   722→  2821→
+   723→  2822→        let d = stack_layout_error("misaligned", loc.clone());
+   724→  2823→        assert_eq!(d.code, "E038");
+   725→  2824→
+   726→  2825→        let d = linker_error("undefined symbol", loc.clone());
+   727→  2826→        assert_eq!(d.code, "E039");
+   728→  2827→
+   729→  2828→        let d = unsupported_feature("SIMD", loc);
+   730→  2829→        assert_eq!(d.code, "E040");
+   731→  2830→    }
+   732→  2831→
+   733→  2832→    #[test]
+   734→  2833→    fn convenience_constructors_verification() {
+   735→  2834→        let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
+   736→  2835→
+   737→  2836→        let d = invariant_violation("violation", loc.clone());
+   738→  2837→        assert_eq!(d.code, "E041");
+   739→  2838→
+   740→  2839→        let d = proof_failure("proof failed", loc.clone());
+   741→  2840→        assert_eq!(d.code, "E042");
+   742→  2841→
+   743→  2842→        let d = liveness_violation("use after free", loc.clone());
+   744→  2843→        assert_eq!(d.code, "E043");
+   745→  2844→
+   746→  2845→        let d = origin_violation("bad origin", loc.clone());
+   747→  2846→        assert_eq!(d.code, "E044");
+   748→  2847→
+   749→  2848→        let d = exclusivity_violation("shared+exclusive", loc.clone());
+   750→  2849→        assert_eq!(d.code, "E045");
+   751→  2850→
+   752→  2851→        let d = interpretation_violation("bad interp", loc.clone());
+   753→  2852→        assert_eq!(d.code, "E046");
+   754→  2853→
+   755→  2854→        let d = cleanup_violation("no cleanup", loc.clone());
+   756→  2855→        assert_eq!(d.code, "E047");
+   757→  2856→
+   758→  2857→        let d = bd_inference_error("inference failed", loc.clone());
+   759→  2858→        assert_eq!(d.code, "E048");
+   760→  2859→
+   761→  2860→        let d = constraint_unsatisfiable("unsat", loc.clone());
+   762→  2861→        assert_eq!(d.code, "E049");
+   763→  2862→
+   764→  2863→        let d = verification_timeout("timed out", loc);
+   765→  2864→        assert_eq!(d.code, "E050");
+   766→  2865→        assert!(!d.suggestions.is_empty());
+   767→  2866→    }
+   768→  2867→
+   769→  2868→    #[test]
+   770→  2869→    fn convenience_constructors_warnings() {
+   771→  2870→        let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
+   772→  2871→
+   773→  2872→        let d = unused_variable("y", loc.clone());
+   774→  2873→        assert_eq!(d.code, "W001");
+   775→  2874→        assert_eq!(d.severity, DiagnosticSeverity::Warning);
+   776→  2875→        assert!(!d.suggestions.is_empty());
+   777→  2876→
+   778→  2877→        let d = implicit_conversion("u8", "u32", loc.clone());
+   779→  2878→        assert_eq!(d.code, "W002");
+   780→  2879→
+   781→  2880→        let d = large_constant("0xDEADBEEF", loc.clone());
+   782→  2881→        assert_eq!(d.code, "W003");
+   783→  2882→        assert_eq!(d.severity, DiagnosticSeverity::Hint);
+   784→  2883→
+   785→  2884→        let d = dead_code("unreachable", loc.clone());
+   786→  2885→        assert_eq!(d.code, "W004");
+   787→  2886→
+   788→  2887→        let d = redundant_cast("u32", "u32", loc.clone());
+   789→  2888→        assert_eq!(d.code, "W005");
+   790→  2889→        assert!(!d.suggestions.is_empty());
+   791→  2890→
+   792→  2891→        let d = shadowed_variable("x", loc.clone(), DiagnosticSourceLocation::point("test.vu", 1, 1));
+   793→  2892→        assert_eq!(d.code, "W006");
+   794→  2893→        assert!(!d.related.is_empty());
+   795→  2894→
+   796→  2895→        let d = unnecessary_mut("x", loc.clone());
+   797→  2896→        assert_eq!(d.code, "W007");
+   798→  2897→        assert!(!d.suggestions.is_empty());
+   799→  2898→
+   800→  2899→        let d = deprecated_feature("old_fn", Some("new_fn"), loc.clone());
+   801→  2900→        assert_eq!(d.code, "W008");
+   802→  2901→
+   803→  2902→        let d = unused_import("std::foo", loc.clone());
+   804→  2903→        assert_eq!(d.code, "W009");
+   805→  2904→        assert!(!d.suggestions.is_empty());
+   806→  2905→
+   807→  2906→        let d = reachable_panic("panic possible", loc);
+   808→  2907→        assert_eq!(d.code, "W010");
+   809→  2908→    }
+   810→  2909→
+   811→  2910→    #[test]
+   812→  2911→    fn convenience_constructors_informational() {
+   813→  2912→        let d = compilation_started("main.vu");
+   814→  2913→        assert_eq!(d.code, "I001");
+   815→  2914→        assert_eq!(d.severity, DiagnosticSeverity::Info);
+   816→  2915→
+   817→  2916→        let d = stage_completed("parser");
+   818→  2917→        assert_eq!(d.code, "I002");
+   819→  2918→
+   820→  2919→        let d = optimization_applied("constant_fold", DiagnosticSourceLocation::point("test.vu", 1, 1));
+   821→  2920→        assert_eq!(d.code, "I003");
+   822→  2921→
+   823→  2922→        let d = verification_passed("liveness", DiagnosticSourceLocation::point("test.vu", 1, 1));
+   824→  2923→        assert_eq!(d.code, "I004");
+   825→  2924→
+   826→  2925→        let d = artifact_provided("main.o", 4096);
+   827→  2926→        assert_eq!(d.code, "I005");
+   828→  2927→        assert!(d.message.contains("4096"));
+   829→  2928→    }
+   830→  2929→
+   831→  2930→    // -- Integration: ParseError → VumaDiagnostic ----------------------------
+   832→  2931→
+   833→  2932→    #[test]
+   834→  2933→    fn from_parse_error_integration() {
+   835→  2934→        use vuma_parser::Span;
+   836→  2935→
+   837→  2936→        let source = "fn main() { x }";
+   838→  2937→        let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
+   839→  2938→        let diag = from_parse_error(&err, source, Some("main.vu"));
+   840→  2939→
+   841→  2940→        assert_eq!(diag.code, "E002");
+   842→  2941→        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+   843→  2942→        assert_eq!(diag.source, "parser");
+   844→  2943→        assert!(diag.message.contains("x"));
+   845→  2944→        assert!(!diag.location.is_unknown());
+   846→  2945→        assert!(!diag.legacy_suggestions.is_empty());
+   847→  2946→    }
+   848→  2947→
+   849→  2948→    // -- Integration: VumaError → Vec<VumaDiagnostic> ------------------------
+   850→  2949→
+   851→  2950→    #[test]
+   852→  2951→    fn from_vuma_error_ast_to_scg() {
+   853→  2952→        let err = VumaError::AstToScg {
+   854→  2953→            message: "cannot convert node".to_string(),
+   855→  2954→        };
+   856→  2955→        let diags = from_vuma_error(&err);
+   857→  2956→        assert_eq!(diags.len(), 1);
+   858→  2957→        assert_eq!(diags[0].source, "scg");
+   859→  2958→        assert_eq!(diags[0].code, "E024");
+   860→  2959→    }
+   861→  2960→
+   862→  2961→    #[test]
+   863→  2962→    fn from_vuma_error_codegen() {
+   864→  2963→        let err = VumaError::Codegen {
+   865→  2964→            error: CodegenError::UnknownVariable {
+   866→  2965→                name: "foo".to_string(),
+   867→  2966→            },
+   868→  2967→        };
+   869→  2968→        let diags = from_vuma_error(&err);
+   870→  2969→        assert_eq!(diags.len(), 1);
+   871→  2970→        assert_eq!(diags[0].code, "E002");
+   872→  2971→        assert_eq!(diags[0].source, "codegen");
+   873→  2972→        assert!(!diags[0].suggestions.is_empty());
+   874→  2973→    }
+   875→  2974→
+   876→  2975→    #[test]
+   877→  2976→    fn from_vuma_error_multi() {
+   878→  2977→        let err = VumaError::Multi {
+   879→  2978→            errors: vec![
+   880→  2979→                VumaError::AstToScg {
+   881→  2980→                    message: "err1".to_string(),
+   882→  2981→                },
+   883→  2982→                VumaError::Emission {
+   884→  2983→                    message: "err2".to_string(),
+   885→  2984→                },
+   886→  2985→            ],
+   887→  2986→        };
+   888→  2987→        let diags = from_vuma_error(&err);
+   889→  2988→        assert_eq!(diags.len(), 2);
+   890→  2989→    }
+   891→  2990→
+   892→  2991→    #[test]
+   893→  2992→    fn from_vuma_error_verification() {
+   894→  2993→        // Verification errors should map to E042
+   895→  2994→        let err = VumaError::BdInference {
+   896→  2995→            node_id: Some(42),
+   897→  2996→            message: "inference failed".to_string(),
+   898→  2997→        };
+   899→  2998→        let diags = from_vuma_error(&err);
+   900→  2999→        assert_eq!(diags[0].code, "E048");
+   901→  3000→    }
+   902→  3001→
+   903→  3002→    // -- Integration: CodegenError → VumaDiagnostic --------------------------
+   904→  3003→
+   905→  3004→    #[test]
+   906→  3005→    fn from_codegen_error_integration() {
+   907→  3006→        let err = CodegenError::RegisterAllocFailed("spill".to_string());
+   908→  3007→        let diag = from_codegen_error(&err);
+   909→  3008→        assert_eq!(diag.code, "E032");
+   910→  3009→        assert_eq!(diag.source, "register-alloc");
+   911→  3010→
+   912→  3011→        let err = CodegenError::UnknownVariable {
+   913→  3012→            name: "bar".to_string(),
+   914→  3013→        };
+   915→  3014→        let diag = from_codegen_error(&err);
+   916→  3015→        assert_eq!(diag.code, "E002");
+   917→  3016→        assert!(diag.suggestions.iter().any(|s| s.message.contains("declare")));
+   918→  3017→    }
+   919→  3018→
+   920→  3019→    // -- has_machine_applicable_fixes test ------------------------------------
+   921→  3020→
+   922→  3021→    #[test]
+   923→  3022→    fn has_machine_applicable_fixes() {
+   924→  3023→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   925→  3024→        let edit_loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+   926→  3025→
+   927→  3026→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type mismatch", "parser", loc.clone())
+   928→  3027→            .with_structured_suggestion(Suggestion::edit("fix it", edit_loc, "i32"));
+   929→  3028→        assert!(diag.has_machine_applicable_fixes());
+   930→  3029→
+   931→  3030→        let diag2 = VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "syntax error", "parser", loc)
+   932→  3031→            .with_structured_suggestion(Suggestion::text("try something else"));
+   933→  3032→        assert!(!diag2.has_machine_applicable_fixes());
+   934→  3033→    }
+   935→  3034→
+   936→  3035→    // -- Chaining with structured suggestions --------------------------------
+   937→  3036→
+   938→  3037→    #[test]
+   939→  3038→    fn chain_with_suggestions() {
+   940→  3039→        let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
+   941→  3040→        let cause = VumaDiagnostic::new(
+   942→  3041→            "E023",
+   943→  3042→            DiagnosticSeverity::Error,
+   944→  3043→            "Unknown type 'int' — did you mean 'i32'?",
+   945→  3044→            "parser",
+   946→  3045→            loc.clone(),
+   947→  3046→        ).with_structured_suggestion(Suggestion::machine_applicable(
+   948→  3047→            "Replace 'int' with 'i32'",
+   949→  3048→            loc,
+   950→  3049→            "i32",
+   951→  3050→        ));
+   952→  3051→
+   953→  3052→        let diag = VumaDiagnostic::new(
+   954→  3053→            "E003",
+   955→  3054→            DiagnosticSeverity::Error,
+   956→  3055→            "Type mismatch: expected i32, found int",
+   957→  3056→            "parser",
+   958→  3057→            DiagnosticSourceLocation::range("main.vu", 5, 20, 25),
+   959→  3058→        ).chain(cause);
+   960→  3059→
+   961→  3060→        assert!(diag.has_chain());
+   962→  3061→        let immediate = diag.immediate_cause().unwrap();
+   963→  3062→        assert_eq!(immediate.code, "E023");
+   964→  3063→        assert!(immediate.has_machine_applicable_fixes());
+   965→  3064→    }
+   966→  3065→
+   967→  3066→    #[test]
+   968→  3067→    fn all_suggestions_method() {
+   969→  3068→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   970→  3069→        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type error", "parser", loc)
+   971→  3070→            .with_structured_suggestion(Suggestion::text("fix A"))
+   972→  3071→            .with_structured_suggestion(Suggestion::text("fix B"));
+   973→  3072→        assert_eq!(diag.all_suggestions().len(), 2);
+   974→  3073→    }
+   975→  3074→}
+   976→
+   977→[showing lines 2100-3074 of 3075; use offset=3075 with limit to continue reading]

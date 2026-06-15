@@ -57,6 +57,7 @@ fn make_main_returning(value: i32) -> IRFunction {
         param_types: vec![],
         result_types: vec![IRType::I32],
         vregs: HashMap::new(),
+        source_file: String::new(),
         blocks: vec![IRBlock {
             label: "entry".to_string(),
             instructions: vec![IRInstr::Ret {
@@ -65,6 +66,7 @@ fn make_main_returning(value: i32) -> IRFunction {
             terminator: IRTerminator::Return(vec![IRValue::Immediate(value as i64)]),
             predecessors: HashSet::new(),
             successors: HashSet::new(),
+            source_line: 0,
         }],
     }
 }
@@ -78,12 +80,14 @@ fn make_main_void() -> IRFunction {
         param_types: vec![],
         result_types: vec![],
         vregs: HashMap::new(),
+        source_file: String::new(),
         blocks: vec![IRBlock {
             label: "entry".to_string(),
             instructions: vec![IRInstr::Ret { values: vec![] }],
             terminator: IRTerminator::Return(vec![]),
             predecessors: HashSet::new(),
             successors: HashSet::new(),
+            source_line: 0,
         }],
     }
 }
@@ -829,6 +833,7 @@ fn test_compile_to_wasm_returns_ok() {
         param_types: vec![],
         result_types: vec![IRType::I32],
         vregs: HashMap::new(),
+        source_file: String::new(),
         blocks: vec![IRBlock {
             label: "entry".to_string(),
             instructions: vec![IRInstr::Ret {
@@ -837,6 +842,7 @@ fn test_compile_to_wasm_returns_ok() {
             terminator: IRTerminator::Return(vec![IRValue::Immediate(7)]),
             predecessors: HashSet::new(),
             successors: HashSet::new(),
+            source_line: 0,
         }],
     };
     let result = compile_to_wasm(&[func]);
