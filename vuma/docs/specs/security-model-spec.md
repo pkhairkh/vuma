@@ -15,7 +15,7 @@
 3. [Capability-Based Access Control](#3-capability-based-access-control)
 4. [Security Boundary Enforcement](#4-security-boundary-enforcement)
 5. [Attack Surface Reduction](#5-attack-surface-reduction)
-6. [AArch64 Specific Security](#6-pi-5-specific-security)
+6. [AArch64 Specific Security](#6-aarch64-specific-security)
 
 ---
 

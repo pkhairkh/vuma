@@ -9,3 +9,15 @@ Cargo.lock
 .DS_Store
 tool-results/
 .env
+
+# Development debris
+agent-ctx/
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+WORKLOG.md
+worklog.md
+WAVE_PLAN.md
+MANIFEST.md

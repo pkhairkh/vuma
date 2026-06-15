@@ -17,7 +17,7 @@ This document is the definitive reference for the VUMA programming language, a m
 7. [Concurrency](#7-concurrency)
 8. [Memory Safety](#8-memory-safety)
 9. [Standard Library Overview](#9-standard-library-overview)
-10. [AArch64 Platform-Specific Features](#10-pi-5-platform-specific-features)
+10. [AArch64 Platform-Specific Features](#10-aarch64-platform-specific-features)
 11. [Appendix: Keyword and Operator Quick Reference](#11-appendix-keyword-and-operator-quick-reference)
 
 ---

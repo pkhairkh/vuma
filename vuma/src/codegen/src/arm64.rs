@@ -887,6 +887,25 @@ pub enum Instruction {
         rn: Register,
         rm: Operand,
     },
+    /// Extract and rotate: `EXTR Rd, Rn, Rm, #lsb`
+    ///
+    /// On AArch64, `ROR Rd, Rn, #amount` is encoded as `EXTR Rd, Rn, Rn, #amount`.
+    /// `ROL Rd, Rn, #amount` is encoded as `EXTR Rd, Rn, Rn, #(regsize - amount)`.
+    EXTR {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        imm6: u32,
+    },
+    /// Rotate right variable: `RORV Rd, Rn, Rm`
+    ///
+    /// `ROLV` does not exist on AArch64; rotate-left-by-register is
+    /// synthesized as `SUB tmp, XZR, Rm; RORV Rd, Rn, tmp`.
+    RORV {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    },
 
     // ---- Load / Store (64-bit) ----
     /// Load register (64-bit): `LDR Xt, [addr]`
@@ -1292,6 +1311,23 @@ impl Instruction {
                     | (rn.encoding() << 5)
                     | rd.encoding()),
             },
+
+            // ---- EXTR (extract): 1 00 100111 1 0 Rm imm6 Rn Rd (64-bit) ----
+            // 64-bit base = 0x93C00000
+            // Used for ROR Rd, Rn, #amount (= EXTR Rd, Rn, Rn, #amount)
+            // and for ROL Rd, Rn, #amount (= EXTR Rd, Rn, Rn, #(64 - amount))
+            Instruction::EXTR { rd, rn, rm, imm6 } => Ok(0x93C00000u32
+                | (rm.encoding() << 16)
+                | ((imm6 & 0x3F) << 10)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
+            // ---- RORV (rotate right variable): 1 00 11010 11 0 Rm 001011 Rn Rd ----
+            // 64-bit base = 0x9AC02C00
+            Instruction::RORV { rd, rn, rm } => Ok(0x9AC02C00u32
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
 
             // ---- LDR (unsigned offset, 64-bit) ----
             Instruction::LDR { rt, rn, offset } => {
@@ -2086,6 +2122,30 @@ impl Instruction {
                 }
             },
 
+            // ---- EXTR (extract) ----
+            // 64-bit: 1 00 100111 1 0 Rm imm6 Rn Rd  (base 0x93C00000)
+            // 32-bit: 0 00 100111 0 0 Rm imm6 Rn Rd  (base 0x13800000)
+            // ROR Rd, Rn, #amount = EXTR Rd, Rn, Rn, #amount
+            // ROL Rd, Rn, #amount = EXTR Rd, Rn, Rn, #(size - amount)
+            Instruction::EXTR { rd, rn, rm, imm6 } => {
+                let imm_mask = if width == RegWidth::X64 { 0x3F } else { 0x1F };
+                Ok((sf << 31)
+                    | 0x13800000u32
+                    | (rm.encoding() << 16)
+                    | ((imm6 & imm_mask) << 10)
+                    | (rn.encoding() << 5)
+                    | rd.encoding())
+            }
+
+            // ---- RORV (rotate right variable) ----
+            // 64-bit: 1 00 11010 11 0 Rm 001011 Rn Rd  (base 0x9AC02C00)
+            // 32-bit: 0 00 11010 11 0 Rm 001011 Rn Rd  (base 0x1AC02C00)
+            Instruction::RORV { rd, rn, rm } => Ok((sf << 31)
+                | 0x1AC02C00u32
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
+
             // ---- LDR (unsigned offset) ----
             // LDR Wt: size=10, opc=01 → 10_111_0_01_01
             // LDR Xt: size=11, opc=01 → 11_111_0_01_01
@@ -2704,6 +2764,34 @@ impl Instruction {
             return Some(Instruction::RET { rn: Some(rn_reg) });
         }
 
+        // ---- EXTR: sf 00 100111 N 0 Rm imm6 Rn Rd ----
+        // 64-bit: (word >> 21) & 0x7FF == 0b10010011110 == 0x4BE
+        // 32-bit: (word >> 21) & 0x7FF == 0b00010011100 == 0x09C
+        if (word >> 21) & 0x7FF == 0x4BE || (word >> 21) & 0x7FF == 0x09C {
+            let rd_reg = Register::from_encoding(rd)?;
+            let rn_reg = Register::from_encoding(rn)?;
+            let rm_reg = Register::from_encoding(rm)?;
+            return Some(Instruction::EXTR {
+                rd: rd_reg,
+                rn: rn_reg,
+                rm: rm_reg,
+                imm6: imm6,
+            });
+        }
+
+        // ---- RORV: sf 00 1101 0110 Rm 001011 Rn Rd ----
+        // bits[30:21] = 00_1101_0110 = 0x0D6, bits[15:10] = 001011 = 0x0B
+        if (word >> 21) & 0x3FF == 0x0D6 && (word >> 10) & 0x3F == 0x0B {
+            let rd_reg = Register::from_encoding(rd)?;
+            let rn_reg = Register::from_encoding(rn)?;
+            let rm_reg = Register::from_encoding(rm)?;
+            return Some(Instruction::RORV {
+                rd: rd_reg,
+                rn: rn_reg,
+                rm: rm_reg,
+            });
+        }
+
         None
     }
 }
@@ -2726,6 +2814,15 @@ impl std::fmt::Display for Instruction {
             Instruction::LSL { rd, rn, rm } => write!(f, "lsl {}, {}, {}", rd, rn, rm),
             Instruction::LSR { rd, rn, rm } => write!(f, "lsr {}, {}, {}", rd, rn, rm),
             Instruction::ASR { rd, rn, rm } => write!(f, "asr {}, {}, {}", rd, rn, rm),
+            Instruction::EXTR { rd, rn, rm, imm6 } => {
+                // Display as ROR when rn == rm (the common case for rotation)
+                if rn == rm {
+                    write!(f, "ror {}, {}, #{}", rd, rn, imm6)
+                } else {
+                    write!(f, "extr {}, {}, {}, #{}", rd, rn, rm, imm6)
+                }
+            }
+            Instruction::RORV { rd, rn, rm } => write!(f, "rorv {}, {}, {}", rd, rn, rm),
             Instruction::LDR { rt, rn, offset } => write!(f, "ldr {}, [{}, #{}]", rt, rn, offset),
             Instruction::STR { rt, rn, offset } => write!(f, "str {}, [{}, #{}]", rt, rn, offset),
             Instruction::LDR_W { rt, rn, offset } => write!(f, "ldr w{}, [{}, #{}]", rt.encoding(), rn, offset),
@@ -3032,6 +3129,8 @@ impl InstructionSelector {
     /// - `BinOpKind::Shl` → `LSL`
     /// - `BinOpKind::ShrL` → `LSR`
     /// - `BinOpKind::ShrA` → `ASR`
+    /// - `BinOpKind::Ror` → `EXTR Rd, Rn, Rn, #amount` (imm) or `RORV` (reg)
+    /// - `BinOpKind::Rol` → `EXTR Rd, Rn, Rn, #(64-amount)` (imm) or `SUB+RORV` (reg)
     pub fn select_computation_bitwise(
         &mut self,
         op: BinOpKind,
@@ -3039,37 +3138,94 @@ impl InstructionSelector {
         rn: Register,
         rm: Operand,
     ) -> Result<()> {
-        let instr = match op {
+        match op {
             BinOpKind::And => {
                 let rm_reg = rm.as_reg().ok_or_else(|| {
                     CodegenError::InvalidInstruction("AND requires a register operand".into())
                 })?;
-                Instruction::AND { rd, rn, rm: rm_reg }
+                self.push(Instruction::AND { rd, rn, rm: rm_reg });
             }
             BinOpKind::Or => {
                 let rm_reg = rm.as_reg().ok_or_else(|| {
                     CodegenError::InvalidInstruction("ORR requires a register operand".into())
                 })?;
-                Instruction::ORR { rd, rn, rm: rm_reg }
+                self.push(Instruction::ORR { rd, rn, rm: rm_reg });
             }
             BinOpKind::Xor => {
                 let rm_reg = rm.as_reg().ok_or_else(|| {
                     CodegenError::InvalidInstruction("EOR requires a register operand".into())
                 })?;
-                Instruction::EOR { rd, rn, rm: rm_reg }
+                self.push(Instruction::EOR { rd, rn, rm: rm_reg });
             }
-            BinOpKind::Shl => Instruction::LSL { rd, rn, rm },
-            BinOpKind::ShrL => Instruction::LSR { rd, rn, rm },
-            BinOpKind::ShrA => Instruction::ASR { rd, rn, rm },
-            BinOpKind::Ror | BinOpKind::Rol => Instruction::ASR { rd, rn, rm }, // placeholder
+            BinOpKind::Shl => {
+                self.push(Instruction::LSL { rd, rn, rm });
+            }
+            BinOpKind::ShrL => {
+                self.push(Instruction::LSR { rd, rn, rm });
+            }
+            BinOpKind::ShrA => {
+                self.push(Instruction::ASR { rd, rn, rm });
+            }
+            BinOpKind::Ror => {
+                // ROR Rd, Rn, #amount = EXTR Rd, Rn, Rn, #amount
+                // ROR Rd, Rn, Rm     = RORV Rd, Rn, Rm
+                match rm {
+                    Operand::Imm12(amount) => {
+                        self.push(Instruction::EXTR {
+                            rd,
+                            rn,
+                            rm: rn,
+                            imm6: amount as u32,
+                        });
+                    }
+                    Operand::Reg { reg, .. } => {
+                        self.push(Instruction::RORV {
+                            rd,
+                            rn,
+                            rm: reg,
+                        });
+                    }
+                }
+            }
+            BinOpKind::Rol => {
+                // ROL Rd, Rn, #amount = EXTR Rd, Rn, Rn, #(64 - amount)
+                // ROL Rd, Rn, Rm     = SUB X9, XZR, Rm; RORV Rd, Rn, X9
+                //   (negating the register effectively computes 64-Rm for RORV)
+                match rm {
+                    Operand::Imm12(amount) => {
+                        // 64 - amount: for 64-bit registers, EXTR imm6 is modulo 64
+                        let shift = (64 - amount as u32) & 63;
+                        self.push(Instruction::EXTR {
+                            rd,
+                            rn,
+                            rm: rn,
+                            imm6: shift,
+                        });
+                    }
+                    Operand::Reg { reg, .. } => {
+                        // SUB X9, XZR, Rm  →  X9 = -Rm
+                        // RORV treats the shift amount modulo 64, so -Rm mod 64 = (64 - Rm) mod 64
+                        // which is exactly the ROL semantics.
+                        self.push(Instruction::SUB {
+                            rd: Register::X9,
+                            rn: Register::XZR,
+                            rm: Operand::reg(reg),
+                        });
+                        self.push(Instruction::RORV {
+                            rd,
+                            rn,
+                            rm: Register::X9,
+                        });
+                    }
+                }
+            }
             _ => {
                 return Err(CodegenError::InvalidInstruction(format!(
                     "not a bitwise/shift op: {:?}",
                     op
                 )))
             }
-        };
-        self.push(instr);
+        }
         Ok(())
     }
 

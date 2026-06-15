@@ -1564,8 +1564,18 @@ impl Emitter {
             }
             BinOpKind::Ror | BinOpKind::Rol => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                // ARM64 rotation: use ASR as placeholder
-                self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm: Operand::Reg { reg: rm_reg, shift: None } }, width)?;
+                if op == BinOpKind::Ror {
+                    self.emit_instruction_with_width(Instruction::RORV { rd, rn, rm: rm_reg }, width)?;
+                } else {
+                    // ROL by Rm = ROR by -Rm (mod regsize).
+                    // SUB X9, XZR, Rm; RORV Rd, Rn, X9
+                    self.emit_instruction_with_width(Instruction::SUB {
+                        rd: Register::X9,
+                        rn: Register::XZR,
+                        rm: Operand::Reg { reg: rm_reg, shift: None },
+                    }, width)?;
+                    self.emit_instruction_with_width(Instruction::RORV { rd, rn, rm: Register::X9 }, width)?;
+                }
             }
             BinOpKind::SRem | BinOpKind::URem => {
                 let rm_reg = self.operand_to_reg(&rm)?;

@@ -519,7 +519,7 @@ Rigorous measurement methodology is essential for producing benchmark results th
 
 - **Platform:** AArch64 (BCM2712, Quad-core ARM Cortex-A76 @ 2.4 GHz)
 - **RAM:** 8 GB LPDDR4X-4267
-- **OS:** Raspberry Pi OS Lite (64-bit, Linux kernel 6.6+)
+- **OS:** AArch64 Linux (64-bit, Linux kernel 6.6+)
 - **CPU governor:** Set to `performance` mode (`cpufreq-set -g performance`) to eliminate dynamic frequency scaling
 - **Isolation:** Disable WiFi, Bluetooth, and HDMI output to minimize interrupt noise
 - **CPU affinity:** Each benchmark thread pinned to a dedicated core via `taskset` or `pthread_setaffinity_np`

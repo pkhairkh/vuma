@@ -608,7 +608,7 @@ Every ELF object file begins with a 64-byte header that identifies the file's ta
 | `e_phentsize`      | `0`                | No program headers                                 |
 | `e_shentsize`      | `64`               | Section header entry size                          |
 
-The little-endian byte ordering (`ELFDATA2LSB`) is mandatory for AArch64 Linux. While the ARM architecture technically supports both endiannesses, all mainstream AArch64 Linux distributions (including Raspberry Pi OS) use little-endian mode exclusively.
+The little-endian byte ordering (`ELFDATA2LSB`) is mandatory for AArch64 Linux. While the ARM architecture technically supports both endiannesses, all mainstream AArch64 Linux distributions (including Debian, Ubuntu, Fedora) use little-endian mode exclusively.
 
 ### Standard Sections
 

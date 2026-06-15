@@ -363,7 +363,7 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 
 | Wave Range | Focus Area | Key Achievements |
 |------------|-----------|------------------|
-| W1-5 | Foundation & Pi5 Removal | All 8 backends pass SHA256d, Pi5 removed, formal specs, initial crates |
+| W1-5 | Foundation & Platform Consolidation | All 8 backends pass SHA256d, platform-specific code removed, formal specs, initial crates |
 | W6 | Testing & Validation | Cross-backend tests, ELF/Wasm validation, PPC64 deep audit, codegen bug fixes |
 | W7 | Parser Hardening | LLM type aliases, macro detection, C-style for loop detection, reference conversion |
 | W8 | Standard Library | crypto.rs, string.rs, math.rs, enhanced alloc.rs and io.rs |
