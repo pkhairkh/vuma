@@ -1,0 +1,1028 @@
+     1→# BD Inference Algorithm Specification
+     2→
+     3→**Document ID:** VUMA-SPEC-BD-INF-001  
+     4→**Task ID:** W1-26  
+     5→**Author:** Agent W1-26  
+     6→**Date:** 2026-03-04  
+     7→**Status:** Draft  
+     8→**Dependencies:** SCG Specification, VUMA Memory Model Specification  
+     9→
+    10→---
+    11→
+    12→## Table of Contents
+    13→
+    14→1. [RepD Inference Algorithm](#1-repd-inference-algorithm)
+    15→2. [CapD Inference Algorithm](#2-capd-inference-algorithm)
+    16→3. [RelD Inference Algorithm](#3-reld-inference-algorithm)
+    17→4. [Combined BD Inference](#4-combined-bd-inference)
+    18→5. [Soundness Theorem](#5-soundness-theorem)
+    19→6. [Completeness Discussion](#6-completeness-discussion)
+    20→
+    21→---
+    22→
+    23→## 1. RepD Inference Algorithm
+    24→
+    25→### 1.1 Overview
+    26→
+    27→Representation Descriptors (RepD) specify the physical layout of data in memory — size, alignment, field offsets, and bit-level structure. Unlike traditional types, RepD is a *memory map* that enumerates all valid interpretations of a memory region rather than selecting a single nominal category. The RepD inference algorithm determines, for every value in the Semantic Computation Graph (SCG), the precise memory representation that the value carries at each program point. This inference is performed first among the three BD components because RepD has no dependency on CapD or RelD — it is determined purely by the structural and operational properties of the program.
+    28→
+    29→The algorithm operates as a forward dataflow analysis over the SCG. Each node in the SCG produces a value (or values) that carry RepD annotations, and these annotations are propagated along DataFlow edges. At certain nodes — allocation nodes, cast nodes, and access nodes — the algorithm either initializes, transforms, or verifies RepD information. The key invariant maintained throughout inference is that every value at every program point has a well-defined RepD, and that all operations consuming that value respect its RepD.
+    30→
+    31→### 1.2 Formal Definitions
+    32→
+    33→A **RepD** is a record comprising the following fields:
+    34→
+    35→```
+    36→RepD ::= {
+    37→  size     : Nat,              // total size in bytes
+    38→  align    : Nat,              // alignment requirement in bytes
+    39→  interp   : Set<Interpretation>,  // set of valid interpretations
+    40→  variant  : Option<VariantMap>    // for sum-type representations
+    41→}
+    42→
+    43→Interpretation ::= 
+    44→  | PrimitiveInt(bits: Nat, signed: Bool)
+    45→  | PrimitiveFloat(bits: Nat)
+    46→  | PointerTo(target: RepD)
+    47→  | ArrayOf(elem: RepD, count: Nat)
+    48→  | StructOf(fields: List<(Name, RepD, Offset)>)
+    49→  | BytesOf(count: Nat)
+    50→  | UnionOf(alternatives: Set<RepD>)    // overlapping interpretations
+    51→  | Opaque                               // unknown interpretation
+    52→
+    53→VariantMap ::= Map<VariantTag, RepD>   // tag -> variant RepD
+    54→```
+    55→
+    56→An **AllocationNode** in the SCG represents a memory allocation event (stack allocation, heap allocation, static allocation, memory-mapped region). Each AllocationNode carries annotations specifying the size and alignment of the allocated region, and optionally a structural layout.
+    57→
+    58→A **CastNode** represents a reinterpretation of a value's memory representation. CastNode carries an annotation specifying the target RepD.
+    59→
+    60→An **AccessNode** represents a read or write operation on a memory region, specifying the expected RepD of the accessed sub-region.
+    61→
+    62→A **FunctionCall** node represents invocation of a function with formal parameter BDs and a return BD.
+    63→
+    64→### 1.3 Algorithm
+    65→
+    66→```
+    67→Algorithm: RepD-Inference
+    68→Input:  SCG = (V, E) where V = nodes, E = dataflow edges
+    69→Output: Map<Node, RepD> mapping each value-producing node to its RepD
+    70→        OR Error with diagnostic information
+    71→
+    72→1.  // Phase 1: Initialization
+    73→2.  RepD_map := empty map from Node to RepD
+    74→3.  WorkList := empty queue of Nodes
+    75→4.  
+    76→5.  for each node v in V do
+    77→6.    if v is AllocationNode then
+    78→7.      // Derive RepD from allocation annotations
+    79→8.      repd := RepD from v's size/align/layout annotations
+    80→9.      if v has structural layout annotation then
+    81→10.       repd.interp := { StructOf(v.fields) }
+    82→11.     else
+    83→12.       repd.interp := { BytesOf(v.size) }  // opaque bytes
+    84→13.     RepD_map[v] := repd
+    85→14.     WorkList.enqueue(v)
+    86→15.   
+    87→16.   elif v is LiteralNode then
+    88→17.     // Derive RepD from literal's intrinsic representation
+    89→18.     repd := RepD from v's literal type
+    90→19.     RepD_map[v] := repd
+    91→20.     WorkList.enqueue(v)
+    92→21.   
+    93→22.   elif v is ParameterNode then
+    94→23.     // Formal parameter RepD comes from function signature
+    95→24.     repd := v.function_signature.param_RepD[v.param_index]
+    96→25.     RepD_map[v] := repd
+    97→26.     WorkList.enqueue(v)
+    98→27. end for
+    99→28. 
+   100→29. // Phase 2: Forward propagation
+   101→30. while WorkList is not empty do
+   102→31.   v := WorkList.dequeue()
+   103→32.   current_repd := RepD_map[v]
+   104→33.   
+   105→34.   for each edge (v, u) in E do  // v flows to u
+   106→35.     case u.type of
+   107→36.       
+   108→37.       DataFlowPass:  // simple pass-through
+   109→38.         if u not in RepD_map or RepD_map[u] != current_repd then
+   110→39.           RepD_map[u] := current_repd
+   111→40.           WorkList.enqueue(u)
+   112→41.       
+   113→42.       CastNode:
+   114→43.         // Compute new RepD from cast annotation
+   115→44.         target_repd := u.cast_annotation.target_RepD
+   116→45.         // Verify compatibility: source memory must cover target
+   117→46.         if not RepD-Compatible(current_repd, target_repd) then
+   118→47.           error("CastNode %u: source RepD %current_repd incompatible "
+   119→48.                 "with target RepD %target_repd")
+   120→49.         RepD_map[u] := target_repd
+   121→50.         WorkList.enqueue(u)
+   122→51.       
+   123→52.       AccessNode:
+   124→53.         // Verify RepD is compatible with access type
+   125→54.         access_repd := u.access_annotation.expected_RepD
+   126→55.         if not RepD-Compatible(RepD_map[u], access_repd) then
+   127→56.           error("AccessNode %u: value RepD incompatible with access "
+   128→57.                 "type %access_repd")
+   129→58.         // AccessNode does not change the RepD of the value
+   130→59.         // but may produce a sub-value with a different RepD
+   131→60.         if u.produces_subvalue then
+   132→61.           sub_repd := RepD-Project(RepD_map[u], u.access_path)
+   133→62.           RepD_map[u.output] := sub_repd
+   134→63.           WorkList.enqueue(u.output)
+   135→64.       
+   136→65.       FunctionCall:
+   137→66.         // Verify caller's actual RepDs match callee's formal RepDs
+   138→67.         callee := u.callee_function
+   139→68.         for i = 0 to u.actual_params.length - 1 do
+   140→69.           actual_repd := RepD_map[u.actual_params[i]]
+   141→70.           formal_repd := callee.signature.param_RepD[i]
+   142→71.           if not RepD-Compatible(actual_repd, formal_repd) then
+   143→72.             error("FunctionCall %u: actual param %i RepD %actual_repd "
+   144→73.                   "incompatible with formal param RepD %formal_repd")
+   145→74.         // Return value gets callee's return RepD
+   146→75.         RepD_map[u] := callee.signature.return_RepD
+   147→76.         WorkList.enqueue(u)
+   148→77.       
+   149→78.       PhiNode:  // merge point from control flow
+   150→79.         // All predecessors must agree on RepD (or be union-compatible)
+   151→80.         incoming := { RepD_map[p] for each predecessor p of u }
+   152→81.         merged := RepD-Merge(incoming)
+   153→82.         if merged = FAIL then
+   154→83.           error("PhiNode %u: incompatible incoming RepDs %incoming")
+   155→84.         if u not in RepD_map or RepD_map[u] != merged then
+   156→85.           RepD_map[u] := merged
+   157→86.           WorkList.enqueue(u)
+   158→87.       
+   159→88.       default:
+   160→89.         // All other nodes: RepD passes through unchanged
+   161→90.         if u not in RepD_map or RepD_map[u] != current_repd then
+   162→91.           RepD_map[u] := current_repd
+   163→92.           WorkList.enqueue(u)
+   164→93.   end for
+   165→94. end while
+   166→95. 
+   167→96. // Phase 3: Completeness check
+   168→97. for each node v in V do
+   169→98.   if v not in RepD_map then
+   170→99.     error("Node %v: RepD could not be inferred (unreachable or "
+   171→100.          "uninitialized)")
+   172→101. end for
+   173→102. 
+   174→103. return RepD_map
+   175→```
+   176→
+   177→### 1.4 Helper Functions
+   178→
+   179→```
+   180→Function RepD-Compatible(source: RepD, target: RepD) -> Bool
+   181→  // A cast from source to target is valid if:
+   182→  // 1. source.size >= target.size (target fits within source's memory)
+   183→  // 2. target.align divides source.align (alignment is compatible)
+   184→  // 3. If target specifies a struct layout, all field offsets
+   185→  //    fall within source.size
+   186→  return source.size >= target.size
+   187→     and source.align % target.align == 0
+   188→     and fields-within-bounds(target, source.size)
+   189→
+   190→Function RepD-Merge(repd_set: Set<RepD>) -> RepD or FAIL
+   191→  // Merge multiple RepDs from control flow merge points
+   192→  if all elements of repd_set are equal then
+   193→    return any element
+   194→  // Try to find a common supertype: union of interpretations
+   195→  merged_size := max(r.size for r in repd_set)
+   196→  merged_align := lcm(r.align for r in repd_set)
+   197→  merged_interp := union(r.interp for r in repd_set)
+   198→  // Verify that all interpretations are valid for merged size/align
+   199→  for each interp in merged_interp do
+   200→    if not interp-fits(interp, merged_size, merged_align) then
+   201→      return FAIL
+   202→  return RepD{size=merged_size, align=merged_align, interp=merged_interp}
+   203→
+   204→Function RepD-Project(repd: RepD, path: AccessPath) -> RepD
+   205→  // Project a sub-region from a struct RepD
+   206→  match path with
+   207→    | FieldAccess(name) -> find field named 'name' in repd.interp
+   208→    | IndexAccess(idx)  -> return element RepD from array interpretation
+   209→    | SubRange(off, sz) -> return RepD{size=sz, align=1, interp={BytesOf(sz)}}
+   210→```
+   211→
+   212→### 1.5 Complexity Analysis
+   213→
+   214→The algorithm performs a standard forward dataflow analysis on the SCG. Each node is enqueued in the worklist at most once per distinct RepD value it can hold. In practice, the RepD at a node changes at most O(|RepD_variants|) times, where |RepD_variants| is the number of distinct representation variants in the program. The total work is therefore O(|V| * |RepD_variants|), which is linear in program size for fixed RepD vocabulary. In the worst case, the number of RepD variants is bounded by the number of distinct struct/type definitions in the program, making the overall complexity O(|V| * |T|) where |T| is the number of type definitions. This is analogous to the complexity of Hindley-Milner type inference, which is nearly linear in practice.
+   215→
+   216→### 1.6 Consistency Proof Sketch
+   217→
+   218→**Theorem:** If RepD-Inference succeeds for a program P (i.e., returns a RepD_map without error), then all RepD annotations in the program are consistent.
+   219→
+   220→**Proof Sketch:** By induction on the structure of the SCG.
+   221→
+   222→- **Base case (AllocationNode, LiteralNode, ParameterNode):** The RepD is initialized directly from the node's intrinsic annotations, which are consistent by construction (the allocation request specifies a valid size and alignment).
+   223→
+   224→- **Inductive step (DataFlow pass-through):** If the source node's RepD is consistent, and the algorithm propagates it unchanged to the target, then the target's RepD is consistent because the data has the same representation.
+   225→
+   226→- **Inductive step (CastNode):** The algorithm verifies RepD-Compatible(source, target) before assigning the target RepD. By definition of RepD-Compatible, the target memory region is a valid reinterpretation of the source memory region. Therefore, all subsequent operations that respect the target RepD also respect the source memory layout.
+   227→
+   228→- **Inductive step (FunctionCall):** The algorithm verifies that each actual parameter's RepD is compatible with the corresponding formal parameter's RepD. By the induction hypothesis, the callee's body is consistent with its formal RepDs. Therefore, the call is consistent.
+   229→
+   230→- **Inductive step (PhiNode):** The merge function produces a RepD that is a valid supertype of all incoming RepDs. Any operation valid on the merged RepD is valid on all incoming RepDs. Therefore, the merged RepD is consistent.
+   231→
+   232→Since every node is covered by one of these cases, and the algorithm processes all nodes, global consistency follows. QED.
+   233→
+   234→---
+   235→
+   236→## 2. CapD Inference Algorithm
+   237→
+   238→### 2.1 Overview
+   239→
+   240→Capability Descriptors (CapD) specify what operations are valid on data — a set of permissions that is context-dependent and may be weakened (reduced) as data flows through the program. Unlike RepD, which is preserved along data flow, CapD is *weakened* along data flow edges: passing a value to a function may reduce its capabilities, storing it in a shared structure may remove write access, and sending it over a network may strip all local capabilities.
+   241→
+   242→The CapD inference algorithm is a forward dataflow analysis over the SCG that tracks the capability set of each value at each program point. The analysis uses a lattice structure where the top element is the full capability set and the ordering is subset inclusion. At merge points (control flow joins), CapD sets are joined using union (the most permissive capability set that satisfies both branches). At capability-reducing operations (function calls with restricted signatures, free operations, send operations), CapD is weakened by intersecting with the required capability set.
+   243→
+   244→The algorithm depends on RepD inference for cast validation — when a value is cast to a new RepD, the CapD must be verified to include the operations implied by the target representation (e.g., casting to a pointer type requires the DerivePtr capability).
+   245→
+   246→### 2.2 Formal Definitions
+   247→
+   248→A **CapD** is a set of capabilities drawn from the following universe:
+   249→
+   250→```
+   251→Capability ::= 
+   252→  | Read            // may read the value
+   253→  | Write           // may write/modify the value
+   254→  | DerivePtr       // may derive a pointer/address to the value
+   255→  | Drop            // may deallocate/drop the value
+   256→  | Move            // may transfer ownership (move semantics)
+   257→  | Copy            // may duplicate the value (copy semantics)
+   258→  | Iterate         // may iterate over the value (collection)
+   259→  | Execute         // may execute the value as code
+   260→  | Serialize       // may serialize the value to bytes
+   261→  | Send            // may send the value across a boundary (network, thread)
+   262→  | Persist         // may persist the value to durable storage
+   263→  | Compare         // may compare the value for equality
+   264→  | Hash            // may compute a hash of the value
+   265→  | FFI             // may pass the value to foreign function interface
+   266→
+   267→CapD = Set<Capability>
+   268→```
+   269→
+   270→The **CapD lattice** is defined as:
+   271→
+   272→- **Ordering:** C1 ≤ C2 iff C1 ⊇ C2 (subset ordering: fewer capabilities = lower in lattice)
+   273→- **Top (⊤):** ∅ (no capabilities — the most restrictive, lowest in our inverted ordering)
+   274→- **Bottom (⊥):** AllCapabilities (every capability — the most permissive)
+   275→- **Join (∨):** C1 ∪ C2 (union: take the most permissive capabilities)
+   276→- **Meet (∧):** C1 ∩ C2 (intersection: take the most restrictive capabilities)
+   277→
+   278→Note: The lattice is inverted with respect to the natural subset ordering. We use "weakening" to mean *removing capabilities* (moving down in the lattice), and "strengthening" to mean *adding capabilities* (moving up). The join at merge points takes the union to ensure that both branches' capabilities are preserved.
+   279→
+   280→### 2.3 Algorithm
+   281→
+   282→```
+   283→Algorithm: CapD-Inference
+   284→Input:  SCG = (V, E), RepD_map from RepD-Inference
+   285→Output: Map<Node, CapD> mapping each value-producing node to its CapD
+   286→        OR Error with diagnostic information
+   287→
+   288→1.  // Phase 1: Initialization
+   289→2.  CapD_map := empty map from Node to CapD
+   290→3.  WorkList := empty queue of Nodes
+   291→4.  
+   292→5.  FULL_CAPS := {Read, Write, DerivePtr, Drop, Move, Copy, Iterate,
+   293→6.                 Execute, Serialize, Send, Persist, Compare, Hash, FFI}
+   294→7.  
+   295→8.  for each node v in V do
+   296→9.    if v is AllocationNode then
+   297→10.     // Freshly allocated values get all capabilities
+   298→11.     CapD_map[v] := FULL_CAPS
+   299→12.     WorkList.enqueue(v)
+   300→13.   
+   301→14.   elif v is LiteralNode then
+   302→15.     // Literals are read-only but copyable
+   303→16.     CapD_map[v] := {Read, Copy, Compare, Hash, Serialize}
+   304→17.     WorkList.enqueue(v)
+   305→18.   
+   306→19.   elif v is ParameterNode then
+   307→20.     // Formal parameter CapD from function signature
+   308→21.     CapD_map[v] := v.function_signature.param_CapD[v.param_index]
+   309→22.     WorkList.enqueue(v)
+   310→23. end for
+   311→24. 
+   312→25. // Phase 2: Forward propagation with weakening
+   313→26. while WorkList is not empty do
+   314→27.   v := WorkList.dequeue()
+   315→28.   current_capd := CapD_map[v]
+   316→29.   
+   317→30.   for each edge (v, u) in E do
+   318→31.     case u.type of
+   319→32.       
+   320→33.       DataFlowPass:
+   321→34.         // CapD is preserved along simple data flow
+   322→35.         propagate_if_changed(u, current_capd)
+   323→36.       
+   324→37.       FunctionCall:
+   325→38.         // Caller's CapD must satisfy callee's required CapD
+   326→39.         callee := u.callee_function
+   327→40.         for i = 0 to u.actual_params.length - 1 do
+   328→41.           actual_capd := CapD_map[u.actual_params[i]]
+   329→42.           required_capd := callee.signature.param_CapD[i]
+   330→43.           // Verify: actual capabilities must include all required ones
+   331→44.           if not (required_capd ⊆ actual_capd) then
+   332→45.             error("FunctionCall %u: actual param %i has CapD "
+   333→46.                   "%actual_capd but callee requires %required_capd")
+   334→47.           // After call, CapD of passed value is weakened
+   335→48.           // to intersection with callee's return CapD for that param
+   336→49.           returned_capd := callee.signature.param_CapD_post[i]
+   337→50.           new_capd := actual_capd ∩ returned_capd
+   338→51.           propagate_if_changed(u.actual_params[i], new_capd)
+   339→52.         // Return value gets callee's return CapD
+   340→53.         propagate_if_changed(u, callee.signature.return_CapD)
+   341→54.       
+   342→55.       FreeNode:
+   343→56.         // After free(): CapD of derived pointers loses Read and Write
+   344→57.         freed_capd := CapD_map[u.freed_value]
+   345→58.         if freed_capd is not in CapD_map then
+   346→59.           error("FreeNode %u: freeing value with unknown CapD")
+   347→60.         // The freed value retains only Drop (it has been dropped)
+   348→61.         // All derived pointers lose Read and Write
+   349→62.         for each node w derived from u.freed_value do
+   350→63.           old_capd := CapD_map[w]
+   351→64.           new_capd := old_capd \ {Read, Write, DerivePtr, Execute}
+   352→65.           propagate_if_changed(w, new_capd)
+   353→66.       
+   354→67.       SendNode:
+   355→68.         // After send(): CapD of local reference loses everything
+   356→69.         // (ownership transferred to remote context)
+   357→70.         sent_capd := CapD_map[u.sent_value]
+   358→71.         new_capd := {}  // empty CapD after send
+   359→72.         propagate_if_changed(u.sent_value, new_capd)
+   360→73.       
+   361→74.       CastNode:
+   362→75.         // Verify CapD includes operations implied by target RepD
+   363→76.         target_repd := RepD_map[u]  // from RepD inference
+   364→77.         implied_caps := CapD-ImpliedBy(target_repd)
+   365→78.         if not (implied_caps ⊆ current_capd) then
+   366→79.           error("CastNode %u: target RepD implies capabilities "
+   367→80.                 "%implied_caps but value only has %current_capd")
+   368→81.         // Casting may restrict capabilities based on target RepD
+   369→82.         // (e.g., casting to const removes Write)
+   370→83.         cast_capd := u.cast_annotation.capd_restriction
+   371→84.         new_capd := current_capd ∩ cast_capd
+   372→85.         propagate_if_changed(u, new_capd)
+   373→86.       
+   374→87.       PhaseTransitionNode:
+   375→88.         // In phase transition: CapD may gain or lose capabilities
+   376→89.         // based on the phase transition annotation
+   377→90.         transition := u.phase_annotation
+   378→91.         gained := transition.gained_capabilities
+   379→92.         lost := transition.lost_capabilities
+   380→93.         new_capd := (current_capd ∪ gained) \ lost
+   381→94.         propagate_if_changed(u, new_capd)
+   382→95.       
+   383→96.       PhiNode:
+   384→97.         // At conditional: both branches' CapD are joined (union)
+   385→98.         incoming := { CapD_map[p] for each predecessor p of u }
+   386→99.         joined := ⋃ incoming  // union = most permissive
+   387→100.        propagate_if_changed(u, joined)
+   388→101.      
+   389→102.      MoveSemanticsNode:
+   390→103.        // After a move, the source loses all capabilities
+   391→104.        new_source_capd := {}
+   392→105:       propagate_if_changed(u.source, new_source_capd)
+   393→106:       // The target gets the moved capabilities
+   394→107:       propagate_if_changed(u.target, current_capd)
+   395→108:      
+   396→109:      default:
+   397→110:        propagate_if_changed(u, current_capd)
+   398→111:  end for
+   399→112: end while
+   400→113:
+   401→114: // Phase 3: Completeness check
+   402→115: for each node v in V do
+   403→116:   if v not in CapD_map then
+   404→117:     error("Node %v: CapD could not be inferred")
+   405→118: end for
+   406→119:
+   407→120: return CapD_map
+   408→121:
+   409→122: // Helper: propagate only if changed
+   410→123: procedure propagate_if_changed(node: Node, new_capd: CapD)
+   411→124:   if node not in CapD_map or CapD_map[node] != new_capd then
+   412→125:     CapD_map[node] := new_capd
+   413→126:     WorkList.enqueue(node)
+   414→127:
+   415→128: // Helper: capabilities implied by a RepD
+   416→129: function CapD-ImpliedBy(repd: RepD) -> CapD
+   417→130:   caps := {Read}  // all RepDs require at least Read
+   418→131:   if repd has mutable interpretation then caps += {Write}
+   419→132:   if repd has pointer interpretation then caps += {DerivePtr}
+   420→133:   if repd has function/code interpretation then caps += {Execute}
+   421→134:   return caps
+   422→```
+   423→
+   424→### 2.4 Context-Dependent Resolution
+   425→
+   426→A critical feature of CapD inference is its context-dependent resolution. The same value may have different CapD at different program points, and the algorithm tracks this precisely. The key context-dependent transformations are:
+   427→
+   428→**After `free()`**: The freed value's memory region is marked as deallocated. All pointers derived from the freed value lose the `Read`, `Write`, `DerivePtr`, and `Execute` capabilities, because accessing freed memory is undefined. They retain `Compare` (the address value can still be compared), `Hash` (the bit pattern can be hashed), and `Serialize` (the address can be serialized as an integer), but these operations are semantically meaningless and the IVE may warn about them.
+   429→
+   430→**After `send()`**: Ownership of the value is transferred to a remote execution context (another thread, another machine, another process). The local reference loses all capabilities — it can no longer be read, written, or derived from. This is the most aggressive weakening, and it mirrors Rust's move semantics for `Send` types.
+   431→
+   432→**Phase transitions**: When the program transitions between phases (e.g., from initialization to steady-state, from authenticated to unauthenticated), capabilities may change. During initialization, a configuration object may be `Write`-able; after initialization, it becomes read-only. The PhaseTransitionNode in the SCG captures these transitions, and the algorithm applies the corresponding capability changes.
+   433→
+   434→**At function boundaries**: The caller's CapD must be a superset of the callee's required CapD. If the callee requires `{Read, Write}` but the caller only provides `{Read}`, the inference fails with a diagnostic. This is analogous to Rust's trait bound checking, but operates on the finer-grained CapD rather than trait implementations.
+   435→
+   436→### 2.5 Complexity Analysis
+   437→
+   438→The CapD lattice has 2^|Capability| elements, where |Capability| is the number of distinct capabilities (currently 14). Each node's CapD can change at most 2^|Capability| times in the worst case. However, in practice, CapD only decreases (weakening) along most paths, and the join at merge points is bounded by the union of incoming CapDs. The total work is O(|V| * |Capability|^2) for the following reasons:
+   439→
+   440→1. Each capability check (subset test) takes O(|Capability|) time.
+   441→2. Each node processes at most |Capability| distinct capability changes.
+   442→3. The worklist processes each node at most |Capability| times.
+   443→
+   444→Therefore, the overall complexity is polynomial in program size: O(|V| * |Capability|^2). This is efficient enough for practical use on large programs.
+   445→
+   446→### 2.6 Most-Precision Proof Sketch
+   447→
+   448→**Theorem:** If CapD-Inference succeeds, the inferred CapD for each node is the most-precise (largest, i.e., containing the most capabilities) CapD that satisfies all constraints.
+   449→
+   450→**Proof Sketch:** We show this by contradiction. Suppose there exists a valid CapD assignment C' that assigns strictly more capabilities to some node v than the inferred CapD C = CapD_map[v]. That is, C ⊂ C'.
+   451→
+   452→- If v is an AllocationNode, then C = FULL_CAPS, which is the maximum possible CapD. Contradiction.
+   453→- If v is reached by data flow from a predecessor p with CapD C_p, then C = C_p (for pass-through) or C = C_p ∩ restriction (for weakening). Since C_p is the most-precise for p (by induction), C is the most-precise for v.
+   454→- If v is a PhiNode with predecessors p1, ..., pk, then C = C_p1 ∪ ... ∪ C_pk. Any CapD C' that is valid for v must be valid for all predecessors, meaning C' ⊆ C_pi for each i. Therefore C' ⊆ C, and since C ⊆ C' by assumption, C = C'. Contradiction.
+   455→- If v is weakened by a function call or operation, the weakening is the minimum necessary (exact intersection with the required CapD). A larger CapD would violate the required CapD constraint. Contradiction.
+   456→
+   457→Therefore, the inferred CapD is the most-precise assignment. QED.
+   458→
+   459→---
+   460→
+   461→## 3. RelD Inference Algorithm
+   462→
+   463→### 3.1 Overview
+   464→
+   465→Relational Descriptors (RelD) specify relationships between data values — temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, and security-level flow. RelD is the most complex of the three BD components because it captures arbitrary semantic relationships that span the entire program. Unlike RepD (which is local to a value) and CapD (which flows with weakening along edges), RelD involves relationships between *pairs* or *groups* of values, requiring a constraint-based analysis that reasons about the entire relationship graph.
+   466→
+   467→The RelD inference algorithm builds a constraint graph from the SCG, where nodes represent values and edges represent relational constraints. The algorithm then performs fixed-point iteration to compute the transitive closure of all relational constraints, and finally checks consistency (no circular Outlives, no security downgrades).
+   468→
+   469→RelD inference depends on both RepD (for structural containment relationships) and CapD (for capability-dependent relationships, e.g., a value without DerivePtr cannot have its address-derived relation).
+   470→
+   471→### 3.2 Formal Definitions
+   472→
+   473→A **RelD** is a set of relational assertions, each connecting this value to another value or to a property:
+   474→
+   475→```
+   476→RelAssertion ::=
+   477→  | Outlives(target: NodeID)                    // this value outlives target
+   478→  | ContainedIn(container: NodeID)              // this value is contained in container
+   479→  | DependsOn(source: NodeID)                   // this value depends on source
+   480→  | SemanticallyEquivalentTo(other: NodeID)     // same semantic content, different RepD
+   481→  | SecurityLevel(level: SecurityClass)         // confidentiality classification
+   482→  | TaintedBy(source: TaintSource)              // data originates from untrusted source
+   483→  | ValidDuring(scope: ScopeID)                 // value is valid only within scope
+   484→  | AliasesWith(other: NodeID)                  // value shares memory with other
+   485→
+   486→SecurityClass ::= Public | Internal | Confidential | Secret
+   487→TaintSource ::= UserInput | NetworkInput | FileAccess | Environment | Untainted
+   488→
+   489→RelD = Set<RelAssertion>
+   490→```
+   491→
+   492→The **RelD lattice** is defined as:
+   493→
+   494→- **Ordering:** R1 ≤ R2 iff R1 ⊆ R2 (more assertions = more constrained = lower in lattice)
+   495→- **Top (⊤):** {} (no relational assertions — completely unconstrained)
+   496→- **Bottom (⊥):** all possible assertions (maximally constrained)
+   497→- **Join (∨):** R1 ∪ R2 (union: take all constraints from both)
+   498→- **Meet (∧):** R1 ∩ R2 (intersection: take only shared constraints)
+   499→
+   500→The join operation merges relational information: if one path says value A outlives B, and another says A outlives C, the merged RelD says A outlives both B and C. This is the most conservative (most constrained) assignment, ensuring no relational constraint is lost.
+   501→
+   502→### 3.3 Algorithm
+   503→
+   504→```
+   505→Algorithm: RelD-Inference
+   506→Input:  SCG = (V, E), RepD_map, CapD_map
+   507→Output: Map<Node, RelD> mapping each value-producing node to its RelD
+   508→        OR Error with diagnostic information
+   509→
+   510→1.  // Phase 1: Initialize all values with empty RelD
+   511→2.  RelD_map := Map from Node to RelD, initially {} for all nodes
+   512→3.  
+   513→4.  // Phase 2: Add temporal relations from scope structure
+   514→5.  for each ScopeNode s in V do
+   515→6.    // Values declared in scope s outlive all references to them
+   516→7.    // that escape scope s
+   517→8.    for each value v declared in s do
+   518→9.      for each reference r to v that escapes s do
+   519→10.       add Outlives(r) to RelD_map[v]
+   520→11:      add ValidDuring(s) to RelD_map[v]
+   521→12:   // Values in outer scope outlive values in inner scope
+   522→13:   for each inner scope s' nested in s do
+   523→14:     for each value v in s do
+   524→15:       for each value v' in s' do
+   525→16:         add Outlives(v') to RelD_map[v]
+   526→17: end for
+   527→18:
+   528→19: // Phase 3: Add dependency relations from data flow
+   529→20: for each DataFlow edge (v, u) in E do
+   530→21:   // u depends on v (data dependency)
+   531→22:   add DependsOn(v) to RelD_map[u]
+   532→23:   // If v is a container and u is an element access,
+   533→24:   // add containment relation
+   534→25:   if u is AccessNode accessing element of v then
+   535→26:     add ContainedIn(v) to RelD_map[u]
+   536→27:     // Element outlives container semantics:
+   537→28:     // container must outlive element reference
+   538→29:     add Outlives(u) to RelD_map[v]
+   539→30: end for
+   540→31:
+   541→32: // Phase 4: Add security relations from taint analysis
+   542→33: for each node v in V do
+   543→34:   if v is InputNode from untrusted source then
+   544→35:     add TaintedBy(v.source_type) to RelD_map[v]
+   545→36:     // Propagate taint through data flow
+   546→37:     // (will be done in Phase 5)
+   547→38:   
+   548→39:   elif v is DeclassificationNode then
+   549→40:     // Explicit declassification: security level may be lowered
+   550→41:     // but only at annotated declassification points
+   551→42:     declass_level := v.annotation.target_security_level
+   552→43:     add SecurityLevel(declass_level) to RelD_map[v]
+   553→44:   
+   554→45:   else
+   555→46:     // Default: security level is maximum of sources
+   556→47:     sources := { u | (u, v) in E }
+   557→48:     if sources is non-empty then
+   558→49:       max_level := max(RelD_map[u].SecurityLevel for u in sources)
+   559→50:       add SecurityLevel(max_level) to RelD_map[v]
+   560→51: end for
+   561→52:
+   562→53: // Phase 5: Fixed-point propagation
+   563→54: // Build constraint graph and iterate until convergence
+   564→55: changed := true
+   565→56: iteration := 0
+   566→57: while changed do
+   567→58:   changed := false
+   568→59:   iteration := iteration + 1
+   569→60:   
+   570→61:   for each node v in V in topological order do
+   571→62:     new_reld := RelD_map[v]
+   572→63:     
+   573→64:     for each edge (u, v) in E do
+   574→65:       // Propagate RelD along DataFlow edges with composition
+   575→66:       source_reld := RelD_map[u]
+   576→67:       
+   577→68:       // Compose: if u Outlives(x) and v DependsOn(u),
+   578→69:       // then transitively v may need to Outlive(x)
+   579→70:       for each Outlives(x) in source_reld do
+   580→71:         if x != v and not (Outlives(x) in new_reld) then
+   581→72:           add Outlives(x) to new_reld
+   582→73:           changed := true
+   583→74:       
+   584→75:       // Compose: if u TaintedBy(t) and v DependsOn(u),
+   585→76:       // then v is also tainted by t
+   586→77:       for each TaintedBy(t) in source_reld do
+   587→78:         if not (TaintedBy(t) in new_reld) then
+   588→79:           add TaintedBy(t) to new_reld
+   589→80:           changed := true
+   590→81:       
+   591→82:       // Compose: if u SecurityLevel(l1) and v has no
+   592→83:       // explicit security level, v gets max(l1, existing)
+   593→84:       for each SecurityLevel(l) in source_reld do
+   594→85:         existing := new_reld.SecurityLevel or Public
+   595→86:         new_level := max(l, existing)
+   596→87:         if new_level != existing then
+   597→88:           replace SecurityLevel(existing) with
+   598→89:             SecurityLevel(new_level) in new_reld
+   599→90:           changed := true
+   600→91:       
+   601→92:       // Compose: if u SemanticallyEquivalentTo(w),
+   602→93:       // then v (which depends on u) may transitively
+   603→94:       // relate to w
+   604→95:       for each SemanticallyEquivalentTo(w) in source_reld do
+   605→96:         if not (DependsOn(w) in new_reld) then
+   606→97:           add DependsOn(w) to new_reld
+   607→98:           changed := true
+   608→99:     
+   609→100:    // Aliasing: if two values have overlapping RepD regions,
+   610→101:    // add AliasesWith relation
+   611→102:    for each node w in V where w != v do
+   612→103:      if RepD-Overlaps(RepD_map[v], RepD_map[w]) and
+   613→104:         CapD_map[v] ∩ CapD_map[w] contains {Write} then
+   614→105:        if not (AliasesWith(w) in new_reld) then
+   615→106:          add AliasesWith(w) to new_reld
+   616→107:          changed := true
+   617→108:    
+   618→109:    RelD_map[v] := new_reld
+   619→110: end for
+   620→111: end while
+   621→112:
+   622→113: // Phase 6: Consistency checks
+   623→114: // Check 1: No circular Outlives
+   624→115: for each node v in V do
+   625→116:   if exists path v ->* v through Outlives edges then
+   626→117:     error("Circular Outlives: value %v must outlive itself "
+   627→118:           "(lifetime cycle detected)")
+   628→119: end for
+   629→120:
+   630→121: // Check 2: No security downgrades (except at declassification points)
+   631→122: for each edge (u, v) in E do
+   632→123:   if RelD_map[u].SecurityLevel > RelD_map[v].SecurityLevel then
+   633→124:     if v is not DeclassificationNode then
+   634→125:       error("Security downgrade: value %u has security level "
+   635→126:             "%(RelD_map[u].SecurityLevel) but flows to %v with "
+   636→127:             "level %(RelD_map[v].SecurityLevel) without "
+   637→128:             "declassification")
+   638→129: end for
+   639→130:
+   640→131: // Check 3: Scope validity
+   641→132: for each node v in V do
+   642→133:   for each ValidDuring(s) in RelD_map[v] do
+   643→134:     for each use u of v where u is not in scope s do
+   644→135:       if not (Outlives(u) in RelD_map[v]) then
+   645→136:         error("Scope violation: value %v used at %u outside "
+   646→137:               "its valid scope %s without Outlives guarantee")
+   647→138: end for
+   648→139:
+   649→140: return RelD_map
+   650→```
+   651→
+   652→### 3.4 Constraint Graph and Fixed-Point Properties
+   653→
+   654→The RelD constraint graph is constructed as follows: each node v in the SCG becomes a node in the constraint graph, and for each relational assertion in v's RelD, we add a directed edge in the constraint graph. For example, if v's RelD contains `Outlives(w)`, we add edge v → w in the constraint graph.
+   655→
+   656→The fixed-point iteration in Phase 5 is guaranteed to terminate because:
+   657→
+   658→1. **Monotone growth:** In each iteration, the RelD at each node can only grow (gain more assertions). No assertion is ever removed.
+   659→2. **Finite lattice:** The RelD at each node is a subset of the finite set of all possible relational assertions. Given |V| nodes and a bounded set of relation types, the total number of possible assertions is finite: O(|V|^2 * |RelationTypes|).
+   660→3. **Termination:** Since the lattice is finite and the transfer function is monotone, the iteration must terminate in at most O(|V| * |max_Reld_size|) iterations.
+   661→
+   662→The composition rules in Phase 5 are carefully designed to maintain soundness:
+   663→
+   664→- **Outlives composition:** If A outlives B and B outlives C, then A outlives C (transitivity).
+   665→- **Taint propagation:** If A is tainted and B depends on A, then B is tainted (taint monotonicity).
+   666→- **Security level propagation:** If A has security level L1 and B depends on A, then B has security level ≥ L1 (security monotonicity).
+   667→- **Semantic equivalence propagation:** If A ≡ B and C depends on A, then C transitively depends on B (preservation of semantic relationships).
+   668→
+   669→### 3.5 Complexity Analysis
+   670→
+   671→The worst-case complexity of RelD inference is O(|V|^2) for the following reasons:
+   672→
+   673→1. **Constraint graph construction (Phases 2-4):** Each phase visits each node and edge once, producing O(|V| + |E|) relational assertions. Since the SCG is typically sparse (|E| = O(|V|)), this is O(|V|).
+   674→
+   675→2. **Fixed-point iteration (Phase 5):** In each iteration, each node processes its incoming edges and produces new assertions. The number of iterations is bounded by the diameter of the constraint graph, which is O(|V|). Each iteration processes O(|V|) nodes, each with O(|V|) incoming assertions. Therefore, the total work is O(|V|^2).
+   676→
+   677→3. **Transitive closure (implicit in Outlives composition):** Computing the transitive closure of the Outlives relation is O(|V|^2) using standard graph algorithms (e.g., Floyd-Warshall or repeated BFS).
+   678→
+   679→4. **Consistency checks (Phase 6):** Checking for circular Outlives requires cycle detection in the Outlives graph, which is O(|V| + |E_Outlives|) = O(|V|^2) in the worst case. Checking for security downgrades is O(|E|) = O(|V|).
+   680→
+   681→The overall worst-case complexity is O(|V|^2), dominated by the transitive closure computation. This is acceptable for programs of moderate size (up to ~10^6 nodes), and can be optimized using incremental techniques for larger programs.
+   682→
+   683→### 3.6 Termination and Soundness Proof Sketch
+   684→
+   685→**Theorem (Termination):** RelD-Inference always terminates.
+   686→
+   687→**Proof:** The RelD at each node is a set of relational assertions drawn from a finite universe. The transfer function in each iteration is monotone (it only adds assertions, never removes them). Since the lattice is finite (bounded by the total number of possible assertions), the iteration must reach a fixed point after a finite number of steps. The maximum number of steps is the total number of possible assertions across all nodes, which is O(|V|^2 * |RelationTypes|). QED.
+   688→
+   689→**Theorem (Soundness):** If RelD-Inference succeeds (no errors in Phase 6), then the inferred RelDs are consistent with the program's semantics.
+   690→
+   691→**Proof Sketch:** By induction on the number of fixed-point iterations.
+   692→
+   693→- **Base case (initial state):** The initial RelDs contain only assertions directly derived from the SCG structure (scope relations, data dependencies, taint sources). These are sound by construction.
+   694→
+   695→- **Inductive step:** Each composition rule in Phase 5 preserves soundness:
+   696→  - If A outlives B (sound by IH) and B outlives C (sound by IH), then A outlives C (sound by transitivity of outlives).
+   697→  - If A is tainted (sound by IH) and B depends on A (sound by construction), then B is tainted (sound by taint monotonicity).
+   698→  - If A has security level L (sound by IH) and B depends on A, then B has security level ≥ L (sound by information flow policy).
+   699→
+   700→- **Consistency checks:** Phase 6 verifies that no soundness-critical property is violated:
+   701→  - No circular Outlives (which would be logically inconsistent).
+   702→  - No security downgrades (which would violate information flow policy).
+   703→  - No scope violations (which would violate lifetime constraints).
+   704→
+   705→Therefore, if all checks pass, the inferred RelDs are consistent. QED.
+   706→
+   707→---
+   708→
+   709→## 4. Combined BD Inference
+   710→
+   711→### 4.1 Overview
+   712→
+   713→The three BD inference algorithms — RepD, CapD, and RelD — are not independent. CapD inference depends on RepD (for validating capability requirements of cast operations), and RelD inference depends on both RepD (for structural containment and aliasing analysis) and CapD (for capability-dependent relational properties). Therefore, the combined BD inference must execute the three algorithms in a specific order and may need to iterate if later phases affect earlier ones.
+   714→
+   715→This section specifies the combined inference procedure, proves that it converges in at most three iterations, and characterizes the conditions under which iteration is necessary.
+   716→
+   717→### 4.2 Dependency Analysis
+   718→
+   719→The dependencies between the three BD components are:
+   720→
+   721→| Component | Depends On | Reason |
+   722→|-----------|-----------|--------|
+   723→| RepD | None | RepD is determined purely by memory layout and structural properties |
+   724→| CapD | RepD | CastNode validation requires RepD to determine implied capabilities |
+   725→| RelD | RepD, CapD | Aliasing analysis requires RepD; security relations require CapD |
+   726→
+   727→There is a potential *reverse* dependency: CapD may affect RepD in the case where a value has no `Write` capability, which means its RepD should be treated as read-only (the `Write` bit in the RepD's interpretation flags is cleared). Similarly, RelD may affect CapD when a security-level constraint prevents certain capabilities (e.g., a `Secret` value cannot have the `Send` capability to an unencrypted channel).
+   728→
+   729→However, these reverse dependencies are *refinement-only*: they can only restrict (make more conservative) the earlier component's results, never expand them. This property is crucial for proving convergence.
+   730→
+   731→### 4.3 Combined Algorithm
+   732→
+   733→```
+   734→Algorithm: BD-Inference
+   735→Input:  SCG = (V, E)
+   736→Output: Map<Node, BD> where BD = (RepD, CapD, RelD)
+   737→        OR Error with diagnostic information
+   738→
+   739→1.  // Iteration 1: RepD (no dependencies)
+   740→2.  RepD_map := RepD-Inference(SCG)
+   741→3.  if RepD_map is Error then return Error
+   742→4.  
+   743→5.  // Iteration 1: CapD (depends on RepD)
+   744→6.  CapD_map := CapD-Inference(SCG, RepD_map)
+   745→7.  if CapD_map is Error then return Error
+   746→8.  
+   747→9.  // Iteration 1: RelD (depends on RepD and CapD)
+   748→10. RelD_map := RelD-Inference(SCG, RepD_map, CapD_map)
+   749→11. if RelD_map is Error then return Error
+   750→12. 
+   751→13. // Iteration 2: Refine RepD based on CapD
+   752→14. // If a value has no Write capability, mark its RepD as read-only
+   753→15. RepD_map_refined := copy of RepD_map
+   754→16. for each node v in V do
+   755→17.   if Write not in CapD_map[v] then
+   756→18.     RepD_map_refined[v] := RepD-MarkReadOnly(RepD_map[v])
+   757→19.     // Also: if DerivePtr not in CapD, remove pointer interpretations
+   758→20.     if DerivePtr not in CapD_map[v] then
+   759→21.       RepD_map_refined[v] := RepD-RemovePtrInterp(RepD_map_refined[v])
+   760→22. 
+   761→23. // Re-run CapD with refined RepD (may further restrict CapD)
+   762→24. if RepD_map_refined != RepD_map then
+   763→25.   RepD_map := RepD_map_refined
+   764→26:  CapD_map_2 := CapD-Inference(SCG, RepD_map)
+   765→27:  if CapD_map_2 is Error then return Error
+   766→28:  
+   767→29:  // CapD can only have decreased (more restricted) or stayed the same
+   768→30:  // Verify this invariant
+   769→31:  for each node v in V do
+   770→32:    assert CapD_map_2[v] ⊆ CapD_map[v]
+   771→33:  
+   772→34:  if CapD_map_2 != CapD_map then
+   773→35:    CapD_map := CapD_map_2
+   774→36:    
+   775→37:    // Re-run RelD with refined CapD
+   776→38:    RelD_map_2 := RelD-Inference(SCG, RepD_map, CapD_map)
+   777→39:    if RelD_map_2 is Error then return Error
+   778→40:    
+   779→41:    // RelD can only have grown (more assertions) or stayed the same
+   780→42:    for each node v in V do
+   781→43:      assert RelD_map_2[v] ⊇ RelD_map[v]
+   782→44:    
+   783→45:    RelD_map := RelD_map_2
+   784→46: 
+   785→47: // Iteration 3: Final stabilization check
+   786→48: // Re-run RepD to check if RelD changes affect RepD
+   787→49. // (They don't in the current model, but we verify)
+   788→50. RepD_map_3 := RepD-Inference(SCG)
+   789→51. assert RepD_map_3 == RepD_map  // must be unchanged
+   790→52.
+   791→53. // Construct final BD map
+   792→54. BD_map := {}
+   793→55. for each node v in V do
+   794→56.   BD_map[v] := (RepD_map[v], CapD_map[v], RelD_map[v])
+   795→57.
+   796→58. return BD_map
+   797→```
+   798→
+   799→### 4.4 Convergence Proof
+   800→
+   801→**Theorem:** BD-Inference converges in at most 3 iterations (one initial pass plus at most two refinement passes).
+   802→
+   803→**Proof:** We show that each component stabilizes after a bounded number of passes.
+   804→
+   805→**Claim 1: RepD stabilizes after iteration 1.**
+   806→
+   807→RepD inference depends only on the SCG structure and allocation annotations, which are fixed. The only way RepD can change is through refinement based on CapD (marking read-only, removing pointer interpretations). After iteration 2 refines RepD based on CapD, the refined RepD can only cause CapD to further decrease (more restrictions). But a further-decreased CapD cannot introduce new RepD refinements that weren't already present, because the refinements are deterministic functions of CapD. Therefore, RepD stabilizes after iteration 2 at the latest. In fact, RepD map computed from scratch (iteration 3, line 50) is identical to the original RepD map because RepD inference has no dependency on CapD or RelD — the refinements are applied externally. So RepD_map_3 == RepD_map (the original), and the external refinements converge in one step.
+   808→
+   809→**Claim 2: CapD stabilizes after iteration 2.**
+   810→
+   811→In iteration 1, CapD is computed with the original RepD. In iteration 2, CapD is recomputed with the refined RepD. The refined RepD can only have fewer interpretations (no pointer, read-only), which can only reduce implied capabilities, which can only further restrict CapD. Since CapD is monotone decreasing (it only gets smaller), and the CapD lattice is finite, CapD must stabilize after at most one refinement pass. If CapD_map_2 == CapD_map, no further iteration is needed. If CapD_map_2 ⊂ CapD_map, the further-restricted CapD cannot cause any new RepD refinements (because the refinements from CapD→RepD are already maximal given the current CapD), so CapD stabilizes.
+   812→
+   813→**Claim 3: RelD stabilizes after iteration 2.**
+   814→
+   815→RelD depends on both RepD and CapD. After both have stabilized (by Claim 1 and Claim 2), RelD is deterministic and also stabilizes. The only way RelD could change is if CapD changes affect aliasing analysis (two values with Write capability to overlapping memory are aliases; if one loses Write, they may no longer be aliases). But removing aliasing relations only reduces RelD, and the monotone growth property of RelD inference means it re-converges from the smaller starting point.
+   816→
+   817→**Conclusion:** The combined inference converges in at most 3 iterations: one initial pass, one refinement pass (if needed), and one verification pass. In practice, most programs converge in 2 iterations (the refinement pass produces no changes). QED.
+   818→
+   819→### 4.5 Practical Optimization
+   820→
+   821→In practice, the full three-iteration procedure is rarely needed. Most programs exhibit the following pattern:
+   822→
+   823→1. **Iteration 1 succeeds:** RepD, CapD, and RelD are all inferred without error.
+   824→2. **Refinement check:** The CapD→RepD refinement produces no changes (no value has its Write capability removed by inference that wasn't already known from the SCG structure).
+   825→3. **Convergence:** The algorithm terminates after a single effective pass.
+   826→
+   827→The refinement pass is needed only for programs where CapD inference discovers capability restrictions that were not apparent from the SCG structure alone. For example, a program that passes a mutable value through a read-only function interface will have the value's CapD reduced to exclude Write, which in turn refines the RepD to be read-only. This is a rare but important case that the combined algorithm handles correctly.
+   828→
+   829→For implementation efficiency, the algorithm can be optimized to skip the refinement pass when no CapD changes are detected in iteration 1 that would affect RepD. This optimization reduces the effective cost of BD inference to a single pass for the vast majority of programs.
+   830→
+   831→---
+   832→
+   833→## 5. Soundness Theorem
+   834→
+   835→### 5.1 Statement
+   836→
+   837→**Theorem (BD Soundness):** If BD inference succeeds for a program P (i.e., the BD-Inference algorithm returns a BD_map without error for the SCG of P), then every operation in P respects the inferred BD. Formally, for every node v in the SCG and every operation op performed on the value produced by v, op satisfies BD_map[v] = (RepD_v, CapD_v, RelD_v), meaning:
+   838→
+   839→1. **RepD soundness:** The memory region accessed by op matches a valid interpretation in RepD_v.
+   840→2. **CapD soundness:** The capability required by op is contained in CapD_v.
+   841→3. **RelD soundness:** The relational constraints in RelD_v are satisfied by op (no scope violations, no security downgrades, no lifetime violations).
+   842→
+   843→### 5.2 Proof by Induction on SCG Structure
+   844→
+   845→We prove soundness by structural induction on the SCG, covering each node type.
+   846→
+   847→**Base Case: AllocationNode v.**
+   848→
+   849→An AllocationNode produces a freshly allocated value. By construction:
+   850→- RepD_v is derived from the allocation's size/align/layout annotations, which accurately describe the allocated memory. Any operation on this value accesses memory within the allocated region with the correct interpretation. ✓
+   851→- CapD_v = FULL_CAPS (all capabilities), which trivially includes any capability required by any operation. ✓
+   852→- RelD_v includes `ValidDuring(scope)` where scope is the allocation scope, and no `Outlives` or security constraints. Any operation within the scope satisfies these constraints. ✓
+   853→
+   854→**Inductive Step: DataFlow edge (u, v) with pass-through.**
+   855→
+   856→By the induction hypothesis, BD_map[u] is sound. Since the algorithm propagates BD_map[u] unchanged to v (for pass-through edges), BD_map[v] = BD_map[u]. Any operation on v's value is an operation on u's value (same data, same representation), so soundness is preserved. ✓
+   857→
+   858→**Inductive Step: CastNode v with source u.**
+   859→
+   860→By the IH, BD_map[u] is sound. The algorithm verifies:
+   861→1. RepD-Compatible(RepD_u, RepD_v): the target memory region is a valid reinterpretation of the source region. Any operation respecting RepD_v accesses memory that is within the source region and validly interpreted. ✓
+   862→2. CapD-ImpliedBy(RepD_v) ⊆ CapD_u: the capabilities implied by the target RepD are available in the source CapD. Any operation requiring a capability from RepD_v is permitted by CapD_u. ✓
+   863→3. The cast does not introduce new relational constraints that could be violated. ✓
+   864→
+   865→**Inductive Step: FunctionCall v with callee f.**
+   866→
+   867→By the IH, BD_map for each actual parameter is sound. The algorithm verifies:
+   868→1. For each parameter i: RepD-Compatible(actual_RepD_i, formal_RepD_i) and formal_CapD_i ⊆ actual_CapD_i. By the callee's contract (inductively assumed sound for f's body), any operation within f on parameter i respects formal_BD_i, which is compatible with actual_BD_i. ✓
+   869→2. The return value's BD is f's return BD, which is sound by the callee's contract. ✓
+   870→3. Relational constraints are preserved across the call boundary: if a value has `Outlives(x)` before the call, it still outlives x after the call. ✓
+   871→
+   872→**Inductive Step: PhiNode v merging predecessors u1, ..., uk.**
+   873→
+   874→By the IH, BD_map[ui] is sound for each i. The algorithm computes:
+   875→1. RepD_v = RepD-Merge({RepD_ui}): any operation valid on the merged RepD is valid on all predecessor RepDs. ✓
+   876→2. CapD_v = CapD-Join({CapD_ui}) = ⋃ CapD_ui: any capability in CapD_v is present in some CapD_ui, and by IH, operations using that capability are sound for that predecessor. Since the merged value may come from any predecessor, any operation valid on the merged CapD is sound for the actual runtime value. ✓
+   877→3. RelD_v = RelD-Join({RelD_ui}) = ⋃ RelD_ui: the merged RelD contains all constraints from all predecessors, making it the most conservative (most constrained) assignment. Any operation satisfying the merged RelD satisfies all predecessor RelDs. ✓
+   878→
+   879→**Inductive Step: FreeNode v.**
+   880→
+   881→By the IH, BD_map for the freed value is sound before the free. After the free:
+   882→1. RepD of the freed value is unchanged (the memory layout doesn't change), but any subsequent access is prevented by CapD.
+   883→2. CapD of the freed value and all derived pointers loses Read, Write, DerivePtr, and Execute. Any subsequent operation requiring these capabilities is rejected by CapD soundness. ✓
+   884→3. RelD of the freed value gains additional scope constraints that prevent use-after-free. ✓
+   885→
+   886→**Inductive Step: SendNode v.**
+   887→
+   888→By the IH, BD_map for the sent value is sound before the send. After the send:
+   889→1. CapD of the local reference is set to {} (empty), preventing any further operation on the local reference. ✓
+   890→2. RelD captures the ownership transfer, preventing aliasing violations. ✓
+   891→
+   892→**Conclusion:** By structural induction over all node types in the SCG, BD inference is sound. Every operation in P respects the inferred BD. QED.
+   893→
+   894→### 5.3 Corollaries
+   895→
+   896→**Corollary 1 (Memory Safety):** If BD inference succeeds, no operation accesses freed memory. This follows directly from CapD soundness: after a FreeNode, all derived values lose Read and Write capabilities, so any subsequent access would violate CapD soundness.
+   897→
+   898→**Corollary 2 (Data Race Freedom):** If BD inference succeeds, no two concurrent operations conflict on the same memory. This follows from RelD soundness: the AliasesWith relation tracks all potential aliasing, and the CapD check ensures that at most one aliased value has the Write capability at any program point.
+   899→
+   900→**Corollary 3 (Information Flow Security):** If BD inference succeeds, no data flows from a higher security level to a lower security level without explicit declassification. This follows directly from the security downgrade check in RelD inference Phase 6.
+   901→
+   902→---
+   903→
+   904→## 6. Completeness Discussion
+   905→
+   906→### 6.1 The Completeness Question
+   907→
+   908→A natural question arises: is BD inference *complete*? That is, for every program P that is BD-valid (every operation in P respects some valid BD assignment), does BD inference succeed and find a valid BD assignment?
+   909→
+   910→This question is analogous to asking whether a type inference algorithm is *principal* and *complete* — whether it finds a type for every well-typed program.
+   911→
+   912→### 6.2 Answer: No, BD Inference Is Not Complete
+   913→
+   914→BD inference is **not complete**. There exist BD-valid programs for which BD inference fails. The primary source of incompleteness is CapD inference's conservative choices at merge points.
+   915→
+   916→Consider the following program fragment:
+   917→
+   918→```
+   919→if condition then
+   920→  x := allocate(size=64, align=8)    // x has FULL_CAPS
+   921→  y := read_only_view(x)             // y has CapD = {Read, ...} (no Write)
+   922→else
+   923→  x := allocate(size=64, align=8)    // x has FULL_CAPS
+   924→  y := x                             // y has CapD = FULL_CAPS (alias of x)
+   925→end if
+   926→
+   927→// At the merge point (PhiNode):
+   928→// CapD of y = {Read, ...} ∪ FULL_CAPS = FULL_CAPS
+   929→// But if we later try to write through y, this may be unsound
+   930→// because in the then-branch, y was a read-only view
+   931→```
+   932→
+   933→In this example, the CapD join at the merge point produces `FULL_CAPS` (union of both branches), which includes Write. But in the then-branch, writing through y would violate the read-only constraint. The BD inference algorithm conservatively allows Write because it cannot determine which branch was taken at runtime. A more precise analysis (e.g., path-sensitive analysis) could handle this case, but at the cost of exponential complexity.
+   934→
+   935→This is the same kind of incompleteness found in all non-path-sensitive dataflow analyses: merge points lose precision because they must account for all possible execution paths. The CapD join (union) is the most permissive choice that is sound for all paths, but it may be too permissive for some paths.
+   936→
+   937→### 6.3 Incompleteness Is Bounded and Practical
+   938→
+   939→Despite being incomplete, BD inference is complete for a large and important class of programs:
+   940→
+   941→**Theorem:** For programs that type-check in Rust or Haskell under their standard type systems, BD inference always succeeds.
+   942→
+   943→**Proof Sketch:** Rust's type system enforces ownership and borrowing rules that are strictly more restrictive than CapD inference. Any program that satisfies Rust's borrow checker has a well-defined CapD assignment where:
+   944→- Owned values have full capabilities (minus Copy for non-Copy types).
+   945→- Immutable borrows have {Read, DerivePtr, Compare, Hash, ...} (no Write).
+   946→- Mutable borrows have {Read, Write, DerivePtr} (no Copy, no Move).
+   947→- Moved values have {} (empty CapD).
+   948→
+   949→These CapD assignments are compatible with BD inference's propagation rules, so BD inference will succeed for any Rust-type-correct program. Similarly, Haskell's type system enforces purity constraints that are more restrictive than CapD's capability restrictions, so BD inference will also succeed for Haskell programs. QED.
+   950→
+   951→### 6.4 Programs Where Inference Fails
+   952→
+   953→There exist BD-valid programs where inference fails, just as there exist Rust programs that need explicit type annotations. The key categories are:
+   954→
+   955→1. **Path-sensitive capability programs:** Programs where the correct CapD depends on which execution path was taken, and the merge point's CapD is too permissive. These programs are BD-valid (the runtime behavior respects BD) but inference cannot verify this with its path-insensitive analysis.
+   956→
+   957→2. **Higher-order capability programs:** Programs where capabilities are determined by higher-order functions that are not statically resolvable. For example, a function that takes a capability-set as a parameter and applies it to a value. If the capability-set is computed at runtime, BD inference cannot determine the exact CapD.
+   958→
+   959→3. **Complex lifetime programs:** Programs with lifetime relationships that are not expressible in the Outlives graph's transitive closure. For example, a program where two values have a lifetime relationship that depends on a runtime condition. These are the same programs that Rust's borrow checker rejects (requiring explicit lifetime annotations or `unsafe` code).
+   960→
+   961→4. **Cross-boundary programs:** Programs where data flows across security boundaries or FFI boundaries with complex capability transformations that are not captured by the SCG's annotations. These require explicit CapD annotations at the boundary.
+   962→
+   963→### 6.5 Handling Incompleteness
+   964→
+   965→The VUMA framework handles incompleteness through several mechanisms:
+   966→
+   967→1. **Explicit annotations:** The programmer (or AI agent) can add explicit BD annotations to constrain inference. These are optional refinements that override or supplement the inferred BD. This is analogous to Rust's type annotations — most are inferred, but some must be written explicitly.
+   968→
+   969→2. **Verification debt:** The IVE maintains a "verification debt" for operations where BD inference could not prove soundness. These operations are flagged for review but not blocked from execution. The IVE continues to attempt verification using more sophisticated analysis techniques.
+   970→
+   971→3. **Gradual inference:** The IVE can operate in a gradual mode where it infers the most precise BD it can and falls back to conservative defaults (e.g., `Opaque` RepD, `{Read}` CapD) for values it cannot fully analyze. This ensures that inference always produces a result, even if it is less precise than optimal.
+   972→
+   973→4. **Path-sensitive extensions:** For critical code paths, the IVE can invoke path-sensitive analysis as a refinement step. This is more expensive (potentially exponential) but can verify BD-valid programs that the default analysis cannot.
+   974→
+   975→### 6.6 Completeness vs. Precision Trade-off
+   976→
+   977→The incompleteness of BD inference is not a flaw — it is a deliberate trade-off between precision and tractability. A complete inference algorithm would need to be path-sensitive (exponential in the number of branches) and would need to solve higher-order constraints (undecidable in general). By accepting bounded incompleteness, BD inference achieves polynomial complexity while covering the vast majority of practical programs.
+   978→
+   979→This trade-off mirrors the design philosophy of modern type systems: Rust's borrow checker is incomplete (it rejects some safe programs), Haskell's type inference is incomplete (some well-typed programs need annotations), and Java's generics are incomplete (type erasure loses information). In each case, the designers chose tractability over completeness, and the result is a system that works well in practice despite theoretical incompleteness.
+   980→
+   981→The VUMA framework extends this philosophy by providing multiple levels of analysis: the default polynomial-time inference covers most programs, and the IVE's deeper reasoning capabilities handle the rest through verification debt and explicit annotations. The result is a system that is sound (all verified programs are correct), tractable (verification is efficient), and practically complete (most real-world programs are verified without manual intervention).
+   982→
+   983→---
+   984→
+   985→## Appendix A: Notation Summary
+   986→
+   987→| Symbol | Meaning |
+   988→|--------|---------|
+   989→| SCG | Semantic Computation Graph |
+   990→| BD | Behavioral Descriptor = (RepD, CapD, RelD) |
+   991→| RepD | Representation Descriptor |
+   992→| CapD | Capability Descriptor |
+   993→| RelD | Relational Descriptor |
+   994→| V, E | Nodes and edges of the SCG |
+   995→| ⊆, ⊇ | Subset, superset |
+   996→| ∪, ∩ | Union, intersection |
+   997→| ⊂ | Proper subset |
+   998→| ∨, ∧ | Lattice join, meet |
+   999→| ⊤, ⊥ | Lattice top, bottom |
+  1000→
+  1001→## Appendix B: Capability Universe
+  1002→
+  1003→| Capability | Description | Weakened By |
+  1004→|-----------|-------------|-------------|
+  1005→| Read | May read the value | Free, Send |
+  1006→| Write | May write the value | Read-only view, Free, Send |
+  1007→| DerivePtr | May derive pointer/address | Free, Send |
+  1008→| Drop | May deallocate the value | Send (transferred ownership) |
+  1009→| Move | May transfer ownership | Borrow, Send |
+  1010→| Copy | May duplicate the value | Move-only types |
+  1011→| Iterate | May iterate over collection | Free |
+  1012→| Execute | May execute as code | Free, Send |
+  1013→| Serialize | May convert to bytes | Never (additive) |
+  1014→| Send | May send across boundary | Never (additive) |
+  1015→| Persist | May write to storage | Never (additive) |
+  1016→| Compare | May compare for equality | Free (if deallocated) |
+  1017→| Hash | May compute hash | Free (if deallocated) |
+  1018→| FFI | May pass to foreign function | Free, Send |
+  1019→
+  1020→## Appendix C: References
+  1021→
+  1022→- Proposal: "Beyond Human Syntax: A Proposal for AI-Native Programming Language Design" (Section 3.5)
+  1023→- SCG Specification: VUMA-SPEC-SCG-001
+  1024→- VUMA Memory Model: VUMA-SPEC-VUMA-001
+  1025→- Hindley-Milner type inference: "Principal type-schemes for functional programs" (Damas & Milner, 1982)
+  1026→- Lattice-based dataflow analysis: "Monotone frameworks" (Kam & Ullman, 1977)
+  1027→- Taint analysis: "A Dynamic Technique for Eliminating Taint Vulnerabilities" (Newsome & Song, 2005)
+  1028→

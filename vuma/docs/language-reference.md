@@ -1,8 +1,8 @@
 # VUMA Language Reference
 
-> Version 0.1 — Last updated 2026-03-04
+> Version 0.2.0 — Last updated 2026-03-06
 
-This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language designed for the AArch64 platform. VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
+This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language targeting 8 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32). VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
 
 ---
 
@@ -17,8 +17,9 @@ This document is the definitive reference for the VUMA programming language, a m
 7. [Concurrency](#7-concurrency)
 8. [Memory Safety](#8-memory-safety)
 9. [Standard Library Overview](#9-standard-library-overview)
-10. [AArch64 Platform-Specific Features](#10-aarch64-platform-specific-features)
-11. [Appendix: Keyword and Operator Quick Reference](#11-appendix-keyword-and-operator-quick-reference)
+10. [FFI and External Functions](#10-ffi-and-external-functions)
+11. [Platform-Specific Features](#11-platform-specific-features)
+12. [Appendix: Keyword and Operator Quick Reference](#12-appendix-keyword-and-operator-quick-reference)
 
 ---
 
@@ -852,7 +853,7 @@ The IVE produces one of three verdicts for each invariant:
 
 ## 9. Standard Library Overview
 
-VUMA's standard library is designed for bare-metal and embedded systems programming on the AArch64. It provides essential data structures, memory management, I/O, and concurrency primitives — all written in VUMA and verified by the IVE. The standard library is organized into modules that can be imported as needed.
+VUMA's standard library provides essential data structures, memory management, I/O, formatting, mathematics, cryptography, string operations, concurrency, and filesystem primitives — all BD-annotated and verified by the IVE. The standard library is organized into modules that can be imported as needed.
 
 ### Memory Management
 
@@ -860,6 +861,7 @@ VUMA's standard library is designed for bare-metal and embedded systems programm
 - **`free(ptr)`**: Release a memory region. IVE marks all derived pointers as dead.
 - **`map_device(base, size) -> Address`**: Map a physical hardware address range into the program's address space. Implies volatile semantics; never needs to be freed.
 - **`align_to(ptr, alignment) -> Address`**: Align a pointer to the given boundary. Part of the derivation chain.
+- **Allocation strategies**: `GlobalAllocator`, `ArenaAllocator`, `BumpAllocator`, `PoolAllocator`, `FreeListAllocator` — each with BD-annotated allocation and deallocation.
 
 ```vuma
 import "vuma:mem";
@@ -874,6 +876,9 @@ free(pool);
 - **`Queue<T>`**: Lock-free single-producer single-consumer ring buffer with `AtomicU64` indices
 - **`Arena`**: Bump allocator with bulk invalidation on destroy
 - **`NodeHeader`**: Doubly-linked list node with `prev`, `next`, and `data` fields
+- **`Vec<T>`**: Growable array with BD-annotated push/pop/insert/remove
+- **`HashMap<K, V>`**: Hash map using SipHash-1-3 with BD-tracked keys/values
+- **`RingBuffer<T>`**: Fixed-capacity circular buffer
 
 ```vuma
 import "vuma:ds";
@@ -888,6 +893,9 @@ value = queue_pop(q);  // Some(42)
 - **`AtomicU64`**: 64-bit atomic integer with `load(ordering)`, `store(value, ordering)`, `compare_exchange(expected, desired, success_order, failure_order)`
 - **`channel<T>`**: Typed message-passing channel with `send` and `recv`
 - **`lock(id)` / `unlock(id)`**: Mutual exclusion primitives
+- **`Mutex`**: BD-annotated mutual exclusion with `MutexGuard` RAII pattern
+- **`RwLock`**: Reader-writer lock with separate read/write guards
+- **`Barrier`**: Synchronization barrier for multi-threaded coordination
 
 ```vuma
 import "vuma:sync";
@@ -901,6 +909,10 @@ val = counter.load(Acquire);
 
 - **`print(value)`**: Output a value to the standard output
 - **`delay_ms(ms)`**: Busy-wait for the specified number of milliseconds (bare-metal)
+- **`VumaReader` / `VumaWriter`**: Core I/O traits with UART and file backends
+- **`VumaBufReader` / `VumaBufWriter`**: Buffered I/O wrappers
+- **`read_bytes` / `write_bytes`**: Low-level syscall wrappers
+- **`read_u32_le` / `write_u32_le`**: Little-endian u32 byte access
 
 ```vuma
 import "vuma:io";
@@ -908,6 +920,74 @@ import "vuma:io";
 print((*current).data);
 delay_ms(500);
 ```
+
+### String Formatting (fmt)
+
+The `fmt` module provides printf-style string formatting for VUMA programs:
+
+- **`format_int(value, base, width)`**: Format a signed integer in the given base (2–36) with zero-padding
+- **`format_uint(value, base, width)`**: Format an unsigned integer
+- **`format_float(value, precision)`**: Format a floating-point number with configurable precision
+- **`format_hex(value, width)`**: Format as hexadecimal
+- **`format_binary(value, width)`**: Format as binary
+- **`format_octal(value, width)`**: Format as octal
+- **`format_pointer(addr)`**: Format an address as a hex pointer
+- **`pad_left(s, width, fill)`** / **`pad_right(s, width, fill)`**: String padding
+- **`join(strings, separator)`**: Join multiple strings with a separator
+- **`write_str(buf, offset, s)`** / **`write_int(buf, offset, value, base)`** / **`write_float(buf, offset, value, precision)`**: Write formatted output into byte buffers
+
+```vuma
+import "vuma:fmt";
+
+hex_str = format_hex(0xDEADBEEF, 8);  // "DEADBEEF"
+padded = pad_left("42", 8, '0');         // "00000042"
+```
+
+### Mathematics (math)
+
+The `math` module provides comprehensive mathematical utilities:
+
+- **Integer arithmetic**: `abs`, `min`, `max`, `clamp`
+- **Trigonometric (f64)**: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`
+- **Exponential/Logarithmic (f64)**: `sqrt`, `cbrt`, `exp`, `exp2`, `exp_m1`, `ln`, `log2`, `log10`, `ln_1p`, `pow`, `powi`
+- **Rounding (f64)**: `floor`, `ceil`, `round`, `trunc`, `fract`
+- **Comparison (f64)**: `min_of`, `max_of`
+- **Classification (f64)**: `is_nan`, `is_infinite`, `is_finite`, `is_normal`, `signum`, `copysign`
+- **Constants**: `PI`, `TAU`, `E`, `LN_2`, `LN_10`, `LOG2_E`, `LOG10_E`, `SQRT_2`, `FRAC_1_SQRT_2`
+- **f32 variants**: All floating-point functions have `_f32` suffixed counterparts (e.g., `sin_f32`, `sqrt_f32`)
+- **f32 constants**: `PI_F32`, `TAU_F32`, `E_F32`, etc.
+
+```vuma
+import "vuma:math";
+
+val: f64 = sin(PI / 4.0);     // ≈ 0.7071
+root: f64 = sqrt(2.0);        // ≈ 1.4142
+clamped: i64 = clamp(x, 0, 100);
+```
+
+### Cryptography (crypto)
+
+The `crypto` module provides SHA-256 constants and logical functions, plus constant-time operations:
+
+- **SHA-256 helpers**: `sha256_ch`, `sha256_maj`, `sha256_big_sigma0`, `sha256_big_sigma1`, `sha256_small_sigma0`, `sha256_small_sigma1`
+- **Byte access**: `sha256_read_u32_be`, `sha256_write_u32_be`
+- **Constant-time operations**: `ct_select_u32`, `ct_eq_u32`, `ct_ne_u32`, `ct_lt_u32`, `ct_gte_u32` — branchless implementations across all 8 backends
+- **SHA-256 constants**: `SHA256_K` (64 round constants), `SHA256_H` (8 initial hash values)
+
+```vuma
+import "vuma:crypto";
+
+// Constant-time comparison (no data-dependent branches)
+equal: u32 = ct_eq_u32(a, b);
+selected: u32 = ct_select_u32(equal, a, b);
+```
+
+### String Operations
+
+- **`strlen(ptr)`**: Compute the length of a null-terminated string
+- **`strcmp(a, b)`**: Compare two null-terminated strings
+- **`memcpy(dst, src, len)`**: Copy `len` bytes from `src` to `dst`
+- **`memset(ptr, value, len)`**: Fill `len` bytes with `value`
 
 ### Type Operations
 
@@ -931,15 +1011,74 @@ match result {
 }
 ```
 
+### Additional Modules
+
+The standard library also includes:
+
+- **`env`**: Environment variable access
+- **`error`**: Error type definitions and BD-annotated error handling
+- **`fs`**: Filesystem operations with capability-based access control
+- **`path`**: Path manipulation and normalization
+- **`process`**: Process management (exit, spawn, etc.)
+- **`net`**: Network I/O (TCP, UDP sockets)
+- **`thread`**: Thread creation and management
+- **`time`**: Time measurement and duration types
+
 ---
 
-## 10. AArch64 Platform-Specific Features
+## 10. FFI and External Functions
 
-VUMA is designed as a first-class systems programming language for the AArch64. Its memory model, code generation, and verification engine are all tailored to the ARM64 (AArch64) architecture and the AArch64's specific hardware layout. This section describes the platform-specific features that make VUMA uniquely suited for AArch64 development.
+VUMA supports calling external C functions and Linux syscalls through `extern "C"` blocks. This enables interoperability with existing C libraries and direct system call access across all 8 backend architectures.
+
+### Extern Block Syntax
+
+The `extern "C" { ... }` block declares external functions that are resolved at link time:
+
+```vuma
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+}
+
+fn main() -> i32 {
+    write(1, message, 13);
+    return 0;
+}
+```
+
+Functions declared in `extern` blocks have the `is_extern` flag set in the SCG. During code generation, extern function calls emit relocations instead of local `BL` instructions, allowing the linker to resolve them against shared libraries.
+
+### Supported Syscalls
+
+VUMA provides FFI bindings for 19 Linux syscalls across all 8 architectures:
+
+`read`, `write`, `open`, `close`, `exit`, `mmap`, `munmap`, `brk`, `ioctl`, `fcntl`, `getpid`, `clone`, `futex`, `pipe`, `dup`, `dup2`, `wait4`, `rt_sigaction`, `rt_sigprocmask`
+
+Each syscall has architecture-specific relocations for all backends.
+
+### DWARF Debug Information
+
+When compiled with `--debug-info`, VUMA generates DWARF v4 debug information sections for all 8 backends. The emitted sections include:
+
+| Section | Contents |
+|---------|----------|
+| `.debug_abbrev` | Abbreviation tables (tag + attribute encodings) |
+| `.debug_info` | Compilation unit DIEs (subprograms, variables) |
+| `.debug_line` | Line-number program (DWARF standard opcodes) |
+| `.debug_frame` | Call frame information (CIE + FDE entries) |
+
+The DWARF builder is parameterized by address size to support all 8 backends (8-byte addresses for 64-bit targets, 4-byte for ARM32 and Wasm32).
+
+---
+
+## 11. Platform-Specific Features
+
+VUMA targets 8 backend architectures with AArch64 as the primary platform. This section describes platform-specific features, with detailed AArch64 bare-metal support.
 
 ### Device Memory Mapping
 
-The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On the AArch64, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
+The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On AArch64, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
 
 - They never need to be freed (hardware is always present)
 - They have volatile semantics (reads and writes have side effects)
@@ -1024,9 +1163,26 @@ const GPSET0_OFFSET: Address = 0x1c;
 const GPCLR0_OFFSET: Address = 0x28;
 ```
 
+### Multi-Backend Support
+
+VUMA supports 8 compilation targets with a unified `Backend` trait:
+
+| Backend | Endianness | Pointer Width | Output Format |
+|---------|-----------|---------------|---------------|
+| AArch64 | Little | 64-bit | ELF64 |
+| x86_64 | Little | 64-bit | ELF64 |
+| RISC-V 64 | Little | 64-bit | ELF64 |
+| ARM32 | Little | 32-bit | ELF32 |
+| MIPS64 | Big | 64-bit | ELF64 |
+| PPC64 | Big | 64-bit | ELF64 |
+| LoongArch64 | Little | 64-bit | ELF64 |
+| Wasm32 | Little | 32-bit | Wasm |
+
+All 6 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass the full SHA256d execution test. LoongArch64 passes individual operation tests. Wasm32 generates valid modules.
+
 ---
 
-## 11. Appendix: Keyword and Operator Quick Reference
+## 12. Appendix: Keyword and Operator Quick Reference
 
 ### Complete Keyword List
 

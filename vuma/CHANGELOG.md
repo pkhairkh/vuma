@@ -7,9 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.2.0] — 2026-03-05
+## [0.1.0-alpha.1] — 2026-03-06
 
-Multi-architecture codegen, LLM integration, Wasm sandbox, and verification hardening.
+Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 8 backends.
+
+---
+
+### Bug Fixes
+
+#### Wave 1 — Critical Bug Fixes
+
+- **ARM64 ROR/ROL**: Rotation instructions now correctly emit `EXTR`/`RORV` instead of erroneously emitting `ASR` (arithmetic shift right). *(W1)*
+- **Documentation cleanup**: Removed all Pi5 / Raspberry Pi references from documentation and code comments. *(W1)*
+- **Development debris**: Deleted stale `.bak` files, `agent-ctx/` directory, and orphaned work logs from the repository. *(W1)*
+- **`.gitignore`**: Added entries for development artifacts (`.bak`, `agent-ctx/`, work logs) to prevent future contamination. *(W1)*
+
+#### Wave 2 — Atomics & ABI Fixes
+
+- **LoongArch64 atomics**: All atomic operations now properly emit `LL.D`/`SC.D`/`AMSWAP.D` sequences with `DBAR` barriers for correct load-link/store-conditional semantics. *(W2)*
+- **PPC64 atomics**: All atomic operations now properly emit `LDARX`/`STDCX` loops with `SYNC`/`LWSYNC` barriers (13 new instructions). *(W2)*
+- **RISC-V 64 atomics**: Fixed `AtomicCAS` loop with missing label insertions that caused incorrect branch targets under certain code layouts. *(W2)*
+- **Wasm32 atomics**: Proper `i32.atomic.rmw.cmpxchg` / `i64.atomic.rmw.cmpxchg` for compare-and-swap (24 new atomic instructions). *(W2)*
+- **ARM32 atomics**: `AtomicCAS` now emits correct `LDREX`/`STREX`/`DMB` sequences (7 new instructions). *(W2)*
+- **MIPS64 atomics**: `AtomicCAS` now emits `LLD`/`SCD`/`SYNC` sequences (5 new instructions). *(W2)*
+- **ARM32 ABI**: Proper >4 argument passing via the stack, compliant with the AAPCS calling convention. *(W2)*
+- **MIPS64 rotations**: Complete `ROR`/`ROL` rotation sequences using `ROTR` instruction. *(W2)*
+- **LoongArch64 terminators**: Fixed `Switch`/`Invoke`/`TailCall`/`Resume` terminator lowering to correctly emit branch and call sequences. *(W2)*
+
+#### Wave 3 — FP Conversion Casts
+
+- **`IRInstr::Cast`**: Added `from_ty`/`to_ty` fields for type-aware floating-point conversion, replacing the previous type-agnostic single-operand cast. *(W3)*
+- **x86_64**: Fixed FP conversions to emit proper `CVTSI2SS`/`CVTSI2SD`/`CVTSS2SI`/`CVTSD2SI` instructions, with u64→f64 halving for unsigned 64-bit to double conversion. *(W3)*
+- **ARM32**: Fixed `VCVT` encoding, added unsigned and double-precision variants for correct f32↔i32, f64↔i32, f64↔i64 conversions. *(W3)*
+- **RISC-V 64**: `FCVT` instructions now properly dispatch signed vs. unsigned rounding mode based on `from_ty`/`to_ty`. *(W3)*
+- **MIPS64**: Correct `CVT` instructions with `MTC1`/`DMTC1` bridge for GPR→FPR moves before conversion. *(W3)*
+- **PPC64**: Proper `FCFID`/`FCFIDU`/`FCTIDZ`/`FRSP` bridge instructions for signed/unsigned integer↔FP conversions. *(W3)*
+- **LoongArch64**: `FFINT`/`FTINT` conversions with fixed `FfintDW` opcode encoding. *(W3)*
+- **Wasm32**: Fixed 8 swapped opcodes (`i32.trunc_f32_s`↔`i32.trunc_f64_s`, etc.) and proper type inference for conversion instructions. *(W3)*
+
+#### Wave 4 — Codegen Fixes
+
+- **ARM64 stack slots**: Fixed spurious NOP emissions for `CtSelect`/`CtEq` and atomic operations that left unnecessary `NOP` instructions in the output. *(W4)*
+
+---
+
+### New Features
+
+#### Atomics (Wave 2)
+
+- **PPC64**: 13 new atomic instructions — `LDARX`, `STDCX`, `SYNC`, `LWSYNC`, `ISYNC`, `ADD_LDARX_STDCX`, `SUB_LDARX_STDCX`, `AND_LDARX_STDCX`, `OR_LDARX_STDCX`, `XOR_LDARX_STDCX`, `NAND_LDARX_STDCX`, `SWAP_LDARX_STDCX`, `CAS_LDARX_STDCX`. *(W2)*
+- **Wasm32**: 24 new atomic instructions — `i32.atomic.rmw.cmpxchg`, `i64.atomic.rmw.cmpxchg`, plus full `i32`/`i64` atomic rmw set (add, sub, and, or, xor, xchg). *(W2)*
+- **ARM32**: 7 new instructions — `LDREX`, `STREX`, `DMB`, `DSB`, `ISB`, `CLREX`, and `AtomicCAS` composite. *(W2)*
+- **MIPS64**: 5 new instructions — `LLD`, `SCD`, `SYNC`, `SYNC_MB`, and `AtomicCAS` composite. *(W2)*
+- **LoongArch64**: `LL.D`, `SC.D`, `AMSWAP.D`, `DBAR` for all atomic operations. *(W2)*
+
+#### FP Conversion Casts (Wave 3)
+
+- **`IRInstr::Cast`**: Extended with `from_ty`/`to_ty` enabling type-aware conversions across `i32`↔`f32`, `i32`↔`f64`, `i64`↔`f32`, `i64`↔`f64`, `f32`↔`f64` in both signed and unsigned variants. *(W3)*
+- All 8 backends now emit architecturally correct FP conversion instructions instead of generic or wrong encodings. *(W3)*
+
+#### Standard Library (Wave 4)
+
+- **`math.rs`**: Expanded from 4 to 92 public items — comprehensive math primitives including trigonometric approximations, bit manipulation, integer overflow helpers, and saturating arithmetic. *(W4)*
+- **`fmt.rs`**: New formatting module with 13 functions — integer formatting (decimal, hex, binary, octal), float formatting, buffer utilities. *(W4)*
+
+#### Debug Info (Wave 4)
+
+- **DWARF debug info generation**: Full `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_frame` sections with per-backend address sizes, alignment factors, and CIE presets for all 8 architectures. *(W4)*
+
+#### FFI (Wave 4)
+
+- **C FFI end-to-end wiring**: Complete `extern "C"` block support from parser through SCG to ELF relocation emission, with `ffi_demo.vuma` example program. *(W4)*
+
+---
+
+### Infrastructure
+
+- **AArch64**: Refactored `select_cast` for type-aware FP conversions, eliminating duplicate code paths and ensuring correct signed/unsigned dispatch. *(W4)*
+- **E037 diagnostic**: All backends now emit a structured `E037` diagnostic when encountering unresolved relocations, replacing silent failures. *(W4)*
+- **GitHub Actions CI/CD**: 5-job workflow (test, lint, cross-compile matrix, release build, publish) plus automated release workflow for tagged commits. *(W4)*
+- **`.gitignore`**: Entries for `.bak` files, `agent-ctx/`, and development work logs to prevent artifact commits. *(W1)*
+- **Repository cleanup**: Removed all `.bak` files, `agent-ctx/` directory, and stale development work logs. *(W1)*
+
+---
+
+### Tests
+
+#### Wave 5 — Test Infrastructure
+
+- **25 SHA256d backend validation tests** — End-to-end SHA256d execution correctness across all 8 backends. *(W5)*
+- **13 dedicated regression tests** — Targeted tests for each fix from Waves 1–4 (ARM64 rotation, atomics per-arch, FP conversions per-arch, ABI compliance, stack-slot NOP). *(W5)*
+- **74 diagnostics integration tests** — Full coverage of diagnostic emission, error chaining, suggestion applicability, and all 4 output formats. *(W5)*
+- **29 DWARF/FFI integration tests** — CIE presets per-architecture, debug section validation, ELF relocation verification, extern block parsing, FFI pipeline tests. *(W5)*
+- **21 expanded ABI conformance tests** — Calling convention compliance for argument passing, return values, and callee-saved register preservation across all 8 backends. *(W5)*
+- **19 property-based tests** — Proptest-driven fuzzing for parser roundtrip, SCG invariants, codegen correctness, and cross-backend consistency. *(W5)*
+- **55 math test functions** — Comprehensive coverage of the expanded `math.rs` module (92 public items). *(W5)*
+- **30 fmt test functions** — Full coverage of the new `fmt.rs` module (13 functions). *(W5)*
+
+**Total new/expanded tests**: ~266 tests across 8 categories.
+
+---
+
+## [0.1.0-alpha.0] — 2026-03-05
+
+> **Note**: This is a pre-release (alpha) version. The API is not yet stabilized and may change before v0.1.0.
 
 ---
 
@@ -221,7 +322,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 ## Release Notes
 
-### [0.2.0] — 2026-03-05
+### [0.1.0-alpha.0] — 2026-03-05
 
 This release represents Phase 2 (substantially complete) of the VUMA framework. Major additions include:
 
@@ -274,4 +375,4 @@ This is the initial public release of the VUMA framework. It contains the comple
 - **2026-03-05 — Wave 25-27:** Security hardening, codegen quality improvements, test infrastructure.
 - **2026-03-05 — Wave 28:** Constant-time crypto operations across all 8 backends.
 - **2026-03-05 — Wave 29-31:** Final hardening, documentation updates, release preparation.
-- **2026-03-05 — Wave 32:** Release preparation: Cargo.toml v0.2.0, CHANGELOG, README, ROADMAP, RELEASES.md.
+- **2026-03-05 — Wave 32:** Release preparation: Cargo.toml v0.1.0-alpha.1, CHANGELOG, README, ROADMAP, RELEASES.md.

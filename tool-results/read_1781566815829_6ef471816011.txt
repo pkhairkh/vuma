@@ -1,0 +1,838 @@
+     1→# Contributing to VUMA
+     2→
+     3→Thank you for contributing to the VUMA project — the Verified-Unsafe Memory Access
+     4→framework for AI-native programming language design. This guide explains how to set
+     5→up your development environment, make changes, and get them merged.
+     6→
+     7→---
+     8→
+     9→## Table of Contents
+    10→
+    11→1. [How to Build the Project](#1-how-to-build-the-project)
+    12→2. [How to Run Tests](#2-how-to-run-tests)
+    13→3. [How to Add New SCG Node Types](#3-how-to-add-new-scg-node-types)
+    14→4. [How to Add New Verification Passes](#4-how-to-add-new-verification-passes)
+    15→5. [How to Add New ARM64 Instructions](#5-how-to-add-new-arm64-instructions)
+    16→6. [Code Review Process](#6-code-review-process)
+    17→7. [PR Template](#7-pr-template)
+    18→
+    19→---
+    20→
+    21→## 1. How to Build the Project
+    22→
+    23→### 1.1 Prerequisites
+    24→
+    25→| Tool | Minimum Version | Purpose |
+    26→|------|----------------|---------|
+    27→| Rust toolchain (stable) | Per `rust-toolchain.toml` | Core language; VUMA uses the stable channel |
+    28→| `rustup` | Latest | Rust toolchain management |
+    29→| `cargo` | Included with Rust | Build system |
+    30→| Git | 2.30+ | Version control |
+    31→| QEMU (aarch64) | 7.0+ | ARM64 emulation for testing |
+    32→| `aarch64-none-elf-` toolchain | Latest | Bare-metal cross-compilation (objcopy, ld) |
+    33→| ARM64 hardware | Any | Physical target (optional but recommended) |
+    34→
+    35→### 1.2 Install the Rust Toolchain
+    36→
+    37→The project uses `rust-toolchain.toml` to pin the toolchain. When you enter the
+    38→repository, `rustup` will automatically select the correct channel and components.
+    39→
+    40→```bash
+    41→# Install rustup if not already installed
+    42→curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    43→
+    44→# The targets are listed in rust-toolchain.toml and will be auto-installed:
+    45→#   stable, components: rustfmt, clippy
+    46→#   targets: aarch64-unknown-linux-gnu, aarch64-unknown-none
+    47→
+    48→# Verify the toolchain
+    49→rustup show
+    50→cargo --version
+    51→```
+    52→
+    53→### 1.3 Clone and Build
+    54→
+    55→```bash
+    56→git clone https://github.com/vuma-project/vuma.git
+    57→cd vuma
+    58→
+    59→# Build all workspace members (12 crates)
+    60→cargo build --workspace
+    61→
+    62→# Quick check without generating binaries (faster iteration)
+    63→cargo check --workspace
+    64→```
+    65→
+    66→The workspace consists of the following crates:
+    67→
+    68→| Crate | Path | Purpose |
+    69→|-------|------|---------|
+    70→| `vuma-scg` | `src/scg/` | Semantic Computation Graph data structures and algorithms |
+    71→| `vuma-ive` | `src/ive/` | Inference and Verification Engine |
+    72→| `vuma` (core) | `src/vuma/` | VUMA memory model: Address, Region, Access, MSG |
+    73→| `vuma-bd` | `src/bd/` | Behavioral Descriptors (RepD, CapD, RelD) |
+    74→| `vuma-cor` | `src/cor/` | Continuous Optimization Runtime |
+    75→| `vuma-projection` | `src/projection/` | Projection system (textual, visual, conversational) |
+    76→| `vuma-parser` | `src/parser/` | SCG parser and projection parser |
+    77→| `vuma-codegen` | `src/codegen/` | ARM64 code generation |
+    78→| `vuma-std` | `src/std/` | VUMA standard library |
+    79→| `vuma-proof` | `src/proof/` | Proof infrastructure and formal methods |
+    80→| `vuma-tests` | `src/tests/` | Integration tests |
+    81→
+    82→### 1.4 Build with Make or Just
+    83→
+    84→The project includes both a `Makefile` and a `justfile` for common tasks:
+    85→
+    86→```bash
+    87→# Using make
+    88→make build          # cargo build --workspace
+    89→make test           # cargo test --workspace
+    90→make check          # cargo check --workspace
+    91→make doc            # cargo doc --workspace --no-deps
+    92→make fmt            # cargo fmt --all
+    93→make clippy         # cargo clippy --workspace -- -D warnings
+    94→make clean          # cargo clean
+    95→
+    96→# Using just
+    97→just build
+    98→just test
+    99→just clean
+   100→```
+   101→
+   102→### 1.5 Cross-Compilation
+   103→
+   104→#### Userspace (Linux ARM64)
+   105→
+   106→If you are developing on an x86_64 host and targeting ARM64 with Linux:
+   107→
+   108→```bash
+   109→# The target is already configured in rust-toolchain.toml
+   110→# Install the ARM64 Linux linker
+   111→# On Ubuntu/Debian:
+   112→sudo apt install gcc-aarch64-linux-gnu
+   113→
+   114→# Build for ARM64 Linux
+   115→cargo build --target aarch64-unknown-linux-gnu
+   116→```
+   117→
+   118→#### Bare-Metal (aarch64-unknown-none)
+   119→
+   120→For bare-metal ARM64 targets (no OS), the project provides a complete build pipeline:
+   121→
+   122→```bash
+   123→# Build the bare-metal kernel
+   124→make bare-metal
+   125→
+   126→# Build kernel8.img from the ELF binary (requires aarch64-none-elf-objcopy)
+   127→make bare-metal-image
+   128→
+   129→# Flash kernel8.img to an SD card boot partition
+   130→make bare-metal-flash SD=/mnt/sd-boot
+   131→
+   132→# Launch a QEMU debug session with GDB stub on :1234
+   133→make bare-metal-debug
+   134→```
+   135→
+   136→The bare-metal build uses a linker script and build script. The linker script defines
+   137→the memory layout (RAM at `0x80000`, 8 MiB; MMIO window at `0x100000`, 1 MiB),
+   138→section ordering (`.text.boot` → `.text` → `.rodata` → `.data` → `.bss`),
+   139→and per-core stacks (64 KiB × 4 cores).
+   140→
+   141→### 1.6 QEMU Setup for ARM64 Testing
+   142→
+   143→```bash
+   144→# Install QEMU with ARM64 support
+   145→# On Ubuntu/Debian:
+   146→sudo apt install qemu-system-arm
+   147→
+   148→# Run a test binary under QEMU (userspace)
+   149→qemu-aarch64 -L /usr/aarch64-linux-gnu target/aarch64-unknown-linux-gnu/debug/vuma-test
+   150→
+   151→# Run the bare-metal kernel in QEMU (uses raspi3b as closest model)
+   152→make bare-metal-debug
+   153→```
+   154→
+   155→### 1.7 Formatting and Linting
+   156→
+   157→```bash
+   158→# Check formatting (CI enforces this)
+   159→cargo fmt --check
+   160→
+   161→# Apply formatting
+   162→cargo fmt --all
+   163→
+   164→# Run clippy with warnings-as-errors (CI enforces this)
+   165→cargo clippy --workspace -- -D warnings
+   166→```
+   167→
+   168→The project uses `rustfmt.toml` (max_width = 100, tab_spaces = 4, edition = "2021")
+   169→and `clippy.toml` (cognitive-complexity-threshold = 50).
+   170→
+   171→---
+   172→
+   173→## 2. How to Run Tests
+   174→
+   175→### 2.1 Unit Tests
+   176→
+   177→Run all unit tests across the workspace:
+   178→
+   179→```bash
+   180→cargo test --workspace
+   181→```
+   182→
+   183→Run tests for a specific crate:
+   184→
+   185→```bash
+   186→cargo test -p vuma-ive
+   187→cargo test -p vuma-scg
+   188→cargo test -p vuma-codegen
+   189→cargo test -p vuma-bd
+   190→cargo test -p vuma-vuma
+   191→cargo test -p vuma-proof
+   192→cargo test -p vuma-cor
+   193→```
+   194→
+   195→Run a specific test by name:
+   196→
+   197→```bash
+   198→cargo test -p vuma-ive -- verify_liveness_catches_use_after_free
+   199→cargo test -p vuma-scg -- integration_test_build_validate_query
+   200→cargo test -p vuma-bd -- test_repd_compat
+   201→```
+   202→
+   203→### 2.2 Integration Tests
+   204→
+   205→Integration tests live in `src/tests/` and exercise cross-crate workflows:
+   206→
+   207→```bash
+   208→cargo test -p vuma-tests
+   209→```
+   210→
+   211→The integration test crate includes tests for BD inference, trivial proofs,
+   212→concurrent access patterns, doubly-linked list verification, and graph
+   213→construction workflows.
+   214→
+   215→### 2.3 Verification Tests
+   216→
+   217→The IVE has its own verification test suite that exercises the full
+   218→verification pipeline across all five invariants:
+   219→
+   220→```bash
+   221→# Run IVE verification tests (may be slow; serial execution avoids races)
+   222→cargo test -p vuma-ive -- --test-threads=1 -- verification
+   223→
+   224→# Run with verbose output to see verification details
+   225→cargo test -p vuma-ive -- --nocapture -- verification
+   226→
+   227→# Run a specific invariant's tests
+   228→cargo test -p vuma-ive -- liveness
+   229→cargo test -p vuma-ive -- exclusivity
+   230→cargo test -p vuma-ive -- interpretation
+   231→cargo test -p vuma-ive -- origin
+   232→cargo test -p vuma-ive -- cleanup
+   233→```
+   234→
+   235→### 2.4 Codegen Tests
+   236→
+   237→ARM64 codegen tests produce assembly output that is compared against
+   238→expected outputs. These tests verify instruction encoding, register
+   239→allocation, and the SCG → IR → ARM64 pipeline:
+   240→
+   241→```bash
+   242→cargo test -p vuma-codegen
+   243→
+   244→# The codegen crate tests instruction encoding against the ARM Architecture
+   245→# Reference Manual. Each Instruction variant has an encode() method that
+   246→# produces a 32-bit machine code word.
+   247→```
+   248→
+   249→### 2.5 Proof Tests
+   250→
+   251→The proof infrastructure tests verify formal proof construction,
+   252→checking, counterexample generation, and proof tactics:
+   253→
+   254→```bash
+   255→cargo test -p vuma-proof
+   256→```
+   257→
+   258→### 2.6 Benchmarks
+   259→
+   260→```bash
+   261→# Run benchmarks (requires nightly or stable with test feature)
+   262→cargo bench --workspace
+   263→
+   264→# Or via Make
+   265→make bench
+   266→```
+   267→
+   268→### 2.7 Full CI Check
+   269→
+   270→Before submitting a PR, run the full CI check locally:
+   271→
+   272→```bash
+   273→cargo fmt --check &&
+   274→cargo clippy --workspace -- -D warnings &&
+   275→cargo test --workspace &&
+   276→cargo test -p vuma-ive -- --test-threads=1 -- verification
+   277→```
+   278→
+   279→---
+   280→
+   281→## 3. How to Add New SCG Node Types
+   282→
+   283→The Semantic Computation Graph is extensible. Adding a new node type involves
+   284→coordinated changes across the `vuma-scg`, `vuma-ive`, `vuma-codegen`, and
+   285→`vuma-tests` crates.
+   286→
+   287→### 3.1 Step 1: Define the Node Payload (vuma-scg)
+   288→
+   289→Add a new struct in `src/scg/src/node.rs` representing the node's type-specific
+   290→data. Follow the existing pattern used by `AllocationNode`, `AccessNode`,
+   291→`ComputationNode`, etc.:
+   292→
+   293→```rust
+   294→/// Data specific to a barrier synchronization node.
+   295→///
+   296→/// Represents a memory barrier operation that enforces ordering
+   297→/// between preceding and subsequent memory accesses. Maps to
+   298→/// ARM64 DMB/DSB/ISB instructions depending on the barrier kind.
+   299→///
+   300→/// # SCG Semantics
+   301→///
+   302→/// - Input edges: preceding access nodes
+   303→/// - Output edges: subsequent access nodes
+   304→/// - Effects: memory ordering constraint
+   305→/// - Invariants: exclusivity verification must respect barrier ordering
+   306→#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+   307→pub struct BarrierNode {
+   308→    /// The kind of memory barrier (DataMemory, DataSync, InstructionSync).
+   309→    pub barrier_kind: BarrierKind,
+   310→    /// The shareability domain of the barrier (InnerShareable, OuterShareable, FullSystem).
+   311→    pub domain: BarrierDomain,
+   312→}
+   313→```
+   314→
+   315→### 3.2 Step 2: Register the Node Type Variant
+   316→
+   317→Add the variant to the `NodeType` enum in `src/scg/src/node.rs`:
+   318→
+   319→```rust
+   320→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   321→pub enum NodeType {
+   322→    Computation,
+   323→    Allocation,
+   324→    Deallocation,
+   325→    Access,
+   326→    Cast,
+   327→    Effect,
+   328→    Control,
+   329→    Phantom,
+   330→    Barrier,  // New variant
+   331→}
+   332→```
+   333→
+   334→Update the `Display` impl for `NodeType`:
+   335→
+   336→```rust
+   337→NodeType::Barrier => write!(f, "Barrier"),
+   338→```
+   339→
+   340→### 3.3 Step 3: Add the Node Payload Variant
+   341→
+   342→Add the variant to `NodePayload` and the corresponding match arms:
+   343→
+   344→```rust
+   345→pub enum NodePayload {
+   346→    // ... existing variants ...
+   347→    /// Payload for `NodeType::Barrier`.
+   348→    Barrier(BarrierNode),
+   349→}
+   350→```
+   351→
+   352→### 3.4 Step 4: Re-export from the Crate Root
+   353→
+   354→In `src/scg/src/lib.rs`, add the new types to the re-exports:
+   355→
+   356→```rust
+   357→pub use node::{
+   358→    // ... existing exports ...
+   359→    BarrierNode, BarrierKind, BarrierDomain,
+   360→};
+   361→```
+   362→
+   363→### 3.5 Step 5: Update Graph Construction
+   364→
+   365→Update `src/scg/src/graph.rs` to handle the new node type in any
+   366→validation or traversal logic. The `SCG::add_node()` method accepts
+   367→`NodeType` + `NodePayload`, so ensure validation covers the new variant.
+   368→
+   369→### 3.6 Step 6: Add IVE Verification (vuma-ive)
+   370→
+   371→Add a verification function for the new node in `src/ive/src/`. The IVE
+   372→has per-invariant modules (`liveness.rs`, `exclusivity.rs`, `interpretation.rs`,
+   373→`origin.rs`, `cleanup.rs`) — update whichever invariants are affected by the
+   374→new node type. For a barrier node, the exclusivity pass must respect barrier
+   375→ordering:
+   376→
+   377→```rust
+   378→// In src/ive/src/exclusivity.rs or a new module
+   379→
+   380→/// Verify that barrier nodes correctly order memory accesses for
+   381→/// exclusivity verification.
+   382→///
+   383→/// Checks:
+   384→/// - The barrier node has at least one predecessor access node
+   385→/// - The barrier node has at least one successor access node
+   386→/// - The barrier's domain covers all concurrent access pairs it separates
+   387→pub fn verify_barrier_ordering(
+   388→    node: &BarrierNode,
+   389→    msg: &MSG,
+   390→) -> Result<VerificationResult, IveError> {
+   391→    // Implementation here
+   392→}
+   393→```
+   394→
+   395→### 3.7 Step 7: Add Codegen (vuma-codegen)
+   396→
+   397→Add the instruction selection and lowering rule in `src/codegen/src/arm64.rs`
+   398→and `src/codegen/src/scg_to_ir.rs`:
+   399→
+   400→```rust
+   401→// In the instruction selector in src/codegen/src/arm64.rs
+   402→// Map the Barrier SCG node to the appropriate ARM64 instruction:
+   403→//   BarrierKind::DataMemory + BarrierDomain::InnerShareable → DMB ISH
+   404→//   BarrierKind::DataSync + BarrierDomain::FullSystem → DSB SY
+   405→//   BarrierKind::InstructionSync → ISB
+   406→```
+   407→
+   408→### 3.8 Step 8: Add Tests
+   409→
+   410→Add tests at every level:
+   411→
+   412→1. **Unit tests** in `src/scg/src/node.rs` — test construction and display of the
+   413→   new `BarrierNode` and `NodeType::Barrier`
+   414→2. **Graph tests** in `src/scg/src/graph.rs` — test that an SCG containing barrier
+   415→   nodes validates correctly
+   416→3. **IVE tests** in `src/ive/src/` — test that the verification pass correctly
+   417→   accepts and rejects barrier configurations
+   418→4. **Codegen tests** in `src/codegen/` — test that barrier nodes lower to the
+   419→   correct ARM64 instruction encoding
+   420→5. **Integration test** in `src/tests/` — exercise the full pipeline:
+   421→   SCG construction → IVE verification → codegen → assembly output check
+   422→
+   423→---
+   424→
+   425→## 4. How to Add New Verification Passes
+   426→
+   427→VUMA currently defines five global invariants (liveness, exclusivity,
+   428→interpretation, origin, cleanup). Adding a new verification pass requires
+   429→careful design and cross-crate coordination.
+   430→
+   431→### 4.1 Step 1: Define the Invariant
+   432→
+   433→Add the invariant to the `InvariantKind` enum in
+   434→`src/ive/src/invariant_aggregator.rs`:
+   435→
+   436→```rust
+   437→pub enum InvariantKind {
+   438→    Liveness,
+   439→    Exclusivity,
+   440→    Interpretation,
+   441→    Origin,
+   442→    Cleanup,
+   443→    Alignment,  // New: every access is properly aligned for its RepD
+   444→}
+   445→```
+   446→
+   447→### 4.2 Step 2: Write the Formal Specification
+   448→
+   449→Create a formal specification document in `docs/spec/` describing the invariant.
+   450→The specification must include:
+   451→
+   452→- **Definition**: What property does the invariant guarantee?
+   453→- **Scope**: Which SCG nodes and MSG edges does it apply to?
+   454→- **Verification algorithm**: How does the IVE check this invariant?
+   455→  What is the time complexity?
+   456→- **Counterexample format**: When verification fails, what information is reported?
+   457→- **Relationship to existing invariants**: Is the new invariant independent of,
+   458→  implied by, or does it imply any existing invariant?
+   459→- **Interaction with ARM64 memory model**: How does the weakly-ordered
+   460→  memory model affect this invariant?
+   461→
+   462→### 4.3 Step 3: Implement the Verification Module
+   463→
+   464→Create a new module in `src/ive/src/`. The IVE follows a per-invariant module
+   465→structure:
+   466→
+   467→```
+   468→src/ive/src/
+   469→├── liveness.rs            # Liveness verification
+   470→├── exclusivity.rs         # Exclusivity verification
+   471→├── interpretation.rs      # Interpretation verification
+   472→├── origin.rs              # Origin verification
+   473→├── cleanup.rs             # Cleanup verification
+   474→├── alignment.rs           # NEW: Alignment verification
+   475→├── invariant_aggregator.rs # Runs all passes and produces unified results
+   476→└── ...
+   477→```
+   478→
+   479→The verification module should expose a verifier struct and a top-level
+   480→verification function:
+   481→
+   482→```rust
+   483→// src/ive/src/alignment.rs
+   484→
+   485→use vuma_core::msg::MSG;
+   486→use crate::result::VerificationResult;
+   487→
+   488→/// Verifier for the alignment invariant.
+   489→///
+   490→/// Checks that every memory access in the MSG targets an address
+   491→/// that satisfies the alignment requirement of the access's RepD.
+   492→/// For example, a 64-bit access must target an 8-byte-aligned address.
+   493→pub struct AlignmentVerifier {
+   494→    verbose: bool,
+   495→}
+   496→
+   497→impl AlignmentVerifier {
+   498→    pub fn new() -> Self { Self { verbose: false } }
+   499→
+   500→    /// Verify alignment for all accesses in the MSG.
+   501→    pub fn verify(&self, msg: &MSG) -> VerificationResult {
+   502→        // For every access node in the MSG, check that the target address
+   503→        // satisfies the alignment requirement of the operation's RepD.
+   504→        // ...
+   505→    }
+   506→}
+   507→```
+   508→
+   509→### 4.4 Step 4: Register the Module
+   510→
+   511→Add `pub mod alignment;` to `src/ive/src/lib.rs` and add the re-exports:
+   512→
+   513→```rust
+   514→pub mod alignment;
+   515→
+   516→pub use alignment::{AlignmentVerifier, AlignmentViolation};
+   517→```
+   518→
+   519→### 4.5 Step 5: Integrate into the Aggregator Pipeline
+   520→
+   521→Add the new pass to the `InvariantAggregator` in
+   522→`src/ive/src/invariant_aggregator.rs`. The aggregator runs all verification
+   523→passes and produces a unified `VerificationSummary`:
+   524→
+   525→```rust
+   526→impl InvariantAggregator {
+   527→    pub fn verify_all(&self, msg: &MSG) -> VerificationSummary {
+   528→        let mut results = Vec::new();
+   529→
+   530→        results.push(self.verify_liveness(msg));
+   531→        results.push(self.verify_exclusivity(msg));
+   532→        results.push(self.verify_interpretation(msg));
+   533→        results.push(self.verify_origin(msg));
+   534→        results.push(self.verify_cleanup(msg));
+   535→        results.push(self.verify_alignment(msg));  // New
+   536→
+   537→        VerificationSummary::from(results)
+   538→    }
+   539→}
+   540→```
+   541→
+   542→### 4.6 Step 6: Add Proof Support (vuma-proof)
+   543→
+   544→If the invariant can be formally proven, add a proof module in
+   545→`src/proof/src/`:
+   546→
+   547→```rust
+   548→// src/proof/src/alignment_proofs.rs
+   549→
+   550→/// Formal proof objects for alignment verification.
+   551→/// Constructed by the IVE when alignment can be proven statically.
+   552→pub struct AlignmentProof { /* ... */ }
+   553→```
+   554→
+   555→Register the module in `src/proof/src/lib.rs` and add re-exports.
+   556→
+   557→### 4.7 Step 7: Update the VUMA Core (vuma)
+   558→
+   559→If the invariant requires new data in the MSG (e.g., alignment metadata on
+   560→regions), add it to `src/vuma/src/region.rs` or the relevant module.
+   561→
+   562→### 4.8 Step 8: Add Tests and Examples
+   563→
+   564→- **Unit tests** for the verification pass in the new module
+   565→- **Integration test** with a program that violates the invariant
+   566→- **Example program** in `examples/` demonstrating correct usage
+   567→- **Update existing tests** that check the full invariant set (the
+   568→  `InvariantAggregator` now returns 6 results instead of 5)
+   569→- **Counterexample tests** verifying that violations produce actionable diagnostics
+   570→
+   571→### 4.9 Step 9: Update Documentation
+   572→
+   573→- Add the invariant term to `docs/GLOSSARY.md` with a full definition,
+   574→  pronunciation, and cross-references
+   575→- Update `docs/CONVENTIONS.md` if any naming conventions are affected
+   576→- Update the IVE crate-level documentation in `src/ive/src/lib.rs`
+   577→
+   578→---
+   579→
+   580→## 5. How to Add New ARM64 Instructions
+   581→
+   582→The codegen crate (`src/codegen/`) defines ARM64 instructions, encodings,
+   583→register allocation, and the SCG → IR → ARM64 lowering pipeline. Adding a
+   584→new instruction requires changes across several modules.
+   585→
+   586→### 5.1 Step 1: Define the Instruction Variant
+   587→
+   588→Add the instruction to the `Instruction` enum in
+   589→`src/codegen/src/arm64.rs`. The enum already contains arithmetic, load/store,
+   590→atomic, branch, barrier, move, and system instructions. Follow the existing
+   591→pattern:
+   592→
+   593→```rust
+   594→pub enum Instruction {
+   595→    // ... existing variants ...
+   596→
+   597→    /// Atomic add: `LDADD Rs, Rt, [Rn]` (ARMv8.1-LSE)
+   598→    LDADD {
+   599→        /// Source register (value to add).
+   600→        rs: Register,
+   601→        /// Destination register (old value before add).
+   602→        rt: Register,
+   603→        /// Base register (memory address).
+   604→        rn: Register,
+   605→        /// Operand size (32 or 64 bit).
+   606→        size: OperandSize,
+   607→        /// Acquire semantics.
+   608→        acquire: bool,
+   609→        /// Release semantics.
+   610→        release: bool,
+   611→    },
+   612→}
+   613→```
+   614→
+   615→### 5.2 Step 2: Implement the Encoding
+   616→
+   617→Add the binary encoding in the `Instruction::encode()` method. Follow the
+   618→ARM Architecture Reference Manual (ARMv8-A) encoding tables:
+   619→
+   620→```rust
+   621→impl Instruction {
+   622→    pub fn encode(&self) -> Result<u32> {
+   623→        match self {
+   624→            // ... existing encodings ...
+   625→
+   626→            // LDADD: 1 0 111 0 00 ar 1 0 Rn Rs 0 o Rt
+   627→            // ar = acquire/release bits, o = size bit
+   628→            Instruction::LDADD { rs, rt, rn, size, acquire, release } => {
+   629→                let size_bit = match size {
+   630→                    OperandSize::Bit32 => 0,
+   631→                    OperandSize::Bit64 => 1,
+   632→                };
+   633→                let a_bit = if *acquire { 1 } else { 0 };
+   634→                let r_bit = if *release { 1 } else { 0 };
+   635→                Ok(0x38200000u32
+   636→                    | (size_bit << 31)
+   637→                    | (a_bit << 23)
+   638→                    | (r_bit << 22)
+   639→                    | (rn.encoding() << 16)
+   640→                    | (rs.encoding() << 10)
+   641→                    | rt.encoding())
+   642→            }
+   643→        }
+   644→    }
+   645→}
+   646→```
+   647→
+   648→### 5.3 Step 3: Implement the Display Trait
+   649→
+   650→Add the assembly output for the new instruction in the `Display` impl:
+   651→
+   652→```rust
+   653→impl std::fmt::Display for Instruction {
+   654→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   655→        match self {
+   656→            // ... existing arms ...
+   657→            Instruction::LDADD { rs, rt, rn, size, acquire, release } => {
+   658→                let suffix = match (*acquire, *release) {
+   659→                    (true, true) => "al",
+   660→                    (true, false) => "a",
+   661→                    (false, true) => "l",
+   662→                    (false, false) => "",
+   663→                };
+   664→                write!(f, "ldadd{} {}, {}, [{}]", suffix, rs, rt, rn)
+   665→            }
+   666→        }
+   667→    }
+   668→}
+   669→```
+   670→
+   671→### 5.4 Step 4: Add the IR Instruction (if needed)
+   672→
+   673→If the new ARM64 instruction does not map to an existing IR instruction,
+   674→add one in `src/codegen/src/ir.rs`. The IR is the target-independent
+   675→intermediate representation between the SCG and ARM64 assembly.
+   676→
+   677→### 5.5 Step 5: Add the SCG-to-IR Mapping
+   678→
+   679→In `src/codegen/src/scg_to_ir.rs`, add the lowering rule that maps SCG
+   680→node types to the new IR instruction. If the instruction only applies to
+   681→ARM64 and not to the generic IR, add the mapping in the instruction
+   682→selector in `src/codegen/src/arm64.rs`.
+   683→
+   684→### 5.6 Step 6: Add Tests
+   685→
+   686→- **Encoding test**: Verify the output bytes match the ARM Architecture
+   687→  Reference Manual. Use concrete register assignments and compare the
+   688→  32-bit encoding against the expected value:
+   689→
+   690→  ```rust
+   691→  #[test]
+   692→  fn ldadd_encode_matches_arm_reference() {
+   693→      let inst = Instruction::LDADD {
+   694→          rs: Register::X1,
+   695→          rt: Register::X2,
+   696→          rn: Register::X3,
+   697→          size: OperandSize::Bit64,
+   698→          acquire: true,
+   699→          release: true,
+   700→      };
+   701→      let encoded = inst.encode().unwrap();
+   702→      assert_eq!(encoded, 0xF8E06841); // Expected per ARM spec
+   703→  }
+   704→  ```
+   705→
+   706→- **Integration test**: Build a small SCG program using the new instruction,
+   707→  run codegen, and verify the assembly output.
+   708→- **QEMU test**: If available, run the generated binary under QEMU and
+   709→  verify correct execution.
+   710→
+   711→### 5.7 Step 7: Update Documentation
+   712→
+   713→- Add the instruction to the codegen crate's module-level documentation in
+   714→  `src/codegen/src/arm64.rs` (the instruction selection table)
+   715→- If the instruction affects VUMA invariants (e.g., atomic instructions
+   716→  affect exclusivity verification, barrier instructions affect memory
+   717→  ordering verification), update the relevant spec documents in `docs/specs/`
+   718→- Add the instruction mnemonic to `docs/GLOSSARY.md` if it is a significant
+   719→  addition (e.g., a new atomic or barrier instruction)
+   720→
+   721→---
+   722→
+   723→## 6. Code Review Process
+   724→
+   725→### 6.1 Before Submitting
+   726→
+   727→1. **Run the full CI check locally** (see Section 2.7)
+   728→2. **Verify that no new `unsafe` blocks** are introduced without
+   729→   `// VUMA-VERIFIED` or `// IVE-TODO` annotations
+   730→3. **Update documentation** if your change affects public APIs, invariants,
+   731→   or the glossary
+   732→4. **Write tests** for all new functionality — unit tests, integration tests,
+   733→   and verification tests as appropriate
+   734→5. **Organize commits** into logical units following conventional commits
+   735→   (see `CONVENTIONS.md`)
+   736→
+   737→### 6.2 Review Criteria
+   738→
+   739→Reviewers will evaluate PRs against the following criteria:
+   740→
+   741→1. **Correctness**: Does the code do what it claims? Are edge cases handled?
+   742→   Are there off-by-one errors in pointer arithmetic or graph traversal?
+   743→2. **Verification compliance**: Are all memory operations properly annotated?
+   744→   Does the IVE pass structure make sense? Does the new verification pass
+   745→   correctly identify violations and produce useful counterexamples?
+   746→3. **Documentation**: Are public items documented with doc comments? Are
+   747→   examples included? Is the glossary updated?
+   748→4. **Testing**: Is there adequate test coverage? Do tests cover failure modes
+   749→   and boundary conditions? Are property-based tests used where appropriate?
+   750→5. **Conventions**: Does the code follow the naming, formatting, and
+   751→   organizational conventions in `CONVENTIONS.md`?
+   752→6. **Performance**: Does the change introduce any performance regressions?
+   753→   Are allocations minimized in hot paths (especially IVE verification passes)?
+   754→7. **Architecture**: Does the change fit cleanly into the existing crate
+   755→   structure, or does it require restructuring? Are cross-crate dependencies
+   756→   maintained correctly (no circular dependencies)?
+   757→
+   758→### 6.3 Review Timeline
+   759→
+   760→- Initial review within **2 business days**
+   761→- Follow-up reviews within **1 business day**
+   762→- At least **1 approving review** required for merge
+   763→- Changes to IVE verification logic or VUMA invariants require **2 approving
+   764→  reviews** from maintainers with domain expertise
+   765→
+   766→### 6.4 Special Review Rules
+   767→
+   768→- **New SCG node types**: Must include IVE verification and codegen support
+   769→  in the same PR (no partial implementations)
+   770→- **New verification passes**: Must include a formal specification document
+   771→  in `docs/specs/` and proof infrastructure in `src/proof/`
+   772→- **New ARM64 instructions**: Must include encoding tests verified against
+   773→  the ARM Architecture Reference Manual
+   774→- **Changes to `unsafe` annotations**: Any change to `// VUMA-VERIFIED` or
+   775→  `// IVE-TODO` annotations requires explicit reviewer acknowledgment
+   776→
+   777→---
+   778→
+   779→## 7. PR Template
+   780→
+   781→Every PR must use the following template. Copy it into the PR description
+   782→when opening a pull request.
+   783→
+   784→```markdown
+   785→## Summary
+   786→[Brief description of changes — what and why]
+   787→
+   788→## Related Issues
+   789→[Closes #X, Related to #Y]
+   790→
+   791→## Changes
+   792→- [Specific change 1]
+   793→- [Specific change 2]
+   794→- [etc.]
+   795→
+   796→## Verification Impact
+   797→- [ ] No new IVE-TODOs introduced
+   798→- [ ] All existing IVE-TODOs resolved or documented
+   799→- [ ] New SCG node types: [list or "none"]
+   800→- [ ] New VUMA invariants: [list or "none"]
+   801→- [ ] New ARM64 instructions: [list or "none"]
+   802→- [ ] Verification pass changes: [describe or "none"]
+   803→
+   804→## Test Plan
+   805→- [Unit tests added/modified: describe]
+   806→- [Integration tests added/modified: describe]
+   807→- [Verification tests added/modified: describe]
+   808→- [Manual testing performed: describe]
+   809→
+   810→## Checklist
+   811→- [ ] `cargo fmt --check` passes
+   812→- [ ] `cargo clippy --workspace -- -D warnings` passes
+   813→- [ ] `cargo test --workspace` passes
+   814→- [ ] `cargo test -p vuma-ive -- --test-threads=1 -- verification` passes
+   815→- [ ] All public items have doc comments with examples
+   816→- [ ] No bare `unsafe` blocks without `// VUMA-VERIFIED` or `// IVE-TODO` annotations
+   817→- [ ] `docs/GLOSSARY.md` updated if new terms introduced
+   818→- [ ] `docs/CONVENTIONS.md` updated if new patterns introduced
+   819→- [ ] Formal spec in `docs/specs/` if new invariant added
+   820→```
+   821→
+   822→---
+   823→
+   824→## Getting Help
+   825→
+   826→- **Documentation**: Start with `docs/GLOSSARY.md` for terminology and
+   827→  `docs/CONVENTIONS.md` for coding standards
+   828→- **Architecture**: See `docs/ROADMAP.md` for the project structure and plan
+   829→- **Specifications**: See `docs/specs/` for formal specifications of VUMA
+   830→  invariants, algorithms, and the ARM64 codegen
+   831→- **Issues**: File bugs or request features via GitHub Issues
+   832→- **Discussions**: Use GitHub Discussions for design questions and proposals
+   833→
+   834→---
+   835→
+   836→*This guide is a living document. If you find errors, ambiguities, or missing
+   837→information, please submit a PR to improve it.*
+   838→

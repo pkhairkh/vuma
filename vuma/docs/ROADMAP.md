@@ -2,8 +2,8 @@
 
 **Project:** VUMA — Verified-Unsafe Memory Access Framework  
 **Version:** 0.2.0  
-**Status:** Phase 2 — Core Implementation (substantially complete)  
-**Date:** March 5, 2026  
+**Status:** Phase 3 — Hardening & Optimization (in progress, Waves 1-32 complete)  
+**Date:** March 6, 2026  
 
 ---
 
@@ -11,7 +11,7 @@
 
 The VUMA project implements a six-layer AI-native programming language framework: (1) Semantic Computation Graph (SCG), (2) Inference and Verification Engine (IVE), (3) Projection System, (4) Continuous Optimization Runtime (COR), (5) Behavioral Descriptors (BD), and (6) Verified-Unsafe Memory Access (VUMA). The project targets multi-architecture backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) with AArch64 as the primary platform.
 
-The implementation follows a bottom-up strategy organized into five phases, each building on the output of previous phases. Phase 1 (COMPLETE) established foundational data structures and the minimal pipeline. Phase 2 (current, substantially complete) implements core verification, multi-backend code generation, and LLM integration. Phase 3 hardens the system and adds concurrency. Phase 4 adds language server and tooling support. Phase 5 achieves self-hosting compiler status. Each phase has specific milestones and deliverables that are objectively verifiable.
+The implementation follows a bottom-up strategy organized into five phases, each building on the output of previous phases. Phase 1 (COMPLETE) established foundational data structures and the minimal pipeline. Phase 2 (SUBSTANTIALLY COMPLETE) implemented core verification, multi-backend code generation, and LLM integration. Phase 3 (IN PROGRESS — Waves 6-32 completed) hardens the system, adds concurrency support, DWARF debug info, FFI/syscalls, constant-time crypto, and expanded test infrastructure. Phase 4 adds outcome spaces and ecosystem. Phase 5 achieves self-hosting compiler status. Each phase has specific milestones and deliverables that are objectively verifiable.
 
 ### Key Differentiator: LLM Integration
 
@@ -68,7 +68,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 **Goal:** Complete the verification engine, strengthen BD inference, expand multi-architecture codegen to handle complex programs, add LLM integration features, and demonstrate non-trivial verified programs. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, 8 backends handle complex programs, and LLM agents can use VUMA as a verified compilation sandbox.
 
-**Status:** ✅ Substantially Complete (9/11 milestones achieved)
+**Status:** ✅ Substantially Complete (9/11 milestones achieved; deferred items moved to Phase 3)
 
 ### Milestones
 
@@ -374,8 +374,8 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 | W15 | Diagnostics | 65 diagnostic codes, error chaining, structured suggestions, 4 output formats |
 | W16 | CI Infrastructure | GitHub Actions, cross-compile matrix (8 targets), Dependabot |
 | W17-18 | Memory Safety & Benchmarks | 10 violation types, runtime bounds checks, benchmark suite |
-| W19-20 | ABI & Debug Info | ABI conformance (27 tests), DWARF per-backend config, --debug-info |
-| W21-22 | Linker & LLM API | 3 LOAD segments (W^X), VumaForLLM API, section alignment |
+| W19-20 | ABI & Debug Info | ABI conformance (27 tests), DWARF v4 per-backend config, --debug-info flag |
+| W21-22 | Linker & LLM API | 3 LOAD segments (W^X), VumaForLLM API, section alignment, debug info integration |
 | W23 | Package Manager | PackageManifest, resolve_dependencies, CLI subcommands |
 | W24 | FFI & Syscalls | 19 syscalls × 8 architectures, relocations, is_extern flag |
 | W25-27 | Security Hardening | Codegen quality, test infrastructure hardening |

@@ -1,8 +1,8 @@
 # VUMA Benchmark Suite Design: Comparative Performance vs C and Rust
 
 **Document ID:** VUMA-SPEC-BENCH-001
-**Version:** 1.0
-**Date:** 2026-03-04
+**Version:** 1.1
+**Date:** 2026-03-06
 **Author:** Agent W1-29
 **Status:** Draft
 
@@ -27,13 +27,13 @@ The VUMA benchmark suite is organized into five distinct categories, each design
 
 Each category is designed to be independently runnable and reproducible. A benchmark harness script (`vuma-bench`) will orchestrate execution across all four language configurations (VUMA verified, C with `-O2`, Rust safe, Rust unsafe), collect raw cycle counts, compute statistical aggregates, and emit both machine-readable JSON and human-readable Markdown tables. The harness will also enforce environmental controls: CPU frequency scaling disabled, isolated CPU cores via `taskset`, transparent hugepages configured consistently, and no other user-space workloads running during measurement windows.
 
-The rationale for five categories rather than the traditional two (micro vs macro) is that VUMA introduces a novel axis -- verification time -- that no existing benchmark suite accounts for. Traditional benchmarks assume compilation cost is a one-time developer inconvenience; VUMA's IVE makes verification a measurable, repeatable cost that directly affects iteration speed and CI pipeline duration. By elevating verification time to a first-class benchmark category, we ensure that IVE performance regressions are caught as aggressively as runtime regressions. Additionally, separating concurrency from data structures acknowledges that AArch64's four Cortex-A76 cores introduce NUMA-like caching effects that would confound results if mixed with single-threaded collection benchmarks.
+The rationale for five categories rather than the traditional two (micro vs macro) is that VUMA introduces a novel axis -- verification time -- that no existing benchmark suite accounts for. Traditional benchmarks assume compilation cost is a one-time developer inconvenience; VUMA's IVE makes verification a measurable, repeatable cost that directly affects iteration speed and CI pipeline duration. By elevating verification time to a first-class benchmark category, we ensure that IVE performance regressions are caught as aggressively as runtime regressions. Additionally, separating concurrency from data structures acknowledges that multi-core AArch64 processors introduce NUMA-like caching effects that would confound results if mixed with single-threaded collection benchmarks.
 
 ---
 
 ## 2. Micro-Benchmarks
 
-Micro-benchmarks measure the raw cost of individual operations, stripped of algorithmic complexity. Each benchmark performs a single, well-defined operation millions of times so that per-operation cost can be extracted with sub-nanosecond precision using the ARM64 PMU cycle counter. The goal is to isolate codegen differences between VUMA, C (compiled with `gcc -O2`), Rust safe (compiled with `cargo build --release`), and Rust unsafe (same but with `unsafe` blocks bypassing bounds checks). All micro-benchmarks operate on a pre-allocated 8 MiB buffer (2x L2 cache size on Cortex-A76) to ensure predictable cache behavior unless the benchmark explicitly tests cache-miss scenarios.
+Micro-benchmarks measure the raw cost of individual operations, stripped of algorithmic complexity. Each benchmark performs a single, well-defined operation millions of times so that per-operation cost can be extracted with sub-nanosecond precision using the ARM64 PMU cycle counter. The goal is to isolate codegen differences between VUMA, C (compiled with `gcc -O2`), Rust safe (compiled with `cargo build --release`), and Rust unsafe (same but with `unsafe` blocks bypassing bounds checks). All micro-benchmarks operate on a pre-allocated 8 MiB buffer (2x L2 cache size on typical AArch64 cores) to ensure predictable cache behavior unless the benchmark explicitly tests cache-miss scenarios.
 
 ### 2.1 alloc_free
 
@@ -104,7 +104,7 @@ Micro-benchmarks measure the raw cost of individual operations, stripped of algo
 
 **Parameters:**
 - Chain length: 1,048,576 nodes (1M)
-- Node size: 64 bytes (one cache line on Cortex-A76)
+- Node size: 64 bytes (one cache line on typical AArch64 cores)
 - Layout: pre-shuffled to randomize cache behavior
 - Each node contains a single `next` pointer plus padding
 - Iterations: 10 full chases
@@ -251,7 +251,7 @@ Data structure benchmarks exercise VUMA's core value proposition: safe, verified
 
 ## 4. Concurrency Benchmarks
 
-Concurrency benchmarks exercise VUMA's IVE concurrent memory model verification on the AArch64's four Cortex-A76 cores. These benchmarks are designed to stress both the runtime performance of synchronization primitives and the IVE's ability to prove data-race freedom at compile time. Each benchmark pins threads to specific cores using `pthread_setaffinity_np` (or the VUMA equivalent) to eliminate scheduler noise. All benchmarks are run with the AArch64's CPU governor set to `performance` mode to eliminate frequency scaling variance.
+Concurrency benchmarks exercise VUMA's IVE concurrent memory model verification on multi-core AArch64 processors. These benchmarks are designed to stress both the runtime performance of synchronization primitives and the IVE's ability to prove data-race freedom at compile time. Each benchmark pins threads to specific cores using `pthread_setaffinity_np` (or the VUMA equivalent) to eliminate scheduler noise. All benchmarks are run with the CPU governor set to `performance` mode to eliminate frequency scaling variance.
 
 ### 4.1 parallel_sum
 
@@ -396,7 +396,7 @@ Real-world benchmarks measure end-to-end application performance, including I/O,
 
 ### 5.4 image_transform
 
-**Purpose:** Apply a 3x3 convolution filter (Gaussian blur) to an image buffer. This benchmark measures compute throughput on regular data with SIMD potential. The ARM NEON SIMD unit on Cortex-A76 should be exercisable from all four language configurations.
+**Purpose:** Apply a 3x3 convolution filter (Gaussian blur) to an image buffer. This benchmark measures compute throughput on regular data with SIMD potential. The ARM NEON SIMD unit on AArch64 should be exercisable from all four language configurations.
 
 **Parameters:**
 - Image: 4096 x 4096 pixels, RGBA (16 MiB per channel, 64 MiB total)
@@ -432,7 +432,7 @@ Real-world benchmarks measure end-to-end application performance, including I/O,
 
 Verification time benchmarks measure how long IVE takes to prove program correctness at compile time. This is the novel cost axis that VUMA introduces: unlike C and Rust, where compilation is a fixed cost regardless of program correctness, VUMA's IVE must construct a formal proof that the program satisfies its safety invariants. These benchmarks quantify the "price of verification" and help the VUMA team identify scalability bottlenecks in IVE's proof engine.
 
-All verification times are measured on the AArch64 itself (not cross-compiled), using `time vuma build --release` with IVE enabled. The measurement includes parsing, type checking, IVE proof construction, and LLVM codegen. For comparison, we also measure `gcc -O2` and `cargo build --release` compilation times for equivalent C and Rust programs.
+All verification times are measured on AArch64 (not cross-compiled), using `time vuma build --release` with IVE enabled. The measurement includes parsing, type checking, IVE proof construction, and LLVM codegen. For comparison, we also measure `gcc -O2` and `cargo build --release` compilation times for equivalent C and Rust programs.
 
 ### 6.1 trivial_program
 
@@ -513,12 +513,12 @@ All verification times are measured on the AArch64 itself (not cross-compiled), 
 
 ## 7. Measurement Methodology
 
-Rigorous measurement methodology is essential for producing benchmark results that are reproducible, defensible, and free of confounding factors. The VUMA benchmark suite adopts the following methodology, which is designed for the AArch64's specific hardware characteristics (Cortex-A76, 4 cores, 8 GB LPDDR4X-4267 RAM, 512 KB L2 cache per core, shared 2 MB L3 cache).
+Rigorous measurement methodology is essential for producing benchmark results that are reproducible, defensible, and free of confounding factors. The VUMA benchmark suite adopts the following methodology, which is designed for AArch64 hardware characteristics (Cortex-A76 class, 4+ cores, 512 KB L2 cache per core, shared L3 cache).
 
 ### 7.1 Hardware Configuration
 
-- **Platform:** AArch64 (BCM2712, Quad-core ARM Cortex-A76 @ 2.4 GHz)
-- **RAM:** 8 GB LPDDR4X-4267
+- **Platform:** AArch64 (ARM Cortex-A76 class, quad-core @ 2.4 GHz or equivalent)
+- **RAM:** 8 GB DDR4 or LPDDR4X (or equivalent)
 - **OS:** AArch64 Linux (64-bit, Linux kernel 6.6+)
 - **CPU governor:** Set to `performance` mode (`cpufreq-set -g performance`) to eliminate dynamic frequency scaling
 - **Isolation:** Disable WiFi, Bluetooth, and HDMI output to minimize interrupt noise
@@ -529,7 +529,7 @@ Rigorous measurement methodology is essential for producing benchmark results th
 
 - **Primary timer:** ARM64 PMU cycle counter (`cntvct_el0`), accessed via `__builtin_arm_rsr64("cntvct_el0")` in C/VUMA and `std::arch::aarch64::_rdcntvct_el0()` in Rust
 - **Resolution:** 1 cycle at 2.4 GHz = ~0.42 ns per tick
-- **Overhead:** Timer read overhead measured and subtracted (typically 15-20 cycles on Cortex-A76)
+- **Overhead:** Timer read overhead measured and subtracted (typically 15-20 cycles on Cortex-A76 class cores)
 - **Secondary timer:** `clock_gettime(CLOCK_MONOTONIC_RAW)` for wall-clock measurements (verification time, I/O-bound benchmarks)
 - **Conversion:** Cycles to nanoseconds via `cycles / 2.4` (fixed frequency in performance mode)
 
@@ -590,7 +590,7 @@ Rationale: VUMA compiles through LLVM (same backend as Clang/Rust) after IVE ver
 
 Against Rust safe, VUMA should win on bounds-checked operations (vec index, array access) by 10-30%, since IVE elides bounds checks that Rust's safe API must retain. Against Rust unsafe, VUMA should be within 1-2%, since both produce equivalent unchecked machine code.
 
-The 5% margin accounts for: (a) minor codegen differences due to VUMA's type layout rules, (b) linker differences (VUMA links against a minimal runtime vs glibc for C), and (c) instruction scheduling differences that may favor one compiler over another on specific Cortex-A76 pipeline configurations.
+The 5% margin accounts for: (a) minor codegen differences due to VUMA's type layout rules, (b) linker differences (VUMA links against a minimal runtime vs glibc for C), and (c) instruction scheduling differences that may favor one compiler over another on specific AArch64 pipeline configurations.
 
 ### 8.2 Verification Time
 
@@ -641,7 +641,7 @@ Benchmarks should be executed in the following order to minimize thermal throttl
 4. Concurrency benchmarks (highest thermal load, run last)
 5. Real-world benchmarks (mixed characteristics, run individually)
 
-Between each benchmark category, a 30-second cool-down period is enforced to allow the AArch64's thermal management to return to baseline.
+Between each benchmark category, a 30-second cool-down period is enforced to allow AArch64 thermal management to return to baseline.
 
 ## Appendix B: Results Template
 
@@ -673,7 +673,7 @@ Between each benchmark category, a 30-second cool-down period is enforced to all
     "platform": "aarch64",
     "cpu": "cortex-a76",
     "cores": 4,
-    "ram_gb": 8,
+    "ram_gb": 0,
     "kernel": "",
     "gcc_version": "",
     "rust_version": "",

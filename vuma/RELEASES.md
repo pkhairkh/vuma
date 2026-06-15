@@ -4,9 +4,40 @@ This document summarizes each VUMA release with key changes and known limitation
 
 ---
 
-## v0.2.0 — 2026-03-05
+## v0.1.0-alpha.1 — 2026-03-06
+
+**Alpha Pre-Release: Critical Bug Fixes, Atomics, FP Conversions, Test Hardening**
+
+Pre-release alpha incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 8 backends.
+
+### Highlights
+
+- **ARM64 ROR/ROL fix**: Rotation instructions now correctly emit `EXTR`/`RORV`
+- **6-arch atomics**: LoongArch64 (LL.D/SC.D), PPC64 (LDARX/STDCX), RISC-V 64, Wasm32 (24 new atomic ops), ARM32 (LDREX/STREX), MIPS64 (LLD/SCD)
+- **FP conversion casts**: Type-aware `IRInstr::Cast` with `from_ty`/`to_ty` across all 8 backends
+- **LoongArch64 terminators**: Fixed Switch/Invoke/TailCall/Resume lowering
+- **ARM32 AAPCS**: Proper >4 argument passing via the stack
+- **Standard library expansion**: `math.rs` (92 items), `fmt.rs` (13 functions)
+- **DWARF debug info**: Full pipeline integration with per-backend CIE presets
+- **C FFI wiring**: ExternRegistry, SyscallTable, RelocationKind
+- **~266 new/expanded tests** across SHA256d, regression, diagnostics, DWARF/FFI, ABI, property-based, math, and fmt categories
+- **CI/CD**: GitHub Actions workflow, .gitignore, repo cleanup
+
+### Known Limitations
+
+- BD inference completeness (M2.3) deferred to Phase 3
+- Doubly-linked list verification (M2.4) deferred to Phase 3
+- ARM64 atomics and concurrent verification are Phase 3 targets
+- COR end-to-end integration not yet complete
+- LoongArch64 full SHA256d too slow for QEMU (should work natively)
+
+---
+
+## v0.1.0-alpha.0 — 2026-03-05
 
 **Phase 2: Multi-Architecture Codegen, LLM Integration, Wasm Sandbox**
+
+> **Note**: This is a pre-release (alpha) version. The API is not yet stabilized and may change before v0.1.0.
 
 This release represents the substantial completion of Phase 2 of the VUMA framework. The project now supports 8 backend architectures, provides comprehensive LLM integration, and includes a Wasm32 sandbox for safe LLM-generated code execution.
 
@@ -24,7 +55,7 @@ This release represents the substantial completion of Phase 2 of the VUMA framew
 - **Diagnostics**: 65 diagnostic codes (E001–E050, W001–W010, I001–I005), error chaining, structured suggestions, 4 output formats (JSON, ANSI, plain text, LSP)
 - **CI**: GitHub Actions with cross-compile matrix for all 8 ISA targets
 
-### New Features (since v0.1.0)
+### New Features (since initial alpha)
 
 #### Multi-Architecture Codegen
 - All 6 native backends pass SHA256d: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64

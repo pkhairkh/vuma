@@ -1,14 +1,21 @@
 [package]
 name = "vuma-cor"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Continuous Optimization Runtime — JIT optimization, profiling, speculative execution, and deployment"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-vuma-scg = { path = "../scg" }
-vuma-codegen = { path = "../codegen" }
-serde = { version = "1", features = ["derive"] }
-log = "0.4"
-thiserror = "1"
+vuma-scg.workspace = true
+vuma-codegen.workspace = true
+serde.workspace = true
+log.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true

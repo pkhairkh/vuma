@@ -1,12 +1,19 @@
 [package]
 name = "vuma-scg"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Semantic Computation Graph — formal graph IR for VUMA programs"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-petgraph = "0.6"
-indexmap = "2"
-smallvec = "1"
-hashbrown = { version = "0.14", features = ["serde"] }
-serde_json = "1"
+serde.workspace = true
+petgraph.workspace = true
+indexmap.workspace = true
+smallvec.workspace = true
+hashbrown.workspace = true
+serde_json.workspace = true

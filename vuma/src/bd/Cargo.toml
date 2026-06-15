@@ -1,11 +1,18 @@
 [package]
 name = "vuma-bd"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Behavioral Descriptors — RepD, CapD, RelD descriptor lattices and BD inference"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-indexmap = "2"
-hashbrown = { version = "0.14", features = ["serde"] }
-vuma-scg = { path = "../scg" }
-serde_json = "1.0.150"
+serde.workspace = true
+indexmap.workspace = true
+hashbrown.workspace = true
+vuma-scg.workspace = true
+serde_json.workspace = true

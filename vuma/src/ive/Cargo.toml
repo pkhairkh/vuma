@@ -1,12 +1,19 @@
 [package]
 name = "vuma-ive"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Inference & Verification Engine — behavioral descriptor inference and invariant verification"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-vuma-bd = { path = "../bd" }
-vuma-scg = { path = "../scg" }
-serde = { version = "1", features = ["derive"] }
-thiserror = "1"
-log = "0.4"
-hashbrown = { version = "0.14", features = ["serde"] }
+vuma-bd.workspace = true
+vuma-scg.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+log.workspace = true
+hashbrown.workspace = true

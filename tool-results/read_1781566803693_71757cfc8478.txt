@@ -1,0 +1,1263 @@
+     1→     1→# VUMA Language Reference for LLMs
+     2→     2→
+     3→     3→> **Audience**: This document is written for large language models that need to generate correct VUMA source code. It is unambiguous, example-heavy, and explicitly documents every pitfall and edge case. If you are an LLM reading this, follow these rules precisely.
+     4→     4→
+     5→     5→---
+     6→     6→
+     7→     7→## Table of Contents
+     8→     8→
+     9→     9→1. [Quick Start](#1-quick-start)
+    10→    10→2. [Types](#2-types)
+    11→    11→3. [Functions](#3-functions)
+    12→    12→4. [Variables](#4-variables)
+    13→    13→5. [Control Flow](#5-control-flow)
+    14→    14→6. [Memory](#6-memory)
+    15→    15→7. [Pointer Operations](#7-pointer-operations)
+    16→    16→8. [Bitwise Operations](#8-bitwise-operations)
+    17→    17→9. [Arithmetic](#9-arithmetic)
+    18→    18→10. [Comparison](#10-comparison)
+    19→    19→11. [Constants](#11-constants)
+    20→    20→12. [Calling Convention](#12-calling-convention)
+    21→    21→13. [Common Patterns](#13-common-patterns)
+    22→    22→14. [Pitfalls](#14-pitfalls)
+    23→    23→15. [Target Platforms](#15-target-platforms)
+    24→    24→
+    25→    25→---
+    26→    26→
+    27→    27→## 1. Quick Start
+    28→    28→
+    29→    29→A VUMA program consists of one or more function definitions. The entry point is always `fn main()`. The compiler produces a native binary (or Wasm module) that can be executed directly or via QEMU for cross-architecture testing.
+    30→    30→
+    31→    31→### Minimal Program
+    32→    32→
+    33→    33→```vuma
+    34→    34→fn main() -> i32 {
+    35→    35→    return 0;
+    36→    36→}
+    37→    37→```
+    38→    38→
+    39→    39→This program exits with code 0.
+    40→    40→
+    41→    41→### Compile and Run
+    42→    42→
+    43→    43→VUMA compiles `.vuma` source files to native binaries. The build system uses Cargo under the hood. To build and test:
+    44→    44→
+    45→    45→```bash
+    46→    46→# Build the VUMA compiler
+    47→    47→cargo build --workspace
+    48→    48→
+    49→    49→# Run all tests
+    50→    50→cargo test --workspace
+    51→    51→
+    52→    52→# Cross-architecture testing uses QEMU
+    53→    53→# x86_64:
+    54→    54→qemu-x86_64 ./output_binary
+    55→    55→# AArch64:
+    56→    56→qemu-aarch64 ./output_binary
+    57→    57→# RISC-V 64:
+    58→    58→qemu-riscv64-static ./output_binary
+    59→    59→# ARM32:
+    60→    60→qemu-arm ./output_binary
+    61→    61→# MIPS64:
+    62→    62→qemu-mips64-static ./output_binary
+    63→    63→# PPC64:
+    64→    64→qemu-ppc64 ./output_binary
+    65→    65→# LoongArch64:
+    66→    66→qemu-loongarch64 ./output_binary
+    67→    67→```
+    68→    68→
+    69→    69→### Program with Memory
+    70→    70→
+    71→    71→```vuma
+    72→    72→fn main() -> i32 {
+    73→    73→    msg = allocate(3);
+    74→    74→    *(msg + 0) = 97;   // 'a'
+    75→    75→    *(msg + 1) = 98;   // 'b'
+    76→    76→    *(msg + 2) = 99;   // 'c'
+    77→    77→    free(msg);
+    78→    78→    return 0;
+    79→    79→}
+    80→    80→```
+    81→    81→
+    82→    82→**Key facts**:
+    83→    83→- `main()` returns `i32` (the process exit code) or `u64`.
+    84→    84→- Every `allocate()` must be paired with a `free()`.
+    85→    85→- Pointer dereference uses `*(ptr + offset)` syntax.
+    86→    86→- Bytes are stored as integer values (e.g., `97` for ASCII `'a'`).
+    87→    87→
+    88→    88→---
+    89→    89→
+    90→    90→## 2. Types
+    91→    91→
+    92→    92→VUMA supports the following primitive types:
+    93→    93→
+    94→    94→| Type | Size (bytes) | Range | Signed |
+    95→    95→|------|-------------|-------|--------|
+    96→    96→| `i8`  | 1 | -128 to 127 | Yes |
+    97→    97→| `i16` | 2 | -32768 to 32767 | Yes |
+    98→    98→| `i32` | 4 | -2147483648 to 2147483647 | Yes |
+    99→    99→| `i64` | 8 | -9223372036854775808 to 9223372036854775807 | Yes |
+   100→   100→| `u8`  | 1 | 0 to 255 | No |
+   101→   101→| `u16` | 2 | 0 to 65535 | No |
+   102→   102→| `u32` | 4 | 0 to 4294967295 | No |
+   103→   103→| `u64` | 8 | 0 to 18446744073709551615 | No |
+   104→   104→| `Address` | 8 (4 on 32-bit targets) | N/A (opaque pointer) | No |
+   105→   105→| `bool` | 1 | `true` or `false` | N/A |
+   106→   106→| `void` | 0 | N/A | N/A |
+   107→   107→
+   108→   108→### Type Annotation Syntax
+   109→   109→
+   110→   110→```vuma
+   111→   111→x: i32 = 42;
+   112→   112→y: u32 = 0xFFFFFFFF;
+   113→   113→ptr: Address = allocate(64);
+   114→   114→big: u64 = 18446744073709551615;
+   115→   115→flag: bool = true;
+   116→   116→```
+   117→   117→
+   118→   118→### Critical Constraint: u32 on 64-bit Registers
+   119→   119→
+   120→   120→**This is the single most important thing to know about VUMA types.** All 64-bit target platforms (x86_64, AArch64, RISC-V 64, MIPS64, PPC64, LoongArch64) use 64-bit general-purpose registers. A `u32` value stored in a 64-bit register can have garbage bits in the upper 32 bits after arithmetic operations. You **must** manually mask u32 results with `& 4294967295` (which is `0xFFFFFFFF` in decimal) after any operation that could set bits above bit 31:
+   121→   121→
+   122→   122→```vuma
+   123→   123→// WRONG: bits above bit 31 may be set
+   124→   124→sum: u32 = a + b;
+   125→   125→
+   126→   126→// CORRECT: mask to 32 bits after addition
+   127→   127→sum: u32 = (a + b) & 4294967295;
+   128→   128→```
+   129→   129→
+   130→   130→See [Section 14: Pitfalls](#14-pitfalls) for the complete list of operations that require masking.
+   131→   131→
+   132→   132→### Address Type
+   133→   133→
+   134→   134→`Address` is the type for pointers and memory regions. It is 8 bytes on 64-bit targets and 4 bytes on 32-bit targets (ARM32, Wasm32). The `allocate()` built-in returns an `Address`.
+   135→   135→
+   136→   136→```vuma
+   137→   137→buf: Address = allocate(256);
+   138→   138→```
+   139→   139→
+   140→   140→---
+   141→   141→
+   142→   142→## 3. Functions
+   143→   143→
+   144→   144→### Function Declaration
+   145→   145→
+   146→   146→```vuma
+   147→   147→fn function_name(param1: type1, param2: type2) -> return_type {
+   148→   148→    // body
+   149→   149→    return value;
+   150→   150→}
+   151→   151→```
+   152→   152→
+   153→   153→- The `fn` keyword introduces a function.
+   154→   154→- Parameters have mandatory type annotations when declared in the signature.
+   155→   155→- The return type follows `->`. If omitted, the function returns `void`.
+   156→   156→- The body is a block enclosed in `{ }`.
+   157→   157→- Use `return expr;` to return a value. The last expression in a block without `return` is also the return value in some contexts, but `return` is preferred for clarity.
+   158→   158→
+   159→   159→### Examples
+   160→   160→
+   161→   161→```vuma
+   162→   162→// Function returning a value
+   163→   163→fn add(a: i32, b: i32) -> i32 {
+   164→   164→    return a + b;
+   165→   165→}
+   166→   166→
+   167→   167→// Function with no return value (void)
+   168→   168→fn store_byte(buf: Address, offset: u64, val: u32) {
+   169→   169→    *(buf + offset) = val & 255;
+   170→   170→}
+   171→   171→
+   172→   172→// Function with Address parameter
+   173→   173→fn read_u32_be(buf: Address, offset: u64) -> u32 {
+   174→   174→    b0: u32 = *(buf + offset);
+   175→   175→    b1: u32 = *(buf + offset + 1);
+   176→   176→    b2: u32 = *(buf + offset + 2);
+   177→   177→    b3: u32 = *(buf + offset + 3);
+   178→   178→    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+   179→   179→}
+   180→   180→
+   181→   181→// Main entry point — must return i32 or u64
+   182→   182→fn main() -> i32 {
+   183→   183→    return 0;
+   184→   184→}
+   185→   185→```
+   186→   186→
+   187→   187→### Function Call
+   188→   188→
+   189→   189→```vuma
+   190→   190→result: i32 = add(10, 20);
+   191→   191→store_byte(buffer, 0, 65);
+   192→   192→```
+   193→   193→
+   194→   194→Functions are called by name with parenthesized arguments. Function calls can appear as expressions (when the function returns a value) or as statements (when the function returns void or the return value is discarded).
+   195→   195→
+   196→   196→---
+   197→   197→
+   198→   198→## 4. Variables
+   199→   199→
+   200→   200→### Declaration with Type Annotation
+   201→   201→
+   202→   202→```vuma
+   203→   203→name: type = expression;
+   204→   204→```
+   205→   205→
+   206→   206→Variables are declared with a name, a type annotation, and an initial value. The type annotation is required in most cases.
+   207→   207→
+   208→   208→```vuma
+   209→   209→x: i32 = 42;
+   210→   210→y: u32 = 0xFFFFFFFF;
+   211→   211→ptr: Address = allocate(64);
+   212→   212→sum: u32 = (a + b) & 4294967295;
+   213→   213→```
+   214→   214→
+   215→   215→### Declaration Without Type Annotation (Inferred)
+   216→   216→
+   217→   217→VUMA can infer the type from the right-hand side in some cases, but explicit annotation is strongly recommended to avoid ambiguity:
+   218→   218→
+   219→   219→```vuma
+   220→   220→result = add1(41);       // type inferred from function return type
+   221→   221→msg = allocate(3);        // type inferred as Address
+   222→   222→```
+   223→   223→
+   224→   224→**When writing VUMA code as an LLM, always use explicit type annotations** except for variables assigned from `allocate()` (which always returns `Address`).
+   225→   225→
+   226→   226→### Assignment
+   227→   227→
+   228→   228→Once declared, variables can be reassigned without repeating the type:
+   229→   229→
+   230→   230→```vuma
+   231→   231→x: u32 = 10;
+   232→   232→x = 20;              // reassignment
+   233→   233→x = (x + 1) & 4294967295;  // reassignment with expression
+   234→   234→```
+   235→   235→
+   236→   236→### Compound Assignment
+   237→   237→
+   238→   238→VUMA supports compound assignment operators:
+   239→   239→
+   240→   240→```vuma
+   241→   241→x += 1;     // x = x + 1
+   242→   242→x -= 1;     // x = x - 1
+   243→   243→x *= 2;     // x = x * 2
+   244→   244→x &= 255;   // x = x & 255
+   245→   245→x |= mask;  // x = x | mask
+   246→   246→x ^= key;   // x = x ^ key
+   247→   247→x <<= 4;    // x = x << 4
+   248→   248→x >>= 4;    // x = x >> 4
+   249→   249→```
+   250→   250→
+   251→   251→**Note**: Compound assignments on `u32` values still need the `& 4294967295` mask. The compound form does **not** automatically mask. Prefer explicit assignment with masking:
+   252→   252→
+   253→   253→```vuma
+   254→   254→// WRONG for u32 on 64-bit registers:
+   255→   255→x += 1;
+   256→   256→
+   257→   257→// CORRECT:
+   258→   258→x = (x + 1) & 4294967295;
+   259→   259→```
+   260→   260→
+   261→   261→---
+   262→   262→
+   263→   263→## 5. Control Flow
+   264→   264→
+   265→   265→### For Loop (Range)
+   266→   266→
+   267→   267→The `for` loop iterates over an exclusive range `start..end`. The loop variable takes each integer value from `start` (inclusive) to `end` (exclusive).
+   268→   268→
+   269→   269→```vuma
+   270→   270→for i in 0..10 {
+   271→   271→    // i = 0, 1, 2, ..., 9
+   272→   272→}
+   273→   273→
+   274→   274→for i in 0..64 {
+   275→   275→    // i = 0, 1, 2, ..., 63
+   276→   276→}
+   277→   277→
+   278→   278→for i in 16..64 {
+   279→   279→    // i = 16, 17, ..., 63
+   280→   280→}
+   281→   281→```
+   282→   282→
+   283→   283→**The range is always exclusive on the upper bound**: `0..10` means `0 <= i < 10`.
+   284→   284→
+   285→   285→### For Loop with Memory Access
+   286→   286→
+   287→   287→```vuma
+   288→   288→// Copy 32 bytes from src to dst
+   289→   289→fn copy32(dst: Address, src: Address) {
+   290→   290→    i: u64 = 0;
+   291→   291→    for i in 0..32 {
+   292→   292→        *(dst + i) = *(src + i);
+   293→   293→    }
+   294→   294→}
+   295→   295→```
+   296→   296→
+   297→   297→### While Loop
+   298→   298→
+   299→   299→```vuma
+   300→   300→current = (*list).next;
+   301→   301→while current != list {
+   302→   302→    process(current);
+   303→   303→    current = (*current).next;
+   304→   304→}
+   305→   305→```
+   306→   306→
+   307→   307→### If / Else
+   308→   308→
+   309→   309→```vuma
+   310→   310→if x > 100 {
+   311→   311→    y = 2;
+   312→   312→} else {
+   313→   313→    y = 1;
+   314→   314→}
+   315→   315→```
+   316→   316→
+   317→   317→```vuma
+   318→   318→if value & 1 == 1 {
+   319→   319→    // odd
+   320→   320→}
+   321→   321→```
+   322→   322→
+   323→   323→Nested conditionals:
+   324→   324→
+   325→   325→```vuma
+   326→   326→if x > 0 {
+   327→   327→    if x > 100 {
+   328→   328→        result = 2;
+   329→   329→    } else {
+   330→   330→        result = 1;
+   331→   331→    }
+   332→   332→} else {
+   333→   333→    result = 0;
+   334→   334→}
+   335→   335→```
+   336→   336→
+   337→   337→### Infinite Loop
+   338→   338→
+   339→   339→```vuma
+   340→   340→loop {
+   341→   341→    // runs forever (useful in embedded/bare-metal contexts)
+   342→   342→}
+   343→   343→```
+   344→   344→
+   345→   345→### Break and Continue
+   346→   346→
+   347→   347→```vuma
+   348→   348→for i in 0..100 {
+   349→   349→    if i == 50 {
+   350→   350→        break;
+   351→   351→    }
+   352→   352→    if i % 2 == 0 {
+   353→   353→        continue;
+   354→   354→    }
+   355→   355→    process(i);
+   356→   356→}
+   357→   357→```
+   358→   358→
+   359→   359→---
+   360→   360→
+   361→   361→## 6. Memory
+   362→   362→
+   363→   363→VUMA provides two first-class memory operations: `allocate` and `free`. There is no garbage collector; memory management is manual.
+   364→   364→
+   365→   365→### allocate(n)
+   366→   366→
+   367→   367→Reserves `n` bytes of memory and returns an `Address` (pointer to the start of the block). The allocated memory is uninitialized.
+   368→   368→
+   369→   369→```vuma
+   370→   370→buf = allocate(64);     // 64-byte buffer
+   371→   371→state = allocate(32);   // 32-byte state buffer
+   372→   372→k_table = allocate(256); // 256-byte constant table
+   373→   373→```
+   374→   374→
+   375→   375→**The returned `Address` does not need a type annotation** — it is always inferred as `Address`:
+   376→   376→
+   377→   377→```vuma
+   378→   378→state = allocate(32);   // state has type Address
+   379→   379→```
+   380→   380→
+   381→   381→### free(ptr)
+   382→   382→
+   383→   383→Releases the memory block pointed to by `ptr`. After `free(ptr)`, the pointer is invalid and must not be used.
+   384→   384→
+   385→   385→```vuma
+   386→   386→free(state);
+   387→   387→free(k_table);
+   388→   388→free(buf);
+   389→   389→```
+   390→   390→
+   391→   391→**Every `allocate` must be matched with a `free`**. Failing to free memory is a resource leak. The IVE (Invariant Verification Engine) checks this at compile time.
+   392→   392→
+   393→   393→### Memory Layout Example
+   394→   394→
+   395→   395→```vuma
+   396→   396→fn sha256d(msg: Address, msg_len: u64, out: Address) {
+   397→   397→    // Allocate working memory
+   398→   398→    state = allocate(32);
+   399→   399→    k = allocate(256);
+   400→   400→    w = allocate(256);
+   401→   401→    block = allocate(64);
+   402→   402→    inner = allocate(32);
+   403→   403→
+   404→   404→    // ... use the memory ...
+   405→   405→
+   406→   406→    // Clean up all allocations
+   407→   407→    free(state);
+   408→   408→    free(k);
+   409→   409→    free(w);
+   410→   410→    free(block);
+   411→   411→    free(inner);
+   412→   412→}
+   413→   413→```
+   414→   414→
+   415→   415→### Region Declarations
+   416→   416→
+   417→   417→Named regions can be declared with the `region` keyword:
+   418→   418→
+   419→   419→```vuma
+   420→   420→region pool = allocate(4096);
+   421→   421→```
+   422→   422→
+   423→   423→---
+   424→   424→
+   425→   425→## 7. Pointer Operations
+   426→   426→
+   427→   427→### Dereference: Load
+   428→   428→
+   429→   429→Read a byte from memory at `ptr + offset`:
+   430→   430→
+   431→   431→```vuma
+   432→   432→b0: u32 = *(buf + offset);
+   433→   433→```
+   434→   434→
+   435→   435→The result is a single byte zero-extended to the type of the variable (typically `u32`).
+   436→   436→
+   437→   437→### Dereference: Store
+   438→   438→
+   439→   439→Write a byte to memory at `ptr + offset`:
+   440→   440→
+   441→   441→```vuma
+   442→   442→*(buf + offset) = value & 255;
+   443→   443→```
+   444→   444→
+   445→   445→Only the low 8 bits of `value` are stored.
+   446→   446→
+   447→   447→### Pointer Arithmetic
+   448→   448→
+   449→   449→Pointer + integer produces a new `Address` offset by that many bytes:
+   450→   450→
+   451→   451→```vuma
+   452→   452→ptr = base + 128;      // 128 bytes forward
+   453→   453→byte3 = *(buf + 3);    // read byte at offset 3
+   454→   454→*(buf + 4) = 99;       // write byte at offset 4
+   455→   455→```
+   456→   456→
+   457→   457→The offset can be an expression:
+   458→   458→
+   459→   459→```vuma
+   460→   460→*(buf + i * 4) = val;  // write at byte offset i*4
+   461→   461→byte_val = *(buf + i); // read at byte offset i
+   462→   462→```
+   463→   463→
+   464→   464→### Read/Write Multi-byte Values (u32)
+   465→   465→
+   466→   466→VUMA does not have native multi-byte load/store. You must compose byte-level accesses. For big-endian u32:
+   467→   467→
+   468→   468→```vuma
+   469→   469→fn write_u32_be(buf: Address, offset: u64, val: u32) {
+   470→   470→    *(buf + offset) = (val >> 24) & 255;
+   471→   471→    *(buf + offset + 1) = (val >> 16) & 255;
+   472→   472→    *(buf + offset + 2) = (val >> 8) & 255;
+   473→   473→    *(buf + offset + 3) = val & 255;
+   474→   474→}
+   475→   475→
+   476→   476→fn read_u32_be(buf: Address, offset: u64) -> u32 {
+   477→   477→    b0: u32 = *(buf + offset);
+   478→   478→    b1: u32 = *(buf + offset + 1);
+   479→   479→    b2: u32 = *(buf + offset + 2);
+   480→   480→    b3: u32 = *(buf + offset + 3);
+   481→   481→    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+   482→   482→}
+   483→   483→```
+   484→   484→
+   485→   485→**Why the `& 4294967295` mask?** After left-shifting `b0` by 24 bits in a 64-bit register, bits above bit 31 may be set. The mask clears them. This is the most common source of bugs in VUMA code. See [Section 14: Pitfalls](#14-pitfalls).
+   486→   486→
+   487→   487→### Address-Of Operator
+   488→   488→
+   489→   489→The `@` operator takes the address of a variable:
+   490→   490→
+   491→   491→```vuma
+   492→   492→let x: i32 = 42;
+   493→   493→ptr = @x;       // ptr has type Address, points to x
+   494→   494→*ptr = 100;     // modifies x through the pointer
+   495→   495→```
+   496→   496→
+   497→   497→### Derive
+   498→   498→
+   499→   499→The `derive(ptr, region)` expression explicitly creates a derived pointer within a specific region. This is the formal mechanism for sub-allocation:
+   500→   500→
+   501→   501→```vuma
+   502→   502→inner = derive(ptr, arena_region);
+   503→   503→```
+   504→   504→
+   505→   505→In practice, pointer arithmetic (`base + offset`) implicitly derives a new pointer.
+   506→   506→
+   507→   507→---
+   508→   508→
+   509→   509→## 8. Bitwise Operations
+   510→   510→
+   511→   511→VUMA supports the standard bitwise operations:
+   512→   512→
+   513→   513→| Operator | Name | Example |
+   514→   514→|----------|------|---------|
+   515→   515→| `&` | Bitwise AND | `a & 0xFF` |
+   516→   516→| `\|` | Bitwise OR | `a \| b` |
+   517→   517→| `^` | Bitwise XOR | `a ^ 0xFFFFFFFF` |
+   518→   518→| `<<` | Left shift | `a << 8` |
+   519→   519→| `>>` | Right shift | `a >> 4` |
+   520→   520→
+   521→   521→### No Built-in NOT Operator
+   522→   522→
+   523→   523→**VUMA does not have a reliable bitwise NOT (`~`) operator for u32 values.** The `~x` operator inverts all 64 bits of the register, which corrupts the upper 32 bits. Instead, use XOR with `0xFFFFFFFF`:
+   524→   524→
+   525→   525→```vuma
+   526→   526→// WRONG: ~x inverts bits 32-63 which corrupts u32 values
+   527→   527→not_x = ~x;
+   528→   528→
+   529→   529→// CORRECT: XOR with 0xFFFFFFFF inverts only the lower 32 bits
+   530→   530→not_x: u32 = x ^ 4294967295;
+   531→   531→```
+   532→   532→
+   533→   533→**Always use `x ^ 4294967295` instead of `~x` for u32 bitwise NOT.**
+   534→   534→
+   535→   535→### Bitwise AND for Masking
+   536→   536→
+   537→   537→```vuma
+   538→   538→low_byte: u32 = value & 255;          // mask to 8 bits
+   539→   539→low_16: u32 = value & 65535;          // mask to 16 bits
+   540→   540→low_32: u32 = value & 4294967295;     // mask to 32 bits
+   541→   541→```
+   542→   542→
+   543→   543→### Bitwise OR for Combining
+   544→   544→
+   545→   545→```vuma
+   546→   546→combined: u32 = (high << 8) | low;
+   547→   547→```
+   548→   548→
+   549→   549→### Left Shift
+   550→   550→
+   551→   551→```vuma
+   552→   552→shifted: u32 = (value << 24) & 4294967295;  // MUST mask after left shift
+   553→   553→```
+   554→   554→
+   555→   555→**Left shift on u32 values always requires masking** because the result can have bits set above bit 31.
+   556→   556→
+   557→   557→### Right Shift
+   558→   558→
+   559→   559→```vuma
+   560→   560→upper: u32 = value >> 24;   // no mask needed for right shift
+   561→   561→```
+   562→   562→
+   563→   563→Right shift does not require masking because it only clears bits (never sets new bits above the existing ones).
+   564→   564→
+   565→   565→### Rotate Right (Compose from Shifts)
+   566→   566→
+   567→   567→VUMA does not have a built-in rotate operator. Compose it from shifts:
+   568→   568→
+   569→   569→```vuma
+   570→   570→fn rotr32(x: u32, n: u32) -> u32 {
+   571→   571→    return ((x >> n) | (x << (32 - n))) & 4294967295;
+   572→   572→}
+   573→   573→```
+   574→   574→
+   575→   575→The mask is required because `x << (32 - n)` sets bits above bit 31.
+   576→   576→
+   577→   577→---
+   578→   578→
+   579→   579→## 9. Arithmetic
+   580→   580→
+   581→   581→### Basic Operators
+   582→   582→
+   583→   583→| Operator | Name | Example |
+   584→   584→|----------|------|---------|
+   585→   585→| `+` | Addition | `a + b` |
+   586→   586→| `-` | Subtraction | `a - b` |
+   587→   587→| `*` | Multiplication | `a * b` |
+   588→   588→| `/` | Division | `a / b` |
+   589→   589→| `%` | Modulo | `a % b` |
+   590→   590→
+   591→   591→### u32 Masking Rule
+   592→   592→
+   593→   593→**All u32 arithmetic results must be masked with `& 4294967295`.** VUMA uses 64-bit registers on 64-bit targets. Arithmetic on u32 values can produce carries into the upper 32 bits:
+   594→   594→
+   595→   595→```vuma
+   596→   596→// WRONG: overflow bits pollute upper 32 bits
+   597→   597→sum: u32 = a + b;
+   598→   598→
+   599→   599→// CORRECT: mask to 32 bits
+   600→   600→sum: u32 = (a + b) & 4294967295;
+   601→   601→```
+   602→   602→
+   603→   603→This applies to **all** arithmetic operations on u32 values:
+   604→   604→
+   605→   605→```vuma
+   606→   606→sum: u32 = (a + b) & 4294967295;
+   607→   607→diff: u32 = (a - b) & 4294967295;
+   608→   608→prod: u32 = (a * b) & 4294967295;
+   609→   609→quot: u32 = (a / b) & 4294967295;
+   610→   610→rem: u32 = (a % b) & 4294967295;
+   611→   611→```
+   612→   612→
+   613→   613→Division and modulo technically cannot overflow for u32, but masking is still recommended for consistency and safety.
+   614→   614→
+   615→   615→### u64 Arithmetic
+   616→   616→
+   617→   617→u64 arithmetic does **not** require masking:
+   618→   618→
+   619→   619→```vuma
+   620→   620→big_sum: u64 = a + b;    // OK, no mask needed
+   621→   621→```
+   622→   622→
+   623→   623→### i32 Arithmetic
+   624→   624→
+   625→   625→Signed 32-bit arithmetic should also be masked for correctness:
+   626→   626→
+   627→   627→```vuma
+   628→   628→signed_result: i32 = (a + b) & 4294967295;
+   629→   629→```
+   630→   630→
+   631→   631→### Chained Arithmetic
+   632→   632→
+   633→   633→When multiple u32 operations are chained, mask the **final** result:
+   634→   634→
+   635→   635→```vuma
+   636→   636→// SHA-256 T1 computation
+   637→   637→t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & 4294967295;
+   638→   638→```
+   639→   639→
+   640→   640→Intermediate results in sub-expressions (like `big_sigma1(e)`) should also be masked in their function definitions. Every function that returns u32 must mask its return value.
+   641→   641→
+   642→   642→---
+   643→   643→
+   644→   644→## 10. Comparison
+   645→   645→
+   646→   646→### Comparison Operators
+   647→   647→
+   648→   648→| Operator | Name | Example |
+   649→   649→|----------|------|---------|
+   650→   650→| `==` | Equal | `a == b` |
+   651→   651→| `!=` | Not equal | `a != b` |
+   652→   652→| `<` | Less than | `a < b` |
+   653→   653→| `<=` | Less than or equal | `a <= b` |
+   654→   654→| `>` | Greater than | `a > b` |
+   655→   655→| `>=` | Greater than or equal | `a >= b` |
+   656→   656→
+   657→   657→### Usage
+   658→   658→
+   659→   659→```vuma
+   660→   660→if x == 0 {
+   661→   661→    // handle zero case
+   662→   662→}
+   663→   663→
+   664→   664→if offset < 256 {
+   665→   665→    // within bounds
+   666→   666→}
+   667→   667→
+   668→   668→if a != b {
+   669→   669→    // not equal
+   670→   670→}
+   671→   671→```
+   672→   672→
+   673→   673→### Comparison in Loops
+   674→   674→
+   675→   675→```vuma
+   676→   676→for i in 0..64 {
+   677→   677→    if i < 16 {
+   678→   678→        // first 16 iterations
+   679→   679→    } else {
+   680→   680→        // remaining iterations
+   681→   681→    }
+   682→   682→}
+   683→   683→```
+   684→   684→
+   685→   685→### Boolean Results
+   686→   686→
+   687→   687→Comparison operators produce boolean values. However, in VUMA's compiled form, booleans are represented as integers (1 for true, 0 for false). This means they can be used in arithmetic:
+   688→   688→
+   689→   689→```vuma
+   690→   690→is_zero: u32 = (x == 0);  // 1 if x is 0, 0 otherwise
+   691→   691→```
+   692→   692→
+   693→   693→---
+   694→   694→
+   695→   695→## 11. Constants
+   696→   696→
+   697→   697→### Decimal Literals
+   698→   698→
+   699→   699→```vuma
+   700→   700→x: i32 = 42;
+   701→   701→y: u32 = 4294967295;
+   702→   702→z: u64 = 1000000;
+   703→   703→```
+   704→   704→
+   705→   705→### Hexadecimal Literals
+   706→   706→
+   707→   707→Use the `0x` prefix:
+   708→   708→
+   709→   709→```vuma
+   710→   710→mask: u32 = 0xFF;           // 255
+   711→   711→full: u32 = 0xFFFFFFFF;     // 4294967295
+   712→   712→k_val: u32 = 0x428a2f98;    // SHA-256 round constant
+   713→   713→byte: u32 = 0x80;           // 128 — padding byte
+   714→   714→```
+   715→   715→
+   716→   716→### Underscore Separators
+   717→   717→
+   718→   718→Literals support underscore separators for readability:
+   719→   719→
+   720→   720→```vuma
+   721→   721→big: u64 = 1_000_000;
+   722→   722→hex: u32 = 0xFF00_0000;
+   723→   723→```
+   724→   724→
+   725→   725→### Important: Decimal vs Hex for Masking
+   726→   726→
+   727→   727→The u32 mask value `4294967295` is `0xFFFFFFFF`. Both notations are equivalent:
+   728→   728→
+   729→   729→```vuma
+   730→   730→x = value & 4294967295;   // decimal
+   731→   731→x = value & 0xFFFFFFFF;   // hex (equivalent)
+   732→   732→```
+   733→   733→
+   734→   734→**In existing VUMA code, the decimal form `4294967295` is conventional for u32 masking.** When generating VUMA code, prefer the decimal form for consistency with the existing codebase.
+   735→   735→
+   736→   736→### Common Constant Values
+   737→   737→
+   738→   738→| Decimal | Hex | Meaning |
+   739→   739→|---------|-----|---------|
+   740→   740→| `255` | `0xFF` | 8-bit mask |
+   741→   741→| `65535` | `0xFFFF` | 16-bit mask |
+   742→   742→| `4294967295` | `0xFFFFFFFF` | 32-bit mask |
+   743→   743→| `128` | `0x80` | SHA padding byte |
+   744→   744→
+   745→   745→---
+   746→   746→
+   747→   747→## 12. Calling Convention
+   748→   748→
+   749→   749→### Argument Passing
+   750→   750→
+   751→   751→On 64-bit targets, the first 8 integer/pointer arguments are passed in registers (X0-X7 on AArch64, RDI/RSI/RDX/RCX/R8/R9 on x86_64, a0-a7 on RISC-V). Additional arguments are passed on the stack.
+   752→   752→
+   753→   753→On 32-bit targets (ARM32, Wasm32), the first 4 arguments use registers (r0-r3 on ARM32, the value stack on Wasm32).
+   754→   754→
+   755→   755→### Return Values
+   756→   756→
+   757→   757→The return value is passed in the first return register (X0 on AArch64, RAX on x86_64, a0 on RISC-V). For void functions, no return register is used.
+   758→   758→
+   759→   759→### Address Parameters
+   760→   760→
+   761→   761→`Address` parameters are passed like integer values (pointer-sized). On 64-bit targets, they occupy 8 bytes; on 32-bit targets, 4 bytes.
+   762→   762→
+   763→   763→### Function Call Example
+   764→   764→
+   765→   765→```vuma
+   766→   766→fn add1(x: i32) -> i32 {
+   767→   767→    return x + 1;
+   768→   768→}
+   769→   769→
+   770→   770→fn main() -> i32 {
+   771→   771→    return add1(41);  // returns 42
+   772→   772→}
+   773→   773→```
+   774→   774→
+   775→   775→### Cross-Function u32 Values
+   776→   776→
+   777→   777→When a function returns `u32`, the caller receives the value in a 64-bit register. The upper 32 bits may contain garbage. The **returning function** must mask the value before returning, and the **calling function** should not assume the upper bits are clear unless the callee guarantees it.
+   778→   778→
+   779→   779→```vuma
+   780→   780→fn safe_add(a: u32, b: u32) -> u32 {
+   781→   781→    return (a + b) & 4294967295;  // callee masks the result
+   782→   782→}
+   783→   783→
+   784→   784→fn main() -> i32 {
+   785→   785→    result: u32 = safe_add(0xFFFFFFFF, 1);  // result = 0
+   786→   786→    return 0;
+   787→   787→}
+   788→   788→```
+   789→   789→
+   790→   790→### Stack Layout (AArch64)
+   791→   791→
+   792→   792→```
+   793→   793→Higher addresses
+   794→   794→  +----------------------+
+   795→   795→  | Incoming stack args   |  FP+16, FP+24, ...
+   796→   796→  +----------------------+
+   797→   797→  | Saved FP (X29)       |  FP+0
+   798→   798→  | Saved LR (X30)       |  FP+8
+   799→   799→  +----------------------+
+   800→   800→  | Callee-saved regs    |  FP-8, FP-16, ...
+   801→   801→  | (X19..X28)           |
+   802→   802→  +----------------------+
+   803→   803→  | Local variables      |
+   804→   804→  | (aligned)            |
+   805→   805→  +----------------------+
+   806→   806→  | Outgoing stack args  |
+   807→   807→  | (for nested calls)   |
+   808→   808→  +----------------------+  SP
+   809→   809→Lower addresses
+   810→   810→```
+   811→   811→
+   812→   812→---
+   813→   813→
+   814→   814→## 13. Common Patterns
+   815→   815→
+   816→   816→### Pattern 1: SHA256d (Double SHA-256)
+   817→   817→
+   818→   818→This is the canonical VUMA program. It exercises all major language features: functions, memory, pointer arithmetic, bitwise operations, u32 masking, and loops.
+   819→   819→
+   820→   820→```vuma
+   821→   821→fn rotr32(x: u32, n: u32) -> u32 {
+   822→   822→    return ((x >> n) | (x << (32 - n))) & 4294967295;
+   823→   823→}
+   824→   824→
+   825→   825→fn ch(x: u32, y: u32, z: u32) -> u32 {
+   826→   826→    return (x & y) ^ ((x ^ 4294967295) & z);
+   827→   827→}
+   828→   828→
+   829→   829→fn maj(a: u32, b: u32, c: u32) -> u32 {
+   830→   830→    return (a & b) ^ (a & c) ^ (b & c);
+   831→   831→}
+   832→   832→
+   833→   833→fn big_sigma0(x: u32) -> u32 {
+   834→   834→    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+   835→   835→}
+   836→   836→
+   837→   837→fn big_sigma1(x: u32) -> u32 {
+   838→   838→    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+   839→   839→}
+   840→   840→
+   841→   841→fn small_sigma0(x: u32) -> u32 {
+   842→   842→    return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
+   843→   843→}
+   844→   844→
+   845→   845→fn small_sigma1(x: u32) -> u32 {
+   846→   846→    return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
+   847→   847→}
+   848→   848→
+   849→   849→fn write_u32_be(buf: Address, offset: u64, val: u32) {
+   850→   850→    *(buf + offset) = (val >> 24) & 255;
+   851→   851→    *(buf + offset + 1) = (val >> 16) & 255;
+   852→   852→    *(buf + offset + 2) = (val >> 8) & 255;
+   853→   853→    *(buf + offset + 3) = val & 255;
+   854→   854→}
+   855→   855→
+   856→   856→fn read_u32_be(buf: Address, offset: u64) -> u32 {
+   857→   857→    b0: u32 = *(buf + offset);
+   858→   858→    b1: u32 = *(buf + offset + 1);
+   859→   859→    b2: u32 = *(buf + offset + 2);
+   860→   860→    b3: u32 = *(buf + offset + 3);
+   861→   861→    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+   862→   862→}
+   863→   863→
+   864→   864→fn main() -> i32 {
+   865→   865→    msg = allocate(3);
+   866→   866→    *(msg + 0) = 97;
+   867→   867→    *(msg + 1) = 98;
+   868→   868→    *(msg + 2) = 99;
+   869→   869→    // ... SHA-256 compression ...
+   870→   870→    free(msg);
+   871→   871→    return 0;
+   872→   872→}
+   873→   873→```
+   874→   874→
+   875→   875→### Pattern 2: Memory Buffer (Read/Write Bytes)
+   876→   876→
+   877→   877→```vuma
+   878→   878→fn main() -> i32 {
+   879→   879→    buf = allocate(16);
+   880→   880→
+   881→   881→    // Write bytes
+   882→   882→    *(buf + 0) = 0x4f;
+   883→   883→    *(buf + 1) = 0x8b;
+   884→   884→
+   885→   885→    // Read bytes back
+   886→   886→    b0: u32 = *(buf + 0);
+   887→   887→    b1: u32 = *(buf + 1);
+   888→   888→
+   889→   889→    free(buf);
+   890→   890→    return 0;
+   891→   891→}
+   892→   892→```
+   893→   893→
+   894→   894→### Pattern 3: Byte Manipulation (Extract/Insert)
+   895→   895→
+   896→   896→```vuma
+   897→   897→// Extract byte n from a u32 (big-endian)
+   898→   898→fn get_byte(val: u32, n: u32) -> u32 {
+   899→   899→    return (val >> (n * 8)) & 255;
+   900→   900→}
+   901→   901→
+   902→   902→// Set byte n in a u32 (big-endian)
+   903→   903→fn set_byte(val: u32, n: u32, byte: u32) -> u32 {
+   904→   904→    shift: u32 = n * 8;
+   905→   905→    mask: u32 = 255 << shift;
+   906→   906→    return (val & (mask ^ 4294967295)) | ((byte & 255) << shift) & 4294967295;
+   907→   907→}
+   908→   908→```
+   909→   909→
+   910→   910→### Pattern 4: Memory Copy
+   911→   911→
+   912→   912→```vuma
+   913→   913→fn copy_bytes(dst: Address, src: Address, len: u64) {
+   914→   914→    i: u64 = 0;
+   915→   915→    for i in 0..len {
+   916→   916→        *(dst + i) = *(src + i);
+   917→   917→    }
+   918→   918→}
+   919→   919→```
+   920→   920→
+   921→   921→### Pattern 5: Memory Set (Fill with Value)
+   922→   922→
+   923→   923→```vuma
+   924→   924→fn mem_set(buf: Address, len: u64, val: u32) {
+   925→   925→    i: u64 = 0;
+   926→   926→    for i in 0..len {
+   927→   927→        *(buf + i) = val & 255;
+   928→   928→    }
+   929→   929→}
+   930→   930→```
+   931→   931→
+   932→   932→### Pattern 6: Array-style Access via Stride
+   933→   933→
+   934→   934→When storing an array of u32 values in a byte buffer, each element occupies 4 bytes (stride = 4):
+   935→   935→
+   936→   936→```vuma
+   937→   937→fn w_store(w_base: Address, idx: u64, val: u32) {
+   938→   938→    write_u32_be(w_base, idx * 4, val);
+   939→   939→}
+   940→   940→
+   941→   941→fn w_load(w_base: Address, idx: u64) -> u32 {
+   942→   942→    return read_u32_be(w_base, idx * 4);
+   943→   943→}
+   944→   944→```
+   945→   945→
+   946→   946→### Pattern 7: SHA-256 Compression Round
+   947→   947→
+   948→   948→```vuma
+   949→   949→for i in 0..64 {
+   950→   950→    ki: u32 = read_u32_be(k, i * 4);
+   951→   951→    wi: u32 = w_load(w, i);
+   952→   952→    t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & 4294967295;
+   953→   953→    t2: u32 = (big_sigma0(a) + maj(a, b, c)) & 4294967295;
+   954→   954→    h = g;
+   955→   955→    g = f;
+   956→   956→    f = e;
+   957→   957→    e = (d + t1) & 4294967295;
+   958→   958→    d = c;
+   959→   959→    c = b;
+   960→   960→    b = a;
+   961→   961→    a = (t1 + t2) & 4294967295;
+   962→   962→}
+   963→   963→```
+   964→   964→
+   965→   965→---
+   966→   966→
+   967→   967→## 14. Pitfalls
+   968→   968→
+   969→   969→This section documents the most common mistakes when writing VUMA code. **Read this section carefully.**
+   970→   970→
+   971→   971→### Pitfall 1: u32 Arithmetic Without Masking
+   972→   972→
+   973→   973→**Problem**: VUMA uses 64-bit registers. When two u32 values are added, the 64-bit result can have bits set above bit 31 (the carry). Subsequent operations on this value (especially right shifts) will produce wrong results.
+   974→   974→
+   975→   975→```vuma
+   976→   976→// WRONG
+   977→   977→sum: u32 = a + b;        // upper 32 bits may have carry
+   978→   978→rotated: u32 = sum >> 4;  // wrong! shift includes garbage bits
+   979→   979→
+   980→   980→// CORRECT
+   981→   981→sum: u32 = (a + b) & 4294967295;  // clear upper 32 bits
+   982→   982→rotated: u32 = sum >> 4;          // now correct
+   983→   983→```
+   984→   984→
+   985→   985→**Rule**: After every arithmetic operation (`+`, `-`, `*`) on u32 values, apply `& 4294967295`.
+   986→   986→
+   987→   987→### Pitfall 2: Using `~` for Bitwise NOT
+   988→   988→
+   989→   989→**Problem**: The `~` operator inverts all 64 bits. For a u32 value in a 64-bit register, this means bits 32-63 are also inverted, producing `0xFFFFFFFF????????` instead of `0x00000000????????`.
+   990→   990→
+   991→   991→```vuma
+   992→   992→// WRONG
+   993→   993→not_x = ~x;  // produces 0xFFFFFFFF???????? for u32 x
+   994→   994→
+   995→   995→// CORRECT
+   996→   996→not_x: u32 = x ^ 4294967295;  // flips only lower 32 bits
+   997→   997→```
+   998→   998→
+   999→   999→**Rule**: Never use `~` for u32 bitwise NOT. Always use `x ^ 4294967295`.
+  1000→  1000→
+  1001→  1001→### Pitfall 3: Left Shift Without Masking
+  1002→  1002→
+  1003→  1003→**Problem**: Left-shifting a u32 value by N bits in a 64-bit register moves bits into the upper 32 bits.
+  1004→  1004→
+  1005→  1005→```vuma
+  1006→  1006→// WRONG
+  1007→  1007→shifted: u32 = value << 24;  // bits above bit 31 are set
+  1008→  1008→
+  1009→  1009→// CORRECT
+  1010→  1010→shifted: u32 = (value << 24) & 4294967295;  // clear upper 32 bits
+  1011→  1011→```
+  1012→  1012→
+  1013→  1013→**Rule**: After any left shift of a u32 value, apply `& 4294967295`.
+  1014→  1014→
+  1015→  1015→### Pitfall 4: Rotate Without Masking
+  1016→  1016→
+  1017→  1017→**Problem**: A rotate-right composed from shifts produces bits above bit 31 from the left-shift component.
+  1018→  1018→
+  1019→  1019→```vuma
+  1020→  1020→// WRONG
+  1021→  1021→rotated: u32 = (x >> n) | (x << (32 - n));  // upper bits polluted
+  1022→  1022→
+  1023→  1023→// CORRECT
+  1024→  1024→rotated: u32 = ((x >> n) | (x << (32 - n))) & 4294967295;
+  1025→  1025→```
+  1026→  1026→
+  1027→  1027→**Rule**: Always mask the result of a rotate operation.
+  1028→  1028→
+  1029→  1029→### Pitfall 5: Forgetting to Free Memory
+  1030→  1030→
+  1031→  1031→**Problem**: Every `allocate()` must be matched with a `free()`. The IVE checks this, but it is easy to forget in complex control flow.
+  1032→  1032→
+  1033→  1033→```vuma
+  1034→  1034→// WRONG — memory leak
+  1035→  1035→fn bad() -> i32 {
+  1036→  1036→    buf = allocate(64);
+  1037→  1037→    return 0;  // buf is never freed!
+  1038→  1038→}
+  1039→  1039→
+  1040→  1040→// CORRECT
+  1041→  1041→fn good() -> i32 {
+  1042→  1042→    buf = allocate(64);
+  1043→  1043→    // ... use buf ...
+  1044→  1044→    free(buf);
+  1045→  1045→    return 0;
+  1046→  1046→}
+  1047→  1047→```
+  1048→  1048→
+  1049→  1049→**Rule**: Always pair `allocate()` with `free()`. Free in reverse order of allocation to match the typical stack discipline.
+  1050→  1050→
+  1051→  1051→### Pitfall 6: Using `!x` for Bitwise NOT
+  1052→  1052→
+  1053→  1053→**Problem**: The `!` operator is logical NOT (converts non-zero to 0 and 0 to 1), not bitwise NOT.
+  1054→  1054→
+  1055→  1055→```vuma
+  1056→  1056→// WRONG — logical NOT, not bitwise NOT
+  1057→  1057→not_x = !x;  // produces 0 or 1, not bitwise complement
+  1058→  1058→
+  1059→  1059→// CORRECT — bitwise NOT via XOR
+  1060→  1060→not_x: u32 = x ^ 4294967295;
+  1061→  1061→```
+  1062→  1062→
+  1063→  1063→**Rule**: Use `x ^ 4294967295` for bitwise NOT, never `!x` or `~x`.
+  1064→  1064→
+  1065→  1065→### Pitfall 7: Hex Literals as Byte Values in Stores
+  1066→  1066→
+  1067→  1067→**Problem**: When storing a value to memory via `*(ptr + offset) = value`, only the low 8 bits are stored. Make sure you are not accidentally storing a truncated value.
+  1068→  1068→
+  1069→  1069→```vuma
+  1070→  1070→// This stores only the low 8 bits (0xC2)
+  1071→  1071→*(buf + 0) = 0x4FC2;  // stores 0xC2, NOT 0x4FC2
+  1072→  1072→
+  1073→  1073→// To store a specific byte, mask explicitly:
+  1074→  1074→*(buf + 0) = (0x4FC2 >> 8) & 255;  // stores 0x4F
+  1075→  1075→*(buf + 1) = 0x4FC2 & 255;        // stores 0xC2
+  1076→  1076→```
+  1077→  1077→
+  1078→  1078→### Pitfall 8: Exit Code Truncation
+  1079→  1079→
+  1080→  1080→**Problem**: The process exit code is typically 8 bits (0-255) on Linux. When `main()` returns a u32 or i32, only the low byte is used as the exit code.
+  1081→  1081→
+  1082→  1082→```vuma
+  1083→  1083→fn main() -> i32 {
+  1084→  1084→    // To exit with code 79 (0x4F):
+  1085→  1085→    return 79;  // exit code = 79
+  1086→  1086→}
+  1087→  1087→```
+  1088→  1088→
+  1089→  1089→If you need to verify a specific byte from a u32 computation, mask it and return:
+  1090→  1090→
+  1091→  1091→```vuma
+  1092→  1092→fn main() -> i32 {
+  1093→  1093→    result: u32 = compute_something();
+  1094→  1094→    return result & 255;  // return low byte as exit code
+  1095→  1095→}
+  1096→  1096→```
+  1097→  1097→
+  1098→  1098→### Pitfall 9: Reading Bytes as u32 Without Masking
+  1099→  1099→
+  1100→  1100→When you read a byte from memory into a `u32` variable, the value is zero-extended by the load. However, if you then shift and combine bytes, the result must be masked:
+  1101→  1101→
+  1102→  1102→```vuma
+  1103→  1103→// Each byte read is zero-extended to u32, but after shifting
+  1104→  1104→// and combining, upper bits may be set
+  1105→  1105→b0: u32 = *(buf + 0);  // e.g., 0x61
+  1106→  1106→combined: u32 = (b0 << 24);  // 0x61000000 in 64-bit register, but
+  1107→  1107→                               // might have upper bits
+  1108→  1108→combined: u32 = (b0 << 24) & 4294967295;  // CORRECT
+  1109→  1109→```
+  1110→  1110→
+  1111→  1111→### Pitfall 10: Range Bounds in For Loops
+  1112→  1112→
+  1113→  1113→The range `a..b` is exclusive on the upper bound. `0..64` means 0 through 63, not 0 through 64:
+  1114→  1114→
+  1115→  1115→```vuma
+  1116→  1116→for i in 0..64 {
+  1117→  1117→    // i goes from 0 to 63 inclusive (64 iterations)
+  1118→  1118→}
+  1119→  1119→
+  1120→  1120→for i in 16..64 {
+  1121→  1121→    // i goes from 16 to 63 inclusive (48 iterations)
+  1122→  1122→}
+  1123→  1123→```
+  1124→  1124→
+  1125→  1125→---
+  1126→  1126→
+  1127→  1127→## 15. Target Platforms
+  1128→  1128→
+  1129→  1129→VUMA compiles to native machine code for 8 architectures plus Wasm. Each target has its own backend that translates the IR to machine code.
+  1130→  1130→
+  1131→  1131→### Supported Targets
+  1132→  1132→
+  1133→  1133→| Target | Status | Pointer Size | Register Width | Notes |
+  1134→  1134→|--------|--------|-------------|----------------|-------|
+  1135→  1135→| x86_64 | Stable | 8 bytes | 64-bit | System V AMD64 ABI |
+  1136→  1136→| AArch64 | Stable | 8 bytes | 64-bit | AAPCS64 calling convention |
+  1137→  1137→| RISC-V 64 | Stable | 8 bytes | 64-bit | RV64GC, LP64 ABI |
+  1138→  1138→| ARM32 | Stable | 4 bytes | 32-bit | AAPCS, no u32 masking needed* |
+  1139→  1139→| MIPS64 | Stable | 8 bytes | 64-bit | N64 ABI |
+  1140→  1140→| PPC64 | Stable | 8 bytes | 64-bit | ELFv2 ABI |
+  1141→  1141→| LoongArch64 | Experimental | 8 bytes | 64-bit | LP64 ABI, QEMU slow |
+  1142→  1142→| Wasm32 | Experimental | 4 bytes | 32-bit | WebAssembly MVP |
+  1143→  1143→
+  1144→  1144→*ARM32 uses 32-bit registers, so u32 masking is not needed on this target. However, **write code that works on all targets** by always masking u32 results.
+  1145→  1145→
+  1146→  1146→### Cross-Compilation and Testing
+  1147→  1147→
+  1148→  1148→The VUMA build system uses QEMU user-mode emulation to test cross-compiled binaries:
+  1149→  1149→
+  1150→  1150→```bash
+  1151→  1151→# Test on x86_64 (native on x86_64 hosts)
+  1152→  1152→./sha256d_x86_64; echo $?
+  1153→  1153→
+  1154→  1154→# Test on AArch64
+  1155→  1155→qemu-aarch64 ./sha256d_aarch64; echo $?
+  1156→  1156→
+  1157→  1157→# Test on RISC-V 64
+  1158→  1158→qemu-riscv64-static ./sha256d_riscv64; echo $?
+  1159→  1159→
+  1160→  1160→# Test on ARM32
+  1161→  1161→qemu-arm ./sha256d_arm32; echo $?
+  1162→  1162→
+  1163→  1163→# Test on MIPS64
+  1164→  1164→qemu-mips64-static ./sha256d_mips64; echo $?
+  1165→  1165→
+  1166→  1166→# Test on PPC64
+  1167→  1167→qemu-ppc64 ./sha256d_ppc64; echo $?
+  1168→  1168→
+  1169→  1169→# Test on LoongArch64
+  1170→  1170→qemu-loongarch64 ./sha256d_loongarch64; echo $?
+  1171→  1171→```
+  1172→  1172→
+  1173→  1173→### Target-Specific Considerations
+  1174→  1174→
+  1175→  1175→**64-bit targets (x86_64, AArch64, RISC-V 64, MIPS64, PPC64, LoongArch64)**:
+  1176→  1176→- All use 64-bit general-purpose registers
+  1177→  1177→- u32 values stored in 64-bit registers **must** be masked with `& 4294967295` after arithmetic and left shifts
+  1178→  1178→- `Address` is 8 bytes
+  1179→  1179→- Pointer arithmetic uses 64-bit addition
+  1180→  1180→
+  1181→  1181→**32-bit targets (ARM32, Wasm32)**:
+  1182→  1182→- Use 32-bit registers
+  1183→  1183→- u32 masking is technically unnecessary but recommended for portability
+  1184→  1184→- `Address` is 4 bytes
+  1185→  1185→- Pointer arithmetic uses 32-bit addition
+  1186→  1186→
+  1187→  1187→**Wasm32 specifics**:
+  1188→  1188→- No native ROR/ROL instructions; rotates are synthesized from shift+or sequences
+  1189→  1189→- Type inference can be tricky; explicit type annotations are important
+  1190→  1190→- Stack machine architecture (no registers); the backend manages a virtual value stack
+  1191→  1191→
+  1192→  1192→### Portability Rules
+  1193→  1193→
+  1194→  1194→When writing VUMA code, follow these rules to ensure it works on all 8 targets:
+  1195→  1195→
+  1196→  1196→1. **Always mask u32 results** with `& 4294967295` after addition, subtraction, multiplication, and left shift.
+  1197→  1197→2. **Use `x ^ 4294967295`** for bitwise NOT, never `~x`.
+  1198→  1198→3. **Compose rotates from shifts** with a final mask: `((x >> n) | (x << (32 - n))) & 4294967295`.
+  1199→  1199→4. **Use explicit type annotations** for all variable declarations.
+  1200→  1200→5. **Use `u64` for offsets and lengths**, not `u32`, to avoid truncation on large buffers.
+  1201→  1201→6. **Always pair `allocate()` with `free()`**.
+  1202→  1202→
+  1203→  1203→---
+  1204→  1204→
+  1205→  1205→## Quick Reference Card
+  1206→  1206→
+  1207→  1207→```
+  1208→  1208→# Types
+  1209→  1209→i8 i16 i32 i64 u8 u16 u32 u64 Address bool void
+  1210→  1210→
+  1211→  1211→# Variable declaration
+  1212→  1212→name: type = value;
+  1213→  1213→
+  1214→  1214→# Assignment
+  1215→  1215→name = value;
+  1216→  1216→name = (expression) & 4294967295;  # for u32
+  1217→  1217→
+  1218→  1218→# Function
+  1219→  1219→fn name(param: type, ...) -> return_type { ... }
+  1220→  1220→
+  1221→  1221→# Control flow
+  1222→  1222→for i in 0..n { ... }
+  1223→  1223→while condition { ... }
+  1224→  1224→if condition { ... } else { ... }
+  1225→  1225→loop { ... }
+  1226→  1226→
+  1227→  1227→# Memory
+  1228→  1228→ptr = allocate(n);
+  1229→  1229→free(ptr);
+  1230→  1230→
+  1231→  1231→# Pointer access
+  1232→  1232→*(ptr + offset)              # load byte
+  1233→  1233→*(ptr + offset) = value;     # store byte
+  1234→  1234→
+  1235→  1235→# Bitwise
+  1236→  1236→a & b    a | b    a ^ b    a << n    a >> n
+  1237→  1237→NOT: x ^ 4294967295          # NOT ~x
+  1238→  1238→ROR: ((x >> n) | (x << (32-n))) & 4294967295
+  1239→  1239→
+  1240→  1240→# Arithmetic
+  1241→  1241→(a + b) & 4294967295    # u32 add
+  1242→  1242→(a - b) & 4294967295    # u32 sub
+  1243→  1243→(a * b) & 4294967295    # u32 mul
+  1244→  1244→
+  1245→  1245→# Comparison
+  1246→  1246→==  !=  <  <=  >  >=
+  1247→  1247→
+  1248→  1248→# Return
+  1249→  1249→return value;
+  1250→  1250→```
+  1251→  1251→
+  1252→  1252→---
+  1253→  1253→
+  1254→  1254→## End of Document
+  1255→  1255→
+  1256→  1256→This reference covers all constructs needed to write correct VUMA programs. The most critical rules are:
+  1257→  1257→
+  1258→  1258→1. **Mask all u32 arithmetic results** with `& 4294967295`.
+  1259→  1259→2. **Never use `~`** for u32 bitwise NOT; use `^ 4294967295`.
+  1260→  1260→3. **Always pair `allocate()` with `free()`**.
+  1261→  1261→4. **Compose rotates from shifts** and mask the result.
+  1262→  1262→5. **Use big-endian byte-level access** for multi-byte values.
+  1263→  1263→

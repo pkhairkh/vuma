@@ -53,6 +53,8 @@ let z: u64 = 100;       // let binding (also supported)
 | `i16` | 2 bytes | Signed 16-bit integer |
 | `i32` | 4 bytes | Signed 32-bit integer |
 | `i64` | 8 bytes | Signed 64-bit integer |
+| `f32` | 4 bytes | IEEE 754 single-precision floating point |
+| `f64` | 8 bytes | IEEE 754 double-precision floating point |
 | `bool` | 1 byte | Boolean |
 | `void` | 0 bytes | Unit/void type |
 | `Address` | 8 bytes | Opaque memory region handle (u64 internally) |
@@ -182,22 +184,135 @@ match value {
 
 ### 1.6 Available Backends
 
-VUMA supports 8 compilation targets:
+VUMA supports 8 compilation targets, all with FFI and DWARF debug info support:
 
-| Backend | ISA Name | Endianness | Pointer Width | Output Format |
-|---------|----------|------------|---------------|---------------|
-| AArch64 | `aarch64` | Little | 64-bit | ELF64 |
-| x86_64 | `x86_64` | Little | 64-bit | ELF64 |
-| RISC-V 64 | `riscv64` | Little | 64-bit | ELF64 |
-| LoongArch64 | `loongarch64` | Little | 64-bit | ELF64 |
-| MIPS64 | `mips64` | Big | 64-bit | ELF64 |
-| PowerPC64 | `ppc64` | Big | 64-bit | ELF64 |
-| ARM32 | `arm32` | Little | 32-bit | ELF32 |
-| Wasm32 | `wasm32` | Little | 32-bit | Wasm |
+| Backend | ISA Name | Endianness | Pointer Width | Output Format | FFI | Atomics | DWARF |
+|---------|----------|------------|---------------|---------------|-----|---------|-------|
+| AArch64 | `aarch64` | Little | 64-bit | ELF64 | ✓ | ✓ | ✓ |
+| x86_64 | `x86_64` | Little | 64-bit | ELF64 | ✓ | ✓ | ✓ |
+| RISC-V 64 | `riscv64` | Little | 64-bit | ELF64 | ✓ | ✓ | ✓ |
+| LoongArch64 | `loongarch64` | Little | 64-bit | ELF64 | ✓ | — | ✓ |
+| MIPS64 | `mips64` | Big | 64-bit | ELF64 | ✓ | — | ✓ |
+| PowerPC64 | `ppc64` | Big | 64-bit | ELF64 | ✓ | — | ✓ |
+| ARM32 | `arm32` | Little | 32-bit | ELF32 | ✓ | — | ✓ |
+| Wasm32 | `wasm32` | Little | 32-bit | Wasm | — | Limited | — |
 
 All 64-bit backends use the same LP64 data model. The ARM32 and Wasm32 backends use a 32-bit pointer model where `Address` is 4 bytes.
 
-### 1.7 Behavioral Descriptors (BD) System
+### 1.7 Standard Library: `fmt` Module
+
+VUMA provides a `fmt` module for string formatting — the equivalent of C's `printf`/`sprintf`:
+
+```vuma
+// Integer formatting (base 2–36, with zero-padding)
+s = fmt::format_int(value: i64, base: u32, width: u32);
+s = fmt::format_uint(value: u64, base: u32, width: u32);
+
+// Convenience wrappers
+s = fmt::format_hex(value: u64, width: u32);     // base 16
+s = fmt::format_binary(value: u64, width: u32);  // base 2
+s = fmt::format_octal(value: u64, width: u32);   // base 8
+s = fmt::format_pointer(addr: u64);               // "0x" + 16-char hex
+
+// Floating-point formatting
+s = fmt::format_float(value: f64, precision: u32);
+
+// String utilities
+s = fmt::pad_left(s, width, fill);
+s = fmt::pad_right(s, width, fill);
+s = fmt::join(parts, separator);
+```
+
+**Special float values:** NaN → `"nan"`, +∞ → `"inf"`, −∞ → `"-inf"`.
+
+### 1.8 Standard Library: `math` Module
+
+VUMA provides a `math` module with mathematical constants and functions:
+
+**Constants:** `math::PI`, `math::TAU`, `math::E`, `math::LN_2`, `math::LN_10`, `math::LOG2_E`, `math::LOG10_E`, `math::SQRT_2`, `math::FRAC_1_SQRT_2`. f32 variants have `_F32` suffix.
+
+**Trigonometric:** `math::sin`, `math::cos`, `math::tan`, `math::asin`, `math::acos`, `math::atan`, `math::atan2`, `math::sinh`, `math::cosh`, `math::tanh`.
+
+**Exponential/Logarithmic:** `math::sqrt`, `math::cbrt`, `math::exp`, `math::exp2`, `math::exp_m1`, `math::ln`, `math::log2`, `math::log10`, `math::ln_1p`, `math::pow`, `math::powi`.
+
+**Integer helpers:** `math::abs`, `math::min`, `math::max`, `math::clamp` (all on `i64`).
+
+**Rounding:** `math::floor`, `math::ceil`, `math::round`, `math::trunc`, `math::fract`.
+
+**Classification:** `math::is_nan`, `math::is_infinite`, `math::is_finite`, `math::is_normal`, `math::signum`, `math::copysign`.
+
+All floating-point functions have `_f32` suffixed counterparts (e.g., `math::sin_f32`, `math::sqrt_f32`).
+
+### 1.9 Foreign Function Interface (FFI)
+
+VUMA can call external C functions via `extern "C"` blocks:
+
+```vuma
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+}
+
+fn main() -> i64 {
+    let msg_addr: Address = 0x400000;
+    let result: i64 = write(1, msg_addr, 21);
+    exit(0);
+    return result;
+}
+```
+
+**Key points:**
+- `extern "C"` blocks appear at the top level only.
+- Function signatures end with `;` (no body).
+- The compiler emits relocations (not local BL instructions) for extern calls.
+- Programs must be linked with `ld` or `gcc`: `vuma compile --format obj prog.vuma -o prog.o && ld -o prog prog.o -lc`
+- Built-in bindings for Linux syscalls (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`) and C library (`memcpy`, `memset`, `malloc`, `free`) are available by default.
+- **Always match C ABI types exactly** — use `i64`/`u64` for `size_t`, `ssize_t`.
+
+### 1.10 Atomic Operations
+
+VUMA provides three atomic memory operations for concurrent programming:
+
+```vuma
+// Atomic load with acquire semantics
+value = AtomicLoad(addr);
+
+// Atomic store with release semantics
+AtomicStore(value, addr);
+
+// Atomic compare-and-swap — returns old value at addr
+old_value = AtomicCas(addr, expected, desired);
+```
+
+**Critical:** Always wrap `AtomicCas` in a retry loop:
+```vuma
+fn atomic_increment(counter: Address) -> u64 {
+    old: u64 = AtomicLoad(counter);
+    loop {
+        new_val: u64 = old + 1;
+        prev: u64 = AtomicCas(counter, old, new_val);
+        if prev == old {
+            return new_val;
+        }
+        old = prev;
+    }
+}
+```
+
+Atomic operations are available on 64-bit backends (x86_64, AArch64, RISC-V 64).
+
+### 1.11 Debug Information
+
+VUMA can emit DWARF v4 debug info with the `--debug` flag (alias: `--debug-info`):
+
+```bash
+vuma build program.vu --debug -o program
+vuma emit aarch64 program.vu --debug -o program.elf
+```
+
+When enabled, the ELF binary contains `.debug_info`, `.debug_abbrev`, `.debug_line`, and `.debug_frame` sections with per-architecture CIE presets for stack unwinding. Without `--debug`, no `.debug_*` sections are emitted.
+
+### 1.12 Behavioral Descriptors (BD) System
 
 Every value in VUMA carries a Behavioral Descriptor composed of three orthogonal axes:
 
@@ -538,6 +653,116 @@ fn main() -> i32 {
 
 **What this teaches:** This single example covers nearly every VUMA concept: u32 masking on all arithmetic, XOR-based NOT, rotate from shifts, big-endian byte packing, allocate/free lifecycle, pointer arithmetic for array access, function decomposition, for loops, and multi-step cryptographic computation. The SHA256d program is the canonical test for VUMA compiler correctness — all production backends must produce exit code 79 when running this program.
 
+### Example 6: Using fmt and math — Distance Between Two Points
+
+```vuma
+// Compute the Euclidean distance between (0, 0) and (3, 4) = 5.0
+fn main() -> i32 {
+    x1: f64 = 0.0;
+    y1: f64 = 0.0;
+    x2: f64 = 3.0;
+    y2: f64 = 4.0;
+
+    dx: f64 = x2 - x1;
+    dy: f64 = y2 - y1;
+    dist: f64 = math::sqrt(dx * dx + dy * dy);   // 5.0
+
+    // Format for display
+    s = fmt::format_float(dist, 4);                // "5.0000"
+
+    // Return integer part as exit code
+    return dist as i32;                             // exits with code 5
+}
+```
+
+**What this teaches:** The `math` module provides standard mathematical functions like `sqrt`, `sin`, `cos`, etc. The `fmt` module formats numbers as strings for display. Use `as i32` to convert f64 to integer for the exit code.
+
+### Example 7: Trigonometry — Compute Sine Table
+
+```vuma
+// Compute sin values for angles 0° to 90° in 10° steps
+fn sin_degrees(degrees: f64) -> f64 {
+    radians: f64 = degrees * math::PI / 180.0;
+    return math::sin(radians);
+}
+
+fn main() -> i32 {
+    // sin(30°) = 0.5, format as "0.500000"
+    val: f64 = sin_degrees(30.0);
+    s = fmt::format_float(val, 6);                 // "0.500000"
+
+    // Also demonstrate hex formatting
+    hex_val = fmt::format_hex(255, 2);              // "ff"
+
+    // Return the integer part of sin(90°) = 1
+    result: f64 = sin_degrees(90.0);
+    return result as i32;                           // exits with code 1
+}
+```
+
+**What this teaches:** `math::PI` and `math::sin` work like their standard library counterparts. `fmt::format_hex` provides zero-padded hex output. Angle conversion from degrees to radians uses the standard formula.
+
+### Example 8: FFI — Calling C Library Functions
+
+```vuma
+// Call C's write() and exit() through FFI
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+}
+
+fn main() -> i64 {
+    // Write a message to stdout
+    let msg_addr: Address = 0x400000;
+    let msg_len: i64 = 13;
+    let result: i64 = write(1, msg_addr, msg_len);
+
+    // Exit cleanly
+    exit(0);
+    return result;   // unreachable
+}
+```
+
+**Compile and link:**
+```bash
+vuma compile --format obj --target aarch64 prog.vuma -o prog.o
+ld -o prog prog.o -lc
+```
+
+**What this teaches:** The `extern "C"` block declares external C functions. Calls to these functions emit relocations instead of local BL instructions. The program must be linked with the C library using `ld`. Always match the C ABI exactly — use `i64` for `size_t`.
+
+### Example 9: Atomic Counter with AtomicCas
+
+```vuma
+// Thread-safe atomic increment using compare-and-swap
+fn atomic_increment(counter: Address) -> u64 {
+    old: u64 = AtomicLoad(counter);
+    loop {
+        new_val: u64 = old + 1;
+        prev: u64 = AtomicCas(counter, old, new_val);
+        if prev == old {
+            return new_val;
+        }
+        old = prev;
+    }
+}
+
+fn main() -> i32 {
+    counter = allocate(8);
+
+    // Initialize counter to 0
+    AtomicStore(0, counter);
+
+    // Increment atomically
+    val: u64 = atomic_increment(counter);
+
+    free(counter);
+    return val as i32;  // exits with code 1
+}
+```
+
+**What this teaches:** `AtomicLoad`, `AtomicStore`, and `AtomicCas` provide lock-free concurrency primitives. The CAS loop pattern is essential — a single CAS attempt can fail spuriously, so you must retry. `AtomicCas` returns the old value, which you compare against the expected value to determine success.
+
 ---
 
 ## Part 3: Error Recovery Patterns
@@ -640,6 +865,23 @@ Fix: Check the line and column in the error message. Common causes:
 Cause: The Behavioral Descriptor inference engine cannot determine a consistent
        BD for a node, often due to conflicting type usage.
 Fix: Add explicit type annotations to the variables involved.
+```
+
+**Error: E037 "Relocation error"**
+```
+Cause: An extern function declared in an `extern "C"` block cannot be resolved
+       by the linker, or a relocation offset overflows.
+Fix: Ensure the program is linked with the required library (e.g., -lc for libc).
+     Check that the extern function name matches exactly (C is case-sensitive).
+     If compiling to a relocatable object, use `ld` to link:
+       vuma compile --format obj prog.vuma -o prog.o
+       ld -o prog prog.o -lc
+```
+
+**Error: "unsupported operation" on ARM32/Wasm32 with atomics**
+```
+Cause: AtomicLoad/AtomicStore/AtomicCas are only available on 64-bit backends.
+Fix: Use a 64-bit backend (x86_64, AArch64, RISC-V 64) or avoid atomics.
 ```
 
 **Error: codegen "unsupported operation"**
@@ -918,6 +1160,8 @@ vuma repl
 ```bash
 --opt-level O0|O1|O2|O3          # Optimization level (default: O2)
 --verify-level none|quick|normal|exhaustive  # Verification thoroughness (default: normal)
+--debug                          # Include DWARF debug info in output (alias: --debug-info)
+--sections                       # Emit full ELF section headers
 ```
 
 ### 4.7 LLM Coding Workflow
@@ -959,3 +1203,13 @@ Here is the recommended workflow for an LLM writing VUMA code:
 | Conditional NOT | `x ^ 4294967295` (never `~x` for u32) |
 | Allocate + init + free | `buf=allocate(n); ...; free(buf);` |
 | Return computed exit code | `fn main() -> i32 { return value; }` |
+| Format integer | `fmt::format_int(val, 10, 4)` — decimal, 4-digit zero-padded |
+| Format hex | `fmt::format_hex(val, 8)` — 8-char zero-padded hex |
+| Format float | `fmt::format_float(val, 6)` — 6 decimal places |
+| Square root | `math::sqrt(x)` — f64 square root |
+| Sine/cosine | `math::sin(x)`, `math::cos(x)` — f64 trig, x in radians |
+| π constant | `math::PI` ≈ 3.14159 |
+| Declare C function | `extern "C" { fn name(params) -> ret; }` |
+| Atomic increment | `loop { old=AtomicLoad(p); if AtomicCas(p,old,old+1)==old { break; } }` |
+| Debug build | `vuma build prog.vu --debug -o prog` |
+| FFI link step | `vuma compile --format obj prog.vuma -o prog.o && ld -o prog prog.o -lc` |

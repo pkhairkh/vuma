@@ -1,0 +1,601 @@
+     1→# Relational Descriptors (RelD) — Formal Mathematical Specification
+     2→
+     3→**VUMA Project — Behavioral Descriptors Component**
+     4→**Task ID:** W1-04
+     5→**Date:** 2026-03-04
+     6→**Status:** Specification Draft v1.0
+     7→
+     8→---
+     9→
+    10→## 1. Relation Types
+    11→
+    12→### 1.1 Syntactic Definition
+    13→
+    14→Relational Descriptors (RelD) form the third component of the Behavioral Descriptor triple `(RepD, CapD, RelD)`. While RepD governs physical memory layout and CapD governs permissible operations, RelD governs the *relationships* that values bear to one another — temporal ordering, structural containment, data- and control-flow dependency, semantic equivalence, information-security flow, and liveness scoping. These six relation families are exhaustive in the sense that every inter-value relationship relevant to program correctness can be decomposed into a combination of these primitives.
+    15→
+    16→We begin by fixing a universe of discourse. Let `ValId` denote the countable set of value identifiers — unique, stable names assigned by the Inference and Verification Engine (IVE) to every value node in the Semantic Computation Graph (SCG). Let `Path` denote finite sequences of field selectors. Let `ScopeId` denote the countable set of lexical and dynamic scope identifiers. Let `SecLevel = {Public, Internal, Confidential, Secret, TopSecret}` denote the linear security lattice ordered by `Public ≤ Internal ≤ Confidential ≤ Secret ≤ TopSecret`. We write `RepMapping` for the set of partial functions `ValId ⇀ ValId` that map fields of one representation onto fields of another (the formal underpinning of zero-copy reinterpretation).
+    17→
+    18→The grammar of relations is:
+    19→
+    20→```
+    21→Relation ::= TemporalRel { kind: TemporalKind, target: ValId }
+    22→           | ContainmentRel { container: ValId, field: Path }
+    23→           | DependencyRel { source: ValId, kind: DepKind }
+    24→           | EquivalenceRel { equivalent: ValId, mapping: RepMapping }
+    25→           | SecurityRel { level: SecLevel, flow: FlowPolicy }
+    26→           | LivenessRel { scope: ScopeId, phase: Phase }
+    27→
+    28→TemporalKind ::= Outlives | Coincides | Precedes | Succeeds
+    29→DepKind      ::= DataDep | ControlDep | AliasDep
+    30→FlowPolicy   ::= NoDowngrade | NoCrossBoundary | Sanitized
+    31→Phase        ::= Init | Steady | Teardown | Dropped
+    32→```
+    33→
+    34→A RelD is the aggregation of all relations pertaining to a single value:
+    35→
+    36→```
+    37→RelD ::= RelD { relations: Set<Relation> }
+    38→```
+    39→
+    40→### 1.2 Semantic Interpretation
+    41→
+    42→Each relation is a constraint on the trace semantics of the program. Let `T = (E, ≤_E, σ)` be a trace: a partially ordered set of events `E` with happens-before ordering `≤_E` and store mapping `σ : ValId × E ⇀ ByteVec`. The satisfaction relation `T ⊨ r` (trace `T` satisfies relation `r`) is defined case-by-case:
+    43→
+    44→- **TemporalRel{Outlives, y}**: For the value `v` carrying this relation and target `y`, `T ⊨ TemporalRel{Outlives, y}` iff the maximal event at which `σ(v, ·)` is defined is ≥ in the happens-before order than the maximal event at which `σ(y, ·)` is defined. Informally: `v` is live at least as long as `y`.
+    45→
+    46→- **TemporalRel{Coincides, y}**: `T ⊨ TemporalRel{Coincides, y}` iff `v` and `y` share exactly the same liveness interval: the minimal and maximal events of `v` and `y` in the trace are identical. Coincides is strictly stronger than mutual Outlives.
+    47→
+    48→- **TemporalRel{Precedes, y}**: The maximal event of `v` is ≤ the minimal event of `y`. Value `v` completes before `y` begins.
+    49→
+    50→- **TemporalRel{Succeeds, y}**: The minimal event of `v` is ≥ the maximal event of `y`. Value `v` begins only after `y` completes.
+    51→
+    52→- **ContainmentRel{c, p}**: Value `v` is a sub-field of container `c` at path `p`. Formally, for every event `e` where `σ(v, e)` is defined, `σ(c, e)` is also defined and the byte range of `v` is a subset of the byte range of `c`.
+    53→
+    54→- **DependencyRel{s, DataDep}**: Every event that reads `v` is preceded by an event that wrote `s`. The data-flow edge from `s` to `v` must be respected.
+    55→
+    56→- **DependencyRel{s, ControlDep}**: Whether `v` is computed at all depends on a predicate involving `s`. This is a control-flow constraint, not a data-flow constraint: `v`'s existence in the trace is conditioned on `s`.
+    57→
+    58→- **DependencyRel{s, AliasDep}**: `v` and `s` are derived from the same allocation root. A write through one may affect reads through the other. AliasDep is the relational analogue of Rust's aliasing analysis.
+    59→
+    60→- **EquivalenceRel{e, m}**: `v` and `e` denote the same abstract entity, differing only in representation. The mapping `m : ValId ⇀ ValId` specifies which logical fields correspond. For each corresponding pair `(f_v, f_e)` in `m`, the bytes of `v` at `f_v` and the bytes of `e` at `f_e` encode semantically identical information (possibly in different byte orders, encodings, or layouts).
+    61→
+    62→- **SecurityRel{ℓ, NoDowngrade}**: The security level of `v` is at least `ℓ`, and no operation on `v` may produce a value at a level below `ℓ`. This is the non-interference property: `T ⊨ SecurityRel{ℓ, NoDowngrade}` iff for every pair of traces `T₁, T₂` that agree on all events at level ≥ ℓ, the observable behavior of `v` is identical.
+    63→
+    64→- **SecurityRel{ℓ, NoCrossBoundary}**: `v` at level `ℓ` must not cross a specified trust boundary (e.g., from a trusted enclave to untrusted host). Formally, there is no event that reads `v` and writes to a value whose SecurityRel carries a level below `ℓ`.
+    65→
+    66→- **SecurityRel{ℓ, Sanitized}**: `v` originated at level `ℓ` but has been transformed by a sanctioned sanitization function, producing a value that may be treated at a lower level. The trace must contain a specific sanitization event between the origin of `v` and any downstream use at a reduced level.
+    67→
+    68→- **LivenessRel{s, p}**: Value `v` is live exactly during phase `p` of scope `s`. The liveness interval of `v` is bounded by the phase transitions of `s`.
+    69→
+    70→### 1.3 Well-Formedness
+    71→
+    72→Not every set of relations is meaningful. A RelD `d = RelD{R}` is **well-formed** iff:
+    73→
+    74→1. **No self-relation**: For no `r ∈ R` does `r` relate `v` to itself (trivial relations add no information and indicate a probable inference error).
+    75→
+    76→2. **Temporal consistency within d**: If `TemporalRel{Outlives, y} ∈ R` and `TemporalRel{Precedes, y} ∈ R`, then `d` is ill-formed (a value cannot both outlive and precede the same target — the two constraints are contradictory unless `y` has zero liveness, which we exclude by requiring positive liveness intervals).
+    77→
+    78→3. **Security monotonicity**: If `SecurityRel{ℓ₁, f₁} ∈ R` and `SecurityRel{ℓ₂, f₂} ∈ R` with `ℓ₁ ≠ ℓ₂`, then `ℓ₁` and `ℓ₂` must be compatible — i.e., the effective security level is `max(ℓ₁, ℓ₂)` with the most restrictive flow policy. This is the join operation of the security lattice.
+    79→
+    80→We write `wf(d)` to denote that `d` is well-formed.
+    81→
+    82→---
+    83→
+    84→## 2. RelD Refinement
+    85→
+    86→### 2.1 Motivation and Intuition
+    87→
+    88→Refinement is the ordering relation on RelDs that captures the intuition "more restrictive / more informative / narrower." If `r₁ refines r₂`, then every trace that satisfies `r₁` also satisfies `r₂`, but not necessarily vice versa. Refinement is the relational analogue of subtyping: a value with a more refined RelD can be used wherever a less refined one is expected, because it carries stronger guarantees. This section defines `refines` precisely, proves it is a partial order, and establishes the key lattice properties that enable composition.
+    89→
+    90→### 2.2 Pointwise Refinement of Relations
+    91→
+    92→We first define refinement on individual relations, then lift to RelDs. The pointwise refinement relation `⊑` on `Relation` is defined as follows:
+    93→
+    94→**Temporal refinement lattice.** The temporal kinds form a refinement lattice induced by logical strength:
+    95→
+    96→```
+    97→Outlives(x, y) ⊑ Coincides(x, y)     [if x and y are the same pair]
+    98→Precedes(x, y) ⊑ Coincides(x, y)      [if x and y are the same pair]
+    99→Succeeds(x, y) ⊑ Coincides(x, y)      [if x and y are the same pair]
+   100→```
+   101→
+   102→The justification: `Outlives(x, y)` asserts that `x`'s liveness extends at least to the end of `y`'s liveness — it is a *lower bound* on `x`'s lifetime. `Coincides(x, y)` asserts exact equality of liveness intervals — a *tighter* constraint. Any trace where `x` and `y` coincide certainly satisfies `Outlives`, but not vice versa. Similarly, `Precedes` and `Succeeds` each constrain one endpoint of the liveness interval, while `Coincides` constrains both. Formally:
+   103→
+   104→```
+   105→{T | T ⊨ Coincides(x, y)} ⊆ {T | T ⊨ Outlives(x, y)}
+   106→```
+   107→
+   108→Moreover, `Outlives(x, y) ∧ Outlives(y, x) ⟺ Coincides(x, y)`. This is the join: if both directions of Outlives hold, the intervals must be identical. We capture this as:
+   109→
+   110→```
+   111→⊤_Temporal = Coincides   (most restrictive)
+   112→⊥_Temporal = Outlives    (least restrictive, for same direction)
+   113→```
+   114→
+   115→Note that `Precedes(x, y)` and `Outlives(x, y)` are *incomparable* when considered as constraints on a single value `x` relative to `y` — Precedes constrains the end of `x` to precede the start of `y`, while Outlives constrains the end of `x` to follow the end of `y`. They occupy orthogonal axes of the temporal space. They are comparable only through Coincides, which dominates both.
+   116→
+   117→**Security refinement.** Security relations refine according to the security lattice and flow-policy ordering:
+   118→
+   119→```
+   120→SecurityRel{ℓ₁, NoDowngrade} ⊑ SecurityRel{ℓ₂, NoDowngrade}  iff  ℓ₁ ≥ ℓ₂
+   121→SecurityRel{ℓ, NoDowngrade}  ⊑ SecurityRel{ℓ, NoCrossBoundary}
+   122→SecurityRel{ℓ, NoCrossBoundary} ⊑ SecurityRel{ℓ, Sanitized}
+   123→```
+   124→
+   125→The first rule: a higher security level is more restrictive. Any value at level `Secret` with `NoDowngrade` certainly satisfies the constraint for level `Internal` with `NoDowngrade` — the higher level subsumes the lower. The second rule: `NoDowngrade` is stricter than `NoCrossBoundary` because the former prohibits any flow downward while the latter only prohibits flows across trust boundaries. The third rule: `NoCrossBoundary` is stricter than `Sanitized` because the latter permits downgrade after approved sanitization.
+   126→
+   127→**Containment refinement.** Containment relations refine by narrowing the path scope:
+   128→
+   129→```
+   130→ContainmentRel{c, p₁} ⊑ ContainmentRel{c, p₂}  iff  p₂ is a prefix of p₁
+   131→```
+   132→
+   133→If `p₁ = p₂.q`, then `v` is contained at a *deeper* field within `c`. A deeper containment is a narrower constraint: it asserts more about the location of `v` within `c`. Any trace satisfying the deeper containment also satisfies the shallower one, because the byte range of a deeper field is a subset of the byte range of a shallower field.
+   134→
+   135→**Dependency refinement.** Dependency relations refine by increasing specificity:
+   136→
+   137→```
+   138→DependencyRel{s, AliasDep} ⊑ DependencyRel{s, DataDep}
+   139→```
+   140→
+   141→If two values are aliased, they are certainly data-dependent (a write through one observable through the other). The reverse does not hold. `ControlDep` and `DataDep` are incomparable — one constrains existence, the other constrains value.
+   142→
+   143→**Equivalence refinement.** Equivalence relations refine by expanding the mapping:
+   144→
+   145→```
+   146→EquivalenceRel{e, m₁} ⊑ EquivalenceRel{e, m₂}  iff  dom(m₁) ⊇ dom(m₂)
+   147→```
+   148→
+   149→A larger mapping (more fields mapped) is a weaker constraint because it asserts correspondence over more fields. Wait — we must be careful. Actually, a *smaller* mapping is *less informative* and therefore *less restrictive*. A larger mapping `m₁ ⊇ m₂` says "not only do these fields correspond, but also these additional fields," which is a stronger assertion. Thus:
+   150→
+   151→```
+   152→EquivalenceRel{e, m₁} ⊑ EquivalenceRel{e, m₂}  iff  m₁ ⊇ m₂  (m₁ maps more fields)
+   153→```
+   154→
+   155→**Liveness refinement.** Liveness relations refine by narrowing the phase:
+   156→
+   157→```
+   158→LivenessRel{s, Init} ⊑ LivenessRel{s, Steady}    iff  true   (Init ⊂ Steady in scope)
+   159→```
+   160→
+   161→More precisely, `Init` is a sub-phase of `Steady` in the sense that any value live during `Init` is also live during the broader `Steady` phase. The refinement goes the other direction: `LivenessRel{s, Init}` is more restrictive (narrower liveness window), so it refines the broader constraint.
+   162→
+   163→### 2.3 Lifting to RelD
+   164→
+   165→Let `d₁ = RelD{R₁}` and `d₂ = RelD{R₂}`. We define:
+   166→
+   167→```
+   168→d₁ refines d₂  (written d₁ ⊑ d₂)  iff
+   169→  ∀ r₂ ∈ R₂. ∃ r₁ ∈ R₁. r₁ ⊑ r₂ ∧ sameKind(r₁, r₂) ∧ sameTarget(r₁, r₂)
+   170→```
+   171→
+   172→That is, every relation in `d₂` is "covered" by a more restrictive relation of the same kind targeting the same value in `d₁`. The refining RelD must be at least as strong along every dimension that the coarser RelD constrains.
+   173→
+   174→### 2.4 Partial Order Proof
+   175→
+   176→**Theorem 1.** The relation `⊑` on well-formed RelDs is a partial order (reflexive, antisymmetric, transitive).
+   177→
+   178→*Proof.*
+   179→
+   180→**Reflexivity.** For any well-formed `d = RelD{R}`, we have `d ⊑ d` because for each `r ∈ R`, we can choose `r₁ = r₂ = r` and `r ⊑ r` holds by the reflexivity of pointwise refinement (each pointwise rule is reflexive by construction).
+   181→
+   182→**Antisymmetry.** Suppose `d₁ ⊑ d₂` and `d₂ ⊑ d₁`. Then every relation in `R₂` is covered by a more restrictive relation in `R₁`, and vice versa. By the antisymmetry of each pointwise refinement rule (each rule defines a partial order on relations of the same kind and target), the covering relations must be equal. Hence `R₁ = R₂` and `d₁ = d₂`.
+   183→
+   184→**Transitivity.** Suppose `d₁ ⊑ d₂` and `d₂ ⊑ d₃`. For any `r₃ ∈ R₃`, by `d₂ ⊑ d₃` there exists `r₂ ∈ R₂` with `r₂ ⊑ r₃`. By `d₁ ⊑ d₂`, there exists `r₁ ∈ R₁` with `r₁ ⊑ r₂`. By transitivity of pointwise refinement, `r₁ ⊑ r₃`. Hence `d₁ ⊑ d₃`. ∎
+   185→
+   186→### 2.5 Join and Meet
+   187→
+   188→The refinement partial order admits joins and meets for compatible RelDs. Two RelDs are *compatible* if they constrain the same value. The **join** `d₁ ⊔ d₂` is the least upper bound: the weakest RelD that is refined by both. The **meet** `d₁ ⊓ d₂` is the greatest lower bound: the strongest RelD that refines both.
+   189→
+   190→```
+   191→d₁ ⊔ d₂ = RelD{ r₁ ⊔ r₂ | r₁ ∈ R₁, r₂ ∈ R₂, sameKind(r₁,r₂), sameTarget(r₁,r₂) }
+   192→           ∪ (R₁ \ matched_in_R₂) ∪ (R₂ \ matched_in_R₁)
+   193→```
+   194→
+   195→The join takes the weaker of each matched pair and preserves unmatched relations from both sides. This corresponds to the union of constraints, where shared constraints are weakened to their common generalization. The meet is defined dually, taking the stronger of each matched pair. Both operations preserve well-formedness given well-formed inputs.
+   196→
+   197→**Lemma 1 (Join-Soundness).** If `wf(d₁)` and `wf(d₂)`, then `wf(d₁ ⊔ d₂)`.
+   198→
+   199→*Proof sketch.* The join weakens constraints, so it cannot introduce contradictions. Any temporal inconsistency present in `d₁ ⊔ d₂` would have to arise from a matched pair `r₁, r₂` where `r₁ ⊔ r₂` is contradictory. But the pointwise join operations on each relation kind are defined to produce consistent results (e.g., `Outlives ⊔ Precedes` with same target is undefined, so the pair is treated as unmatched, preserving both). Unmatched relations from `d₁` and `d₂` are individually consistent by hypothesis. ∎
+   200→
+   201→---
+   202→
+   203→## 3. RelD Composition Across Operations
+   204→
+   205→### 3.1 Overview
+   206→
+   207→Programs are built from composition: function calls, assignments, branches, loops, and concurrent forks. Each composition operation must respect and propagate RelDs. This section defines how RelDs combine under each operation, establishing the composition laws that the IVE enforces. The guiding principle is that composition must preserve the soundness guarantee: if every individual RelD is satisfied before composition, and the composition law is respected, then every RelD is satisfied after composition.
+   208→
+   209→### 3.2 Function Call
+   210→
+   211→Consider a function `f` with formal parameter `p` and callee-body value `v`, called with actual argument `a`. Let `RelD(a)` be the RelD of the actual argument and `RelD(p)` be the RelD expected by the callee. The call is well-typed iff:
+   212→
+   213→```
+   214→RelD(a) ⊑ RelD(p)     [argument refines parameter]
+   215→```
+   216→
+   217→This is the relational analogue of contravariant subtyping on function arguments. The callee promises to respect the constraints in `RelD(p)`; the caller must provide a value that satisfies at least those constraints. If `RelD(a) ⊑ RelD(p)`, then every trace satisfying `RelD(a)` also satisfies `RelD(p)`, so the callee's assumptions hold.
+   218→
+   219→For the return value `r`, the caller acquires:
+   220→
+   221→```
+   222→RelD(r_caller) = RelD(r_callee)[v_return/caller_v]
+   223→```
+   224→
+   225→where `[v_return/caller_v]` is the substitution that replaces callee-internal value identifiers with the caller's corresponding identifiers (the standard scope exit substitution). Additionally, any relations in `RelD(r_callee)` that reference values not escaping the callee are dropped, and any relations referencing values that do escape (e.g., through returned pointers) are re-targeted to the caller's namespace.
+   226→
+   227→**Lemma 2 (Call-Soundness).** If `RelD(a) ⊑ RelD(p)` and the callee body preserves its own RelD constraints (induction hypothesis), then the caller's RelD after the call is consistent.
+   228→
+   229→*Proof sketch.* By the refinement condition, the argument satisfies all callee assumptions. By the callee's internal soundness (inductive hypothesis), all callee-internal relations are satisfied. The substitution preserves satisfaction because it is a syntactic renaming that does not alter the trace semantics. Dropping non-escaping relations is sound because they constrain only callee-internal values that are no longer accessible from the caller. ∎
+   230→
+   231→### 3.3 Assignment
+   232→
+   233→For an assignment `x := e`, where `RelD(e) = RelD_e` is the RelD of the expression result and `RelD(x)_old` is the prior RelD of `x`:
+   234→
+   235→```
+   236→RelD(x)_new = RelD_e[target ← x] ⊓ RelD(x)_old
+   237→```
+   238→
+   239→The target `x` acquires the RelD of the source expression (with value identifiers re-targeted to `x`), *meet*-combined with any pre-existing constraints on `x` that survive the assignment. The meet is necessary because pre-existing relations may impose constraints that are not present in the source — for example, `x` may have a `SecurityRel{Confidential, NoDowngrade}` that persists across the assignment because the *location* `x` occupies is in a confidential-labeled memory region, regardless of what value is stored there.
+   240→
+   241→**Scoping rule.** Temporal relations in `RelD_e` are adjusted: if `e`'s value has `TemporalRel{Outlives, y}` where `y` is a value in the current scope, the assignment to `x` extends `x`'s liveness to at least the point of assignment. The assigned-to `x` may then have a shorter liveness than `y`, in which case the `Outlives` relation is dropped and a warning is emitted (the value in `e` is constrained to outlive `y`, but `x` may not, creating a potential dangling relation).
+   242→
+   243→### 3.4 Branch (Conditional)
+   244→
+   245→For a conditional `if c then e₁ else e₂`, where both branches produce a value bound to `x`:
+   246→
+   247→```
+   248→RelD(x) = RelD(e₁) ⊔ RelD(e₂)
+   249→```
+   250→
+   251→The result's RelD is the **join** of the two branch RelDs. This is the weakest RelD that is refined by both branches, capturing the fact that after the conditional, the RelD must account for either path having been taken. This is the relational analogue of union types / meet types in type theory.
+   252→
+   253→**Requirement.** Both branches must satisfy any *required* RelD `RelD_req` imposed by the continuation:
+   254→
+   255→```
+   256→RelD(e₁) ⊑ RelD_req    and    RelD(e₂) ⊑ RelD_req
+   257→```
+   258→
+   259→If one branch fails this check, the conditional is rejected. This ensures that the continuation's assumptions hold regardless of which branch is taken.
+   260→
+   261→**Lemma 3 (Branch-Soundness).** If `RelD(e₁) ⊑ RelD_req` and `RelD(e₂) ⊑ RelD_req`, then `RelD(e₁) ⊔ RelD(e₂) ⊑ RelD_req`.
+   262→
+   263→*Proof.* By definition of join, `d₁ ⊔ d₂` is the least upper bound, so `d₁ ⊑ d₁ ⊔ d₂` and `d₂ ⊑ d₁ ⊔ d₂`. Since `d₁ ⊑ RelD_req` and `d₂ ⊑ RelD_req`, and `d₁ ⊔ d₂` is the least upper bound, we have `d₁ ⊔ d₂ ⊑ RelD_req`. ∎
+   264→
+   265→### 3.5 Loop
+   266→
+   267→For a loop `while c do body`, the RelD of any value `v` modified in the loop body must satisfy the **loop invariant** condition:
+   268→
+   269→```
+   270→RelD(v)_entry ⊑ RelD(v)_exit_body
+   271→```
+   272→
+   273→where `RelD(v)_entry` is the RelD of `v` at the top of the loop and `RelD(v)_exit_body` is the RelD of `v` after one iteration of the body. This ensures that the RelD is *monotone with respect to refinement* across iterations: each iteration produces a RelD that is at least as strong as the one it started with. If the RelD were to weaken, the invariant would be violated.
+   274→
+   275→Equivalently, the loop invariant `RelD_inv(v)` must satisfy:
+   276→
+   277→```
+   278→RelD_inv(v) ⊑ RelD(v)_before_body   [pre-condition]
+   279→RelD(v)_after_body ⊑ RelD_inv(v)    [post-condition]
+   280→```
+   281→
+   282→The first condition says the invariant is established before the first iteration. The second says each iteration restores the invariant. Together, they guarantee that the invariant holds at every loop head.
+   283→
+   284→**Fixed-point formulation.** Let `F : RelD → RelD` be the transfer function of the loop body (mapping the RelD at entry to the RelD at exit). The loop invariant is a fixed point of `F`:
+   285→
+   286→```
+   287→RelD_inv = ⊔{ F^n(⊥) | n ≥ 0 }
+   288→```
+   289→
+   290→where `⊥` is the minimal (empty) RelD and `F^n` denotes `n`-fold application. Since the refinement lattice has finite height (bounded by the number of distinct relations, which is bounded by the size of the program), this iteration reaches a fixed point in finite steps.
+   291→
+   292→**Explicit relaxation.** The programmer (or IVE) may specify a weaker invariant `RelD_inv' ≺ RelD_inv`, where `RelD_inv' ⊑ RelD_inv`. This is explicit relaxation: the loop is verified against the weaker invariant, which may be sufficient for the continuation's requirements. This is the relational analogue of loop-carried dependency relaxation in vectorization analysis.
+   293→
+   294→**Lemma 4 (Loop-Termination-of-Analysis).** The fixed-point iteration `⊥, F(⊥), F²(⊥), …` terminates in at most `|R|` steps, where `R` is the set of all possible relations in the program.
+   295→
+   296→*Proof.* Each application of `F` either produces a strictly more refined RelD (adding or strengthening at least one relation) or reaches a fixed point. The refinement ordering has finite height bounded by `|R|` (each step must add or strengthen at least one of finitely many possible relations). By the ascending chain condition, the sequence stabilizes in at most `|R|` steps. ∎
+   297→
+   298→### 3.6 Concurrent Composition
+   299→
+   300→For concurrent composition `e₁ || e₂`, the RelD of shared values must satisfy **non-interference**:
+   301→
+   302→```
+   303→∀ v shared between e₁ and e₂:
+   304→  RelD(v)_e₁ ⊓ RelD(v)_e₂ is well-formed
+   305→```
+   306→
+   307→and the security relations must not allow a write in one thread to violate the security constraints observed by the other. Formally:
+   308→
+   309→```
+   310→∄ SecurityRel{ℓ, f} ∈ RelD(v)_e₁,  ∄ write(v) ∈ e₂
+   311→  where level(e₂) < ℓ
+   312→```
+   313→
+   314→This prevents a low-security thread from observing high-security data through a shared mutable reference — the relational formulation of information-flow control for concurrency.
+   315→
+   316→---
+   317→
+   318→## 4. RelD Consistency
+   319→
+   320→### 4.1 Definition
+   321→
+   322→A set of RelDs `D = {d₁, …, dₙ}` is **consistent** iff there exists at least one trace `T` that satisfies all of them simultaneously:
+   323→
+   324→```
+   325→consistent(D)  iff  ∃ T. ∀ dᵢ ∈ D. T ⊨ dᵢ
+   326→```
+   327→
+   328→In practice, the IVE does not enumerate traces (the space is infinite). Instead, it checks a set of syntactic conditions that are *necessary* and *sufficient* for consistency given the well-formedness constraints of Section 1.3. This section defines those conditions and proves their equivalence to the semantic definition.
+   329→
+   330→### 4.2 Consistency Conditions
+   331→
+   332→**C1: No circular Outlives.** The Outlives relation induces a directed graph on values. Define:
+   333→
+   334→```
+   335→G_outlives(D) = (V, E)  where
+   336→  V = { v | TemporalRel{Outlives, v} ∈ relations(dᵢ) for some dᵢ ∈ D }
+   337→  E = { (v, u) | TemporalRel{Outlives, u} ∈ RelD(v) }
+   338→```
+   339→
+   340→**Condition C1:** `G_outlives(D)` must be acyclic.
+   341→
+   342→**Justification.** If `v₁ outlives v₂ outlives … outlives v₁`, then by transitivity `v₁` must outlive itself, which means `v₁`'s liveness interval strictly exceeds itself — a contradiction for any finite trace.
+   343→
+   344→**Exception.** A cycle `v outlives u ∧ u outlives v` is permitted iff `Coincides(v, u)` is also present. In this case, the cycle collapses to a single equivalence class of coincident values.
+   345→
+   346→**C2: No security downgrades.** Define the security flow graph:
+   347→
+   348→```
+   349→G_sec(D) = (V, E)  where
+   350→  V = all values with SecurityRel in D
+   351→  E = { (v, u) | ∃ data dependency from v to u,
+   352→         level(v) > level(u),
+   353→         flow_policy(v) ∈ {NoDowngrade, NoCrossBoundary} }
+   354→```
+   355→
+   356→**Condition C2:** `G_sec(D)` must be empty (no edges).
+   357→
+   358→**Justification.** An edge `(v, u)` with `level(v) > level(u)` and `NoDowngrade` on `v` means information flows from a higher-security value to a lower-security one, violating non-interference. The only exception is `Sanitized` flow, which requires a verified sanitization event on the path from `v` to `u`.
+   359→
+   360→Formally, if `SecurityRel{ℓ, Sanitized} ∈ RelD(v)` and there is a sanitization function `sanitize : ValId → ValId` that the IVE has verified as reducing the security level, then the edge is permitted iff the trace contains `sanitize(v)` on the path from `v` to `u`.
+   361→
+   362→**C3: No containment cycles.** Define the containment graph:
+   363→
+   364→```
+   365→G_contain(D) = (V, E)  where
+   366→  V = all values with ContainmentRel in D
+   367→  E = { (v, c) | ContainmentRel{c, p} ∈ RelD(v) }
+   368→```
+   369→
+   370→**Condition C3:** `G_contain(D)` must be acyclic.
+   371→
+   372→**Justification.** If `v` is contained in `c` and `c` is contained in `v`, then the byte range of `v` is a strict subset of the byte range of `c` and vice versa — a contradiction unless `v = c` and `p` is the empty path, which is excluded by the no-self-relation well-formedness rule.
+   373→
+   374→**C4: Temporal-Containment agreement.** If `v` is contained in `c`, then `v` must not outlive `c`:
+   375→
+   376→```
+   377→ContainmentRel{c, p} ∈ RelD(v)  ⟹  TemporalRel{Outlives, c} ∉ RelD(v)
+   378→```
+   379→
+   380→More precisely, the liveness interval of `v` must be a subset of the liveness interval of `c`. If `v` is contained in `c` but outlives `c`, then after `c` is deallocated, `v` would reference freed memory — a use-after-free in relational clothing.
+   381→
+   382→**C5: Equivalence consistency.** If `EquivalenceRel{e, m} ∈ RelD(v)`, then the security levels must agree across the mapping:
+   383→
+   384→```
+   385→∀ (fᵥ, fₑ) ∈ m:
+   386→  SecurityRel{ℓᵥ, _} ∈ RelD(v.fᵥ) ∧ SecurityRel{ℓₑ, _} ∈ RelD(e.fₑ)
+   387→  ⟹  ℓᵥ = ℓₑ
+   388→```
+   389→
+   390→Semantically equivalent fields must carry the same security level, otherwise the equivalence mapping would create an implicit downgrade channel.
+   391→
+   392→### 4.3 Formal Consistency Predicate
+   393→
+   394→Combining C1–C5:
+   395→
+   396→```
+   397→consistent(D) ⟺ wf_all(D)
+   398→                ∧ acyclic(G_outlives(D) \ coincides_edges(D))
+   399→                ∧ G_sec(D) = ∅
+   400→                ∧ acyclic(G_contain(D))
+   401→                ∧ C4_holds(D)
+   402→                ∧ C5_holds(D)
+   403→```
+   404→
+   405→where `wf_all(D)` asserts that every `dᵢ ∈ D` is well-formed, and `coincides_edges(D)` removes edges `(v, u)` from the Outlives graph where `Coincides(v, u)` is also present.
+   406→
+   407→### 4.4 Soundness and Completeness
+   408→
+   409→**Theorem 2 (Soundness).** If `consistent(D)`, then there exists a trace `T` satisfying all `dᵢ ∈ D`.
+   410→
+   411→*Proof sketch.* We construct `T` as follows. By C1, the Outlives graph (minus coincidences) is a DAG, so we can topologically sort values from longest-lived to shortest-lived. Assign each value a liveness interval consistent with this ordering and with all temporal relations. By C3, containment is a forest, so we assign byte ranges consistent with the containment hierarchy. By C2, there are no forbidden security flows, so we assign security levels consistent with the security lattice. By C4, contained values do not outlive their containers. By C5, equivalent fields have consistent security. The resulting trace satisfies all relations by construction. ∎
+   412→
+   413→**Theorem 3 (Completeness).** If `¬consistent(D)`, then no trace `T` satisfies all `dᵢ ∈ D`.
+   414→
+   415→*Proof.* By case analysis on the violated condition:
+   416→- If C1 is violated, the Outlives cycle implies a value must outlive itself strictly, which is impossible in any finite trace.
+   417→- If C2 is violated, the security downgrade violates non-interference, which is a trace-level property.
+   418→- If C3 is violated, the containment cycle implies a value strictly contains itself, which is impossible for finite byte ranges.
+   419→- If C4 is violated, a contained value outlives its container, implying a use-after-free.
+   420→- If C5 is violated, equivalent fields have different security levels, creating an implicit downgrade. ∎
+   421→
+   422→### 4.5 Computational Complexity
+   423→
+   424→Checking `consistent(D)` reduces to: (1) cycle detection in a directed graph (C1, C3), which is `O(|V| + |E|)`; (2) edge-existence checks in the security flow graph (C2), which is `O(|E_sec|)`; and (3) pairwise compatibility checks (C4, C5), which are `O(|R|)` where `R` is the total number of relations. Overall, consistency checking is **linear** in the size of the relation set, making it tractable for the IVE to check incrementally as the program is edited.
+   425→
+   426→---
+   427→
+   428→## 5. RelD Inference Algorithm Sketch
+   429→
+   430→### 5.1 Overview
+   431→
+   432→The IVE must infer RelDs for every value in the SCG without programmer annotation. This section sketches the inference algorithm, proves its termination, and argues its soundness relative to the consistency conditions of Section 4. The algorithm is a fixed-point computation over the SCG, driven by five propagation phases: initialization, data-flow propagation, temporal propagation, security propagation, and consistency checking.
+   433→
+   434→### 5.2 Algorithm
+   435→
+   436→**Input:** A Semantic Computation Graph `G = (N, E)` where `N` is the set of value nodes and `E` is the set of data-flow edges, along with scope annotations `scope : N → ScopeId` and allocation metadata `alloc : N → AllocInfo`.
+   437→
+   438→**Output:** A mapping `ρ : N → RelD` assigning a RelD to every value node, such that `consistent({ρ(n) | n ∈ N})`.
+   439→
+   440→**Phase 0: Initialization.** Set `ρ₀(n) = RelD{∅}` for all `n ∈ N`. Every value starts with an empty (unconstrained) RelD.
+   441→
+   442→**Phase 1: Data-flow propagation.** For each data-flow edge `e = (n₁, n₂) ∈ E`:
+   443→
+   444→```
+   445→ρ(n₂) ← ρ(n₂) ∪ { DependencyRel{n₁, DataDep} }
+   446→```
+   447→
+   448→If the edge represents an alias derivation (e.g., pointer arithmetic from `n₁` to `n₂`):
+   449→
+   450→```
+   451→ρ(n₂) ← ρ(n₂) ∪ { DependencyRel{n₁, AliasDep} }
+   452→```
+   453→
+   454→If the edge represents control flow (e.g., `n₂` is computed only if `n₁` satisfies a predicate):
+   455→
+   456→```
+   457→ρ(n₂) ← ρ(n₂) ∪ { DependencyRel{n₁, ControlDep} }
+   458→```
+   459→
+   460→This phase is iterated until no new DependencyRel relations are added. Since each edge is processed once (the dependency structure is fixed by the SCG), this phase terminates in `O(|E|)` steps.
+   461→
+   462→**Phase 2: Containment propagation.** For each allocation `a` with sub-fields `f₁, …, fₖ` identified by the RepD:
+   463→
+   464→```
+   465→ρ(fᵢ) ← ρ(fᵢ) ∪ { ContainmentRel{a, path(fᵢ)} }
+   466→```
+   467→
+   468→This adds containment relations from the structure of RepDs. It terminates in `O(Σᵢ |fields(aᵢ)|)` where the sum is over all allocations.
+   469→
+   470→**Phase 3: Temporal propagation.** For each value `n`, based on its scope and the scope of values it references:
+   471→
+   472→```
+   473→if scope(n) = s and scope(m) = s' where s' ⊂ s:
+   474→    ρ(n) ← ρ(n) ∪ { TemporalRel{Outlives, m} }
+   475→if scope(n) = scope(m):
+   476→    ρ(n) ← ρ(n) ∪ { TemporalRel{Coincides, m} }
+   477→```
+   478→
+   479→Additionally, for values whose lifetimes are determined by allocation/deallocation events:
+   480→
+   481→```
+   482→if n is allocated before m in the SCG execution order:
+   483→    ρ(n) ← ρ(n) ∪ { TemporalRel{Precedes, m} }
+   484→```
+   485→
+   486→This phase uses the scope nesting structure and the SCG's topological ordering to assign temporal relations. The number of scope pairs is bounded by `|N|²`, so this phase terminates in `O(|N|²)`.
+   487→
+   488→**Phase 4: Security propagation (taint analysis).** Initialize security levels from explicit source annotations (e.g., values from network I/O are tainted `Public`, values from encrypted stores are `Confidential`). Propagate through data-flow edges:
+   489→
+   490→```
+   491→if DependencyRel{n₁, DataDep} ∈ ρ(n₂):
+   492→    level(n₂) ← level(n₂) ⊔ level(n₁)   [join in security lattice]
+   493→```
+   494→
+   495→and add the corresponding security relation:
+   496→
+   497→```
+   498→ρ(n₂) ← ρ(n₂) ∪ { SecurityRel{level(n₂), NoDowngrade} }
+   499→```
+   500→
+   501→For values that cross trust boundaries, add `NoCrossBoundary`. For values that pass through verified sanitization functions, downgrade to `Sanitized`.
+   502→
+   503→This is a standard taint analysis formulated as a dataflow problem on the SCG. Since the security lattice has finite height (5 levels), the propagation reaches a fixed point in at most `5 × |N|` steps.
+   504→
+   505→**Phase 5: Consistency check.** Apply `consistent({ρ(n) | n ∈ N})` as defined in Section 4. If consistent, output `ρ`. If inconsistent:
+   506→
+   507→1. Identify the violated condition (C1–C5).
+   508→2. Report the specific values and relations causing the violation.
+   509→3. Suggest minimal relaxations (e.g., adding `Coincides` to break an Outlives cycle, inserting sanitization to fix a security downgrade, adjusting scope to fix a containment-liveness mismatch).
+   510→4. If the programmer approves a relaxation, update `ρ` and re-check.
+   511→
+   512→### 5.3 Termination Proof
+   513→
+   514→**Theorem 4 (Termination).** The inference algorithm terminates for any finite SCG.
+   515→
+   516→*Proof.* The algorithm processes each phase sequentially. We show each phase terminates:
+   517→
+   518→- **Phase 0** is constant-time: `O(|N|)`.
+   519→- **Phase 1** adds at most one DependencyRel per edge, and edges are fixed. Total additions: `|E|`. Termination in `|E|` steps.
+   520→- **Phase 2** adds at most one ContainmentRel per field, and fields are determined by the (finite) RepD structure. Termination in `Σᵢ |fields(aᵢ)|` steps.
+   521→- **Phase 3** adds at most `|N|²` temporal relations (one per ordered pair of values). Termination in `|N|²` steps.
+   522→- **Phase 4** performs taint propagation on a lattice of height 5. Each value's level can increase at most 5 times (from `Public` to `TopSecret`). Total increases: `5 × |N|`. Termination in `5 × |N|` steps.
+   523→- **Phase 5** is a single consistency check, which by Section 4.5 runs in `O(|R|)` where `|R| ≤ 6 × |N|²` (at most 6 relation types per pair).
+   524→
+   525→Since each phase terminates and phases are sequential, the algorithm terminates. ∎
+   526→
+   527→**Corollary (Monotone Growth).** The RelD mapping `ρ` grows monotonically throughout the algorithm: `ρ₀ ⊑ ρ₁ ⊑ ρ₂ ⊑ ρ₃ ⊑ ρ₄`. Each phase only adds relations, never removes them. The only "shrinking" step is the consistency check, which may suggest removals — but these require programmer approval and produce a new, manually-validated `ρ`.
+   528→
+   529→### 5.4 Soundness
+   530→
+   531→**Theorem 5 (Soundness of Inference).** If the algorithm outputs `ρ` (i.e., consistency check passes), then for every value `n` in the SCG, the inferred `ρ(n)` is satisfied by every trace of the program.
+   532→
+   533→*Proof sketch.* By induction over the phases:
+   534→
+   535→- **Phase 1** adds only DependencyRel relations that are direct reflections of the SCG's data-flow structure. By definition of the SCG, every trace respects the data-flow edges, so every trace satisfies these dependency relations.
+   536→
+   537→- **Phase 2** adds ContainmentRel relations that are direct reflections of the RepD structure. By the RepD's definition (which describes the actual memory layout), these containment relations are satisfied by construction.
+   538→
+   539→- **Phase 3** adds TemporalRel relations derived from scope nesting and allocation ordering. By the operational semantics of scopes, values in outer scopes outlive values in inner scopes, and values allocated earlier precede values allocated later. Thus every trace satisfies these temporal relations.
+   540→
+   541→- **Phase 4** adds SecurityRel relations by taint propagation. By the soundness of taint analysis on a finite lattice (standard result from information-flow theory), the propagated levels are upper bounds on the actual information content of each value. Thus every trace satisfies the NoDowngrade constraints.
+   542→
+   543→- **Phase 5** verifies global consistency, which by Theorem 2 guarantees the existence of a satisfying trace.
+   544→
+   545→The key insight: each phase adds only relations that are *justified* by the program structure, and the consistency check ensures they are mutually compatible. ∎
+   546→
+   547→### 5.5 Precision and Completeness of Inference
+   548→
+   549→The inferred RelDs are sound but not necessarily *complete* — there may exist additional relations that hold in all traces but are not inferred by the algorithm. For example:
+   550→
+   551→- **Relational invariants**: If `x = y + 1` in all executions, the algorithm does not infer `EquivalenceRel` between `x` and `y` (they are not semantically equivalent; the relationship is arithmetic, not representational). This is by design: EquivalenceRel captures *representational* equivalence, not *computational* relationships.
+   552→
+   553→- **Temporal refinements**: The algorithm infers `Outlives` from scope nesting but may not infer `Coincides` even when two values have identical liveness intervals in practice. This is because `Coincides` requires a stronger proof obligation. The IVE may refine `Outlives` to `Coincides` as part of its ongoing verification debt reduction.
+   554→
+   555→**Lemma 5 (Maximality of DataDep Inference).** Phase 1 infers all data-dependency relations that are syntactically present in the SCG.
+   556→
+   557→*Proof.* Every data-flow edge in the SCG is processed exactly once, and a DependencyRel{DataDep} is added for each. The SCG captures all data dependencies by construction (it is the canonical representation of the program's data flow). ∎
+   558→
+   559→### 5.6 Incremental Re-Inference
+   560→
+   561→When the SCG is modified (e.g., a node is added or an edge is changed), full re-inference is unnecessary. The algorithm supports incremental updates:
+   562→
+   563→1. **Affected subgraph identification**: Determine which values are reachable from the modified node/edge via data-flow, containment, or temporal edges.
+   564→2. **Phase 1–4 re-execution** only on the affected subgraph.
+   565→3. **Global consistency re-check** (since local changes can have global implications, e.g., a new data-flow edge may create a security downgrade path).
+   566→
+   567→This incremental approach reduces the average-case cost of re-inference from `O(|N|²)` to `O(|affected|² + |R|)` where `|affected|` is the size of the affected subgraph, typically much smaller than `|N|`.
+   568→
+   569→---
+   570→
+   571→## Appendix A: Notation Summary
+   572→
+   573→| Symbol | Meaning |
+   574→|--------|---------|
+   575→| `ValId` | Countable set of value identifiers |
+   576→| `Path` | Finite sequences of field selectors |
+   577→| `ScopeId` | Countable set of scope identifiers |
+   578→| `SecLevel` | `{Public, Internal, Confidential, Secret, TopSecret}` |
+   579→| `RepMapping` | Partial functions `ValId ⇀ ValId` |
+   580→| `⊑` | Refinement (sub-relationship) ordering |
+   581→| `⊔`, `⊓` | Join and meet in refinement lattice |
+   582→| `T ⊨ r` | Trace `T` satisfies relation `r` |
+   583→| `wf(d)` | RelD `d` is well-formed |
+   584→| `consistent(D)` | Set of RelDs `D` is mutually consistent |
+   585→| `ρ : N → RelD` | Inferred RelD mapping |
+   586→| `G_outlives`, `G_sec`, `G_contain` | Consistency check graphs |
+   587→
+   588→## Appendix B: Relation to Other BD Components
+   589→
+   590→RelD interacts with RepD and CapD as follows:
+   591→
+   592→- **RelD ↔ RepD**: ContainmentRel references the field structure defined by RepD. EquivalenceRel's RepMapping aligns fields across different RepDs. Changes to RepD may require re-inference of ContainmentRel and EquivalenceRel relations.
+   593→
+   594→- **RelD ↔ CapD**: SecurityRel constrains which CapD capabilities may be exercised (e.g., `SecurityRel{Confidential, NoDowngrade}` prohibits the `send_over_network` capability unless `Sanitized` is also present). LivenessRel constrains when CapD capabilities are valid (e.g., `LivenessRel{s, Dropped}` invalidates all capabilities).
+   595→
+   596→- **BD Integration**: A full BD `(RepD, CapD, RelD)` is well-formed iff each component is individually well-formed and the cross-component constraints (above) are satisfied. BD refinement is component-wise: `(r₁, c₁, d₁) ⊑ (r₂, c₂, d₂)` iff `r₁ ⊑ r₂ ∧ c₁ ⊑ c₂ ∧ d₁ ⊑ d₂`.
+   597→
+   598→---
+   599→
+   600→*End of RelD Formal Specification — Task W1-04*
+   601→

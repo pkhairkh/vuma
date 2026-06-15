@@ -1367,7 +1367,7 @@ Expressions:
         }
 
         let json_output = serde_json::json!({
-            "version": "0.1.0",
+            "version": "0.1.0-alpha.1",
             "session_source_bytes": self.session_source.len(),
             "target": self.target,
             "diagnostics": diagnostics,
@@ -1794,7 +1794,7 @@ Expressions:
     pub fn run(&mut self) -> Result<(), ReplError> {
         println!(
             "{}",
-            color!(ansi::BOLD_CYAN, "VUMA REPL v0.2.0")
+            color!(ansi::BOLD_CYAN, "VUMA REPL v0.1.0-alpha.1")
         );
         println!("Type :help for available commands. Tab completes commands/keywords.\n");
 

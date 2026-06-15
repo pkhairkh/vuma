@@ -154,6 +154,128 @@ Implements RFC 4648 Base64 encoding, converting every 3 input bytes into 4 Base6
 
 ---
 
+### 18. [atomics_demo.vuma](atomics_demo.vuma) — Atomic CAS, load, store, and fetch operations
+
+Demonstrates VUMA's full suite of atomic memory operations: `atomic_load`/`atomic_store` with Acquire/Release semantics, `atomic_cas` compare-and-swap, `AtomicU64` with `fetch_add`/`fetch_sub`, and `compare_exchange` with explicit success/failure orderings. Four self-contained demos each exercise a different atomic primitive and return a verifiable checksum.
+
+**Features demonstrated:** `atomic_load`, `atomic_store`, `atomic_cas`, `AtomicU64`, `fetch_add`/`fetch_sub`, `compare_exchange`, Acquire/Release/Relaxed orderings, IVE concurrent access verification
+
+---
+
+### 19. [float_math.vuma](float_math.vuma) — FP conversion and math operations
+
+Showcases VUMA's floating-point capabilities across six demos: integer-to-float conversion (`inttofloat`, `uinttofloat`), float-to-integer conversion (`floattoint`, `floattouint`), float-to-float widening/narrowing (`floattofloat`), arithmetic on `f32`/`f64`, mixed integer/float computation with explicit conversion, and storing/loading floats from allocated memory. The codegen emits proper ISA-specific FP instructions on all 8 backends — not no-op bit reinterpretation.
+
+**Features demonstrated:** `f32`, `f64`, `inttofloat`, `uinttofloat`, `floattoint`, `floattouint`, `floattofloat`, FP arithmetic (+, -, *, /), FP memory store/load, IVE Interpretation invariant for FP types
+
+---
+
+### 20. [debug_info.vuma](debug_info.vuma) — DWARF debug info demonstration
+
+A simple multi-function program designed to exercise VUMA's `--debug` flag. Compiling with `--debug` produces a DWARF v4 ELF with `.debug_abbrev`, `.debug_info`, `.debug_line`, and `.debug_frame` sections. The program includes helper functions, control flow, and struct operations so that the emitted DWARF contains subprogram DIEs, variable DIEs with location expressions, line-number entries for branches, and FDE entries for stack unwinding.
+
+**Features demonstrated:** `--debug` flag, DWARF v4 generation, `.debug_info`/`.debug_line`/`.debug_frame`/`.debug_abbrev` sections, CIE/FDE per function, line-number mapping, variable DIEs, multi-backend debug support
+
+---
+
+## FFI Example
+
+### [ffi_demo.vuma](ffi_demo.vuma) — Calling C library functions from VUMA
+
+This program demonstrates VUMA's C FFI system end-to-end. The `extern "C" { ... }` block declares external C functions with their calling convention and signatures. VUMA code calls these functions like any other function, and the compiler emits relocations for the external symbols instead of local `BL` instructions. The system linker resolves them at link time.
+
+**Features demonstrated:** `extern "C"` block syntax, C calling convention, external symbol relocations, `write`/`read`/`exit` bindings, `SHN_UNDEF` ELF symbols, `.rela.text` relocations
+
+**Compile and link:**
+```bash
+# Compile as a relocatable object
+vuma compile --format obj --target aarch64 ffi_demo.vuma -o ffi_demo.o
+
+# Link with libc
+ld -o ffi_demo ffi_demo.o -lc
+```
+
+**FFI architecture:**
+
+VUMA's FFI module (`src/ffi.rs`) handles:
+
+| Component | Description |
+|-----------|-------------|
+| `ExternBlock` | AST node for `extern "C" { ... }` declarations |
+| `ExternFn` | Individual function signature with param/return types |
+| `ExternRegistry` | Lookup table for extern functions, calling conventions, and relocation needs |
+| `CallingConvention` | C, System, and platform-specific conventions |
+| Default bindings | Linux syscalls (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`) + libc (`memcpy`, `memset`, `malloc`, `free`) |
+
+The FFI pipeline:
+
+1. **Parse** — `extern "C" { fn write(...); }` produces an `ExternBlockDef` AST node
+2. **SCG** — The Static Call Graph gets a Phantom node for each extern block
+3. **Registry** — `ExternBlock` → `ExternRegistry` mapping with convention + relocation metadata
+4. **Codegen** — Extern calls emit `SHN_UNDEF` symbols and `.rela.text` entries
+5. **Link** — The system linker resolves symbols against libc or other shared libraries
+
+---
+
+## DWARF Debug Info
+
+VUMA can emit DWARF v4 debug information when compiled with the `--debug` flag. This enables source-level debugging with GDB, LLDB, and other DWARF-aware tools.
+
+### Sections Generated
+
+| Section | Contents |
+|---------|----------|
+| `.debug_abbrev` | Abbreviation tables (tag + attribute encodings) |
+| `.debug_info` | Compilation unit DIEs (subprograms, variables) |
+| `.debug_line` | Line-number program (DWARF standard opcodes) |
+| `.debug_frame` | Call frame information (CIE + FDE entries) |
+
+### Multi-Backend Support
+
+The DWARF builder is parameterised by address size to support all eight VUMA backends:
+
+| Backend | Address Size | Min Inst Length | CIE Saved Registers |
+|---------|-------------|-----------------|---------------------|
+| x86_64 | 8 bytes | 1 | RSP=7, RBP=6 |
+| AArch64 | 8 bytes | 4 | SP=31, LR=30, FP=29 |
+| RISC-V 64 | 8 bytes | 2 | SP=2, RA=1, FP=8 |
+| ARM32 | 4 bytes | 2 | SP=13, LR=14, FP=11 |
+| MIPS64 | 8 bytes | 4 | SP=29, RA=31 |
+| PPC64 | 8 bytes | 4 | SP=R1, LR=65 |
+| LoongArch64 | 8 bytes | 4 | SP=r3, RA=r1, FP=r22 |
+| Wasm32 | 4 bytes | 1 | Minimal (no saved regs) |
+
+### Usage
+
+```bash
+# Compile with debug info
+vuma compile --debug examples/debug_info.vuma
+
+# Inspect debug sections
+readelf --debug-dump=info output.o      # .debug_info (subprograms, variables)
+readelf --debug-dump=line output.o      # .debug_line (source-line mapping)
+readelf --debug-dump=frames output.o    # .debug_frame (CIE + FDE entries)
+
+# Debug with GDB
+gdb ./output
+(gdb) break main
+(gdb) run
+(gdb) step
+(gdb) info locals
+```
+
+### DWARF Encoding Details
+
+- **Abbreviation codes**: `DW_TAG_COMPILE_UNIT`, `DW_TAG_SUBPROGRAM`, `DW_TAG_VARIABLE`
+- **Attributes**: `DW_AT_NAME`, `DW_AT_LOW_PC`, `DW_AT_HIGH_PC`, `DW_AT_TYPE`, `DW_AT_LOCATION`
+- **Forms**: `DW_FORM_STRING`, `DW_FORM_ADDR`, `DW_FORM_DATA4`, `DW_FORM_EXPRLOC`
+- **Line-number opcodes**: `DW_LNS_COPY`, `DW_LNS_ADVANCE_PC`, `DW_LNS_ADVANCE_LINE`, `DW_LNS_SET_FILE`, `DW_LNE_END_SEQUENCE`
+- **Call frame**: CIE with `DW_CFA_def_cfa` / `DW_CFA_offset`, FDE per function with `initial_location` and `address_range`
+
+Without `--debug`, no debug sections are emitted — the ELF contains only `.text`, `.data`, and `.symtab`.
+
+---
+
 ## Running Examples
 
 ```bash
@@ -162,6 +284,13 @@ vuma compile examples/hello_memory.vuma
 
 # Compile with verbose IVE output
 vuma compile --ive-verbose examples/doubly_linked_list.vuma
+
+# Compile with DWARF debug info
+vuma compile --debug examples/debug_info.vuma
+
+# Compile FFI example as relocatable object
+vuma compile --format obj --target aarch64 examples/ffi_demo.vuma -o ffi_demo.o
+ld -o ffi_demo ffi_demo.o -lc
 
 # Run on bare metal
 vuma flash --target bare examples/gpio_blink.vuma
@@ -189,12 +318,20 @@ vuma flash --target bare examples/gpio_blink.vuma
 13. Master **base64_encode.vuma** for bit-level encoding algorithms
 
 ### Concurrency
-14. Tackle **lock_free_queue.vuma** for atomic SPSC concurrency
-15. Study **thread_pool.vuma** for mutex/condvar synchronization patterns
-16. Master **channel_demo.vuma** for MPSC message-passing concurrency
+14. Study **atomics_demo.vuma** for the full suite of atomic primitives
+15. Tackle **lock_free_queue.vuma** for atomic SPSC concurrency
+16. Study **thread_pool.vuma** for mutex/condvar synchronization patterns
+17. Master **channel_demo.vuma** for MPSC message-passing concurrency
+
+### Floating-Point
+18. Start with **float_math.vuma** for FP conversion, arithmetic, and memory operations
+
+### FFI & Debug
+19. Learn **ffi_demo.vuma** for calling C library functions from VUMA
+20. Try **debug_info.vuma** for DWARF debug info generation and inspection
 
 ### Embedded / Hardware
-17. Start with **gpio_blink.vuma** for basic hardware access patterns
+21. Start with **gpio_blink.vuma** for basic hardware access patterns
 
 ## IVE Verification Summary
 
@@ -219,5 +356,9 @@ Every example in this directory passes all 5 IVE invariants:
 | bsearch | ✓ | ✓ | ✓ | ✓ | ✓ |
 | matrix | ✓ | ✓ | ✓ | ✓ | ✓ |
 | base64_encode | ✓ | ✓ | ✓ | ✓ | ✓ |
+| atomics_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
+| float_math | ✓ | ✓ | ✓ | ✓ | ✓ |
+| debug_info | ✓ | ✓ | ✓ | ✓ | ✓ |
+| ffi_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 **No `unsafe` keyword exists in VUMA.** All verification is automatic.

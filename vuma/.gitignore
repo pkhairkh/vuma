@@ -1,4 +1,5 @@
 /target
+**/target/
 **/*.rs.bk
 Cargo.lock
 *.o
@@ -21,3 +22,17 @@ WORKLOG.md
 worklog.md
 WAVE_PLAN.md
 MANIFEST.md
+
+# Fuzz / Proptest artifacts
+**/fuzz/target/
+**/fuzz/corpus/
+**/proptest-regressions/
+
+# Profiling artifacts
+perf.data*
+flamegraph.svg
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml

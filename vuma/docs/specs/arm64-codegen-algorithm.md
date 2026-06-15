@@ -1,14 +1,14 @@
 # ARM64 Code Generation Algorithm: SCG to Machine Code
 
 **VUMA Project — Specification Document**
-**Target: AArch64 (Broadcom BCM2712, Cortex-A76 quad-core)**
+**Target: AArch64 (ARMv8.2-A, Cortex-A76 quad-core and compatible)**
 **Task ID: W1-28**
 
 ---
 
 ## 1. SCG Node to ARM64 Instruction Mapping
 
-The Semantic Computation Graph (SCG) is the intermediate representation produced by VUMA's front-end compiler passes. Each SCG node represents a discrete semantic operation — allocation, deallocation, memory access, type casting, computation, or control flow — that must be translated into one or more ARM64 (AArch64) machine instructions. This section defines the complete mapping from every SCG node type to its ARM64 instruction sequence, targeting the Cortex-A76 microarchitecture found in the AArch64's BCM2712 SoC.
+The Semantic Computation Graph (SCG) is the intermediate representation produced by VUMA's front-end compiler passes. Each SCG node represents a discrete semantic operation — allocation, deallocation, memory access, type casting, computation, or control flow — that must be translated into one or more ARM64 (AArch64) machine instructions. This section defines the complete mapping from every SCG node type to its ARM64 instruction sequence, targeting the Cortex-A76 microarchitecture and compatible AArch64 processors.
 
 ### AllocationNode
 
@@ -119,31 +119,88 @@ str x0, [x_base, x_index, lsl #3]   ; store at base + index*8
 
 ### CastNode
 
-Type casts between compatible representations (same bit width) are no-ops at the machine level — the bits in the register are simply reinterpreted. Cross-domain casts (integer ↔ floating-point) require data movement between the integer and floating-point register banks using `fmov`:
+The CastNode performs type conversions between representations. The IR instruction `IRInstr::Cast` carries `from_ty` and `to_ty` fields that fully determine the kind of conversion required. The code generator dispatches on these fields to select the correct instruction sequence.
+
+**Bit reinterpretation (same bit width, different domain):** Cross-domain casts between integer and floating-point registers of the same width use `fmov` to move bits between register banks without conversion:
 
 ```asm
-; CastNode { from: i64, to: f64 }  — int to float reinterpretation
+; CastNode { from_ty: i64, to_ty: f64 }  — int to float reinterpretation
 fmov d0, x0              ; move integer bits from x0 to d0 as float
 
-; CastNode { from: f64, to: i64 }  — float to int reinterpretation
+; CastNode { from_ty: f64, to_ty: i64 }  — float to int reinterpretation
 fmov x0, d0              ; move float bits from d0 to x0 as integer
+```
 
-; CastNode { from: i32, to: i64 }  — sign extension
+**Widening and narrowing integer casts:** For casts between different integer widths, the code generator extends or truncates the value. A widening cast (e.g., i32 → i64) uses `sxtw` (signed extend word) or zero-extension depending on the signedness:
+
+```asm
+; CastNode { from_ty: i32, to_ty: i64 }  — sign extension
 sxtw x0, w0              ; sign-extend word to doubleword
 
-; CastNode { from: u32, to: u64 }  — zero extension
+; CastNode { from_ty: u32, to_ty: u64 }  — zero extension
 mov w0, w0                ; implicit zero-extension to 64 bits
 ```
 
-For actual numeric conversions (not bit reinterpretation), such as integer-to-float conversion, the code generator uses `scvtf` (signed convert to float) and `fcvtzs` (float convert to signed integer):
+**Signed integer-to-float conversions:** The code generator uses `scvtf` (signed convert to floating-point) with the destination register size determining the float precision:
 
 ```asm
-; CastNode { from: i64, to: f64, convert: true }
-scvtf d0, x0              ; convert signed int to double-precision float
+; CastNode { from_ty: i32, to_ty: f32 }
+scvtf s0, w0              ; signed i32 → f32
 
-; CastNode { from: f64, to: i64, convert: true }
-fcvtzs x0, d0             ; convert double-precision float to signed int
+; CastNode { from_ty: i32, to_ty: f64 }
+scvtf d0, w0              ; signed i32 → f64
+
+; CastNode { from_ty: i64, to_ty: f32 }
+scvtf s0, x0              ; signed i64 → f32
+
+; CastNode { from_ty: i64, to_ty: f64 }
+scvtf d0, x0              ; signed i64 → f64
 ```
+
+**Unsigned integer-to-float conversions:** For unsigned conversions, `ucvtf` (unsigned convert to floating-point) is used:
+
+```asm
+; CastNode { from_ty: u32, to_ty: f64 }
+ucvtf d0, w0              ; unsigned u32 → f64
+
+; CastNode { from_ty: u64, to_ty: f64 }
+ucvtf d0, x0              ; unsigned u64 → f64
+```
+
+**Float-to-signed-integer conversions:** The code generator uses `fcvtzs` (float convert to signed integer, round toward zero) with the destination register size determining the integer width:
+
+```asm
+; CastNode { from_ty: f32, to_ty: i32 }
+fcvtzs w0, s0             ; f32 → signed i32
+
+; CastNode { from_ty: f64, to_ty: i32 }
+fcvtzs w0, d0             ; f64 → signed i32
+
+; CastNode { from_ty: f64, to_ty: i64 }
+fcvtzs x0, d0             ; f64 → signed i64
+```
+
+**Float-to-unsigned-integer conversions:** The code generator uses `fcvtzu` (float convert to unsigned integer, round toward zero):
+
+```asm
+; CastNode { from_ty: f64, to_ty: u64 }
+fcvtzu x0, d0             ; f64 → unsigned u64
+
+; CastNode { from_ty: f32, to_ty: u32 }
+fcvtzu w0, s0             ; f32 → unsigned u32
+```
+
+**Float precision conversions:** Conversions between `f32` and `f64` use `fcvt` (float convert):
+
+```asm
+; CastNode { from_ty: f32, to_ty: f64 }
+fcvt d0, s0               ; single → double precision
+
+; CastNode { from_ty: f64, to_ty: f32 }
+fcvt s0, d0               ; double → single precision
+```
+
+The `from_ty`/`to_ty` dispatch ensures that the correct instruction variant is always selected. For example, a conversion from `u64` to `f64` must use `ucvtf` rather than `scvtf`, since `scvtf` would treat the bit pattern as a signed value and produce an incorrect result for values with bit 63 set. Similarly, `fcvtzu` must be used for unsigned float-to-integer conversion to avoid treating the result as a negative number when the value exceeds the signed range.
 
 ### ComputationNode
 
@@ -269,7 +326,7 @@ ret
 
 ## 2. Function Calling Convention (AAPCS64)
 
-The ARM64 procedure call standard (AAPCS64) defines the contract between callers and callees that VUMA's code generator must honor on every function boundary. The AArch64 runs Linux in AArch64 mode, and its system libraries, the C runtime, and the kernel all adhere to AAPCS64. Any deviation would result in undefined behavior, silent data corruption, or crashes. This section details the full calling convention as implemented by the VUMA code generator, including VUMA-specific extensions for passing Bounds Descriptor (BD) metadata used by the Inline Validation Engine (IVE).
+The ARM64 procedure call standard (AAPCS64) defines the contract between callers and callees that VUMA's code generator must honor on every function boundary. AArch64 Linux runs in AArch64 mode, and its system libraries, the C runtime, and the kernel all adhere to AAPCS64. Any deviation would result in undefined behavior, silent data corruption, or crashes. This section details the full calling convention as implemented by the VUMA code generator, including VUMA-specific extensions for passing Bounds Descriptor (BD) metadata used by the Inline Validation Engine (IVE).
 
 ### Argument Passing
 
@@ -490,7 +547,7 @@ The Cortex-A76 has a 4-wide out-of-order execution engine with a 128-entry reord
 
 ## 4. Memory Barrier Insertion
 
-The ARM64 memory model is weakly ordered, meaning that the processor may reorder memory operations in ways that are not visible to a single thread but can cause observable inconsistencies in multi-threaded programs. The Cortex-A76 in the AArch64 implements the ARMv8.2-A architecture, which permits store-load reordering and store-store reordering between different addresses. This means that without explicit barriers, a store followed by a load to a different address may appear to execute in the opposite order to another core. The VUMA compiler's SyncEdge annotations in the SCG provide the information needed to insert the correct barriers and atomic operations. This section defines the barrier insertion algorithm for each SyncEdge variant.
+The ARM64 memory model is weakly ordered, meaning that the processor may reorder memory operations in ways that are not visible to a single thread but can cause observable inconsistencies in multi-threaded programs. The Cortex-A76 implements the ARMv8.2-A architecture, which permits store-load reordering and store-store reordering between different addresses. This means that without explicit barriers, a store followed by a load to a different address may appear to execute in the opposite order to another core. The VUMA compiler's SyncEdge annotations in the SCG provide the information needed to insert the correct barriers and atomic operations. This section defines the barrier insertion algorithm for each SyncEdge variant.
 
 ### SyncEdge with HappensBefore
 
@@ -548,6 +605,47 @@ ldr x0, [x_data]          ; guaranteed to see the producer's write
 
 The exclusive store (`stlxr`) writes its success/failure status to the `w3` register — 0 for success, 1 for failure. The compiler must check this status and retry the loop if the store failed. On the Cortex-A76, the exclusive monitor tracks a cache line granule, so any external write to the same cache line between the `ldaxr` and `stlxr` causes the exclusive store to fail.
 
+**ARMv8.1-A Large System Extensions (LSE) atomics:** On processors that implement ARMv8.1-A or later (including the Cortex-A76 via ARMv8.2-A), the VUMA code generator can emit LSE atomic instructions instead of the `ldaxr`/`stlxr` loop. These single-instruction atomics are more efficient under contention because they avoid the retry loop entirely. The code generator selects between the LL/SC loop and LSE atomics at codegen time based on the target CPU's feature flags:
+
+```asm
+; LSE atomic compare-and-swap (CAS) — single instruction, no retry loop
+; if [x_addr] == x1, then [x_addr] = x2
+casal x0, x2, [x_addr]    ; compare-and-swap, acquire-release ordering
+; x0 = old value at [x_addr] (whether or not swap succeeded)
+
+; LSE atomic fetch-and-add
+ldaddal x1, x0, [x_addr]  ; atomically: x0 = [x_addr]; [x_addr] += x1
+; acquire-release ordering
+
+; LSE atomic swap
+swpal x1, x0, [x_addr]    ; atomically: x0 = [x_addr]; [x_addr] = x1
+; acquire-release ordering
+
+; LSE atomic bitwise operations
+clral x1, x0, [x_addr]    ; atomic clear (AND) with acquire-release
+setal x1, x0, [x_addr]    ; atomic set (OR) with acquire-release
+eoral x1, x0, [x_addr]    ; atomic XOR with acquire-release
+```
+
+When LSE is not available, the code generator falls back to the `ldaxr`/`stlxr` loop pattern. The fallback is always emitted for compatibility; the LSE variant is selected when the target CPU supports it (detected via `ID_AA64ISAR0_EL1.Atomic` field or the `-mcpu=cortex-a76` flag).
+
+**Atomic operation summary table:**
+
+| VUMA SCG Atomic Operation | LL/SC Loop (ARMv8.0-A)       | LSE Single Instruction (ARMv8.1-A+) | Ordering          |
+|---------------------------|------------------------------|--------------------------------------|-------------------|
+| AtomicLoad                | `ldar`                       | `ldar`                               | Acquire           |
+| AtomicStore               | `stlr`                       | `stlr`                               | Release           |
+| AtomicCAS                 | `ldaxr`/`stlxr` loop         | `casal`                              | AcqRel            |
+| AtomicFetchAdd            | `ldaxr`/`add`/`stlxr` loop   | `ldaddal`                            | AcqRel            |
+| AtomicFetchSub            | `ldaxr`/`sub`/`stlxr` loop   | `ldaddal` (negated operand)          | AcqRel            |
+| AtomicFetchAnd            | `ldaxr`/`and`/`stlxr` loop   | `clral`                              | AcqRel            |
+| AtomicFetchOr             | `ldaxr`/`orr`/`stlxr` loop   | `setal`                              | AcqRel            |
+| AtomicFetchXor            | `ldaxr`/`eor`/`stlxr` loop   | `eoral`                              | AcqRel            |
+| AtomicSwap                | `ldaxr`/`stlxr` loop         | `swpal`                              | AcqRel            |
+| Fence (Full)              | `dmb ish`                    | `dmb ish`                            | SeqCst            |
+| Fence (Acquire)           | `dmb ishld`                  | `dmb ishld`                          | Acquire           |
+| Fence (Release)           | `dmb ish`                    | `dmb ish`                            | Release           |
+
 ### SyncEdge with MutexLocked
 
 When the SCG indicates that a critical section is protected by a mutex, the compiler inserts calls to the VUMA runtime's `lock_acquire` and `lock_release` functions. These functions internally implement the correct acquire-release semantics using `ldaxr`/`stlxr` with an exponential backoff loop for contention. The compiler wraps the critical section between the lock and unlock calls:
@@ -584,7 +682,7 @@ This pass ensures that the minimum necessary set of barriers is inserted, avoidi
 
 ## 5. ELF Object Format for AArch64 Linux
 
-The VUMA code generator produces ELF (Executable and Linkable Format) object files that are consumed by the system linker (`ld`) to produce the final executable or shared library. For the AArch64 running a 64-bit Linux kernel, the object files must conform to the AArch64 ELF specification. This section defines the ELF header fields, section layout, and relocation types that the VUMA code generator must emit.
+The VUMA code generator produces ELF (Executable and Linkable Format) object files that are consumed by the system linker (`ld`) to produce the final executable or shared library. For AArch64 running a 64-bit Linux kernel, the object files must conform to the AArch64 ELF specification. This section defines the ELF header fields, section layout, and relocation types that the VUMA code generator must emit.
 
 ### ELF Header
 
@@ -712,11 +810,11 @@ The VUMA code generator's relocation pass emits relocation entries for every sym
 
 ## 6. Bare Metal Startup for AArch64
 
-When VUMA targets bare metal execution on the AArch64 (no operating system, no Linux kernel), the code generator must produce a self-contained binary that handles all hardware initialization from the moment the BCM2712 SoC releases the CPU from reset. The bare metal startup sequence sets up the execution environment — stack, BSS, MMU, and exception vectors — before transferring control to the VUMA runtime's `main` function. This section describes the complete startup protocol, linker script, and multi-core management.
+When VUMA targets bare metal execution on AArch64 (no operating system, no Linux kernel), the code generator must produce a self-contained binary that handles all hardware initialization from the moment the SoC releases the CPU from reset. The bare metal startup sequence sets up the execution environment — stack, BSS, MMU, and exception vectors — before transferring control to the VUMA runtime's `main` function. This section describes the complete startup protocol, linker script, and multi-core management.
 
 ### Entry Point and Boot Protocol
 
-The AArch64's VideoCore GPU loads the kernel image (typically named `kernel8.img` for 64-bit mode) into memory at physical address `0x80000` and starts core 0 executing at that address. Cores 1, 2, and 3 are held in a WFE (Wait For Event) loop by the GPU firmware until explicitly released by software. The VUMA bare metal binary must begin with the `_start` symbol at this address:
+The VideoCore GPU (on AArch64 bare metal platforms that use it) loads the kernel image (typically named `kernel8.img` for 64-bit mode) into memory at physical address `0x80000` and starts core 0 executing at that address. Cores 1, 2, and 3 are held in a WFE (Wait For Event) loop by the GPU firmware until explicitly released by software. The VUMA bare metal binary must begin with the `_start` symbol at this address:
 
 ```asm
 .section .text.boot
@@ -772,7 +870,7 @@ sev                         ; send event to wake WFE-waiting cores
 
 ### Stack Setup
 
-The stack grows downward from a high address. The `_stack_top` symbol is defined in the linker script at the top of RAM, below the GPU reserved region. The AArch64 has up to 8 GB of RAM (depending on model), with the GPU firmware typically reserving the first 64-128 MB. The VUMA linker script places the stack at a safe offset from the top of usable RAM:
+The stack grows downward from a high address. The `_stack_top` symbol is defined in the linker script at the top of RAM, below any GPU reserved region. AArch64 platforms may have up to 8 GB of RAM (depending on model), with firmware typically reserving the first 64-128 MB. The VUMA linker script places the stack at a safe offset from the top of usable RAM:
 
 ```asm
 ; Stack for core 0: 64 KB
@@ -1176,6 +1274,93 @@ The inlining decision algorithm considers the following factors:
 5. **Varargs functions:** Never inlined due to complex calling convention handling.
 
 The combined effect of all five optimization passes — constant folding, dead code elimination, instruction scheduling, loop unrolling, and function inlining — typically reduces generated code size by 15-25% and improves execution speed by 20-40% on the Cortex-A76 compared to unoptimized code generation. The passes are run iteratively until a fixed point is reached (no further improvements), with a maximum of 3 iterations to limit compilation time.
+
+---
+
+## 8. DWARF Debug Information Generation
+
+The VUMA code generator can emit DWARF version 4 debug information sections alongside the ELF object file. When the `--debug-info` flag is passed, the code generator produces four standard DWARF sections that enable source-level debugging with `gdb`, `lldb`, and other DWARF-aware tools. This section specifies the DWARF sections generated for the AArch64 backend and their contents.
+
+### 8.1 DWARF Sections
+
+The code generator emits the following sections in every debug-enabled object file:
+
+**`.debug_abbrev` (SHT_PROGBITS):** The abbreviation table defines the tag and attribute encodings used by the DIEs (Debugging Information Entries) in `.debug_info`. Each abbreviation assigns a unique code to a combination of DWARF tag (e.g., `DW_TAG_compile_unit`, `DW_TAG_subprogram`, `DW_TAG_variable`) and a list of attributes with their forms (e.g., `DW_AT_name` with `DW_FORM_string`, `DW_AT_low_pc` with `DW_FORM_addr`). The abbreviation table is the schema that allows the `.debug_info` section to use compact variable-length encoding.
+
+**`.debug_info` (SHT_PROGBITS):** The compilation unit DIEs describe the program's structure. For each VUMA source file, the code generator emits a `DW_TAG_compile_unit` DIE containing:
+
+- `DW_AT_name`: The source file name
+- `DW_AT_comp_dir`: The compilation directory
+- `DW_AT_language`: The source language identifier (VUMA uses a custom vendor extension)
+- `DW_AT_low_pc` / `DW_AT_high_pc`: The address range of the compilation unit's code
+
+Nested within each compilation unit are `DW_TAG_subprogram` DIEs for every function and `DW_TAG_variable` DIEs for local and global variables. Each subprogram DIE includes:
+
+- `DW_AT_name`: The function name
+- `DW_AT_low_pc` / `DW_AT_high_pc`: The function's address range
+- `DW_AT_type`: A reference to the return type DIE
+- `DW_AT_frame_base`: A DWARF expression for locating the frame base (typically `DW_CFA_def_cfa` using x29)
+
+Local variables within functions are described by `DW_TAG_variable` DIEs with `DW_AT_location` expressions that map to stack offsets relative to the frame pointer (x29).
+
+**`.debug_line` (SHT_PROGBITS):** The line-number program maps machine code addresses back to VUMA source file line numbers. The program uses standard DWARF v4 opcodes:
+
+- `DW_LNS_copy`: Emit a row mapping the current address to the current source line
+- `DW_LNS_advance_pc`: Advance the address by a given number of instruction bytes
+- `DW_LNS_advance_line`: Adjust the current source line number
+- `DW_LNS_set_file`: Switch to a different source file
+- `DW_LNE_end_sequence`: Mark the end of a contiguous address range
+
+For AArch64, the `minimum_instruction_length` field in the line number program header is set to 4 (bytes), since all ARM64 instructions are 4 bytes wide. The `line_base` and `line_range` fields are set to standard defaults (-5 and 14 respectively) for compact line delta encoding.
+
+**`.debug_frame` (SHT_PROGBITS):** The call frame information section enables stack unwinding for debuggers and exception handling. It contains:
+
+- **CIE (Common Information Entry):** A single CIE shared by all functions in the compilation unit. For AArch64, the CIE specifies:
+  - `code_alignment_factor`: 4 (ARM64 instruction size)
+  - `data_alignment_factor`: -8 (8-byte stack slots, signed)
+  - `return_address_register`: x30 (LR, register 30)
+  - `DW_CFA_def_cfa`: x29 (FP, register 29), offset 0
+  - `DW_CFA_offset`: x30 (LR) saved at cfa-8
+  - `DW_CFA_offset`: x29 (FP) saved at cfa-16
+
+- **FDE (Frame Description Entry):** One FDE per function, referencing the shared CIE. Each FDE specifies:
+  - `initial_location`: The function's start address
+  - `address_range`: The function's byte size
+  - Per-instruction CFI directives for stack pointer adjustments (e.g., `DW_CFA_def_cfa_offset` when `sp` is decremented for a stack frame)
+
+### 8.2 AArch64-Specific DWARF Configuration
+
+| Parameter                  | Value   | Rationale                                       |
+|----------------------------|---------|-------------------------------------------------|
+| `address_size`             | 8       | 64-bit AArch64 addresses                        |
+| `minimum_instruction_length` | 4     | ARM64 instructions are 4 bytes (fixed-width)    |
+| `code_alignment_factor`    | 4       | Matches instruction size for CFI                |
+| `data_alignment_factor`    | -8      | 8-byte stack slots, negative for stack growth   |
+| `return_address_register`  | 30 (LR) | x30 is the link register on AArch64            |
+| `frame_base_register`      | 29 (FP) | x29 is the frame pointer per AAPCS64           |
+
+### 8.3 Integration with Code Generation Pipeline
+
+DWARF debug info generation is integrated into the code generation pipeline as a separate pass that runs after instruction emission and before ELF serialization. The `DwarfBuilder` collects function boundaries, source line mappings, and variable locations during code generation and emits the four DWARF sections when the ELF is finalized.
+
+The `--debug-info` CLI flag controls DWARF emission. When disabled (the default), no DWARF sections are emitted and the ELF contains only the standard `.text`, `.data`, `.bss`, `.rodata`, `.symtab`, and `.strtab` sections. When enabled, the four DWARF sections are appended and the ELF section header table is updated accordingly.
+
+For the bare metal target (Section 6), DWARF sections are included in the ELF but are placed in the `/DISCARD/` directive in the linker script by default, since bare metal environments typically do not have debugger support. The developer can override this by modifying the linker script to retain the DWARF sections.
+
+### 8.4 Cross-Backend DWARF Support
+
+The `DwarfBuilder` is parameterized by address size and minimum instruction length to support all VUMA backends. For AArch64, the parameters are as specified in Section 8.2. Other backends use their respective configurations:
+
+| Backend      | Address Size | Min Inst Length |
+|--------------|-------------|-----------------|
+| x86_64       | 8 bytes     | 1               |
+| AArch64      | 8 bytes     | 4               |
+| RISC-V 64    | 8 bytes     | 2               |
+| ARM32        | 4 bytes     | 2               |
+| MIPS64       | 8 bytes     | 4               |
+| PPC64        | 8 bytes     | 4               |
+| LoongArch64  | 8 bytes     | 4               |
+| Wasm32       | 4 bytes     | 1               |
 
 ---
 

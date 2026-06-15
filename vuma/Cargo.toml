@@ -1,13 +1,14 @@
 [package]
 name = "vuma"
-version = "0.2.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
-description = "Verified-Unsafe Memory Access — an AI-native programming language framework with behavioral verification, 8-architecture codegen, and LLM integration"
-repository = "https://github.com/vuma-lang/vuma"
-license = "MIT"
-keywords = ["compiler", "verification", "memory-safety", "codegen", "ai-native"]
-categories = ["compilers", "development-tools", "memory-management"]
-authors = ["Super Z (GLM-5.1)"]
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version = "1.75"
 
 [workspace]
 members = [
@@ -25,7 +26,19 @@ members = [
     "src/package",
 ]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0-alpha.1"
+description = "Verified-Unsafe Memory Access — an AI-native programming language framework with behavioral verification, 8-architecture codegen, and LLM integration"
+repository = "https://github.com/vuma-lang/vuma"
+license = "MIT"
+keywords = ["compiler", "verification", "memory-safety", "codegen", "ai-native"]
+categories = ["compilers", "development-tools", "memory-management"]
+authors = ["Super Z (GLM-5.1)"]
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal crates
 vuma-scg = { path = "src/scg" }
 vuma-ive = { path = "src/ive" }
 vuma-core = { path = "src/vuma" }
@@ -34,6 +47,10 @@ vuma-codegen = { path = "src/codegen" }
 vuma-parser = { path = "src/parser" }
 vuma-cor = { path = "src/cor" }
 vuma-proof = { path = "src/proof" }
+vuma-std = { path = "src/std" }
+vuma-projection = { path = "src/projection" }
+vuma-package = { path = "src/package" }
+# External crates — pinned
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 petgraph = "0.6"
@@ -47,8 +64,46 @@ chrono = "0.4"
 indexmap = "2"
 smallvec = "1"
 hashbrown = "0.14"
-vuma-package = { path = "src/package" }
 toml = "0.8"
+libc = "0.2"
+tempfile = "3"
+proptest = "1"
+
+[workspace.metadata]
+release = "alpha"
+release-channel = "pre-release"
+min-rust-version = "1.75"
+msrv-policy = "latest-stable"
+homepage = "https://vuma-lang.github.io"
+documentation = "https://docs.vuma-lang.org"
+bug-tracker = "https://github.com/vuma-lang/vuma/issues"
+changelog = "https://github.com/vuma-lang/vuma/blob/main/CHANGELOG.md"
+license-file = "LICENSE"
+
+[dependencies]
+vuma-scg.workspace = true
+vuma-ive.workspace = true
+vuma-core.workspace = true
+vuma-bd.workspace = true
+vuma-codegen.workspace = true
+vuma-parser.workspace = true
+vuma-cor.workspace = true
+vuma-proof.workspace = true
+vuma-package.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+petgraph.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+colored.workspace = true
+chrono.workspace = true
+indexmap.workspace = true
+smallvec.workspace = true
+hashbrown.workspace = true
+toml.workspace = true
 
 [build-dependencies]
 

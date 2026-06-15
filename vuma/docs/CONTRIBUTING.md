@@ -10,11 +10,12 @@ up your development environment, make changes, and get them merged.
 
 1. [How to Build the Project](#1-how-to-build-the-project)
 2. [How to Run Tests](#2-how-to-run-tests)
-3. [How to Add New SCG Node Types](#3-how-to-add-new-scg-node-types)
-4. [How to Add New Verification Passes](#4-how-to-add-new-verification-passes)
-5. [How to Add New ARM64 Instructions](#5-how-to-add-new-arm64-instructions)
-6. [Code Review Process](#6-code-review-process)
-7. [PR Template](#7-pr-template)
+3. [Test Infrastructure](#3-test-infrastructure)
+4. [How to Add New SCG Node Types](#4-how-to-add-new-scg-node-types)
+5. [How to Add New Verification Passes](#5-how-to-add-new-verification-passes)
+6. [How to Add New Backend Instructions](#6-how-to-add-new-backend-instructions)
+7. [Code Review Process](#7-code-review-process)
+8. [PR Template](#8-pr-template)
 
 ---
 
@@ -74,7 +75,7 @@ The workspace consists of the following crates:
 | `vuma-cor` | `src/cor/` | Continuous Optimization Runtime |
 | `vuma-projection` | `src/projection/` | Projection system (textual, visual, conversational) |
 | `vuma-parser` | `src/parser/` | SCG parser and projection parser |
-| `vuma-codegen` | `src/codegen/` | ARM64 code generation |
+| `vuma-codegen` | `src/codegen/` | Multi-architecture code generation (8 backends) |
 | `vuma-std` | `src/std/` | VUMA standard library |
 | `vuma-proof` | `src/proof/` | Proof infrastructure and formal methods |
 | `vuma-tests` | `src/tests/` | Integration tests |
@@ -278,7 +279,72 @@ cargo test -p vuma-ive -- --test-threads=1 -- verification
 
 ---
 
-## 3. How to Add New SCG Node Types
+## 3. Test Infrastructure
+
+The VUMA project has a comprehensive test infrastructure spanning multiple categories:
+
+### 3.1 Test Categories
+
+| Category | Crate | What It Tests |
+|----------|-------|---------------|
+| Cross-backend consistency | `vuma-tests::cross_backend` | All 8 backends produce consistent results |
+| ABI conformance | `vuma-tests::abi_conformance` | 27 ABI compliance tests across backends |
+| ELF validation | `vuma-tests::elf_validation` | 7 native backends produce valid ELF binaries |
+| Wasm validation | `vuma-tests::wasm_validation` | 12 Wasm32 module validation tests |
+| Property-based testing | `vuma-tests::property_tests` | Proptest-based fuzzing of compiler components |
+| Parser roundtrip | `vuma-tests::parser_roundtrip` | Parse → SCG → text → re-parse stability |
+| SHA256d backends | `vuma-tests::sha256d_backends` | SHA256d correctness across all backends |
+| DWARF/FFI integration | `vuma-tests::dwarf_ffi_integration` | Debug info and FFI syscall emission |
+| Diagnostics integration | `vuma-tests::diagnostics_integration` | 65 diagnostic codes and error chaining |
+| Memory safety | `vuma-tests::execution_validation` | 10 violation types, runtime bounds checks |
+| Regression tests | `vuma-tests::regression` | Prevents re-introduction of fixed bugs |
+
+### 3.2 Running Specific Test Categories
+
+```bash
+# Cross-backend consistency (8 backends)
+cargo test -p vuma-tests -- cross_backend
+
+# ABI conformance (27 tests)
+cargo test -p vuma-tests -- abi_conformance
+
+# ELF validation (7 native backends)
+cargo test -p vuma-tests -- elf_validation
+
+# Wasm validation (12 tests)
+cargo test -p vuma-tests -- wasm_validation
+
+# Property-based testing
+cargo test -p vuma-tests -- property
+
+# DWARF and FFI integration
+cargo test -p vuma-tests -- dwarf_ffi
+
+# Diagnostics system
+cargo test -p vuma-tests -- diagnostics
+```
+
+### 3.3 Benchmarks
+
+The benchmark suite covers SHA256d across all 8 backends, compilation speed, binary size comparison, and codegen quality (redundant load/store analysis):
+
+```bash
+make bench
+# or: cargo bench --workspace
+```
+
+### 3.4 CI Matrix
+
+The GitHub Actions CI runs on every push and PR:
+- Format check (`cargo fmt --check`)
+- Lint check (`cargo clippy -- -D warnings`)
+- Full test suite across all crates
+- Cross-compile matrix for all 8 targets
+- Dependabot for dependency updates
+
+---
+
+## 4. How to Add New SCG Node Types
 
 The Semantic Computation Graph is extensible. Adding a new node type involves
 coordinated changes across the `vuma-scg`, `vuma-ive`, `vuma-codegen`, and
@@ -422,7 +488,7 @@ Add tests at every level:
 
 ---
 
-## 4. How to Add New Verification Passes
+## 5. How to Add New Verification Passes
 
 VUMA currently defines five global invariants (liveness, exclusivity,
 interpretation, origin, cleanup). Adding a new verification pass requires
@@ -577,18 +643,13 @@ regions), add it to `src/vuma/src/region.rs` or the relevant module.
 
 ---
 
-## 5. How to Add New ARM64 Instructions
+## 6. How to Add New Backend Instructions
 
-The codegen crate (`src/codegen/`) defines ARM64 instructions, encodings,
-register allocation, and the SCG → IR → ARM64 lowering pipeline. Adding a
-new instruction requires changes across several modules.
+The codegen crate (`src/codegen/`) defines instructions for all 8 backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32), register allocation, and the SCG → IR → machine code lowering pipeline. Adding a new instruction requires changes across several modules.
 
-### 5.1 Step 1: Define the Instruction Variant
+### 6.1 Step 1: Define the Instruction Variant
 
-Add the instruction to the `Instruction` enum in
-`src/codegen/src/arm64.rs`. The enum already contains arithmetic, load/store,
-atomic, branch, barrier, move, and system instructions. Follow the existing
-pattern:
+Add the instruction to the relevant backend's `Instruction` enum (e.g., `src/codegen/src/arm64.rs` for AArch64, `src/codegen/src/x86_64/mod.rs` for x86_64). Follow the existing pattern:
 
 ```rust
 pub enum Instruction {
@@ -612,7 +673,7 @@ pub enum Instruction {
 }
 ```
 
-### 5.2 Step 2: Implement the Encoding
+### 6.2 Step 2: Implement the Encoding
 
 Add the binary encoding in the `Instruction::encode()` method. Follow the
 ARM Architecture Reference Manual (ARMv8-A) encoding tables:
@@ -645,7 +706,7 @@ impl Instruction {
 }
 ```
 
-### 5.3 Step 3: Implement the Display Trait
+### 6.3 Step 3: Implement the Display Trait
 
 Add the assembly output for the new instruction in the `Display` impl:
 
@@ -668,20 +729,20 @@ impl std::fmt::Display for Instruction {
 }
 ```
 
-### 5.4 Step 4: Add the IR Instruction (if needed)
+### 6.4 Step 4: Add the IR Instruction (if needed)
 
-If the new ARM64 instruction does not map to an existing IR instruction,
+If the new instruction does not map to an existing IR instruction,
 add one in `src/codegen/src/ir.rs`. The IR is the target-independent
-intermediate representation between the SCG and ARM64 assembly.
+intermediate representation between the SCG and machine code.
 
-### 5.5 Step 5: Add the SCG-to-IR Mapping
+### 6.5 Step 5: Add the SCG-to-IR Mapping
 
 In `src/codegen/src/scg_to_ir.rs`, add the lowering rule that maps SCG
 node types to the new IR instruction. If the instruction only applies to
-ARM64 and not to the generic IR, add the mapping in the instruction
-selector in `src/codegen/src/arm64.rs`.
+a specific backend, add the mapping in the instruction selector for that
+backend (e.g., `src/codegen/src/arm64.rs`, `src/codegen/src/x86_64/mod.rs`).
 
-### 5.6 Step 6: Add Tests
+### 6.6 Step 6: Add Tests
 
 - **Encoding test**: Verify the output bytes match the ARM Architecture
   Reference Manual. Use concrete register assignments and compare the
@@ -708,10 +769,9 @@ selector in `src/codegen/src/arm64.rs`.
 - **QEMU test**: If available, run the generated binary under QEMU and
   verify correct execution.
 
-### 5.7 Step 7: Update Documentation
+### 6.7 Step 7: Update Documentation
 
-- Add the instruction to the codegen crate's module-level documentation in
-  `src/codegen/src/arm64.rs` (the instruction selection table)
+- Add the instruction to the codegen crate's module-level documentation
 - If the instruction affects VUMA invariants (e.g., atomic instructions
   affect exclusivity verification, barrier instructions affect memory
   ordering verification), update the relevant spec documents in `docs/specs/`
@@ -720,9 +780,9 @@ selector in `src/codegen/src/arm64.rs`.
 
 ---
 
-## 6. Code Review Process
+## 7. Code Review Process
 
-### 6.1 Before Submitting
+### 7.1 Before Submitting
 
 1. **Run the full CI check locally** (see Section 2.7)
 2. **Verify that no new `unsafe` blocks** are introduced without
@@ -734,7 +794,7 @@ selector in `src/codegen/src/arm64.rs`.
 5. **Organize commits** into logical units following conventional commits
    (see `CONVENTIONS.md`)
 
-### 6.2 Review Criteria
+### 7.2 Review Criteria
 
 Reviewers will evaluate PRs against the following criteria:
 
@@ -755,7 +815,7 @@ Reviewers will evaluate PRs against the following criteria:
    structure, or does it require restructuring? Are cross-crate dependencies
    maintained correctly (no circular dependencies)?
 
-### 6.3 Review Timeline
+### 7.3 Review Timeline
 
 - Initial review within **2 business days**
 - Follow-up reviews within **1 business day**
@@ -763,20 +823,21 @@ Reviewers will evaluate PRs against the following criteria:
 - Changes to IVE verification logic or VUMA invariants require **2 approving
   reviews** from maintainers with domain expertise
 
-### 6.4 Special Review Rules
+### 7.4 Special Review Rules
 
 - **New SCG node types**: Must include IVE verification and codegen support
   in the same PR (no partial implementations)
 - **New verification passes**: Must include a formal specification document
   in `docs/specs/` and proof infrastructure in `src/proof/`
-- **New ARM64 instructions**: Must include encoding tests verified against
-  the ARM Architecture Reference Manual
+- **New backend instructions**: Must include encoding tests verified against
+  the architecture reference manual (ARM, x86, RISC-V, etc.)
 - **Changes to `unsafe` annotations**: Any change to `// VUMA-VERIFIED` or
   `// IVE-TODO` annotations requires explicit reviewer acknowledgment
+- **FFI/syscall changes**: Must test across all 8 backends with ABI conformance tests
 
 ---
 
-## 7. PR Template
+## 8. PR Template
 
 Every PR must use the following template. Copy it into the PR description
 when opening a pull request.

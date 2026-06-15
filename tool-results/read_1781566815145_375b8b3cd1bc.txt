@@ -1,0 +1,1102 @@
+     1→# VUMA Language Reference
+     2→
+     3→> Version 0.1 — Last updated 2026-03-04
+     4→
+     5→This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language designed for the AArch64 platform. VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
+     6→
+     7→---
+     8→
+     9→## Table of Contents
+    10→
+    11→1. [Lexical Structure](#1-lexical-structure)
+    12→2. [Types and BD Annotations](#2-types-and-bd-annotations)
+    13→3. [Memory Model](#3-memory-model)
+    14→4. [Pointer Operations](#4-pointer-operations)
+    15→5. [Control Flow](#5-control-flow)
+    16→6. [Functions](#6-functions)
+    17→7. [Concurrency](#7-concurrency)
+    18→8. [Memory Safety](#8-memory-safety)
+    19→9. [Standard Library Overview](#9-standard-library-overview)
+    20→10. [AArch64 Platform-Specific Features](#10-aarch64-platform-specific-features)
+    21→11. [Appendix: Keyword and Operator Quick Reference](#11-appendix-keyword-and-operator-quick-reference)
+    22→
+    23→---
+    24→
+    25→## 1. Lexical Structure
+    26→
+    27→The VUMA lexer transforms raw source text into a flat stream of tokens, each annotated with byte-offset spans and line/column positions for error reporting. The lexer supports full error recovery: it never stops on the first error, producing `Error` tokens and collecting diagnostic information that can be retrieved later. Whitespace and non-doc comments are silently skipped; doc comments (`///` and `//!`) are emitted as tokens for downstream tooling.
+    28→
+    29→### Keywords
+    30→
+    31→VUMA reserves the following keywords. They cannot be used as identifiers unless escaped. The keyword set is organized into six categories reflecting the language's design priorities:
+    32→
+    33→**Core language keywords:** `fn`, `let`, `if`, `else`, `while`, `for`, `return`, `as`, `match`, `struct`, `enum`, `loop`
+    34→
+    35→**Memory primitive keywords:** `ptr`, `region`, `alloc`, `allocate`, `free`, `derive`, `cast`, `read`, `write`
+    36→
+    37→**Concurrency and synchronization keywords:** `sync`, `async`, `await`, `spawn`, `lock`, `unlock`, `channel`, `send`, `recv`
+    38→
+    39→**Safety keywords:** `unsafe`, `safe`
+    40→
+    41→**Behavioral domain directive keywords:** `bd`, `repd`, `capd`, `reld`
+    42→
+    43→**Module system keywords:** `import`, `export`, `mod`, `use`, `self`, `super`
+    44→
+    45→**Literal keywords:** `true`, `false`
+    46→
+    47→**Type operator keywords:** `sizeof`, `alignof`
+    48→
+    49→### Operators
+    50→
+    51→VUMA provides a comprehensive set of arithmetic, comparison, logical, bitwise, and pointer-specific operators:
+    52→
+    53→| Category | Operators |
+    54→|---|---|
+    55→| Arithmetic | `+` `-` `*` `/` `%` |
+    56→| Comparison | `==` `!=` `<` `<=` `>` `>=` |
+    57→| Logical | `&&` `\|\|` `!` |
+    58→| Bitwise | `&` `\|` `^` `~` `<<` `>>` |
+    59→| Assignment | `=` |
+    60→| Pointer | `*` (dereference) `@` (address-of) |
+    61→| Type | `as` (cast) `::` (path separator) |
+    62→| Arrow | `->` (return type) `=>` (match arm) |
+    63→| Other | `.` `..` `...` `:` `;` `,` `?` `#` `$` |
+    64→
+    65→### Literals
+    66→
+    67→VUMA supports the following literal forms, each with underscore separators for readability:
+    68→
+    69→- **Integer literals:** `42`, `0`, `1_000_000`
+    70→- **Hex address literals:** `0xDEADBEEF`, `0xFF00_0000` — these produce the `Address` token kind, representing a `u64` memory address
+    71→- **Binary literals:** `0b1010_1100`
+    72→- **Octal literals:** `0o777`
+    73→- **Float literals:** `3.14`, `1e10`, `2.5e-3`
+    74→- **String literals:** `"hello"`, with escape sequences `\n`, `\t`, `\r`, `\\`, `\"`, `\0`, `\xHH`
+    75→- **Character literals:** `'a'`, `'\n'`
+    76→- **Byte string literals:** `b"hello"`
+    77→- **Raw string literals:** `r"..."`, `r#"..."#`
+    78→- **Boolean literals:** `true`, `false`
+    79→
+    80→### Comments
+    81→
+    82→VUMA supports three forms of comments:
+    83→
+    84→- **Line comments:** `//` — extend to end of line, silently skipped by the lexer
+    85→- **Block comments:** `/* ... */` — can be nested, silently skipped
+    86→- **Doc comments:** `///` (outer) and `//!` (module-level) — emitted as `DocComment` and `ModuleDoc` tokens for documentation tooling
+    87→
+    88→```vuma
+    89→// This is a line comment
+    90→/* This is a
+    91→   block comment */
+    92→
+    93→/// This is an outer doc comment — documents the next item
+    94→//! This is a module-level doc comment
+    95→```
+    96→
+    97→### Identifiers
+    98→
+    99→Identifiers begin with an ASCII letter or underscore, followed by any combination of ASCII letters, digits, or underscores. Keywords are reserved and cannot be used as identifiers. Type names conventionally use `PascalCase`, while function and variable names use `snake_case`.
+   100→
+   101→```vuma
+   102→my_variable    // valid
+   103→_buffer        // valid
+   104→NodeHeader     // valid (convention: type name)
+   105→3things        // invalid — starts with a digit
+   106→alloc          // invalid — reserved keyword
+   107→```
+   108→
+   109→---
+   110→
+   111→## 2. Types and BD Annotations
+   112→
+   113→VUMA's type system is built around the concept of **Behavioral Descriptors (BDs)**, which provide a complete specification of a value along three orthogonal axes. Every value in VUMA carries a BD that the Invariant Verification Engine (IVE) uses to prove memory safety without requiring an `unsafe` escape hatch. The type system covers primitive types, pointer types, region-annotated types, struct types, generic type applications, function types, and explicit BD annotations.
+   114→
+   115→### The BD Triple: RepD × CapD × RelD
+   116→
+   117→A Behavioral Descriptor is the composition of three sub-descriptors:
+   118→
+   119→```
+   120→BD = RepD × CapD × RelD
+   121→```
+   122→
+   123→Two BDs are **compatible** when all three layers are pairwise compatible. One BD **refines** another when every layer is at least as specific:
+   124→
+   125→```
+   126→bd1 ⊑ bd2  ⟺  bd1.repd.subsumes(bd2.repd)
+   127→               ∧ bd1.capd.is_subset(bd2.capd)
+   128→               ∧ bd1.reld.refines(bd2.reld)
+   129→```
+   130→
+   131→### RepD — Representation Descriptor
+   132→
+   133→RepD describes the memory shape, size, and alignment of a value. It forms a subsumption lattice where more-specific RepDs subsume less-specific ones. The `Byte` variant is the universal bottom element that is compatible with everything.
+   134→
+   135→```vuma
+   136→// RepD variants (from the bd crate):
+   137→//   Byte(size, align)   — raw byte sequence, compatible with anything
+   138→//   Struct { fields }   — named field layout
+   139→//   Array { elem, len } — homogeneous fixed-size array
+   140→//   Enum { variants }   — tagged union
+   141→//   Ptr(pointee)        — pointer representation
+   142→//   Union { variants }  — untagged union
+   143→//   Func { params, ret }— function pointer representation
+   144→
+   145→// In source code, RepD is inferred from type annotations:
+   146→let x: i32 = 42;           // RepD: Byte(4, 4)
+   147→let p: Address = allocate(8); // RepD: Ptr(Byte(8, 8))
+   148→```
+   149→
+   150→### CapD — Capability Descriptor
+   151→
+   152→CapD specifies what operations are permitted on a value. It forms a lattice where the **meet** (intersection of capabilities, union of conditions) and **join** (union of capabilities, intersection of conditions) operations are well-defined. Capabilities can be conditioned on holding a specific lock, enabling fine-grained concurrency reasoning.
+   153→
+   154→```vuma
+   155→// CapD capabilities (from the bd crate):
+   156→//   Read     — the value may be read
+   157→//   Write    — the value may be written
+   158→//   Execute  — the value may be executed as code
+   159→//   Derive   — new pointers may be derived from this value
+   160→
+   161→// CapD can be conditioned on lock acquisition:
+   162→//   CapD { read: true, write: true, write_requires_lock: 42 }
+   163→//   This means write is only permitted when lock #42 is held.
+   164→
+   165→// CapD lattice operations:
+   166→//   meet(a, b) = intersection of caps, union of conditions (more restrictive)
+   167→//   join(a, b) = union of caps, intersection of conditions (less restrictive)
+   168→
+   169→// Explicit BD annotation syntax:
+   170→#bd(ReadOnly)    // CapD with only Read capability
+   171→#bd(ReadWrite)   // CapD with Read and Write capabilities
+   172→#bd(LockedWrite) // CapD where Write requires a specific lock
+   173→```
+   174→
+   175→### RelD — Relational Descriptor
+   176→
+   177→RelD captures temporal, dependency, and security relationships that a value participates in. It ensures that constraints such as lifetime ordering, information flow policies, and dependency tracking are preserved across operations. RelD composition is the union of relations, and consistency checking ensures that contradictory constraints (e.g., `Outlives` + `Succeeds`) are rejected.
+   178→
+   179→```vuma
+   180→// RelD relation types (from the bd crate):
+   181→//   Liveness      — value is guaranteed to be live
+   182→//   Outlives(a,b) — region a outlives region b
+   183→//   DependsOn(a,b)— computation depends on value b
+   184→//   Succeeds(a,b) — event a happens after event b
+   185→//   FlowPolicy(p) — information-flow policy label p
+   186→
+   187→// RelD is usually inferred, but can be annotated:
+   188→// #bd(Exclusive) carries an implicit RelD with Liveness
+   189→```
+   190→
+   191→### Type Syntax
+   192→
+   193→The full type syntax in VUMA covers:
+   194→
+   195→```vuma
+   196→// Primitive (BD base) types:
+   197→u8  u16  u32  u64    // unsigned integers
+   198→i8  i16  i32  i64    // signed integers
+   199→bool                  // boolean
+   200→void                  // unit/void type
+   201→Address               // opaque memory region handle (u64)
+   202→
+   203→// Pointer types:
+   204→*i32                  // pointer to i32
+   205→*Address              // pointer to an address (double indirection)
+   206→
+   207→// Region-annotated pointers:
+   208→*i32 @ arena          // pointer to i32 in region "arena"
+   209→
+   210→// Fixed-size arrays:
+   211→[i32; 10]             // array of 10 i32 values
+   212→
+   213→// Struct types:
+   214→NodeHeader            // named struct (defined with `struct`)
+   215→
+   216→// Generic types:
+   217→Queue<T>              // generic type parameterized by T
+   218→Result<T, E>          // generic with two type parameters
+   219→
+   220→// Function types:
+   221→(i32, i32) -> i32     // function taking two i32s, returning i32
+   222→() -> void            // nullary function returning void
+   223→
+   224→// BD annotation types:
+   225→#bd(ReadOnly)         // behavioral descriptor annotation
+   226→```
+   227→
+   228→### Type Ascription
+   229→
+   230→Variables may optionally carry type annotations. When omitted, the type is inferred from context or the right-hand side expression:
+   231→
+   232→```vuma
+   233→let x: i32 = 42;          // explicit type
+   234→let y = 42;               // inferred as integer literal
+   235→let p: Address = allocate(8); // explicit Address type
+   236→value: i32 = *region;     // type ascription without `let`
+   237→```
+   238→
+   239→---
+   240→
+   241→## 3. Memory Model
+   242→
+   243→VUMA's memory model is built around four first-class operations: **allocate**, **write**, **read**, and **free**. Unlike languages where these are library calls, VUMA makes them primitive statements that the Invariant Verification Engine (IVE) automatically checks. Every pointer operation is verified against the five LIVE invariants, and there is no `unsafe` keyword to bypass verification. This section describes regions, allocations, derivations, and accesses — the core concepts that define how VUMA programs interact with memory.
+   244→
+   245→### Regions
+   246→
+   247→A **region** is a contiguous block of memory created by `allocate(size)` or `map_device(base, size)`. Regions are identified by their `Address` value, an opaque 64-bit handle. The IVE tracks the lifetime and bounds of every region, ensuring that all accesses fall within the region's allocated range.
+   248→
+   249→```vuma
+   250→// Allocate a region for one 64-bit integer
+   251→region = allocate(8);
+   252→
+   253→// Allocate a region large enough for a struct
+   254→node = allocate(24);  // sizeof(NodeHeader) = 24
+   255→
+   256→// Map a hardware device region (never freed, volatile semantics)
+   257→gpio = map_device(0x7e200000, 4096);
+   258→```
+   259→
+   260→Regions can be named using the `region` keyword for clarity:
+   261→
+   262→```vuma
+   263→region pool = allocate(4096);  // named region declaration
+   264→```
+   265→
+   266→### Allocations
+   267→
+   268→The `allocate(size)` statement reserves `size` bytes of memory and returns an `Address`. The IVE verifies at compile time that:
+   269→
+   270→1. **Liveness:** the returned address is live immediately after allocation
+   271→2. **Interpretation:** the allocation size is a positive, known value
+   272→3. **Cleanup:** every allocation is eventually freed (or mapped as a device that never needs freeing)
+   273→
+   274→```vuma
+   275→// Simple allocation
+   276→p = allocate(8);        // 8 bytes for a u64
+   277→*p = 42;                // write to the region
+   278→value: u64 = *p;        // read from the region
+   279→free(p);                // release the region
+   280→
+   281→// Arena-style allocation
+   282→arena = allocate(4096); // one large block
+   283→a = arena + 0;          // offset 0 within arena
+   284→b = arena + 64;         // offset 64 within arena
+   285→// IVE knows a and b are within the arena's 4096-byte range
+   286→free(arena);            // frees the entire arena; a and b are now dead
+   287→```
+   288→
+   289→### Derivations
+   290→
+   291→A **derivation** is the process of creating a new pointer from an existing one. VUMA tracks the full derivation chain so the IVE knows which original allocation a derived pointer comes from. This is critical for proving that offsets stay within bounds and that freeing a base allocation invalidates all derived pointers.
+   292→
+   293→```vuma
+   294→// Pointer arithmetic derives a new address
+   295→base = allocate(1024);
+   296→offset_ptr = base + 128;     // derived: base + 128
+   297→// IVE knows offset_ptr is within base's 1024-byte allocation
+   298→
+   299→// The derive expression is explicit:
+   300→derived = derive(ptr, region);  // formal derivation with region annotation
+   301→
+   302→// Arena allocation uses derivation chains:
+   303→current = (*arena).base + (*arena).offset;  // derived from arena.base
+   304→aligned = current.align_to(16);             // further derivation with alignment
+   305→// IVE tracks: arena.base → current → aligned
+   306→```
+   307→
+   308→When the base allocation is freed, the IVE marks **all** derived pointers as invalid. This prevents the most common bug in arena-based code: using a pointer after its arena has been destroyed.
+   309→
+   310→```vuma
+   311→arena = arena_create(4096);
+   312→a = arena_alloc(arena, 64, 8);
+   313→b = arena_alloc(arena, 128, 16);
+   314→arena_destroy(arena);
+   315→// IVE: a and b are now dead pointers
+   316→// x = *a;  // ERROR: use of dead pointer `a`
+   317→```
+   318→
+   319→### Accesses
+   320→
+   321→A **memory access** is a read or write through a dereferenced pointer. Every access is checked by the IVE against the five invariants. The IVE tracks byte-level granularity, so it can prove that two accesses to different fields of the same struct do not conflict — this is how VUMA verifies doubly-linked list operations that Rust's borrow checker rejects.
+   322→
+   323→```vuma
+   324→// Write access — stores a value into a region
+   325→*region = 42;
+   326→(*node).next = sentinel;
+   327→(*last).prev = node;
+   328→
+   329→// Read access — loads a value from a region
+   330→value: i32 = *region;
+   331→next_node = (*current).next;
+   332→
+   333→// The IVE verifies for each access:
+   334→//   Liveness:      the target address is live
+   335→//   Exclusivity:   no concurrent conflicting access (write-write or write-read)
+   336→//   Interpretation: the BD at the read matches the BD at the write
+   337→//   Origin:        the data came from a valid write
+   338→//   Cleanup:       the region will eventually be freed
+   339→```
+   340→
+   341→---
+   342→
+   343→## 4. Pointer Operations
+   344→
+   345→VUMA provides a small set of first-class pointer operations that cover all the functionality traditionally achieved through `unsafe` pointer arithmetic in Rust or C. These operations are not library calls; they are primitive language constructs that the IVE checks automatically. The key operations are **derive** (create a derived pointer), **offset** (pointer arithmetic), and **cast** (type reinterpretation with proof obligations).
+   346→
+   347→### Dereference (`*`)
+   348→
+   349→The dereference operator `*` reads or writes through a pointer. When used on the left side of an assignment, it performs a write; when used in an expression, it performs a read. The IVE verifies every dereference against all five invariants.
+   350→
+   351→```vuma
+   352→region = allocate(8);
+   353→
+   354→// Write via dereference
+   355→*region = 42;
+   356→
+   357→// Read via dereference
+   358→value: i32 = *region;
+   359→
+   360→// Dereference with field access
+   361→node = allocate(24);
+   362→*node = NodeHeader { prev: 0, next: 0, data: 0 };
+   363→(*node).prev = node;   // write to .prev field
+   364→(*node).next = node;   // write to .next field
+   365→prev_val = (*node).prev; // read from .prev field
+   366→```
+   367→
+   368→### Address-Of (`@`)
+   369→
+   370→The `@` operator takes the address of a value, producing a pointer. This is the inverse of dereference:
+   371→
+   372→```vuma
+   373→let x: i32 = 42;
+   374→ptr = @x;       // ptr has type *i32
+   375→*ptr = 100;     // modifies x through the pointer
+   376→```
+   377→
+   378→### Offset (Pointer Arithmetic)
+   379→
+   380→Pointer arithmetic is expressed using the `+` operator between an `Address` and an integer offset, or through the `Offset` expression. The IVE tracks the derivation chain and verifies that the resulting address remains within the bounds of the original allocation.
+   381→
+   382→```vuma
+   383→base = allocate(1024);
+   384→
+   385→// Offset by bytes
+   386→slot_0 = base + 0;     // first 8 bytes
+   387→slot_1 = base + 8;     // next 8 bytes
+   388→slot_2 = base + 16;    // and so on
+   389→
+   390→// IVE verifies: each slot is within base's 1024-byte allocation
+   391→*slot_0 = 10;
+   392→*slot_1 = 20;
+   393→*slot_2 = 30;
+   394→
+   395→// Hardware register access via offset
+   396→const GPIO_BASE: Address = 0x7e200000;
+   397→gpio = map_device(GPIO_BASE, 4096);
+   398→fsel = gpio + 0x00;    // GPFSEL0 offset
+   399→set = gpio + 0x1c;     // GPSET0 offset
+   400→clr = gpio + 0x28;     // GPCLR0 offset
+   401→```
+   402→
+   403→### Derive
+   404→
+   405→The `derive(ptr, region)` expression explicitly creates a derived pointer within a specific region. This is the formal mechanism for sub-allocation, where a pointer into a larger region is created and the IVE must track its provenance. Derive is implicit in pointer arithmetic but can be made explicit for annotation purposes.
+   406→
+   407→```vuma
+   408→// Explicit derivation
+   409→inner = derive(ptr, arena_region);
+   410→
+   411→// Implicit derivation via pointer arithmetic (equivalent)
+   412→inner = arena_base + offset;
+   413→
+   414→// The derivation chain is tracked:
+   415→//   arena.base → current → aligned → ...
+   416→// When arena is freed, all derived pointers are invalidated.
+   417→```
+   418→
+   419→### Cast
+   420→
+   421→The `cast` operation (expressed with the `as` keyword or the `cast` statement) reinterprets a value as a different type. This is the only way to perform type punning in VUMA, and it carries proof obligations: the IVE checks that the RepD of the target type is compatible with the RepD of the source type. If the cast strengthens capabilities (CapD), a safety proof must be provided.
+   422→
+   423→```vuma
+   424→// Safe cast: narrowing capability (always allowed)
+   425→let raw: u64 = ptr as u64;  // pointer to integer (weakening)
+   426→
+   427→// Cast with proof obligation: widening capability
+   428→let ptr: *i32 = raw as *i32;  // integer to pointer (strengthening)
+   429→// IVE requires proof that `raw` originated from a valid pointer
+   430→
+   431→// Explicit cast statement
+   432→cast expr as Type;
+   433→
+   434→// sizeof and alignof for safe casting
+   435→let size = sizeof(NodeHeader);   // 24
+   436→let align = alignof(NodeHeader); // 8
+   437→```
+   438→
+   439→---
+   440→
+   441→## 5. Control Flow
+   442→
+   443→VUMA provides the standard set of imperative control flow constructs, each with IVE integration to ensure that memory safety invariants are preserved across all execution paths. The IVE analyzes all branches of conditionals, all loop iterations, and all match arms to verify that every possible execution path satisfies the five LIVE invariants.
+   444→
+   445→### If / Else
+   446→
+   447→The `if` statement conditionally executes a block based on a boolean expression. An optional `else` block provides an alternative path. The IVE tracks the state of memory on both branches and merges them at the join point, ensuring that invariants hold regardless of which branch was taken.
+   448→
+   449→```vuma
+   450→if next_head % (*q).capacity == tail % (*q).capacity {
+   451→    return false;  // Queue is full
+   452→} else {
+   453→    *slot = value;
+   454→    (*q).head.store(next_head, Release);
+   455→    return true;
+   456→}
+   457→
+   458→// Nested conditionals are supported:
+   459→if x > 0 {
+   460→    if x > 100 {
+   461→        *ptr = 2;
+   462→    } else {
+   463→        *ptr = 1;
+   464→    }
+   465→} else {
+   466→    *ptr = 0;
+   467→}
+   468→```
+   469→
+   470→### While
+   471→
+   472→The `while` loop repeatedly executes a block as long as a condition is true. The IVE verifies that loop bodies preserve invariants on every iteration and that the loop terminates (when termination analysis is possible). For linked data structures, the IVE can prove that the loop will terminate because the list structure is acyclic aside from the sentinel.
+   473→
+   474→```vuma
+   475→// Traverse a linked list
+   476→current = (*list).next;
+   477→while current != list {
+   478→    print((*current).data);
+   479→    current = (*current).next;
+   480→}
+   481→
+   482→// Free all nodes in a list
+   483→current = (*list).next;
+   484→while current != list {
+   485→    next = (*current).next;
+   486→    free(current);
+   487→    current = next;
+   488→}
+   489→free(list);
+   490→```
+   491→
+   492→### For
+   493→
+   494→The `for` loop iterates over a range or iterable expression. The iterator variable is bound in the loop body's scope:
+   495→
+   496→```vuma
+   497→// Iterate over a range
+   498→for i in 0..10 {
+   499→    slot = base + i * 8;
+   500→    *slot = i;
+   501→}
+   502→
+   503→// Iterate over elements
+   504→for element in buffer {
+   505→    process(element);
+   506→}
+   507→```
+   508→
+   509→### Loop
+   510→
+   511→The infinite `loop` construct runs a block indefinitely. It is typically used in embedded systems for main event loops. The IVE accepts infinite loops in contexts where they are expected (e.g., bare-metal `main` functions) but flags them if they could leak resources.
+   512→
+   513→```vuma
+   514→// Bare-metal blink loop
+   515→loop {
+   516→    gpio_set(led_pin);
+   517→    delay_ms(500);
+   518→    gpio_clear(led_pin);
+   519→    delay_ms(500);
+   520→}
+   521→```
+   522→
+   523→### Match
+   524→
+   525→The `match` statement performs pattern matching on a value. Patterns can be literals, identifiers, wildcards, or struct-like destructuring. Each arm maps a pattern to an expression. The IVE ensures that all match arms preserve invariants and that the match is exhaustive when required.
+   526→
+   527→```vuma
+   528→match result {
+   529→    Some(value) => process(value),
+   530→    None => handle_empty(),
+   531→}
+   532→
+   533→match opcode {
+   534→    0x01 => execute_load(),
+   535→    0x02 => execute_store(),
+   536→    _ => handle_unknown(),  // wildcard catches everything else
+   537→}
+   538→
+   539→match node {
+   540→    Node { data, next } => traverse(next),
+   541→}
+   542→```
+   543→
+   544→### Return
+   545→
+   546→The `return` statement exits the current function, optionally with a value. The IVE verifies that returning does not leak any resources (Cleanup invariant) and that the returned value satisfies the function's declared return type.
+   547→
+   548→```vuma
+   549→fn add(a: i32, b: i32) -> i32 {
+   550→    return a + b;
+   551→}
+   552→
+   553→fn maybe_push(q: Address, value: u64) -> bool {
+   554→    if is_full(q) {
+   555→        return false;
+   556→    }
+   557→    push(q, value);
+   558→    return true;
+   559→}
+   560→```
+   561→
+   562→---
+   563→
+   564→## 6. Functions
+   565→
+   566→Functions are the primary unit of code organization in VUMA. A function definition specifies a name, a list of typed parameters, an optional return type, and a body block. Functions are first-class items that appear at the top level of a program or within module declarations. The IVE analyzes each function independently and in the context of its callers to verify memory safety across function boundaries.
+   567→
+   568→### Function Definition
+   569→
+   570→The `fn` keyword introduces a function definition. Parameters may carry optional type annotations, and the return type is specified after `->`. If no return type is specified, the function returns `void`.
+   571→
+   572→```vuma
+   573→fn main() -> i32 {
+   574→    region = allocate(8);
+   575→    *region = 42;
+   576→    value: i32 = *region;
+   577→    free(region);
+   578→    return value;
+   579→}
+   580→
+   581→fn push_back(list: Address, value: u64) {
+   582→    sentinel = list;
+   583→    last = (*sentinel).prev;
+   584→    node = allocate(24);
+   585→    *node = NodeHeader { prev: last, next: sentinel, data: value };
+   586→    (*last).next = node;
+   587→    (*sentinel).prev = node;
+   588→}
+   589→
+   590→fn arena_alloc(arena: Address, alloc_size: u64, align: u64) -> Address {
+   591→    current = (*arena).base + (*arena).offset;
+   592→    aligned = current.align_to(align);
+   593→    new_offset = (aligned - (*arena).base) + alloc_size;
+   594→    (*arena).offset = new_offset;
+   595→    return aligned;
+   596→}
+   597→```
+   598→
+   599→### Function Calling
+   600→
+   601→Functions are called by name with parenthesized arguments. The IVE verifies that the arguments are compatible with the parameter types and that any `Address` arguments point to live regions. Function calls can appear as expressions or statements.
+   602→
+   603→```vuma
+   604→// Calling a function as a statement
+   605→push_back(list, 10);
+   606→free(region);
+   607→
+   608→// Calling a function as an expression
+   609→value: u64 = queue_pop(q);
+   610→size = sizeof(NodeHeader);
+   611→
+   612→// Method-style calls via namespace access
+   613→head = (*q).head.load(Acquire);
+   614→AtomicU64::new(0);
+   615→```
+   616→
+   617→### Async / Spawn
+   618→
+   619→VUMA supports lightweight concurrency through `async` blocks and `spawn` expressions. An `async` block creates a deferred computation that can be executed concurrently. A `spawn` expression launches an async block on a new task. The IVE extends its five invariants to concurrent code, verifying that no data races occur across tasks and that shared resources are properly synchronized.
+   620→
+   621→```vuma
+   622→// Async block — creates a deferred computation
+   623→task = async {
+   624→    let result = compute_value();
+   625→    return result;
+   626→};
+   627→
+   628→// Spawn — launches an async block as a concurrent task
+   629→handle = spawn async {
+   630→    process_data(buffer);
+   631→};
+   632→
+   633→// Await — waits for a spawned task to complete
+   634→result = await handle;
+   635→
+   636→// Spawning multiple concurrent tasks
+   637→h1 = spawn process_queue(q1);
+   638→h2 = spawn process_queue(q2);
+   639→await h1;
+   640→await h2;
+   641→```
+   642→
+   643→The IVE verifies async/spawn code by:
+   644→- Checking that no two concurrent tasks write to overlapping memory without synchronization
+   645→- Ensuring that shared reads are safe (concurrent reads never conflict)
+   646→- Tracking the derivation chain across task boundaries
+   647→- Verifying that all resources are freed even in the presence of concurrent execution
+   648→
+   649→---
+   650→
+   651→## 7. Concurrency
+   652→
+   653→VUMA provides language-level concurrency primitives that the IVE can reason about formally. Rather than relying on external libraries, VUMA bakes synchronization constructs into the language so that the IVE can prove the absence of data races, deadlocks, and use-after-free bugs in concurrent code. The key constructs are `sync` blocks, channels, locks, and atomic operations.
+   654→
+   655→### Sync Blocks
+   656→
+   657→The `sync` block establishes a happens-before ordering between accesses inside the block and accesses outside it. This is the fundamental mechanism for telling the IVE that certain operations are sequentially ordered. The IVE uses sync edges to build the ordered relation (transitive closure of happens-before), and skips conflict checks for ordered accesses.
+   658→
+   659→```vuma
+   660→// Sync block ensures sequential ordering
+   661→sync {
+   662→    *shared_data = 42;
+   663→    result = *shared_data;
+   664→}
+   665→// IVE: the write happens before the read, no data race
+   666→
+   667→// Without sync, concurrent accesses might conflict:
+   668→// Thread 1: *shared_data = 42;
+   669→// Thread 2: result = *shared_data;
+   670→// IVE would flag this as a write-read conflict without a sync edge
+   671→```
+   672→
+   673→### Channels
+   674→
+   675→Channels provide message-passing concurrency. The `channel` keyword creates a typed communication channel, `send` places a value into the channel, and `recv` extracts a value. Channels enforce ownership transfer: sending a value through a channel moves ownership to the receiver, preventing the sender from accessing it afterward.
+   676→
+   677→```vuma
+   678→// Create a channel
+   679→ch = channel<u64>();
+   680→
+   681→// Send a value (ownership transfers)
+   682→send(ch, computed_value);
+   683→
+   684→// Receive a value
+   685→value = recv(ch);
+   686→
+   687→// The IVE verifies:
+   688→// - After send(), the sender no longer has access to the value
+   689→// - recv() only succeeds after a matching send()
+   690→// - No two receivers can get the same value (Exclusivity)
+   691→```
+   692→
+   693→### Locks
+   694→
+   695→VUMA's `lock` and `unlock` statements provide mutual exclusion. The IVE integrates locks into the CapD lattice: when a CapD specifies `write_requires_lock: id`, the IVE knows that the write is safe as long as lock `id` is held. This enables the IVE to classify conflicting accesses as "probably safe" when they are both protected by the same mutex.
+   696→
+   697→```vuma
+   698→// Lock-based synchronization
+   699→lock(mutex_id);
+   700→// IVE: mutex_id is now held, write-locked CapDs are active
+   701→(*shared).counter = (*shared).counter + 1;
+   702→unlock(mutex_id);
+   703→// IVE: mutex_id is no longer held
+   704→
+   705→// The IVE tracks which locks are held and resolves CapD conditions:
+   706→// CapD { can_write: true, write_requires_lock: Some(42) }
+   707→// is_write_active(held_locks) = true when {42} ⊆ held_locks
+   708→```
+   709→
+   710→### Atomics
+   711→
+   712→VUMA provides atomic types such as `AtomicU64` with explicit memory ordering annotations. Atomic operations establish synchronization edges that the IVE uses to prove the absence of data races in lock-free code. The supported orderings are `Acquire`, `Release`, `AcqRel`, and `SeqCst`.
+   713→
+   714→```vuma
+   715→struct Queue<T> {
+   716→    buffer: Address,
+   717→    capacity: u64,
+   718→    head: AtomicU64,    // producer write index
+   719→    tail: AtomicU64,    // consumer read index
+   720→}
+   721→
+   722→fn queue_push(q: Address, value: u64) -> bool {
+   723→    head = (*q).head.load(Acquire);    // acquire: see all prior writes
+   724→    tail = (*q).tail.load(Acquire);
+   725→
+   726→    if next_head % (*q).capacity == tail % (*q).capacity {
+   727→        return false;
+   728→    }
+   729→
+   730→    slot = (*q).buffer + (head % (*q).capacity) * 8;
+   731→    *slot = value;
+   732→
+   733→    (*q).head.store(next_head, Release);  // release: make value visible
+   734→    return true;
+   735→}
+   736→
+   737→fn queue_pop(q: Address) -> Option<u64> {
+   738→    tail = (*q).tail.load(Acquire);
+   739→    head = (*q).head.load(Acquire);
+   740→
+   741→    if tail % (*q).capacity == head % (*q).capacity {
+   742→        return None;
+   743→    }
+   744→
+   745→    slot = (*q).buffer + (tail % (*q).capacity) * 8;
+   746→    value = *slot;
+   747→
+   748→    (*q).tail.store(tail + 1, Release);
+   749→    return Some(value);
+   750→}
+   751→```
+   752→
+   753→The IVE verifies lock-free code by:
+   754→- Checking that producer and consumer access non-overlapping slots (no data race)
+   755→- Verifying that Release ordering ensures the value write is visible before the index update
+   756→- Proving that Acquire ordering ensures the consumer sees the value before reading the slot
+   757→- Confirming that values read originated from valid writes (Origin invariant)
+   758→
+   759→---
+   760→
+   761→## 8. Memory Safety
+   762→
+   763→Memory safety in VUMA is not optional — it is guaranteed by the Invariant Verification Engine (IVE), which checks every program against five core invariants. There is no `unsafe` keyword to bypass verification; instead, VUMA provides verification annotations and proof hints that help the IVE discharge proof obligations that would otherwise be too complex to verify automatically. This section describes the five invariants, the verification pipeline, and the annotation mechanisms available to programmers.
+   764→
+   765→### The Five LIVE Invariants
+   766→
+   767→The IVE checks the following invariants for every pointer operation in a VUMA program:
+   768→
+   769→| Invariant | Meaning | Violation Example |
+   770→|---|---|---|
+   771→| **Liveness** | Every requested resource will eventually be provided | Use after free, null dereference |
+   772→| **Exclusivity** | At most one owner for exclusive resources | Data race (two concurrent writes) |
+   773→| **Interpretation** | Every read interprets data under the correct BD | Type confusion, reading a pointer as an integer |
+   774→| **Origin** | Every piece of data has a well-defined provenance | Reading uninitialized memory |
+   775→| **Cleanup** | Every acquired resource is eventually released | Memory leak, leaked lock |
+   776→
+   777→### Verification Pipeline
+   778→
+   779→The IVE operates through a multi-stage pipeline:
+   780→
+   781→1. **Parsing:** Source code is parsed into an AST with full span information
+   782→2. **SCG Construction:** The AST is lowered into a Semantic Compute Graph (SCG) — a DAG where nodes represent operations and edges represent data flow, control flow, and security boundaries
+   783→3. **BD Inference:** The InferenceEngine walks the SCG and propagates BDs from leaf nodes, resolving composition at each node:
+   784→   - Sequential composition: forward-propagate the output BD
+   785→   - Parallel composition: intersect or unify BDs
+   786→   - Conditional composition: take the union of branch BDs
+   787→4. **Invariant Verification:** The VerificationEngine checks each of the five invariants against the annotated SCG
+   788→5. **Debt Tracking:** Verification obligations that cannot be discharged immediately are recorded as debt items with priority levels
+   789→
+   790→```vuma
+   791→// After compilation, the IVE produces a verification summary:
+   792→// IVE verification: Liveness ✓, Exclusivity ✓, Interpretation ✓, Origin ✓, Cleanup ✓
+   793→```
+   794→
+   795→### Verification Annotations
+   796→
+   797→VUMA provides several annotation mechanisms to help the IVE:
+   798→
+   799→**BD Annotations** (`#bd(Name)`): Explicitly specify a behavioral descriptor for a value or type. This overrides inferred BDs when the programmer has domain-specific knowledge:
+   800→
+   801→```vuma
+   802→// Mark a buffer as read-only
+   803→buffer: #bd(ReadOnly) Address = allocate(1024);
+   804→
+   805→// Mark a function as safe (manually verified)
+   806→#bd(Safe) fn trusted_operation() -> i32 { ... }
+   807→```
+   808→
+   809→**Proof Hints**: Provide the IVE with additional information about why an operation is safe. Proof hints can be explicit casts, runtime checks, or formal proof steps:
+   810→
+   811→```vuma
+   812→// Explicit cast provides proof of safe reinterpretation
+   813→let raw: u64 = ptr as u64;  // weakening: always safe
+   814→
+   815→// Runtime check provides proof of safe strengthening
+   816→if tag == TYPE_PTR {
+   817→    let recovered: *i32 = raw as *i32;  // safe because tag was checked
+   818→}
+   819→
+   820→// Formal proof (advanced)
+   821→// SafetyProof::FormalProof { steps: ["tag == TYPE_PTR implies raw is a valid pointer"] }
+   822→```
+   823→
+   824→**Safe/Unsafe Blocks**: While VUMA has no `unsafe` escape hatch, the `safe` keyword can be used to assert that a block has been manually verified, creating a proof obligation that must be discharged:
+   825→
+   826→```vuma
+   827→safe {
+   828→    // The programmer asserts this code is safe
+   829→    // IVE creates a proof obligation rather than checking automatically
+   830→    *raw_ptr = value;
+   831→}
+   832→```
+   833→
+   834→### Verification Results
+   835→
+   836→The IVE produces one of three verdicts for each invariant:
+   837→
+   838→- **Proven:** The invariant holds on all execution paths (formal proof or exhaustive analysis)
+   839→- **ProbablySafe:** The invariant holds under stated assumptions (e.g., lock protection, runtime checks)
+   840→- **Violated:** A counterexample was found demonstrating the invariant can be broken
+   841→
+   842→```vuma
+   843→// Example verification output:
+   844→// Liveness:     Proven (exhaustive analysis)
+   845→// Exclusivity:  ProbablySafe (2 conflicts protected by mutex locks)
+   846→// Interpretation: Proven (formal proof: 6 steps)
+   847→// Origin:       Proven (all reads trace to valid writes)
+   848→// Cleanup:      Proven (all allocations freed on all paths)
+   849→```
+   850→
+   851→---
+   852→
+   853→## 9. Standard Library Overview
+   854→
+   855→VUMA's standard library is designed for bare-metal and embedded systems programming on the AArch64. It provides essential data structures, memory management, I/O, and concurrency primitives — all written in VUMA and verified by the IVE. The standard library is organized into modules that can be imported as needed.
+   856→
+   857→### Memory Management
+   858→
+   859→- **`allocate(size) -> Address`**: Reserve `size` bytes of memory. IVE verifies liveness and cleanup.
+   860→- **`free(ptr)`**: Release a memory region. IVE marks all derived pointers as dead.
+   861→- **`map_device(base, size) -> Address`**: Map a physical hardware address range into the program's address space. Implies volatile semantics; never needs to be freed.
+   862→- **`align_to(ptr, alignment) -> Address`**: Align a pointer to the given boundary. Part of the derivation chain.
+   863→
+   864→```vuma
+   865→import "vuma:mem";
+   866→
+   867→region pool = allocate(4096);
+   868→*pool = 0;
+   869→free(pool);
+   870→```
+   871→
+   872→### Data Structures
+   873→
+   874→- **`Queue<T>`**: Lock-free single-producer single-consumer ring buffer with `AtomicU64` indices
+   875→- **`Arena`**: Bump allocator with bulk invalidation on destroy
+   876→- **`NodeHeader`**: Doubly-linked list node with `prev`, `next`, and `data` fields
+   877→
+   878→```vuma
+   879→import "vuma:ds";
+   880→
+   881→q = queue_new(256);
+   882→queue_push(q, 42);
+   883→value = queue_pop(q);  // Some(42)
+   884→```
+   885→
+   886→### Concurrency
+   887→
+   888→- **`AtomicU64`**: 64-bit atomic integer with `load(ordering)`, `store(value, ordering)`, `compare_exchange(expected, desired, success_order, failure_order)`
+   889→- **`channel<T>`**: Typed message-passing channel with `send` and `recv`
+   890→- **`lock(id)` / `unlock(id)`**: Mutual exclusion primitives
+   891→
+   892→```vuma
+   893→import "vuma:sync";
+   894→
+   895→counter = AtomicU64::new(0);
+   896→counter.store(1, Release);
+   897→val = counter.load(Acquire);
+   898→```
+   899→
+   900→### I/O
+   901→
+   902→- **`print(value)`**: Output a value to the standard output
+   903→- **`delay_ms(ms)`**: Busy-wait for the specified number of milliseconds (bare-metal)
+   904→
+   905→```vuma
+   906→import "vuma:io";
+   907→
+   908→print((*current).data);
+   909→delay_ms(500);
+   910→```
+   911→
+   912→### Type Operations
+   913→
+   914→- **`sizeof(Type) -> u64`**: Return the size in bytes of a type
+   915→- **`alignof(Type) -> u64`**: Return the alignment requirement of a type
+   916→
+   917→```vuma
+   918→node_size = sizeof(NodeHeader);   // 24
+   919→node_align = alignof(NodeHeader); // 8
+   920→```
+   921→
+   922→### Option Type
+   923→
+   924→The `Option<T>` type represents an optional value. It is used extensively for operations that may fail (e.g., `queue_pop` when the queue is empty):
+   925→
+   926→```vuma
+   927→result = queue_pop(q);
+   928→match result {
+   929→    Some(value) => process(value),
+   930→    None => handle_empty(),
+   931→}
+   932→```
+   933→
+   934→---
+   935→
+   936→## 10. AArch64 Platform-Specific Features
+   937→
+   938→VUMA is designed as a first-class systems programming language for the AArch64. Its memory model, code generation, and verification engine are all tailored to the ARM64 (AArch64) architecture and the AArch64's specific hardware layout. This section describes the platform-specific features that make VUMA uniquely suited for AArch64 development.
+   939→
+   940→### Device Memory Mapping
+   941→
+   942→The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On the AArch64, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
+   943→
+   944→- They never need to be freed (hardware is always present)
+   945→- They have volatile semantics (reads and writes have side effects)
+   946→- They have a known size for bounds checking
+   947→
+   948→```vuma
+   949→const GPIO_BASE: Address = 0x7e200000;  // AArch64 GPIO base (BCM address)
+   950→
+   951→fn gpio_set_output(pin: u32) {
+   952→    gpio = map_device(GPIO_BASE, 4096);
+   953→    fsel = gpio + 0x00;  // GPFSEL0 register
+   954→    *fsel = (*fsel & ~(7 << (pin * 3))) | (1 << (pin * 3));
+   955→}
+   956→
+   957→fn gpio_set(pin: u32) {
+   958→    gpio = map_device(GPIO_BASE, 4096);
+   959→    *(gpio + 0x1c) = 1 << pin;  // GPSET0 register
+   960→}
+   961→
+   962→fn gpio_clear(pin: u32) {
+   963→    gpio = map_device(GPIO_BASE, 4096);
+   964→    *(gpio + 0x28) = 1 << pin;  // GPCLR0 register
+   965→}
+   966→```
+   967→
+   968→### GPIO Register Layout
+   969→
+   970→The AArch64 GPIO peripheral is memory-mapped at BCM address `0x7e200000`. The key register offsets are:
+   971→
+   972→| Register | Offset | Purpose |
+   973→|---|---|---|
+   974→| GPFSEL0 | 0x00 | Function select for pins 0-9 |
+   975→| GPFSEL1 | 0x04 | Function select for pins 10-19 |
+   976→| GPFSEL2 | 0x08 | Function select for pins 20-29 |
+   977→| GPSET0 | 0x1c | Set pin high |
+   978→| GPCLR0 | 0x28 | Set pin low |
+   979→| GPLEV0 | 0x34 | Pin level read |
+   980→
+   981→Each pin uses 3 bits in the function select register: `000` = input, `001` = output.
+   982→
+   983→### ARM64 Code Generation
+   984→
+   985→VUMA compiles to native ARM64 machine code. The code generator targets the Cortex-A76 (AArch64's SoC) and produces optimized instruction sequences for:
+   986→- Pointer arithmetic using register-offset addressing
+   987→- Atomic operations using `LDXR`/`STXR` (exclusive access) and `LDA`/`STL` (acquire/release)
+   988→- Volatile device access using explicit load/store instructions (no optimization)
+   989→- Stack frame layout aligned to 16-byte boundaries per AAPCS64
+   990→
+   991→### Bare-Metal Execution
+   992→
+   993→VUMA programs can run bare-metal on the AArch64 without an operating system. The runtime provides:
+   994→- **Startup code:** Sets up the stack pointer, clears BSS, calls `main()`
+   995→- **Memory allocator:** Simple bump allocator for the `allocate()` primitive
+   996→- **Delay loops:** `delay_ms()` uses the AArch64's system timer at `0x7e003000`
+   997→- **UART output:** `print()` writes to the AArch64's AUX UART for console output
+   998→
+   999→```vuma
+  1000→// Complete bare-metal LED blink program for AArch64
+  1001→const GPIO_BASE: Address = 0x7e200000;
+  1002→
+  1003→fn main() -> i32 {
+  1004→    led_pin: u32 = 25;
+  1005→    gpio_set_output(led_pin);
+  1006→    loop {
+  1007→        gpio_set(led_pin);
+  1008→        delay_ms(500);
+  1009→        gpio_clear(led_pin);
+  1010→        delay_ms(500);
+  1011→    }
+  1012→    return 0;
+  1013→}
+  1014→```
+  1015→
+  1016→### Const Addresses
+  1017→
+  1018→Hardware register addresses are declared as `const` values with the `Address` type. The IVE treats these as known constants and can verify at compile time that register accesses stay within mapped device regions:
+  1019→
+  1020→```vuma
+  1021→const GPIO_BASE: Address = 0x7e200000;
+  1022→const GPFSEL0_OFFSET: Address = 0x00;
+  1023→const GPSET0_OFFSET: Address = 0x1c;
+  1024→const GPCLR0_OFFSET: Address = 0x28;
+  1025→```
+  1026→
+  1027→---
+  1028→
+  1029→## 11. Appendix: Keyword and Operator Quick Reference
+  1030→
+  1031→### Complete Keyword List
+  1032→
+  1033→| Keyword | Category | Purpose |
+  1034→|---|---|---|
+  1035→| `fn` | Core | Function definition |
+  1036→| `let` | Core | Variable binding |
+  1037→| `if` | Core | Conditional |
+  1038→| `else` | Core | Conditional alternative |
+  1039→| `while` | Core | Conditional loop |
+  1040→| `for` | Core | Iterator loop |
+  1041→| `loop` | Core | Infinite loop |
+  1042→| `return` | Core | Function return |
+  1043→| `as` | Core | Type cast |
+  1044→| `match` | Core | Pattern matching |
+  1045→| `struct` | Core | Struct definition |
+  1046→| `enum` | Core | Enum definition |
+  1047→| `ptr` | Memory | Pointer type annotation |
+  1048→| `region` | Memory | Named region declaration |
+  1049→| `alloc` | Memory | Allocation (short form) |
+  1050→| `allocate` | Memory | Allocation (full form) |
+  1051→| `free` | Memory | Deallocation |
+  1052→| `derive` | Memory | Pointer derivation |
+  1053→| `cast` | Memory | Explicit cast statement |
+  1054→| `read` | Memory | Read access annotation |
+  1055→| `write` | Memory | Write access annotation |
+  1056→| `sync` | Concurrency | Synchronization block |
+  1057→| `async` | Concurrency | Async block |
+  1058→| `await` | Concurrency | Await async result |
+  1059→| `spawn` | Concurrency | Spawn concurrent task |
+  1060→| `lock` | Concurrency | Acquire mutex |
+  1061→| `unlock` | Concurrency | Release mutex |
+  1062→| `channel` | Concurrency | Channel creation |
+  1063→| `send` | Concurrency | Channel send |
+  1064→| `recv` | Concurrency | Channel receive |
+  1065→| `unsafe` | Safety | Reserved (no escape hatch) |
+  1066→| `safe` | Safety | Manual safety assertion |
+  1067→| `bd` | BD | Behavioral descriptor directive |
+  1068→| `repd` | BD | Representation descriptor |
+  1069→| `capd` | BD | Capability descriptor |
+  1070→| `reld` | BD | Relational descriptor |
+  1071→| `import` | Module | Import declaration |
+  1072→| `export` | Module | Export declaration |
+  1073→| `mod` | Module | Module definition |
+  1074→| `use` | Module | Use declaration |
+  1075→| `self` | Module | Current module reference |
+  1076→| `super` | Module | Parent module reference |
+  1077→| `true` | Literal | Boolean true |
+  1078→| `false` | Literal | Boolean false |
+  1079→| `sizeof` | Type | Size-of operator |
+  1080→| `alignof` | Type | Alignment-of operator |
+  1081→
+  1082→### Operator Precedence (highest to lowest)
+  1083→
+  1084→| Precedence | Operators | Associativity |
+  1085→|---|---|---|
+  1086→| 1 (highest) | `*` (dereference) `@` (address-of) `-` (negate) `!` `~` | Unary, right-to-left |
+  1087→| 2 | `as` | Left-to-right |
+  1088→| 3 | `*` `/` `%` | Left-to-right |
+  1089→| 4 | `+` `-` | Left-to-right |
+  1090→| 5 | `<<` `>>` | Left-to-right |
+  1091→| 6 | `&` (bitwise AND) | Left-to-right |
+  1092→| 7 | `^` | Left-to-right |
+  1093→| 8 | `\|` (bitwise OR) | Left-to-right |
+  1094→| 9 | `==` `!=` `<` `<=` `>` `>=` | Left-to-right |
+  1095→| 10 | `&&` | Left-to-right |
+  1096→| 11 | `\|\|` | Left-to-right |
+  1097→| 12 (lowest) | `=` | Right-to-left |
+  1098→
+  1099→---
+  1100→
+  1101→*This language reference was generated from the VUMA parser AST, lexer token definitions, IVE verification engine, and behavioral descriptor subsystem source code. For implementation details, see the `vuma-parser`, `vuma-ive`, and `vuma-bd` crates.*
+  1102→

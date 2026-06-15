@@ -2,8 +2,8 @@
 
 **Project:** VUMA — Verified-Unsafe Memory Access Framework  
 **Version:** 0.2.0  
-**Status:** Phase 2 — Core Implementation (substantial progress)  
-**Date:** March 5, 2026  
+**Status:** Phase 3 — Hardening & Optimization (in progress, Waves 1-32 complete)  
+**Date:** March 6, 2026  
 **Authors:** VUMA Project Team
 
 ---
@@ -328,10 +328,23 @@ vuma/
 │   │   └── src/
 │   │       ├── lib.rs            (crate root, CodegenError, pipeline entry)
 │   │       ├── arm64.rs          (Arm64Instruction, register/condition enums, binary encoding)
+│   │       ├── x86_64/           (x86-64 instruction encoding and register allocation)
+│   │       ├── riscv64.rs        (RISC-V 64-bit instruction encoding)
+│   │       ├── arm32/            (ARM32/AArch32 instruction encoding)
+│   │       ├── mips64/           (MIPS64 instruction encoding)
+│   │       ├── ppc64/            (PowerPC 64-bit instruction encoding)
+│   │       ├── loongarch64/      (LoongArch64 instruction encoding)
+│   │       ├── wasm32/           (WebAssembly 32-bit module generation)
+│   │       ├── dwarf.rs          (DWARF v4 debug info generation for all 8 backends)
+│   │       ├── backend.rs        (Backend trait, TargetInfo, multi-backend architecture)
+│   │       ├── memory_safety.rs  (Memory safety analysis, 10 violation types)
 │   │       ├── ir.rs             (IR types: functions, blocks, instructions, terminators, values)
 │   │       ├── scg_to_ir.rs      (SCG → IR translation via ScgToIr converter)
-│   │       ├── regalloc.rs       (Linear-scan register allocator for aarch64)
-│   │       └── emit.rs           (code emitter and ELF/Wasm generation)
+│   │       ├── regalloc.rs       (Linear-scan register allocator with loop-depth spill weights)
+│   │       ├── target_desc.rs    (Target description: pointer width, endianness, alignment, calling convention)
+│   │       ├── control_flow.rs   (Control flow graph construction for IR)
+│   │       ├── opt.rs            (IR-level optimization passes)
+│   │       └── emit.rs           (code emitter and ELF/Wasm generation with 3 LOAD segments)
 │   │
 │   ├── proof/                    (Formal Proofs)
 │   │   ├── Cargo.toml
@@ -354,9 +367,21 @@ vuma/
 │   │       ├── lib.rs            (crate root, re-exports: BD, RelD, Ptr, RegionPtr, Slice, etc.)
 │   │       ├── primitives.rs     (Ptr, RegionPtr, Slice, VumaResult, VumaOption, Range, HasBD trait)
 │   │       ├── alloc.rs          (Allocation, deallocation, copy, fill, zero — VUMA-VERIFIED)
-│   │       ├── collections.rs    (Vec, LinkedList, HashMap, BTreeMap — VUMA-VERIFIED)
-│   │       ├── sync.rs           (Mutex, RwLock, Channel, AtomicU32, AtomicU64 — VUMA-VERIFIED)
-│   │       └── io.rs             (Read, Write, BufRead traits with UART backends)
+│   │       ├── collections.rs    (Vec, LinkedList, HashMap, RingBuffer — VUMA-VERIFIED)
+│   │       ├── sync.rs           (Mutex, RwLock, Channel, Barrier, AtomicU32, AtomicU64 — VUMA-VERIFIED)
+│   │       ├── fmt.rs            (format_int, format_uint, format_float, format_hex, pad_left, write_str — printf-style formatting)
+│   │       ├── math.rs           (sin, cos, sqrt, exp, ln, abs, min, max, clamp, PI, E, etc. + f32 variants)
+│   │       ├── crypto.rs         (SHA-256 constants, ct_select, ct_eq, ct_ne, ct_lt, ct_gte — constant-time crypto)
+│   │       ├── string.rs         (strlen, strcmp, memcpy, memset)
+│   │       ├── fs.rs             (Filesystem operations with capability-based access control)
+│   │       ├── net.rs             (Network I/O: TCP, UDP sockets)
+│   │       ├── env.rs             (Environment variable access)
+│   │       ├── error.rs           (Error type definitions)
+│   │       ├── path.rs            (Path manipulation and normalization)
+│   │       ├── process.rs         (Process management)
+│   │       ├── thread.rs          (Thread creation and management)
+│   │       ├── time.rs            (Time measurement and duration types)
+│   │       └── io.rs             (Read, Write, BufRead traits with UART backends, read_bytes, write_bytes, read_u32_le, write_u32_le)
 │   │
 │   └── tests/                    (Integration Tests)
 │       ├── Cargo.toml

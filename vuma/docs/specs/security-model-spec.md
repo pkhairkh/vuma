@@ -1,10 +1,10 @@
 # VUMA Security Model Specification
 
 **Document ID:** VUMA-SPEC-SEC-001
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Formal Specification
 **Authors:** Agent W1-30, VUMA Core Team
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-03-06
 
 ---
 
@@ -447,13 +447,15 @@ The bug classes eliminated above are those that VUMA removes by construction. Th
 
 4. **Denial of service:** VUMA does not prevent resource exhaustion attacks. A program that allocates unbounded memory or enters an infinite loop can still deny service to other programs. Mitigation: deployment-level resource limits (cgroups, containers) are recommended.
 
+5. **Link-time relocation errors (E037):** When the VUMA code generator emits an ELF object file with an unresolved relocation — for example, a `bl` instruction targeting a function that was declared via `extern` but never defined in any linked object — the linker cannot resolve the symbol reference. The VUMA compiler emits a structured **E037** diagnostic (`error[E037]: unresolved relocation`) that identifies the symbol name, the referencing function, the instruction offset, and the relocation type. This diagnostic is a security-relevant error because unresolved relocations indicate that a program is attempting to call into undefined code, which could lead to arbitrary execution if the linker fills the relocation with a fall-through address or a PLT stub pointing to an attacker-controlled library. The E037 diagnostic includes a structured suggestion to define the missing function or provide the correct library dependency. The code generator emits E037 across all eight backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) whenever a relocation cannot be resolved, ensuring that no silently broken binary is produced.
+
 ---
 
 ## 6. AArch64 Specific Security
 
 ### 6.1 Overview
 
-The AArch64 is built on the Broadcom BCM2712 SoC, which features a quad-core ARM Cortex-A76 processor implementing the ARMv8.2-A architecture. This architecture includes several hardware security features that VUMA leverages to provide defense-in-depth beyond its software-level invariants. Specifically, VUMA maps its capability model to three ARM64 hardware security mechanisms: Pointer Authentication (PAC), Branch Target Identification (BTI), and the Memory Tagging Extension (MTE). These mappings create a layered defense where software invariants are backed by hardware enforcement, so that even if the IVE has a bug, the hardware provides a fallback.
+The AArch64 platform features a quad-core ARM Cortex-A76 processor implementing the ARMv8.2-A architecture. This architecture includes several hardware security features that VUMA leverages to provide defense-in-depth beyond its software-level invariants. Specifically, VUMA maps its capability model to three ARM64 hardware security mechanisms: Pointer Authentication (PAC), Branch Target Identification (BTI), and the Memory Tagging Extension (MTE). These mappings create a layered defense where software invariants are backed by hardware enforcement, so that even if the IVE has a bug, the hardware provides a fallback.
 
 ### 6.2 ARM64 Pointer Authentication (PAC)
 
@@ -557,6 +559,7 @@ This mapping provides runtime detection of two classes of bugs that the IVE is d
 | Cleanup invariant    | MTE           | Double-free detected by tag mismatch on second free    |
 | Capability monotonicity | PAC + BTI | PAC prevents forging new pointers; BTI prevents redirecting execution |
 | No-downgrade flow    | All three     | Combined PAC+BTI+MTE prevents any bypass of flow control |
+| Unresolved relocations | E037 diagnostic | Compile-time detection of undefined symbol references prevents arbitrary code execution |
 
 ### 6.6 Performance Considerations
 
@@ -566,7 +569,7 @@ The performance overhead of the hardware security features is:
 - **BTI:** The BTI instruction is a single-cycle NOP on ARM Cortex-A76 when BTI is not enabled in the hardware, and a 1-cycle check when enabled. The overhead is negligible.
 - **MTE:** MTE tag checks add approximately 1-2 cycles per memory access. The allocation and deallocation overhead for tag assignment and retagging is approximately 10-20 cycles per operation. The total overhead is typically 2-5% for memory-intensive workloads.
 
-The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on the AArch64, which is acceptable for the security benefits provided.
+The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on AArch64, which is acceptable for the security benefits provided.
 
 ---
 

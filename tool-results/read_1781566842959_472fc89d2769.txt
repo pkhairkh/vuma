@@ -1,0 +1,920 @@
+     1→//! # Foreign Function Interface (FFI) for VUMA
+     2→//!
+     3→//! Provides the FFI infrastructure for calling external C functions and
+     4→//! Linux syscalls from VUMA programs.
+     5→//!
+     6→//! # Overview
+     7→//!
+     8→//! The FFI module handles:
+     9→//!
+    10→//! - **`extern "C"` block syntax** — declares external functions in VUMA source
+    11→//! - **Syscall bindings** — Linux kernel interfaces: `write`, `read`, `exit`,
+    12→//!   `mmap`, `munmap`, `brk`
+    13→//! - **C library bindings** — libc functions: `memcpy`, `memset`, `malloc`,
+    14→//!   `free`
+    15→//! - **Codegen support** — extern function calls emit relocations instead of
+    16→//!   local `BL` instructions
+    17→//!
+    18→//! # Example VUMA Source
+    19→//!
+    20→//! ```vuma
+    21→//! extern "C" {
+    22→//!     fn write(fd: i64, buf: Address, count: i64) -> i64;
+    23→//!     fn read(fd: i64, buf: Address, count: i64) -> i64;
+    24→//!     fn exit(code: i64);
+    25→//! }
+    26→//!
+    27→//! fn main() {
+    28→//!     write(1, 0x400000, 13);
+    29→//!     exit(0);
+    30→//! }
+    31→//! ```
+    32→
+    33→use serde::{Deserialize, Serialize};
+    34→use std::collections::{HashMap, HashSet};
+    35→use std::fmt;
+    36→
+    37→// ---------------------------------------------------------------------------
+    38→// ExternBlock — AST representation
+    39→// ---------------------------------------------------------------------------
+    40→
+    41→/// An `extern "C" { ... }` block declaring external functions.
+    42→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    43→pub struct ExternBlock {
+    44→    /// The calling convention (e.g. "C", "system").
+    45→    pub convention: CallingConvention,
+    46→    /// Functions declared in this block.
+    47→    pub functions: Vec<ExternFn>,
+    48→}
+    49→
+    50→/// A function declared inside an `extern` block.
+    51→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    52→pub struct ExternFn {
+    53→    /// Function name (as it appears in VUMA source and in the linker symbol table).
+    54→    pub name: String,
+    55→    /// Parameter types.
+    56→    pub param_types: Vec<ExternType>,
+    57→    /// Return type (None = void).
+    58→    pub return_type: Option<ExternType>,
+    59→}
+    60→
+    61→/// Calling convention for extern blocks.
+    62→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    63→pub enum CallingConvention {
+    64→    /// C calling convention (System V ABI on Linux, Microsoft on Windows).
+    65→    C,
+    66→    /// Platform default calling convention.
+    67→    System,
+    68→    /// VUMA internal calling convention.
+    69→    Vuma,
+    70→}
+    71→
+    72→impl fmt::Display for CallingConvention {
+    73→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    74→        match self {
+    75→            CallingConvention::C => write!(f, "C"),
+    76→            CallingConvention::System => write!(f, "system"),
+    77→            CallingConvention::Vuma => write!(f, "vuma"),
+    78→        }
+    79→    }
+    80→}
+    81→
+    82→/// Types used in extern function declarations.
+    83→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    84→pub enum ExternType {
+    85→    /// `i8`
+    86→    I8,
+    87→    /// `i16`
+    88→    I16,
+    89→    /// `i32`
+    90→    I32,
+    91→    /// `i64`
+    92→    I64,
+    93→    /// `u8`
+    94→    U8,
+    95→    /// `u16`
+    96→    U16,
+    97→    /// `u32`
+    98→    U32,
+    99→    /// `u64`
+   100→    U64,
+   101→    /// `f32`
+   102→    F32,
+   103→    /// `f64`
+   104→    F64,
+   105→    /// Raw pointer (pointer-sized).
+   106→    Ptr,
+   107→    /// Void (only valid as return type).
+   108→    Void,
+   109→}
+   110→
+   111→impl ExternType {
+   112→    /// Returns the size in bytes for this type on a 64-bit platform.
+   113→    pub fn size_64bit(&self) -> usize {
+   114→        match self {
+   115→            ExternType::I8 | ExternType::U8 => 1,
+   116→            ExternType::I16 | ExternType::U16 => 2,
+   117→            ExternType::I32 | ExternType::U32 | ExternType::F32 => 4,
+   118→            ExternType::I64 | ExternType::U64 | ExternType::F64 | ExternType::Ptr => 8,
+   119→            ExternType::Void => 0,
+   120→        }
+   121→    }
+   122→}
+   123→
+   124→impl fmt::Display for ExternType {
+   125→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   126→        match self {
+   127→            ExternType::I8 => write!(f, "i8"),
+   128→            ExternType::I16 => write!(f, "i16"),
+   129→            ExternType::I32 => write!(f, "i32"),
+   130→            ExternType::I64 => write!(f, "i64"),
+   131→            ExternType::U8 => write!(f, "u8"),
+   132→            ExternType::U16 => write!(f, "u16"),
+   133→            ExternType::U32 => write!(f, "u32"),
+   134→            ExternType::U64 => write!(f, "u64"),
+   135→            ExternType::F32 => write!(f, "f32"),
+   136→            ExternType::F64 => write!(f, "f64"),
+   137→            ExternType::Ptr => write!(f, "ptr"),
+   138→            ExternType::Void => write!(f, "void"),
+   139→        }
+   140→    }
+   141→}
+   142→
+   143→// ---------------------------------------------------------------------------
+   144→// Pre-defined binding tables
+   145→// ---------------------------------------------------------------------------
+   146→
+   147→/// Returns the standard Linux syscall bindings as an `ExternBlock`.
+   148→pub fn linux_syscall_bindings() -> ExternBlock {
+   149→    ExternBlock {
+   150→        convention: CallingConvention::C,
+   151→        functions: vec![
+   152→            ExternFn {
+   153→                name: "write".to_string(),
+   154→                param_types: vec![ExternType::I64, ExternType::Ptr, ExternType::I64],
+   155→                return_type: Some(ExternType::I64),
+   156→            },
+   157→            ExternFn {
+   158→                name: "read".to_string(),
+   159→                param_types: vec![ExternType::I64, ExternType::Ptr, ExternType::I64],
+   160→                return_type: Some(ExternType::I64),
+   161→            },
+   162→            ExternFn {
+   163→                name: "exit".to_string(),
+   164→                param_types: vec![ExternType::I64],
+   165→                return_type: None,
+   166→            },
+   167→            ExternFn {
+   168→                name: "mmap".to_string(),
+   169→                param_types: vec![
+   170→                    ExternType::Ptr,  // addr
+   171→                    ExternType::I64,  // length
+   172→                    ExternType::I64,  // prot
+   173→                    ExternType::I64,  // flags
+   174→                    ExternType::I64,  // fd
+   175→                    ExternType::I64,  // offset
+   176→                ],
+   177→                return_type: Some(ExternType::Ptr),
+   178→            },
+   179→            ExternFn {
+   180→                name: "munmap".to_string(),
+   181→                param_types: vec![ExternType::Ptr, ExternType::I64],
+   182→                return_type: Some(ExternType::I64),
+   183→            },
+   184→            ExternFn {
+   185→                name: "brk".to_string(),
+   186→                param_types: vec![ExternType::Ptr],
+   187→                return_type: Some(ExternType::Ptr),
+   188→            },
+   189→        ],
+   190→    }
+   191→}
+   192→
+   193→/// Returns the standard C library bindings as an `ExternBlock`.
+   194→pub fn c_library_bindings() -> ExternBlock {
+   195→    ExternBlock {
+   196→        convention: CallingConvention::C,
+   197→        functions: vec![
+   198→            ExternFn {
+   199→                name: "memcpy".to_string(),
+   200→                param_types: vec![ExternType::Ptr, ExternType::Ptr, ExternType::I64],
+   201→                return_type: Some(ExternType::Ptr),
+   202→            },
+   203→            ExternFn {
+   204→                name: "memset".to_string(),
+   205→                param_types: vec![ExternType::Ptr, ExternType::I64, ExternType::I64],
+   206→                return_type: Some(ExternType::Ptr),
+   207→            },
+   208→            ExternFn {
+   209→                name: "malloc".to_string(),
+   210→                param_types: vec![ExternType::I64],
+   211→                return_type: Some(ExternType::Ptr),
+   212→            },
+   213→            ExternFn {
+   214→                name: "free".to_string(),
+   215→                param_types: vec![ExternType::Ptr],
+   216→                return_type: None,
+   217→            },
+   218→        ],
+   219→    }
+   220→}
+   221→
+   222→// ---------------------------------------------------------------------------
+   223→// ExternRegistry — tracks all known extern functions
+   224→// ---------------------------------------------------------------------------
+   225→
+   226→/// Registry of all known extern functions, built from `extern` blocks
+   227→/// in the source code and the built-in binding tables.
+   228→#[derive(Debug, Clone, Default)]
+   229→pub struct ExternRegistry {
+   230→    /// Map from function name to its extern declaration.
+   231→    functions: HashMap<String, ExternFn>,
+   232→    /// Map from function name to its calling convention.
+   233→    conventions: HashMap<String, CallingConvention>,
+   234→}
+   235→
+   236→impl ExternRegistry {
+   237→    /// Create a new empty registry.
+   238→    pub fn new() -> Self {
+   239→        Self::default()
+   240→    }
+   241→
+   242→    /// Create a registry pre-populated with Linux syscall and C library bindings.
+   243→    pub fn with_default_bindings() -> Self {
+   244→        let mut registry = Self::new();
+   245→        registry.register_block(&linux_syscall_bindings());
+   246→        registry.register_block(&c_library_bindings());
+   247→        registry
+   248→    }
+   249→
+   250→    /// Register all functions from an `extern` block.
+   251→    pub fn register_block(&mut self, block: &ExternBlock) {
+   252→        for func in &block.functions {
+   253→            self.functions.insert(func.name.clone(), func.clone());
+   254→            self.conventions.insert(func.name.clone(), block.convention);
+   255→        }
+   256→    }
+   257→
+   258→    /// Look up an extern function by name.
+   259→    pub fn get(&self, name: &str) -> Option<&ExternFn> {
+   260→        self.functions.get(name)
+   261→    }
+   262→
+   263→    /// Check if a function name is a known extern function.
+   264→    pub fn is_extern(&self, name: &str) -> bool {
+   265→        self.functions.contains_key(name)
+   266→    }
+   267→
+   268→    /// Get the calling convention for a function.
+   269→    pub fn convention(&self, name: &str) -> Option<CallingConvention> {
+   270→        self.conventions.get(name).copied()
+   271→    }
+   272→
+   273→    /// Returns true if a call to this function should be emitted as a
+   274→    /// relocation (external symbol) rather than a local branch.
+   275→    pub fn needs_relocation(&self, name: &str) -> bool {
+   276→        self.is_extern(name)
+   277→    }
+   278→
+   279→    /// List all registered extern function names.
+   280→    pub fn function_names(&self) -> Vec<&str> {
+   281→        let mut names: Vec<&str> = self.functions.keys().map(|s| s.as_str()).collect();
+   282→        names.sort();
+   283→        names
+   284→    }
+   285→
+   286→    /// Returns the set of all registered extern function names.
+   287→    /// Useful for passing to the codegen bridge so that calls to
+   288→    /// extern functions are marked with `is_extern: true`.
+   289→    pub fn function_name_set(&self) -> HashSet<String> {
+   290→        self.functions.keys().cloned().collect()
+   291→    }
+   292→}
+   293→
+   294→// ---------------------------------------------------------------------------
+   295→// ExternBlock → ExternRegistry conversion
+   296→// ---------------------------------------------------------------------------
+   297→
+   298→impl ExternBlock {
+   299→    /// Convert this block into an `ExternRegistry`.
+   300→    pub fn to_registry(&self) -> ExternRegistry {
+   301→        let mut registry = ExternRegistry::new();
+   302→        registry.register_block(self);
+   303→        registry
+   304→    }
+   305→
+   306→    /// Returns the set of function names declared in this block.
+   307→    pub fn function_names_set(&self) -> HashSet<String> {
+   308→        self.functions.iter().map(|f| f.name.clone()).collect()
+   309→    }
+   310→}
+   311→
+   312→// ---------------------------------------------------------------------------
+   313→// Relocation types for the codegen
+   314→// ---------------------------------------------------------------------------
+   315→
+   316→/// A relocation entry emitted for an extern function call.
+   317→///
+   318→/// Instead of emitting a local `BL <symbol>` instruction, the codegen
+   319→/// emits a relocation that the linker will resolve at link time.
+   320→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+   321→pub struct Relocation {
+   322→    /// Offset in the code section where the relocation applies.
+   323→    pub offset: u64,
+   324→    /// The kind of relocation.
+   325→    pub kind: RelocationKind,
+   326→    /// The external symbol name to resolve.
+   327→    pub symbol: String,
+   328→    /// Addend (typically 0 for function calls).
+   329→    pub addend: i64,
+   330→}
+   331→
+   332→/// The kind of relocation.
+   333→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+   334→pub enum RelocationKind {
+   335→    /// AArch64: R_AARCH64_CALL26 — 26-bit relative call.
+   336→    AArch64Call26,
+   337→    /// AArch64: R_AARCH64_ADR_PREL_PG_HI21 + R_AARCH64_LDST64_ABS_LO12_NC
+   338→    /// for loading a 64-bit address.
+   339→    AArch64AdrpPage,
+   340→    /// x86_64: R_X86_64_PLT32 — 32-bit PC-relative PLT call.
+   341→    X86_64Plt32,
+   342→    /// x86_64: R_X86_64_64 — absolute 64-bit address.
+   343→    X86_64Abs64,
+   344→    /// RISC-V: R_RISCV_CALL — auipc + jalr pair.
+   345→    RiscvCall,
+   346→    /// ARM32: R_ARM_CALL / R_ARM_JUMP24 — 24-bit relative branch.
+   347→    Arm32Call,
+   348→    /// ARM32: R_ARM_V4BX — branch exchange (for Thumb interworking).
+   349→    Arm32V4bx,
+   350→    /// MIPS64: R_MIPS_26 — 26-bit jump target.
+   351→    Mips26,
+   352→    /// MIPS64: R_MIPS_GOT_CALL — GOT-based call.
+   353→    MipsGotCall,
+   354→    /// PPC64: R_PPC64_REL24 — 24-bit relative branch.
+   355→    Ppc64Rel24,
+   356→    /// PPC64: R_PPC64_REL64 — 64-bit relative address.
+   357→    Ppc64Rel64,
+   358→    /// LoongArch64: R_LARCH_B26 — 26-bit relative call.
+   359→    LoongArchB26,
+   360→    /// LoongArch64: R_LARCH_CALL36 — 36-bit call sequence.
+   361→    LoongArchCall36,
+   362→    /// Generic: 32-bit PC-relative call (fallback).
+   363→    GenericCall32,
+   364→    /// Generic: 64-bit absolute address (fallback).
+   365→    GenericAbs64,
+   366→}
+   367→
+   368→impl fmt::Display for RelocationKind {
+   369→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   370→        match self {
+   371→            RelocationKind::AArch64Call26 => write!(f, "R_AARCH64_CALL26"),
+   372→            RelocationKind::AArch64AdrpPage => write!(f, "R_AARCH64_ADR_PREL_PG_HI21"),
+   373→            RelocationKind::X86_64Plt32 => write!(f, "R_X86_64_PLT32"),
+   374→            RelocationKind::X86_64Abs64 => write!(f, "R_X86_64_64"),
+   375→            RelocationKind::RiscvCall => write!(f, "R_RISCV_CALL"),
+   376→            RelocationKind::Arm32Call => write!(f, "R_ARM_CALL"),
+   377→            RelocationKind::Arm32V4bx => write!(f, "R_ARM_V4BX"),
+   378→            RelocationKind::Mips26 => write!(f, "R_MIPS_26"),
+   379→            RelocationKind::MipsGotCall => write!(f, "R_MIPS_GOT_CALL"),
+   380→            RelocationKind::Ppc64Rel24 => write!(f, "R_PPC64_REL24"),
+   381→            RelocationKind::Ppc64Rel64 => write!(f, "R_PPC64_REL64"),
+   382→            RelocationKind::LoongArchB26 => write!(f, "R_LARCH_B26"),
+   383→            RelocationKind::LoongArchCall36 => write!(f, "R_LARCH_CALL36"),
+   384→            RelocationKind::GenericCall32 => write!(f, "GENERIC_CALL32"),
+   385→            RelocationKind::GenericAbs64 => write!(f, "GENERIC_ABS64"),
+   386→        }
+   387→    }
+   388→}
+   389→
+   390→impl RelocationKind {
+   391→    /// Returns the appropriate relocation kind for a function call on the
+   392→    /// given target architecture.
+   393→    pub fn for_arch(arch: &str) -> Self {
+   394→        match arch {
+   395→            "aarch64" => RelocationKind::AArch64Call26,
+   396→            "x86_64" => RelocationKind::X86_64Plt32,
+   397→            "riscv64" => RelocationKind::RiscvCall,
+   398→            "arm32" => RelocationKind::Arm32Call,
+   399→            "mips64" => RelocationKind::Mips26,
+   400→            "ppc64" => RelocationKind::Ppc64Rel24,
+   401→            "loongarch64" => RelocationKind::LoongArchB26,
+   402→            _ => RelocationKind::GenericCall32,
+   403→        }
+   404→    }
+   405→}
+   406→
+   407→// ---------------------------------------------------------------------------
+   408→// SyscallTable — Linux syscall numbers per architecture
+   409→// ---------------------------------------------------------------------------
+   410→
+   411→/// The target architecture for syscall number lookup.
+   412→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+   413→pub enum Arch {
+   414→    /// x86_64 (AMD64)
+   415→    X86_64,
+   416→    /// AArch64 (ARM64)
+   417→    AArch64,
+   418→    /// RISC-V 64-bit
+   419→    RiscV64,
+   420→    /// ARM 32-bit (AARCH32)
+   421→    Arm32,
+   422→    /// MIPS64
+   423→    Mips64,
+   424→    /// PowerPC 64-bit (little-endian)
+   425→    PPC64,
+   426→    /// LoongArch64
+   427→    LoongArch64,
+   428→    /// Wasm32 (no native syscalls; uses wasi or external bindings)
+   429→    Wasm32,
+   430→}
+   431→
+   432→impl fmt::Display for Arch {
+   433→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   434→        match self {
+   435→            Arch::X86_64 => write!(f, "x86_64"),
+   436→            Arch::AArch64 => write!(f, "aarch64"),
+   437→            Arch::RiscV64 => write!(f, "riscv64"),
+   438→            Arch::Arm32 => write!(f, "arm32"),
+   439→            Arch::Mips64 => write!(f, "mips64"),
+   440→            Arch::PPC64 => write!(f, "ppc64"),
+   441→            Arch::LoongArch64 => write!(f, "loongarch64"),
+   442→            Arch::Wasm32 => write!(f, "wasm32"),
+   443→        }
+   444→    }
+   445→}
+   446→
+   447→impl Arch {
+   448→    /// Parse an architecture name string into an `Arch` value.
+   449→    pub fn from_name(name: &str) -> Option<Self> {
+   450→        match name {
+   451→            "x86_64" | "amd64" => Some(Arch::X86_64),
+   452→            "aarch64" | "arm64" => Some(Arch::AArch64),
+   453→            "riscv64" => Some(Arch::RiscV64),
+   454→            "arm32" | "arm" | "armv7" => Some(Arch::Arm32),
+   455→            "mips64" | "mips64el" => Some(Arch::Mips64),
+   456→            "ppc64" | "ppc64le" | "powerpc64" => Some(Arch::PPC64),
+   457→            "loongarch64" | "la64" => Some(Arch::LoongArch64),
+   458→            "wasm32" => Some(Arch::Wasm32),
+   459→            _ => None,
+   460→        }
+   461→    }
+   462→}
+   463→
+   464→/// Well-known Linux syscall names used by VUMA programs.
+   465→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+   466→pub enum SyscallName {
+   467→    /// `read` — read from a file descriptor.
+   468→    Read,
+   469→    /// `write` — write to a file descriptor.
+   470→    Write,
+   471→    /// `open` — open a file.
+   472→    Open,
+   473→    /// `close` — close a file descriptor.
+   474→    Close,
+   475→    /// `exit` — terminate the process.
+   476→    Exit,
+   477→    /// `exit_group` — exit all threads in the process.
+   478→    ExitGroup,
+   479→    /// `mmap` — map memory.
+   480→    Mmap,
+   481→    /// `munmap` — unmap memory.
+   482→    Munmap,
+   483→    /// `brk` — change data segment size.
+   484→    Brk,
+   485→    /// `ioctl` — device control.
+   486→    Ioctl,
+   487→    /// `fcntl` — file control.
+   488→    Fcntl,
+   489→    /// `getpid` — get process ID.
+   490→    Getpid,
+   491→    /// `kill` — send signal.
+   492→    Kill,
+   493→    /// `mprotect` — set memory protection.
+   494→    Mprotect,
+   495→    /// `clock_gettime` — get time.
+   496→    ClockGettime,
+   497→    /// `sched_yield` — yield the CPU.
+   498→    SchedYield,
+   499→    /// `clone` — create a new thread/process.
+   500→    Clone,
+   501→    /// `futex` — fast userspace mutex.
+   502→    Futex,
+   503→    /// `set_tid_address` — set thread ID pointer.
+   504→    SetTidAddress,
+   505→}
+   506→
+   507→impl fmt::Display for SyscallName {
+   508→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   509→        match self {
+   510→            SyscallName::Read => write!(f, "read"),
+   511→            SyscallName::Write => write!(f, "write"),
+   512→            SyscallName::Open => write!(f, "open"),
+   513→            SyscallName::Close => write!(f, "close"),
+   514→            SyscallName::Exit => write!(f, "exit"),
+   515→            SyscallName::ExitGroup => write!(f, "exit_group"),
+   516→            SyscallName::Mmap => write!(f, "mmap"),
+   517→            SyscallName::Munmap => write!(f, "munmap"),
+   518→            SyscallName::Brk => write!(f, "brk"),
+   519→            SyscallName::Ioctl => write!(f, "ioctl"),
+   520→            SyscallName::Fcntl => write!(f, "fcntl"),
+   521→            SyscallName::Getpid => write!(f, "getpid"),
+   522→            SyscallName::Kill => write!(f, "kill"),
+   523→            SyscallName::Mprotect => write!(f, "mprotect"),
+   524→            SyscallName::ClockGettime => write!(f, "clock_gettime"),
+   525→            SyscallName::SchedYield => write!(f, "sched_yield"),
+   526→            SyscallName::Clone => write!(f, "clone"),
+   527→            SyscallName::Futex => write!(f, "futex"),
+   528→            SyscallName::SetTidAddress => write!(f, "set_tid_address"),
+   529→        }
+   530→    }
+   531→}
+   532→
+   533→/// Per-architecture syscall number table for Linux.
+   534→///
+   535→/// Linux assigns different syscall numbers to each architecture. This struct
+   536→/// provides a unified lookup interface so that VUMA codegen can emit the
+   537→/// correct immediate for `svc #0` (AArch64), `syscall` (x86_64), `ecall`
+   538→/// (RISC-V), etc.
+   539→#[derive(Debug, Clone)]
+   540→pub struct SyscallTable {
+   541→    /// Architecture this table is for.
+   542→    pub arch: Arch,
+   543→    /// Map from syscall name to its number.
+   544→    numbers: HashMap<SyscallName, u64>,
+   545→}
+   546→
+   547→impl SyscallTable {
+   548→    /// Create the syscall table for the given architecture.
+   549→    pub fn for_arch(arch: Arch) -> Self {
+   550→        let numbers = match arch {
+   551→            Arch::X86_64 => x86_64_syscalls(),
+   552→            Arch::AArch64 => aarch64_syscalls(),
+   553→            Arch::RiscV64 => riscv64_syscalls(),
+   554→            Arch::Arm32 => arm32_syscalls(),
+   555→            Arch::Mips64 => mips64_syscalls(),
+   556→            Arch::PPC64 => ppc64_syscalls(),
+   557→            Arch::LoongArch64 => loongarch64_syscalls(),
+   558→            Arch::Wasm32 => HashMap::new(), // no native syscalls
+   559→        };
+   560→        Self { arch, numbers }
+   561→    }
+   562→
+   563→    /// Look up the syscall number for a named syscall.
+   564→    pub fn get(&self, name: SyscallName) -> Option<u64> {
+   565→        self.numbers.get(&name).copied()
+   566→    }
+   567→
+   568→    /// Returns the number of syscalls in this table.
+   569→    pub fn len(&self) -> usize {
+   570→        self.numbers.len()
+   571→    }
+   572→
+   573→    /// Returns true if the table is empty.
+   574→    pub fn is_empty(&self) -> bool {
+   575→        self.numbers.is_empty()
+   576→    }
+   577→
+   578→    /// Iterate over all (name, number) pairs.
+   579→    pub fn iter(&self) -> impl Iterator<Item = (SyscallName, u64)> + '_ {
+   580→        self.numbers.iter().map(|(&k, &v)| (k, v))
+   581→    }
+   582→}
+   583→
+   584→// ---------------------------------------------------------------------------
+   585→// Architecture-specific syscall tables
+   586→// ---------------------------------------------------------------------------
+   587→
+   588→fn x86_64_syscalls() -> HashMap<SyscallName, u64> {
+   589→    use SyscallName::*;
+   590→    [
+   591→        (Read, 0),
+   592→        (Write, 1),
+   593→        (Open, 2),
+   594→        (Close, 3),
+   595→        (Exit, 60),
+   596→        (ExitGroup, 231),
+   597→        (Mmap, 9),
+   598→        (Munmap, 11),
+   599→        (Brk, 12),
+   600→        (Ioctl, 16),
+   601→        (Fcntl, 72),
+   602→        (Getpid, 39),
+   603→        (Kill, 62),
+   604→        (Mprotect, 10),
+   605→        (ClockGettime, 228),
+   606→        (SchedYield, 24),
+   607→        (Clone, 56),
+   608→        (Futex, 202),
+   609→        (SetTidAddress, 218),
+   610→    ]
+   611→    .into_iter()
+   612→    .collect()
+   613→}
+   614→
+   615→fn aarch64_syscalls() -> HashMap<SyscallName, u64> {
+   616→    use SyscallName::*;
+   617→    [
+   618→        (Read, 63),
+   619→        (Write, 64),
+   620→        (Open, 35),    // openat
+   621→        (Close, 57),
+   622→        (Exit, 93),
+   623→        (ExitGroup, 94),
+   624→        (Mmap, 222),
+   625→        (Munmap, 215),
+   626→        (Brk, 214),
+   627→        (Ioctl, 29),
+   628→        (Fcntl, 25),
+   629→        (Getpid, 172),
+   630→        (Kill, 129),
+   631→        (Mprotect, 226),
+   632→        (ClockGettime, 115),
+   633→        (SchedYield, 124),
+   634→        (Clone, 220),
+   635→        (Futex, 98),
+   636→        (SetTidAddress, 96),
+   637→    ]
+   638→    .into_iter()
+   639→    .collect()
+   640→}
+   641→
+   642→fn riscv64_syscalls() -> HashMap<SyscallName, u64> {
+   643→    use SyscallName::*;
+   644→    [
+   645→        (Read, 63),
+   646→        (Write, 64),
+   647→        (Open, 35),    // openat
+   648→        (Close, 57),
+   649→        (Exit, 93),
+   650→        (ExitGroup, 94),
+   651→        (Mmap, 222),
+   652→        (Munmap, 215),
+   653→        (Brk, 214),
+   654→        (Ioctl, 29),
+   655→        (Fcntl, 25),
+   656→        (Getpid, 172),
+   657→        (Kill, 129),
+   658→        (Mprotect, 226),
+   659→        (ClockGettime, 115),
+   660→        (SchedYield, 124),
+   661→        (Clone, 220),
+   662→        (Futex, 98),
+   663→        (SetTidAddress, 96),
+   664→    ]
+   665→    .into_iter()
+   666→    .collect()
+   667→}
+   668→
+   669→fn arm32_syscalls() -> HashMap<SyscallName, u64> {
+   670→    use SyscallName::*;
+   671→    [
+   672→        (Read, 3),
+   673→        (Write, 4),
+   674→        (Open, 5),
+   675→        (Close, 6),
+   676→        (Exit, 1),
+   677→        (ExitGroup, 248),
+   678→        (Mmap, 192),   // mmap2 on ARM
+   679→        (Munmap, 91),
+   680→        (Brk, 45),
+   681→        (Ioctl, 54),
+   682→        (Fcntl, 55),
+   683→        (Getpid, 20),
+   684→        (Kill, 37),
+   685→        (Mprotect, 125),
+   686→        (ClockGettime, 263),
+   687→        (SchedYield, 158),
+   688→        (Clone, 120),
+   689→        (Futex, 240),
+   690→        (SetTidAddress, 256),
+   691→    ]
+   692→    .into_iter()
+   693→    .collect()
+   694→}
+   695→
+   696→fn mips64_syscalls() -> HashMap<SyscallName, u64> {
+   697→    use SyscallName::*;
+   698→    [
+   699→        (Read, 5000),
+   700→        (Write, 5001),
+   701→        (Open, 5002),
+   702→        (Close, 5003),
+   703→        (Exit, 5058),
+   704→        (ExitGroup, 5206),
+   705→        (Mmap, 5009),
+   706→        (Munmap, 5011),
+   707→        (Brk, 5012),
+   708→        (Ioctl, 5015),
+   709→        (Fcntl, 5070),
+   710→        (Getpid, 5038),
+   711→        (Kill, 5060),
+   712→        (Mprotect, 5010),
+   713→        (ClockGettime, 5223),
+   714→        (SchedYield, 5023),
+   715→        (Clone, 5055),
+   716→        (Futex, 5194),
+   717→        (SetTidAddress, 5210),
+   718→    ]
+   719→    .into_iter()
+   720→    .collect()
+   721→}
+   722→
+   723→fn ppc64_syscalls() -> HashMap<SyscallName, u64> {
+   724→    use SyscallName::*;
+   725→    [
+   726→        (Read, 3),
+   727→        (Write, 4),
+   728→        (Open, 5),
+   729→        (Close, 6),
+   730→        (Exit, 1),
+   731→        (ExitGroup, 234),
+   732→        (Mmap, 90),
+   733→        (Munmap, 91),
+   734→        (Brk, 45),
+   735→        (Ioctl, 54),
+   736→        (Fcntl, 55),
+   737→        (Getpid, 20),
+   738→        (Kill, 37),
+   739→        (Mprotect, 125),
+   740→        (ClockGettime, 246),
+   741→        (SchedYield, 158),
+   742→        (Clone, 120),
+   743→        (Futex, 221),
+   744→        (SetTidAddress, 232),
+   745→    ]
+   746→    .into_iter()
+   747→    .collect()
+   748→}
+   749→
+   750→fn loongarch64_syscalls() -> HashMap<SyscallName, u64> {
+   751→    use SyscallName::*;
+   752→    [
+   753→        (Read, 63),
+   754→        (Write, 64),
+   755→        (Open, 35),    // openat
+   756→        (Close, 57),
+   757→        (Exit, 93),
+   758→        (ExitGroup, 94),
+   759→        (Mmap, 222),
+   760→        (Munmap, 215),
+   761→        (Brk, 214),
+   762→        (Ioctl, 29),
+   763→        (Fcntl, 25),
+   764→        (Getpid, 172),
+   765→        (Kill, 129),
+   766→        (Mprotect, 226),
+   767→        (ClockGettime, 115),
+   768→        (SchedYield, 124),
+   769→        (Clone, 220),
+   770→        (Futex, 98),
+   771→        (SetTidAddress, 96),
+   772→    ]
+   773→    .into_iter()
+   774→    .collect()
+   775→}
+   776→
+   777→#[cfg(test)]
+   778→mod tests {
+   779→    use super::*;
+   780→
+   781→    #[test]
+   782→    fn test_linux_syscall_bindings() {
+   783→        let bindings = linux_syscall_bindings();
+   784→        assert_eq!(bindings.convention, CallingConvention::C);
+   785→        assert!(bindings.functions.iter().any(|f| f.name == "write"));
+   786→        assert!(bindings.functions.iter().any(|f| f.name == "read"));
+   787→        assert!(bindings.functions.iter().any(|f| f.name == "exit"));
+   788→        assert!(bindings.functions.iter().any(|f| f.name == "mmap"));
+   789→        assert!(bindings.functions.iter().any(|f| f.name == "munmap"));
+   790→        assert!(bindings.functions.iter().any(|f| f.name == "brk"));
+   791→    }
+   792→
+   793→    #[test]
+   794→    fn test_c_library_bindings() {
+   795→        let bindings = c_library_bindings();
+   796→        assert_eq!(bindings.convention, CallingConvention::C);
+   797→        assert!(bindings.functions.iter().any(|f| f.name == "memcpy"));
+   798→        assert!(bindings.functions.iter().any(|f| f.name == "memset"));
+   799→        assert!(bindings.functions.iter().any(|f| f.name == "malloc"));
+   800→        assert!(bindings.functions.iter().any(|f| f.name == "free"));
+   801→    }
+   802→
+   803→    #[test]
+   804→    fn test_extern_registry() {
+   805→        let registry = ExternRegistry::with_default_bindings();
+   806→        assert!(registry.is_extern("write"));
+   807→        assert!(registry.is_extern("malloc"));
+   808→        assert!(!registry.is_extern("my_local_fn"));
+   809→        assert!(registry.needs_relocation("write"));
+   810→        assert_eq!(registry.convention("write"), Some(CallingConvention::C));
+   811→    }
+   812→
+   813→    #[test]
+   814→    fn test_register_custom_extern_block() {
+   815→        let mut registry = ExternRegistry::new();
+   816→        let block = ExternBlock {
+   817→            convention: CallingConvention::C,
+   818→            functions: vec![ExternFn {
+   819→                name: "custom_fn".to_string(),
+   820→                param_types: vec![ExternType::I64],
+   821→                return_type: Some(ExternType::I64),
+   822→            }],
+   823→        };
+   824→        registry.register_block(&block);
+   825→        assert!(registry.is_extern("custom_fn"));
+   826→        assert!(registry.needs_relocation("custom_fn"));
+   827→    }
+   828→
+   829→    // ---- SyscallTable tests ----
+   830→
+   831→    #[test]
+   832→    fn test_syscall_table_x86_64() {
+   833→        let table = SyscallTable::for_arch(Arch::X86_64);
+   834→        assert_eq!(table.get(SyscallName::Read), Some(0));
+   835→        assert_eq!(table.get(SyscallName::Write), Some(1));
+   836→        assert_eq!(table.get(SyscallName::Exit), Some(60));
+   837→        assert_eq!(table.get(SyscallName::Mmap), Some(9));
+   838→        assert_eq!(table.get(SyscallName::Brk), Some(12));
+   839→    }
+   840→
+   841→    #[test]
+   842→    fn test_syscall_table_aarch64() {
+   843→        let table = SyscallTable::for_arch(Arch::AArch64);
+   844→        assert_eq!(table.get(SyscallName::Write), Some(64));
+   845→        assert_eq!(table.get(SyscallName::Exit), Some(93));
+   846→        assert_eq!(table.get(SyscallName::Mmap), Some(222));
+   847→    }
+   848→
+   849→    #[test]
+   850→    fn test_syscall_table_riscv64() {
+   851→        let table = SyscallTable::for_arch(Arch::RiscV64);
+   852→        assert_eq!(table.get(SyscallName::Write), Some(64));
+   853→        assert_eq!(table.get(SyscallName::Exit), Some(93));
+   854→    }
+   855→
+   856→    #[test]
+   857→    fn test_syscall_table_arm32() {
+   858→        let table = SyscallTable::for_arch(Arch::Arm32);
+   859→        assert_eq!(table.get(SyscallName::Exit), Some(1));
+   860→        assert_eq!(table.get(SyscallName::Write), Some(4));
+   861→        assert_eq!(table.get(SyscallName::Mmap), Some(192)); // mmap2
+   862→    }
+   863→
+   864→    #[test]
+   865→    fn test_syscall_table_mips64() {
+   866→        let table = SyscallTable::for_arch(Arch::Mips64);
+   867→        assert_eq!(table.get(SyscallName::Read), Some(5000));
+   868→        assert_eq!(table.get(SyscallName::Write), Some(5001));
+   869→        assert_eq!(table.get(SyscallName::Exit), Some(5058));
+   870→    }
+   871→
+   872→    #[test]
+   873→    fn test_syscall_table_ppc64() {
+   874→        let table = SyscallTable::for_arch(Arch::PPC64);
+   875→        assert_eq!(table.get(SyscallName::Exit), Some(1));
+   876→        assert_eq!(table.get(SyscallName::Write), Some(4));
+   877→        assert_eq!(table.get(SyscallName::Mmap), Some(90));
+   878→    }
+   879→
+   880→    #[test]
+   881→    fn test_syscall_table_loongarch64() {
+   882→        let table = SyscallTable::for_arch(Arch::LoongArch64);
+   883→        assert_eq!(table.get(SyscallName::Write), Some(64));
+   884→        assert_eq!(table.get(SyscallName::Exit), Some(93));
+   885→    }
+   886→
+   887→    #[test]
+   888→    fn test_syscall_table_wasm32_empty() {
+   889→        let table = SyscallTable::for_arch(Arch::Wasm32);
+   890→        assert!(table.is_empty());
+   891→        assert_eq!(table.get(SyscallName::Exit), None);
+   892→    }
+   893→
+   894→    #[test]
+   895→    fn test_arch_from_name() {
+   896→        assert_eq!(Arch::from_name("x86_64"), Some(Arch::X86_64));
+   897→        assert_eq!(Arch::from_name("amd64"), Some(Arch::X86_64));
+   898→        assert_eq!(Arch::from_name("aarch64"), Some(Arch::AArch64));
+   899→        assert_eq!(Arch::from_name("arm64"), Some(Arch::AArch64));
+   900→        assert_eq!(Arch::from_name("riscv64"), Some(Arch::RiscV64));
+   901→        assert_eq!(Arch::from_name("arm32"), Some(Arch::Arm32));
+   902→        assert_eq!(Arch::from_name("mips64"), Some(Arch::Mips64));
+   903→        assert_eq!(Arch::from_name("ppc64"), Some(Arch::PPC64));
+   904→        assert_eq!(Arch::from_name("loongarch64"), Some(Arch::LoongArch64));
+   905→        assert_eq!(Arch::from_name("unknown"), None);
+   906→    }
+   907→
+   908→    #[test]
+   909→    fn test_relocation_kind_for_arch() {
+   910→        assert_eq!(RelocationKind::for_arch("aarch64"), RelocationKind::AArch64Call26);
+   911→        assert_eq!(RelocationKind::for_arch("x86_64"), RelocationKind::X86_64Plt32);
+   912→        assert_eq!(RelocationKind::for_arch("riscv64"), RelocationKind::RiscvCall);
+   913→        assert_eq!(RelocationKind::for_arch("arm32"), RelocationKind::Arm32Call);
+   914→        assert_eq!(RelocationKind::for_arch("mips64"), RelocationKind::Mips26);
+   915→        assert_eq!(RelocationKind::for_arch("ppc64"), RelocationKind::Ppc64Rel24);
+   916→        assert_eq!(RelocationKind::for_arch("loongarch64"), RelocationKind::LoongArchB26);
+   917→        assert_eq!(RelocationKind::for_arch("unknown"), RelocationKind::GenericCall32);
+   918→    }
+   919→}
+   920→

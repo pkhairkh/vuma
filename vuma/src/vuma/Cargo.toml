@@ -1,18 +1,25 @@
 [package]
 name = "vuma-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Core — memory model, MSG construction, invariant checking, and security analysis"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "1"
-log = "0.4"
-hashbrown = "0.14"
-vuma-scg = { path = "../scg" }
-vuma-parser = { path = "../parser" }
-vuma-ive = { path = "../ive" }
-vuma-bd = { path = "../bd" }
-vuma-cor = { path = "../cor" }
-vuma-codegen = { path = "../codegen" }
-vuma-proof = { path = "../proof" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+hashbrown.workspace = true
+vuma-scg.workspace = true
+vuma-parser.workspace = true
+vuma-ive.workspace = true
+vuma-bd.workspace = true
+vuma-cor.workspace = true
+vuma-codegen.workspace = true
+vuma-proof.workspace = true

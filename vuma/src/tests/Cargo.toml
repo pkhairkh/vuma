@@ -1,22 +1,29 @@
 [package]
 name = "vuma-tests"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Integration Tests — cross-backend, property-based, ABI conformance, and benchmark suites"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-vuma-scg = { path = "../scg" }
-vuma-ive = { path = "../ive" }
-vuma-core = { path = "../vuma" }
-vuma-bd = { path = "../bd" }
-vuma-proof = { path = "../proof" }
-vuma-parser = { path = "../parser" }
-vuma-codegen = { path = "../codegen" }
-vuma-cor = { path = "../cor" }
+vuma-scg.workspace = true
+vuma-ive.workspace = true
+vuma-core.workspace = true
+vuma-bd.workspace = true
+vuma-proof.workspace = true
+vuma-parser.workspace = true
+vuma-codegen.workspace = true
+vuma-cor.workspace = true
 vuma = { path = "../.." }
-anyhow = "1"
-chrono = "0.4"
-log = "0.4"
-libc = "0.2"
-proptest = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+libc.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,547 @@
+     1→# Representation Descriptors (RepD) — Formal Mathematical Specification
+     2→
+     3→**Document:** VUMA-W1-02
+     4→**Component:** Behavioral Descriptors → Representation Descriptors
+     5→**Status:** Draft
+     6→**Date:** 2026-03-05
+     7→
+     8→---
+     9→
+    10→## 1. RepD Algebraic Definition
+    11→
+    12→### 1.1 Syntax
+    13→
+    14→A Representation Descriptor (RepD) is an algebraic data type that specifies the physical layout of data in memory — size, alignment, field offsets, and bit-level structure. A RepD is not a nominal type; it is a *memory map*. Multiple RepDs can describe the same region of memory at different granularities simultaneously, and the RepD does not choose among these interpretations — it enumerates all valid ones.
+    15→
+    16→The syntax of RepD is defined inductively as follows:
+    17→
+    18→```
+    19→RepD ::= ByteRep { size: Nat, align: Nat }
+    20→       | StructRep { fields: List<(Offset, RepD)>, total_size: Nat, align: Nat }
+    21→       | ArrayRep { element: RepD, count: Nat }
+    22→       | EnumRep { variants: List<(Tag, RepD)> }
+    23→       | PtrRep { pointee: RepD }
+    24→       | UnionRep { alternatives: List<RepD>, max_size: Nat, max_align: Nat }
+    25→       | FuncRep { params: List<RepD>, result: RepD }
+    26→```
+    27→
+    28→Where `Nat` is the set of natural numbers {0, 1, 2, ...}, `Offset` is a natural number denoting a byte offset from the start of a struct, and `Tag` is a natural number serving as a discriminant for enum variants.
+    29→
+    30→### 1.2 Semantic Domain
+    31→
+    32→Each RepD constructor denotes a set of byte sequences that conform to the described layout. We define the *denotation* function:
+    33→
+    34→```
+    35→⟦_⟧ : RepD → 𝒫(ByteArray)
+    36→```
+    37→
+    38→where `𝒫(ByteArray)` is the powerset of finite byte arrays. The denotation is defined recursively:
+    39→
+    40→- **ByteRep{size = n, align = a}**: ⟦ByteRep{n, a}⟧ = { bs ∈ ByteArray | |bs| = n }
+    41→  The byte representation of size `n` and alignment `a` denotes all byte sequences of exactly `n` bytes. The alignment constrains where in memory such a value may reside but does not restrict the byte content itself.
+    42→
+    43→- **StructRep{fields = [(o₁, r₁), ..., (oₖ, rₖ)], total_size = s, align = a}**: The denotation is the set of all byte arrays `bs` of length `s` such that for each field `(oᵢ, rᵢ)`, the sub-array `bs[oᵢ .. oᵢ + size(rᵢ)]` is in ⟦rᵢ⟧. Fields may not overlap unless they share the same offset (as in a union-like overlay within a struct).
+    44→
+    45→- **ArrayRep{element = r, count = n}**: ⟦ArrayRep{r, n}⟧ = { bs | |bs| = n × size(r) ∧ ∀i ∈ [0, n). bs[i × size(r) .. (i+1) × size(r)] ∈ ⟦r⟧ }
+    46→  The array representation denotes byte sequences that can be partitioned into `n` contiguous segments, each conforming to the element representation.
+    47→
+    48→- **EnumRep{variants = [(t₁, r₁), ..., (tₖ, rₖ)]}**: ⟦EnumRep{variants}⟧ = ⋃ᵢ { bs | ∃bs_tag ∈ ⟦discriminant_rep⟧, ∃bs_payload ∈ ⟦rᵢ⟧, bs = bs_tag ∥ bs_payload }
+    49→  The enum representation denotes byte sequences that consist of a tag portion followed by a payload conforming to exactly one variant's representation.
+    50→
+    51→- **PtrRep{pointee = r}**: ⟦PtrRep{r}⟧ = { bs | |bs| = PTR_SIZE ∧ valid_pointer(bs) ⟹ deref(bs) ∈ ⟦r⟧ }
+    52→  Pointer representations denote byte sequences of the platform's pointer size. The pointer validity condition is context-dependent and verified by the IVE.
+    53→
+    54→- **UnionRep{alternatives = [r₁, ..., rₖ], max_size = s, max_align = a}**: ⟦UnionRep{alternatives, s, a}⟧ = { bs | |bs| = s ∧ ∃i. bs[0 .. size(rᵢ)] ∈ ⟦rᵢ⟧ }
+    55→  The union representation denotes byte sequences of the maximum size among all alternatives, where the initial bytes conform to at least one alternative's representation.
+    56→
+    57→- **FuncRep{params = [r₁, ..., rₖ], result = r}**: ⟦FuncRep{params, result}⟧ = { bs | |bs| = FUNC_PTR_SIZE ∧ callable(bs) }
+    58→  Function representations denote callable code pointers. The param and result RepDs constrain the calling convention but do not restrict the byte content of the pointer itself.
+    59→
+    60→### 1.3 Derived Size and Alignment Functions
+    61→
+    62→We define the auxiliary functions `size : RepD → Nat` and `alignment : RepD → Nat`:
+    63→
+    64→```
+    65→size(ByteRep{n, a})          = n
+    66→size(StructRep{fields, s, a}) = s
+    67→size(ArrayRep{r, n})         = n × size(r)
+    68→size(EnumRep{variants})       = TAG_SIZE + max(size(rᵢ) for (_, rᵢ) ∈ variants)
+    69→size(PtrRep{r})              = PTR_SIZE
+    70→size(UnionRep{_, s, _})      = s
+    71→size(FuncRep{_, _})          = FUNC_PTR_SIZE
+    72→
+    73→alignment(ByteRep{n, a})          = a
+    74→alignment(StructRep{_, _, a})     = a
+    75→alignment(ArrayRep{r, n})         = alignment(r)
+    76→alignment(EnumRep{variants})       = max(alignment(rᵢ) for (_, rᵢ) ∈ variants)
+    77→alignment(PtrRep{r})              = PTR_ALIGN
+    78→alignment(UnionRep{_, _, a})      = a
+    79→alignment(FuncRep{_, _})          = FUNC_ALIGN
+    80→```
+    81→
+    82→### 1.4 Well-Formedness
+    83→
+    84→A RepD `r` is *well-formed*, written `wf(r)`, if it satisfies the following constraints:
+    85→
+    86→**Definition (Well-Formed RepD).** `wf(r)` holds iff:
+    87→
+    88→1. **Positive sizes**: `size(r) > 0` for all sub-representations (except `ByteRep{0, 1}` which is the unit type).
+    89→2. **Power-of-two alignment**: `alignment(r)` is a power of 2 for all sub-representations.
+    90→3. **Struct field ordering**: For `StructRep{fields = [(o₁, r₁), ..., (oₖ, rₖ)], ...}`, we require `oᵢ + size(rᵢ) ≤ total_size` for all `i`, and `oᵢ` is a multiple of `alignment(rᵢ)` for all `i`.
+    91→4. **Struct field non-overlap**: For `StructRep`, if `i ≠ j` and neither field is the discriminant of an enum, then the byte ranges `[oᵢ, oᵢ + size(rᵢ))` and `[oⱼ, oⱼ + size(rⱼ))` are either disjoint or identical (for explicit overlays).
+    92→5. **Union consistency**: For `UnionRep{alternatives, max_size, max_align}`, `max_size ≥ max(size(rᵢ))` for all `rᵢ` in alternatives, and `max_align ≥ max(alignment(rᵢ))` for all `rᵢ`.
+    93→6. **Recursion finiteness**: The recursive structure of `r` must be finite. RepDs are not directly recursive through `StructRep` or `ArrayRep` with unbounded depth; recursive structures must be mediated through `PtrRep`.
+    94→
+    95→**Lemma 1.1 (Size Monotonicity).** If `wf(r)` and `r'` is a sub-representation of `r`, then `size(r') ≤ size(r)`.
+    96→
+    97→*Proof.* By structural induction on `r`. For `ByteRep`, the only sub-representation is itself, so `size(r') = size(r)`. For `StructRep`, each field's size is bounded by `total_size` by well-formedness condition 3. For `ArrayRep{r_elem, n}` with `n ≥ 1`, `size(r_elem) ≤ n × size(r_elem) = size(r)`. For `UnionRep`, each alternative's size is bounded by `max_size`. For `PtrRep` and `FuncRep`, sub-representations are not part of the pointer's own size (pointers have fixed size). ∎
+    98→
+    99→**Lemma 1.2 (Alignment Power-of-Two Preservation).** If `wf(r)`, then `alignment(r)` is a power of 2.
+   100→
+   101→*Proof.* Directly from well-formedness condition 2 and the definition of `alignment`, which only combines alignments via `max`, preserving the power-of-two property. ∎
+   102→
+   103→---
+   104→
+   105→## 2. RepD Compatibility
+   106→
+   107→### 2.1 Motivation
+   108→
+   109→In the VUMA model, a single region of memory may be interpreted under multiple RepDs simultaneously. This is the fundamental mechanism that replaces type casting: instead of converting a value from one type to another, we reinterpret the same bytes under a different representation descriptor. The key question is: when can one RepD be safely used in place of another? This section formalizes two notions — *compatibility* and *subsumption* — and proves their essential properties.
+   110→
+   111→### 2.2 Compatibility
+   112→
+   113→Compatibility captures the notion that memory laid out according to one RepD can be meaningfully interpreted under another RepD. This is a weaker relation than equality: it permits information loss, so long as no invalid memory access occurs.
+   114→
+   115→**Definition (Compatible).** Let `r₁, r₂ : RepD`. We define `compatible(r₁, r₂)` — "r₁'s memory can be interpreted as r₂" — iff every byte sequence that conforms to `r₁` can also be interpreted under `r₂`:
+   116→
+   117→```
+   118→compatible(r₁, r₂) ⟺ ⟦r₁⟧ ⊆ ⟦r₂⟧ ∪ UndefinedInterpretation(r₂)
+   119→```
+   120→
+   121→More operationally, we define compatibility by structural recursion:
+   122→
+   123→```
+   124→compatible(r₁, ByteRep{n, a})           ⟺ size(r₁) = n ∧ alignment(r₁) ≥ a
+   125→                                          (Any RepD can be read as raw bytes)
+   126→
+   127→compatible(ByteRep{n, a}, StructRep{fields, s, a'}) ⟺ n = s ∧ a' divides a
+   128→                                          (Raw bytes can be struct-interpreted
+   129→                                           only if alignment is satisfied)
+   130→
+   131→compatible(StructRep{fs₁, s₁, a₁}, StructRep{fs₂, s₂, a₂}) ⟺
+   132→    s₁ = s₂ ∧ a₂ divides a₁ ∧
+   133→    ∀(oⱼ, rⱼ) ∈ fs₂. ∃(oᵢ, rᵢ) ∈ fs₁. oᵢ = oⱼ ∧ compatible(rᵢ, rⱼ)
+   134→    (Target struct fields must be compatible with source fields at same offsets)
+   135→
+   136→compatible(ArrayRep{r₁, n₁}, ArrayRep{r₂, n₂}) ⟺
+   137→    n₁ = n₂ ∧ compatible(r₁, r₂)
+   138→    (Arrays are compatible element-wise)
+   139→
+   140→compatible(PtrRep{r₁}, PtrRep{r₂})      ⟺ compatible(r₁, r₂)
+   141→                                          (Pointers are compatible if pointees are)
+   142→
+   143→compatible(PtrRep{r}, ByteRep{n, a})     ⟺ PTR_SIZE = n ∧ PTR_ALIGN ≥ a
+   144→                                          (Pointers can be read as integers)
+   145→
+   146→compatible(EnumRep{vs₁}, EnumRep{vs₂})   ⟺
+   147→    ∀(tⱼ, rⱼ) ∈ vs₂. ∃(tᵢ, rᵢ) ∈ vs₁. tᵢ = tⱼ ∧ compatible(rᵢ, rⱼ)
+   148→    (Target variants must be covered by source variants)
+   149→
+   150→compatible(UnionRep{alts₁, s₁, a₁}, UnionRep{alts₂, s₂, a₂}) ⟺
+   151→    s₁ ≥ s₂ ∧ a₂ divides a₁ ∧
+   152→    ∀rⱼ ∈ alts₂. ∃rᵢ ∈ alts₁. compatible(rᵢ, rⱼ)
+   153→    (Target alternatives must be covered by source alternatives)
+   154→```
+   155→
+   156→For cases not covered by the above rules, `compatible(r₁, r₂)` does not hold unless `r₁ = r₂`.
+   157→
+   158→### 2.3 Subsumption
+   159→
+   160→Subsumption is a stronger relation than compatibility. Whereas compatibility permits information loss (some valid `r₁` interpretations may not be valid `r₂` interpretations), subsumption requires that every valid interpretation under the target RepD is also valid under the source RepD.
+   161→
+   162→**Definition (Subsumes).** Let `r₁, r₂ : RepD`. We define `subsumes(r₁, r₂)` — "every valid r₂ interpretation is also a valid r₁ interpretation" — iff:
+   163→
+   164→```
+   165→subsumes(r₁, r₂) ⟺ ⟦r₂⟧ ⊆ ⟦r₁⟧
+   166→```
+   167→
+   168→Operationally:
+   169→
+   170→```
+   171→subsumes(ByteRep{n, a}, r₂)             ⟺ size(r₂) = n ∧ alignment(r₂) divides a
+   172→                                          (Raw bytes subsume any equal-sized RepD
+   173→                                           with weaker alignment)
+   174→
+   175→subsumes(r₁, r₂) where r₁ ≠ ByteRep     ⟺ r₁ = r₂
+   176→                                          (Non-byte RepDs subsume only themselves,
+   177→                                           since they carry specific structure)
+   178→```
+   179→
+   180→The asymmetry between `ByteRep` and other constructors is deliberate: `ByteRep` makes no structural claims about memory beyond size and alignment, so it can subsume any representation of the same size. Conversely, specific structural representations (structs, arrays, enums) make claims about byte-level organization that may not hold for arbitrary representations of the same size.
+   181→
+   182→### 2.4 Formal Properties
+   183→
+   184→**Theorem 2.1 (Compatibility is Reflexive).** For all well-formed RepD `r`, `compatible(r, r)`.
+   185→
+   186→*Proof.* By structural induction on `r`.
+   187→
+   188→- **ByteRep{n, a}**: `size(ByteRep{n,a}) = n` and `alignment(ByteRep{n,a}) = a`, so `a ≥ a` holds trivially.
+   189→- **StructRep{fields, s, a}**: `s = s` and `a divides a` trivially. For each field `(oᵢ, rᵢ) ∈ fields`, we need `(oᵢ, rᵢ) ∈ fields` with `compatible(rᵢ, rᵢ)`, which holds by the inductive hypothesis.
+   190→- **ArrayRep{r_elem, n}**: `n = n` and `compatible(r_elem, r_elem)` by the inductive hypothesis.
+   191→- **EnumRep{variants}**: For each `(tⱼ, rⱼ) ∈ variants`, we need `(tᵢ, rᵢ) ∈ variants` with `tᵢ = tⱼ` and `compatible(rᵢ, rⱼ)`. Choosing `i = j` and applying the inductive hypothesis suffices.
+   192→- **PtrRep{r}**: By the inductive hypothesis on `r`.
+   193→- **UnionRep{alts, s, a}**: For each `rⱼ ∈ alts`, choose `rᵢ = rⱼ` and apply the inductive hypothesis. `s ≥ s` and `a divides a` trivially.
+   194→- **FuncRep{params, result}**: By inductive hypothesis on each param and result. ∎
+   195→
+   196→**Theorem 2.2 (Compatibility is Transitive).** For all well-formed RepD `r₁, r₂, r₃`, if `compatible(r₁, r₂)` and `compatible(r₂, r₃)`, then `compatible(r₁, r₃)`.
+   197→
+   198→*Proof.* We proceed by structural analysis of `r₃`.
+   199→
+   200→*Case `r₃ = ByteRep{n, a}`*: By definition, `compatible(r₁, ByteRep{n, a})` requires `size(r₁) = n` and `alignment(r₁) ≥ a`. From `compatible(r₂, ByteRep{n, a})`, we get `size(r₂) = n` and `alignment(r₂) ≥ a`. From `compatible(r₁, r₂)`, the size and alignment constraints propagate: if `compatible(r₁, r₂)` holds, then either `r₂ = ByteRep{n', a'}` with `size(r₁) = n'` (so `size(r₁) = n`), or the structural compatibility rules preserve size equality. Similarly, alignment constraints compose: `alignment(r₁) ≥ alignment(r₂) ≥ a`.
+   201→
+   202→*Case `r₃ = StructRep{fs₃, s₃, a₃}`*: By `compatible(r₂, r₃)`, we have `size(r₂) = s₃`, `a₃ divides alignment(r₂)`, and for each `(oⱼ, rⱼ) ∈ fs₃`, there exists a matching field in `r₂` with `compatible` at the field level. By `compatible(r₁, r₂)`, the same fields exist in `r₁` with compatible sub-representations. Transitivity at the field level follows by induction on the structure of sub-representations.
+   203→
+   204→*Case `r₃ = ArrayRep{r₃_elem, n₃}`*: From `compatible(r₂, ArrayRep{r₃_elem, n₃})`, `r₂` must be an `ArrayRep{r₂_elem, n₂}` with `n₂ = n₃` and `compatible(r₂_elem, r₃_elem)`. Similarly, `r₁` must be `ArrayRep{r₁_elem, n₁}` with `n₁ = n₂` and `compatible(r₁_elem, r₂_elem)`. By inductive hypothesis, `compatible(r₁_elem, r₃_elem)`, and `n₁ = n₃`. Hence `compatible(r₁, r₃)`.
+   205→
+   206→*Other cases* follow by similar structural decomposition and inductive application of transitivity on sub-representations. ∎
+   207→
+   208→**Remark.** Compatibility is *not* symmetric in general. For example, `compatible(PtrRep{r}, ByteRep{PTR_SIZE, 1})` holds (any pointer can be read as bytes), but `compatible(ByteRep{PTR_SIZE, 1}, PtrRep{r})` does not hold (not every byte sequence is a valid pointer to `r`-typed memory).
+   209→
+   210→**Lemma 2.3 (Subsumption Implies Compatibility).** If `subsumes(r₁, r₂)`, then `compatible(r₂, r₁)`.
+   211→
+   212→*Proof.* If `subsumes(r₁, r₂)`, then ⟦r₂⟧ ⊆ ⟦r₁⟧. This means every byte sequence valid under `r₂` is also valid under `r₁`, which is precisely the condition for `compatible(r₂, r₁)`. ∎
+   213→
+   214→---
+   215→
+   216→## 3. RepD Reinterpretation Rules
+   217→
+   218→### 3.1 Reinterpretation as a Formal Relation
+   219→
+   220→In the VUMA model, reinterpretation is the mechanism by which the same memory region is viewed under a different RepD. Unlike type casting in traditional languages, reinterpretation does not create a new value or modify memory — it changes the *lens* through which existing bytes are interpreted. The IVE must verify that every reinterpretation is safe: that the source bytes, when viewed through the target RepD, yield a valid interpretation.
+   221→
+   222→**Definition (Reinterpretation).** The reinterpretation relation `r₁ ⟶ᵣ r₂` ("r₁ can be reinterpreted as r₂") is defined inductively by the following rules.
+   223→
+   224→### 3.2 Reinterpretation Rules
+   225→
+   226→**Rule R1 (Byte Erosion).** Any RepD can be reinterpreted as a ByteRep of the same size:
+   227→
+   228→```
+   229→          size(r) = n    alignment(r) ≥ a
+   230→    ────────────────────────────────────────── R1
+   231→         r ⟶ᵣ ByteRep{n, a}
+   232→```
+   233→
+   234→This is the most fundamental reinterpretation: all structure is lost, but no memory access becomes invalid. Reading structured data as raw bytes is always safe. The alignment of the target ByteRep must divide the alignment of the source (i.e., `a ≤ alignment(r)`), ensuring that an address satisfying `r`'s alignment also satisfies the ByteRep's alignment.
+   235→
+   236→**Rule R2 (Struct Field-wise Reinterpretation).** A StructRep can be reinterpreted if each field can be individually reinterpreted:
+   237→
+   238→```
+   239→    fields(s₁) = [(o₁, r₁), ..., (oₖ, rₖ)]
+   240→    ∀i ∈ [1, k]. rᵢ ⟶ᵣ rᵢ'
+   241→    ─────────────────────────────────────────────────────── R2
+   242→    StructRep{fields(s₁), s, a} ⟶ᵣ StructRep{[(o₁, r₁'), ..., (oₖ, rₖ')], s', a'}
+   243→    
+   244→    where s' = max(oᵢ + size(rᵢ')) and a' = max(alignment(rᵢ'))
+   245→```
+   246→
+   247→This rule permits reinterpreting a struct by reinterpreting each of its fields independently. The resulting struct's size and alignment are derived from the reinterpreted fields. The well-formedness of the resulting struct must be verified (offsets remain valid, fields do not overlap unexpectedly).
+   248→
+   249→**Rule R3 (Array Element-wise Reinterpretation).** An ArrayRep can be reinterpreted by reinterpreting each element:
+   250→
+   251→```
+   252→         r_elem ⟶ᵣ r_elem'
+   253→    ────────────────────────────── R3
+   254→    ArrayRep{r_elem, n} ⟶ᵣ ArrayRep{r_elem', n}
+   255→```
+   256→
+   257→The element count remains unchanged. This rule is the workhorse for bulk reinterpretation: reinterpreting `float32[32]` as `uint32[32]` or `byte[128]` proceeds through element-wise reinterpretation.
+   258→
+   259→**Rule R4 (Pointer as Integer).** A PtrRep can be reinterpreted as an integer RepD of pointer size:
+   260→
+   261→```
+   262→          PTR_SIZE = n    PTR_ALIGN = a
+   263→    ─────────────────────────────────────── R4
+   264→    PtrRep{r} ⟶ᵣ ByteRep{n, a}
+   265→```
+   266→
+   267→Pointers are stored as addresses, which are integers. This rule permits reading a pointer's numeric value without dereferencing it. The target is a ByteRep (not a more specific integer representation) to reflect the fact that the numeric value of a pointer does not obey arithmetic invariants of typed integers.
+   268→
+   269→**Rule R5 (Enum Variant Reinterpretation).** An EnumRep can be reinterpreted by reinterpreting each variant's payload:
+   270→
+   271→```
+   272→    variants(e) = [(t₁, r₁), ..., (tₖ, rₖ)]
+   273→    ∀i ∈ [1, k]. rᵢ ⟶ᵣ rᵢ'
+   274→    ────────────────────────────────────────────────────── R5
+   275→    EnumRep{variants(e)} ⟶ᵣ EnumRep{[(t₁, r₁'), ..., (tₖ, rₖ')]}
+   276→```
+   277→
+   278→The tags remain unchanged; only the payloads are reinterpreted. This ensures that the discriminant still correctly identifies which variant is active.
+   279→
+   280→**Rule R6 (Union Alternative Reinterpretation).** A UnionRep can be reinterpreted by reinterpreting each alternative:
+   281→
+   282→```
+   283→    alts(u) = [r₁, ..., rₖ]
+   284→    ∀i ∈ [1, k]. rᵢ ⟶ᵣ rᵢ'
+   285→    ─────────────────────────────────────────── R6
+   286→    UnionRep{alts(u), s, a} ⟶ᵣ UnionRep{[r₁', ..., rₖ'], s', a'}
+   287→    
+   288→    where s' = max(size(rᵢ')) and a' = max(alignment(rᵢ'))
+   289→```
+   290→
+   291→**Rule R7 (Transitivity).** Reinterpretation composes:
+   292→
+   293→```
+   294→         r₁ ⟶ᵣ r₂       r₂ ⟶ᵣ r₃
+   295→    ───────────────────────────────── R7
+   296→              r₁ ⟶ᵣ r₃
+   297→```
+   298→
+   299→If `r₁` can be reinterpreted as `r₂`, and `r₂` can be reinterpreted as `r₃`, then `r₁` can be directly reinterpreted as `r₃`. This rule enables the IVE to chain reinterpretations: a struct of arrays can be reinterpreted as an array of structs through an intermediate representation.
+   300→
+   301→### 3.3 Soundness of Reinterpretation
+   302→
+   303→**Theorem 3.1 (Reinterpretation Preserves Memory Safety).** If `wf(r₁)` and `r₁ ⟶ᵣ r₂`, then for any address `a` with `aligned(a, r₁)`, reading the bytes at `a` under RepD `r₂` does not access memory outside the region `[a, a + size(r₁))`.
+   304→
+   305→*Proof.* By induction on the derivation of `r₁ ⟶ᵣ r₂`.
+   306→
+   307→*Case R1*: `r₁ ⟶ᵣ ByteRep{size(r₁), a}`. The ByteRep reads exactly `size(r₁)` bytes, which is precisely the region `[a, a + size(r₁))`. No out-of-bounds access.
+   308→
+   309→*Case R2*: By the inductive hypothesis, each reinterpreted field `rᵢ'` accesses at most `size(rᵢ)` bytes starting at offset `oᵢ`. The total size `s'` is bounded by the original total size `s` (since each `size(rᵢ') ≤ size(rᵢ)` by the structural constraint that reinterpretation does not grow sizes). Fields are at the same offsets, so no field access exceeds the struct boundary.
+   310→
+   311→*Case R3*: The reinterpreted array has `n` elements of `size(r_elem') ≤ size(r_elem)` (by inductive hypothesis), so total size `n × size(r_elem') ≤ n × size(r_elem) = size(r₁)`.
+   312→
+   313→*Case R4*: The ByteRep has size `PTR_SIZE`, which equals `size(PtrRep{r})`.
+   314→
+   315→*Cases R5, R6*: By inductive hypothesis on each variant/alternative.
+   316→
+   317→*Case R7*: By inductive hypothesis applied twice. ∎
+   318→
+   319→**Lemma 3.2 (Reinterpretation Implies Compatibility).** If `r₁ ⟶ᵣ r₂`, then `compatible(r₁, r₂)`.
+   320→
+   321→*Proof.* By induction on the derivation. Each rule's conclusion matches a compatibility case: R1 matches the ByteRep compatibility rule, R2 matches the StructRep rule, etc. ∎
+   322→
+   323→---
+   324→
+   325→## 4. Offset Calculation
+   326→
+   327→### 4.1 Field Access in Structured Representations
+   328→
+   329→The VUMA model requires precise, formal rules for computing the offset and representation of a field within a structured RepD. These rules are the foundation for all memory access: when the IVE verifies that a read or write at a particular offset is valid, it relies on offset calculations to determine which field is being accessed and what representation applies.
+   330→
+   331→**Definition (Field Offset).** Let `r = StructRep{fields = [(o₁, r₁), ..., (oₖ, rₖ)], total_size, align}` be a well-formed StructRep and let `i ∈ [0, k)` be a field index. The field offset is defined as:
+   332→
+   333→```
+   334→field_offset(StructRep{fields, _, _}, i) = oᵢ₊₁
+   335→```
+   336→
+   337→where fields are indexed from 0 (so field 0 has offset `o₁`). This is simply the offset stored in the fields list.
+   338→
+   339→**Definition (Field RepD).** Similarly, the RepD of the field at index `i` is:
+   340→
+   341→```
+   342→field_rep(StructRep{fields, _, _}, i) = rᵢ₊₁
+   343→```
+   344→
+   345→These definitions extend naturally to nested structures. For a path of field indices `p = [i₁, i₂, ..., iₙ]`:
+   346→
+   347→```
+   348→field_offset(r, [i₁, i₂, ..., iₙ]) = field_offset(r, i₁) + field_offset(field_rep(r, i₁), [i₂, ..., iₙ])
+   349→field_rep(r, [i₁, i₂, ..., iₙ])     = field_rep(field_rep(r, i₁), [i₂, ..., iₙ])
+   350→```
+   351→
+   352→For arrays, we define element access:
+   353→
+   354→```
+   355→field_offset(ArrayRep{r_elem, n}, i) = i × size(r_elem)
+   356→field_rep(ArrayRep{r_elem, n}, i)    = r_elem
+   357→```
+   358→
+   359→### 4.2 Offset Invariant
+   360→
+   361→The central invariant that makes structured memory access safe is that every field lies entirely within its parent representation.
+   362→
+   363→**Theorem 4.1 (Field Containment).** For any well-formed RepD `r` and valid field index `i`:
+   364→
+   365→```
+   366→field_offset(r, i) + size(field_rep(r, i)) ≤ size(r)
+   367→```
+   368→
+   369→*Proof.* We proceed by cases on the structure of `r`.
+   370→
+   371→*Case `r = StructRep{fields = [(o₁, r₁), ..., (oₖ, rₖ)], total_size = s, align = a}`*: By well-formedness condition 3, for each field `(oᵢ, rᵢ)`, we have `oᵢ + size(rᵢ) ≤ total_size = s`. Hence `field_offset(r, i-1) + size(field_rep(r, i-1)) ≤ size(r)`.
+   372→
+   373→*Case `r = ArrayRep{r_elem, n}`*: `field_offset(r, i) + size(field_rep(r, i)) = i × size(r_elem) + size(r_elem) = (i + 1) × size(r_elem)`. Since `i` is a valid index, `0 ≤ i < n`, so `(i+1) × size(r_elem) ≤ n × size(r_elem) = size(r)`.
+   374→
+   375→*Case `r = UnionRep{alternatives, max_size, max_align}`*: For a union, every alternative starts at offset 0. By well-formedness, `size(rᵢ) ≤ max_size = size(r)` for every alternative `rᵢ`. Hence `0 + size(field_rep(r, i)) = size(rᵢ) ≤ max_size = size(r)`.
+   376→
+   377→*Case `r = EnumRep{variants}`*: The tag occupies the first `TAG_SIZE` bytes, and each variant payload follows. By well-formedness, `TAG_SIZE + size(rᵢ) ≤ size(r)` for each variant `(tᵢ, rᵢ)`. Since `field_offset(r, i) = TAG_SIZE` and `field_rep(r, i) = rᵢ`, we have `TAG_SIZE + size(rᵢ) ≤ size(r)`. ∎
+   378→
+   379→### 4.3 Alignment of Field Accesses
+   380→
+   381→**Definition (Field Alignment).** A field access at index `i` within RepD `r` starting at base address `a` is aligned iff:
+   382→
+   383→```
+   384→aligned(a + field_offset(r, i), field_rep(r, i))
+   385→```
+   386→
+   387→**Lemma 4.2 (Well-Formed Struct Fields Are Aligned).** If `r = StructRep{fields, s, a}` is well-formed and `aligned(base, r)`, then for every field index `i`, the field at index `i` is aligned at address `base + field_offset(r, i)`.
+   388→
+   389→*Proof.* By well-formedness condition 3, each field offset `oᵢ` is a multiple of `alignment(rᵢ)`. Since `aligned(base, r)` means `base` is a multiple of `alignment(r) = a`, and `a ≥ alignment(rᵢ)` (because `a = max(alignment(rⱼ))` for all fields `j`), we have that `base` is a multiple of `alignment(rᵢ)`. Since `oᵢ` is also a multiple of `alignment(rᵢ)`, their sum `base + oᵢ` is a multiple of `alignment(rᵢ)`, i.e., `aligned(base + oᵢ, rᵢ)`. ∎
+   390→
+   391→### 4.4 Nested Offset Composition
+   392→
+   393→**Theorem 4.3 (Nested Field Containment).** For any well-formed RepD `r` and valid field path `p = [i₁, i₂, ..., iₙ]`:
+   394→
+   395→```
+   396→field_offset(r, p) + size(field_rep(r, p)) ≤ size(r)
+   397→```
+   398→
+   399→*Proof.* By induction on the length of `p`.
+   400→
+   401→*Base case `n = 1`*: This is Theorem 4.1.
+   402→
+   403→*Inductive case*: Let `p = [i₁] ++ p'`. Then:
+   404→```
+   405→field_offset(r, p) = field_offset(r, i₁) + field_offset(field_rep(r, i₁), p')
+   406→```
+   407→
+   408→Let `r₁ = field_rep(r, i₁)`, `off₁ = field_offset(r, i₁)`. By inductive hypothesis:
+   409→```
+   410→field_offset(r₁, p') + size(field_rep(r₁, p')) ≤ size(r₁)
+   411→```
+   412→
+   413→Therefore:
+   414→```
+   415→field_offset(r, p) + size(field_rep(r, p))
+   416→= off₁ + field_offset(r₁, p') + size(field_rep(r₁, p'))
+   417→≤ off₁ + size(r₁)           [by inductive hypothesis]
+   418→≤ size(r)                    [by Theorem 4.1]
+   419→```
+   420→
+   421→∎
+   422→
+   423→---
+   424→
+   425→## 5. Alignment Constraints
+   426→
+   427→### 5.1 Formal Definition of Alignment
+   428→
+   429→Alignment constraints ensure that memory accesses are valid on the target hardware. An address is *aligned* for a given RepD if it satisfies the RepD's alignment requirement, meaning the address is an integer multiple of the RepD's alignment value.
+   430→
+   431→**Definition (Address Alignment).** Let `a : Nat` be a memory address and `r : RepD` be a well-formed RepD. The address `a` is aligned for `r`, written `aligned(a, r)`, iff:
+   432→
+   433→```
+   434→aligned(a, r) ⟺ a mod alignment(r) = 0
+   435→```
+   436→
+   437→That is, `a` is an integer multiple of `alignment(r)`. Since `alignment(r)` is always a power of 2 (by well-formedness), this is equivalent to requiring that the least significant `log₂(alignment(r))` bits of `a` are all zero.
+   438→
+   439→**Definition (Sub-Address Alignment).** For a byte range `[a, a + n)` representing a RepD `r`, every sub-access at offset `o` with RepD `r'` must also be aligned:
+   440→
+   441→```
+   442→sub_aligned(a, r, o, r') ⟺ aligned(a + o, r')
+   443→```
+   444→
+   445→### 5.2 Struct Alignment
+   446→
+   447→The alignment of a struct is determined by the most restrictive alignment among its fields. This is the standard ABI convention across all major platforms, and it ensures that if the struct's base address is aligned, then every field within it is also aligned.
+   448→
+   449→**Theorem 5.1 (Struct Alignment = Max Field Alignment).** For a well-formed `StructRep{fields = [(o₁, r₁), ..., (oₖ, rₖ)], total_size = s, align = a}`:
+   450→
+   451→```
+   452→a = max(alignment(r₁), alignment(r₂), ..., alignment(rₖ))
+   453→```
+   454→
+   455→*Proof.* We prove this in two directions.
+   456→
+   457→**(≥) Direction:** Suppose for contradiction that `a < alignment(rⱼ)` for some field `j`. By well-formedness condition 3, `oⱼ` must be a multiple of `alignment(rⱼ)`. Consider a base address `base` such that `aligned(base, StructRep{..., a})`, i.e., `base mod a = 0`. Since `a < alignment(rⱼ)`, it is possible that `base mod alignment(rⱼ) ≠ 0` (for example, if `a = 2` and `alignment(rⱼ) = 4`, then `base = 2` satisfies `base mod 2 = 0` but `base mod 4 = 2 ≠ 0`). In this case, even though `oⱼ` is a multiple of `alignment(rⱼ)`, we would have `(base + oⱼ) mod alignment(rⱼ) = base mod alignment(rⱼ) ≠ 0`, so the field would not be aligned. This contradicts Lemma 4.2 (well-formed struct fields must be aligned when the struct base is aligned). Therefore `a ≥ alignment(rⱼ)` for all `j`, i.e., `a ≥ max(alignment(rⱼ))`.
+   458→
+   459→**(≤) Direction:** We need to show that `a` need not be larger than the maximum field alignment. By well-formedness, `a` is the declared alignment of the struct. The struct alignment must be at least the maximum field alignment (proven above). If `a` were strictly greater, then the struct would be over-aligned: it would require more alignment than any field needs. While this is not incorrect, it is wasteful and not the canonical form. For the canonical well-formed RepD (as produced by the IVE), `a = max(alignment(rⱼ))`. We note that the IVE may produce over-aligned structs when explicitly requested (e.g., for cache-line alignment), but the *natural* alignment equals the maximum field alignment. ∎
+   460→
+   461→**Corollary 5.2 (Struct Size is a Multiple of Alignment).** For a well-formed StructRep with padding inserted by the IVE, `total_size` is a multiple of `align`.
+   462→
+   463→*Proof.* This follows from the requirement that arrays of structs must have each element properly aligned. If `total_size` were not a multiple of `align`, then in `ArrayRep{StructRep{..., s, a}, n}`, the second element would start at offset `s`, which might not satisfy `s mod a = 0`. Well-formedness requires that array elements are aligned, so `s` must be a multiple of `a`. ∎
+   464→
+   465→### 5.3 Array Alignment
+   466→
+   467→**Theorem 5.3 (Array Alignment = Element Alignment).** For a well-formed `ArrayRep{r_elem, n}` with `n > 0`:
+   468→
+   469→```
+   470→alignment(ArrayRep{r_elem, n}) = alignment(r_elem)
+   471→```
+   472→
+   473→*Proof.* The alignment of an array is the alignment required for its base address. Since the array consists of `n` contiguous elements of `r_elem`, and the first element starts at offset 0, the base address must satisfy `alignment(r_elem)`. Conversely, if the base address is aligned to `alignment(r_elem)`, then every element at offset `i × size(r_elem)` is also aligned, because `size(r_elem)` is a multiple of `alignment(r_elem)` (by Corollary 5.2 applied transitively — each element's size is a multiple of its alignment). Therefore, no additional alignment beyond `alignment(r_elem)` is needed for the array as a whole. ∎
+   474→
+   475→**Lemma 5.4 (Array Element Alignment).** For a well-formed `ArrayRep{r_elem, n}` with base address `a`, if `aligned(a, ArrayRep{r_elem, n})`, then for all `i ∈ [0, n)`:
+   476→
+   477→```
+   478→aligned(a + i × size(r_elem), r_elem)
+   479→```
+   480→
+   481→*Proof.* Since `aligned(a, ArrayRep{r_elem, n})` implies `a mod alignment(r_elem) = 0` (by Theorem 5.3), and `size(r_elem)` is a multiple of `alignment(r_elem)` (by well-formedness of `r_elem`), we have `(a + i × size(r_elem)) mod alignment(r_elem) = a mod alignment(r_elem) + (i × size(r_elem)) mod alignment(r_elem) = 0 + 0 = 0`. Hence every element is aligned. ∎
+   482→
+   483→### 5.4 Alignment in Reinterpretation
+   484→
+   485→**Theorem 5.5 (Reinterpretation Alignment Safety).** If `r₁ ⟶ᵣ r₂` and `aligned(a, r₁)`, and the reinterpretation is applied at address `a`, then `aligned(a, r₂)`.
+   486→
+   487→*Proof.* By induction on the derivation of `r₁ ⟶ᵣ r₂`.
+   488→
+   489→*Case R1*: `r₁ ⟶ᵣ ByteRep{size(r₁), a_target}` where `alignment(r₁) ≥ a_target`. Since `aligned(a, r₁)` means `a mod alignment(r₁) = 0` and `alignment(r₁) ≥ a_target` implies `a_target` divides `alignment(r₁)`, we get `a mod a_target = 0`, i.e., `aligned(a, ByteRep{size(r₁), a_target})`.
+   490→
+   491→*Case R2*: Each field in the target struct has alignment dividing the corresponding field's alignment in the source struct (by inductive hypothesis). Since the source struct's alignment equals the max of its field alignments, and the target struct's alignment equals the max of its (potentially smaller) field alignments, the target alignment divides the source alignment. Hence `aligned(a, r₂)`.
+   492→
+   493→*Case R3*: `ArrayRep{r_elem, n} ⟶ᵣ ArrayRep{r_elem', n}` where `r_elem ⟶ᵣ r_elem'`. By Theorem 5.3, `alignment(ArrayRep{r_elem', n}) = alignment(r_elem')`. By inductive hypothesis, `alignment(r_elem')` divides `alignment(r_elem)`. Since `alignment(ArrayRep{r_elem, n}) = alignment(r_elem)`, the target alignment divides the source alignment, and `aligned(a, r₂)` follows.
+   494→
+   495→*Case R4*: `PtrRep{r} ⟶ᵣ ByteRep{PTR_SIZE, PTR_ALIGN}`. Since `alignment(PtrRep{r}) = PTR_ALIGN`, the alignment is unchanged.
+   496→
+   497→*Cases R5, R6*: Follow by inductive hypothesis on each variant/alternative.
+   498→
+   499→*Case R7*: By inductive hypothesis applied twice. ∎
+   500→
+   501→**Corollary 5.6 (Aligned Byte Erosion).** Any well-aligned RepD can be read as well-aligned bytes. Specifically, if `aligned(a, r)`, then `aligned(a, ByteRep{size(r), 1})`.
+   502→
+   503→*Proof.* By Theorem 5.5 with R1, choosing `a_target = 1`. Since `1` divides any alignment, this always holds. ∎
+   504→
+   505→---
+   506→
+   507→## Appendix A: Summary of Definitions and Theorems
+   508→
+   509→| Item | Statement |
+   510→|------|-----------|
+   511→| **Def 1.1** | RepD algebraic syntax |
+   512→| **Def 1.2** | Denotation function ⟦·⟧ |
+   513→| **Def 1.3** | Derived `size` and `alignment` functions |
+   514→| **Def 1.4** | Well-formedness `wf(r)` |
+   515→| **Lem 1.1** | Size monotonicity for sub-representations |
+   516→| **Lem 1.2** | Alignment power-of-two preservation |
+   517→| **Def 2.1** | `compatible(r₁, r₂)` relation |
+   518→| **Def 2.2** | `subsumes(r₁, r₂)` relation |
+   519→| **Thm 2.1** | Compatibility is reflexive |
+   520→| **Thm 2.2** | Compatibility is transitive |
+   521→| **Lem 2.3** | Subsumption implies compatibility |
+   522→| **Rule R1** | Byte erosion reinterpretation |
+   523→| **Rule R2** | Struct field-wise reinterpretation |
+   524→| **Rule R3** | Array element-wise reinterpretation |
+   525→| **Rule R4** | Pointer as integer reinterpretation |
+   526→| **Rule R5** | Enum variant reinterpretation |
+   527→| **Rule R6** | Union alternative reinterpretation |
+   528→| **Rule R7** | Reinterpretation transitivity |
+   529→| **Thm 3.1** | Reinterpretation preserves memory safety |
+   530→| **Lem 3.2** | Reinterpretation implies compatibility |
+   531→| **Def 4.1** | `field_offset(r, i)` |
+   532→| **Def 4.2** | `field_rep(r, i)` |
+   533→| **Thm 4.1** | Field containment invariant |
+   534→| **Lem 4.2** | Well-formed struct fields are aligned |
+   535→| **Thm 4.3** | Nested field containment |
+   536→| **Def 5.1** | `aligned(a, r)` |
+   537→| **Thm 5.1** | Struct alignment = max field alignment |
+   538→| **Cor 5.2** | Struct size is multiple of alignment |
+   539→| **Thm 5.3** | Array alignment = element alignment |
+   540→| **Lem 5.4** | Array element alignment |
+   541→| **Thm 5.5** | Reinterpretation alignment safety |
+   542→| **Cor 5.6** | Aligned byte erosion |
+   543→
+   544→---
+   545→
+   546→*End of RepD Formal Specification — VUMA-W1-02*
+   547→

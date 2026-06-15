@@ -1,12 +1,19 @@
 [package]
 name = "vuma-std"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Standard Library — primitives, collections, sync, crypto, I/O, and FFI bindings"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 libc = { version = "0.2", optional = true }
-log = "0.4"
+log.workspace = true
 
 [features]
 default = []

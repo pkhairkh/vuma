@@ -1,0 +1,1183 @@
+     1→# ARM64 Code Generation Algorithm: SCG to Machine Code
+     2→
+     3→**VUMA Project — Specification Document**
+     4→**Target: AArch64 (Broadcom BCM2712, Cortex-A76 quad-core)**
+     5→**Task ID: W1-28**
+     6→
+     7→---
+     8→
+     9→## 1. SCG Node to ARM64 Instruction Mapping
+    10→
+    11→The Semantic Computation Graph (SCG) is the intermediate representation produced by VUMA's front-end compiler passes. Each SCG node represents a discrete semantic operation — allocation, deallocation, memory access, type casting, computation, or control flow — that must be translated into one or more ARM64 (AArch64) machine instructions. This section defines the complete mapping from every SCG node type to its ARM64 instruction sequence, targeting the Cortex-A76 microarchitecture found in the AArch64's BCM2712 SoC.
+    12→
+    13→### AllocationNode
+    14→
+    15→The AllocationNode requests a block of memory of a given size and alignment. The code generator must decide between three allocation strategies based on the node's `alloc_type` field and the requested size:
+    16→
+    17→**Stack allocation (small, ≤4096 bytes):** The compiler emits a direct stack pointer adjustment. This is the fastest path since it requires only a single arithmetic instruction and no function call overhead. The stack pointer `sp` is decremented by the allocation size, rounded up to 16-byte alignment per AAPCS64 requirements:
+    18→
+    19→```asm
+    20→; AllocationNode { size: 64, alloc_type: Stack }
+    21→sub sp, sp, #64          ; allocate 64 bytes on stack
+    22→; result register holds the address of the allocation
+    23→mov x0, sp               ; x0 = pointer to allocated block
+    24→```
+    25→
+    26→For sizes that are not multiples of 16, the compiler must round up to maintain stack alignment. For example, a 100-byte allocation becomes 112 bytes:
+    27→
+    28→```asm
+    29→; AllocationNode { size: 100, alloc_type: Stack }
+    30→sub sp, sp, #112         ; round up 100 → 112 (16-byte aligned)
+    31→mov x0, sp
+    32→```
+    33→
+    34→**Heap allocation (large, >4096 bytes):** When the requested size exceeds the stack allocation threshold, the code generator emits a call to the C library's `malloc` function. The size argument is placed in `x0` before the branch-with-link instruction. After the call, `x0` contains either a valid pointer or NULL on failure. The compiler must insert a NULL check if the VUMA safety profile demands it:
+    35→
+    36→```asm
+    37→; AllocationNode { size: 8192, alloc_type: Heap }
+    38→mov x0, #8192            ; size argument for malloc
+    39→bl malloc                 ; call malloc(8192)
+    40→cbz x0, .alloc_fail      ; safety check: branch if NULL
+    41→; x0 now holds the heap pointer
+    42→```
+    43→
+    44→**Arena allocation:** Arena-allocated objects are bump-allocated from a pre-reserved region. The arena base pointer lives in a callee-saved register (e.g., `x19`) and the current arena offset in another (e.g., `x20`). The allocation is a simple addition, and the offset is advanced. This is nearly as fast as stack allocation but avoids the lifetime constraints of the stack:
+    45→
+    46→```asm
+    47→; AllocationNode { size: 256, alloc_type: Arena }
+    48→add x0, x19, x20         ; x0 = arena_base + arena_offset
+    49→add x20, x20, #256       ; advance arena offset by 256
+    50→```
+    51→
+    52→### DeallocationNode
+    53→
+    54→Deallocation reverses the allocation. The strategy is determined by the `alloc_type` field:
+    55→
+    56→**Stack deallocation:** Restore the stack pointer by adding back the size:
+    57→
+    58→```asm
+    59→; DeallocationNode { size: 64, alloc_type: Stack }
+    60→add sp, sp, #64          ; deallocate 64 bytes from stack
+    61→```
+    62→
+    63→**Heap deallocation:** Call `free` with the pointer in `x0`:
+    64→
+    65→```asm
+    66→; DeallocationNode { alloc_type: Heap }
+    67→; x0 already holds the pointer to free
+    68→bl free
+    69→```
+    70→
+    71→**Arena deallocation:** This is a no-op at the individual deallocation level. Arena memory is released in bulk by `arena_destroy`, so no instructions are emitted:
+    72→
+    73→```asm
+    74→; DeallocationNode { alloc_type: Arena }
+    75→; no code emitted — arena_destroy handles bulk deallocation
+    76→```
+    77→
+    78→### AccessNode (Read)
+    79→
+    80→Read access nodes load data from memory into a register. Two addressing modes are supported depending on whether the offset is known at compile time (fixed) or computed at runtime (indexed):
+    81→
+    82→**Fixed-offset read:**
+    83→
+    84→```asm
+    85→; AccessNode { mode: Read, offset: 16 }
+    86→ldr x0, [x_base, #16]   ; load 64-bit value at base+16
+    87→ldr w1, [x_base, #24]   ; load 32-bit value at base+24
+    88→ldrb w2, [x_base, #28]  ; load byte at base+28
+    89→```
+    90→
+    91→**Indexed read (for array access):**
+    92→
+    93→```asm
+    94→; AccessNode { mode: Read, indexed: true, element_size: 8 }
+    95→ldr x0, [x_base, x_index, lsl #3]   ; load at base + index*8
+    96→; For 4-byte elements:
+    97→ldr w1, [x_base, x_index, lsl #2]   ; load at base + index*4
+    98→```
+    99→
+   100→### AccessNode (Write)
+   101→
+   102→Write access nodes store data from a register into memory. The same two addressing modes apply:
+   103→
+   104→**Fixed-offset write:**
+   105→
+   106→```asm
+   107→; AccessNode { mode: Write, offset: 16 }
+   108→str x0, [x_base, #16]   ; store 64-bit value at base+16
+   109→str w1, [x_base, #24]   ; store 32-bit value at base+24
+   110→strb w2, [x_base, #28]  ; store byte at base+28
+   111→```
+   112→
+   113→**Indexed write:**
+   114→
+   115→```asm
+   116→; AccessNode { mode: Write, indexed: true, element_size: 8 }
+   117→str x0, [x_base, x_index, lsl #3]   ; store at base + index*8
+   118→```
+   119→
+   120→### CastNode
+   121→
+   122→Type casts between compatible representations (same bit width) are no-ops at the machine level — the bits in the register are simply reinterpreted. Cross-domain casts (integer ↔ floating-point) require data movement between the integer and floating-point register banks using `fmov`:
+   123→
+   124→```asm
+   125→; CastNode { from: i64, to: f64 }  — int to float reinterpretation
+   126→fmov d0, x0              ; move integer bits from x0 to d0 as float
+   127→
+   128→; CastNode { from: f64, to: i64 }  — float to int reinterpretation
+   129→fmov x0, d0              ; move float bits from d0 to x0 as integer
+   130→
+   131→; CastNode { from: i32, to: i64 }  — sign extension
+   132→sxtw x0, w0              ; sign-extend word to doubleword
+   133→
+   134→; CastNode { from: u32, to: u64 }  — zero extension
+   135→mov w0, w0                ; implicit zero-extension to 64 bits
+   136→```
+   137→
+   138→For actual numeric conversions (not bit reinterpretation), such as integer-to-float conversion, the code generator uses `scvtf` (signed convert to float) and `fcvtzs` (float convert to signed integer):
+   139→
+   140→```asm
+   141→; CastNode { from: i64, to: f64, convert: true }
+   142→scvtf d0, x0              ; convert signed int to double-precision float
+   143→
+   144→; CastNode { from: f64, to: i64, convert: true }
+   145→fcvtzs x0, d0             ; convert double-precision float to signed int
+   146→```
+   147→
+   148→### ComputationNode
+   149→
+   150→Arithmetic and logical operations map directly to ARM64 instructions. The code generator selects the appropriate instruction based on the operator and operand sizes:
+   151→
+   152→```asm
+   153→; ComputationNode { op: Add, size: 64 }
+   154→add x0, x1, x2           ; x0 = x1 + x2
+   155→
+   156→; ComputationNode { op: Sub, size: 64 }
+   157→sub x0, x1, x2           ; x0 = x1 - x2
+   158→
+   159→; ComputationNode { op: Mul, size: 64 }
+   160→mul x0, x1, x2           ; x0 = x1 * x2
+   161→
+   162→; ComputationNode { op: SDiv, size: 64 }
+   163→sdiv x0, x1, x2          ; x0 = x1 / x2 (signed)
+   164→
+   165→; ComputationNode { op: UDiv, size: 64 }
+   166→udiv x0, x1, x2          ; x0 = x1 / x2 (unsigned)
+   167→
+   168→; ComputationNode { op: And, size: 64 }
+   169→and x0, x1, x2           ; x0 = x1 & x2
+   170→
+   171→; ComputationNode { op: Orr, size: 64 }
+   172→orr x0, x1, x2           ; x0 = x1 | x2
+   173→
+   174→; ComputationNode { op: Eor, size: 64 }
+   175→eor x0, x1, x2           ; x0 = x1 ^ x2
+   176→
+   177→; ComputationNode { op: Lsl, size: 64 }
+   178→lsl x0, x1, x2           ; x0 = x1 << x2
+   179→
+   180→; ComputationNode { op: Lsr, size: 64 }
+   181→lsr x0, x1, x2           ; x0 = x1 >> x2 (logical)
+   182→
+   183→; ComputationNode { op: Asr, size: 64 }
+   184→asr x0, x1, x2           ; x0 = x1 >> x2 (arithmetic)
+   185→```
+   186→
+   187→For 32-bit operations, the compiler uses the `w` register variants (which implicitly zero-extend to 64 bits on write):
+   188→
+   189→```asm
+   190→add w0, w1, w2            ; 32-bit addition
+   191→mul w0, w1, w2            ; 32-bit multiplication
+   192→```
+   193→
+   194→Immediate operands use the dedicated immediate forms where the constant fits within the ARM64 encoding constraints:
+   195→
+   196→```asm
+   197→add x0, x1, #42           ; add immediate
+   198→sub x0, x1, #100          ; subtract immediate
+   199→and x0, x1, #0xFF         ; bitwise AND with immediate mask
+   200→```
+   201→
+   202→### ControlNode (Branch)
+   203→
+   204→Branch nodes implement conditional and unconditional control flow. The code generator selects the most efficient branch instruction based on the condition:
+   205→
+   206→**Simple zero/non-zero test:**
+   207→
+   208→```asm
+   209→; ControlNode { type: Branch, condition: Zero }
+   210→cbz x0, .label            ; branch to .label if x0 == 0
+   211→
+   212→; ControlNode { type: Branch, condition: NonZero }
+   213→cbnz x0, .label           ; branch to .label if x0 != 0
+   214→```
+   215→
+   216→**Comparison-based branch:** For general comparisons, the compiler emits a `cmp` instruction followed by a conditional branch:
+   217→
+   218→```asm
+   219→; ControlNode { type: Branch, condition: Equal }
+   220→cmp x0, x1
+   221→b.eq .label               ; branch if x0 == x1
+   222→
+   223→; ControlNode { type: Branch, condition: NotEqual }
+   224→cmp x0, x1
+   225→b.ne .label               ; branch if x0 != x1
+   226→
+   227→; ControlNode { type: Branch, condition: LessThan }
+   228→cmp x0, x1
+   229→b.lt .label               ; branch if x0 < x1 (signed)
+   230→
+   231→; ControlNode { type: Branch, condition: GreaterEqual }
+   232→cmp x0, x1
+   233→b.ge .label               ; branch if x0 >= x1 (signed)
+   234→
+   235→; Unsigned comparison variants:
+   236→cmp x0, x1
+   237→b.lo .label               ; branch if x0 < x1 (unsigned, lower)
+   238→b.hs .label               ; branch if x0 >= x1 (unsigned, higher or same)
+   239→```
+   240→
+   241→### ControlNode (Call)
+   242→
+   243→Function calls use the `bl` (branch with link) instruction, which stores the return address in `x30` (the link register):
+   244→
+   245→```asm
+   246→; ControlNode { type: Call, target: "compute_hash" }
+   247→bl compute_hash            ; call function, return address in x30
+   248→; x0 holds the return value after the call returns
+   249→```
+   250→
+   251→### ControlNode (Return)
+   252→
+   253→Return nodes place the return value in `x0` and execute the `ret` instruction, which branches to the address in `x30`:
+   254→
+   255→```asm
+   256→; ControlNode { type: Return }
+   257→mov x0, x_result          ; move result into return register
+   258→ret                        ; return to caller (branch to x30)
+   259→```
+   260→
+   261→If the function returns void, only `ret` is emitted:
+   262→
+   263→```asm
+   264→; ControlNode { type: Return, void: true }
+   265→ret
+   266→```
+   267→
+   268→---
+   269→
+   270→## 2. Function Calling Convention (AAPCS64)
+   271→
+   272→The ARM64 procedure call standard (AAPCS64) defines the contract between callers and callees that VUMA's code generator must honor on every function boundary. The AArch64 runs Linux in AArch64 mode, and its system libraries, the C runtime, and the kernel all adhere to AAPCS64. Any deviation would result in undefined behavior, silent data corruption, or crashes. This section details the full calling convention as implemented by the VUMA code generator, including VUMA-specific extensions for passing Bounds Descriptor (BD) metadata used by the Inline Validation Engine (IVE).
+   273→
+   274→### Argument Passing
+   275→
+   276→The first eight integer or pointer arguments are passed in registers `x0` through `x7`. This covers the vast majority of function calls in VUMA programs, as most functions take fewer than eight parameters. Arguments beyond the eighth are passed on the stack at ascending addresses from the stack pointer. The caller is responsible for reserving stack space for these arguments before the call:
+   277→
+   278→```asm
+   279→; Function call: foo(a, b, c, d, e, f, g, h, i, j)
+   280→; Arguments 1-8 in x0-x7, arguments 9-10 on stack
+   281→mov x0, x_a               ; arg 1
+   282→mov x1, x_b               ; arg 2
+   283→mov x2, x_c               ; arg 3
+   284→mov x3, x_d               ; arg 4
+   285→mov x4, x_e               ; arg 5
+   286→mov x5, x_f               ; arg 6
+   287→mov x6, x_g               ; arg 7
+   288→mov x7, x_h               ; arg 8
+   289→str x_i, [sp, #0]         ; arg 9 on stack
+   290→str x_j, [sp, #8]         ; arg 10 on stack
+   291→bl foo
+   292→```
+   293→
+   294→Floating-point arguments are passed in `v0` through `v7` (or `d0`-`d7` for double precision, `s0`-`s7` for single precision). If a function takes a mix of integer and floating-point arguments, each argument is assigned to the next register in its respective class:
+   295→
+   296→```asm
+   297→; Function call: mix(int_val, float_val, ptr_val, double_val)
+   298→mov x0, x_int             ; integer arg 1 → x0
+   299→fmov d0, d_float          ; float arg 2 → d0
+   300→mov x1, x_ptr             ; pointer arg 3 → x1
+   301→fmov d1, d_double         ; double arg 4 → d1
+   302→bl mix
+   303→```
+   304→
+   305→### Return Values
+   306→
+   307→The primary return value is placed in `x0` for integer/pointer types and `v0` (or `d0`/`s0`) for floating-point types. For 128-bit returns, the value is split across `x0` and `x1`. For composite returns larger than 16 bytes, the caller passes a pointer to a caller-allocated buffer in `x8`, and the callee writes the result to that buffer:
+   308→
+   309→```asm
+   310→; Caller: passing buffer for large return
+   311→add x8, sp, #0            ; x8 = pointer to return buffer on stack
+   312→bl large_return_func
+   313→; result is now at [sp, #0]
+   314→```
+   315→
+   316→### Callee-Saved Registers
+   317→
+   318→Registers `x19` through `x28`, `x29` (frame pointer), and `x30` (link register) are callee-saved. A function that modifies any of these must preserve their original values by saving them to the stack on entry and restoring them before return. The Cortex-A76's store-pair instructions (`stp`) efficiently save two 64-bit registers in a single instruction:
+   319→
+   320→```asm
+   321→; Function prologue: save callee-saved registers
+   322→stp x29, x30, [sp, #-16]!    ; push fp and lr, decrement sp by 16
+   323→mov x29, sp                    ; set up frame pointer
+   324→
+   325→; If the function also uses x19-x23:
+   326→stp x19, x20, [sp, #-16]!    ; push x19, x20
+   327→stp x21, x22, [sp, #-16]!    ; push x21, x22
+   328→str x23, [sp, #-8]!           ; push odd register (pad for alignment)
+   329→
+   330→; Function epilogue: restore and return
+   331→ldp x21, x22, [sp], #16      ; pop x21, x22
+   332→ldp x19, x20, [sp], #16      ; pop x19, x20
+   333→ldp x29, x30, [sp], #16      ; pop fp and lr, increment sp by 16
+   334→ret
+   335→```
+   336→
+   337→### Caller-Saved Registers
+   338→
+   339→Registers `x0` through `x18` are caller-saved (with `x16`-`x17` reserved for the PLT and `x18` for the platform register on some OSes). If a value in any of these registers must survive a function call, the caller must spill it to the stack or move it to a callee-saved register before the call:
+   340→
+   341→```asm
+   342→; Save x0 across a function call
+   343→str x0, [sp, #-16]!       ; spill x0 to stack
+   344→bl some_function           ; x0 is clobbered by return value
+   345→ldr x1, [sp], #16         ; restore original x0 into x1
+   346→```
+   347→
+   348→### Stack Alignment
+   349→
+   350→The stack must be 16-byte aligned at all public function boundaries (at the point of a `bl` instruction). The VUMA code generator must track the current stack depth and insert padding when necessary. Since each `stp` pair push or `str` with pre-indexed addressing decrements by a multiple of 8, the compiler must ensure the total decrement is always a multiple of 16. If an odd number of 8-byte registers must be saved, the compiler pads the save area by 8 bytes.
+   351→
+   352→### VUMA-Specific: BD Metadata in x8-x15
+   353→
+   354→When the Inline Validation Engine (IVE) requires runtime bounds checks, VUMA passes Bounds Descriptor (BD) metadata in registers `x8` through `x15`. This avoids memory loads for bounds information during hot-path checks. The BD metadata encodes the base address, byte length, and tag for each pointer argument that requires runtime validation. Since `x8` is also used for indirect return buffers, the code generator must handle the conflict: when both BD metadata and an indirect return are needed, the BD data takes priority in `x8`-`x15`, and the return buffer pointer is passed as an additional explicit argument on the stack:
+   355→
+   356→```asm
+   357→; Function call with BD metadata for IVE
+   358→mov x0, x_ptr             ; the pointer to validate
+   359→mov x8, x_bd_base         ; BD: base address of allocation
+   360→mov x9, x_bd_len          ; BD: byte length of allocation
+   361→mov x10, x_bd_tag         ; BD: tag for type validation
+   362→bl ivec_checked_access    ; call with bounds metadata
+   363→```
+   364→
+   365→The callee is expected to check the BD before performing any pointer dereference, inserting inline guard instructions that trap on violation:
+   366→
+   367→```asm
+   368→; IVE guard in callee
+   369→cmp x0, x8                ; ptr < base?
+   370→b.lo .bounds_violation
+   371→add x11, x8, x9           ; x11 = base + length
+   372→cmp x0, x11               ; ptr >= base + length?
+   373→b.hs .bounds_violation
+   374→; access is safe, proceed
+   375→```
+   376→
+   377→---
+   378→
+   379→## 3. Register Allocation Strategy
+   380→
+   381→Register allocation is the process of mapping the unlimited virtual registers in the SCG intermediate representation to the finite set of physical registers available on the Cortex-A76. ARM64 provides 31 general-purpose 64-bit registers (`x0`-`x30`) and 32 SIMD/floating-point registers (`v0`-`v31`). The VUMA code generator employs a linear-scan register allocator with priority-based heuristics tuned for the Cortex-A76's pipeline characteristics. This section describes the complete register partitioning scheme, allocation algorithm, and spilling strategy.
+   382→
+   383→### Register Partitioning by Role
+   384→
+   385→The 31 general-purpose registers are partitioned into functional groups, each with a designated purpose. This partitioning reduces register pressure conflicts and simplifies the allocator's decisions:
+   386→
+   387→**x0–x7: Argument/Return Registers.** These eight registers serve as the primary channel for passing arguments and returning values at function boundaries, as dictated by AAPCS64. Within a function body, they can also be used as temporary scratch registers for values that do not need to survive function calls. The allocator prefers these for short-lived expression temporaries. For example, a chain of additions can use x0-x3 without any spills:
+   388→
+   389→```asm
+   390→add x0, x1, x2            ; temp in x0
+   391→add x3, x0, x4            ; temp in x3
+   392→sub x5, x3, x6            ; temp in x5
+   393→```
+   394→
+   395→**x8–x15: Temporary and BD Metadata Registers.** These registers are used for intermediate computation results within basic blocks and for VUMA-specific BD metadata when the IVE is active. They are caller-saved, so any value that must survive a call must be moved to a callee-saved register or spilled. Within a single basic block (no intervening calls), the allocator uses x8-x15 as an extended scratch pool:
+   396→
+   397→```asm
+   398→; Extended temporaries using x8-x15
+   399→ldr x8, [x_base, #0]      ; load first operand
+   400→ldr x9, [x_base, #8]      ; load second operand
+   401→mul x10, x8, x9           ; intermediate product
+   402→add x11, x10, x12         ; accumulate
+   403→```
+   404→
+   405→**x16–x17: PLT/Intra-Section Call Registers.** These two registers are reserved by the linker and dynamic loader for procedure linkage table (PLT) stubs. The VUMA code generator never allocates these for user variables. They may be clobbered by any function call through a PLT entry, making them unsafe for values that must survive across calls. When generating position-independent code (PIC) for shared libraries, `adrp` instructions also target x16/x17 as scratch:
+   406→
+   407→```asm
+   408→; PLT call pattern (generated by linker)
+   409→adrp x16, :got:function_name
+   410→ldr  x17, [x16, :got_lo12:function_name]
+   411→add  x16, x16, :got_lo12:function_name
+   412→br   x17
+   413→```
+   414→
+   415→**x18: Platform Register.** On some operating systems, x18 is reserved as a platform register (e.g., for the shadow call stack on Android). The VUMA code generator treats x18 as reserved and does not allocate it for general use. On bare-metal AArch64 targets, x18 may be repurposed as a per-CPU data pointer if the VUMA runtime requires it:
+   416→
+   417→```asm
+   418→; Optional: x18 as per-CPU data pointer (bare metal only)
+   419→mrs x18, tpidr_el0         ; read thread pointer from system register
+   420→; or on bare metal:
+   421→ldr x18, =per_cpu_data     ; load per-CPU data base address
+   422→```
+   423→
+   424→**x19–x28: Callee-Saved Variable Registers.** These ten registers are the primary allocation target for variables that are live across function calls. Since they are callee-saved by AAPCS64, their values persist through any call. The allocator assigns these to loop variables, accumulator registers, and any value whose live range spans one or more call sites. The allocator prioritizes x19-x28 for variables with the longest live ranges:
+   425→
+   426→```asm
+   427→; x19 used as loop counter surviving function calls
+   428→mov x19, #0               ; initialize counter
+   429→.loop:
+   430→  bl process_item          ; call preserves x19
+   431→  add x19, x19, #1        ; increment
+   432→  cmp x19, #100
+   433→  b.lt .loop
+   434→```
+   435→
+   436→**x29: Frame Pointer (FP).** Register x29 serves as the frame pointer, providing a stable reference point for accessing local variables and parameters on the stack. The VUMA code generator always sets up a frame pointer in non-leaf functions (those that make calls), as it simplifies stack unwinding for debuggers and exception handling. In leaf functions with small stack frames, the compiler may omit the frame pointer and use `sp`-relative addressing exclusively:
+   437→
+   438→```asm
+   439→; Function prologue with frame pointer
+   440→stp x29, x30, [sp, #-32]!   ; save fp, lr; allocate 32 bytes
+   441→mov x29, sp                   ; establish frame pointer
+   442→; Access local at [x29, #16]
+   443→str x0, [x29, #16]           ; save argument to local slot
+   444→```
+   445→
+   446→**x30: Link Register (LR).** The link register holds the return address after a `bl` instruction. It must be saved to the stack before any subsequent call (which would overwrite it) and restored before `ret`. In non-leaf functions, x30 is typically saved alongside x29 in the prologue's `stp` instruction.
+   447→
+   448→**x31 (sp/xzr):** Register 31 encodes as either the stack pointer (when used in load/store addressing) or the zero register (when used in arithmetic). The zero register always reads as 0 and discards writes, which is useful for zeroing, comparing to zero, and discarding unwanted instruction results:
+   449→
+   450→```asm
+   451→mov x0, xzr               ; set x0 to zero (more efficient than mov x0, #0)
+   452→cmp x1, xzr               ; compare x1 to zero
+   453→```
+   454→
+   455→### Spilling Strategy
+   456→
+   457→When all physical registers are in use and a new allocation is required, the linear-scan allocator selects the register whose current live range ends farthest in the future and spills it. Spilling uses pre-indexed store instructions to push the register onto the stack, and post-indexed loads to restore it:
+   458→
+   459→```asm
+   460→; Spill x19 to stack
+   461→str x19, [sp, #-16]!      ; pre-indexed: store x19, decrement sp by 16
+   462→
+   463→; ... other code ...
+   464→
+   465→; Reload x19 from stack
+   466→ldr x19, [sp], #16        ; post-indexed: load x19, increment sp by 16
+   467→```
+   468→
+   469→For functions with many spills, the compiler allocates a contiguous spill area in the prologue and accesses spills via fixed offsets from the frame pointer, which is more efficient than repeated stack pointer adjustments:
+   470→
+   471→```asm
+   472→; Prologue: allocate spill area
+   473→stp x29, x30, [sp, #-48]!
+   474→mov x29, sp
+   475→; Spill slot 0 at [x29, #16]
+   476→; Spill slot 1 at [x29, #24]
+   477→; Spill slot 2 at [x29, #32]
+   478→; Spill slot 3 at [x29, #40]
+   479→
+   480→; Spill x19 to slot 0
+   481→str x19, [x29, #16]
+   482→
+   483→; Reload x19 from slot 0
+   484→ldr x19, [x29, #16]
+   485→```
+   486→
+   487→The Cortex-A76 has a 4-wide out-of-order execution engine with a 128-entry reorder buffer. The allocator's spilling heuristic favors spilling registers whose next use is far away in the instruction stream, as the out-of-order engine can often hide the load latency of a future reload. For the Cortex-A76, L1 data cache load latency is 4 cycles, and a well-timed spill/reload can often be completely hidden by the out-of-order scheduler if the reload is issued at least 8-10 instructions before the value is actually needed.
+   488→
+   489→---
+   490→
+   491→## 4. Memory Barrier Insertion
+   492→
+   493→The ARM64 memory model is weakly ordered, meaning that the processor may reorder memory operations in ways that are not visible to a single thread but can cause observable inconsistencies in multi-threaded programs. The Cortex-A76 in the AArch64 implements the ARMv8.2-A architecture, which permits store-load reordering and store-store reordering between different addresses. This means that without explicit barriers, a store followed by a load to a different address may appear to execute in the opposite order to another core. The VUMA compiler's SyncEdge annotations in the SCG provide the information needed to insert the correct barriers and atomic operations. This section defines the barrier insertion algorithm for each SyncEdge variant.
+   494→
+   495→### SyncEdge with HappensBefore
+   496→
+   497→When the SCG contains a SyncEdge annotated with `HappensBefore`, the compiler must ensure that all memory operations before the synchronization point are globally visible before any memory operation after the synchronization point begins. This is the classic "release-acquire" pattern. The implementation uses a `dmb ish` (Data Memory Barrier, Inner Shareable) instruction, which is a full barrier that prevents reordering of any memory operations across it:
+   498→
+   499→```asm
+   500→; Producer thread: write data, then signal
+   501→str x0, [x_data]          ; write data
+   502→dmb ish                    ; ensure data write is visible before signal
+   503→str x1, [x_flag]          ; write signal flag
+   504→
+   505→; Consumer thread: check signal, then read data
+   506→ldr x1, [x_flag]          ; read signal flag
+   507→dmb ish                    ; ensure flag read completes before data read
+   508→ldr x0, [x_data]          ; read data (guaranteed to see producer's write)
+   509→```
+   510→
+   511→The `dmb ish` barrier is heavyweight — it stalls the pipeline until all outstanding memory operations have completed. On the Cortex-A76, this can cost 20-30 cycles. The VUMA compiler therefore minimizes `dmb ish` insertions, placing them only where the SyncEdge analysis proves they are necessary. Within a single thread or within a critical section protected by a mutex, no `dmb ish` is needed because the mutex lock/unlock already provides the necessary ordering.
+   512→
+   513→### SyncEdge with AtomicAcquireRelease
+   514→
+   515→For fine-grained synchronization where a full barrier is unnecessary, the compiler uses ARM64's built-in acquire-release semantics. These instructions provide ordering guarantees at the individual memory operation level without the overhead of a full `dmb`:
+   516→
+   517→**Store-release (`stlr`):** Ensures that all preceding memory operations (both loads and stores) are globally visible before the store-release becomes visible. The `stlr` instruction replaces a normal `str` at the synchronization point:
+   518→
+   519→```asm
+   520→; Producer: write data, then release-store the flag
+   521→str x0, [x_data]          ; ordinary store — no ordering guarantee
+   522→stlr x1, [x_flag]         ; store-release — all prior stores visible before this
+   523→```
+   524→
+   525→**Load-acquire (`ldar`):** Ensures that all subsequent memory operations (both loads and stores) are not observed before the load-acquire completes. The `ldar` instruction replaces a normal `ldr` at the synchronization point:
+   526→
+   527→```asm
+   528→; Consumer: acquire-load the flag, then read data
+   529→ldar x1, [x_flag]         ; load-acquire — all subsequent ops after this
+   530→ldr x0, [x_data]          ; guaranteed to see the producer's write
+   531→```
+   532→
+   533→**Exclusive access for compare-and-swap:** For atomic read-modify-write operations (CAS, fetch-and-add), the compiler emits `ldaxr`/`stlxr` loops with a retry on failure:
+   534→
+   535→```asm
+   536→; Atomic compare-and-swap at [x_addr]
+   537→; Expected value in x1, desired value in x2
+   538→.retry:
+   539→  ldaxr x0, [x_addr]       ; load-acquire exclusive
+   540→  cmp x0, x1               ; compare with expected
+   541→  b.ne .fail               ; not equal, abort
+   542→  stlxr w3, x2, [x_addr]  ; store-release exclusive
+   543→  cbnz w3, .retry          ; retry if store failed (another writer intervened)
+   544→  ; success: x0 = old value
+   545→.fail:
+   546→  ; failure: x0 = current value (different from expected)
+   547→```
+   548→
+   549→The exclusive store (`stlxr`) writes its success/failure status to the `w3` register — 0 for success, 1 for failure. The compiler must check this status and retry the loop if the store failed. On the Cortex-A76, the exclusive monitor tracks a cache line granule, so any external write to the same cache line between the `ldaxr` and `stlxr` causes the exclusive store to fail.
+   550→
+   551→### SyncEdge with MutexLocked
+   552→
+   553→When the SCG indicates that a critical section is protected by a mutex, the compiler inserts calls to the VUMA runtime's `lock_acquire` and `lock_release` functions. These functions internally implement the correct acquire-release semantics using `ldaxr`/`stlxr` with an exponential backoff loop for contention. The compiler wraps the critical section between the lock and unlock calls:
+   554→
+   555→```asm
+   556→; Mutex-protected critical section
+   557→mov x0, x_mutex_ptr       ; argument: pointer to mutex
+   558→bl lock_acquire            ; acquire lock (includes dmb ish internally)
+   559→
+   560→; Critical section: any memory operations here are safe
+   561→ldr x1, [x_shared_data]
+   562→add x1, x1, #1
+   563→str x1, [x_shared_data]
+   564→
+   565→mov x0, x_mutex_ptr       ; argument: pointer to mutex
+   566→bl lock_release            ; release lock (includes dmb ish internally)
+   567→```
+   568→
+   569→The `lock_acquire` and `lock_release` functions are implemented in the VUMA runtime library and handle the full synchronization protocol, including the memory barriers. The compiler does not need to insert additional barriers around the critical section because the lock functions already provide happens-before guarantees.
+   570→
+   571→### Barrier Insertion Algorithm
+   572→
+   573→The code generator processes SyncEdge annotations in a separate pass after initial instruction selection. The algorithm works as follows:
+   574→
+   575→1. For each basic block, collect all SyncEdge annotations from the SCG.
+   576→2. For `HappensBefore` edges: insert `dmb ish` after the last store before the edge and before the first load after the edge.
+   577→3. For `AtomicAcquireRelease` edges: replace the store at the release point with `stlr`, and replace the load at the acquire point with `ldar`. For CAS patterns, emit `ldaxr`/`stlxr` loops.
+   578→4. For `MutexLocked` edges: insert `bl lock_acquire` before the critical section and `bl lock_release` after it. No additional barriers are needed.
+   579→5. Eliminate redundant barriers: if two `dmb ish` instructions appear in the same basic block with no intervening memory operations that require ordering, remove the second one.
+   580→
+   581→This pass ensures that the minimum necessary set of barriers is inserted, avoiding the performance cost of over-synchronization while guaranteeing correctness on the weakly-ordered Cortex-A76.
+   582→
+   583→---
+   584→
+   585→## 5. ELF Object Format for AArch64 Linux
+   586→
+   587→The VUMA code generator produces ELF (Executable and Linkable Format) object files that are consumed by the system linker (`ld`) to produce the final executable or shared library. For the AArch64 running a 64-bit Linux kernel, the object files must conform to the AArch64 ELF specification. This section defines the ELF header fields, section layout, and relocation types that the VUMA code generator must emit.
+   588→
+   589→### ELF Header
+   590→
+   591→Every ELF object file begins with a 64-byte header that identifies the file's target architecture and properties. The VUMA code generator sets the following header fields:
+   592→
+   593→| Field               | Value              | Rationale                                          |
+   594→|---------------------|--------------------|----------------------------------------------------|
+   595→| `e_ident[EI_MAG]`  | `0x7f "ELF"`       | ELF magic number                                   |
+   596→| `e_ident[EI_CLASS]`| `ELFCLASS64` (2)   | 64-bit object file for AArch64                     |
+   597→| `e_ident[EI_DATA]` | `ELFDATA2LSB` (1)  | Little-endian (ARM64 is always LE in this context) |
+   598→| `e_ident[EI_VERSION]`| `EV_CURRENT` (1)  | Current ELF version                                |
+   599→| `e_ident[EI_OSABI]`| `ELFOSABI_NONE` (0)| Generic System V ABI (Linux compatible)            |
+   600→| `e_type`           | `ET_REL` (1)       | Relocatable object file                            |
+   601→| `e_machine`        | `EM_AARCH64` (183) | ARM 64-bit architecture                            |
+   602→| `e_version`        | `EV_CURRENT` (1)   | Current ELF version                                |
+   603→| `e_entry`          | `0`                | No entry point in relocatable objects              |
+   604→| `e_phoff`          | `0`                | No program headers in relocatable objects          |
+   605→| `e_shoff`          | offset             | Section header table offset                        |
+   606→| `e_flags`          | `0`                | No AArch64-specific flags                          |
+   607→| `e_ehsize`         | `64`               | ELF header size                                    |
+   608→| `e_phentsize`      | `0`                | No program headers                                 |
+   609→| `e_shentsize`      | `64`               | Section header entry size                          |
+   610→
+   611→The little-endian byte ordering (`ELFDATA2LSB`) is mandatory for AArch64 Linux. While the ARM architecture technically supports both endiannesses, all mainstream AArch64 Linux distributions (including Debian, Ubuntu, Fedora) use little-endian mode exclusively.
+   612→
+   613→### Standard Sections
+   614→
+   615→The VUMA code generator emits the following standard sections in every object file:
+   616→
+   617→**`.text` (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR):** Contains the machine code for all functions. The code generator places each function at a 16-byte aligned offset within this section, as the Cortex-A76's branch predictor performs optimally with aligned branch targets. Functions that are hot paths or interrupt handlers are given 64-byte alignment to match the Cortex-A76's cache line size:
+   618→
+   619→```asm
+   620→.section .text
+   621→.balign 16
+   622→.global vuma_main
+   623→vuma_main:
+   624→  stp x29, x30, [sp, #-16]!
+   625→  mov x29, sp
+   626→  ; ... function body ...
+   627→  ldp x29, x30, [sp], #16
+   628→  ret
+   629→```
+   630→
+   631→**`.data` (SHT_PROGBITS, SHF_ALLOC | SHF_WRITE):** Contains initialized global and static variables. Each variable is aligned to its natural alignment (8 bytes for pointers and 64-bit integers, 4 bytes for 32-bit integers):
+   632→
+   633→```asm
+   634→.section .data
+   635→.balign 8
+   636→.global vuma_heap_base
+   637→vuma_heap_base:
+   638→  .xword 0x00000000        ; initialized to zero, set at runtime
+   639→```
+   640→
+   641→**`.bss` (SHT_NOBITS, SHF_ALLOC | SHF_WRITE):** Contains uninitialized global and static variables. The `.bss` section occupies no space in the object file; the loader allocates and zero-fills it at program start:
+   642→
+   643→```asm
+   644→.section .bss
+   645→.balign 16
+   646→.global vuma_arena
+   647→vuma_arena:
+   648→  .skip 4096               ; reserve 4096 bytes, zero-filled at load
+   649→```
+   650→
+   651→**`.rodata` (SHT_PROGBITS, SHF_ALLOC):** Contains read-only data such as string literals, constant arrays, and jump tables. Placing constants in `.rodata` allows the kernel to map this section as read-only, enabling early detection of accidental writes:
+   652→
+   653→```asm
+   654→.section .rodata
+   655→.balign 8
+   656→vuma_error_msg:
+   657→  .asciz "Bounds violation detected"
+   658→vuma_jump_table:
+   659→  .xword .case_0
+   660→  .xword .case_1
+   661→  .xword .case_2
+   662→```
+   663→
+   664→**`.symtab` (SHT_SYMTAB):** The symbol table maps function names, global variable names, and external references to their addresses within the object file. Each entry includes the symbol name (as an index into `.strtab`), the section index, the value (offset), and the size. The VUMA code generator emits symbol entries for every function and every globally visible variable:
+   665→
+   666→```asm
+   667→; Symbol table entry for vuma_main
+   668→; st_name: index into .strtab for "vuma_main"
+   669→; st_info: STT_FUNC | STB_GLOBAL
+   670→; st_shndx: .text section index
+   671→; st_value: offset of vuma_main within .text
+   672→; st_size: size of vuma_main in bytes
+   673→```
+   674→
+   675→**`.strtab` (SHT_STRTAB):** The string table holds null-terminated symbol names referenced by `.symtab` entries. The first byte is always `\0` (the null string at index 0).
+   676→
+   677→### Relocation Types
+   678→
+   679→Relocation entries tell the linker how to patch code and data addresses when the final executable is assembled from multiple object files. The VUMA code generator emits the following AArch64 relocation types:
+   680→
+   681→**`R_AARCH64_CALL26` (283):** Used for `bl` (branch with link) instructions. The `bl` instruction encodes a 26-bit signed offset (±128 MB range) relative to the instruction's address. If the target function is more than 128 MB away, the linker must insert a veneer (a small thunk that loads a 64-bit address and branches to it):
+   682→
+   683→```asm
+   684→bl external_function       ; R_AARCH64_CALL26 relocation at this instruction
+   685→; Linker patches: bits [25:0] = (target - PC) >> 2
+   686→```
+   687→
+   688→**`R_AARCH64_ADR_PREL_PG_HI21` (275):** Used for `adrp` instructions that compute the page address (4 KB aligned) of a symbol relative to the current PC. The `adrp` instruction encodes a 21-bit signed offset representing the number of 4 KB pages. This is always paired with a subsequent `R_AARCH64_LDST64_LO12` or `R_AARCH64_ADD_ABS_LO12_NC` relocation to add the page offset:
+   689→
+   690→```asm
+   691→adrp x0, :got:vuma_data   ; R_AARCH64_ADR_PREL_PG_HI21
+   692→ldr  x0, [x0, :got_lo12:vuma_data]  ; R_AARCH64_LD64_GOT_LO12_NC
+   693→```
+   694→
+   695→**`R_AARCH64_ADD_ABS_LO12_NC` (277):** Used for `add` instructions that add the low 12 bits of a symbol's absolute address. The `_NC` suffix means "no check" — the linker does not check for overflow because the low 12 bits always fit:
+   696→
+   697→```asm
+   698→adrp x0, vuma_data        ; high 21 bits of page address
+   699→add  x0, x0, :lo12:vuma_data  ; R_AARCH64_ADD_ABS_LO12_NC, low 12 bits
+   700→```
+   701→
+   702→**`R_AARCH64_LDST64_LO12` (286):** Used for 64-bit load/store instructions with a 12-bit immediate offset. The linker fills in the page offset of the target symbol:
+   703→
+   704→```asm
+   705→adrp x0, vuma_data
+   706→ldr  x0, [x0, :lo12:vuma_data]  ; R_AARCH64_LDST64_LO12
+   707→```
+   708→
+   709→The VUMA code generator's relocation pass emits relocation entries for every symbol reference that cannot be resolved within the same object file. For position-independent code (PIC, required for shared libraries), all references to global data use the GOT (Global Offset Table) pattern with `adrp` + `ldr` pairs. For position-dependent code (standard executables), the `adrp` + `add` pattern is used for direct symbol access.
+   710→
+   711→---
+   712→
+   713→## 6. Bare Metal Startup for AArch64
+   714→
+   715→When VUMA targets bare metal execution on the AArch64 (no operating system, no Linux kernel), the code generator must produce a self-contained binary that handles all hardware initialization from the moment the BCM2712 SoC releases the CPU from reset. The bare metal startup sequence sets up the execution environment — stack, BSS, MMU, and exception vectors — before transferring control to the VUMA runtime's `main` function. This section describes the complete startup protocol, linker script, and multi-core management.
+   716→
+   717→### Entry Point and Boot Protocol
+   718→
+   719→The AArch64's VideoCore GPU loads the kernel image (typically named `kernel8.img` for 64-bit mode) into memory at physical address `0x80000` and starts core 0 executing at that address. Cores 1, 2, and 3 are held in a WFE (Wait For Event) loop by the GPU firmware until explicitly released by software. The VUMA bare metal binary must begin with the `_start` symbol at this address:
+   720→
+   721→```asm
+   722→.section .text.boot
+   723→.global _start
+   724→_start:
+   725→  ; ---- Core identification ----
+   726→  mrs x0, mpidr_el1         ; read Multiprocessor Affinity Register
+   727→  and x0, x0, #0xFF         ; extract core ID (0-3)
+   728→  cbz x0, .core0_start      ; core 0 proceeds; others park
+   729→
+   730→  ; ---- Park cores 1-3 in WFE loop ----
+   731→.park_loop:
+   732→  wfe                        ; wait for event (low power)
+   733→  b .park_loop               ; loop indefinitely until released
+   734→
+   735→.core0_start:
+   736→  ; ---- Set up stack pointer ----
+   737→  ldr x0, =_stack_top       ; load address of stack top
+   738→  mov sp, x0                 ; set stack pointer
+   739→
+   740→  ; ---- Zero the .bss section ----
+   741→  ldr x0, =_bss_start       ; start of BSS
+   742→  ldr x1, =_bss_end         ; end of BSS
+   743→.zero_bss:
+   744→  cmp x0, x1
+   745→  b.ge .bss_done
+   746→  str xzr, [x0], #8         ; zero 8 bytes, advance pointer
+   747→  b .zero_bss
+   748→.bss_done:
+   749→
+   750→  ; ---- Set up exception vector table ----
+   751→  ldr x0, =exception_vector_table
+   752→  msr vbar_el1, x0           ; set Vector Base Address Register
+   753→
+   754→  ; ---- Jump to main ----
+   755→  bl main                    ; call VUMA main function
+   756→
+   757→  ; ---- Halt if main returns ----
+   758→.halt:
+   759→  wfe
+   760→  b .halt
+   761→```
+   762→
+   763→The `mpidr_el1` register's affinity field identifies which core is executing. Core 0 (affinity 0x00) proceeds with initialization, while cores 1-3 enter a low-power WFE loop. The VUMA runtime can later release secondary cores by sending an SEV (Send Event) instruction and providing each core with its own stack pointer and entry point:
+   764→
+   765→```asm
+   766→; Release core 1
+   767→ldr x0, =core1_stack_top
+   768→ldr x1, =core1_entry
+   769→dsb ish                     ; data synchronization barrier
+   770→sev                         ; send event to wake WFE-waiting cores
+   771→```
+   772→
+   773→### Stack Setup
+   774→
+   775→The stack grows downward from a high address. The `_stack_top` symbol is defined in the linker script at the top of RAM, below the GPU reserved region. The AArch64 has up to 8 GB of RAM (depending on model), with the GPU firmware typically reserving the first 64-128 MB. The VUMA linker script places the stack at a safe offset from the top of usable RAM:
+   776→
+   777→```asm
+   778→; Stack for core 0: 64 KB
+   779→ldr x0, =_stack_top       ; e.g., 0x80000 + code_size + data_size + 0x10000
+   780→mov sp, x0
+   781→```
+   782→
+   783→For multi-core operation, each core gets its own stack, separated by at least 4 KB to avoid cache line aliasing on the Cortex-A76's L1 data cache:
+   784→
+   785→```
+   786→Core 0 stack: _stack_top - 0x0000 to _stack_top - 0x4000 (16 KB)
+   787→Core 1 stack: _stack_top - 0x4000 to _stack_top - 0x8000 (16 KB)
+   788→Core 2 stack: _stack_top - 0x8000 to _stack_top - 0xC000 (16 KB)
+   789→Core 3 stack: _stack_top - 0xC000 to _stack_top - 0x10000 (16 KB)
+   790→```
+   791→
+   792→### BSS Zeroing
+   793→
+   794→The `.bss` section contains uninitialized data that must be zeroed before any code references it. The startup code uses a simple loop that stores double-words of zero:
+   795→
+   796→```asm
+   797→ldr x0, =_bss_start
+   798→ldr x1, =_bss_end
+   799→.zero_bss:
+   800→  cmp x0, x1
+   801→  b.ge .bss_done
+   802→  str xzr, [x0], #8         ; post-indexed: store 0, add 8 to x0
+   803→  b .zero_bss
+   804→.bss_done:
+   805→```
+   806→
+   807→For large BSS sections, the Cortex-A76 benefits from using `stp` to zero 16 bytes per iteration:
+   808→
+   809→```asm
+   810→.zero_bss_fast:
+   811→  cmp x0, x1
+   812→  b.ge .bss_done
+   813→  stp xzr, xzr, [x0], #16  ; zero 16 bytes per iteration
+   814→  b .zero_bss_fast
+   815→```
+   816→
+   817→### Exception Vector Table
+   818→
+   819→The ARM64 exception vector table contains 16 entries, each 128 bytes aligned, covering synchronous and asynchronous exceptions from four exception levels (EL1, EL2, EL3, and EL0). For bare metal VUMA, the table is placed at a known address and registered with the `vbar_el1` system register:
+   820→
+   821→```asm
+   822→.balign 2048
+   823→exception_vector_table:
+   824→  ; Current EL with SP0
+   825→  .balign 128
+   826→  b synchronous_handler_sp0
+   827→  .balign 128
+   828→  b irq_handler_sp0
+   829→  .balign 128
+   830→  b fiq_handler_sp0
+   831→  .balign 128
+   832→  b serror_handler_sp0
+   833→
+   834→  ; Current EL with SPx
+   835→  .balign 128
+   836→  b synchronous_handler_spx
+   837→  .balign 128
+   838→  b irq_handler_spx
+   839→  .balign 128
+   840→  b fiq_handler_spx
+   841→  .balign 128
+   842→  b serror_handler_spx
+   843→
+   844→  ; Lower EL using AArch64
+   845→  .balign 128
+   846→  b lower_el_sync_handler
+   847→  .balign 128
+   848→  b lower_el_irq_handler
+   849→  .balign 128
+   850→  b lower_el_fiq_handler
+   851→  .balign 128
+   852→  b lower_el_serror_handler
+   853→
+   854→  ; Lower EL using AArch32
+   855→  .balign 128
+   856→  b lower_el_a32_sync_handler
+   857→  .balign 128
+   858→  b lower_el_a32_irq_handler
+   859→  .balign 128
+   860→  b lower_el_a32_fiq_handler
+   861→  .balign 128
+   862→  b lower_el_a32_serror_handler
+   863→```
+   864→
+   865→### Linker Script
+   866→
+   867→The linker script defines the memory layout for the bare metal binary. It specifies the entry point, section placement, and symbol definitions used by the startup code:
+   868→
+   869→```ld
+   870→/* vuma-bare-metal.ld */
+   871→ENTRY(_start)
+   872→
+   873→MEMORY
+   874→{
+   875→  RAM (rwx) : ORIGIN = 0x80000, LENGTH = 0x3F800000  /* 1 GB minus 512 KB */
+   876→}
+   877→
+   878→SECTIONS
+   879→{
+   880→  .text : {
+   881→    *(.text.boot)           /* boot code first, at 0x80000 */
+   882→    *(.text .text.*)        /* all other code */
+   883→  } > RAM
+   884→
+   885→  .rodata : {
+   886→    *(.rodata .rodata.*)
+   887→  } > RAM
+   888→
+   889→  .data : {
+   890→    *(.data .data.*)
+   891→  } > RAM
+   892→
+   893→  .bss : {
+   894→    _bss_start = .;
+   895→    *(.bss .bss.*)
+   896→    *(COMMON)
+   897→    _bss_end = .;
+   898→  } > RAM
+   899→
+   900→  . = ALIGN(16);
+   901→  . = . + 0x10000;         /* 64 KB stack for core 0 */
+   902→  _stack_top = .;
+   903→
+   904→  /DISCARD/ : {
+   905→    *(.comment)
+   906→    *(.note.*)
+   907→    *(.eh_frame*)
+   908→  }
+   909→}
+   910→```
+   911→
+   912→The `/DISCARD/` directive removes unnecessary sections that the bare metal environment does not need (debug notes, comments, exception frames). The stack is placed immediately after BSS, growing downward from `_stack_top`. For multi-core configurations, additional stack areas can be defined by extending the linker script with per-core stack symbols.
+   913→
+   914→---
+   915→
+   916→## 7. Optimization Passes
+   917→
+   918→The VUMA code generator applies a series of optimization passes after initial instruction selection and before final emission. These passes transform the instruction stream to improve performance on the Cortex-A76 microarchitecture while preserving the program's observable semantics. The optimization pipeline runs in a fixed order: constant folding, dead code elimination, instruction scheduling, loop unrolling, and function inlining. Each pass is described in detail below with ARM64 instruction examples targeting the Cortex-A76's specific pipeline characteristics.
+   919→
+   920→### Constant Folding
+   921→
+   922→Constant folding evaluates expressions whose operands are all known at compile time, replacing the computation with its result. This eliminates unnecessary arithmetic instructions and reduces register pressure. The pass walks the instruction stream looking for computation nodes where both source operands are immediate constants or have been previously folded. On ARM64, many immediate forms have encoding constraints (12-bit with optional shift), so the pass also checks whether the folded result can be represented as an immediate operand:
+   923→
+   924→```asm
+   925→; Before constant folding:
+   926→mov x0, #10
+   927→mov x1, #20
+   928→add x2, x0, x1             ; x2 = 10 + 20
+   929→
+   930→; After constant folding:
+   931→mov x2, #30                 ; direct assignment of folded result
+   932→```
+   933→
+   934→For more complex constant expressions involving multiplication and division:
+   935→
+   936→```asm
+   937→; Before:
+   938→mov x0, #6
+   939→mov x1, #7
+   940→mul x2, x0, x1             ; x2 = 6 * 7
+   941→
+   942→; After:
+   943→mov x2, #42                 ; folded result
+   944→
+   945→; Division by constant (before):
+   946→mov x0, #100
+   947→mov x1, #4
+   948→udiv x2, x0, x1            ; x2 = 100 / 4
+   949→
+   950→; Division by constant (after):
+   951→mov x2, #25                 ; folded result
+   952→
+   953→; For division by non-power-of-2 constants at runtime, the compiler
+   954→; replaces udiv with multiply-by-reciprocal:
+   955→; x / 7 → multiply by 0x2492492492492493, then shift
+   956→mov x1, #0x49249249         ; load reciprocal constant (low bits)
+   957→movk x1, #0x9249, lsl #16
+   958→movk x1, #0x2492, lsl #32
+   959→movk x1, #0x4924, lsl #48
+   960→mul x2, x0, x1
+   961→lsr x2, x2, #3             ; approximate x/7 using multiply-high + shift
+   962→```
+   963→
+   964→Constant folding also applies to address calculations. When the base address of a global and a fixed offset are both known, the pass combines them into a single address or a more efficient addressing mode:
+   965→
+   966→```asm
+   967→; Before:
+   968→adrp x0, vuma_array
+   969→add  x0, x0, :lo12:vuma_array
+   970→add  x0, x0, #64            ; offset into array
+   971→
+   972→; After (if the linker resolves the full address):
+   973→adrp x0, vuma_array + 64
+   974→add  x0, x0, :lo12:(vuma_array + 64)
+   975→```
+   976→
+   977→### Dead Code Elimination
+   978→
+   979→Dead code elimination removes instructions whose results are never used. This pass is especially important after constant folding, which often leaves behind the original definition instructions (now superseded by the folded constant). The pass builds a use-def chain for each register and marks any instruction whose destination register has no subsequent uses as dead:
+   980→
+   981→```asm
+   982→; Before dead code elimination:
+   983→mov x0, #30                 ; constant-folded result (used)
+   984→mov x1, #10                 ; original operand (no longer used)
+   985→mov x2, #20                 ; original operand (no longer used)
+   986→add x3, x1, x2              ; dead computation
+   987→str x0, [x_base]            ; only x0 is actually used
+   988→
+   989→; After dead code elimination:
+   990→mov x0, #30
+   991→str x0, [x_base]            ; eliminated mov x1, mov x2, add x3
+   992→```
+   993→
+   994→Dead code elimination also removes unreachable allocations and their corresponding deallocations:
+   995→
+   996→```asm
+   997→; Before: dead allocation in unreachable branch
+   998→b .skip
+   999→sub sp, sp, #64             ; dead AllocationNode
+  1000→add sp, sp, #64             ; dead DeallocationNode
+  1001→.skip:
+  1002→
+  1003→; After: both removed
+  1004→b .skip
+  1005→.skip:
+  1006→```
+  1007→
+  1008→The pass also eliminates redundant stores. If a value is stored to the same address twice without an intervening load from that address, the first store is dead and can be removed:
+  1009→
+  1010→```asm
+  1011→; Before:
+  1012→str x0, [x_base]            ; dead store (overwritten below)
+  1013→str x1, [x_base]            ; live store
+  1014→
+  1015→; After:
+  1016→str x1, [x_base]
+  1017→```
+  1018→
+  1019→### Instruction Scheduling for Cortex-A76
+  1020→
+  1021→The Cortex-A76 is a 4-wide out-of-order superscalar processor with a 128-entry reorder buffer. While the out-of-order engine dynamically reorders instructions to hide latencies, the compiler's instruction scheduler can still improve performance by arranging instructions to minimize structural hazards and maximize instruction-level parallelism. The scheduler models the Cortex-A76's pipeline with the following latency characteristics:
+  1022→
+  1023→| Operation           | Latency | Throughput     |
+  1024→|---------------------|---------|----------------|
+  1025→| Integer add/sub/log | 1 cycle | 4 per cycle    |
+  1026→| Integer multiply    | 3 cycles| 1 per cycle    |
+  1027→| Integer divide      | 4-12 cycles | 1 per 4-12 cycles |
+  1028→| L1 data cache load  | 4 cycles| 2 per cycle    |
+  1029→| L2 cache load       | 10 cycles| 1 per cycle   |
+  1030→| Branch (predicted)  | 1 cycle | 2 per cycle    |
+  1031→| Branch (mispredicted)| ~12 cycles | —           |
+  1032→
+  1033→The scheduler's primary goal is to fill load-use delay slots. After a load instruction, the loaded value is not available for 4 cycles. The scheduler reorders independent instructions to execute in the load's shadow:
+  1034→
+  1035→```asm
+  1036→; Before scheduling (load-use stall):
+  1037→ldr x0, [x_base]            ; load: 4-cycle latency
+  1038→add x1, x0, #10             ; stalled: depends on x0 (4-cycle bubble)
+  1039→
+  1040→; After scheduling (independent work fills the bubble):
+  1041→ldr x0, [x_base]            ; load: 4-cycle latency
+  1042→add x2, x3, x4              ; independent: executes in load shadow
+  1043→sub x5, x6, #1              ; independent: executes in load shadow
+  1044→mul x7, x8, x9              ; independent: executes in load shadow
+  1045→add x1, x0, #10             ; x0 now available, no stall
+  1046→```
+  1047→
+  1048→The scheduler also avoids back-to-back multiply instructions, which compete for the Cortex-A76's single multiply unit. It interleaves multiplies with independent ALU operations:
+  1049→
+  1050→```asm
+  1051→; Before: two multiplies compete for the same execution unit
+  1052→mul x0, x1, x2
+  1053→mul x3, x4, x5              ; stalls waiting for multiply unit
+  1054→
+  1055→; After: interleave with independent ALU ops
+  1056→mul x0, x1, x2
+  1057→add x6, x7, x8              ; uses different execution unit
+  1058→mul x3, x4, x5              ; multiply unit now free
+  1059→```
+  1060→
+  1061→For branch-heavy code, the scheduler aligns branch targets to 16-byte boundaries to optimize the Cortex-A76's branch predictor's target cache:
+  1062→
+  1063→```asm
+  1064→.balign 16
+  1065→.loop_body:
+  1066→  ; loop body starts at aligned address
+  1067→  ldr x0, [x_base, x_index, lsl #3]
+  1068→  add x0, x0, #1
+  1069→  str x0, [x_base, x_index, lsl #3]
+  1070→  add x_index, x_index, #1
+  1071→  cmp x_index, x_limit
+  1072→  b.lt .loop_body
+  1073→```
+  1074→
+  1075→### Loop Unrolling
+  1076→
+  1077→Loop unrolling reduces the overhead of branch and counter maintenance instructions by replicating the loop body multiple times. For small bounded loops where the trip count is known at compile time, the compiler can fully unroll the loop, eliminating the loop overhead entirely. For loops with large or unknown trip counts, partial unrolling reduces the per-iteration overhead:
+  1078→
+  1079→```asm
+  1080→; Before unrolling (loop: sum 4 elements):
+  1081→mov x0, xzr                  ; accumulator = 0
+  1082→mov x1, #0                   ; index = 0
+  1083→.loop:
+  1084→  ldr x2, [x_base, x1, lsl #3]
+  1085→  add x0, x0, x2
+  1086→  add x1, x1, #1
+  1087→  cmp x1, #4
+  1088→  b.lt .loop
+  1089→
+  1090→; After full unrolling (trip count = 4, known at compile time):
+  1091→ldr x2, [x_base, #0]
+  1092→ldr x3, [x_base, #8]
+  1093→ldr x4, [x_base, #16]
+  1094→ldr x5, [x_base, #24]
+  1095→add x0, x2, x3
+  1096→add x0, x0, x4
+  1097→add x0, x0, x5
+  1098→```
+  1099→
+  1100→For partially unrolled loops, the compiler emits a prologue to handle the remainder iterations and an unrolled main body:
+  1101→
+  1102→```asm
+  1103→; Partial unrolling by 4 with remainder handling
+  1104→; x_limit = total iterations
+  1105→lsr x2, x_limit, #2          ; x2 = x_limit / 4 (main loop count)
+  1106→and x3, x_limit, #3          ; x3 = x_limit % 4 (remainder)
+  1107→
+  1108→cbz x2, .remainder           ; skip main loop if no full groups
+  1109→
+  1110→.unrolled_loop:
+  1111→  ldr x4, [x_base, x1, lsl #3]       ; element 0
+  1112→  ldr x5, [x_base, x1, lsl #3, add #1] ; element 1 (offset by 8)
+  1113→  add x1, x1, #2
+  1114→  ldr x6, [x_base, x1, lsl #3]       ; element 2
+  1115→  ldr x7, [x_base, x1, lsl #3, add #1] ; element 3
+  1116→  add x1, x1, #2
+  1117→  add x0, x0, x4
+  1118→  add x0, x0, x5
+  1119→  add x0, x0, x6
+  1120→  add x0, x0, x7
+  1121→  sub x2, x2, #1
+  1122→  cbnz x2, .unrolled_loop
+  1123→
+  1124→.remainder:
+  1125→  cbz x3, .done
+  1126→.remainder_loop:
+  1127→  ldr x4, [x_base, x1, lsl #3]
+  1128→  add x0, x0, x4
+  1129→  add x1, x1, #1
+  1130→  sub x3, x3, #1
+  1131→  cbnz x3, .remainder_loop
+  1132→.done:
+  1133→```
+  1134→
+  1135→The unroll factor is tuned for the Cortex-A76's reorder buffer size (128 entries) and the loop body's register pressure. Unrolling too aggressively exhausts physical registers, causing spills that negate the benefit. A heuristic of 4x unrolling for simple bodies and 2x for complex bodies works well on the Cortex-A76.
+  1136→
+  1137→### Function Inlining
+  1138→
+  1139→Function inlining replaces a function call (`bl` + `ret`) with the function's body directly at the call site, eliminating the call/return overhead and exposing the inlined body to further optimization (constant folding, dead code elimination). The VUMA compiler inlines small functions (fewer than 16 instructions) that are called from a limited number of sites:
+  1140→
+  1141→```asm
+  1142→; Before inlining: call to small helper function
+  1143→; Caller:
+  1144→  bl increment_counter       ; call overhead: bl + ret + register saves
+  1145→; Callee (increment_counter):
+  1146→  ldr x0, [x_counter]
+  1147→  add x0, x0, #1
+  1148→  str x0, [x_counter]
+  1149→  ret
+  1150→
+  1151→; After inlining:
+  1152→  ldr x0, [x_counter]       ; directly inlined body
+  1153→  add x0, x0, #1
+  1154→  str x0, [x_counter]
+  1155→  ; eliminated: bl, ret, potential register saves/restores
+  1156→```
+  1157→
+  1158→Inlined code also benefits from context-specific optimizations that are impossible across function boundaries:
+  1159→
+  1160→```asm
+  1161→; Before inlining: constant argument not known in callee
+  1162→mov x0, #0                   ; argument: increment amount
+  1163→bl add_to_counter
+  1164→
+  1165→; After inlining: constant propagation into the body
+  1166→; add_to_counter(x0=0) → just a no-op or simplified operation
+  1167→; Dead code elimination can remove the entire inlined body
+  1168→```
+  1169→
+  1170→The inlining decision algorithm considers the following factors:
+  1171→
+  1172→1. **Function size:** Only functions with ≤16 instructions are candidates. Larger functions are never inlined to avoid code bloat.
+  1173→2. **Call site count:** Functions called from more than 8 sites are not inlined to prevent excessive code size growth.
+  1174→3. **Hot path analysis:** Functions on the hot path (identified by profiling or heuristic estimation) are preferentially inlined.
+  1175→4. **Recursive functions:** Never inlined to avoid infinite expansion.
+  1176→5. **Varargs functions:** Never inlined due to complex calling convention handling.
+  1177→
+  1178→The combined effect of all five optimization passes — constant folding, dead code elimination, instruction scheduling, loop unrolling, and function inlining — typically reduces generated code size by 15-25% and improves execution speed by 20-40% on the Cortex-A76 compared to unoptimized code generation. The passes are run iteratively until a fixed point is reached (no further improvements), with a maximum of 3 iterations to limit compilation time.
+  1179→
+  1180→---
+  1181→
+  1182→*End of ARM64 Code Generation Algorithm Specification — VUMA Project W1-28*
+  1183→

@@ -1,10 +1,17 @@
 [package]
 name = "vuma-projection"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description = "Projection System — textual, visual, and LLM-facing representations of VUMA programs"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-vuma-scg = { path = "../scg" }
-serde = { version = "1", features = ["derive"] }
-colored = "2"
-thiserror = "1"
+vuma-scg.workspace = true
+serde.workspace = true
+colored.workspace = true
+thiserror.workspace = true
