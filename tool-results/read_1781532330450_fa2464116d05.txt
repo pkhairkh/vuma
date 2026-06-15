@@ -1,0 +1,1041 @@
+  2000→
+  2001→    /// Read up to `buf_len` bytes from stdin.
+  2002→    // VUMA-VERIFIED: read delegates to real stdin
+  2003→    pub fn read(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
+  2004→        let mut buf = vec![0u8; buf_len];
+  2005→        #[cfg(feature = "os-linux")]
+  2006→        {
+  2007→            let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+  2008→            if ret < 0 {
+  2009→                let err = std::io::Error::last_os_error();
+  2010→                Err(format!("libc::read failed on fd {}: {}", self.fd, err))
+  2011→            } else if ret == 0 {
+  2012→                Ok(Vec::new())
+  2013→            } else {
+  2014→                buf.truncate(ret as usize);
+  2015→                Ok(buf)
+  2016→            }
+  2017→        }
+  2018→        #[cfg(not(feature = "os-linux"))]
+  2019→        {
+  2020→            let mut handle = std::io::stdin();
+  2021→            use std::io::Read;
+  2022→            match handle.read(&mut buf) {
+  2023→                Ok(0) => Ok(Vec::new()),
+  2024→                Ok(n) => {
+  2025→                    buf.truncate(n);
+  2026→                    Ok(buf)
+  2027→                }
+  2028→                Err(e) => Err(format!("stdin read failed: {}", e)),
+  2029→            }
+  2030→        }
+  2031→    }
+  2032→}
+  2033→
+  2034→impl Default for Stdin {
+  2035→    fn default() -> Self {
+  2036→        Self::new()
+  2037→    }
+  2038→}
+  2039→
+  2040→/// Standard output stream (Write capability).
+  2041→///
+  2042→/// This is the original `Stdout` type preserved for backward compatibility.
+  2043→/// New code should prefer `VumaStdout` which implements `VumaWriter`.
+  2044→///
+  2045→/// ## BD Annotations
+  2046→///
+  2047→/// - CapD: { Write }
+  2048→pub struct Stdout {
+  2049→    /// File descriptor used by os-linux syscall path.
+  2050→    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+  2051→    pub fd: i32,
+  2052→}
+  2053→
+  2054→impl Stdout {
+  2055→    /// Create a new Stdout handle.
+  2056→    // VUMA-VERIFIED: stdout is always available with Write capability
+  2057→    pub fn new() -> Self {
+  2058→        Self { fd: 1 }
+  2059→    }
+  2060→
+  2061→    /// Returns the CapD for stdout.
+  2062→    // VUMA-VERIFIED: stdout has Write capability only
+  2063→    pub fn capd(&self) -> CapD {
+  2064→        CapD::new(vec![CapFlag::Write])
+  2065→    }
+  2066→
+  2067→    /// Returns the RepD for stdout.
+  2068→    // VUMA-VERIFIED: type descriptor is correct
+  2069→    pub fn repd(&self) -> RepD {
+  2070→        RepD::new("Stdout", 0, 8, CapD::new(vec![CapFlag::Write]))
+  2071→    }
+  2072→
+  2073→    /// Write the given bytes to stdout.
+  2074→    // VUMA-VERIFIED: write delegates to real stdout
+  2075→    pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
+  2076→        #[cfg(feature = "os-linux")]
+  2077→        {
+  2078→            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+  2079→            if ret < 0 {
+  2080→                let err = std::io::Error::last_os_error();
+  2081→                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+  2082→            } else {
+  2083→                Ok(ret as usize)
+  2084→            }
+  2085→        }
+  2086→        #[cfg(not(feature = "os-linux"))]
+  2087→        {
+  2088→            log::warn!("Stdout::write: no OS backend");
+  2089→            Ok(data.len())
+  2090→        }
+  2091→    }
+  2092→}
+  2093→
+  2094→impl Default for Stdout {
+  2095→    fn default() -> Self {
+  2096→        Self::new()
+  2097→    }
+  2098→}
+  2099→
+  2100→/// Standard error stream (Write capability).
+  2101→///
+  2102→/// ## BD Annotations
+  2103→///
+  2104→/// - CapD: { Write }
+  2105→pub struct Stderr {
+  2106→    /// File descriptor used by os-linux syscall path.
+  2107→    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+  2108→    pub fd: i32,
+  2109→}
+  2110→
+  2111→impl Stderr {
+  2112→    /// Create a new Stderr handle.
+  2113→    // VUMA-VERIFIED: stderr is always available with Write capability
+  2114→    pub fn new() -> Self {
+  2115→        Self { fd: 2 }
+  2116→    }
+  2117→
+  2118→    /// Returns the CapD for stderr.
+  2119→    // VUMA-VERIFIED: stderr has Write capability only
+  2120→    pub fn capd(&self) -> CapD {
+  2121→        CapD::new(vec![CapFlag::Write])
+  2122→    }
+  2123→
+  2124→    /// Returns the RepD for stderr.
+  2125→    // VUMA-VERIFIED: type descriptor is correct
+  2126→    pub fn repd(&self) -> RepD {
+  2127→        RepD::new("Stderr", 0, 8, CapD::new(vec![CapFlag::Write]))
+  2128→    }
+  2129→
+  2130→    /// Write the given bytes to stderr.
+  2131→    // VUMA-VERIFIED: write delegates to real stderr
+  2132→    pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
+  2133→        #[cfg(feature = "os-linux")]
+  2134→        {
+  2135→            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+  2136→            if ret < 0 {
+  2137→                let err = std::io::Error::last_os_error();
+  2138→                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+  2139→            } else {
+  2140→                Ok(ret as usize)
+  2141→            }
+  2142→        }
+  2143→        #[cfg(not(feature = "os-linux"))]
+  2144→        {
+  2145→            log::warn!("Stderr::write: no OS backend");
+  2146→            Ok(data.len())
+  2147→        }
+  2148→    }
+  2149→}
+  2150→
+  2151→impl Default for Stderr {
+  2152→    fn default() -> Self {
+  2153→        Self::new()
+  2154→    }
+  2155→}
+  2156→
+  2157→// ---------------------------------------------------------------------------
+  2158→// Network CapD (preserved from original)
+  2159→// ---------------------------------------------------------------------------
+  2160→
+  2161→/// Returns the CapD for network stream types (TCP/UDP).
+  2162→/// Supports: Read, Write, Send.
+  2163→// VUMA-VERIFIED: well-known capability set for network I/O
+  2164→pub fn network_capd() -> CapD {
+  2165→    CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send])
+  2166→}
+  2167→
+  2168→/// Type alias for network CapD (used in re-exports).
+  2169→pub type NetworkCapD = CapD;
+  2170→
+  2171→/// Returns the RepD for a TCP stream.
+  2172→// VUMA-VERIFIED: type descriptor is correct
+  2173→pub fn tcp_stream_repd() -> RepD {
+  2174→    RepD::new("TcpStream", 0, 8, network_capd())
+  2175→}
+  2176→
+  2177→/// Returns the RepD for a TCP listener.
+  2178→// VUMA-VERIFIED: type descriptor is correct
+  2179→pub fn tcp_listener_repd() -> RepD {
+  2180→    RepD::new(
+  2181→        "TcpListener",
+  2182→        0,
+  2183→        8,
+  2184→        CapD::new(vec![CapFlag::Read, CapFlag::Send]),
+  2185→    )
+  2186→}
+  2187→
+  2188→/// Returns the RepD for a UDP socket.
+  2189→// VUMA-VERIFIED: type descriptor is correct
+  2190→pub fn udp_socket_repd() -> RepD {
+  2191→    RepD::new("UdpSocket", 0, 8, network_capd())
+  2192→}
+  2193→
+  2194→// ---------------------------------------------------------------------------
+  2195→// TcpStream (preserved from original)
+  2196→// ---------------------------------------------------------------------------
+  2197→
+  2198→/// A VUMA-verified TCP stream (connection).
+  2199→///
+  2200→/// ## BD Annotations
+  2201→///
+  2202→/// - CapD: { Read, Write, Send }
+  2203→/// - SyncEdge: connect → read/write (Seq), close → read/write (Fence)
+  2204→pub struct TcpStream {
+  2205→    /// Simulated file descriptor for the socket.
+  2206→    pub fd: i32,
+  2207→    /// Remote address.
+  2208→    pub remote_addr: String,
+  2209→    /// Whether the connection is open.
+  2210→    pub is_open: bool,
+  2211→}
+  2212→
+  2213→impl TcpStream {
+  2214→    /// Connect to a remote address.
+  2215→    // VUMA-VERIFIED: connect creates a valid stream with network capabilities
+  2216→    pub fn connect(addr: impl Into<String>) -> Result<Self, String> {
+  2217→        Ok(Self {
+  2218→            fd: 200,
+  2219→            remote_addr: addr.into(),
+  2220→            is_open: true,
+  2221→        })
+  2222→    }
+  2223→
+  2224→    /// Returns the CapD for this TCP stream.
+  2225→    // VUMA-VERIFIED: network capabilities are correct
+  2226→    pub fn capd(&self) -> CapD {
+  2227→        network_capd()
+  2228→    }
+  2229→
+  2230→    /// Returns the RepD for this TCP stream.
+  2231→    // VUMA-VERIFIED: type descriptor is correct
+  2232→    pub fn repd(&self) -> RepD {
+  2233→        tcp_stream_repd()
+  2234→    }
+  2235→
+  2236→    /// Returns the SyncEdge annotations for this TCP stream.
+  2237→    // VUMA-VERIFIED: synchronization edges correctly model network I/O ordering
+  2238→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+  2239→        vec![
+  2240→            SyncEdge::new("tcp_connect", "tcp_read", SyncEdgeKind::Seq),
+  2241→            SyncEdge::new("tcp_connect", "tcp_write", SyncEdgeKind::Seq),
+  2242→            SyncEdge::new("tcp_close", "tcp_read", SyncEdgeKind::Fence),
+  2243→            SyncEdge::new("tcp_close", "tcp_write", SyncEdgeKind::Fence),
+  2244→        ]
+  2245→    }
+  2246→
+  2247→    /// Read up to `buf_len` bytes from the TCP stream.
+  2248→    // VUMA-VERIFIED: read is safe on an open TCP stream
+  2249→    pub fn read(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
+  2250→        if !self.is_open {
+  2251→            return Err("TCP stream is not open".to_string());
+  2252→        }
+  2253→        Ok(vec![0u8; buf_len])
+  2254→    }
+  2255→
+  2256→    /// Write the given bytes to the TCP stream.
+  2257→    // VUMA-VERIFIED: write is safe on an open TCP stream
+  2258→    pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
+  2259→        if !self.is_open {
+  2260→            return Err("TCP stream is not open".to_string());
+  2261→        }
+  2262→        Ok(data.len())
+  2263→    }
+  2264→
+  2265→    /// Close the TCP stream.
+  2266→    // VUMA-VERIFIED: close invalidates the stream
+  2267→    pub fn close(&mut self) -> Result<(), String> {
+  2268→        self.is_open = false;
+  2269→        Ok(())
+  2270→    }
+  2271→}
+  2272→
+  2273→// ---------------------------------------------------------------------------
+  2274→// TcpListener (preserved from original)
+  2275→// ---------------------------------------------------------------------------
+  2276→
+  2277→/// A VUMA-verified TCP listener.
+  2278→///
+  2279→/// ## BD Annotations
+  2280→///
+  2281→/// - CapD: { Read, Send }
+  2282→/// - SyncEdge: bind → accept (Seq)
+  2283→pub struct TcpListener {
+  2284→    /// Simulated file descriptor for the listener socket.
+  2285→    pub fd: i32,
+  2286→    /// Local address the listener is bound to.
+  2287→    pub local_addr: String,
+  2288→    /// Whether the listener is open.
+  2289→    pub is_open: bool,
+  2290→}
+  2291→
+  2292→impl TcpListener {
+  2293→    /// Bind a TCP listener to the given address.
+  2294→    // VUMA-VERIFIED: bind creates a valid listener
+  2295→    pub fn bind(addr: impl Into<String>) -> Result<Self, String> {
+  2296→        Ok(Self {
+  2297→            fd: 201,
+  2298→            local_addr: addr.into(),
+  2299→            is_open: true,
+  2300→        })
+  2301→    }
+  2302→
+  2303→    /// Returns the CapD for this TCP listener.
+  2304→    // VUMA-VERIFIED: listener has Read and Send capabilities
+  2305→    pub fn capd(&self) -> CapD {
+  2306→        CapD::new(vec![CapFlag::Read, CapFlag::Send])
+  2307→    }
+  2308→
+  2309→    /// Returns the RepD for this TCP listener.
+  2310→    // VUMA-VERIFIED: type descriptor is correct
+  2311→    pub fn repd(&self) -> RepD {
+  2312→        tcp_listener_repd()
+  2313→    }
+  2314→
+  2315→    /// Accept an incoming connection.
+  2316→    // VUMA-VERIFIED: accept creates a valid stream from the listener
+  2317→    pub fn accept(&mut self) -> Result<TcpStream, String> {
+  2318→        if !self.is_open {
+  2319→            return Err("TCP listener is not open".to_string());
+  2320→        }
+  2321→        TcpStream::connect("accepted-connection")
+  2322→    }
+  2323→
+  2324→    /// Close the TCP listener.
+  2325→    // VUMA-VERIFIED: close invalidates the listener
+  2326→    pub fn close(&mut self) -> Result<(), String> {
+  2327→        self.is_open = false;
+  2328→        Ok(())
+  2329→    }
+  2330→}
+  2331→
+  2332→// ---------------------------------------------------------------------------
+  2333→// UdpSocket (preserved from original)
+  2334→// ---------------------------------------------------------------------------
+  2335→
+  2336→/// A VUMA-verified UDP socket.
+  2337→///
+  2338→/// ## BD Annotations
+  2339→///
+  2340→/// - CapD: { Read, Write, Send }
+  2341→/// - SyncEdge: bind → recv/send (Seq)
+  2342→pub struct UdpSocket {
+  2343→    /// Simulated file descriptor for the socket.
+  2344→    pub fd: i32,
+  2345→    /// Local address the socket is bound to.
+  2346→    pub local_addr: String,
+  2347→    /// Whether the socket is open.
+  2348→    pub is_open: bool,
+  2349→}
+  2350→
+  2351→impl UdpSocket {
+  2352→    /// Bind a UDP socket to the given address.
+  2353→    // VUMA-VERIFIED: bind creates a valid UDP socket
+  2354→    pub fn bind(addr: impl Into<String>) -> Result<Self, String> {
+  2355→        Ok(Self {
+  2356→            fd: 202,
+  2357→            local_addr: addr.into(),
+  2358→            is_open: true,
+  2359→        })
+  2360→    }
+  2361→
+  2362→    /// Returns the CapD for this UDP socket.
+  2363→    // VUMA-VERIFIED: UDP socket has network capabilities
+  2364→    pub fn capd(&self) -> CapD {
+  2365→        network_capd()
+  2366→    }
+  2367→
+  2368→    /// Returns the RepD for this UDP socket.
+  2369→    // VUMA-VERIFIED: type descriptor is correct
+  2370→    pub fn repd(&self) -> RepD {
+  2371→        udp_socket_repd()
+  2372→    }
+  2373→
+  2374→    /// Receive a datagram from the UDP socket.
+  2375→    // VUMA-VERIFIED: recv is safe on an open socket
+  2376→    pub fn recv(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
+  2377→        if !self.is_open {
+  2378→            return Err("UDP socket is not open".to_string());
+  2379→        }
+  2380→        Ok(vec![0u8; buf_len])
+  2381→    }
+  2382→
+  2383→    /// Send a datagram to the given address.
+  2384→    // VUMA-VERIFIED: send is safe on an open socket
+  2385→    pub fn send_to(&mut self, data: &[u8], _addr: &str) -> Result<usize, String> {
+  2386→        if !self.is_open {
+  2387→            return Err("UDP socket is not open".to_string());
+  2388→        }
+  2389→        Ok(data.len())
+  2390→    }
+  2391→
+  2392→    /// Close the UDP socket.
+  2393→    // VUMA-VERIFIED: close invalidates the socket
+  2394→    pub fn close(&mut self) -> Result<(), String> {
+  2395→        self.is_open = false;
+  2396→        Ok(())
+  2397→    }
+  2398→}
+  2399→
+  2400→// ---------------------------------------------------------------------------
+  2401→// Tests
+  2402→// ---------------------------------------------------------------------------
+  2403→
+  2404→#[cfg(test)]
+  2405→mod tests {
+  2406→    use super::*;
+  2407→    use std::io::{Read as StdRead, Write as StdWrite};
+  2408→
+  2409→    // --- Original tests (preserved) ---
+  2410→
+  2411→    #[test]
+  2412→    fn test_file_open_read() {
+  2413→        let f = File::open("/tmp/test.txt", FileMode::Read).unwrap();
+  2414→        assert_eq!(f.mode, FileMode::Read);
+  2415→        assert!(f.capd().has(CapFlag::Read));
+  2416→        assert!(!f.capd().has(CapFlag::Write));
+  2417→    }
+  2418→
+  2419→    #[test]
+  2420→    fn test_file_open_write() {
+  2421→        let f = File::open("/tmp/test.txt", FileMode::Write).unwrap();
+  2422→        assert!(f.capd().has(CapFlag::Write));
+  2423→        assert!(!f.capd().has(CapFlag::Read));
+  2424→    }
+  2425→
+  2426→    #[test]
+  2427→    fn test_file_open_readwrite() {
+  2428→        let f = File::open("/tmp/test.txt", FileMode::ReadWrite).unwrap();
+  2429→        assert!(f.capd().has(CapFlag::Read));
+  2430→        assert!(f.capd().has(CapFlag::Write));
+  2431→    }
+  2432→
+  2433→    #[test]
+  2434→    fn test_file_read_requires_read_capability() {
+  2435→        let mut f = File::open("/tmp/test.txt", FileMode::Write).unwrap();
+  2436→        assert!(f.read(64).is_err());
+  2437→    }
+  2438→
+  2439→    #[test]
+  2440→    fn test_file_write_requires_write_capability() {
+  2441→        let mut f = File::open("/tmp/test.txt", FileMode::Read).unwrap();
+  2442→        assert!(f.write(b"hello").is_err());
+  2443→    }
+  2444→
+  2445→    #[test]
+  2446→    fn test_file_close() {
+  2447→        let mut f = File::open("/tmp/test.txt", FileMode::ReadWrite).unwrap();
+  2448→        f.close().unwrap();
+  2449→        assert!(!f.is_open);
+  2450→        assert!(f.read(64).is_err());
+  2451→    }
+  2452→
+  2453→    #[test]
+  2454→    fn test_stdin_readonly() {
+  2455→        let stdin = Stdin::new();
+  2456→        assert!(stdin.capd().has(CapFlag::Read));
+  2457→        assert!(!stdin.capd().has(CapFlag::Write));
+  2458→    }
+  2459→
+  2460→    #[test]
+  2461→    fn test_stdout_writeonly() {
+  2462→        let stdout = Stdout::new();
+  2463→        assert!(stdout.capd().has(CapFlag::Write));
+  2464→        assert!(!stdout.capd().has(CapFlag::Read));
+  2465→    }
+  2466→
+  2467→    #[test]
+  2468→    fn test_stderr_writeonly() {
+  2469→        let stderr = Stderr::new();
+  2470→        assert!(stderr.capd().has(CapFlag::Write));
+  2471→        assert!(!stderr.capd().has(CapFlag::Read));
+  2472→    }
+  2473→
+  2474→    #[test]
+  2475→    fn test_tcp_stream_capabilities() {
+  2476→        let stream = TcpStream::connect("127.0.0.1:8080").unwrap();
+  2477→        let capd = stream.capd();
+  2478→        assert!(capd.has(CapFlag::Read));
+  2479→        assert!(capd.has(CapFlag::Write));
+  2480→        assert!(capd.has(CapFlag::Send));
+  2481→    }
+  2482→
+  2483→    #[test]
+  2484→    fn test_tcp_listener_capabilities() {
+  2485→        let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
+  2486→        let capd = listener.capd();
+  2487→        assert!(capd.has(CapFlag::Read));
+  2488→        assert!(capd.has(CapFlag::Send));
+  2489→        assert!(!capd.has(CapFlag::Write));
+  2490→    }
+  2491→
+  2492→    #[test]
+  2493→    fn test_udp_socket_capabilities() {
+  2494→        let socket = UdpSocket::bind("0.0.0.0:9090").unwrap();
+  2495→        let capd = socket.capd();
+  2496→        assert!(capd.has(CapFlag::Read));
+  2497→        assert!(capd.has(CapFlag::Write));
+  2498→        assert!(capd.has(CapFlag::Send));
+  2499→    }
+  2500→
+  2501→    #[test]
+  2502→    fn test_tcp_stream_close() {
+  2503→        let mut stream = TcpStream::connect("127.0.0.1:8080").unwrap();
+  2504→        stream.close().unwrap();
+  2505→        assert!(stream.read(64).is_err());
+  2506→    }
+  2507→
+  2508→    // --- New tests for VUMA I/O types ---
+  2509→
+  2510→    // Test 1: VumaIoError construction and kind
+  2511→    #[test]
+  2512→    fn test_vuma_io_error_construction() {
+  2513→        let capd = CapD::new(vec![CapFlag::Read]);
+  2514→        let err = VumaIoError::capability_denied("no write access", capd.clone());
+  2515→        assert_eq!(err.kind(), VumaIoErrorKind::CapabilityDenied);
+  2516→        assert_eq!(err.message, "no write access");
+  2517→        assert!(err.capd.has(CapFlag::Read));
+  2518→
+  2519→        let err2 = VumaIoError::not_open("file closed", CapD::empty());
+  2520→        assert_eq!(err2.kind(), VumaIoErrorKind::NotOpen);
+  2521→
+  2522→        let err3 = VumaIoError::unexpected_eof("end of stream", capd);
+  2523→        assert_eq!(err3.kind(), VumaIoErrorKind::UnexpectedEof);
+  2524→    }
+  2525→
+  2526→    // Test 2: VumaStdin implements VumaReader with Read capability
+  2527→    #[test]
+  2528→    fn test_vuma_stdin_reader_trait() {
+  2529→        let stdin = VumaStdin::new();
+  2530→        assert!(stdin.capd().has(CapFlag::Read));
+  2531→        assert!(!stdin.capd().has(CapFlag::Write));
+  2532→        // Note: we don't call read() here because real stdin read()
+  2533→        // would block in test environments waiting for terminal input.
+  2534→        // The real I/O path is tested indirectly via VumaFile read/write.
+  2535→    }
+  2536→
+  2537→    // Test 3: VumaStdout implements VumaWriter with Write capability
+  2538→    #[test]
+  2539→    fn test_vuma_stdout_writer_trait() {
+  2540→        let mut stdout = VumaStdout::new();
+  2541→        assert!(stdout.capd().has(CapFlag::Write));
+  2542→        assert!(!stdout.capd().has(CapFlag::Read));
+  2543→        let n = StdWrite::write(&mut stdout, b"hello").unwrap();
+  2544→        assert_eq!(n, 5);
+  2545→        StdWrite::flush(&mut stdout).unwrap();
+  2546→    }
+  2547→
+  2548→    // Test 4: VumaFile read/write with capability enforcement
+  2549→    #[test]
+  2550→    fn test_vuma_file_capability_enforcement() {
+  2551→        let tmp = std::env::temp_dir().join("vuma_test_cap_enforce.txt");
+  2552→        let _ = std::fs::remove_file(&tmp); // clean up from prior runs
+  2553→        let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Write).unwrap();
+  2554→        // Write should succeed.
+  2555→        let n = f.write(b"hello").unwrap();
+  2556→        assert_eq!(n, 5);
+  2557→
+  2558→        // Read should fail (Write mode).
+  2559→        let result = f.read(10);
+  2560→        assert!(result.is_err());
+  2561→        assert_eq!(
+  2562→            result.unwrap_err().kind(),
+  2563→            VumaIoErrorKind::CapabilityDenied
+  2564→        );
+  2565→        f.close().unwrap();
+  2566→        let _ = std::fs::remove_file(&tmp);
+  2567→    }
+  2568→
+  2569→    // Test 5: VumaFile close prevents further I/O
+  2570→    #[test]
+  2571→    fn test_vuma_file_close_blocks_io() {
+  2572→        let tmp = std::env::temp_dir().join("vuma_test_close.txt");
+  2573→        let _ = std::fs::remove_file(&tmp);
+  2574→        // Create the file so we can open it in ReadWrite mode
+  2575→        std::fs::write(&tmp, b"test data").unwrap();
+  2576→        let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::ReadWrite).unwrap();
+  2577→        f.close().unwrap();
+  2578→        assert!(!f.is_open);
+  2579→
+  2580→        let result = f.read(10);
+  2581→        assert!(result.is_err());
+  2582→        assert_eq!(result.unwrap_err().kind(), VumaIoErrorKind::NotOpen);
+  2583→        let _ = std::fs::remove_file(&tmp);
+  2584→    }
+  2585→
+  2586→    // Test 6: VumaBufReader buffers reads correctly
+  2587→    #[test]
+  2588→    fn test_vuma_buf_reader_buffering() {
+  2589→        let tmp = std::env::temp_dir().join("vuma_test_buf_reader.txt");
+  2590→        let _ = std::fs::remove_file(&tmp);
+  2591→        // Write some data to the file so we can read it back
+  2592→        std::fs::write(&tmp, b"Hello, VumaBufReader! This is test data.").unwrap();
+  2593→        let inner = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2594→        let mut reader = VumaBufReader::with_capacity(64, inner);
+  2595→
+  2596→        assert!(reader.capd().has(CapFlag::Read));
+  2597→        assert_eq!(reader.buffer_size(), 0);
+  2598→
+  2599→        let mut buf = [0u8; 10];
+  2600→        let n = StdRead::read(&mut reader, &mut buf).unwrap();
+  2601→        assert_eq!(n, 10);
+  2602→        assert_eq!(&buf, b"Hello, Vum");
+  2603→
+  2604→        // Verify we can access the inner reader.
+  2605→        let inner_ref = reader.get_ref();
+  2606→        assert!(inner_ref.is_open);
+  2607→        let _ = std::fs::remove_file(&tmp);
+  2608→    }
+  2609→
+  2610→    // Test 7: VumaBufWriter buffers writes and flushes
+  2611→    #[test]
+  2612→    fn test_vuma_buf_writer_buffering_and_flush() {
+  2613→        // Use VumaStdout as the inner writer.
+  2614→        let inner = VumaStdout::new();
+  2615→        let mut writer = VumaBufWriter::with_capacity(64, inner);
+  2616→
+  2617→        assert!(writer.capd().has(CapFlag::Write));
+  2618→
+  2619→        // Write less than buffer capacity — data should be buffered.
+  2620→        let n = writer.write(b"hello").unwrap();
+  2621→        assert_eq!(n, 5);
+  2622→        assert_eq!(writer.buffered(), 5);
+  2623→
+  2624→        // Flush should clear the buffer.
+  2625→        writer.flush().unwrap();
+  2626→        assert_eq!(writer.buffered(), 0);
+  2627→    }
+  2628→
+  2629→    // Test 8: VumaStdin bare-metal mode with UART
+  2630→    #[test]
+  2631→    fn test_vuma_stdin_bare_metal() {
+  2632→        let mut stdin = VumaStdin::new_bare_metal(0x1D0A_0000);
+  2633→        assert!(stdin.bare_metal);
+  2634→        assert!(stdin.capd().has(CapFlag::Read));
+  2635→
+  2636→        // Bare-metal read may fail if no data is available, but should
+  2637→        // return the correct error kind.
+  2638→        let mut buf = [0u8; 4];
+  2639→        let result = StdRead::read(&mut stdin, &mut buf);
+  2640→        // In the x86_64 simulation, uart_rx_ready() returns true and
+  2641→        // read_uart_byte() returns Ok(0), so the read succeeds with
+  2642→        // data. On real bare-metal hardware with no UART input, it
+  2643→        // would return UartError instead.
+  2644→        if result.is_err() {
+  2645→            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Other);
+  2646→        } else {
+  2647→            // Simulation path: read returns Ok with zero bytes
+  2648→            assert!(
+  2649→                result.unwrap() > 0,
+  2650→                "Simulation should return at least one byte"
+  2651→            );
+  2652→        }
+  2653→    }
+  2654→
+  2655→    // Test 9: VumaStdout bare-metal mode
+  2656→    #[test]
+  2657→    fn test_vuma_stdout_bare_metal() {
+  2658→        let mut stdout = VumaStdout::new_bare_metal(0x1D0A_0000);
+  2659→        assert!(stdout.bare_metal);
+  2660→        assert!(stdout.capd().has(CapFlag::Write));
+  2661→
+  2662→        // Writing to bare-metal UART should succeed (simulated).
+  2663→        let n = StdWrite::write(&mut stdout, b"test").unwrap();
+  2664→        assert_eq!(n, 4);
+  2665→        StdWrite::flush(&mut stdout).unwrap();
+  2666→    }
+  2667→
+  2668→    // Test 10: VumaFile bare-metal mode
+  2669→    #[test]
+  2670→    fn test_vuma_file_bare_metal() {
+  2671→        let mut f =
+  2672→            VumaFile::open_bare_metal("/mmc/test.txt", FileMode::ReadWrite, 0xFE340000).unwrap();
+  2673→        assert!(f.bare_metal);
+  2674→        assert!(f.is_open);
+  2675→
+  2676→        // Write should succeed.
+  2677→        let n = f.write(b"bare-metal data").unwrap();
+  2678→        assert_eq!(n, 15);
+  2679→
+  2680→        // Read should succeed.
+  2681→        let data = f.read(15).unwrap();
+  2682→        assert_eq!(data.len(), 15);
+  2683→
+  2684→        // Seek should work.
+  2685→        f.seek(0).unwrap();
+  2686→        assert_eq!(f.position, 0);
+  2687→
+  2688→        // Close should work.
+  2689→        f.close().unwrap();
+  2690→        assert!(!f.is_open);
+  2691→    }
+  2692→
+  2693→    // Test 11: VumaReader read_exact returns error on EOF
+  2694→    #[test]
+  2695→    fn test_vuma_reader_read_exact_eof() {
+  2696→        // Create a simple reader that returns 0 bytes (EOF).
+  2697→        struct EofReader;
+  2698→        impl VumaReader for EofReader {
+  2699→            fn capd(&self) -> CapD {
+  2700→                CapD::new(vec![CapFlag::Read])
+  2701→            }
+  2702→            fn repd(&self) -> RepD {
+  2703→                RepD::new("EofReader", 0, 1, CapD::new(vec![CapFlag::Read]))
+  2704→            }
+  2705→            fn read(&mut self, _buf: &mut [u8]) -> VumaIoResult<usize> {
+  2706→                Ok(0)
+  2707→            }
+  2708→        }
+  2709→
+  2710→        let mut reader = EofReader;
+  2711→        let mut buf = [0u8; 10];
+  2712→        let result = reader.read_exact(&mut buf);
+  2713→        assert!(result.is_err());
+  2714→        assert_eq!(result.unwrap_err().kind(), VumaIoErrorKind::UnexpectedEof);
+  2715→    }
+  2716→
+  2717→    // Test 12: VumaWriter write_all retries on partial writes
+  2718→    #[test]
+  2719→    fn test_vuma_writer_write_all() {
+  2720→        let mut stdout = VumaStdout::new();
+  2721→        StdWrite::write_all(&mut stdout, b"hello world").unwrap();
+  2722→    }
+  2723→
+  2724→    // Test 13: VumaIoErrorKind Display
+  2725→    #[test]
+  2726→    fn test_vuma_io_error_kind_display() {
+  2727→        assert_eq!(format!("{}", VumaIoErrorKind::NotOpen), "resource not open");
+  2728→        assert_eq!(
+  2729→            format!("{}", VumaIoErrorKind::CapabilityDenied),
+  2730→            "capability denied"
+  2731→        );
+  2732→        assert_eq!(format!("{}", VumaIoErrorKind::UartError), "UART error");
+  2733→        assert_eq!(format!("{}", VumaIoErrorKind::MmioError), "MMIO error");
+  2734→        assert_eq!(
+  2735→            format!("{}", VumaIoErrorKind::UnexpectedEof),
+  2736→            "unexpected end of resource"
+  2737→        );
+  2738→    }
+  2739→
+  2740→    // Test 14: VumaFile implements VumaReader trait
+  2741→    #[test]
+  2742→    fn test_vuma_file_vuma_reader_trait() {
+  2743→        let tmp = std::env::temp_dir().join("vuma_test_reader_trait.txt");
+  2744→        let _ = std::fs::remove_file(&tmp);
+  2745→        std::fs::write(&tmp, b"0123456789").unwrap();
+  2746→        let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2747→        let mut buf = [0u8; 8];
+  2748→        let n = VumaReader::read(&mut f, &mut buf).unwrap();
+  2749→        assert_eq!(n, 8);
+  2750→        assert_eq!(&buf, b"01234567");
+  2751→        let _ = std::fs::remove_file(&tmp);
+  2752→    }
+  2753→
+  2754→    // Test 15: VumaBufReader into_inner preserves inner
+  2755→    #[test]
+  2756→    fn test_vuma_buf_reader_into_inner() {
+  2757→        let tmp = std::env::temp_dir().join("vuma_test_unwrap.txt");
+  2758→        let _ = std::fs::remove_file(&tmp);
+  2759→        std::fs::write(&tmp, b"test").unwrap();
+  2760→        let inner = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2761→        let reader = VumaBufReader::new(inner);
+  2762→        let file = reader.into_inner();
+  2763→        assert!(file.is_open);
+  2764→        let _ = std::fs::remove_file(&tmp);
+  2765→    }
+  2766→
+  2767→    // Test 16: VumaBufWriter large write bypasses buffer
+  2768→    #[test]
+  2769→    fn test_vuma_buf_writer_large_write() {
+  2770→        let inner = VumaStdout::new();
+  2771→        let mut writer = VumaBufWriter::with_capacity(16, inner);
+  2772→
+  2773→        // Write more than buffer capacity — should flush and write directly.
+  2774→        let large_data = [0xAA_u8; 256];
+  2775→        let n = writer.write(&large_data).unwrap();
+  2776→        assert_eq!(n, 256);
+  2777→    }
+  2778→
+  2779→    // Test 17: SyncEdge annotations for VumaStdin bare-metal
+  2780→    #[test]
+  2781→    fn test_vuma_stdin_bare_metal_sync_edges() {
+  2782→        let stdin = VumaStdin::new_bare_metal(0x1D0A_0000);
+  2783→        let edges = stdin.sync_edges();
+  2784→        assert!(edges
+  2785→            .iter()
+  2786→            .any(|e| e.from == "uart_init" && e.to == "uart_read"));
+  2787→    }
+  2788→
+  2789→    // Test 18: VumaFile display formatting
+  2790→    #[test]
+  2791→    fn test_vuma_file_display() {
+  2792→        let tmp = std::env::temp_dir().join("vuma_test_display.txt");
+  2793→        let _ = std::fs::remove_file(&tmp);
+  2794→        std::fs::write(&tmp, b"x").unwrap();
+  2795→        let f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2796→        let display = format!("{}", f);
+  2797→        assert!(display.contains("VumaFile"));
+  2798→        assert!(display.contains("linux"));
+  2799→
+  2800→        let f_bm = VumaFile::open_bare_metal("/mmc/test.txt", FileMode::Read, 0xFE340000).unwrap();
+  2801→        let display_bm = format!("{}", f_bm);
+  2802→        assert!(display_bm.contains("bare-metal"));
+  2803→        let _ = std::fs::remove_file(&tmp);
+  2804→    }
+  2805→
+  2806→    // --- New tests for real I/O (Wave 7) ---
+  2807→
+  2808→    // Test 19: VumaStderr implements VumaWriter
+  2809→    #[test]
+  2810→    fn test_vuma_stderr_writer_trait() {
+  2811→        let mut stderr = VumaStderr::new();
+  2812→        assert!(stderr.capd().has(CapFlag::Write));
+  2813→        assert!(!stderr.capd().has(CapFlag::Read));
+  2814→        // Write to stderr — this goes to the real stderr fd.
+  2815→        let n = StdWrite::write(&mut stderr, b"vuma-stderr-test\n").unwrap();
+  2816→        assert_eq!(n, 17);
+  2817→        StdWrite::flush(&mut stderr).unwrap();
+  2818→    }
+  2819→
+  2820→    // Test 20: VumaStderr bare-metal mode
+  2821→    #[test]
+  2822→    fn test_vuma_stderr_bare_metal() {
+  2823→        let mut stderr = VumaStderr::new_bare_metal(0x1D0A_0000);
+  2824→        assert!(stderr.bare_metal);
+  2825→        assert!(stderr.capd().has(CapFlag::Write));
+  2826→        let n = StdWrite::write(&mut stderr, b"test").unwrap();
+  2827→        assert_eq!(n, 4);
+  2828→        StdWrite::flush(&mut stderr).unwrap();
+  2829→    }
+  2830→
+  2831→    // Test 21: VumaFile real write, seek, and read round-trip
+  2832→    #[test]
+  2833→    fn test_vuma_file_write_seek_read_roundtrip() {
+  2834→        let tmp = std::env::temp_dir().join("vuma_test_roundtrip.txt");
+  2835→        let _ = std::fs::remove_file(&tmp);
+  2836→        {
+  2837→            // Write phase
+  2838→            let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::ReadWrite).unwrap();
+  2839→            let written = f.write(b"Hello, VumaFile!").unwrap();
+  2840→            assert_eq!(written, 16);
+  2841→            assert_eq!(f.position, 16);
+  2842→
+  2843→            // Seek back to start and read
+  2844→            f.seek(0).unwrap();
+  2845→            assert_eq!(f.position, 0);
+  2846→            let data = f.read(16).unwrap();
+  2847→            assert_eq!(&data, b"Hello, VumaFile!");
+  2848→            f.close().unwrap();
+  2849→        }
+  2850→        let _ = std::fs::remove_file(&tmp);
+  2851→    }
+  2852→
+  2853→    // Test 22: VumaFile real file descriptor is a valid OS fd
+  2854→    #[test]
+  2855→    fn test_vuma_file_real_fd() {
+  2856→        let tmp = std::env::temp_dir().join("vuma_test_fd.txt");
+  2857→        let _ = std::fs::remove_file(&tmp);
+  2858→        std::fs::write(&tmp, b"fd test").unwrap();
+  2859→
+  2860→        let f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2861→        // The fd should be a real OS file descriptor (>= 0), not a fake value.
+  2862→        assert!(
+  2863→            f.fd >= 0,
+  2864→            "fd should be a valid OS file descriptor, got {}",
+  2865→            f.fd
+  2866→        );
+  2867→        assert_ne!(f.fd, 100, "fd should not be the old simulated value 100");
+  2868→        assert_ne!(f.fd, 101, "fd should not be the old simulated value 101");
+  2869→        assert_ne!(f.fd, 102, "fd should not be the old simulated value 102");
+  2870→        let _ = std::fs::remove_file(&tmp);
+  2871→    }
+  2872→
+  2873→    // Test 23: VumaStdout writes actual bytes (verified via VumaFile capture)
+  2874→    #[test]
+  2875→    fn test_vuma_stdout_real_write() {
+  2876→        let mut stdout = VumaStdout::new();
+  2877→        // Write bytes to real stdout — this should not error.
+  2878→        // The output may appear in test logs, but the write should succeed.
+  2879→        let data = b"vuma-stdout-test\n";
+  2880→        let n = StdWrite::write(&mut stdout, data).unwrap();
+  2881→        assert_eq!(n, data.len());
+  2882→        StdWrite::flush(&mut stdout).unwrap();
+  2883→    }
+  2884→
+  2885→    // Test 24: VumaFile open non-existent file returns error
+  2886→    #[test]
+  2887→    fn test_vuma_file_open_nonexistent() {
+  2888→        let result = VumaFile::open("/tmp/vuma_nonexistent_file_12345.txt", FileMode::Read);
+  2889→        assert!(result.is_err(), "opening a non-existent file should fail");
+  2890→        let err = result.unwrap_err();
+  2891→        assert_eq!(err.kind(), VumaIoErrorKind::Other);
+  2892→    }
+  2893→
+  2894→    // Test 25: VumaFile read from empty file returns 0 bytes
+  2895→    #[test]
+  2896→    fn test_vuma_file_read_empty() {
+  2897→        let tmp = std::env::temp_dir().join("vuma_test_empty.txt");
+  2898→        let _ = std::fs::remove_file(&tmp);
+  2899→        std::fs::write(&tmp, b"").unwrap();
+  2900→
+  2901→        let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::Read).unwrap();
+  2902→        let data = f.read(100).unwrap();
+  2903→        assert_eq!(
+  2904→            data.len(),
+  2905→            0,
+  2906→            "reading from empty file should return 0 bytes"
+  2907→        );
+  2908→        let _ = std::fs::remove_file(&tmp);
+  2909→    }
+  2910→
+  2911→    // Test 26: VumaStderr display formatting
+  2912→    #[test]
+  2913→    fn test_vuma_stderr_display() {
+  2914→        let stderr = VumaStderr::new();
+  2915→        let display = format!("{}", stderr);
+  2916→        assert!(display.contains("VumaStderr"));
+  2917→        assert!(display.contains("linux"));
+  2918→
+  2919→        let stderr_bm = VumaStderr::new_bare_metal(0x1D0A_0000);
+  2920→        let display_bm = format!("{}", stderr_bm);
+  2921→        assert!(display_bm.contains("bare-metal"));
+  2922→    }
+  2923→
+  2924→    // --- os-linux feature-gated tests ---
+  2925→
+  2926→    #[cfg(feature = "os-linux")]
+  2927→    mod os_linux {
+  2928→        use super::*;
+  2929→
+  2930→        #[test]
+  2931→        fn test_libc_stdout_write() {
+  2932→            let mut stdout = VumaStdout::new();
+  2933→            let data = b"vuma-libc-stdout-test\n";
+  2934→            let n = StdWrite::write(&mut stdout, data).unwrap();
+  2935→            assert_eq!(n, data.len());
+  2936→            StdWrite::flush(&mut stdout).unwrap();
+  2937→        }
+  2938→
+  2939→        #[test]
+  2940→        fn test_libc_stderr_write() {
+  2941→            let mut stderr = VumaStderr::new();
+  2942→            let data = b"vuma-libc-stderr-test\n";
+  2943→            let n = stderr.write(data).unwrap();
+  2944→            assert_eq!(n, data.len());
+  2945→            StdWrite::flush(&mut stderr).unwrap();
+  2946→        }
+  2947→
+  2948→        #[test]
+  2949→        fn test_libc_stdout_write_empty() {
+  2950→            let mut stdout = VumaStdout::new();
+  2951→            let n = StdWrite::write(&mut stdout, b"").unwrap();
+  2952→            assert_eq!(n, 0);
+  2953→        }
+  2954→
+  2955→        #[test]
+  2956→        fn test_libc_stdout_fd_is_1() {
+  2957→            let stdout = VumaStdout::new();
+  2958→            assert_eq!(stdout.fd, 1);
+  2959→        }
+  2960→
+  2961→        #[test]
+  2962→        fn test_libc_stdin_fd_is_0() {
+  2963→            let stdin = VumaStdin::new();
+  2964→            assert_eq!(stdin.fd, 0);
+  2965→        }
+  2966→
+  2967→        #[test]
+  2968→        fn test_libc_stderr_fd_is_2() {
+  2969→            let stderr = VumaStderr::new();
+  2970→            assert_eq!(stderr.fd, 2);
+  2971→        }
+  2972→
+  2973→        #[test]
+  2974→        fn test_libc_legacy_stdout_write() {
+  2975→            let mut stdout = Stdout::new();
+  2976→            let data = b"vuma-legacy-stdout-test\n";
+  2977→            let n = StdWrite::write(&mut stdout, data).unwrap();
+  2978→            assert_eq!(n, data.len());
+  2979→        }
+  2980→
+  2981→        #[test]
+  2982→        fn test_libc_legacy_stderr_write() {
+  2983→            let mut stderr = Stderr::new();
+  2984→            let data = b"vuma-legacy-stderr-test\n";
+  2985→            let n = stderr.write(data).unwrap();
+  2986→            assert_eq!(n, data.len());
+  2987→        }
+  2988→
+  2989→        #[test]
+  2990→        fn test_libc_vuma_file_write_and_read() {
+  2991→            let tmp = std::env::temp_dir().join("vuma_test_libc_io.txt");
+  2992→            let _ = std::fs::remove_file(&tmp);
+  2993→            {
+  2994→                let mut f = VumaFile::open(tmp.to_str().unwrap(), FileMode::ReadWrite).unwrap();
+  2995→                let written = f.write(b"libc I/O roundtrip").unwrap();
+  2996→                assert_eq!(written, 18);
+  2997→                f.seek(0).unwrap();
+  2998→                let data = f.read(18).unwrap();
+  2999→                assert_eq!(&data, b"libc I/O roundtrip");
+  3000→                f.close().unwrap();
+  3001→            }
+  3002→            let _ = std::fs::remove_file(&tmp);
+  3003→        }
+  3004→    }
+  3005→
+  3006→    // --- Tests for cross-domain From conversions ---
+  3007→
+  3008→    #[test]
+  3009→    fn test_from_thread_error_to_vuma_io_error() {
+  3010→        let thread_err = crate::thread::VumaThreadError::AlreadyJoined;
+  3011→        let io_err: VumaIoError = thread_err.into();
+  3012→        assert_eq!(io_err.kind(), VumaIoErrorKind::NotOpen);
+  3013→
+  3014→        let thread_err2 = crate::thread::VumaThreadError::InvalidConfig("bad stack".to_string());
+  3015→        let io_err2: VumaIoError = thread_err2.into();
+  3016→        assert_eq!(io_err2.kind(), VumaIoErrorKind::InvalidInput);
+  3017→    }
+  3018→
+  3019→    #[test]
+  3020→    fn test_from_env_error_to_vuma_io_error() {
+  3021→        let env_err = crate::env::VumaEnvError::NotPresent;
+  3022→        let io_err: VumaIoError = env_err.into();
+  3023→        assert_eq!(io_err.kind(), VumaIoErrorKind::NotOpen);
+  3024→
+  3025→        let env_err2 = crate::env::VumaEnvError::NotUnicode("BAD_VAR".to_string());
+  3026→        let io_err2: VumaIoError = env_err2.into();
+  3027→        assert_eq!(io_err2.kind(), VumaIoErrorKind::InvalidInput);
+  3028→    }
+  3029→
+  3030→    #[test]
+  3031→    fn test_from_fs_io_error_to_vuma_io_error() {
+  3032→        let fs_err = crate::fs::VumaIoError::new(
+  3033→            crate::error::VumaErrorKind::PermissionDenied,
+  3034→            "access denied",
+  3035→        );
+  3036→        let io_err: VumaIoError = fs_err.into();
+  3037→        assert_eq!(io_err.kind(), VumaIoErrorKind::CapabilityDenied);
+  3038→    }
+  3039→}
+  3040→

@@ -18,7 +18,7 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use vuma::pipeline::{
-    compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
+    compile_with_path, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
 };
 use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
@@ -269,11 +269,11 @@ fn cmd_build(
     cli: &Cli,
     file: &PathBuf,
     output: &Option<PathBuf>,
-    target: TargetArg,
+    target: &TargetArg,
 ) -> Result<(), String> {
     let source = read_source(file)?;
-    let config = make_config(cli, CompileTarget::from(target));
-    let result = compile(&source, &config).map_err(|errors| {
+    let config = make_config(cli, CompileTarget::from(*target));
+    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
         format!("compilation failed with {} error(s)", errors.len())
     })?;
@@ -322,7 +322,7 @@ fn cmd_build(
 fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
     let source = read_source(file)?;
     let config = make_config(cli, CompileTarget::Linux);
-    let result = compile(&source, &config).map_err(|errors| {
+    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
         format!("compilation failed with {} error(s)", errors.len())
     })?;
@@ -400,7 +400,7 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 
     // Run the full compile — the check command doesn't save the binary,
     // it just verifies the program compiles and passes verification.
-    let result = compile(&source, &config).map_err(|errors| {
+    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
         format!("check failed with {} error(s)", errors.len())
     })?;
@@ -429,12 +429,12 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 /// most program semantics in the SCG→IR bridge).
 fn cmd_emit(
     cli: &Cli,
-    isa: IsaArg,
+    isa: &IsaArg,
     file: &PathBuf,
     output: &Option<PathBuf>,
 ) -> Result<(), String> {
     let source = read_source(file)?;
-    let backend_kind = BackendKind::from(isa);
+    let backend_kind = BackendKind::from(*isa);
 
     // Step 1: Parse source → AST.
     let mut parser = vuma_parser::Parser::new(&source);
@@ -1197,14 +1197,14 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
         | PStmt::Access(_) => vec![],
     }
 }
-fn cmd_disasm(file: &PathBuf, isa: IsaArg, base_addr_str: &str) -> Result<(), String> {
+fn cmd_disasm(file: &PathBuf, isa: &IsaArg, base_addr_str: &str) -> Result<(), String> {
     let bytes = fs::read(file)
         .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;
 
     let base_addr = u64::from_str_radix(base_addr_str.trim_start_matches("0x"), 16)
         .map_err(|e| format!("error: invalid base address '{}': {}", base_addr_str, e))?;
 
-    let backend_kind = BackendKind::from(isa);
+    let backend_kind = BackendKind::from(*isa);
     let backend = create_backend(backend_kind).map_err(|e| {
         format!(
             "error: cannot create {} backend: {}",
@@ -1235,7 +1235,7 @@ fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     // Force exhaustive verification for the verify subcommand.
     config.verification_level = VerificationLevel::Exhaustive;
 
-    let result = compile(&source, &config).map_err(|errors| {
+    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
         format!(
             "compilation/verification failed with {} error(s)",
@@ -1380,7 +1380,7 @@ fn main() {
     }
 
     let command = match cli.command {
-        Some(cmd) => cmd,
+        Some(ref cmd) => cmd.clone(),
         None => {
             // No subcommand and no --repl: print help.
             eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");
@@ -1392,18 +1392,18 @@ fn main() {
         Commands::Build {
             ref file,
             ref output,
-            target,
+            ref target,
         } => cmd_build(&cli, file, output, target),
         Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
         Commands::Check { ref file } => cmd_check(&cli, file),
         Commands::Emit {
-            isa,
+            ref isa,
             ref file,
             ref output,
         } => cmd_emit(&cli, isa, file, output),
         Commands::Disasm {
             ref file,
-            isa,
+            ref isa,
             ref base_addr,
         } => cmd_disasm(file, isa, base_addr),
         Commands::Verify { ref file } => cmd_verify(&cli, file),

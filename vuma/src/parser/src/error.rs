@@ -242,6 +242,17 @@ pub enum ParseErrorKind {
     /// expected (e.g. `+=`, `-=`, etc.).
     InvalidCompoundOp,
 
+    // -- LLM-generated code mistakes -----------------------------------------
+    /// A construct from another language (Rust/C) that doesn't exist in VUMA.
+    /// For example, `int` instead of `i32`, `println!`, `&` references, etc.
+    LlmMistake,
+    /// A C-style for-loop (`for (i=0; i<n; i++)`) was used instead of
+    /// VUMA's range-based `for i in 0..n`.
+    CStyleForLoop,
+    /// A type name from another language was used (e.g. `int`, `long`,
+    /// `String` with capital S in Rust style) instead of the VUMA equivalent.
+    UnknownType,
+
     // -- Legacy aliases (kept for backward compat) ---------------------------
     /// Alias for [`Self::InvalidSyntax`] — a required semicolon separator is missing.
     MissingSemicolon,
@@ -264,6 +275,9 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::RegionError => write!(f, "region error"),
             ParseErrorKind::BDAnnotationError => write!(f, "BD annotation error"),
             ParseErrorKind::InvalidCompoundOp => write!(f, "invalid compound assignment operator"),
+            ParseErrorKind::LlmMistake => write!(f, "LLM code mismatch"),
+            ParseErrorKind::CStyleForLoop => write!(f, "C-style for loop"),
+            ParseErrorKind::UnknownType => write!(f, "unknown type"),
             ParseErrorKind::MissingSemicolon => write!(f, "missing semicolon"),
             ParseErrorKind::InvalidAddress => write!(f, "invalid address"),
             ParseErrorKind::UndefinedVariable => write!(f, "undefined variable"),
@@ -423,6 +437,44 @@ impl ParseError {
         Self::new(msg, span, ParseErrorKind::InvalidCompoundOp)
     }
 
+    /// Convenience: LLM-generated code mistake (e.g. Rust/C syntax in VUMA).
+    ///
+    /// Use this for constructs that are valid in other languages but not in
+    /// VUMA, such as `let` bindings, `mut` keyword, `&` references,
+    /// `println!` macros, etc.
+    pub fn llm_mistake(msg: impl Into<String>, span: Span, suggestion: impl Into<String>) -> Self {
+        Self::new(msg, span, ParseErrorKind::LlmMistake).with_suggestion(suggestion)
+    }
+
+    /// Convenience: C-style for-loop detected.
+    ///
+    /// Reports `for (i=0; i<n; i++)` and suggests `for i in 0..n`.
+    pub fn c_style_for_loop(span: Span) -> Self {
+        Self::new(
+            "C-style for loop is not supported in VUMA — use `for name in start..end` instead",
+            span,
+            ParseErrorKind::CStyleForLoop,
+        )
+        .with_suggestion("for i in 0..n")
+    }
+
+    /// Convenience: unknown type name (likely from another language).
+    ///
+    /// Checks if the type name is close to a known VUMA type and attaches
+    /// a "did you mean?" suggestion if so.
+    pub fn unknown_type(name: &str, span: Span) -> Self {
+        let suggestion = suggest_vuma_type(name);
+        let mut err = Self::new(
+            format!("unknown type '{}' — VUMA uses sized integer types like i32, u32, i64, etc.", name),
+            span,
+            ParseErrorKind::UnknownType,
+        );
+        if let Some(s) = suggestion {
+            err = err.with_suggestion(s);
+        }
+        err
+    }
+
     /// Render the error with source context and a visual pointer.
     ///
     /// The `source` parameter should be the full source text. The function
@@ -508,6 +560,13 @@ impl ErrorRecovery {
             ParseErrorKind::InvalidCompoundOp => ErrorRecovery::SkipOneToken,
             ParseErrorKind::InvalidAddress => ErrorRecovery::SkipOneToken,
             ParseErrorKind::UndefinedVariable => ErrorRecovery::SkipOneToken,
+            // LLM mistakes: skip the offending token and continue — the parser
+            // can often recover and keep finding more errors.
+            ParseErrorKind::LlmMistake => ErrorRecovery::SkipOneToken,
+            // C-style for loops: skip to statement boundary (the whole for)
+            ParseErrorKind::CStyleForLoop => ErrorRecovery::SkipToStatementBoundary,
+            // Unknown type: skip one token (the type name) and keep going
+            ParseErrorKind::UnknownType => ErrorRecovery::SkipOneToken,
         }
     }
 }
@@ -1019,6 +1078,125 @@ pub fn suggest_keyword(input: &str) -> Option<&'static str> {
 /// `"did you mean 'fn'?"`.
 pub fn format_suggestion(input: &str, suggestion: &str) -> String {
     format!("did you mean '{}' instead of '{}'?", suggestion, input)
+}
+
+// ---------------------------------------------------------------------------
+// VUMA type suggestions (for LLM-generated code)
+// ---------------------------------------------------------------------------
+
+/// Common type names from C/Rust that LLMs often produce, mapped to the
+/// correct VUMA equivalent.
+///
+/// **Important**: Only include entries where the alias is DIFFERENT from the
+/// VUMA type. Valid VUMA types (i8, u8, i32, etc.) should NOT be listed here
+/// — they are already handled by [`VUMA_TYPES`] and the fuzzy matcher.
+const LLM_TYPE_ALIASES: &[(&str, &str)] = &[
+    ("int", "i32"),
+    ("uint", "u32"),
+    ("long", "i64"),
+    ("ulong", "u64"),
+    ("longlong", "i64"),
+    ("long long", "i64"),
+    ("short", "i16"),
+    ("ushort", "u16"),
+    ("char", "i8"),
+    ("uchar", "u8"),
+    ("byte", "u8"),
+    ("sbyte", "i8"),
+    ("float", "f32"),
+    ("double", "f64"),
+    ("longdouble", "f64"),
+    ("long double", "f64"),
+    ("boolean", "bool"),
+    ("size_t", "u64"),
+    ("ssize_t", "i64"),
+    ("intptr", "i64"),
+    ("uintptr", "u64"),
+    ("intptr_t", "i64"),
+    ("uintptr_t", "u64"),
+    ("String", "string"),   // Rust String → VUMA string
+    ("str", "string"),      // Rust &str → VUMA string
+    ("Vec", "array"),       // Rust Vec → VUMA array
+    ("Box", "ptr"),         // Rust Box → VUMA ptr
+    ("Rc", "ptr"),          // Rust Rc → VUMA ptr
+    ("Arc", "ptr"),         // Rust Arc → VUMA ptr
+    ("usize", "u64"),       // Rust usize → VUMA u64
+    ("isize", "i64"),       // Rust isize → VUMA i64
+    ("void", "()"),          // C void → VUMA unit
+    ("auto", "var"),         // C++ auto
+];
+
+/// Valid VUMA type names (used for spellcheck suggestions).
+const VUMA_TYPES: &[&str] = &[
+    "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
+    "f32", "f64", "bool", "string", "ptr", "null", "var", "()",
+];
+
+/// Check if a type name is a known LLM alias and return the VUMA equivalent.
+///
+/// Returns `None` if the type is already a valid VUMA type or is not
+/// recognised at all.
+pub fn suggest_vuma_type(input: &str) -> Option<&'static str> {
+    // First, check exact alias matches.
+    for &(alias, vuma) in LLM_TYPE_ALIASES {
+        if input == alias {
+            return Some(vuma);
+        }
+    }
+
+    // If not an exact match, try fuzzy matching against VUMA types.
+    let mut best: Option<(&'static str, usize)> = None;
+    for &ty in VUMA_TYPES {
+        if ty == input {
+            return None; // already a valid VUMA type
+        }
+        let dist = levenshtein(input, ty);
+        if dist <= 2 {
+            match best {
+                Some((_, best_dist)) if dist >= best_dist => {}
+                _ => best = Some((ty, dist)),
+            }
+        }
+    }
+    best.map(|(ty, _)| ty)
+}
+
+/// Known C/Rust identifiers that LLMs often produce, mapped to VUMA
+/// equivalents or error messages.
+const LLM_CONSTRUCT_MAP: &[(&str, &str)] = &[
+    ("println", "use `write` or a format string `f\"...\"` instead"),
+    ("print", "use `write` or a format string `f\"...\"` instead"),
+    ("eprintln", "use `write` or a format string `f\"...\"` instead"),
+    ("eprint", "use `write` or a format string `f\"...\"` instead"),
+    ("printf", "use `write` or a format string `f\"...\"` instead"),
+    ("fmt", "use `write` or a format string `f\"...\"` instead"),
+    ("dbg", "VUMA does not have a dbg! macro — use `write` for debugging"),
+    ("vec!", "VUMA does not have vec! — use array syntax `[a, b, c]`"),
+    ("println!", "VUMA does not have println! — use `write` or format strings"),
+    ("format!", "VUMA does not have format! — use format strings `f\"...\"`"),
+    ("todo!", "VUMA does not have todo!"),
+    ("unimplemented!", "VUMA does not have unimplemented!"),
+    ("unreachable!", "VUMA does not have unreachable!"),
+    ("panic!", "VUMA does not have panic! — use `return` with an error"),
+];
+
+/// Check if an identifier looks like a known LLM-generated construct
+/// (e.g. `println`, `println!`) and return a diagnostic hint.
+pub fn check_llm_construct(name: &str) -> Option<&'static str> {
+    // Check exact matches first.
+    for &(pattern, hint) in LLM_CONSTRUCT_MAP {
+        if name == pattern {
+            return Some(hint);
+        }
+    }
+    // Also check with `!` stripped (e.g. "println" from "println!").
+    let without_bang = name.strip_suffix('!').unwrap_or(name);
+    for &(pattern, hint) in LLM_CONSTRUCT_MAP {
+        if without_bang == pattern {
+            return Some(hint);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

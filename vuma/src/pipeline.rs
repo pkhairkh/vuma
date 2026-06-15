@@ -35,6 +35,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::path::Path;
 use std::time::Instant;
 
 // ── Workspace crate imports ──────────────────────────────────────────────
@@ -59,7 +60,7 @@ use vuma_ive::{
     AggregatedResult, InferenceEngine, InvariantAggregator,
     VerificationLevel as IveVerificationLevel,
 };
-use vuma_parser::{AstToScg, ParseError, Parser, Program as AstProgram};
+use vuma_parser::{AstToScg, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
     EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
@@ -277,6 +278,11 @@ pub enum VumaError {
         /// Error message.
         message: String,
     },
+    /// Module resolution error (import not found, circular import, etc.).
+    ModuleResolution {
+        /// The resolution errors.
+        errors: Vec<ResolveError>,
+    },
     /// A collection of errors accumulated across stages.
     Multi {
         /// The collected errors.
@@ -299,6 +305,7 @@ impl VumaError {
             VumaError::RegisterAlloc { .. } => "register-alloc",
             VumaError::Emission { .. } => "elf-emission",
             VumaError::CorInit { .. } => "cor-init",
+            VumaError::ModuleResolution { .. } => "module-resolution",
             VumaError::Multi { .. } => "multi",
         }
     }
@@ -340,6 +347,13 @@ impl fmt::Display for VumaError {
             VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
             VumaError::Emission { message } => write!(f, "[elf-emission] {}", message),
             VumaError::CorInit { message } => write!(f, "[cor-init] {}", message),
+            VumaError::ModuleResolution { errors } => {
+                write!(f, "[module-resolution] {} error(s):", errors.len())?;
+                for e in errors {
+                    write!(f, "\n  - {}", e)?;
+                }
+                Ok(())
+            }
             VumaError::Multi { errors } => {
                 write!(f, "multiple errors ({}):", errors.len())?;
                 for (i, e) in errors.iter().enumerate() {
@@ -1663,12 +1677,39 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
 /// 9. **Register Allocation** — assign physical ARM64 registers
 /// 10. **Code Emission** — generate ARM64 machine code and ELF binary
 pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput, Vec<VumaError>> {
+    compile_with_path(source, None, config)
+}
+
+/// Compile VUMA source text with an optional file path for import resolution.
+///
+/// This is the same as [`compile`] but accepts an optional file path that
+/// is used to resolve `import` statements.  When a file path is provided,
+/// imported modules are located relative to the file's parent directory.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use vuma::pipeline::{compile_with_path, CompileConfig};
+/// use std::path::Path;
+///
+/// let source = r#"
+///     import "utils.vuma";
+///     fn main() { helper(); }
+/// "#;
+/// let config = CompileConfig::default();
+/// let result = compile_with_path(source, Some(Path::new("src/main.vuma")), &config);
+/// ```
+pub fn compile_with_path(
+    source: &str,
+    file_path: Option<&Path>,
+    config: &CompileConfig,
+) -> Result<CompilationOutput, Vec<VumaError>> {
     let mut errors: Vec<VumaError> = Vec::new();
     let mut timings: Vec<(String, u64)> = Vec::new();
 
-    // ── Stage 1: Parse ────────────────────────────────────────────────
+    // ── Stage 1: Parse + Resolve imports ────────────────────────────
     let t = Instant::now();
-    let ast = match parse_source(source) {
+    let ast = match parse_and_resolve(source, file_path) {
         Ok(ast) => ast,
         Err(e) => {
             errors.push(e);
@@ -2161,6 +2202,39 @@ fn parse_source(source: &str) -> Result<AstProgram, VumaError> {
         });
     }
     Ok(result.unwrap())
+}
+
+/// Parse VUMA source text and resolve imports relative to a base file path.
+///
+/// This is the preferred entry point when the source file's path is known,
+/// as it enables import resolution for multi-file programs.
+///
+/// If the source has no `import` statements, this is equivalent to
+/// [`parse_source`].  Otherwise, imported files are read, parsed, and
+/// merged into a single program.
+fn parse_and_resolve(source: &str, file_path: Option<&Path>) -> Result<AstProgram, VumaError> {
+    // Fast path: if there are no imports, just parse normally.
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    if result.has_errors() {
+        return Err(VumaError::Parse {
+            errors: result.errors,
+        });
+    }
+    let program = result.unwrap();
+
+    // Check if there are any import statements.
+    let has_imports = program.items.iter().any(|i| matches!(i, vuma_parser::ast::Item::Import(_)));
+    if !has_imports {
+        return Ok(program);
+    }
+
+    // Resolve imports using the ModuleResolver.
+    let mut resolver = ModuleResolver::new();
+    match resolver.resolve_source(source, file_path) {
+        Ok(resolved) => Ok(resolved),
+        Err(errors) => Err(VumaError::ModuleResolution { errors }),
+    }
 }
 
 /// Convert an AST to an SCG.

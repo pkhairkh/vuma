@@ -2398,6 +2398,190 @@ impl UdpSocket {
 }
 
 // ---------------------------------------------------------------------------
+// Low-Level I/O Syscall Wrappers
+// ---------------------------------------------------------------------------
+// These functions provide the lowest-level I/O interface available to VUMA
+// programs. They operate on raw file descriptors and VUMA Addresses,
+// corresponding to the `read`/`write` POSIX syscalls on Linux and to
+// MMIO operations on bare-metal targets.
+//
+// LLMs generating VUMA code that needs to move bytes between file
+// descriptors and memory buffers should use these functions.
+
+/// Read up to `count` bytes from file descriptor `fd` into the buffer at
+/// `buf`.
+///
+/// ## Semantics
+///
+/// - Reads bytes from `fd` and stores them starting at `buf`.
+/// - Returns the number of bytes actually read, or -1 on error.
+/// - A return value of 0 indicates end-of-file (EOF).
+/// - The buffer region `[buf, buf + count)` must be valid and writable.
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// n: i64 = read_bytes(fd, buf, count);
+/// if n < 0 {
+///     // handle error
+/// }
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read } — reads from the file descriptor
+/// - SyncEdge: produces a ReadEdge from fd → buf
+///
+/// ## Safety
+///
+/// The caller must ensure that `buf` points to at least `count` bytes of
+/// writable memory. Passing an invalid file descriptor results in an error
+/// return (-1), not undefined behavior.
+// VUMA-VERIFIED: read is bounded by count and produces a ReadEdge
+pub fn read_bytes(fd: i32, buf: crate::alloc::Address, count: u64) -> i64 {
+    #[cfg(feature = "os-linux")]
+    {
+        let ret = unsafe { libc::read(fd, buf.0 as *mut std::ffi::c_void, count as usize) };
+        ret as i64
+    }
+    #[cfg(not(feature = "os-linux"))]
+    {
+        // On non-Linux targets, this is a stub that returns an error.
+        // A bare-metal VUMA runtime would map this to a UART/MMIO read.
+        let _ = (fd, buf, count);
+        -1
+    }
+}
+
+/// Write up to `count` bytes from the buffer at `buf` to file descriptor
+/// `fd`.
+///
+/// ## Semantics
+///
+/// - Writes bytes starting at `buf` to `fd`.
+/// - Returns the number of bytes actually written, or -1 on error.
+/// - A partial write (return < count) is possible and does not indicate
+///   an error; the caller should retry with the remaining bytes.
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// n: i64 = write_bytes(fd, buf, count);
+/// if n < 0 {
+///     // handle error
+/// }
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Write } — writes to the file descriptor
+/// - SyncEdge: produces a WriteEdge from buf → fd
+///
+/// ## Safety
+///
+/// The caller must ensure that `buf` points to at least `count` bytes of
+/// readable memory.
+// VUMA-VERIFIED: write is bounded by count and produces a WriteEdge
+pub fn write_bytes(fd: i32, buf: crate::alloc::Address, count: u64) -> i64 {
+    #[cfg(feature = "os-linux")]
+    {
+        let ret = unsafe { libc::write(fd, buf.0 as *const std::ffi::c_void, count as usize) };
+        ret as i64
+    }
+    #[cfg(not(feature = "os-linux"))]
+    {
+        let _ = (fd, buf, count);
+        -1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Little-Endian Byte Access
+// ---------------------------------------------------------------------------
+// VUMA programs that interact with little-endian file formats (e.g., ELF,
+// PE, WAV, many network protocols) need these helpers. SHA-256 and other
+// crypto primitives use big-endian (see `crypto.rs`), but most general-
+// purpose I/O on x86/ARM is little-endian.
+
+/// Read a little-endian u32 from a VUMA byte buffer at the given offset.
+///
+/// Reads four consecutive bytes starting at `buf + offset` and interprets
+/// them as a little-endian 32-bit unsigned integer.
+///
+/// ## When to Use
+///
+/// Use this for reading little-endian data structures such as:
+/// - ELF section headers and program headers
+/// - BMP/WAV file headers
+/// - x86 machine code operands
+/// - TCP/IP headers (some fields)
+///
+/// For SHA-256 and other FIPS 180-4 algorithms, use the big-endian variant
+/// (`read_u32_be` / `write_u32_be`) instead.
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// fn read_u32_le(buf: Address, offset: u64) -> u32 {
+///     b0: u32 = *(buf + offset);
+///     b1: u32 = *(buf + offset + 1);
+///     b2: u32 = *(buf + offset + 2);
+///     b3: u32 = *(buf + offset + 3);
+///     return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 4294967295;
+/// }
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read } — reads from the buffer without modifying it
+// VUMA-VERIFIED: little-endian byte order is correctly composed
+pub fn read_u32_le(buf: crate::alloc::Address, offset: u64) -> u32 {
+    let base = (buf.0 + offset) as *const u8;
+    unsafe {
+        let b0 = *base as u32;
+        let b1 = *base.add(1) as u32;
+        let b2 = *base.add(2) as u32;
+        let b3 = *base.add(3) as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+}
+
+/// Write a little-endian u32 to a VUMA byte buffer at the given offset.
+///
+/// Decomposes `val` into four bytes in little-endian byte order and stores
+/// them starting at `buf + offset`.
+///
+/// ## When to Use
+///
+/// Use this for writing little-endian data structures. See [`read_u32_le`]
+/// for common use cases.
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// fn write_u32_le(buf: Address, offset: u64, val: u32) {
+///     *(buf + offset)     =  val        & 255;
+///     *(buf + offset + 1) = (val >> 8)  & 255;
+///     *(buf + offset + 2) = (val >> 16) & 255;
+///     *(buf + offset + 3) = (val >> 24) & 255;
+/// }
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Write } — writes to the buffer
+// VUMA-VERIFIED: little-endian byte order is correctly decomposed
+pub fn write_u32_le(buf: crate::alloc::Address, offset: u64, val: u32) {
+    let base = (buf.0 + offset) as *mut u8;
+    unsafe {
+        *base = val as u8;
+        *base.add(1) = (val >> 8) as u8;
+        *base.add(2) = (val >> 16) as u8;
+        *base.add(3) = (val >> 24) as u8;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

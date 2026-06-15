@@ -1653,3 +1653,239 @@ Stage Summary:
 - No regressions — codegen crate builds, all PPC64 tests pass
 - The CMP l-field bug was particularly insidious: all 64-bit comparisons were
   silently 32-bit, masked by SHA256d using zero-extended 32-bit values
+
+---
+Task ID: 8
+Agent: general-purpose
+Task: Expand VUMA standard library with practical functions for LLMs
+
+Work Log:
+- Read existing std library structure: alloc.rs, io.rs, lib.rs, and crypto examples
+- Enhanced alloc.rs with three system-call-level heap functions:
+  - `heap_alloc(size: u64) -> Address`: wraps libc::malloc (Linux) or Rust global allocator, zero-initializes memory
+  - `heap_free(ptr: Address)`: wraps libc::free, safe no-op on null
+  - `heap_realloc(ptr: Address, new_size: u64) -> Address`: wraps libc::realloc with proper null/zero semantics
+- Created crypto.rs module with comprehensive SHA-256 documentation:
+  - Documented all VUMA crypto idioms (32-bit masking, NOT via XOR, rotate from shifts, memory layout)
+  - Added SHA256_K (64 round constants) and SHA256_H (8 initial hash values) as const arrays
+  - Implemented host-side sha256_ch, sha256_maj, sha256_big_sigma0/1, sha256_small_sigma0/1
+  - Added sha256_read_u32_be / sha256_write_u32_be host-side helpers
+  - Added crypto_capd() capability descriptor
+  - 10 unit tests covering all functions
+- Enhanced io.rs with four new functions:
+  - `read_bytes(fd, buf, count) -> i64`: POSIX read syscall wrapper
+  - `write_bytes(fd, buf, count) -> i64`: POSIX write syscall wrapper
+  - `read_u32_le(buf, offset) -> u32`: little-endian u32 reader (for ELF, WAV, etc.)
+  - `write_u32_le(buf, offset, val)`: little-endian u32 writer
+- Created string.rs module with four memory/string operations:
+  - `strlen(s: Address) -> u64`: null-terminated string length
+  - `strcmp(a: Address, b: Address) -> i32`: lexicographic string comparison
+  - `memcpy(dst, src, n)`: non-overlapping memory copy
+  - `memset(dst, val, n)`: memory fill
+  - Added string_capd() capability descriptor
+  - 11 unit tests
+- Created math.rs module with four utility functions:
+  - `abs(x: i64) -> i64`: absolute value (wrapping for i64::MIN)
+  - `min(a, b: i64) -> i64`: minimum of two values
+  - `max(a, b: i64) -> i64`: maximum of two values
+  - `clamp(x, lo, hi: i64) -> i64`: constrain to range [lo, hi]
+  - Added math_capd() capability descriptor
+  - 15 unit tests
+- Updated lib.rs:
+  - Added `pub mod crypto`, `pub mod math`, `pub mod string`
+  - Added re-exports for all new public items (heap_alloc/free/realloc, SHA256_K/H, crypto functions, I/O functions, string functions, math functions)
+  - Updated module documentation with descriptions of new modules
+- All 381 tests pass, 0 failures, clean build
+
+Stage Summary:
+- 3 new modules created (crypto.rs, string.rs, math.rs)
+- 2 existing modules enhanced (alloc.rs, io.rs)
+- 15 new public functions with comprehensive documentation
+- Each function has VUMA program equivalents, BD annotations, and safety documentation
+- All functions follow existing codebase patterns (VUMA-VERIFIED comments, CapD/SyncEdge annotations, cfg feature flags)
+
+---
+Task ID: 9
+Agent: general-purpose
+Task: Improve register allocator to reduce excessive stack spilling (greedy register cache)
+
+Work Log:
+- Read regalloc.rs (5470 lines), target_desc.rs, and stack_slot_isel files for x86_64 and loongarch64
+- Analyzed the current approach: stack-slot ISel assigns every vreg → stack slot, meaning every operation does load→compute→store (3 memory ops per instruction)
+- Studied loongarch64/reg_alloc_isel.rs which already implements a target-specific register cache (RegCache)
+- Designed and implemented a TARGET-INDEPENDENT solution in regalloc.rs
+
+Changes to regalloc.rs:
+1. **LoopDetector** — Detects natural loops via back-edge analysis and dominator computation
+   - Uses iterative dominator algorithm (Cooper, Harvey, Kennedy)
+   - Computes loop nesting depth for each loop
+   - detect_with_induction_vars() identifies self-referencing induction variables (v = v + const)
+
+2. **Loop Depth Computation** — compute_block_loop_depths() and compute_vreg_loop_depths()
+   - Maps each block to its loop nesting depth
+   - Maps each vreg to its maximum loop depth across all uses/defs
+
+3. **Enhanced LiveInterval spill weights** — enhanced_spill_weight() and enhanced_weight_per_length()
+   - Loop depth multiplier: 10^depth (exponential, standard in production compilers)
+   - Induction variable bonus: 3x
+   - Call crossing penalty: 2x
+   - Formula: (uses+defs) × 10^depth × induction_bonus × call_multiplier
+
+4. **GreedyRegCache** — Target-independent register cache for backends to use at ISel time
+   - Tracks which vregs are in physical registers vs on the stack
+   - LRU eviction policy, preferring to evict caller-saved over callee-saved
+   - read_vreg(): ensures vreg is in register (returns whether reload needed)
+   - alloc_vreg(): allocates register for new definition
+   - release_vreg(): frees register when liveness says vreg is dead (NO spill needed)
+   - flush_all()/flush_caller_saved(): emits spill code for dirty registers
+   - invalidate_caller_saved(): after function calls, marks caller-saved regs as stale
+   - Can be constructed from TargetDesc for any backend
+
+5. **LivenessAnalysis** — Per-instruction liveness dataflow analysis
+   - Iterative backward dataflow: live_in = use ∪ (live_out - def)
+   - Per-instruction dead_at set: definitions that are never used later
+   - Backends can query is_dead_at() to know when to call release_vreg()
+
+6. **Enhanced TargetAgnosticRegAlloc::allocate_function_enhanced()**
+   - Integrates loop detection + induction variable detection
+   - Sorts intervals by (start, -loop_depth, -is_induction, -length) for priority
+   - Uses enhanced spill weights for eviction decisions
+   - Tracks dead vregs during allocation for register reuse
+
+7. **19 new tests** (all passing):
+   - loop_detector_simple_loop — back-edge detection
+   - loop_detector_induction_variable — induction var detection
+   - loop_detector_self_referencing_induction — v=v+1 pattern detection
+   - loop_depth_computation — block/vreg depth mapping
+   - enhanced_spill_weight_loop_priority — depth 1 > depth 0
+   - enhanced_spill_weight_induction_bonus — 3x bonus for induction vars
+   - enhanced_spill_weight_exponential_depth — 10^depth growth
+   - cache_basic_alloc — register cache creation and vreg allocation
+   - cache_release_dead_vreg — dead vreg releases register
+   - cache_spill_only_when_necessary — eviction only when all regs full
+   - enhanced_allocator_prioritizes_loop_vars — loop vars get priority
+   - enhanced_allocator_fewer_spills_for_loops — fewer spills for loop code
+   - liveness_identifies_dead_vregs — dead-at detection
+   - liveness_block_in_out — live-in/live-out computation
+   - cache_dead_vreg_frees_register — release + new alloc without spill
+   - cache_flush_caller_saved — caller-saved flush before calls
+   - cache_invalidate_caller_saved — post-call invalidation
+   - enhanced_weight_per_length_eviction_decision — eviction ordering
+   - cache_register_reuse_after_death — register reuse after vreg death
+
+Stage Summary:
+- All new code is TARGET-INDEPENDENT in regalloc.rs — all backends benefit
+- Backends can still use stack-slot ISel as fallback, but can incrementally
+  adopt GreedyRegCache for frequently-used vregs
+- For SHA256d's 64-round compression, loop variables (working vars a-h, round constants)
+  will now have 10x-1000x higher spill weights, ensuring they stay in registers
+  instead of being spilled in favor of one-off temporaries
+- The GreedyRegCache can be used at ISel time by any backend to eliminate the
+  load→compute→store pattern for cached vregs (direct register operations)
+- Build: cargo build -p vuma-codegen succeeds with only pre-existing warnings
+- Tests: 19/19 passing
+
+---
+Task ID: 7
+Agent: main
+Task: Harden VUMA parser for LLM-generated code
+
+Work Log:
+- Read and analyzed parser.rs (6100+ lines), error.rs (1445+ lines), lexer.rs (2969+ lines)
+- Added 3 new ParseErrorKind variants: LlmMistake, CStyleForLoop, UnknownType
+- Added convenience constructors: llm_mistake(), c_style_for_loop(), unknown_type()
+- Added ErrorRecovery strategies for new error kinds (SkipOneToken, SkipToStatementBoundary)
+- Added LLM type suggestion system in error.rs:
+  - LLM_TYPE_ALIASES table: maps C/Rust types (int, float, double, String, Vec, etc.) to VUMA equivalents (i32, f32, f64, string, array, etc.)
+  - VUMA_TYPES list for fuzzy spellcheck suggestions via Levenshtein distance
+  - suggest_vuma_type() function: exact alias lookup + fuzzy matching
+  - check_llm_construct() function: detects println!, vec!, format!, panic!, etc.
+- Enhanced lexer.rs:
+  - Added TokenKind::MacroIdent for Rust-style macro identifiers (println!, vec!, etc.)
+  - lex_ident() now detects `name!` patterns and produces MacroIdent tokens
+- Enhanced parser.rs:
+  - Added current_fn_name field to Parser for context-aware error messages
+  - parse_stmt(): detects `mut` keyword → LLM mistake with suggestion to remove
+  - parse_stmt(): detects MacroIdent → LLM mistake with helpful hint, skips macro args
+  - parse_for_stmt(): detects C-style for `(i=0; i<n; i++)` → specific error with suggestion
+  - parse_type(): detects `&T` and `&mut T` → LLM mistake, auto-converts to `*T` pointer
+  - parse_type(): detects unknown type names (int, float, etc.) → UnknownType error with suggestion
+  - expect(): improved messages to "expected ';' after expression, found '}'" format
+  - expect(): adds line/column tracking from current token
+  - expect(): also checks suggest_vuma_type for identifiers
+  - expect_name(), expect_ident(), expect_string(): improved messages with line/column
+  - parse_block(): better EOF handling — pushes error for missing '}' but returns partial block
+  - parse_program(): collects lexer errors before and after parsing
+  - parse_program(): resolves line/column for all accumulated errors
+  - Added skip_balanced_parens() and skip_balanced_braces() recovery helpers
+- Updated diagnostics.rs:
+  - Added error codes E021 (LlmMistake), E022 (CStyleForLoop), E023 (UnknownType)
+  - Added code descriptions for new error codes
+  - Fixed pre-existing non-exhaustive match on VumaError::ModuleResolution
+- Updated lib.rs: re-exported check_llm_construct and suggest_vuma_type
+
+Key Design Decisions:
+- LLM mistakes are pushed to self.errors as non-fatal errors (parser still returns partial AST)
+- Type detection (int→i32) uses the alias table to auto-correct: parse_type() reports the error but still produces a valid Type node so downstream passes can continue
+- &T/&mut T auto-convert to *T (pointer type) so the rest of the compilation pipeline works
+- The `fn main()` return type hint was considered but removed — omitting return types is valid VUMA
+- Valid VUMA types (i8, i32, i64, etc.) are excluded from LLM_TYPE_ALIASES to avoid false positives
+
+Build: cargo build --lib succeeds, all 324 parser tests pass, all 58 vuma lib tests pass
+
+---
+Task ID: 10
+Agent: general-purpose
+Task: Add multi-file compilation support to VUMA (module system)
+
+Work Log:
+- Read existing parser, AST, lexer, pipeline, main.rs, and to_scg codebase
+- Found that import syntax already partially existed (import "path" {names};)
+- Updated parser.rs parse_import() to support new `::` syntax:
+  `import "crypto.vuma"::{sha256, sha256d};` (with `::` before `{`)
+  Legacy `import "crypto.vuma" {sha256};` still works
+- Created /home/z/my-project/vuma/src/parser/src/resolver.rs:
+  - ModuleResolver struct with cache + in_progress set
+  - resolve_file() for file-path-based resolution
+  - resolve_source() for source-string-based resolution (used by pipeline)
+  - merge_imports() to merge imported items into the importing program
+  - Circular import detection via in_progress set
+  - FileNotFound vs Io error distinction
+  - Name conflict detection (same name from multiple sources)
+  - Symbol not found validation for selective imports
+  - item_name() helper to extract names from AST items
+  - 8 unit tests covering all resolver features
+- Updated /home/z/my-project/vuma/src/parser/src/lib.rs:
+  - Added `pub mod resolver;`
+  - Re-exported `ModuleResolver` and `ResolveError`
+- Updated /home/z/my-project/vuma/src/pipeline.rs:
+  - Added `ModuleResolution` variant to `VumaError` enum
+  - Added `parse_and_resolve()` helper that uses ModuleResolver when imports are present
+  - Created `compile_with_path(source, file_path, config)` function
+  - `compile()` now delegates to `compile_with_path(source, None, config)`
+  - Added stage() and Display() for ModuleResolution error
+- Updated /home/z/my-project/vuma/src/lib.rs:
+  - Re-exported `compile_with_path` from pipeline
+- Updated /home/z/my-project/vuma/src/diagnostics.rs:
+  - Added `from_vuma_error` match arm for `ModuleResolution` variant
+- Updated /home/z/my-project/vuma/src/main.rs:
+  - All CLI commands (build, run, check, verify) now use `compile_with_path`
+  - Pass the input file path so imports resolve relative to the source file
+  - Fixed borrow/move issues in command dispatch
+
+Test Results:
+- All 286 parser unit tests pass (including 8 new resolver tests)
+- All 36 edge_cases tests pass
+- End-to-end tests with multi-file programs:
+  - `import "utils.vuma"::{helper};` with specific symbol import: ✓
+  - `import "utils.vuma";` with wildcard import: ✓
+  - Circular import detection: ✓ (proper error message)
+  - Missing symbol in selective import: ✓ (shows available symbols)
+  - File not found: ✓ (proper error with resolved path)
+
+Stage Summary:
+- Minimal module system implemented: file-level imports, no visibility modifiers, no hierarchy
+- Import syntax: `import "path";` or `import "path"::{name1, name2};`
+- Module resolution: relative path resolution, circular import detection, name conflict detection
+- Pipeline: new `compile_with_path()` API, backward-compatible `compile()` still works
+- CLI: all subcommands now pass file paths for import resolution

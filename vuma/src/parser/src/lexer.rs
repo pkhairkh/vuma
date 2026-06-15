@@ -374,6 +374,10 @@ pub enum TokenKind {
     ErrKw,
     /// Format string literal: `f"..."`
     FormatStr,
+    /// Rust-style macro invocation identifier ending with `!`
+    /// (e.g. `println!`, `vec!`). This is not a valid VUMA construct and
+    /// the parser will report an LLM-mistake diagnostic.
+    MacroIdent,
 
     // ---- Doc comments (preserved as tokens) --------------------------------
     /// `///` outer doc comment
@@ -528,6 +532,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::OkKw => write!(f, "'Ok'"),
             TokenKind::ErrKw => write!(f, "'Err'"),
             TokenKind::FormatStr => write!(f, "format string"),
+            TokenKind::MacroIdent => write!(f, "macro identifier"),
 
             // Doc comments
             TokenKind::DocComment => write!(f, "doc comment"),
@@ -1717,6 +1722,10 @@ impl<'src> Lexer<'src> {
     }
 
     /// Lex an identifier or keyword.
+    ///
+    /// Also detects Rust-style macro invocations (`println!`, `vec!`, etc.)
+    /// and emits a diagnostic warning, since VUMA does not support the `!`
+    /// macro syntax.
     fn lex_ident(&mut self, start: usize, line: usize, column: usize) -> Token {
         self.bump(); // consume first character
         while let Some(&c) = self.chars.peek() {
@@ -1731,6 +1740,21 @@ impl<'src> Lexer<'src> {
         if text == "_" {
             return self.make_token(TokenKind::Underscore, start, line, column);
         }
+
+        // Detect Rust-style macro invocation: `name!`
+        // The `!` is consumed as part of the identifier lexeme so the parser
+        // can report a clear LLM-mistake diagnostic.
+        if self.chars.peek() == Some(&'!') {
+            let macro_name = text.to_string();
+            // Check if this is a known LLM-generated macro pattern
+            if crate::error::check_llm_construct(&macro_name).is_some() {
+                self.bump(); // consume the '!'
+                // Return a MacroIdent token so the parser can easily detect it.
+                // The lexeme will be the full "name!" text.
+                return self.make_token(TokenKind::MacroIdent, start, line, column);
+            }
+        }
+
         let kind = keyword_kind(text).unwrap_or(TokenKind::Ident);
         self.make_token(kind, start, line, column)
     }

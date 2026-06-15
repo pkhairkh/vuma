@@ -239,6 +239,9 @@ pub fn code_for_parse_error_kind(kind: &ParseErrorKind) -> &'static str {
         ParseErrorKind::InvalidCompoundOp => "E013",
         ParseErrorKind::MissingSemicolon => "E014",
         ParseErrorKind::InvalidAddress => "E015",
+        ParseErrorKind::LlmMistake => "E021",
+        ParseErrorKind::CStyleForLoop => "E022",
+        ParseErrorKind::UnknownType => "E023",
     }
 }
 
@@ -277,6 +280,9 @@ pub fn code_description(code: &str) -> &'static str {
         "E017" => "Register allocation failed",
         "E018" => "Encoding error",
         "E019" => "IR translation error",
+        "E021" => "LLM code mismatch (Rust/C syntax in VUMA)",
+        "E022" => "C-style for loop (use range-based for instead)",
+        "E023" => "Unknown type (use VUMA sized integer types)",
         "E020" => "ELF emission error",
         "W001" => "Unused variable",
         "W002" => "Implicit type conversion",
@@ -578,6 +584,18 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
             )]
         }
         VumaError::Multi { errors } => errors.iter().flat_map(from_vuma_error).collect(),
+        VumaError::ModuleResolution { errors } => errors
+            .iter()
+            .flat_map(|e| {
+                vec![VumaDiagnostic::new(
+                    "E001",
+                    DiagnosticSeverity::Error,
+                    e.to_string(),
+                    "module-resolution",
+                    DiagnosticSourceLocation::unknown(),
+                )]
+            })
+            .collect(),
     }
 }
 

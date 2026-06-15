@@ -10,10 +10,20 @@
 //!   (integers, floats, bool, byte, pointers) with Capability Descriptors (CapDs).
 //! - **alloc**: Memory allocation strategies (Global, Arena, Pool, Bump, FreeList,
 //!   VumaAllocator) with VUMA-compatible BD annotations for verified memory management.
+//!   Also provides system-call-level heap allocation (`heap_alloc`, `heap_free`,
+//!   `heap_realloc`) that underpins the `.vuma` `allocate`/`free` builtins.
 //! - **collections**: Verified data structures (DoublyLinkedList, Vec, HashMap, RingBuffer)
 //!   with BD-annotated methods and capability tracking.
+//! - **crypto**: Cryptographic primitive declarations (SHA-256 constants, logical
+//!   functions, byte-access helpers) and documentation of available VUMA crypto idioms.
 //! - **io**: I/O bindings for file, standard stream, and network operations with
-//!   capability-based access control.
+//!   capability-based access control. Also provides low-level syscall wrappers
+//!   (`read_bytes`, `write_bytes`) and little-endian byte access (`read_u32_le`,
+//!   `write_u32_le`).
+//! - **string**: String and memory operations (`strlen`, `strcmp`, `memcpy`, `memset`)
+//!   that operate on VUMA `Address` pointers.
+//! - **math**: Mathematical utility functions (`abs`, `min`, `max`, `clamp`) commonly
+//!   needed by LLMs writing real programs.
 //! - **sync**: Synchronization primitives (Mutex, RwLock, Channel, Barrier) with
 //!   BD CapD annotations ensuring exclusive access patterns and SyncEdge annotations
 //!   for the Message Sequence Graph (MSG).
@@ -28,14 +38,17 @@
 
 pub mod alloc;
 pub mod collections;
+pub mod crypto;
 pub mod env;
 pub mod error;
 pub mod fs;
 pub mod io;
+pub mod math;
 pub mod net;
 pub mod path;
 pub mod primitives;
 pub mod process;
+pub mod string;
 pub mod sync;
 pub mod thread;
 pub mod time;
@@ -54,7 +67,8 @@ pub use primitives::{Ptr, Range, RegionPtr, Slice, VumaOption, VumaResult};
 // Re-export allocation types
 pub use alloc::{
     Address, AllocError, AllocEventKind, AllocRecord, AllocResult, AllocTracker, ArenaAllocator,
-    BumpAllocator, FreeListAllocator, GlobalAllocator, MemoryStats, PoolAllocator, VumaAllocator,
+    BumpAllocator, FreeListAllocator, GlobalAllocator, heap_alloc, heap_free, heap_realloc,
+    MemoryStats, PoolAllocator, VumaAllocator,
 };
 
 // Re-export collection types
@@ -93,6 +107,11 @@ pub use io::{
     VumaStdin,
     VumaStdout,
     VumaWriter,
+    // Low-level I/O syscalls and byte access
+    read_bytes,
+    write_bytes,
+    read_u32_le,
+    write_u32_le,
 };
 
 // Re-export sync types
@@ -100,6 +119,18 @@ pub use sync::{
     Barrier, BarrierCapD, Channel, ChannelCapD, Mutex, MutexCapD, MutexGuard, RwLock, RwLockCapD,
     RwLockReadGuard, RwLockWriteGuard,
 };
+
+// Re-export crypto types
+pub use crypto::{
+    SHA256_K, SHA256_H, crypto_capd, sha256_ch, sha256_maj, sha256_big_sigma0, sha256_big_sigma1,
+    sha256_small_sigma0, sha256_small_sigma1, sha256_read_u32_be, sha256_write_u32_be,
+};
+
+// Re-export string/memory operations
+pub use string::{strlen, strcmp, memcpy, memset};
+
+// Re-export math utility functions
+pub use math::{abs, min, max, clamp};
 
 /// VUMA Standard Library version
 pub const VERSION: &str = "0.1.0";

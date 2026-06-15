@@ -21,7 +21,10 @@
 //!   literals (int, float, bool, string, address, null), struct init, namespace access
 
 use crate::ast::*;
-use crate::error::{suggest_keyword, ErrorRecovery, ParseError, ParseErrorKind, ParseResult, Span};
+use crate::error::{
+    check_llm_construct, suggest_keyword, suggest_vuma_type, ErrorRecovery, ParseError,
+    ParseErrorKind, ParseResult, Span,
+};
 use crate::lexer::{Lexer, Token, TokenKind};
 
 // ---------------------------------------------------------------------------
@@ -50,6 +53,8 @@ pub struct Parser<'src> {
     /// is not consumed as part of a struct literal and remains available
     /// for the enclosing construct (e.g. a for-loop body).
     no_struct_literal: bool,
+    /// Name of the function currently being parsed (for context-aware errors).
+    current_fn_name: Option<String>,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -120,6 +125,7 @@ impl<'src> Parser<'src> {
             expr_depth: 0,
             max_depth: MAX_EXPR_DEPTH,
             no_struct_literal: false,
+            current_fn_name: None,
         }
     }
 
@@ -137,10 +143,15 @@ impl<'src> Parser<'src> {
     /// If errors are encountered the parser attempts recovery and continues;
     /// the returned [`ParseResult`] carries both the partial AST and any
     /// accumulated non-fatal errors, enabling multi-error reporting in a
-    /// single pass.
+    /// single pass. All errors are collected — the parser never stops at
+    /// the first error.
     pub fn parse_program(&mut self) -> ParseResult<Program> {
         let start = self.current.span.start;
         let mut items = Vec::new();
+
+        // Also collect any lexer-level errors
+        let lexer_errors = self.lexer.take_errors();
+        self.errors.extend(lexer_errors);
 
         while !self.at(TokenKind::Eof) {
             match self.parse_item() {
@@ -152,11 +163,21 @@ impl<'src> Parser<'src> {
             }
         }
 
+        // Collect any remaining lexer errors that appeared during parsing
+        let lexer_errors = self.lexer.take_errors();
+        self.errors.extend(lexer_errors);
+
         let end = self.current.span.end;
         let program = Program {
             items,
             span: Span::new(start, end),
         };
+
+        // Resolve line/column for all accumulated errors
+        let source = self.lexer.source();
+        for err in &mut self.errors {
+            err.resolve_location(source, None);
+        }
 
         if self.errors.is_empty() {
             ParseResult::ok(program)
@@ -249,6 +270,9 @@ impl<'src> Parser<'src> {
 
         let name = self.expect_name()?;
 
+        // Track current function name for context-aware error messages
+        self.current_fn_name = Some(name.clone());
+
         // Optional generic type parameters: `<T, U>`
         let type_params = if self.at(TokenKind::Lt) {
             self.parse_generic_params()?
@@ -293,6 +317,9 @@ impl<'src> Parser<'src> {
             }
         };
         let end = body.span.end;
+
+        // Clear the current function name after we're done parsing it
+        self.current_fn_name = None;
 
         Ok(FnDef {
             visibility: _visibility,
@@ -556,13 +583,23 @@ impl<'src> Parser<'src> {
         })
     }
 
-    /// `import` <string> [`{` <names> `}`] `;`
+    /// `import` <string> [`::` `{` <names> `}`] `;`
+    ///
+    /// Supported forms:
+    /// - `import "crypto.vuma";` — import all functions from file
+    /// - `import "crypto.vuma"::{sha256, sha256d};` — import specific functions
+    /// - `import "crypto.vuma" {sha256, sha256d};` — legacy form (also accepted)
     fn parse_import(&mut self) -> Result<Import, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Import)?;
 
         let path = self.expect_string()?;
         let mut symbols = Vec::new();
+
+        // Accept optional `::` before `{` for the new syntax
+        if self.at(TokenKind::PathSep) {
+            self.advance();
+        }
 
         if self.at(TokenKind::LBrace) {
             self.advance();
@@ -886,6 +923,10 @@ impl<'src> Parser<'src> {
     // -- block & statements --------------------------------------------------
 
     /// `{` <stmt>* `}`
+    ///
+    /// On error within a statement, the parser pushes the error to
+    /// [`self.errors`] and recovers to the next statement boundary, allowing
+    /// the rest of the block to be parsed and all errors to be collected.
     fn parse_block(&mut self) -> Result<Block, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::LBrace)?;
@@ -901,6 +942,19 @@ impl<'src> Parser<'src> {
             }
         }
 
+        // If we hit EOF without finding '}', push an error but don't fail
+        if self.at(TokenKind::Eof) {
+            self.errors.push(ParseError::expected(
+                "'}'",
+                "end of file",
+                self.current.span,
+            ));
+            return Ok(Block {
+                statements,
+                span: Span::new(start, self.current.span.end),
+            });
+        }
+
         self.expect(TokenKind::RBrace)?;
         let end = self.current.span.end;
 
@@ -914,6 +968,46 @@ impl<'src> Parser<'src> {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match self.current.kind {
             TokenKind::Let => self.parse_let_stmt(),
+            TokenKind::Mut => {
+                // LLM mistake: `mut` is not a VUMA keyword for declarations
+                let span = self.current.span;
+                self.errors.push(ParseError::llm_mistake(
+                    "`mut` is not used in VUMA — variables are mutable by default; just use assignment without `mut`",
+                    span,
+                    "remove `mut`",
+                ));
+                self.advance(); // consume `mut`
+                // Try to continue parsing what comes after `mut`
+                self.parse_stmt()
+            }
+            TokenKind::MacroIdent => {
+                // LLM mistake: Rust-style macro invocation (println!, etc.)
+                let span = self.current.span;
+                let lexeme = self.current.lexeme.clone();
+                let name_without_bang = lexeme.strip_suffix('!').unwrap_or(&lexeme);
+                let hint = check_llm_construct(name_without_bang)
+                    .unwrap_or("VUMA does not support macro syntax with `!`");
+                self.errors.push(ParseError::llm_mistake(
+                    format!("`{}` is not valid VUMA syntax — {}", lexeme, hint),
+                    span,
+                    "use `write` or format strings instead",
+                ));
+                self.advance(); // consume the macro identifier
+                // Try to skip the macro arguments and continue
+                if self.at(TokenKind::LParen) {
+                    self.skip_balanced_parens();
+                }
+                if self.at(TokenKind::Semicolon) {
+                    self.advance();
+                }
+                // Return a synthetic expression statement to allow recovery
+                Ok(Stmt::Expr(ExprStmt {
+                    expr: Expr::Uninitialized {
+                        span: Span::new(span.start, span.end),
+                    },
+                    span,
+                }))
+            }
             TokenKind::If => self.parse_if_stmt(),
             TokenKind::While => self.parse_while_stmt(),
             TokenKind::For => self.parse_for_stmt(),
@@ -1146,9 +1240,33 @@ impl<'src> Parser<'src> {
     }
 
     /// `for` <name> `in` <expr> `{` <block> `}`
+    ///
+    /// Also detects and reports C-style for loops: `for (i=0; i<n; i++)`.
     fn parse_for_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::For)?;
+
+        // Detect C-style for loop: `for (` or `for(i=0;...)`
+        if self.at(TokenKind::LParen) {
+            self.errors.push(ParseError::c_style_for_loop(
+                Span::new(start, self.current.span.end),
+            ));
+            // Skip the entire C-style for loop to recover
+            self.recover_to_statement_boundary();
+            // Return a synthetic for loop
+            return Ok(Stmt::For(ForStmt {
+                name: "_".to_string(),
+                iter: Expr::Uninitialized {
+                    span: Span::new(start, self.current.span.start),
+                },
+                body: Block {
+                    statements: Vec::new(),
+                    span: Span::synthetic(),
+                },
+                span: Span::new(start, self.current.span.end),
+            }));
+        }
+
         let name = self.expect_name()?;
         // "in" is tokenized as Ident
         if self.current.kind == TokenKind::Ident && self.current.lexeme == "in" {
@@ -2223,6 +2341,33 @@ impl<'src> Parser<'src> {
     ///          | ident ['<' type (',' type)* '>']  -- BDBase or Generic
     ///          | '(' type (',' type)* ')' '->' type  -- Func
     fn parse_type(&mut self) -> Result<Type, ParseError> {
+        // Detect Rust-style reference: `&T` or `&mut T`
+        // VUMA doesn't use `&` for references — use pointer types `*T` instead.
+        if self.at(TokenKind::Ampersand) {
+            let span = self.current.span;
+            // Check for `&mut` pattern
+            let next = self.peek_next();
+            let is_mut_ref = next.kind == TokenKind::Mut;
+            self.advance(); // consume '&'
+            if is_mut_ref {
+                self.advance(); // consume 'mut'
+                self.errors.push(ParseError::llm_mistake(
+                    "`&mut` references are not used in VUMA — use pointer types `*T` instead",
+                    span,
+                    "use `*T` for mutable pointers",
+                ));
+            } else {
+                self.errors.push(ParseError::llm_mistake(
+                    "`&` references are not used in VUMA — use pointer types `*T` instead",
+                    span,
+                    "use `*T` for pointers",
+                ));
+            }
+            // Continue parsing the inner type and return a pointer type
+            let inner = self.parse_type()?;
+            return Ok(Type::Ptr(Box::new(inner)));
+        }
+
         // Pointer type: `*T` or `*T @ region`
         if self.at(TokenKind::Star) {
             self.advance(); // consume '*'
@@ -2300,6 +2445,13 @@ impl<'src> Parser<'src> {
 
         // Named type (BDBase) or Generic type: `Name<T, ...>`
         let name = self.expect_name()?;
+
+        // Check for known LLM type aliases (int, float, String, etc.)
+        if suggest_vuma_type(&name).is_some() {
+            // Only report if the name is NOT a valid VUMA type already
+            // (suggest_vuma_type returns None for valid VUMA types)
+            self.errors.push(ParseError::unknown_type(&name, self.current.span));
+        }
 
         // Check for generic arguments: `Name<T, U, ...>`
         if self.at(TokenKind::Lt) {
@@ -2404,12 +2556,15 @@ impl<'src> Parser<'src> {
     ///
     /// If the current token is an identifier that is close to a VUMA keyword,
     /// a "did you mean?" suggestion is automatically attached to the error.
+    /// Also detects common LLM mistakes like `int` for `i32`.
     fn expect(&mut self, kind: TokenKind) -> Result<Token, ParseError> {
         if self.current.kind == kind {
             Ok(self.advance())
         } else {
-            let mut err = ParseError::unexpected(
-                format!("expected {}, found {}", kind, self.current.kind),
+            let found_desc = format!("{}", self.current.kind);
+            let mut err = ParseError::expected(
+                format!("'{}'", kind),
+                format!("'{}'", found_desc),
                 self.current.span,
             );
             // If the unexpected token is an identifier, check if it's a typo
@@ -2418,7 +2573,14 @@ impl<'src> Parser<'src> {
                 if let Some(kw) = suggest_keyword(&self.current.lexeme) {
                     err = err.with_suggestion(kw);
                 }
+                // Also check for known LLM type names (int, float, etc.)
+                if suggest_vuma_type(&self.current.lexeme).is_some() {
+                    err = err.with_suggestion(suggest_vuma_type(&self.current.lexeme).unwrap());
+                }
             }
+            // Populate line/column from the current token
+            err.line = Some(self.current.line as u32 + 1);
+            err.column = Some(self.current.column as u32 + 1);
             Err(err)
         }
     }
@@ -2431,10 +2593,14 @@ impl<'src> Parser<'src> {
             self.advance();
             Ok(name)
         } else {
-            Err(ParseError::unexpected(
-                format!("expected identifier, found {}", self.current.kind),
+            let mut err = ParseError::expected(
+                "identifier",
+                format!("'{}'", self.current.kind),
                 self.current.span,
-            ))
+            );
+            err.line = Some(self.current.line as u32 + 1);
+            err.column = Some(self.current.column as u32 + 1);
+            Err(err)
         }
     }
 
@@ -2449,8 +2615,9 @@ impl<'src> Parser<'src> {
             self.advance();
             Ok(name)
         } else {
-            let mut err = ParseError::unexpected(
-                format!("expected name, found {}", self.current.kind),
+            let mut err = ParseError::expected(
+                "name",
+                format!("'{}'", self.current.kind),
                 self.current.span,
             );
             // If the unexpected token is an identifier, check for keyword typos.
@@ -2459,6 +2626,8 @@ impl<'src> Parser<'src> {
                     err = err.with_suggestion(kw);
                 }
             }
+            err.line = Some(self.current.line as u32 + 1);
+            err.column = Some(self.current.column as u32 + 1);
             Err(err)
         }
     }
@@ -2519,10 +2688,14 @@ impl<'src> Parser<'src> {
             self.advance();
             Ok(value)
         } else {
-            Err(ParseError::unexpected(
-                format!("expected string literal, found {}", self.current.kind),
+            let mut err = ParseError::expected(
+                "string literal",
+                format!("'{}'", self.current.kind),
                 self.current.span,
-            ))
+            );
+            err.line = Some(self.current.line as u32 + 1);
+            err.column = Some(self.current.column as u32 + 1);
+            Err(err)
         }
     }
 
@@ -2587,6 +2760,55 @@ impl<'src> Parser<'src> {
     #[allow(dead_code)]
     fn recover_to_block_boundary(&mut self) {
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            self.advance();
+        }
+    }
+
+    /// Skip balanced parentheses (used for error recovery when encountering
+    /// macro invocations like `println!(...)`).
+    fn skip_balanced_parens(&mut self) {
+        if !self.at(TokenKind::LParen) {
+            return;
+        }
+        let mut depth: usize = 0;
+        while !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::LParen) {
+                depth += 1;
+            } else if self.at(TokenKind::RParen) {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    self.advance(); // consume closing ')'
+                    break;
+                }
+            }
+            self.advance();
+        }
+    }
+
+    /// Skip balanced braces (used for error recovery when encountering
+    /// unterminated blocks).
+    #[allow(dead_code)]
+    fn skip_balanced_braces(&mut self) {
+        if !self.at(TokenKind::LBrace) {
+            return;
+        }
+        let mut depth: usize = 0;
+        while !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::LBrace) {
+                depth += 1;
+            } else if self.at(TokenKind::RBrace) {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    self.advance(); // consume closing '}'
+                    break;
+                }
+            }
             self.advance();
         }
     }

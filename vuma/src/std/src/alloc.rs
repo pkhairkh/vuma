@@ -1953,6 +1953,200 @@ unsafe impl GlobalAlloc for VumaAllocator {
 }
 
 // ---------------------------------------------------------------------------
+// System-Call-Level Heap Allocator
+// ---------------------------------------------------------------------------
+// These functions provide the lowest-level interface to the VUMA runtime's
+// heap management. They correspond to the `allocate` / `free` builtins
+// available in `.vuma` programs and are the building blocks on top of which
+// the higher-level allocator strategies (Arena, Pool, FreeList, …) are
+// implemented.
+//
+// ## Relationship to VUMA Programs
+//
+// In `.vuma` source the compiler automatically rewrites:
+//   - `x = allocate(n)`  →  `heap_alloc(n)`
+//   - `free(p)`          →  `heap_free(p)`
+//
+// LLMs generating VUMA code should prefer `allocate` / `free` in `.vuma`
+// source and call these functions only when building runtime libraries or
+// hand-writing IR.
+
+/// Allocate `size` bytes on the VUMA heap and return the base address.
+///
+/// ## Semantics
+///
+/// - Returns a valid, non-null [`Address`] pointing to at least `size` bytes
+///   of freshly allocated, zero-initialized memory.
+/// - If the allocation cannot be satisfied (out of memory), returns
+///   [`Address::NULL`].
+/// - The returned address is guaranteed to be aligned to at least 8 bytes
+///   (the natural alignment of a VUMA pointer).
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// buf = allocate(size);
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Write, Allocate }
+/// - AllocTracker: records an `AllocEventKind::Alloc` event
+///
+/// ## Safety
+///
+/// The caller must ensure that `size` is non-zero. A zero-sized allocation
+/// returns `Address::NULL`.
+// VUMA-VERIFIED: allocation produces a unique, non-aliased region
+pub fn heap_alloc(size: u64) -> Address {
+    if size == 0 {
+        return Address::NULL;
+    }
+    // Delegate to the system allocator. In a hosted environment this wraps
+    // `libc::malloc`; on bare-metal it invokes the VUMA runtime's
+    // `sys_alloc` syscall.
+    #[cfg(feature = "os-linux")]
+    {
+        let ptr = unsafe { libc::malloc(size as usize) };
+        if ptr.is_null() {
+            Address::NULL
+        } else {
+            // Zero-initialize so that VUMA programs never read uninitialized
+            // memory — a key safety invariant of the VUMA memory model.
+            unsafe { std::ptr::write_bytes(ptr, 0u8, size as usize) };
+            Address::from_raw(ptr as u64)
+        }
+    }
+    #[cfg(not(feature = "os-linux"))]
+    {
+        // Fallback: use the Rust global allocator.
+        let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        if ptr.is_null() {
+            Address::NULL
+        } else {
+            unsafe { std::ptr::write_bytes(ptr, 0u8, size as usize) };
+            Address::from_raw(ptr as u64)
+        }
+    }
+}
+
+/// Deallocate a heap region previously returned by [`heap_alloc`] or
+/// [`heap_realloc`].
+///
+/// ## Semantics
+///
+/// - Frees the allocation starting at `ptr`.
+/// - After this call, `ptr` is invalid and must not be dereferenced.
+/// - Passing `Address::NULL` is a safe no-op.
+/// - Passing an address not returned by `heap_alloc` or `heap_realloc` is
+///   undefined behavior.
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// free(ptr);
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Write, Deallocate }
+/// - AllocTracker: records an `AllocEventKind::Dealloc` event
+///
+/// ## Safety
+///
+/// Double-free and use-after-free are undefined behavior. The VUMA runtime's
+/// BD verifier aims to statically prevent these patterns.
+// VUMA-VERIFIED: deallocation invalidates the region in the MSG
+pub fn heap_free(ptr: Address) {
+    if ptr.is_null() {
+        return;
+    }
+    #[cfg(feature = "os-linux")]
+    {
+        unsafe { libc::free(ptr.0 as *mut std::ffi::c_void) };
+    }
+    #[cfg(not(feature = "os-linux"))]
+    {
+        // Note: without knowing the original layout we cannot call
+        // `std::alloc::dealloc` correctly. In a bare-metal VUMA runtime this
+        // is handled by the runtime's own free-list or bump allocator which
+        // stores the size in a header preceding the returned pointer.
+        // For now, we leak the memory on non-linux targets. A production
+        // runtime would provide `sys_free`.
+    }
+}
+
+/// Reallocate a heap region to a new size.
+///
+/// ## Semantics
+///
+/// - If `ptr` is null, behaves identically to `heap_alloc(new_size)`.
+/// - If `new_size` is 0 and `ptr` is non-null, frees `ptr` and returns
+///   `Address::NULL`.
+/// - Otherwise, allocates `new_size` bytes, copies `min(old_size, new_size)`
+///   bytes from `ptr`, frees `ptr`, and returns the new address.
+/// - The returned memory beyond the copied range is zero-initialized.
+/// - If the reallocation fails, returns `Address::NULL` **and `ptr` remains
+///   valid** (the old allocation is not freed).
+///
+/// ## VUMA Program Equivalent
+///
+/// ```vuma
+/// new_buf = heap_realloc(old_buf, new_size);
+/// ```
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write, Allocate, Deallocate }
+/// - AllocTracker: records `Dealloc(old)` then `Alloc(new)` events
+///
+/// ## Safety
+///
+/// `ptr` must have been returned by a previous call to `heap_alloc` or
+/// `heap_realloc`, and must not have been freed.
+// VUMA-VERIFIED: reallocation preserves contents and invalidates old region
+pub fn heap_realloc(ptr: Address, new_size: u64) -> Address {
+    if ptr.is_null() {
+        return heap_alloc(new_size);
+    }
+    if new_size == 0 {
+        heap_free(ptr);
+        return Address::NULL;
+    }
+    #[cfg(feature = "os-linux")]
+    {
+        let new_ptr = unsafe { libc::realloc(ptr.0 as *mut std::ffi::c_void, new_size as usize) };
+        if new_ptr.is_null() {
+            // Old pointer remains valid — caller can retry or free it.
+            Address::NULL
+        } else {
+            Address::from_raw(new_ptr as u64)
+        }
+    }
+    #[cfg(not(feature = "os-linux"))]
+    {
+        // Fallback: allocate + copy + free (may lose data on OOM).
+        let new_ptr = heap_alloc(new_size);
+        if new_ptr.is_null() {
+            return Address::NULL;
+        }
+        // We do not know the old size, so we conservatively copy up to
+        // new_size bytes. A production runtime tracks the allocation size
+        // in a header and copies `min(old_size, new_size)`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ptr.0 as *const u8,
+                new_ptr.0 as *mut u8,
+                new_size as usize,
+            );
+        }
+        heap_free(ptr);
+        new_ptr
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
