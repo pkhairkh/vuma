@@ -82,6 +82,18 @@ pub enum IRType {
         /// Number of elements.
         count: usize,
     },
+    /// Tagged union type (for enums): a discriminant tag + union of payloads.
+    /// Layout: [tag: u32, padding, payload: max_payload_size bytes]
+    TaggedUnion {
+        /// Enum name.
+        name: String,
+        /// Tag type (typically U32).
+        tag_type: Box<IRType>,
+        /// Size of the largest variant payload in bytes.
+        max_payload_size: usize,
+        /// Number of variants.
+        variant_count: usize,
+    },
 }
 
 impl IRType {
@@ -124,6 +136,7 @@ impl IRType {
             IRType::Void => false,
             IRType::Struct { fields, .. } => size_of(self) <= 16 && !fields.is_empty(),
             IRType::Array { .. } => size_of(self) <= 16,
+            IRType::TaggedUnion { .. } => size_of(self) <= 16,
         }
     }
 
@@ -162,6 +175,11 @@ impl IRType {
             _ => None,
         }
     }
+
+    /// Returns `true` if this is a tagged union (enum) type.
+    pub fn is_tagged_union(&self) -> bool {
+        matches!(self, IRType::TaggedUnion { .. })
+    }
 }
 
 impl fmt::Display for IRType {
@@ -190,6 +208,9 @@ impl fmt::Display for IRType {
             }
             IRType::Array { element, count } => {
                 write!(f, "[{}; {}]", element, count)
+            }
+            IRType::TaggedUnion { name, .. } => {
+                write!(f, "enum {}", name)
             }
         }
     }
@@ -235,6 +256,24 @@ pub fn size_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
             }
         }
         IRType::Array { element, count } => size_of_with_ptr_width(element, ptr_width) * count,
+        IRType::TaggedUnion {
+            tag_type,
+            max_payload_size,
+            ..
+        } => {
+            let tag_size = size_of_with_ptr_width(tag_type, ptr_width);
+            let tag_align = alignment_of_with_ptr_width(tag_type, ptr_width);
+            // Layout: [tag][padding][payload]
+            let payload_offset = (tag_size + tag_align - 1) & !(tag_align - 1);
+            let total = payload_offset + max_payload_size;
+            // Round up to alignment of the union (max of tag and payload alignment)
+            let union_align = alignment_of_with_ptr_width(t, ptr_width);
+            if union_align > 0 {
+                (total + union_align - 1) & !(union_align - 1)
+            } else {
+                total
+            }
+        }
     }
 }
 
@@ -267,6 +306,11 @@ pub fn alignment_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
                 .unwrap_or(1)
         }
         IRType::Array { element, .. } => alignment_of_with_ptr_width(element, ptr_width),
+        IRType::TaggedUnion { tag_type, .. } => {
+            // Alignment is max of tag alignment and 4 (u32 payload alignment)
+            let tag_align = alignment_of_with_ptr_width(tag_type, ptr_width);
+            tag_align.max(4)
+        }
     }
 }
 
@@ -350,8 +394,8 @@ pub fn classify_arg(t: &IRType) -> ArgClass {
         // (the caller should treat a void return as "no return value").
         IRType::Void => ArgClass::Integer,
 
-        // Struct / Array: check HFA first, then size.
-        IRType::Struct { .. } | IRType::Array { .. } => {
+        // Struct / Array / TaggedUnion: check HFA first, then size.
+        IRType::Struct { .. } | IRType::Array { .. } | IRType::TaggedUnion { .. } => {
             if t.is_hfa() {
                 ArgClass::FP
             } else {
@@ -1225,6 +1269,10 @@ pub enum IRInstr {
         func: String,
         /// Argument values.
         args: Vec<IRValue>,
+        /// Whether this is a call to an extern (foreign) function.
+        /// When true, the backend should emit a relocation instead of a
+        /// local `BL` / `CALL` to a defined symbol.
+        is_extern: bool,
     },
 
     /// Stack allocation: `dst = alloc size` — reserves `size` bytes on the
@@ -1360,6 +1408,60 @@ pub enum IRInstr {
         ty: Option<IRType>,
     },
 
+    // ── Atomic operations ──────────────────────────────────────────────
+    /// Atomic load: `dst = atomic_load addr`
+    ///
+    /// Emits target-specific acquire-load instructions:
+    /// - AArch64: `LDAXR`
+    /// - x86_64: `LOCK` prefix or plain `MOV` (x86 is already atomic for aligned loads)
+    /// - RISC-V: `LR.D`
+    AtomicLoad {
+        /// Destination register.
+        dst: IRValue,
+        /// Source address register.
+        addr: IRValue,
+        /// Type of the value being loaded (determines access size).
+        ty: IRType,
+    },
+
+    /// Atomic store: `atomic_store value, addr`
+    ///
+    /// Emits target-specific release-store instructions:
+    /// - AArch64: `STLXR`
+    /// - x86_64: `LOCK` prefix or plain `MOV`
+    /// - RISC-V: `SC.D`
+    AtomicStore {
+        /// Value to store.
+        value: IRValue,
+        /// Target address register.
+        addr: IRValue,
+        /// Type of the value being stored.
+        ty: IRType,
+    },
+
+    /// Atomic compare-and-swap: `dst = atomic_cas addr, expected, desired`
+    ///
+    /// Returns the old value at `addr`. If the old value equals `expected`,
+    /// the new value `desired` is written. The `dst` receives the old value
+    /// so the caller can check whether the swap succeeded.
+    ///
+    /// Emits target-specific LL/SC or CMPXCHG sequences:
+    /// - AArch64: `LDAXR` / `CMP` / `B.NE` / `STLXR` loop
+    /// - x86_64: `LOCK CMPXCHG`
+    /// - RISC-V: `LR.D` / `BNE` / `SC.D` loop
+    AtomicCas {
+        /// Destination register (receives the old value at addr).
+        dst: IRValue,
+        /// Target address register.
+        addr: IRValue,
+        /// Expected value.
+        expected: IRValue,
+        /// Desired new value.
+        desired: IRValue,
+        /// Type of the value (determines access size).
+        ty: IRType,
+    },
+
     // ── Instruction-level control flow ───────────────────────────────
     /// Return from the current function with optional values.
     Ret {
@@ -1380,6 +1482,45 @@ pub enum IRInstr {
         true_target: String,
         /// Label to branch to when condition is false.
         false_target: String,
+    },
+
+    // ── Constant-time security operations ───────────────────────────
+    /// Constant-time conditional select: `dst = ct_select(cond, a, b)`.
+    ///
+    /// Returns `a` if `cond != 0`, else `b`, using only bitwise operations
+    /// (no branches) to prevent timing side-channel attacks.
+    ///
+    /// Lowered to: `(a & mask) | (b & ~mask)` where `mask = -(cond != 0)`.
+    CtSelect {
+        /// Destination register.
+        dst: IRValue,
+        /// Condition value.
+        cond: IRValue,
+        /// Value selected when condition is true.
+        true_val: IRValue,
+        /// Value selected when condition is false.
+        false_val: IRValue,
+        /// Type of the result (determines 32-bit vs 64-bit encoding).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
+    },
+
+    /// Constant-time equality check: `dst = ct_eq(a, b)`.
+    ///
+    /// Returns 1 if `a == b`, else 0, using only bitwise operations
+    /// (no branches) to prevent timing side-channel attacks.
+    ///
+    /// Lowered to: XOR-based comparison with constant-time result.
+    CtEq {
+        /// Destination register (boolean result: 1 or 0).
+        dst: IRValue,
+        /// Left-hand side operand.
+        lhs: IRValue,
+        /// Right-hand side operand.
+        rhs: IRValue,
+        /// Type of the operands (determines 32-bit vs 64-bit comparison).
+        /// `None` defaults to 64-bit (X register) behavior.
+        ty: Option<IRType>,
     },
 }
 
@@ -1406,12 +1547,17 @@ impl IRInstr {
             | IRInstr::Sub { dst, .. }
             | IRInstr::Mul { dst, .. }
             | IRInstr::Div { dst, .. }
-            | IRInstr::Cmp { dst, .. } => dst.as_register().into_iter().collect(),
+            | IRInstr::Cmp { dst, .. }
+            | IRInstr::CtSelect { dst, .. }
+            | IRInstr::CtEq { dst, .. }
+            | IRInstr::AtomicLoad { dst, .. }
+            | IRInstr::AtomicCas { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
             | IRInstr::Branch { .. }
-            | IRInstr::CondBranch { .. } => vec![],
+            | IRInstr::CondBranch { .. }
+            | IRInstr::AtomicStore { .. } => vec![],
         }
     }
 
@@ -1463,6 +1609,34 @@ impl IRInstr {
             IRInstr::Ret { values } => values.iter().filter_map(|v| v.as_register()).collect(),
             IRInstr::Branch { .. } => vec![],
             IRInstr::CondBranch { cond, .. } => cond.as_register().into_iter().collect(),
+            IRInstr::CtSelect {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => {
+                let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(true_val.as_register());
+                r.extend(false_val.as_register());
+                r
+            }
+            IRInstr::CtEq { lhs, rhs, .. } => {
+                let mut r = lhs.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(rhs.as_register());
+                r
+            }
+            IRInstr::AtomicLoad { addr, .. } => addr.as_register().into_iter().collect(),
+            IRInstr::AtomicStore { value, addr, .. } => {
+                let mut r = value.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(addr.as_register());
+                r
+            }
+            IRInstr::AtomicCas { addr, expected, desired, .. } => {
+                let mut r = addr.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(expected.as_register());
+                r.extend(desired.as_register());
+                r
+            }
         }
     }
 }
@@ -1490,15 +1664,16 @@ impl fmt::Display for IRInstr {
             IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
                 write!(f, "{} = {} {}", dst, op, operand)
             }
-            IRInstr::Call { dst, func, args } => {
+            IRInstr::Call { dst, func, args, is_extern } => {
                 let args_str = args
                     .iter()
                     .map(|a| format!("{}", a))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let prefix = if *is_extern { "extern call" } else { "call" };
                 match dst {
-                    Some(d) => write!(f, "{} = call @{}({})", d, func, args_str),
-                    None => write!(f, "call @{}({})", func, args_str),
+                    Some(d) => write!(f, "{} = {} @{}({})", d, prefix, func, args_str),
+                    None => write!(f, "{} @{}({})", prefix, func, args_str),
                 }
             }
             IRInstr::Alloc { dst, size } => write!(f, "{} = alloc {}", dst, size),
@@ -1555,6 +1730,36 @@ impl fmt::Display for IRInstr {
                 false_target,
             } => {
                 write!(f, "br {}, @{}, @{}", cond, true_target, false_target)
+            }
+            IRInstr::CtSelect {
+                dst,
+                cond,
+                true_val,
+                false_val,
+                ty: _,
+            } => {
+                write!(
+                    f,
+                    "{} = ct_select {}, {}, {}",
+                    dst, cond, true_val, false_val
+                )
+            }
+            IRInstr::CtEq {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => {
+                write!(f, "{} = ct_eq {}, {}", dst, lhs, rhs)
+            }
+            IRInstr::AtomicLoad { dst, addr, ty } => {
+                write!(f, "{} = atomic_load {} ({})", dst, addr, ty)
+            }
+            IRInstr::AtomicStore { value, addr, ty } => {
+                write!(f, "atomic_store {}, {} ({})", value, addr, ty)
+            }
+            IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+                write!(f, "{} = atomic_cas {}, {}, {} ({})", dst, addr, expected, desired, ty)
             }
         }
     }

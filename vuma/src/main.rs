@@ -220,6 +220,32 @@ enum Commands {
 
     /// Start the Language Server (LSP) for IDE/LLM integration
     Lsp,
+
+    /// Package manager subcommands
+    Pkg {
+        #[command(subcommand)]
+        cmd: PkgCommand,
+    },
+}
+
+/// Package manager subcommands.
+#[derive(Subcommand, Debug)]
+enum PkgCommand {
+    /// Initialize a new VUMA package in the current directory
+    Init {
+        /// Package name
+        name: String,
+    },
+    /// Build the package and its dependencies
+    Build,
+    /// Add a dependency to the package manifest
+    Add {
+        /// Dependency name
+        dep: String,
+        /// Version requirement (e.g. "0.1", "^1.0")
+        #[arg(default_value = "*")]
+        version: String,
+    },
 }
 
 /// Target platform CLI argument for the `build` subcommand.
@@ -770,6 +796,7 @@ fn flatten_expr(
                 dst: Some(dst.clone()),
                 func: func_name,
                 args: flat_args,
+                is_extern: false,
             }));
             ScgExpr::Var(dst)
         }
@@ -839,6 +866,7 @@ fn flatten_expr(
                 dst: Some(dst.clone()),
                 func: "__vuma_alloc".to_string(),
                 args: vec![size_expr],
+                is_extern: true,
             }));
             ScgExpr::Var(dst)
         }
@@ -917,6 +945,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         dst: Some(let_stmt.name.clone()),
                         func: name.clone(),
                         args: flat_args,
+                        is_extern: false,
                     }));
                     return stmts;
                 }
@@ -1031,6 +1060,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         dst: Some(dst),
                         func: name.clone(),
                         args: flat_args,
+                        is_extern: false,
                     }));
                     return stmts;
                 }
@@ -1660,11 +1690,34 @@ fn main() {
         Commands::Verify { ref file } => cmd_verify(&cli, file),
         Commands::Repl => cmd_repl(),
         Commands::Lsp => cmd_lsp(),
+        Commands::Pkg { ref cmd } => cmd_pkg(cmd),
     };
 
     if let Err(err) = result {
         eprintln!("{}", err);
         std::process::exit(1);
+    }
+}
+
+/// `vuma pkg init/build/add` — Package manager subcommands.
+fn cmd_pkg(cmd: &PkgCommand) -> Result<(), String> {
+    let dir = std::env::current_dir().map_err(|e| format!("cannot get current directory: {}", e))?;
+    match cmd {
+        PkgCommand::Init { name } => {
+            vuma::init_package(&dir, name).map_err(|e| format!("pkg init failed: {}", e))?;
+            println!("Initialized VUMA package '{}' in {}", name, dir.display());
+            Ok(())
+        }
+        PkgCommand::Build => {
+            vuma::build_package(&dir).map_err(|e| format!("pkg build failed: {}", e))?;
+            println!("Package built successfully");
+            Ok(())
+        }
+        PkgCommand::Add { dep, version } => {
+            vuma::add_dependency(&dir, dep, version).map_err(|e| format!("pkg add failed: {}", e))?;
+            println!("Added dependency {} @ {}", dep, version);
+            Ok(())
+        }
     }
 }
 

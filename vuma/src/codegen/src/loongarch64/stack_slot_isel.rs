@@ -894,7 +894,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Call ──
-                IRInstr::Call { dst, func: call_target, args } => {
+                IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
                     let mut code = Vec::new();
                     // Per the LP64 ABI: first 8 args in $a0–$a7, args 8+ on
                     // the stack at $sp+0, $sp+8, …
@@ -1057,6 +1057,47 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Store result
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
+                }
+
+                // ── Constant-time conditional select (NO BRANCHES) ──
+                // ct_select uses the same maskeqz/masknez pattern as Select,
+                // but with explicit documentation that it's constant-time.
+                IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    code.extend(encode_load_value(false_val, S0, fp, &vreg_slots));
+                    code.extend(encode_load_value(true_val, S1, fp, &vreg_slots));
+                    code.extend(encode_load_value(cond, S2, fp, &vreg_slots));
+                    code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S0, rk: S2 }.encode());
+                    code.extend_from_slice(&Instruction::Masknez { rd: S1, rj: S1, rk: S2 }.encode());
+                    code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S1 }.encode());
+                    code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                    code
+                }
+
+                // ── Constant-time equality check (NO BRANCHES) ──
+                IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                    code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
+                    // xor S0, S0, S1 → diff
+                    code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S1 }.encode());
+                    // sub.d S2, $r0, S0 → -diff
+                    code.extend_from_slice(&Instruction::SubD { rd: S2, rj: Gpr::R0, rk: S0 }.encode());
+                    // or S0, S0, S2 → (diff | -diff)
+                    code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S2 }.encode());
+                    // srli.d S0, S0, 31 → 0 if diff==0, 1 if diff!=0
+                    code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 31 }.encode());
+                    // xori S0, S0, 1 → invert: 1 if equal, 0 if not
+                    code.extend_from_slice(&Instruction::Xori { rd: S0, rj: S0, imm12: 1 }.encode());
+                    code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                    code
+                }
+
+                // ── Atomic operations (placeholder) ──
+                IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+                    Vec::new() // TODO: implement LoongArch64 atomic lowering
                 }
 
                 // ── Offset ──

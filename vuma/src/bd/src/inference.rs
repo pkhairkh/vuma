@@ -393,7 +393,7 @@ impl BDInferenceEngine {
             NodeType::Effect => self.compute_effect_bd(scg, node_id, bd_map),
             NodeType::Control => self.compute_control_bd(scg, node_id, bd_map),
             NodeType::Phantom => self.compute_phantom_bd(scg, node_id, bd_map),
-            NodeType::VTable | NodeType::ClosureEnv => {
+            NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime => {
                 // VTable and ClosureEnv nodes inherit BD from their inputs
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
@@ -863,7 +863,7 @@ impl BDInferenceEngine {
             NodeType::Effect => Some(UsageContext::ReadWrite),
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
-            NodeType::VTable | NodeType::ClosureEnv => None,
+            NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime => None,
         }
     }
 

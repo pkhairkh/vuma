@@ -168,7 +168,7 @@ pub fn scg_edge_kind_to_edge_kind(kind: &vuma_scg::EdgeKind, label: Option<&str>
 /// the most natural string from each payload variant.
 pub fn extract_label(payload: &vuma_scg::NodePayload) -> String {
     match payload {
-        vuma_scg::NodePayload::Computation(p) => p.operation.clone(),
+        vuma_scg::NodePayload::Computation(p) => p.kind.label(),
         vuma_scg::NodePayload::Allocation(p) => p
             .type_name
             .clone()

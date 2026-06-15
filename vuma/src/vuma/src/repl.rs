@@ -150,7 +150,7 @@ pub fn complete(input: &str) -> Vec<String> {
 fn node_label(node: &vuma_scg::NodeData) -> String {
     use vuma_scg::NodePayload;
     match &node.payload {
-        NodePayload::Computation(c) => c.operation.clone(),
+        NodePayload::Computation(c) => c.kind.label(),
         NodePayload::Allocation(a) => a.type_name.clone().unwrap_or_else(|| "alloc".to_string()),
         NodePayload::Deallocation(_) => "dealloc".to_string(),
         NodePayload::Access(a) => format!("{:?}_access", a.mode),
@@ -1552,7 +1552,7 @@ Expressions:
             for node in self.scg.nodes() {
                 // Match by payload content.
                 let matches = match &node.payload {
-                    vuma_scg::NodePayload::Computation(c) => c.operation.contains(expr),
+                    vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(expr),
                     vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(expr)),
                     _ => false,
                 };
@@ -1595,7 +1595,7 @@ Expressions:
             // Match by payload content — look for the function name in
             // the node's payload (operation, type_name, etc.).
             let matches = match &node.payload {
-                vuma_scg::NodePayload::Computation(c) => c.operation.contains(func_name),
+                vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(func_name),
                 vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(func_name)),
                 _ => false,
             };

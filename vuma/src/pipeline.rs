@@ -884,7 +884,8 @@ fn extract_case_value(
         let cond_source = df_edge.source;
         if let Some(source_node) = scg.get_node(cond_source) {
             if let NodePayload::Computation(comp) = &source_node.payload {
-                let is_eq = comp.operation == "eq" || comp.operation == "==";
+                let op_label = comp.kind.label();
+                let is_eq = op_label == "eq" || op_label == "==";
                 if is_eq {
                     // The RHS of the equality is the case value.
                     let rhs_inputs = edge_idx.incoming_df(cond_source);
@@ -894,7 +895,7 @@ fn extract_case_value(
                             // The RHS node might be a Computation whose
                             // operation string is a literal integer.
                             if let NodePayload::Computation(rhs_comp) = &rhs_node.payload {
-                                if let Ok(val) = rhs_comp.operation.parse::<i64>() {
+                                if let Ok(val) = rhs_comp.kind.label().parse::<i64>() {
                                     return val;
                                 }
                             }
@@ -1229,7 +1230,8 @@ fn convert_node_to_statement(
         },
 
         NodePayload::Computation(comp) => {
-            let op = parse_binop(&comp.operation).unwrap_or(IrBinOpKind::Add);
+            let op_label = comp.kind.label();
+            let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
             Some(ScgStatement::Computation(ComputationNode {
                 dst: node_var(node_id, "comp"),
                 op,
@@ -1264,6 +1266,7 @@ fn convert_node_to_statement(
                 dst: None,
                 func: "__vuma_dealloc".to_string(),
                 args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
             }))
         }
 
@@ -1271,6 +1274,7 @@ fn convert_node_to_statement(
             dst: Some(node_var(node_id, "eff")),
             func: eff.effect_kind.clone(),
             args: vec![],
+            is_extern: false,
         })),
 
         NodePayload::Phantom(_) => None,

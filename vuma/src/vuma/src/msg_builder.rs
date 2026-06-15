@@ -660,7 +660,7 @@ impl MsgBuilder {
         // Heuristic: if the operation name contains "offset", "add", "sub",
         // "index", "ptr+", or similar, treat it as an offset derivation.
         // Otherwise, treat as a direct derivation (assignment/alias).
-        let op_lower = comp.operation.to_lowercase();
+        let op_lower = comp.kind.label().to_lowercase();
         let is_offset = op_lower.contains("offset")
             || op_lower.contains("add")
             || op_lower.contains("sub")
@@ -681,7 +681,7 @@ impl MsgBuilder {
             // DERIVE-OFFSET: Create an Offset derivation.
             // We use 0 as the default offset; a more precise analysis would
             // extract the actual offset from the computation's operands.
-            let offset_by = MsgBuilder::extract_offset_from_operation(&comp.operation);
+            let offset_by = MsgBuilder::extract_offset_from_operation(&comp.kind.label());
             self.create_offset_derivation(deriv_id, source_derivation_id, offset_by)?
         } else {
             // DERIVE-DIRECT: Create a Direct derivation (alias/assignment).

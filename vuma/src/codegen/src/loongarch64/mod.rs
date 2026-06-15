@@ -3197,8 +3197,7 @@ fn lower_ir_instr_la64(
             ));
         }
 
-        IRInstr::Call { dst, func: target_name, args } => {
-            // Move args to argument registers, then bl
+        IRInstr::Call { dst, func: target_name, args, is_extern: _ } => {
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {
                     let (a, code) = resolve_gpr_la64(arg, vreg_map, Gpr::T0);
@@ -3328,6 +3327,104 @@ fn lower_ir_instr_la64(
                     rk: Gpr::R0,
                 },
                 vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        // Constant-time conditional select (NO BRANCHES)
+        // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+        // mask = -(cond != 0): all-ones if cond!=0, else 0
+        IRInstr::CtSelect {
+            dst, cond, true_val, false_val, ..
+        } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let (c, code) = resolve_gpr_la64(cond, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (fv, pre_fv) = resolve_gpr_la64(false_val, vreg_map, Gpr::T1);
+            result.extend(pre_fv);
+            let (tv, pre_tv) = resolve_gpr_la64(true_val, vreg_map, Gpr::T2);
+            result.extend(pre_tv);
+            // Build mask = -(cond != 0)
+            // sltui T3, c, 1 → T3 = (c == 0) ? 1 : 0
+            result.push(emit_alloc_instr(
+                Instruction::Sltui { rd: Gpr::T3, rj: c, imm12: 1 },
+                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+            ));
+            // xori T3, T3, 1 → T3 = (c != 0) ? 1 : 0
+            result.push(emit_alloc_instr(
+                Instruction::Xori { rd: Gpr::T3, rj: Gpr::T3, imm12: 1 },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+            ));
+            // sub.d T3, $r0, T3 → T3 = -T3 = mask (all-ones or 0)
+            result.push(emit_alloc_instr(
+                Instruction::SubD { rd: Gpr::T3, rj: Gpr::R0, rk: Gpr::T3 },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+            ));
+            // and T2, T2, T3 → true_val & mask
+            result.push(emit_alloc_instr(
+                Instruction::And { rd: Gpr::T2, rj: tv, rk: Gpr::T3 },
+                vec![PhysicalReg::new(RegClass::Gpr, tv.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+            ));
+            // nor T3, $r0, T3 → ~mask
+            result.push(emit_alloc_instr(
+                Instruction::Nor { rd: Gpr::T3, rj: Gpr::R0, rk: Gpr::T3 },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+            ));
+            // and T1, T1, T3 → false_val & ~mask
+            result.push(emit_alloc_instr(
+                Instruction::And { rd: Gpr::T1, rj: fv, rk: Gpr::T3 },
+                vec![PhysicalReg::new(RegClass::Gpr, fv.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T1.encoding())],
+            ));
+            // or d, T1, T2 → result
+            result.push(emit_alloc_instr(
+                Instruction::Or { rd: d, rj: Gpr::T1, rk: Gpr::T2 },
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T1.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        // Constant-time equality check (NO BRANCHES)
+        // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+        IRInstr::CtEq { dst, lhs, rhs, .. } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let (l, code) = resolve_gpr_la64(lhs, vreg_map, Gpr::T0);
+            result.extend(code);
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
+            // xor d, l, r → diff
+            result.push(emit_alloc_instr(
+                Instruction::Xor { rd: d, rj: l, rk: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // sub.d T2, $r0, d → -diff
+            result.push(emit_alloc_instr(
+                Instruction::SubD { rd: Gpr::T2, rj: Gpr::R0, rk: d },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+            ));
+            // or d, d, T2 → (diff | -diff)
+            result.push(emit_alloc_instr(
+                Instruction::Or { rd: d, rj: d, rk: Gpr::T2 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // srli.d d, d, 31 → 0 if diff==0, 1 if diff!=0
+            result.push(emit_alloc_instr(
+                Instruction::SrliD { rd: d, rj: d, imm8: 31 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // xori d, d, 1 → invert: 1 if equal, 0 if not
+            result.push(emit_alloc_instr(
+                Instruction::Xori { rd: d, rj: d, imm12: 1 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
             ));
         }
@@ -4392,6 +4489,7 @@ mod tests {
                     IRValue::Register(2),
                     IRValue::Register(3),
                 ],
+                is_extern: false,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4436,6 +4534,7 @@ mod tests {
                     IRValue::Register(4),
                     IRValue::Register(5),
                 ],
+                is_extern: false,
             }],
         );
         let backend = LoongArch64Backend::new();
@@ -4471,6 +4570,7 @@ mod tests {
                 dst: Some(IRValue::Register(0)),
                 func: "get_value".to_string(),
                 args: vec![],
+                is_extern: false,
             }],
         );
         let backend = LoongArch64Backend::new();

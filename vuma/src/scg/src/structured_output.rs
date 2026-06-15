@@ -580,7 +580,7 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
 /// Extract a human-readable operation description from a node.
 fn node_operation(node: &NodeData) -> String {
     match &node.payload {
-        NodePayload::Computation(c) => c.operation.clone(),
+        NodePayload::Computation(c) => c.kind.label(),
         NodePayload::Allocation(a) => {
             let tn = a
                 .type_name
@@ -615,6 +615,10 @@ fn node_operation(node: &NodeData) -> String {
         NodePayload::Phantom(p) => format!("phantom({})", p.purpose),
         NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
         NodePayload::ClosureEnv(e) => format!("closure_env({:?})", e.captured_vars),
+        NodePayload::StructDef(s) => format!("struct_def({})", s.name),
+        NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
+        NodePayload::Match(m) => format!("match({})", m.subject),
+        NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
     }
 }
 

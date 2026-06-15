@@ -122,6 +122,8 @@ pub enum Item {
     TraitDef(TraitDef),
     /// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
     ImplBlock(ImplBlock),
+    /// Extern block: `extern "C" { fn ...; fn ...; }`
+    ExternBlock(ExternBlockDef),
     /// Top-level statement (assignment, expression, free, etc.) that
     /// appears outside of any function body.
     Stmt(Stmt),
@@ -356,6 +358,38 @@ pub struct ImplBlock {
     pub methods: Vec<FnDef>,
     /// Optional where clause.
     pub where_clause: Option<WhereClause>,
+    /// Source span.
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// Extern block
+// ---------------------------------------------------------------------------
+
+/// Extern block: `extern "C" { fn ...; fn ...; }`
+///
+/// Declares external functions that will be resolved at link time.
+/// The codegen emits relocations for calls to these functions instead
+/// of local branch instructions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternBlockDef {
+    /// Calling convention string (e.g. "C", "system").
+    pub convention: String,
+    /// Function declarations inside the extern block.
+    pub functions: Vec<ExternFnDecl>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A function declaration inside an `extern` block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternFnDecl {
+    /// Function name.
+    pub name: String,
+    /// Parameter names and types.
+    pub params: Vec<Param>,
+    /// Optional return type.
+    pub return_type: Option<Type>,
     /// Source span.
     pub span: Span,
 }
@@ -681,6 +715,32 @@ pub enum MatchPattern {
     },
 }
 
+// ---------------------------------------------------------------------------
+// Simplified Pattern type (for struct/enum destructuring)
+// ---------------------------------------------------------------------------
+
+/// A simplified pattern for struct/enum destructuring and matching.
+///
+/// Unlike [`MatchPattern`] (which carries source spans and supports the full
+/// range of VUMA match patterns), `Pattern` is a minimal, spanless pattern
+/// type designed for structural decomposition — particularly useful when
+/// lowering struct field access and enum variant destructuring in the SCG
+/// and codegen passes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pattern {
+    /// Wildcard pattern: `_` — matches anything, binds nothing.
+    Wild,
+    /// Literal pattern: matches an exact integer value.
+    Literal(i64),
+    /// Binding pattern: binds the matched value to a name.
+    Binding(String),
+    /// Variant pattern: matches an enum variant by name, with an optional
+    /// nested pattern for the variant's payload.
+    /// Examples: `None` → `Variant("None", None)`,
+    ///           `Some(x)` → `Variant("Some", Some(Box::new(Binding("x"))))`
+    Variant(String, Option<Box<Pattern>>),
+}
+
 /// `sync { … }` block for synchronized access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBlock {
@@ -967,6 +1027,26 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Constant-time conditional select: `ct_select(cond, a, b)`
+    CtSelect {
+        /// Condition value.
+        cond: Box<Expr>,
+        /// Value returned when condition is true.
+        true_val: Box<Expr>,
+        /// Value returned when condition is false.
+        false_val: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Constant-time equality check: `ct_eq(a, b)`
+    CtEq {
+        /// Left-hand side.
+        lhs: Box<Expr>,
+        /// Right-hand side.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Range expression: `start..end`
     Range {
         /// Range start (inclusive).
@@ -1003,6 +1083,46 @@ pub enum Expr {
     },
     /// An uninitialized binding (`let x;`).
     Uninitialized {
+        /// Source span.
+        span: Span,
+    },
+    /// Atomic load: `atomic_load(addr)`
+    AtomicLoad {
+        /// The address expression to load from.
+        addr: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Atomic store: `atomic_store(addr, val)`
+    AtomicStore {
+        /// The address expression to store to.
+        addr: Box<Expr>,
+        /// The value expression to store.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Atomic compare-and-swap: `atomic_cas(addr, expected, desired)`
+    AtomicCas {
+        /// The address expression.
+        addr: Box<Expr>,
+        /// The expected value.
+        expected: Box<Expr>,
+        /// The desired new value.
+        desired: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Match expression: `match expr { pattern => body, ... }`
+    ///
+    /// Unlike [`MatchStmt`] (which is a statement), `MatchExpr` produces a
+    /// value and can appear anywhere an expression is expected. Each arm's
+    /// body must evaluate to the same type.
+    MatchExpr {
+        /// The expression being matched (scrutinee).
+        scrutinee: Box<Expr>,
+        /// Match arms.
+        arms: Vec<MatchArm>,
         /// Source span.
         span: Span,
     },

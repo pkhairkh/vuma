@@ -643,6 +643,68 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
+                // ── Constant-time conditional select (no branches) ──
+                // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+                // where mask = -(cond != 0) = all-ones if cond!=0, else 0
+                // Key: NO BRANCHES — all bitwise operations to prevent timing side-channels
+                IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    // Load cond into R10, true_val into R11, false_val into RAX
+                    code.extend(load_value(cond, Gpr::R10));
+                    code.extend(load_value(true_val, Gpr::R11));
+                    code.extend(load_value(false_val, Gpr::Rax));
+                    // Build mask: mask = -(cond != 0)
+                    //   TEST R10, R10      ; set ZF if cond == 0
+                    //   SETNE R10b         ; R10b = 1 if cond != 0, else 0
+                    //   MOVZX R10, R10b    ; zero-extend to full register
+                    //   NEG R10            ; R10 = 0xFFFFFFFFFFFFFFFF if cond!=0, else 0
+                    code.extend(encode_test_reg_reg(Gpr::R10, Gpr::R10));
+                    code.extend(encode_setcc(Cc::NotEqual, Gpr::R10));
+                    code.extend(encode_movzx_reg8(Gpr::R10, Gpr::R10));
+                    code.extend(encode_neg_reg(Gpr::R10));
+                    // result = (true_val & mask) | (false_val & ~mask)
+                    //   R11 &= R10         ; R11 = true_val & mask
+                    //   RAX &= ~R10        ; RAX = false_val & ~mask (NOT R10 then AND)
+                    //   OR RAX, R11        ; RAX = result
+                    code.extend(encode_and_reg_reg(Gpr::R11, Gpr::R10));
+                    code.extend(encode_not_reg(Gpr::R10));
+                    code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::R10));
+                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::R11));
+                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
+                }
+
+                // ── Constant-time equality check (no branches) ──
+                // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+                // Returns 1 if equal, 0 if not.
+                // Key: NO BRANCHES — all bitwise operations to prevent timing side-channels
+                IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    // Load lhs into RAX, rhs into RCX
+                    code.extend(load_value(lhs, Gpr::Rax));
+                    code.extend(load_value(rhs, Gpr::Rcx));
+                    // XOR RAX, RCX → diff in RAX
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    // NEG RAX → -diff in RAX (but we need diff too, so save diff first)
+                    // Use R10 = diff, R11 = -diff
+                    code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rax)); // R10 = diff
+                    code.extend(encode_neg_reg(Gpr::Rax));                // RAX = -diff
+                    code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax));  // R11 = -diff
+                    // OR R10, R11 → (diff | -diff)
+                    code.extend(encode_or_reg_reg(Gpr::R10, Gpr::R11));
+                    // SHR R10, 31 → 0 if diff==0, 1 if diff!=0 (for 32-bit)
+                    // For 64-bit, we'd use >> 63, but ct_eq operates on u32 primarily
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 31));
+                    code.extend(encode_shr_reg_cl(Gpr::R10));
+                    // XOR R10, 1 → invert: 1 if equal, 0 if not
+                    code.extend(encode_xor_reg_imm32(Gpr::R10, 1));
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::R10));
+                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
+                }
+
                 // ── Memory: Load ──
                 IRInstr::Load { dst, addr, offset, ty } => {
                     let mut code = Vec::new();
@@ -864,7 +926,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Call ──
-                IRInstr::Call { dst, func: call_target, args } => {
+                IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
                     let mut code = Vec::new();
                     // Load arguments from stack into SystemV arg registers
                     let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
@@ -920,6 +982,49 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(store_vreg(dst_id, Gpr::Rax));
                         code
                     }
+                }
+
+                // ── Atomic operations ──────────────────────────────────────────
+                // x86_64 uses LOCK CMPXCHG for CAS, and plain MOV with LOCK
+                // prefix for store (x86 is already atomic for aligned accesses).
+                IRInstr::AtomicLoad { dst, addr, .. } => {
+                    // x86_64: aligned MOV is already atomic, use plain load
+                    let mut code = Vec::new();
+                    code.extend(load_value(addr, Gpr::Rax));     // addr -> Rax
+                    code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::Rax, 0)); // Rdx = [Rax]
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    code.extend(store_vreg(dst_id, Gpr::Rdx));
+                    code
+                }
+
+                IRInstr::AtomicStore { value, addr, .. } => {
+                    // x86_64: aligned MOV is already atomic, use plain store
+                    let mut code = Vec::new();
+                    code.extend(load_value(addr, Gpr::Rax));     // addr -> Rax
+                    code.extend(load_value(value, Gpr::Rdx));    // value -> Rdx
+                    code.extend(encode_mov_mem_reg(Gpr::Rax, 0, Gpr::Rdx)); // [Rax] = Rdx
+                    code
+                }
+
+                IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
+                    // x86_64: LOCK CMPXCHG [addr], desired
+                    // RAX = expected (implicitly compared by CMPXCHG)
+                    // If [addr] == RAX, then [addr] = desired, ZF=1
+                    // Otherwise RAX = [addr], ZF=0
+                    let mut code = Vec::new();
+                    code.extend(load_value(addr, Gpr::Rbx));     // addr -> Rbx
+                    code.extend(load_value(expected, Gpr::Rax)); // expected -> Rax
+                    code.extend(load_value(desired, Gpr::Rcx));  // desired -> Rcx
+                    // LOCK CMPXCHG [Rbx], RCx
+                    // F0 0F B1 0B  =  LOCK CMPXCHG RCx, [Rbx]
+                    code.push(0xF0); // LOCK prefix
+                    code.push(0x0F);
+                    code.push(0xB1);
+                    code.push(0x0B); // ModRM: [Rbx], RCx
+                    // Result: Rax has the old value (whether swap succeeded or not)
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
                 }
             };
 

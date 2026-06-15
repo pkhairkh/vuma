@@ -1170,9 +1170,10 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
         for node_id in &reachable {
             if let Some(node) = scg.get_node(*node_id) {
                 if let NodePayload::Computation(comp) = &node.payload {
-                    if !is_known_binop(&comp.operation) && !comp.operation.starts_with('_') {
-                        if !calls.contains(&comp.operation) {
-                            calls.push(comp.operation.clone());
+                    let op_label = comp.kind.label();
+                    if !is_known_binop(&op_label) && !op_label.starts_with('_') {
+                        if !calls.contains(&op_label) {
+                            calls.push(op_label);
                         }
                     }
                 }
@@ -1196,9 +1197,10 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
         let mut calls = Vec::new();
         for node in scg.nodes() {
             if let NodePayload::Computation(comp) = &node.payload {
-                if !is_known_binop(&comp.operation) && !comp.operation.starts_with('_') {
-                    if !calls.contains(&comp.operation) {
-                        calls.push(comp.operation.clone());
+                let op_label = comp.kind.label();
+                if !is_known_binop(&op_label) && !op_label.starts_with('_') {
+                    if !calls.contains(&op_label) {
+                        calls.push(op_label);
                     }
                 }
             }

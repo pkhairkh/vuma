@@ -41,9 +41,19 @@
 
 pub mod api;
 pub mod diagnostics;
+pub mod ffi;
 pub mod llm_api;
 pub mod lsp;
 pub mod pipeline;
+
+// Re-export package manager types.
+pub use vuma_package::{
+    PackageManifest, PackageTarget, Dependency, TargetKind,
+    PackageRegistry, DependencyResolver, ResolveResult,
+    PackageError, PackageResult,
+    init_package, add_dependency, build_package,
+    parse_manifest, resolve_dependencies,
+};
 
 // Re-export the primary pipeline API at the crate root for convenience.
 pub use pipeline::{

@@ -2692,6 +2692,53 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     code.extend(ss_sd(Gpr::T0, dst_off));
                 }
 
+                // Constant-time conditional select (NO BRANCHES)
+                // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+                // mask = -(cond != 0): all-ones if cond!=0, else 0
+                IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                    // Load cond into T2, true_val into T1, false_val into T0
+                    code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T2));
+                    code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::T1));
+                    code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::T0));
+                    // Build mask: SLTIU T3, T2, 1 → T3 = (cond == 0) ? 1 : 0
+                    code.extend_from_slice(&Instruction::Sltiu { rt: Gpr::T3, rs: Gpr::T2, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                    // XORI T3, T3, 1 → T3 = (cond != 0) ? 1 : 0
+                    code.extend_from_slice(&Instruction::Xori { rt: Gpr::T3, rs: Gpr::T3, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                    // NEG: SUBU T3, $zero, T3 → T3 = mask (all-ones or 0)
+                    code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T3, rs: Gpr::Zero, rt: Gpr::T3 }.encode()); code.extend_from_slice(&encode_nop());
+                    // AND T1, T1, T3 → true_val & mask
+                    code.extend_from_slice(&Instruction::And { rd: Gpr::T1, rs: Gpr::T1, rt: Gpr::T3 }.encode()); code.extend_from_slice(&encode_nop());
+                    // NOR T3, $zero, T3 → ~mask (NOR with zero = NOT)
+                    code.extend_from_slice(&Instruction::Nor { rd: Gpr::T3, rs: Gpr::Zero, rt: Gpr::T3 }.encode()); code.extend_from_slice(&encode_nop());
+                    // AND T0, T0, T3 → false_val & ~mask
+                    code.extend_from_slice(&Instruction::And { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T3 }.encode()); code.extend_from_slice(&encode_nop());
+                    // OR T0, T0, T1 → result
+                    code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                    code.extend(ss_sd(Gpr::T0, dst_off));
+                }
+
+                // Constant-time equality check (NO BRANCHES)
+                // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+                IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+                    // XOR T0, T0, T1 → diff
+                    code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                    // NEG: DSUBU T2, $zero, T0 → -diff
+                    code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T2, rs: Gpr::Zero, rt: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop());
+                    // OR T0, T0, T2 → (diff | -diff)
+                    code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
+                    // DSRL T0, T0, 31 → 0 if diff==0, 1 if diff!=0
+                    code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 31 }.encode()); code.extend_from_slice(&encode_nop());
+                    // XORI T0, T0, 1 → invert: 1 if equal, 0 if not
+                    code.extend_from_slice(&Instruction::Xori { rt: Gpr::T0, rs: Gpr::T0, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                    code.extend(ss_sd(Gpr::T0, dst_off));
+                }
+
                 // ── Offset ──
                 IRInstr::Offset { dst, base, offset } => {
                     let dst_id = dst.as_register().unwrap_or(0);
@@ -2747,7 +2794,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 }
 
                 // ── Call ──
-                IRInstr::Call { dst, func: target_func, args } => {
+                IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                     // Load arguments into $a0-$a7 (N64 ABI)
                     let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::T0, Gpr::T1, Gpr::T2, Gpr::T3];
                     for (i, arg) in args.iter().enumerate() {
@@ -3254,7 +3301,7 @@ fn lower_ir_instr(
             }
         }
 
-        IRInstr::Call { dst, func: _, args } => {
+        IRInstr::Call { dst, func: _, args, is_extern: _ } => {
             // Move arguments into a0–a3, handling immediates
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {

@@ -124,6 +124,7 @@ pub use sync::{
 pub use crypto::{
     SHA256_K, SHA256_H, crypto_capd, sha256_ch, sha256_maj, sha256_big_sigma0, sha256_big_sigma1,
     sha256_small_sigma0, sha256_small_sigma1, sha256_read_u32_be, sha256_write_u32_be,
+    ct_select_u32, ct_eq_u32, ct_ne_u32, ct_lt_u32, ct_gte_u32,
 };
 
 // Re-export string/memory operations

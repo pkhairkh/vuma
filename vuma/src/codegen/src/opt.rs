@@ -59,10 +59,11 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             operand: sv(operand),
             ty: ty.clone(),
         },
-        IRInstr::Call { dst, func, args } => IRInstr::Call {
+        IRInstr::Call { dst, func, args, is_extern } => IRInstr::Call {
             dst: dst.as_ref().map(&sv),
             func: func.clone(),
             args: args.iter().map(sv).collect(),
+            is_extern: *is_extern,
         },
         IRInstr::Alloc { dst, size } => IRInstr::Alloc {
             dst: sv(dst),
@@ -151,6 +152,47 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             cond: sv(cond),
             true_target: true_target.clone(),
             false_target: false_target.clone(),
+        },
+        IRInstr::CtSelect {
+            dst,
+            cond,
+            true_val,
+            false_val,
+            ty,
+        } => IRInstr::CtSelect {
+            dst: sv(dst),
+            cond: sv(cond),
+            true_val: sv(true_val),
+            false_val: sv(false_val),
+            ty: ty.clone(),
+        },
+        IRInstr::CtEq {
+            dst,
+            lhs,
+            rhs,
+            ty,
+        } => IRInstr::CtEq {
+            dst: sv(dst),
+            lhs: sv(lhs),
+            rhs: sv(rhs),
+            ty: ty.clone(),
+        },
+        IRInstr::AtomicLoad { dst, addr, ty } => IRInstr::AtomicLoad {
+            dst: sv(dst),
+            addr: sv(addr),
+            ty: ty.clone(),
+        },
+        IRInstr::AtomicStore { value, addr, ty } => IRInstr::AtomicStore {
+            value: sv(value),
+            addr: sv(addr),
+            ty: ty.clone(),
+        },
+        IRInstr::AtomicCas { dst, addr, expected, desired, ty } => IRInstr::AtomicCas {
+            dst: sv(dst),
+            addr: sv(addr),
+            expected: sv(expected),
+            desired: sv(desired),
+            ty: ty.clone(),
         },
     }
 }
@@ -786,6 +828,7 @@ pub fn inline_small(
                 dst,
                 func: callee_name,
                 args,
+                is_extern: _,
             } = instr
             {
                 // Don't inline recursive calls.
@@ -1376,6 +1419,7 @@ mod tests {
             dst: None,
             func: "side_effect".to_string(),
             args: vec![],
+            is_extern: false,
         }];
         func.blocks[0].terminator = IRTerminator::Return(vec![]);
         let result = dead_code_eliminate(func);
@@ -1498,6 +1542,7 @@ mod tests {
             dst: Some(IRValue::Register(0)),
             func: "add_one".to_string(),
             args: vec![IRValue::Immediate(42)],
+            is_extern: false,
         }];
         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
 
@@ -1539,6 +1584,7 @@ mod tests {
             dst: Some(IRValue::Register(0)),
             func: "big_fn".to_string(),
             args: vec![IRValue::Immediate(0)],
+            is_extern: false,
         }];
         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
 
@@ -1576,6 +1622,7 @@ mod tests {
             dst: Some(IRValue::Register(0)),
             func: "double".to_string(),
             args: vec![IRValue::Immediate(21)],
+            is_extern: false,
         }];
         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
 
@@ -1781,6 +1828,7 @@ mod tests {
                 dst: Some(IRValue::Register(1)),
                 func: "square".to_string(),
                 args: vec![IRValue::Immediate(5)],
+                is_extern: false,
             },
         ];
         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);

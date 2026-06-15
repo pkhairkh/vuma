@@ -701,7 +701,7 @@ fn lower_instr(
             }
             code
         }
-        IRInstr::Call { dst, func: target, args } => {
+        IRInstr::Call { dst, func: target, args, is_extern: _ } => {
             let mut code = cache.flush_caller_saved(fp);
             let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
             for (i, arg) in args.iter().enumerate() {

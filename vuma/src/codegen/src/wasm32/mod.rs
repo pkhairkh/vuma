@@ -2086,7 +2086,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.emit(store_op);
         }
 
-        IRInstr::Call { dst, func, args } => {
+        IRInstr::Call { dst, func, args, is_extern: _ } => {
             for arg in args {
                 ctx.push_value(arg, None);
             }
@@ -2220,6 +2220,102 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(true_val, None);
             ctx.push_value(false_val, None);
             ctx.emit(WasmInstr::Select);
+            if let IRValue::Register(id) = dst {
+                ctx.pop_to_vreg(*id, WasmType::I32);
+            } else {
+                ctx.emit(WasmInstr::Drop);
+            }
+        }
+
+        // Constant-time conditional select (NO BRANCHES)
+        // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+        // mask = -(cond != 0)
+        IRInstr::CtSelect {
+            dst, cond, true_val, false_val, ..
+        } => {
+            // Build mask = -(cond != 0) using only bitwise ops
+            // mask = 0 - (cond != 0)
+            // On Wasm: cond_eqz = i32.eqz(cond); mask = i32.sub(0, i32.xor(cond_eqz, 1))
+            ctx.push_value(cond, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::I32Eqz);           // [cond == 0] ? 1 : 0
+            ctx.emit(WasmInstr::I32Const(1));
+            ctx.emit(WasmInstr::I32Xor);            // [cond != 0] ? 1 : 0
+            ctx.emit(WasmInstr::I32Const(0));
+            ctx.emit(WasmInstr::I32Sub);            // mask = 0 - 1 = -1 or 0 - 0 = 0
+
+            // Now stack has: [mask]
+            // We need: (true_val & mask) | (false_val & ~mask)
+            // Push true_val
+            ctx.push_value(true_val, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::I32And);            // true_val & mask
+
+            // Push false_val and ~mask
+            // ~mask = mask ^ -1
+            ctx.push_value(false_val, Some(&WasmType::I32));
+            // Duplicate mask: we already consumed it, need to recompute
+            // Actually, let's use locals to save mask
+            let mask_local = ctx.alloc_local(9000, WasmType::I32);
+            let tv_local = ctx.alloc_local(9001, WasmType::I32);
+            // Re-approach: use locals to avoid stack juggling
+            // Recompute mask and store
+            ctx.push_value(cond, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::I32Eqz);
+            ctx.emit(WasmInstr::I32Const(1));
+            ctx.emit(WasmInstr::I32Xor);
+            ctx.emit(WasmInstr::I32Const(0));
+            ctx.emit(WasmInstr::I32Sub);            // mask on stack
+            ctx.emit(WasmInstr::LocalTee(mask_local)); // mask (keep copy on stack)
+
+            // true_val & mask
+            ctx.push_value(true_val, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::I32And);            // true_val & mask
+            ctx.emit(WasmInstr::LocalSet(tv_local)); // save to local
+
+            // false_val & ~mask
+            ctx.push_value(false_val, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::LocalGet(mask_local));
+            ctx.emit(WasmInstr::I32Const(-1));
+            ctx.emit(WasmInstr::I32Xor);            // ~mask
+            ctx.emit(WasmInstr::I32And);            // false_val & ~mask
+
+            // OR with (true_val & mask)
+            ctx.emit(WasmInstr::LocalGet(tv_local));
+            ctx.emit(WasmInstr::I32Or);             // result
+
+            if let IRValue::Register(id) = dst {
+                ctx.pop_to_vreg(*id, WasmType::I32);
+            } else {
+                ctx.emit(WasmInstr::Drop);
+            }
+        }
+
+        // Constant-time equality check (NO BRANCHES)
+        // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+        IRInstr::CtEq { dst, lhs, rhs, .. } => {
+            // diff = a ^ b
+            ctx.push_value(lhs, Some(&WasmType::I32));
+            ctx.push_value(rhs, Some(&WasmType::I32));
+            ctx.emit(WasmInstr::I32Xor);            // diff
+
+            // -diff = 0 - diff
+            ctx.emit(WasmInstr::I32Const(0));
+            // Need to duplicate diff first: use a local
+            let diff_local = ctx.alloc_local(9002, WasmType::I32);
+            ctx.emit(WasmInstr::LocalTee(diff_local)); // diff (keep on stack)
+            ctx.emit(WasmInstr::I32Sub);             // -diff = 0 - diff
+
+            // diff | -diff
+            ctx.emit(WasmInstr::LocalGet(diff_local));
+            ctx.emit(WasmInstr::I32Or);              // diff | -diff
+
+            // >> 31
+            ctx.emit(WasmInstr::I32Const(31));
+            ctx.emit(WasmInstr::I32ShrU);            // logical right shift by 31
+
+            // ^ 1 (invert: 1 if equal, 0 if not)
+            ctx.emit(WasmInstr::I32Const(1));
+            ctx.emit(WasmInstr::I32Xor);
+
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             } else {

@@ -547,6 +547,12 @@ pub enum Instruction {
     Divdu { rt: Gpr, ra: Gpr, rb: Gpr },
     /// Negate: `neg rT, rA` (XO-form, primary=31, xo=104)
     Neg { rt: Gpr, ra: Gpr },
+    /// Add Immediate Carrying: `addic rT, rA, simm16` (D-form, primary=12)
+    Addic { rt: Gpr, ra: Gpr, simm: i32 },
+    /// Subtract From Immediate Carrying: `subfic rT, rA, simm16` (D-form, primary=8)
+    Subfic { rt: Gpr, ra: Gpr, simm: i32 },
+    /// Subtract From Extended: `subfe rT, rA, rB` (XO-form, primary=31, xo=136)
+    Subfe { ra: Gpr, rs: Gpr, rb: Gpr },
     /// Count Leading Zeros Doubleword: `cntlzd rA, rS` (X-form, primary=31, xo=58)
     Cntlzd { ra: Gpr, rs: Gpr },
     /// Population Count Doubleword: `popcntd rA, rS` (X-form, primary=31, xo=506)
@@ -769,6 +775,18 @@ impl Instruction {
             Instruction::Neg { rt, ra } => {
                 // NEG rT, rA: primary=31, OE=0, xo=104, Rc=0, rB=0
                 encode_xo_form(31, rt.encoding(), ra.encoding(), 0, 0, 104, 0)
+            }
+            Instruction::Addic { rt, ra, simm } => {
+                // ADDIC rT, rA, simm16: primary=12
+                encode_d_form(12, rt.encoding(), ra.encoding(), *simm)
+            }
+            Instruction::Subfic { rt, ra, simm } => {
+                // SUBFIC rT, rA, simm16: primary=8
+                encode_d_form(8, rt.encoding(), ra.encoding(), *simm)
+            }
+            Instruction::Subfe { ra, rs, rb } => {
+                // SUBFE rA, rS, rB: primary=31, xo=136, Rc=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 136, 0)
             }
             Instruction::Cntlzd { ra, rs } => {
                 // CNTLZD rA, rS: primary=31, xo=58, Rc=0, rB=0
@@ -1065,6 +1083,9 @@ impl Instruction {
             Instruction::Divwu { .. } => "divwu",
             Instruction::Divdu { .. } => "divdu",
             Instruction::Neg { .. } => "neg",
+            Instruction::Addic { .. } => "addic",
+            Instruction::Subfic { .. } => "subfic",
+            Instruction::Subfe { .. } => "subfe",
             Instruction::Cntlzd { .. } => "cntlzd",
             Instruction::Popcntd { .. } => "popcntd",
             Instruction::Extsw { .. } => "extsw",
@@ -1143,6 +1164,9 @@ impl fmt::Display for Instruction {
             Instruction::Divwu { rt, ra, rb } => write!(f, "divwu {}, {}, {}", rt, ra, rb),
             Instruction::Divdu { rt, ra, rb } => write!(f, "divdu {}, {}, {}", rt, ra, rb),
             Instruction::Neg { rt, ra } => write!(f, "neg {}, {}", rt, ra),
+            Instruction::Addic { rt, ra, simm } => write!(f, "addic {}, {}, {}", rt, ra, simm),
+            Instruction::Subfic { rt, ra, simm } => write!(f, "subfic {}, {}, {}", rt, ra, simm),
+            Instruction::Subfe { ra, rs, rb } => write!(f, "subfe {}, {}, {}", ra, rs, rb),
             Instruction::Cntlzd { ra, rs } => write!(f, "cntlzd {}, {}", ra, rs),
             Instruction::Popcntd { ra, rs } => write!(f, "popcntd {}, {}", ra, rs),
             Instruction::Extsw { ra, rs } => write!(f, "extsw {}, {}", ra, rs),
@@ -2410,7 +2434,7 @@ fn lower_ir_instr_ppc64(
             // The epilogue restores LR, deallocates the frame, and emits BLR.
         }
 
-        IRInstr::Call { dst, func, args } => {
+        IRInstr::Call { dst, func, args, is_extern: _ } => {
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {
                     let a = resolve_gpr_ppc64(arg, vreg_map, Gpr::R0, &mut result);
@@ -2594,6 +2618,118 @@ fn lower_ir_instr_ppc64(
             result.push(emit_alloc_instr(
                 Instruction::Mr { ra: d, rs: tv },
                 vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        // Constant-time conditional select (NO BRANCHES)
+        // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+        // mask = -(cond != 0): all-ones if cond!=0, else 0
+        IRInstr::CtSelect {
+            dst, cond, true_val, false_val, ..
+        } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let c = resolve_gpr_ppc64(cond, vreg_map, Gpr::R0, &mut result);
+            let tv = resolve_gpr_ppc64(true_val, vreg_map, Gpr::R11, &mut result);
+            let fv = resolve_gpr_ppc64(false_val, vreg_map, Gpr::R12, &mut result);
+            // Build mask: cmpi cr0, 0, c, 0; li r11_tmp, 0; bne cr0, +8; li r11_tmp, 1
+            // Actually for constant-time, we use: cntlzw to check zero, then mask
+            // Better: use subfic/cmpwi trick or just:
+            //   cmpi cr0, 0, c, 0  → sets CR0
+            //   li R11s, 1          → 1 (will be overwritten)
+            //   bne cr0, +8         → skip next if cond != 0
+            //   li R11s, 0          → 0 if cond == 0
+            // But that's a branch! For truly constant-time on PPC64:
+            //   neg R11s, c         → R11s = -c (gives 0 if c=0, garbage otherwise)
+            //   But we need mask = -(c != 0)...
+            // Better approach using carry:
+            //   subfic R11s, c, 0   → R11s = 0 - c = -c (sets CA if c != 0)
+            //   subfe R12s, R12s, R12s → R12s = CA ? -1 : 0 (this is the mask!)
+            // This uses the carry flag — NO BRANCHES, constant-time!
+            // Actually subfe sets: rt = (ca ? ~rs : -1) + rb + 1... Let me use:
+            //   addic R11s, c, -1   → R11s = c - 1, sets CA if c >= 1 (i.e. c != 0)
+            //   subfe R11s, R11s, R11s → R11s = CA ? -1 : 0
+            // So: mask = subfe result
+            // Then: and tv, tv, mask; andc fv, fv, mask; or d, tv, fv
+            // Use R11 and R12 as scratch, and save tv/fv to other scratch regs
+            // We need to be careful about register reuse. Use R11, R12 as scratch.
+            let mask_tmp = Gpr::R11;
+            let tv_tmp = Gpr::R12;
+            // Move tv and fv into temp regs if they conflict
+            result.push(emit_alloc_instr(
+                Instruction::Mr { ra: tv_tmp, rs: tv },
+                vec![PhysicalReg::new(RegClass::Gpr, tv.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, tv_tmp.encoding())],
+            ));
+            // addic mask_tmp, c, -1 → mask_tmp = c - 1, CA = (c >= 1) = (c != 0)
+            result.push(emit_alloc_instr(
+                Instruction::Addic { rt: mask_tmp, ra: c, simm: -1 },
+                vec![PhysicalReg::new(RegClass::Gpr, c.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, mask_tmp.encoding())],
+            ));
+            // subfe mask_tmp, mask_tmp, mask_tmp → mask_tmp = CA ? -1 : 0
+            result.push(emit_alloc_instr(
+                Instruction::Subfe { ra: mask_tmp, rs: mask_tmp, rb: mask_tmp },
+                vec![PhysicalReg::new(RegClass::Gpr, mask_tmp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, mask_tmp.encoding())],
+            ));
+            // and tv_tmp, tv_tmp, mask_tmp → tv & mask
+            result.push(emit_alloc_instr(
+                Instruction::And { ra: tv_tmp, rs: tv_tmp, rb: mask_tmp },
+                vec![PhysicalReg::new(RegClass::Gpr, tv_tmp.encoding()), PhysicalReg::new(RegClass::Gpr, mask_tmp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, tv_tmp.encoding())],
+            ));
+            // andc d, fv, mask_tmp → fv & ~mask
+            result.push(emit_alloc_instr(
+                Instruction::Andc { ra: d, rs: fv, rb: mask_tmp },
+                vec![PhysicalReg::new(RegClass::Gpr, fv.encoding()), PhysicalReg::new(RegClass::Gpr, mask_tmp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // or d, d, tv_tmp → result
+            result.push(emit_alloc_instr(
+                Instruction::Or { ra: d, rs: d, rb: tv_tmp },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding()), PhysicalReg::new(RegClass::Gpr, tv_tmp.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+        }
+
+        // Constant-time equality check (NO BRANCHES)
+        // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+        IRInstr::CtEq { dst, lhs, rhs, .. } => {
+            let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
+            let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
+            let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
+            // XOR d, l, r → diff
+            result.push(emit_alloc_instr(
+                Instruction::Xor { ra: d, rs: l, rb: r },
+                vec![PhysicalReg::new(RegClass::Gpr, l.encoding()), PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // NEG: subfic R11, d, 0 → R11 = -diff
+            result.push(emit_alloc_instr(
+                Instruction::Subfic { rt: Gpr::R11, ra: d, simm: 0 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+            ));
+            // OR d, d, R11 → (diff | -diff)
+            result.push(emit_alloc_instr(
+                Instruction::Or { ra: d, rs: d, rb: Gpr::R11 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // SRWI d, d, 31 (using Rlwinm sh=31, mb=31, me=31)
+            // Actually rlwinm ra=d, rs=d, sh=31, mb=31, me=31 extracts bit 31
+            // srwi = rlwinm ra, rs, 31, 31, 31 for a 32-bit right shift by 31
+            // But on PPC64, we want the 32-bit value's bit 31. Use rlwinm:
+            result.push(emit_alloc_instr(
+                Instruction::Rlwinm { ra: d, rs: d, sh: 31, mb: 31, me: 31 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+            ));
+            // XORI d, d, 1 → invert: 1 if equal, 0 if not
+            result.push(emit_alloc_instr(
+                Instruction::Xori { ra: d, rs: d, uimm: 1 },
+                vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                 vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
             ));
         }
@@ -3299,6 +3435,55 @@ impl Backend for PPC64Backend {
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }
+
+                    // Constant-time conditional select (NO BRANCHES)
+                    // ct_select uses carry-based mask: addic+subfe for mask, then and/andc/or
+                    IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R5));
+                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R4));
+                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R3));
+                        // Build mask: addic R6, R5, -1 → CA = (cond >= 1) = (cond != 0)
+                        code.extend_from_slice(&Instruction::Addic { rt: Gpr::R6, ra: Gpr::R5, simm: -1 }.encode());
+                        // subfe R6, R6, R6 → R6 = CA ? -1 : 0
+                        code.extend_from_slice(&Instruction::Subfe { ra: Gpr::R6, rs: Gpr::R6, rb: Gpr::R6 }.encode());
+                        // and R4, R4, R6 → true_val & mask
+                        code.extend_from_slice(&Instruction::And { ra: Gpr::R4, rs: Gpr::R4, rb: Gpr::R6 }.encode());
+                        // andc R3, R3, R6 → false_val & ~mask
+                        code.extend_from_slice(&Instruction::Andc { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R6 }.encode());
+                        // or R3, R3, R4 → result
+                        code.extend_from_slice(&Instruction::Or { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode());
+                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                        code
+                    }
+
+                    // Constant-time equality check (NO BRANCHES)
+                    IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+                        // xor R3, R3, R4 → diff
+                        code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode());
+                        // subfic R5, R3, 0 → R5 = -diff (sets CA)
+                        code.extend_from_slice(&Instruction::Subfic { rt: Gpr::R5, ra: Gpr::R3, simm: 0 }.encode());
+                        // or R3, R3, R5 → (diff | -diff)
+                        code.extend_from_slice(&Instruction::Or { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
+                        // rlwinm R3, R3, 31, 31, 31 → extract bit 31
+                        code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 31, mb: 31, me: 31 }.encode());
+                        // xori R3, R3, 1 → invert: 1 if equal, 0 if not
+                        code.extend_from_slice(&Instruction::Xori { ra: Gpr::R3, rs: Gpr::R3, uimm: 1 }.encode());
+                        code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                        code
+                    }
+
+                    // Atomic operations (placeholder)
+                    IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+                        Vec::new() // TODO: implement PPC64 atomic stack-slot lowering
+                    }
                     IRInstr::Offset { dst, base, offset } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -3327,7 +3512,7 @@ impl Backend for PPC64Backend {
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }
-                    IRInstr::Call { dst, func: target_func, args } => {
+                    IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
                         for (i, arg) in args.iter().enumerate() {
                             if i >= 8 { break; }

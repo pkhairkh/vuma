@@ -327,7 +327,7 @@ impl fmt::Display for Condition {
 const DP_AND: u32 = 0b0000;
 const DP_EOR: u32 = 0b0001;
 const DP_SUB: u32 = 0b0010;
-const _DP_RSB: u32 = 0b0011;
+const DP_RSB: u32 = 0b0011;
 const DP_ADD: u32 = 0b0100;
 const DP_TST: u32 = 0b1000;
 const DP_TEQ: u32 = 0b1001;
@@ -3577,7 +3577,7 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Call ──
-                    crate::ir::IRInstr::Call { dst, func: target_func, args } => {
+                    crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
 
                         // Move args to R0-R3
@@ -3690,6 +3690,97 @@ impl Backend for Arm32Backend {
                         code.extend_from_slice(&encode_dp_reg(
                             Condition::Ne, DP_MOV, false, 0,
                             Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Constant-time conditional select (NO BRANCHES) ──
+                    // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+                    // mask = -(cond != 0): all-ones if cond!=0, else 0
+                    crate::ir::IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        // Load cond into R2, true_val into R1, false_val into R0
+                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R2));
+                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R1));
+                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R0));
+                        // Build mask: CMP R2, #0; MOVNE R3, #1; RSB R3, #0, R3 → mask
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R2.encoding(), 0, 0, 0,
+                        ));
+                        // R3 = (cond != 0) ? 1 : 0
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Ne, DP_MOV, false,
+                            Gpr::R3.encoding(), 0, 0, 1,
+                        ));
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Eq, DP_MOV, false,
+                            Gpr::R3.encoding(), 0, 0, 0,
+                        ));
+                        // R3 = -R3 (NEG: RSB R3, R3, #0)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_RSB, false,
+                            Gpr::R3.encoding(), Gpr::R3.encoding(), 0, 0,
+                        ));
+                        // R1 = R1 & R3 (true_val & mask)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_AND, false,
+                            Gpr::R1.encoding(), Gpr::R1.encoding(), Gpr::R3.encoding(),
+                        ));
+                        // R3 = ~R3 (MVN R3, R3)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_MVN, false, 0,
+                            Gpr::R3.encoding(), Gpr::R3.encoding(),
+                        ));
+                        // R0 = R0 & R3 (false_val & ~mask)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_AND, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R3.encoding(),
+                        ));
+                        // R0 = R0 | R1 (result)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_ORR, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code
+                    }
+
+                    // ── Constant-time equality check (NO BRANCHES) ──
+                    // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+                    crate::ir::IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        // R0 = R0 ^ R1 (diff)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_EOR, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                        ));
+                        // R2 = -R0 (NEG: RSB R2, R0, #0)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_RSB, false,
+                            Gpr::R2.encoding(), Gpr::R0.encoding(), 0, 0,
+                        ));
+                        // R0 = R0 | R2 (diff | -diff)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_ORR, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R2.encoding(),
+                        ));
+                        // R0 = R0 >> 31 (logical shift right immediate)
+                        code.extend_from_slice(&encode_dp_shift_imm(
+                            Condition::Al, DP_MOV, false, 0,
+                            Gpr::R0.encoding(), 1, 31, Gpr::R0.encoding(),
+                        ));
+                        // R0 = R0 ^ 1 (invert: 1 if equal, 0 if not)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_EOR, false,
+                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
                         ));
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code

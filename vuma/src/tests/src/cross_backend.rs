@@ -428,6 +428,7 @@ fn make_function_call_program() -> Vec<IRFunction> {
         dst: Some(IRValue::Register(0)),
         func: "helper".to_string(),
         args: vec![],
+        is_extern: false,
     });
     main_fn.current_block().terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
 

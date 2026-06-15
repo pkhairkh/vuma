@@ -73,6 +73,7 @@ fn make_func_with_call_n_args(n: usize) -> IRFunction {
         dst: Some(IRValue::Register(0)),
         func: "callee".to_string(),
         args,
+        is_extern: false,
     });
     func.current_block().terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
     func

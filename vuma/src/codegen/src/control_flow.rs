@@ -647,6 +647,7 @@ impl ExceptionLowerer {
             dst: dst.clone(),
             func: func.to_string(),
             args: args.to_vec(),
+            is_extern: true, // runtime function
         });
         call_block.terminator = IRTerminator::Jump(normal.to_string());
 
@@ -1256,6 +1257,7 @@ impl CoroutineLowerer {
                 IRValue::Immediate(frame.size as i64),
                 IRValue::Immediate(frame.align as i64),
             ],
+            is_extern: true,
         });
 
         // Store initial state = Running (1).
@@ -1316,6 +1318,7 @@ impl CoroutineLowerer {
             dst: Some(frame_ptr.clone()),
             func: "__vuma_coro_get_frame".to_string(),
             args: vec![],
+            is_extern: true,
         });
 
         // Save each live value to its spill slot.
@@ -1407,6 +1410,7 @@ impl CoroutineLowerer {
             dst: Some(frame_ptr.clone()),
             func: "__vuma_coro_get_frame".to_string(),
             args: vec![],
+            is_extern: true,
         });
 
         let yi_addr = next_vreg(vreg_counter);
@@ -1475,6 +1479,7 @@ impl CoroutineLowerer {
             dst: Some(state_addr2.clone()),
             func: "__vuma_coro_get_frame".to_string(),
             args: vec![],
+            is_extern: true,
         });
         let state_field_addr = next_vreg(vreg_counter);
         completed_block.push(IRInstr::Offset {
@@ -1504,6 +1509,7 @@ impl CoroutineLowerer {
                 dst: Some(fptr.clone()),
                 func: "__vuma_coro_get_frame".to_string(),
                 args: vec![],
+                is_extern: true,
             });
 
             for live_val in &yp.live_values {

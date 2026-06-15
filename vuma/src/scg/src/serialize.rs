@@ -27,9 +27,11 @@
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::graph::SCG;
 use crate::node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationNode,
-    ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, VTableNode,
+    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationKind,
+    ComputationNode,
+    ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode, DeallocationNode, EffectNode,
+    EnumDefNode, EnumVariantInfo, MatchArmInfo, MatchNode, MatchPatternInfo, NodeData, NodeId,
+    NodePayload, NodeType, PhantomNode, ProgramPoint, StructDefNode, StructFieldInfo, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -56,6 +58,10 @@ const NODE_TYPE_CONTROL: u32 = 6;
 const NODE_TYPE_PHANTOM: u32 = 7;
 const NODE_TYPE_VTABLE: u32 = 8;
 const NODE_TYPE_CLOSURE_ENV: u32 = 9;
+const NODE_TYPE_STRUCT_DEF: u32 = 10;
+const NODE_TYPE_ENUM_DEF: u32 = 11;
+const NODE_TYPE_MATCH: u32 = 12;
+const NODE_TYPE_CONSTANT_TIME: u32 = 13;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -349,6 +355,10 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::Phantom => NODE_TYPE_PHANTOM,
         NodeType::VTable => NODE_TYPE_VTABLE,
         NodeType::ClosureEnv => NODE_TYPE_CLOSURE_ENV,
+        NodeType::StructDef => NODE_TYPE_STRUCT_DEF,
+        NodeType::EnumDef => NODE_TYPE_ENUM_DEF,
+        NodeType::Match => NODE_TYPE_MATCH,
+        NodeType::ConstantTime => NODE_TYPE_CONSTANT_TIME,
     }
 }
 
@@ -364,6 +374,10 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_PHANTOM => Ok(NodeType::Phantom),
         NODE_TYPE_VTABLE => Ok(NodeType::VTable),
         NODE_TYPE_CLOSURE_ENV => Ok(NodeType::ClosureEnv),
+        NODE_TYPE_STRUCT_DEF => Ok(NodeType::StructDef),
+        NODE_TYPE_ENUM_DEF => Ok(NodeType::EnumDef),
+        NODE_TYPE_MATCH => Ok(NodeType::Match),
+        NODE_TYPE_CONSTANT_TIME => Ok(NodeType::ConstantTime),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -614,7 +628,7 @@ fn serialized_to_scg(s: SerializedSCG) -> Result<SCG, DeserializeError> {
 /// let id = scg.add_node(
 ///     NodeType::Computation,
 ///     NodePayload::Computation(ComputationNode {
-///         operation: "add".to_string(),
+///         kind: ComputationKind::Other("add".to_string()),
 ///         result_type: None,
 ///         tail_call: false }),
 ///     ProgramPoint { file: None, line: None, column: None, offset: None },
@@ -810,7 +824,7 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
     match payload {
         NodePayload::Computation(c) => {
             w.write_u32_le(NODE_TYPE_COMPUTATION);
-            w.write_string(&c.operation);
+            w.write_string(&c.kind.label());
             w.write_optional_string(&c.result_type);
         }
         NodePayload::Allocation(a) => {
@@ -873,6 +887,97 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
             }
             w.write_optional_u64(&e.closure_entry.map(|id| id.as_u64()));
         }
+        NodePayload::StructDef(s) => {
+            w.write_u32_le(NODE_TYPE_STRUCT_DEF);
+            w.write_string(&s.name);
+            w.write_u64_le(s.fields.len() as u64);
+            for f in &s.fields {
+                w.write_string(&f.name);
+                w.write_string(&f.type_name);
+                w.write_u64_le(f.offset);
+                w.write_u64_le(f.size);
+            }
+            w.write_u64_le(s.total_size);
+            w.write_u64_le(s.alignment);
+        }
+        NodePayload::EnumDef(e) => {
+            w.write_u32_le(NODE_TYPE_ENUM_DEF);
+            w.write_string(&e.name);
+            w.write_u64_le(e.variants.len() as u64);
+            for v in &e.variants {
+                w.write_string(&v.name);
+                w.write_u64_le(v.discriminant);
+                w.write_optional_string(&v.payload_type);
+                w.write_u64_le(v.payload_size);
+            }
+            w.write_string(&e.tag_type);
+            w.write_u64_le(e.tag_size);
+            w.write_u64_le(e.max_payload_size);
+            w.write_u64_le(e.total_size);
+            w.write_u64_le(e.alignment);
+        }
+        NodePayload::Match(m) => {
+            w.write_u32_le(NODE_TYPE_MATCH);
+            w.write_string(&m.subject);
+            w.write_string(&m.subject_type);
+            w.write_u64_le(m.arms.len() as u64);
+            for arm in &m.arms {
+                write_match_pattern(w, &arm.pattern);
+                w.write_optional_string(&arm.guard);
+                w.write_u64_le(arm.body.len() as u64);
+                for stmt in &arm.body {
+                    w.write_string(stmt);
+                }
+            }
+        }
+        NodePayload::ConstantTime(ct) => {
+            w.write_u32_le(NODE_TYPE_CONSTANT_TIME);
+            w.write_u32_le(match ct.op {
+                ConstantTimeOp::CtSelect => 0,
+                ConstantTimeOp::CtEq => 1,
+            });
+            w.write_string(&ct.dst);
+            w.write_u64_le(ct.operands.len() as u64);
+            for op in &ct.operands {
+                w.write_string(op);
+            }
+        }
+    }
+}
+
+fn write_match_pattern(w: &mut BinaryWriter, pattern: &MatchPatternInfo) {
+    match pattern {
+        MatchPatternInfo::Wildcard => {
+            w.write_u32_le(0);
+        }
+        MatchPatternInfo::Lit(v) => {
+            w.write_u32_le(1);
+            w.write_u64_le(*v as u64);
+        }
+        MatchPatternInfo::Ident(name) => {
+            w.write_u32_le(2);
+            w.write_string(name);
+        }
+        MatchPatternInfo::Enum { variant, binding } => {
+            w.write_u32_le(3);
+            w.write_string(variant);
+            w.write_optional_string(binding);
+        }
+        MatchPatternInfo::Struct { name, fields } => {
+            w.write_u32_le(4);
+            w.write_string(name);
+            w.write_u64_le(fields.len() as u64);
+            for f in fields {
+                w.write_string(f);
+            }
+        }
+        MatchPatternInfo::Or(patterns) => {
+            w.write_u32_le(5);
+            w.write_u64_le(patterns.len() as u64);
+            for p in patterns {
+                write_match_pattern(w, p);
+            }
+        }
     }
 }
 
@@ -897,7 +1002,7 @@ fn read_payload(
             let operation = reader.read_string(&format!("{}.operation", context))?;
             let result_type = reader.read_optional_string(&format!("{}.result_type", context))?;
             Ok(NodePayload::Computation(ComputationNode {
-                operation,
+                kind: ComputationKind::Other(operation),
                 result_type,
                 tail_call: false,
             }))
@@ -1001,6 +1106,153 @@ fn read_payload(
                 closure_entry,
             }))
         }
+        NodeType::StructDef => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let field_count = reader.read_u64_le(&format!("{}.field_count", context))?;
+            let mut fields = Vec::with_capacity(field_count as usize);
+            for i in 0..field_count as usize {
+                let f_name = reader.read_string(&format!("{}.field[{}].name", context, i))?;
+                let f_type = reader.read_string(&format!("{}.field[{}].type", context, i))?;
+                let f_offset = reader.read_u64_le(&format!("{}.field[{}].offset", context, i))?;
+                let f_size = reader.read_u64_le(&format!("{}.field[{}].size", context, i))?;
+                fields.push(StructFieldInfo {
+                    name: f_name,
+                    type_name: f_type,
+                    offset: f_offset,
+                    size: f_size,
+                });
+            }
+            let total_size = reader.read_u64_le(&format!("{}.total_size", context))?;
+            let alignment = reader.read_u64_le(&format!("{}.alignment", context))?;
+            Ok(NodePayload::StructDef(StructDefNode {
+                name,
+                fields,
+                total_size,
+                alignment,
+            }))
+        }
+        NodeType::EnumDef => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let variant_count = reader.read_u64_le(&format!("{}.variant_count", context))?;
+            let mut variants = Vec::with_capacity(variant_count as usize);
+            for i in 0..variant_count as usize {
+                let v_name = reader.read_string(&format!("{}.variant[{}].name", context, i))?;
+                let discriminant = reader.read_u64_le(&format!("{}.variant[{}].discriminant", context, i))?;
+                let payload_type = reader.read_optional_string(&format!("{}.variant[{}].payload_type", context, i))?;
+                let payload_size = reader.read_u64_le(&format!("{}.variant[{}].payload_size", context, i))?;
+                variants.push(EnumVariantInfo {
+                    name: v_name,
+                    discriminant,
+                    payload_type,
+                    payload_size,
+                });
+            }
+            let tag_type = reader.read_string(&format!("{}.tag_type", context))?;
+            let tag_size = reader.read_u64_le(&format!("{}.tag_size", context))?;
+            let max_payload_size = reader.read_u64_le(&format!("{}.max_payload_size", context))?;
+            let total_size = reader.read_u64_le(&format!("{}.total_size", context))?;
+            let alignment = reader.read_u64_le(&format!("{}.alignment", context))?;
+            Ok(NodePayload::EnumDef(EnumDefNode {
+                name,
+                variants,
+                tag_type,
+                tag_size,
+                max_payload_size,
+                total_size,
+                alignment,
+            }))
+        }
+        NodeType::Match => {
+            let subject = reader.read_string(&format!("{}.subject", context))?;
+            let subject_type = reader.read_string(&format!("{}.subject_type", context))?;
+            let arm_count = reader.read_u64_le(&format!("{}.arm_count", context))?;
+            let mut arms = Vec::with_capacity(arm_count as usize);
+            for i in 0..arm_count as usize {
+                let pattern = read_match_pattern(reader, &format!("{}.arm[{}].pattern", context, i))?;
+                let guard = reader.read_optional_string(&format!("{}.arm[{}].guard", context, i))?;
+                let body_count = reader.read_u64_le(&format!("{}.arm[{}].body_count", context, i))?;
+                let mut body = Vec::with_capacity(body_count as usize);
+                for j in 0..body_count as usize {
+                    body.push(reader.read_string(&format!("{}.arm[{}].body[{}]", context, i, j))?);
+                }
+                arms.push(MatchArmInfo {
+                    pattern,
+                    guard,
+                    body,
+                });
+            }
+            Ok(NodePayload::Match(MatchNode {
+                subject,
+                arms,
+                subject_type,
+            }))
+        }
+        NodeType::ConstantTime => {
+            let op_tag = reader.read_u32_le(&format!("{}.op", context))?;
+            let op = match op_tag {
+                0 => ConstantTimeOp::CtSelect,
+                1 => ConstantTimeOp::CtEq,
+                _ => return Err(DeserializeError::InvalidValue {
+                    field: format!("{}.op", context),
+                    value: format!("{}", op_tag),
+                }),
+            };
+            let dst = reader.read_string(&format!("{}.dst", context))?;
+            let operand_count = reader.read_u64_le(&format!("{}.operand_count", context))?;
+            let mut operands = Vec::with_capacity(operand_count as usize);
+            for i in 0..operand_count as usize {
+                operands.push(reader.read_string(&format!("{}.operand[{}]", context, i))?);
+            }
+            Ok(NodePayload::ConstantTime(ConstantTimeNode {
+                op,
+                dst,
+                operands,
+            }))
+        }
+    }
+}
+
+fn read_match_pattern(
+    reader: &mut BinaryReader,
+    context: &str,
+) -> Result<MatchPatternInfo, DeserializeError> {
+    let tag = reader.read_u32_le(&format!("{}.tag", context))?;
+    match tag {
+        0 => Ok(MatchPatternInfo::Wildcard),
+        1 => {
+            let v = reader.read_u64_le(&format!("{}.value", context))? as i64;
+            Ok(MatchPatternInfo::Lit(v))
+        }
+        2 => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            Ok(MatchPatternInfo::Ident(name))
+        }
+        3 => {
+            let variant = reader.read_string(&format!("{}.variant", context))?;
+            let binding = reader.read_optional_string(&format!("{}.binding", context))?;
+            Ok(MatchPatternInfo::Enum { variant, binding })
+        }
+        4 => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let field_count = reader.read_u64_le(&format!("{}.field_count", context))?;
+            let mut fields = Vec::with_capacity(field_count as usize);
+            for i in 0..field_count as usize {
+                fields.push(reader.read_string(&format!("{}.field[{}]", context, i))?);
+            }
+            Ok(MatchPatternInfo::Struct { name, fields })
+        }
+        5 => {
+            let pattern_count = reader.read_u64_le(&format!("{}.pattern_count", context))?;
+            let mut patterns = Vec::with_capacity(pattern_count as usize);
+            for i in 0..pattern_count as usize {
+                patterns.push(read_match_pattern(reader, &format!("{}.pattern[{}]", context, i))?);
+            }
+            Ok(MatchPatternInfo::Or(patterns))
+        }
+        _ => Err(DeserializeError::InvalidValue {
+            field: format!("{}.tag", context),
+            value: format!("{}", tag),
+        }),
     }
 }
 
@@ -1115,7 +1367,7 @@ pub fn deserialize_scg_json(json: &str) -> Result<SCG, DeserializeError> {
 /// let n1 = scg.add_node(
 ///     NodeType::Computation,
 ///     NodePayload::Computation(ComputationNode {
-///         operation: "add".to_string(),
+///         kind: ComputationKind::Other("add".to_string()),
 ///         result_type: None,
 ///         tail_call: false }),
 ///     ProgramPoint { file: None, line: None, column: None, offset: None },
@@ -1248,7 +1500,7 @@ fn format_node_label(node: &NodeData) -> String {
                 .as_deref()
                 .map(|t| format!(":{}", t))
                 .unwrap_or_default();
-            format!("{}{}", c.operation, rt)
+            format!("{}{}", c.kind.label(), rt)
         }
         NodePayload::Allocation(a) => {
             let tn = a
@@ -1276,6 +1528,10 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::Phantom(p) => format!("phantom({})", p.purpose),
         NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
         NodePayload::ClosureEnv(e) => format!("closure_env({:?})", e.captured_vars),
+        NodePayload::StructDef(s) => format!("struct_def({})", s.name),
+        NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
+        NodePayload::Match(m) => format!("match({})", m.subject),
+        NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
     };
 
     let ann = node
@@ -1332,7 +1588,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1367,7 +1623,7 @@ mod tests {
         let comp = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "write".to_string(),
+                kind: ComputationKind::Other("write".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1501,7 +1757,7 @@ mod tests {
         let node = restored.nodes().next().unwrap();
         assert_eq!(node.node_type, NodeType::Computation);
         if let NodePayload::Computation(ref c) = node.payload {
-            assert_eq!(c.operation, "add");
+            assert_eq!(c.kind.label(), "add");
             assert_eq!(c.result_type, Some("i32".to_string()));
         } else {
             panic!("Expected Computation payload");
@@ -1604,7 +1860,7 @@ mod tests {
             .find(|n| matches!(n.node_type, NodeType::Computation))
             .unwrap();
         if let NodePayload::Computation(ref c) = comp_node.payload {
-            assert_eq!(c.operation, "write");
+            assert_eq!(c.kind.label(), "write");
         } else {
             panic!("Expected Computation payload");
         }
@@ -1795,7 +2051,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "f".to_string(),
+                kind: ComputationKind::Other("f".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1804,7 +2060,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "g".to_string(),
+                kind: ComputationKind::Other("g".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

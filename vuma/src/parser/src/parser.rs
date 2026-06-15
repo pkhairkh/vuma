@@ -241,6 +241,7 @@ impl<'src> Parser<'src> {
             TokenKind::Mod => self.parse_module_def().map(Item::ModuleDef),
             TokenKind::Trait => self.parse_trait_def(visibility, attrs).map(Item::TraitDef),
             TokenKind::Impl => self.parse_impl_block(attrs).map(Item::ImplBlock),
+            TokenKind::Extern => self.parse_extern_block().map(Item::ExternBlock),
             TokenKind::Ident => {
                 let lexeme = self.current.lexeme.as_str();
                 match lexeme {
@@ -916,6 +917,81 @@ impl<'src> Parser<'src> {
             target_type,
             methods,
             where_clause,
+            span: Span::new(start, self.current.span.end),
+        })
+    }
+
+    /// `extern` `"C"` `{` <fn_decl>* `}`
+    ///
+    /// Parses an extern block declaring external functions.
+    /// Example: `extern "C" { fn write(fd: i64, buf: ptr, count: i64) -> i64; }`
+    fn parse_extern_block(&mut self) -> Result<ExternBlockDef, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::Extern)?;
+
+        // Parse the calling convention string: "C", "system", etc.
+        let convention = if self.at(TokenKind::String) {
+            let conv = self.current.lexeme.clone();
+            self.advance();
+            conv
+        } else {
+            "C".to_string() // default to C calling convention
+        };
+
+        self.expect(TokenKind::LBrace)?;
+
+        let mut functions = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Fn) {
+                match self.parse_extern_fn_decl() {
+                    Ok(fn_decl) => functions.push(fn_decl),
+                    Err(err) => {
+                        self.errors.push(err);
+                        self.recover_to_statement_boundary();
+                    }
+                }
+            } else {
+                self.advance(); // skip unexpected tokens
+            }
+        }
+
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(ExternBlockDef {
+            convention,
+            functions,
+            span: Span::new(start, self.current.span.end),
+        })
+    }
+
+    /// Parse a single function declaration inside an extern block.
+    /// `fn` <name> `(` <params>? `)` [`->` <type>] `;`
+    fn parse_extern_fn_decl(&mut self) -> Result<ExternFnDecl, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::Fn)?;
+
+        let name = self.expect_name()?;
+
+        self.expect(TokenKind::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(TokenKind::RParen)?;
+
+        let return_type = if self.at(TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        // Semicolon is optional but recommended
+        if self.at(TokenKind::Semicolon) {
+            self.advance();
+        }
+
+        Ok(ExternFnDecl {
+            name,
+            params,
+            return_type,
             span: Span::new(start, self.current.span.end),
         })
     }
@@ -1984,6 +2060,43 @@ impl<'src> Parser<'src> {
                 }
             }
 
+            // ---- Constant-time security intrinsics ----
+            TokenKind::CtSelect => {
+                // ct_select(cond, a, b) — constant-time conditional select
+                let span = self.current.span;
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let cond = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let true_val = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let false_val = self.parse_expr()?;
+                let end = self.current.span.end;
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::CtSelect {
+                    cond: Box::new(cond),
+                    true_val: Box::new(true_val),
+                    false_val: Box::new(false_val),
+                    span: Span::new(span.start, end),
+                })
+            }
+            TokenKind::CtEq => {
+                // ct_eq(a, b) — constant-time equality check
+                let span = self.current.span;
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let lhs = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let rhs = self.parse_expr()?;
+                let end = self.current.span.end;
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::CtEq {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: Span::new(span.start, end),
+                })
+            }
+
             // ---- Literals ----
             TokenKind::Number => {
                 let lexeme = self.current.lexeme.clone();
@@ -2139,6 +2252,92 @@ impl<'src> Parser<'src> {
                 Ok(Expr::Spawn {
                     expr: Box::new(expr),
                     span: Span::new(start, end),
+                })
+            }
+            TokenKind::AtomicLoad => {
+                // `atomic_load(addr)`
+                self.advance(); // consume 'atomic_load'
+                self.expect(TokenKind::LParen)?;
+                let addr = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                let end = self.current.span.end;
+                Ok(Expr::AtomicLoad {
+                    addr: Box::new(addr),
+                    span: Span::new(start, end),
+                })
+            }
+            TokenKind::AtomicStore => {
+                // `atomic_store(addr, val)`
+                self.advance(); // consume 'atomic_store'
+                self.expect(TokenKind::LParen)?;
+                let addr = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                let end = self.current.span.end;
+                Ok(Expr::AtomicStore {
+                    addr: Box::new(addr),
+                    value: Box::new(value),
+                    span: Span::new(start, end),
+                })
+            }
+            TokenKind::AtomicCas => {
+                // `atomic_cas(addr, expected, desired)`
+                self.advance(); // consume 'atomic_cas'
+                self.expect(TokenKind::LParen)?;
+                let addr = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let expected = self.parse_expr()?;
+                self.expect(TokenKind::Comma)?;
+                let desired = self.parse_expr()?;
+                self.expect(TokenKind::RParen)?;
+                let end = self.current.span.end;
+                Ok(Expr::AtomicCas {
+                    addr: Box::new(addr),
+                    expected: Box::new(expected),
+                    desired: Box::new(desired),
+                    span: Span::new(start, end),
+                })
+            }
+            TokenKind::Match => {
+                // Match expression: `match expr { pattern => body, ... }`
+                let span = self.current.span;
+                self.advance(); // consume 'match'
+                let scrutinee = self.parse_expr()?;
+                self.expect(TokenKind::LBrace)?;
+
+                let mut arms = Vec::new();
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    let arm_start = self.current.span.start;
+                    let pattern = self.parse_match_pattern()?;
+
+                    // Optional guard: `if expr`
+                    let guard = if self.at(TokenKind::If) {
+                        self.advance(); // consume 'if'
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
+
+                    self.expect(TokenKind::FatArrow)?;
+                    let body = self.parse_expr()?;
+                    let arm_end = body.span().end;
+                    arms.push(MatchArm {
+                        pattern,
+                        guard,
+                        body,
+                        span: Span::new(arm_start, arm_end),
+                    });
+                    if self.at(TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+
+                self.expect(TokenKind::RBrace)?;
+                Ok(Expr::MatchExpr {
+                    scrutinee: Box::new(scrutinee),
+                    arms,
+                    span: Span::new(span.start, self.current.span.end),
                 })
             }
             TokenKind::FormatStr => {
@@ -3065,11 +3264,17 @@ impl Expr {
             Expr::Spawn { span, .. } => *span,
             Expr::Allocate { span, .. } => *span,
             Expr::Null { span } => *span,
+            Expr::CtSelect { span, .. } => *span,
+            Expr::CtEq { span, .. } => *span,
             Expr::Range { span, .. } => *span,
             Expr::FormatStr { span, .. } => *span,
             Expr::Closure { span, .. } => *span,
             Expr::Await { span, .. } => *span,
             Expr::Uninitialized { span } => *span,
+            Expr::AtomicLoad { span, .. } => *span,
+            Expr::AtomicStore { span, .. } => *span,
+            Expr::AtomicCas { span, .. } => *span,
+            Expr::MatchExpr { span, .. } => *span,
         }
     }
 }

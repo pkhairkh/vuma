@@ -3856,7 +3856,7 @@ impl InstructionSelector {
                 }
             }
 
-            IRInstr::Call { .. } => {
+            IRInstr::Call { is_extern: _, .. } => {
                 // Call lowering is handled by the emitter, which needs
                 // to set up argument registers and emit BL.
             }
@@ -3976,6 +3976,12 @@ impl InstructionSelector {
                 // Handled by the emitter's emit_ir_instr. The instruction
                 // selector does not need to produce separate instructions
                 // for this; the emitter handles it directly.
+            }
+            IRInstr::CtSelect { .. } | IRInstr::CtEq { .. } => {
+                // Constant-time operations handled by the emitter's emit_ir_instr.
+            }
+            IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+                // Atomic operations handled by the emitter's emit_ir_instr.
             }
         }
         Ok(())

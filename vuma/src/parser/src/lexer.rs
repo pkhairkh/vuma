@@ -360,6 +360,14 @@ pub enum TokenKind {
     Mut,
     /// `ref`
     Ref,
+    /// `extern`
+    Extern,
+    /// `atomic_load`
+    AtomicLoad,
+    /// `atomic_store`
+    AtomicStore,
+    /// `atomic_cas`
+    AtomicCas,
     /// `Option` type keyword
     OptionKw,
     /// `Some` variant keyword
@@ -372,6 +380,10 @@ pub enum TokenKind {
     OkKw,
     /// `Err` variant keyword
     ErrKw,
+    /// `ct_select` — constant-time conditional select intrinsic
+    CtSelect,
+    /// `ct_eq` — constant-time equality check intrinsic
+    CtEq,
     /// Format string literal: `f"..."`
     FormatStr,
     /// Rust-style macro invocation identifier ending with `!`
@@ -525,12 +537,18 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Static => write!(f, "'static'"),
             TokenKind::Mut => write!(f, "'mut'"),
             TokenKind::Ref => write!(f, "'ref'"),
+            TokenKind::Extern => write!(f, "'extern'"),
+            TokenKind::AtomicLoad => write!(f, "'atomic_load'"),
+            TokenKind::AtomicStore => write!(f, "'atomic_store'"),
+            TokenKind::AtomicCas => write!(f, "'atomic_cas'"),
             TokenKind::OptionKw => write!(f, "'Option'"),
             TokenKind::SomeKw => write!(f, "'Some'"),
             TokenKind::NoneKw => write!(f, "'None'"),
             TokenKind::ResultKw => write!(f, "'Result'"),
             TokenKind::OkKw => write!(f, "'Ok'"),
             TokenKind::ErrKw => write!(f, "'Err'"),
+            TokenKind::CtSelect => write!(f, "'ct_select'"),
+            TokenKind::CtEq => write!(f, "'ct_eq'"),
             TokenKind::FormatStr => write!(f, "format string"),
             TokenKind::MacroIdent => write!(f, "macro identifier"),
 
@@ -602,6 +620,14 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "send" => Some(TokenKind::Send),
         "recv" => Some(TokenKind::Recv),
 
+        // FFI
+        "extern" => Some(TokenKind::Extern),
+
+        // Atomic operations
+        "atomic_load" => Some(TokenKind::AtomicLoad),
+        "atomic_store" => Some(TokenKind::AtomicStore),
+        "atomic_cas" => Some(TokenKind::AtomicCas),
+
         // Safety
         "unsafe" => Some(TokenKind::Unsafe),
         "safe" => Some(TokenKind::Safe),
@@ -636,6 +662,10 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "Result" => Some(TokenKind::ResultKw),
         "Ok" => Some(TokenKind::OkKw),
         "Err" => Some(TokenKind::ErrKw),
+
+        // Constant-time security intrinsics
+        "ct_select" => Some(TokenKind::CtSelect),
+        "ct_eq" => Some(TokenKind::CtEq),
 
         _ => None,
     }

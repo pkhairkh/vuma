@@ -18,6 +18,7 @@
 //! The [`PassManager`] sequences passes, optionally running verification between
 //! each one, and accumulates aggregate statistics across all runs.
 
+use crate::node::ComputationKind;
 use hashbrown::{HashMap, HashSet};
 
 use crate::edge::EdgeKind;
@@ -287,8 +288,10 @@ impl ConstantFolding {
                 }
                 if let Some(pred_node) = scg.get_node(pred_id) {
                     if let NodePayload::Computation(ref comp) = pred_node.payload {
-                        if let Some(val) = Self::try_parse_constant(&comp.operation) {
-                            constants.push((pred_id, val));
+                        if let ComputationKind::Other(ref op) = comp.kind {
+                            if let Some(val) = Self::try_parse_constant(op) {
+                                constants.push((pred_id, val));
+                            }
                         }
                     }
                 }
@@ -319,7 +322,7 @@ impl SCGPass for ConstantFolding {
             // Get the operation string if this is a computation node
             let operation = match scg.get_node(id) {
                 Some(n) => match &n.payload {
-                    NodePayload::Computation(c) => c.operation.clone(),
+                    NodePayload::Computation(c) => c.kind.label(),
                     _ => continue,
                 },
                 None => continue,
@@ -350,7 +353,7 @@ impl SCGPass for ConstantFolding {
                     // Mutate the node's operation in place
                     if let Some(node) = scg.get_node_mut(id) {
                         if let NodePayload::Computation(ref mut comp) = node.payload {
-                            comp.operation = new_op;
+                            comp.kind = ComputationKind::Other(new_op);
                         }
                     }
 
@@ -401,7 +404,7 @@ impl CommonSubexpressionElimination {
                     .map(|e| e.source)
                     .collect();
                 preds.sort();
-                Some((comp.operation.clone(), comp.result_type.clone(), preds))
+                Some((comp.kind.label(), comp.result_type.clone(), preds))
             }
             _ => None,
         }
@@ -1183,7 +1186,7 @@ impl SCGPass for StrengthReduction {
         for id in node_ids {
             let (operation, _result_type) = match scg.get_node(id) {
                 Some(n) => match &n.payload {
-                    NodePayload::Computation(c) => (c.operation.clone(), c.result_type.clone()),
+                    NodePayload::Computation(c) => (c.kind.label(), c.result_type.clone()),
                     _ => continue,
                 },
                 None => continue,
@@ -1204,7 +1207,9 @@ impl SCGPass for StrengthReduction {
                         }
                         if let Some(pn) = scg.get_node(pred) {
                             if let NodePayload::Computation(c) = &pn.payload {
-                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                                if let ComputationKind::Other(ref op) = c.kind {
+                                    return Self::try_parse_const_int(op).map(|v| (pred, v));
+                                }
                             }
                         }
                         None
@@ -1217,7 +1222,7 @@ impl SCGPass for StrengthReduction {
                         let new_op = format!("shl_{}", shift);
                         if let Some(node) = scg.get_node_mut(id) {
                             if let NodePayload::Computation(ref mut c) = node.payload {
-                                c.operation = new_op;
+                                c.kind = ComputationKind::Other(new_op);
                             }
                         }
                         result.changed = true;
@@ -1240,7 +1245,9 @@ impl SCGPass for StrengthReduction {
                         }
                         if let Some(pn) = scg.get_node(pred) {
                             if let NodePayload::Computation(c) = &pn.payload {
-                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                                if let ComputationKind::Other(ref op) = c.kind {
+                                    return Self::try_parse_const_int(op).map(|v| (pred, v));
+                                }
                             }
                         }
                         None
@@ -1253,7 +1260,7 @@ impl SCGPass for StrengthReduction {
                         let new_op = format!("shr_{}", shift);
                         if let Some(node) = scg.get_node_mut(id) {
                             if let NodePayload::Computation(ref mut c) = node.payload {
-                                c.operation = new_op;
+                                c.kind = ComputationKind::Other(new_op);
                             }
                         }
                         result.changed = true;
@@ -1276,7 +1283,9 @@ impl SCGPass for StrengthReduction {
                         }
                         if let Some(pn) = scg.get_node(pred) {
                             if let NodePayload::Computation(c) = &pn.payload {
-                                return Self::try_parse_const_int(&c.operation).map(|v| (pred, v));
+                                if let ComputationKind::Other(ref op) = c.kind {
+                                    return Self::try_parse_const_int(op).map(|v| (pred, v));
+                                }
                             }
                         }
                         None
@@ -1289,7 +1298,7 @@ impl SCGPass for StrengthReduction {
                         let new_op = format!("and_{}", mask);
                         if let Some(node) = scg.get_node_mut(id) {
                             if let NodePayload::Computation(ref mut c) = node.payload {
-                                c.operation = new_op;
+                                c.kind = ComputationKind::Other(new_op);
                             }
                         }
                         result.changed = true;
@@ -1369,7 +1378,13 @@ impl SCGPass for TailCallOptDetection {
         for id in node_ids {
             let is_call = match scg.get_node(id) {
                 Some(n) => match &n.payload {
-                    NodePayload::Computation(c) => Self::is_call_node(&c.operation),
+                    NodePayload::Computation(c) => {
+                        if let ComputationKind::Other(ref op) = c.kind {
+                            Self::is_call_node(op)
+                        } else {
+                            false
+                        }
+                    }
                     _ => false,
                 },
                 None => continue,
@@ -1601,7 +1616,7 @@ pub fn strength_reduce(graph: &mut SCG) -> Vec<NodeId> {
     for id in node_ids {
         let operation = match graph.get_node(id) {
             Some(n) => match &n.payload {
-                NodePayload::Computation(c) => c.operation.clone(),
+                NodePayload::Computation(c) => c.kind.label(),
                 _ => continue,
             },
             None => continue,
@@ -1641,7 +1656,7 @@ pub fn strength_reduce(graph: &mut SCG) -> Vec<NodeId> {
         if let Some(op) = new_op {
             if let Some(node) = graph.get_node_mut(id) {
                 if let NodePayload::Computation(ref mut c) = node.payload {
-                    c.operation = op;
+                    c.kind = ComputationKind::Other(op);
                     replaced.push(id);
                 }
             }
@@ -1664,7 +1679,10 @@ fn get_const_df_predecessor(graph: &SCG, id: NodeId) -> Option<u64> {
         }
         if let Some(pn) = graph.get_node(pred) {
             if let NodePayload::Computation(c) = &pn.payload {
-                if let Some(v) = StrengthReduction::try_parse_const_int(&c.operation) {
+                if let Some(v) = (match &c.kind {
+                    ComputationKind::Other(ref op) => StrengthReduction::try_parse_const_int(op),
+                    _ => None,
+                }) {
                     return Some(v);
                 }
             }
@@ -1686,7 +1704,13 @@ pub fn detect_tail_calls(graph: &mut SCG) -> Vec<NodeId> {
     for id in node_ids {
         let is_call = match graph.get_node(id) {
             Some(n) => match &n.payload {
-                NodePayload::Computation(c) => TailCallOptDetection::is_call_node(&c.operation),
+                NodePayload::Computation(c) => {
+                    if let ComputationKind::Other(ref op) = c.kind {
+                        TailCallOptDetection::is_call_node(op)
+                    } else {
+                        false
+                    }
+                }
                 _ => false,
             },
             None => continue,
@@ -1757,7 +1781,7 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        ComputationNode, ControlKind, ControlNode, EffectNode, NodePayload, NodeType, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, EffectNode, NodePayload, NodeType, ProgramPoint,
     };
 
     /// Helper: create a default program point for tests.
@@ -1779,7 +1803,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:10".to_string(),
+                kind: ComputationKind::Other("const.i32:10".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1796,7 +1820,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1839,7 +1863,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:1".to_string(),
+                kind: ComputationKind::Other("const.i32:1".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1848,7 +1872,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:2".to_string(),
+                kind: ComputationKind::Other("const.i32:2".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1857,7 +1881,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1881,7 +1905,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:10".to_string(),
+                kind: ComputationKind::Other("const.i32:10".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1890,7 +1914,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:20".to_string(),
+                kind: ComputationKind::Other("const.i32:20".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1899,7 +1923,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1915,8 +1939,9 @@ mod tests {
         let folded = scg.get_node(n3).unwrap();
         match &folded.payload {
             NodePayload::Computation(c) => {
-                assert!(c.operation.starts_with("const.i32:"));
-                assert!(c.operation.contains("30"));
+                let op_label = c.kind.label();
+                assert!(op_label.starts_with("const.i32:"));
+                assert!(op_label.contains("30"));
             }
             _ => panic!("expected computation node"),
         }
@@ -1928,7 +1953,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1937,7 +1962,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1957,7 +1982,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:5".to_string(),
+                kind: ComputationKind::Other("const.i32:5".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1966,7 +1991,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:3".to_string(),
+                kind: ComputationKind::Other("const.i32:3".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1976,7 +2001,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1985,7 +2010,7 @@ mod tests {
         let n4 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -1994,7 +2019,7 @@ mod tests {
         let n5 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "use".to_string(),
+                kind: ComputationKind::Other("use".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2019,7 +2044,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:5".to_string(),
+                kind: ComputationKind::Other("const.i32:5".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2028,7 +2053,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2037,7 +2062,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2058,7 +2083,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2067,7 +2092,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2092,7 +2117,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2101,7 +2126,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "b".to_string(),
+                kind: ComputationKind::Other("b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2151,7 +2176,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:10".to_string(),
+                kind: ComputationKind::Other("const.i32:10".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2160,7 +2185,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:20".to_string(),
+                kind: ComputationKind::Other("const.i32:20".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2169,7 +2194,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2194,7 +2219,7 @@ mod tests {
         let _n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2250,7 +2275,7 @@ mod tests {
         let pre_header = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "pre".to_string(),
+                kind: ComputationKind::Other("pre".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2259,7 +2284,7 @@ mod tests {
         let outer_const = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:10".to_string(),
+                kind: ComputationKind::Other("const.i32:10".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2276,7 +2301,7 @@ mod tests {
         let body_add = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2314,7 +2339,7 @@ mod tests {
         let pre_header = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "pre".to_string(),
+                kind: ComputationKind::Other("pre".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2366,7 +2391,7 @@ mod tests {
         let pre_header = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "pre".to_string(),
+                kind: ComputationKind::Other("pre".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2383,7 +2408,7 @@ mod tests {
         let body_add = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2417,7 +2442,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2433,7 +2458,7 @@ mod tests {
         let pre_header = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "pre".to_string(),
+                kind: ComputationKind::Other("pre".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2442,7 +2467,7 @@ mod tests {
         let outer1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:5".to_string(),
+                kind: ComputationKind::Other("const.i32:5".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2451,7 +2476,7 @@ mod tests {
         let outer2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:7".to_string(),
+                kind: ComputationKind::Other("const.i32:7".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2468,7 +2493,7 @@ mod tests {
         let inv1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2477,7 +2502,7 @@ mod tests {
         let inv2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2515,7 +2540,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:8".to_string(),
+                kind: ComputationKind::Other("const.i32:8".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2524,7 +2549,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2533,7 +2558,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
+                kind: ComputationKind::Other("mul".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2546,7 +2571,7 @@ mod tests {
         assert_eq!(replaced.len(), 1);
         let node = scg.get_node(n3).unwrap();
         match &node.payload {
-            NodePayload::Computation(c) => assert_eq!(c.operation, "shl_3"),
+            NodePayload::Computation(c) => assert_eq!(c.kind.label(), "shl_3"),
             _ => panic!("expected computation"),
         }
     }
@@ -2557,7 +2582,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:16".to_string(),
+                kind: ComputationKind::Other("const.i32:16".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2566,7 +2591,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2575,7 +2600,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "div".to_string(),
+                kind: ComputationKind::Other("div".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2588,7 +2613,7 @@ mod tests {
         assert_eq!(replaced.len(), 1);
         let node = scg.get_node(n3).unwrap();
         match &node.payload {
-            NodePayload::Computation(c) => assert_eq!(c.operation, "shr_4"),
+            NodePayload::Computation(c) => assert_eq!(c.kind.label(), "shr_4"),
             _ => panic!("expected computation"),
         }
     }
@@ -2599,7 +2624,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:8".to_string(),
+                kind: ComputationKind::Other("const.i32:8".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2608,7 +2633,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2617,7 +2642,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mod".to_string(),
+                kind: ComputationKind::Other("mod".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2630,7 +2655,7 @@ mod tests {
         assert_eq!(replaced.len(), 1);
         let node = scg.get_node(n3).unwrap();
         match &node.payload {
-            NodePayload::Computation(c) => assert_eq!(c.operation, "and_7"),
+            NodePayload::Computation(c) => assert_eq!(c.kind.label(), "and_7"),
             _ => panic!("expected computation"),
         }
     }
@@ -2641,7 +2666,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "const.i32:3".to_string(),
+                kind: ComputationKind::Other("const.i32:3".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2650,7 +2675,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2659,7 +2684,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
+                kind: ComputationKind::Other("mul".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2673,7 +2698,7 @@ mod tests {
         // Operation should remain "mul"
         let node = scg.get_node(n3).unwrap();
         match &node.payload {
-            NodePayload::Computation(c) => assert_eq!(c.operation, "mul"),
+            NodePayload::Computation(c) => assert_eq!(c.kind.label(), "mul"),
             _ => panic!("expected computation"),
         }
     }
@@ -2684,7 +2709,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2693,7 +2718,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "load".to_string(),
+                kind: ComputationKind::Other("load".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2702,7 +2727,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
+                kind: ComputationKind::Other("mul".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -2723,7 +2748,7 @@ mod tests {
         let call_node = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "call_foo".to_string(),
+                kind: ComputationKind::Other("call_foo".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2756,7 +2781,7 @@ mod tests {
         let call_node = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "call_bar".to_string(),
+                kind: ComputationKind::Other("call_bar".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2782,7 +2807,7 @@ mod tests {
         let call_node = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "call_foo".to_string(),
+                kind: ComputationKind::Other("call_foo".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2791,7 +2816,7 @@ mod tests {
         let other = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "use".to_string(),
+                kind: ComputationKind::Other("use".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2816,7 +2841,7 @@ mod tests {
         let add_node = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -2842,7 +2867,7 @@ mod tests {
         let call_node = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "fn_call_baz".to_string(),
+                kind: ComputationKind::Other("fn_call_baz".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -3314,7 +3339,7 @@ mod tests {
         let comp = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "call_process".to_string(),
+                kind: ComputationKind::Other("call_process".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

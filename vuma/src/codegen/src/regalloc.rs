@@ -4197,6 +4197,7 @@ mod tests {
             dst: Some(IRValue::Register(1)),
             func: "other".to_string(),
             args: vec![],
+            is_extern: false,
         });
 
         // ...and used after the call.

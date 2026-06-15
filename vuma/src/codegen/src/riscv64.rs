@@ -687,6 +687,13 @@ pub enum Instruction {
     Fence { pred: u32, succ: u32 },
     /// No-operation (pseudo: `addi x0, x0, 0`)
     Nop,
+
+    // ── RV64A Extension: Atomic operations ──────────────────────────────
+    /// Load-Reserved Doubleword: `lr.d rd, (rs1)` — RV64A
+    LrD { rd: Gpr, rs1: Gpr },
+    /// Store-Conditional Doubleword: `sc.d rd, rs1, rs2` — RV64A
+    /// rd = 0 on success, non-zero on failure
+    ScD { rd: Gpr, rs1: Gpr, rs2: Gpr },
 }
 
 impl Instruction {
@@ -1239,6 +1246,20 @@ impl Instruction {
                 // NOP = ADDI x0, x0, 0 = 0x00000013
                 encode_i_type(0, 0, 0b000, 0, OP_IMM)
             }
+
+            // ── RV64A Extension: Atomic ───────────────────────────────
+            Instruction::LrD { rd, rs1 } => {
+                // LR.D rd, (rs1)
+                // Encoding: R-type with funct3=0b010, funct7=0b0001010
+                // lr.d = 0b0001010 | aq=0 | rl=0
+                encode_r_type(0b0001010, rs1.encoding(), 0b010, rd.encoding(), 0, 0b0101111)
+            }
+            Instruction::ScD { rd, rs1, rs2 } => {
+                // SC.D rd, rs1, rs2
+                // Encoding: R-type with funct3=0b010, funct7=0b0001100
+                // sc.d = 0b0001100 | aq=0 | rl=0
+                encode_r_type(0b0001100, rs1.encoding(), 0b010, rd.encoding(), rs2.encoding(), 0b0101111)
+            }
         }
     }
 
@@ -1322,6 +1343,8 @@ impl Instruction {
             Instruction::Ebreak => "ebreak",
             Instruction::Fence { .. } => "fence",
             Instruction::Nop => "nop",
+            Instruction::LrD { .. } => "lr.d",
+            Instruction::ScD { .. } => "sc.d",
         }
     }
 
@@ -1931,6 +1954,8 @@ impl std::fmt::Display for Instruction {
             Instruction::Ebreak => write!(f, "ebreak"),
             Instruction::Fence { pred, succ } => write!(f, "fence {:#x}, {:#x}", pred, succ),
             Instruction::Nop => write!(f, "nop"),
+            Instruction::LrD { rd, rs1 } => write!(f, "lr.d {}, ({})", rd, rs1),
+            Instruction::ScD { rd, rs1, rs2 } => write!(f, "sc.d {}, {}, ({})", rd, rs2, rs1),
         }
     }
 }
@@ -4417,6 +4442,57 @@ impl Backend for RiscV64Backend {
                         code
                     }
 
+                    // Constant-time conditional select (NO BRANCHES)
+                    // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
+                    // mask = -(cond != 0): all-ones if cond!=0, else 0
+                    IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        // Load cond into T2, true_val into T1, false_val into T0
+                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T2));
+                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::T1));
+                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::T0));
+                        // Build mask = -(cond != 0): SLTIU T3, T2, 1 → T3 = (cond == 0) ? 1 : 0
+                        // XORI T3, T3, 1 → T3 = (cond != 0) ? 1 : 0
+                        // SUB T3, zero, T3 → T3 = mask (all-ones or 0)
+                        code.extend(Instruction::Sltiu { rd: Gpr::T3, rs1: Gpr::T2, imm: 1 }.encode()); // T3 = (cond == 0) ? 1 : 0
+                        code.extend(Instruction::Xori { rd: Gpr::T3, rs1: Gpr::T3, imm: 1 }.encode());  // T3 = (cond != 0) ? 1 : 0
+                        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::Zero, rs2: Gpr::T3 }.encode()); // T3 = mask
+                        // AND T1, T1, T3  → true_val & mask
+                        code.extend(Instruction::And { rd: Gpr::T1, rs1: Gpr::T1, rs2: Gpr::T3 }.encode());
+                        // NOT T3, T3 → ~mask (XORI with -1)
+                        code.extend(Instruction::Xori { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+                        // AND T0, T0, T3  → false_val & ~mask
+                        code.extend(Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
+                        // OR T0, T0, T1 → result
+                        code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code
+                    }
+
+                    // Constant-time equality check (NO BRANCHES)
+                    // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
+                    IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+                        // XOR T0, T0, T1 → diff
+                        code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                        // SUB T2, zero, T0 → -diff
+                        code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::Zero, rs2: Gpr::T0 }.encode());
+                        // OR T0, T0, T2 → (diff | -diff)
+                        code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                        // SRLI T0, T0, 31 → 0 if diff==0, 1 if diff!=0
+                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 31 }.encode());
+                        // XORI T0, T0, 1 → invert: 1 if equal, 0 if not
+                        code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code
+                    }
+
                     IRInstr::Offset { dst, base, offset } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -4450,7 +4526,7 @@ impl Backend for RiscV64Backend {
                         code
                     }
 
-                    IRInstr::Call { dst, func: target_func, args } => {
+                    IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
                         let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                                             Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
@@ -4565,6 +4641,83 @@ impl Backend for RiscV64Backend {
                             .encode()
                             .to_vec()
                     }
+
+                    // ── Atomic operations ──────────────────────────────────────────
+                    // RISC-V: LR.D / SC.D for load-reserved / store-conditional
+                    IRInstr::AtomicLoad { dst, addr, .. } => {
+                        // RISC-V: LR.D rd, [addr] — load-reserved
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
+                        // LR.D T1, T0, 0
+                        code.extend(Instruction::LrD { rd: Gpr::T1, rs1: Gpr::T0 }.encode());
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        code.extend(ss_store_vreg(dst_id, Gpr::T1, &vreg_stack_slots));
+                        code
+                    }
+
+                    IRInstr::AtomicStore { value, addr, .. } => {
+                        // RISC-V: SC.D loop — store-conditional, retry on failure
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
+                        code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T1));
+
+                        // retry: SC.D T2, T1, T0
+                        let retry_offset = code.len() as u64 + current_byte_offset;
+                        code.extend(Instruction::ScD { rd: Gpr::T2, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                        // BNE T2, x0, retry — if SC failed, retry
+                        let bne_offset_in_encoded = code.len();
+                        let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
+                        code.extend(Instruction::Bne { rs1: Gpr::T2, rs2: Gpr::Zero, offset: 0 }.encode());
+
+                        // Branch fixup: BNE back to retry
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            offset_in_encoded: bne_offset_in_encoded,
+                            abs_byte_offset: bne_abs_offset,
+                            target_label: format!("__atomic_store_retry_{}", retry_offset),
+                            is_jal: false,
+                            jal_rd: Gpr::Zero,
+                            bne_rs1: Gpr::T2,
+                            bne_rs2: Gpr::Zero,
+                        });
+                        // We need a label at retry_offset — for simplicity, emit a NOP
+                        // The proper fix would add label support; for now we use a self-referencing
+                        // backward branch. We'll emit the retry label as part of the same block.
+                        // TODO: proper label support for atomic loops
+                        code
+                    }
+
+                    IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
+                        // RISC-V CAS loop: LR.D / BNE / SC.D / BNE retry
+                        let mut code = Vec::new();
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
+                        code.extend(ss_load_value(expected, &vreg_stack_slots, Gpr::T1));
+                        code.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::T3));
+
+                        // retry: LR.D T2, T0 — load current value
+                        let retry_offset_in_encoded = code.len();
+                        code.extend(Instruction::LrD { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
+
+                        // BNE T2, T1, done — if not equal, skip
+                        let bne_offset_in_encoded = code.len();
+                        let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
+                        code.extend(Instruction::Bne { rs1: Gpr::T2, rs2: Gpr::T1, offset: 0 }.encode());
+
+                        // SC.D T4, T3, T0 — try to store desired
+                        code.extend(Instruction::ScD { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
+
+                        // BNE T4, x0, retry — if SC failed, retry
+                        let bne2_offset_in_encoded = code.len();
+                        let bne2_abs_offset = current_byte_offset + bne2_offset_in_encoded as u64;
+                        code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode());
+
+                        // done: store old value (T2) to dst
+                        // For now, always store T2 (the current value)
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        code.extend(ss_store_vreg(dst_id, Gpr::T2, &vreg_stack_slots));
+                        // TODO: proper label fixups for the retry/done branches
+                        code
+                    }
                 };
 
                 if !encoded.is_empty() {
@@ -4596,6 +4749,9 @@ impl Backend for RiscV64Backend {
                         IRInstr::Ret { .. } => "ret", IRInstr::Branch { .. } => "j",
                         IRInstr::CondBranch { .. } => "bnez", IRInstr::Call { .. } => "call",
                         IRInstr::Phi { .. } => "nop",
+                        IRInstr::AtomicLoad { .. } => "atomic_load",
+                        IRInstr::AtomicStore { .. } => "atomic_store",
+                        IRInstr::AtomicCas { .. } => "atomic_cas",
                     };
 
                     let encoded_len = encoded.len() as u64;

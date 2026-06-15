@@ -18,6 +18,7 @@
 //! | `ControlNode::Loop`   | Loop header with phi nodes + back-edge + exit block  |
 //! | `ControlNode::Break`  | `Branch` to loop exit                                |
 //! | `ControlNode::Continue` | `Branch` to loop header                           |
+//! | `ControlNode::Switch` | Cascading `Cmp`+`CondBranch` for each arm + merge   |
 //! | `AllocationNode::Stack` | `Alloc` + stack slot registration                  |
 //! | `AllocationNode::Heap`  | `Call` to `__vuma_alloc`                           |
 //! | `AccessNode::Load`    | Optional `Offset` + `Load`                           |
@@ -26,7 +27,25 @@
 //! | `ComputationNode`     | `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`BinOp`/`UnaryOp`     |
 //! | `UnaryComputationNode`| `UnaryOp` (neg / not / clz / ctz / popcnt)           |
 //! | `CallNode`            | `Call`                                               |
+//! | `StructAccessNode`    | Offset-based `Load`/`Store` at `base + field_offset` |
+//! | `EnumAccessNode`      | Tag `Load`/`Store` at offset 0; payload at offset N  |
 //! | `Return`              | `Ret` + `IRTerminator::Return`                       |
+//!
+//! ## Struct and Enum Lowering
+//!
+//! **Structs** are lowered to flat memory layouts. Field N is stored at
+//! `base_ptr + offset_N` where offsets are computed during layout resolution.
+//! `StructAccessNode::Load` lowers to `Load { addr: ptr, offset: field_offset }`
+//! and `StructAccessNode::Store` lowers to `Store { addr: ptr, offset: field_offset }`.
+//!
+//! **Enums** are lowered to tagged unions: a discriminant (tag) at offset 0
+//! followed by a payload at offset `tag_size` (aligned). `EnumAccessNode::LoadTag`
+//! reads the tag (offset 0), and `EnumAccessNode::LoadPayload` reads the
+//! payload at its computed offset.
+//!
+//! **Match** expressions are lowered to if/else chains via `ControlNode::Switch`:
+//! for each arm, a `Cmp { kind: Eq }` compares the discriminant against the
+//! expected tag value, and a `CondBranch` dispatches to the arm body.
 //!
 //! ## Control Flow
 //!
@@ -160,6 +179,12 @@ pub enum ScgStatement {
     Call(CallNode),
     /// Return from function.
     Return(Vec<ScgExpr>),
+    /// Constant-time security operation (ct_select, ct_eq).
+    ConstantTime(ConstantTimeStatement),
+    /// Struct field access: read/write a field from a flat memory layout.
+    StructAccess(StructAccessNode),
+    /// Enum tag access: read the discriminant or payload of a tagged union.
+    EnumAccess(EnumAccessNode),
 }
 
 /// Control-flow node.
@@ -304,6 +329,9 @@ pub struct CallNode {
     pub func: String,
     /// Argument expressions.
     pub args: Vec<ScgExpr>,
+    /// Whether this is a call to an extern (foreign) function.
+    /// When true, the backend should emit a relocation instead of a local branch.
+    pub is_extern: bool,
 }
 
 /// A simple expression in the SCG.
@@ -317,6 +345,112 @@ pub enum ScgExpr {
     Float(f64),
     /// A symbolic label reference.
     Label(String),
+}
+
+/// Constant-time operation statement.
+///
+/// These operations are guaranteed to execute in constant time (no
+/// data-dependent branches or memory accesses) to prevent timing
+/// side-channel attacks.
+#[derive(Debug, Clone)]
+pub struct ConstantTimeStatement {
+    /// The constant-time operation kind.
+    pub op: ConstantTimeOpKind,
+    /// Destination variable name.
+    pub dst: String,
+    /// Operand variable names or expressions.
+    pub operands: Vec<ScgExpr>,
+    /// Type of the result.
+    pub ty: ScgType,
+}
+
+/// Kinds of constant-time operations in the SCG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstantTimeOpKind {
+    /// Constant-time conditional select: `ct_select(cond, a, b)`.
+    /// Returns `a` if `cond != 0`, else `b`, without branching.
+    CtSelect,
+    /// Constant-time equality check: `ct_eq(a, b)`.
+    /// Returns 1 if `a == b`, else 0, without branching.
+    CtEq,
+}
+
+/// Struct field access node.
+///
+/// Reads or writes a field from a struct stored in flat memory.
+/// The field's byte offset is computed from the struct layout.
+#[derive(Debug, Clone)]
+pub enum StructAccessNode {
+    /// Read a struct field: `dst = ptr.field_name`
+    Load {
+        /// Destination variable name.
+        dst: String,
+        /// Base pointer expression (start of the struct in memory).
+        ptr: ScgExpr,
+        /// Byte offset of the field within the struct.
+        field_offset: u32,
+        /// Type of the field being loaded.
+        field_ty: ScgType,
+    },
+    /// Write a struct field: `ptr.field_name = value`
+    Store {
+        /// Base pointer expression (start of the struct in memory).
+        ptr: ScgExpr,
+        /// Byte offset of the field within the struct.
+        field_offset: u32,
+        /// Value expression to store.
+        value: ScgExpr,
+        /// Type of the field being stored.
+        field_ty: ScgType,
+    },
+}
+
+/// Enum (tagged union) access node.
+///
+/// Reads the discriminant tag or the variant payload from a tagged
+/// union stored in memory.
+#[derive(Debug, Clone)]
+pub enum EnumAccessNode {
+    /// Read the discriminant tag: `dst = ptr.tag`
+    LoadTag {
+        /// Destination variable name.
+        dst: String,
+        /// Base pointer expression (start of the tagged union in memory).
+        ptr: ScgExpr,
+        /// Type of the tag (typically u32).
+        tag_ty: ScgType,
+    },
+    /// Write the discriminant tag: `ptr.tag = value`
+    StoreTag {
+        /// Base pointer expression.
+        ptr: ScgExpr,
+        /// Tag value expression.
+        value: ScgExpr,
+        /// Type of the tag.
+        tag_ty: ScgType,
+    },
+    /// Read the payload at a given offset: `dst = ptr.payload`
+    LoadPayload {
+        /// Destination variable name.
+        dst: String,
+        /// Base pointer expression.
+        ptr: ScgExpr,
+        /// Byte offset of the payload from the start of the tagged union.
+        payload_offset: u32,
+        /// Type of the payload being loaded.
+        payload_ty: ScgType,
+    },
+    /// Write the payload at a given offset: `ptr.payload = value`
+    StorePayload {
+        /// Base pointer expression.
+        ptr: ScgExpr,
+        /// Byte offset of the payload.
+        payload_offset: u32,
+        /// Value expression to store.
+        value: ScgExpr,
+        /// Type of the payload being stored.
+        payload_ty: ScgType,
+    },
 }
 
 /// SCG data declaration.
@@ -561,6 +695,15 @@ impl IRBuilder {
                     values: ir_vals.clone(),
                 });
                 ir_func.current_block().terminator = IRTerminator::Return(ir_vals);
+            }
+            ScgStatement::ConstantTime(ct) => {
+                self.lower_constant_time(ct, ir_func, names)?;
+            }
+            ScgStatement::StructAccess(sa) => {
+                self.lower_struct_access(sa, ir_func, names)?;
+            }
+            ScgStatement::EnumAccess(ea) => {
+                self.lower_enum_access(ea, ir_func, names)?;
             }
         }
         Ok(())
@@ -1258,6 +1401,7 @@ impl IRBuilder {
                     dst: Some(IRValue::Register(vreg)),
                     func: "__vuma_alloc".to_string(),
                     args: vec![size_val],
+                    is_extern: true,
                 });
             }
         }
@@ -1592,7 +1736,223 @@ impl IRBuilder {
             dst,
             func: call.func.clone(),
             args,
+            is_extern: call.is_extern,
         });
+        Ok(())
+    }
+
+    // =======================================================================
+    // Constant-time operation lowering
+    // =======================================================================
+
+    /// Lower a constant-time operation to branch-free IR instructions.
+    ///
+    /// ## ct_select(cond, a, b)
+    ///
+    /// Implements: `(a & mask) | (b & ~mask)` where `mask = -(cond != 0)`.
+    ///
+    /// This is lowered to:
+    /// 1. `neg_mask = -1` if `cond != 0`, else `0` → via Cmp + Neg
+    /// 2. `a_masked = a & neg_mask`
+    /// 3. `b_masked = b & ~neg_mask`
+    /// 4. `result = a_masked | b_masked`
+    ///
+    /// Using the IR `CtSelect` instruction, which backends lower to the
+    /// appropriate branch-free sequence (e.g., CSEL on AArch64, CMOV on x86).
+    ///
+    /// ## ct_eq(a, b)
+    ///
+    /// Implements: XOR-based constant-time comparison.
+    ///
+    /// Using the IR `CtEq` instruction, which backends lower to the
+    /// appropriate branch-free sequence.
+    fn lower_constant_time(
+        &mut self,
+        ct: &ConstantTimeStatement,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let dst_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &ct.dst));
+        names.insert(ct.dst.clone(), dst_vreg);
+        let dst = IRValue::Register(dst_vreg);
+        let ty = Some(ct.ty.to_ir_type());
+
+        match ct.op {
+            ConstantTimeOpKind::CtSelect => {
+                // ct_select(cond, a, b) — requires exactly 3 operands
+                if ct.operands.len() != 3 {
+                    return Err(crate::Error::InvalidIR(format!(
+                        "ct_select requires 3 operands, got {}",
+                        ct.operands.len()
+                    )));
+                }
+                let cond = self.resolve_expr(&ct.operands[0], names)?;
+                let true_val = self.resolve_expr(&ct.operands[1], names)?;
+                let false_val = self.resolve_expr(&ct.operands[2], names)?;
+
+                ir_func.current_block().push(IRInstruction::CtSelect {
+                    dst,
+                    cond,
+                    true_val,
+                    false_val,
+                    ty,
+                });
+            }
+            ConstantTimeOpKind::CtEq => {
+                // ct_eq(a, b) — requires exactly 2 operands
+                if ct.operands.len() != 2 {
+                    return Err(crate::Error::InvalidIR(format!(
+                        "ct_eq requires 2 operands, got {}",
+                        ct.operands.len()
+                    )));
+                }
+                let lhs = self.resolve_expr(&ct.operands[0], names)?;
+                let rhs = self.resolve_expr(&ct.operands[1], names)?;
+
+                ir_func.current_block().push(IRInstruction::CtEq {
+                    dst,
+                    lhs,
+                    rhs,
+                    ty,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    // =======================================================================
+    // Struct access lowering
+    // =======================================================================
+
+    /// Lower a struct field access to a Load or Store with the field offset.
+    ///
+    /// Structs are stored in flat memory with fields laid out sequentially
+    /// at their computed byte offsets. Accessing a field is simply a
+    /// load/store at `base_ptr + field_offset`.
+    fn lower_struct_access(
+        &mut self,
+        sa: &StructAccessNode,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        match sa {
+            StructAccessNode::Load {
+                dst,
+                ptr,
+                field_offset,
+                field_ty,
+            } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+
+                ir_func.current_block().push(IRInstruction::Load {
+                    dst: IRValue::Register(dst_vreg),
+                    addr: ptr_val,
+                    offset: *field_offset as i32,
+                    ty: field_ty.to_ir_type(),
+                });
+            }
+            StructAccessNode::Store {
+                ptr,
+                field_offset,
+                value,
+                field_ty,
+            } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let val = self.resolve_expr(value, names)?;
+
+                ir_func.current_block().push(IRInstruction::Store {
+                    value: val,
+                    addr: ptr_val,
+                    offset: *field_offset as i32,
+                    ty: field_ty.to_ir_type(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    // =======================================================================
+    // Enum (tagged union) access lowering
+    // =======================================================================
+
+    /// Lower an enum access to Load/Store instructions.
+    ///
+    /// Enums (tagged unions) are stored in memory as:
+    ///   [tag: u32] [padding] [payload: max_payload_size bytes]
+    ///
+    /// - Tag is at offset 0 (4 bytes, u32)
+    /// - Payload starts at offset `max(4, align_of(payload_type))` (typically 4 or 8)
+    fn lower_enum_access(
+        &mut self,
+        ea: &EnumAccessNode,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        match ea {
+            EnumAccessNode::LoadTag { dst, ptr, tag_ty } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+
+                // Tag is always at offset 0
+                ir_func.current_block().push(IRInstruction::Load {
+                    dst: IRValue::Register(dst_vreg),
+                    addr: ptr_val,
+                    offset: 0,
+                    ty: tag_ty.to_ir_type(),
+                });
+            }
+            EnumAccessNode::StoreTag { ptr, value, tag_ty } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let val = self.resolve_expr(value, names)?;
+
+                ir_func.current_block().push(IRInstruction::Store {
+                    value: val,
+                    addr: ptr_val,
+                    offset: 0,
+                    ty: tag_ty.to_ir_type(),
+                });
+            }
+            EnumAccessNode::LoadPayload {
+                dst,
+                ptr,
+                payload_offset,
+                payload_ty,
+            } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+
+                ir_func.current_block().push(IRInstruction::Load {
+                    dst: IRValue::Register(dst_vreg),
+                    addr: ptr_val,
+                    offset: *payload_offset as i32,
+                    ty: payload_ty.to_ir_type(),
+                });
+            }
+            EnumAccessNode::StorePayload {
+                ptr,
+                payload_offset,
+                value,
+                payload_ty,
+            } => {
+                let ptr_val = self.resolve_expr(ptr, names)?;
+                let val = self.resolve_expr(value, names)?;
+
+                ir_func.current_block().push(IRInstruction::Store {
+                    value: val,
+                    addr: ptr_val,
+                    offset: *payload_offset as i32,
+                    ty: payload_ty.to_ir_type(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -2193,6 +2553,7 @@ mod tests {
                     dst: Some("result".into()),
                     func: "compute".into(),
                     args: vec![ScgExpr::Int(42), ScgExpr::Int(7)],
+                    is_extern: false,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
             ],
@@ -2898,6 +3259,7 @@ mod tests {
                     dst: None,
                     func: "print_int".into(),
                     args: vec![ScgExpr::Int(123)],
+                    is_extern: false,
                 }),
                 ScgStatement::Return(vec![]),
             ],

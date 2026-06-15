@@ -2357,3 +2357,140 @@ Stage Summary:
 - CLI flags: --safe (runtime bounds checks) and --bench (benchmark suite)
 - Benchmark suite: SHA256d per-backend, compilation speed, backend comparison, codegen quality
 - All new code compiles and tests pass
+
+---
+Task ID: 23
+Agent: general-purpose
+Task: Wave23: Package manager — Create minimal package manager foundation for VUMA
+
+Work Log:
+- Read existing worklog and explored project structure
+- Found vuma-package already existed as a workspace crate at src/package/ with manifest.rs, resolver.rs, registry.rs
+- Fixed compilation error in registry.rs: `v == version_req` → `**v == version_req` (type mismatch for &String == str)
+- Fixed topological sort producing wrong order: added `sorted.reverse()` so dependencies come before dependents (build order)
+- Added `parse_manifest(toml_str: &str) -> Result<PackageManifest>` standalone function to manifest.rs
+- Added `resolve_dependencies(manifest: &PackageManifest, registry_path: &Path) -> PackageResult<Vec<PackageManifest>>` standalone function to resolver.rs
+- Replaced old `PackageRegistry::publish(name, version, source_dir: &Path)` with task-requested signature `publish(&self, manifest: &PackageManifest, source: &str) -> Result<()>`
+- Added `PackageRegistry::fetch(name: &str, version: &str) -> Result<(PackageManifest, String)>` — returns manifest and source directory path
+- Added `PackageRegistry::list() -> Result<Vec<(String, String)>>` — flat (name, version) pairs (vs. existing list_packages which groups versions)
+- Updated vuma-package lib.rs to re-export parse_manifest and resolve_dependencies
+- Updated main vuma lib.rs to re-export parse_manifest and resolve_dependencies from vuma_package
+- Verified `vuma pkg init/build/add` CLI subcommands already implemented and working in main.rs
+- All 6 package tests pass (manifest roundtrip, minimal parse, registry index, version prefix match, resolve no deps, topological sort)
+
+Stage Summary:
+- Package manager foundation complete with all requested API functions:
+  - PackageManifest struct with name, version, dependencies (Vec<Dependency>), targets (Vec<PackageTarget>)
+  - parse_manifest() — convenience TOML parser
+  - resolve_dependencies() — standalone resolver from registry path
+  - PackageRegistry with publish(manifest, source), fetch(name, version), list()
+- CLI subcommands: vuma pkg init <name>, vuma pkg build, vuma pkg add <dep> [version]
+- Pre-existing vuma-scg errors (field/method conflicts) are unrelated and not addressed
+
+---
+Task ID: 24
+Agent: general-purpose
+Task: Wave24: FFI and syscalls
+
+Work Log:
+- Confirmed AST already had ExternBlockDef and ExternFnDecl in ast.rs (lines 375-395)
+- Confirmed parser already had parse_extern_block() and parse_extern_fn_decl() in parser.rs (lines 928-997)
+- Confirmed ffi.rs already existed with ExternBlock, ExternFn, CallingConvention, ExternType, ExternRegistry, Relocation, RelocationKind, and basic Linux/C library bindings
+- Confirmed src/lib.rs already had `pub mod ffi;`
+- Added `is_extern: bool` field to IRInstr::Call in ir.rs (line 1264-1276)
+- Updated IRInstr::Call Display impl to show "extern call" prefix when is_extern is true
+- Added `is_extern: bool` field to CallNode in scg_to_ir.rs (line 304-316)
+- Updated lower_call in scg_to_ir.rs to propagate is_extern from CallNode to IRInstr::Call
+- Updated __vuma_alloc call to set is_extern: true (runtime function)
+- Updated all IRInstr::Call construction/destruction sites across the entire codebase:
+  - codegen/src/opt.rs: substitute_value, inline detection, all test functions
+  - codegen/src/emit.rs: both register-based and stack-slot call lowering, all test functions
+  - codegen/src/arm64.rs: instruction selection match
+  - codegen/src/arm32/mod.rs: stack-slot instruction selection
+  - codegen/src/mips64/mod.rs: both register and stack-slot paths
+  - codegen/src/ppc64/mod.rs: both register and stack-slot paths
+  - codegen/src/riscv64.rs: stack-slot instruction selection
+  - codegen/src/loongarch64/mod.rs: register path and stack-slot path, plus tests
+  - codegen/src/loongarch64/reg_alloc_isel.rs: reg-alloc path
+  - codegen/src/loongarch64/stack_slot_isel.rs: stack-slot path
+  - codegen/src/x86_64/stack_slot_isel.rs: stack-slot path
+  - codegen/src/wasm32/mod.rs: wasm call lowering
+  - codegen/src/regalloc.rs: test function
+  - codegen/src/control_flow.rs: exception invoke, coroutine runtime calls
+  - tests/src/cross_backend.rs: helper function
+  - tests/src/abi_conformance.rs: caller function
+- Updated all CallNode construction sites across codebase:
+  - src/main.rs: 4 call sites (3 user calls: is_extern: false, 1 __vuma_alloc: is_extern: true)
+  - src/pipeline.rs: 2 call sites (__vuma_dealloc: is_extern: true, effect: is_extern: false)
+  - src/cor/src/runtime.rs: 1 call site (__vuma_call: is_extern: true)
+  - src/codegen/src/scg_to_ir.rs: 2 test call sites (is_extern: false)
+  - src/codegen/src/memory_safety.rs: 4 test call sites (free: is_extern: true)
+  - src/tests/src/codegen.rs: 2 test call sites (is_extern: false)
+- Added SyscallTable with per-architecture Linux syscall numbers to ffi.rs:
+  - Arch enum: X86_64, AArch64, RiscV64, Arm32, Mips64, PPC64, LoongArch64, Wasm32
+  - SyscallName enum: Read, Write, Open, Close, Exit, ExitGroup, Mmap, Munmap, Brk, Ioctl, Fcntl, Getpid, Kill, Mprotect, ClockGettime, SchedYield, Clone, Futex, SetTidAddress
+  - SyscallTable struct with for_arch(), get(), len(), is_empty(), iter()
+  - Architecture-specific syscall tables (19 syscalls each for 7 architectures, Wasm32 empty)
+  - Verified numbers against official Linux kernel headers
+- Added architecture-specific relocation kinds to ffi.rs:
+  - Arm32Call (R_ARM_CALL), Arm32V4bx (R_ARM_V4BX)
+  - Mips26 (R_MIPS_26), MipsGotCall (R_MIPS_GOT_CALL)
+  - Ppc64Rel24 (R_PPC64_REL24), Ppc64Rel64 (R_PPC64_REL64)
+  - LoongArchB26 (R_LARCH_B26), LoongArchCall36 (R_LARCH_CALL36)
+  - RelocationKind::for_arch() method for architecture-specific relocation selection
+- Fixed pre-existing vuma-scg build errors:
+  - Added `use crate::node::ComputationKind;` to transform.rs
+  - Added ComputationKind to imports in serialize.rs
+- Added comprehensive tests for SyscallTable (all 8 architectures), Arch::from_name(), RelocationKind::for_arch()
+- Verified no is_extern-related compilation errors (all pre-existing errors are unrelated)
+
+Stage Summary:
+- FFI infrastructure fully implemented:
+  - Parser: extern "C" { fn ...; } blocks parse into ExternBlockDef (pre-existing)
+  - AST: ExternBlockDef and ExternFnDecl types (pre-existing)
+  - IR: IRInstr::Call now carries is_extern flag for relocation vs local branch distinction
+  - SCG: CallNode carries is_extern flag, propagated through lower_call
+  - ffi.rs: Complete SyscallTable with 19 syscalls across 8 architectures
+  - ffi.rs: Architecture-specific relocation kinds for all 8 backends
+  - ffi.rs: ExternRegistry for tracking known extern functions
+- Pre-existing codegen errors (emit_label, Bcond variant, ss_store_vreg, etc.) from prior tasks remain
+- Pre-existing parser to_scg.rs ComputationNode field mismatch errors remain
+
+---
+Task ID: 28
+Agent: main
+Task: Wave28: Constant-time crypto ops
+
+Work Log:
+- Verified existing parser/AST/IR infrastructure: ct_select and ct_eq already defined in AST (Expr::CtSelect, Expr::CtEq), lexer (TokenKind::CtSelect, TokenKind::CtEq), SCG (ConstantTimeOpKind), and IR (IRInstr::CtSelect, IRInstr::CtEq)
+- Added CtSelect/CtEq backend lowering to all 8 backends:
+  1. x86_64 (stack_slot_isel.rs): TEST+SETNE+MOVZX+NEG mask, then AND+NOT+AND+OR — no branches
+  2. AArch64 (emit.rs): Already had CtSelect (CSEL) and CtEq (EOR+SUB+CSET) from prior work
+  3. RISC-V 64: SLTIU+XORI+SUB mask building, AND+XORI+AND+OR for ct_select; XOR+SUB+OR+SRLI+XORI for ct_eq
+  4. ARM32: CMP+MOVNE/MOVEQ mask building, AND+MVN+AND+ORR for ct_select; EOR+RSB+ORR+LSR_imm+EOR for ct_eq
+  5. MIPS64: SLTIU+XORI+DSUBU mask, AND+NOR+AND+OR for ct_select; XOR+DSUBU+OR+DSRL+XORI for ct_eq
+  6. PPC64: addic+subfe carry-based mask, AND+ANDC+OR for ct_select; XOR+subfic+OR+rlwinm+xori for ct_eq
+  7. LoongArch64: maskeqz/masknez branchless pattern for ct_select; XOR+SubD+OR+SrliD+Xori for ct_eq
+  8. Wasm32: i32.eqz+xor+sub mask, i32.and+i32.xor+i32.or for ct_select; i32.xor+i32.sub+i32.or+i32.shr_u+i32.xor for ct_eq
+- Added PPC64 instructions: Addic, Subfic, Subfe (carry-based arithmetic for constant-time mask generation)
+- Fixed ARM32: promoted _DP_RSB to DP_RSB (needed for NEG via RSB), used encode_dp_shift_imm for LSR immediate
+- Added ct_select_u32, ct_eq_u32, ct_ne_u32, ct_lt_u32, ct_gte_u32 to std/crypto.rs with documentation
+- Added comprehensive tests including ct_select(1, 42, 99) = 42 and ct_select(0, 42, 99) = 99
+- Fixed non-exhaustive match errors in opt.rs (substitute_instr), arm64.rs, emit.rs, loongarch64/stack_slot_isel.rs, ppc64/mod.rs
+- All 20 crypto tests pass including new constant-time u32 tests
+- vuma-std compiles cleanly
+
+Key Design Decisions:
+- ct_select: mask = -(cond != 0) using bitwise ops only; result = (a & mask) | (b & !mask) — NO BRANCHES
+- ct_eq: diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1 — NO BRANCHES
+- ct_lt_u32: borrow detection using (!a & b) | ((!a | b) & (a.wrapping_sub(b))) >> 31 — NO BRANCHES
+- PPC64 uses carry flag (addic+subfe) for most efficient constant-time mask — unique to Power ISA
+- LoongArch64 uses maskeqz/masknez instructions — ISA-native branchless conditional select
+- All implementations documented with constant-time properties and VUMA-VERIFIED annotations
+
+Stage Summary:
+- All 8 backends have constant-time ct_select and ct_eq lowering
+- 5 public u32 constant-time functions added to std/crypto.rs
+- All tests passing (20 crypto tests)
+- Pre-existing codegen errors (emit_label, Bcond, ss_store_vreg, ComputationNode) remain from prior tasks
+

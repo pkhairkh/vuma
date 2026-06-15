@@ -65,7 +65,7 @@ use crate::ast::*;
 use crate::error::{ParseError, Span};
 use std::collections::HashMap;
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationNode, ControlKind,
+    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, ComputationKind, ComputationNode, ControlKind,
     ControlNode, DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
     NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, VTableNode, SCG,
 };
@@ -167,7 +167,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("import \"{}\"", i.path),
+                        kind: ComputationKind::Other(format!("import \"{}\"", i.path),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -180,7 +180,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("export {}", e.name),
+                        kind: ComputationKind::Other(format!("export {}", e.name),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -194,7 +194,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: c.ty.as_ref().map(|t| t.to_string()),
                         tail_call: false,
                     }),
@@ -214,7 +214,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("struct {} {{ {} }}", s.name, fields_str.join(", ")),
+                        kind: ComputationKind::Other(format!("struct {} {{ {} }}", s.name, fields_str.join(", ")),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -228,7 +228,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("enum {} {{ {} }}", e.name, variants_str.join(", ")),
+                        kind: ComputationKind::Other(format!("enum {} {{ {} }}", e.name, variants_str.join(", ")),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -241,7 +241,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("module {}", m.name),
+                        kind: ComputationKind::Other(format!("module {}", m.name),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -256,7 +256,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: s.ty.as_ref().map(|t| t.to_string()),
                         tail_call: false,
                     }),
@@ -277,7 +277,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
+                        kind: ComputationKind::Other(format!("trait {} {{ {} }}", t.name, methods_str.join(", ")),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -293,7 +293,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!(
+                        kind: ComputationKind::Other(format!(
                             "impl {}{} for {} {{ {} }}",
                             trait_str,
                             if trait_str.is_empty() { "" } else { " " },
@@ -345,7 +345,7 @@ impl AstToScg {
             let param_id = scg.add_node(
                 NodeType::Computation,
                 NodePayload::Computation(ComputationNode {
-                    operation: format!("param {}", p.name),
+                    kind: ComputationKind::Other(format!("param {}", p.name),
                     result_type: p.ty.as_ref().map(|t| t.to_string()),
                     tail_call: false,
                 }),
@@ -487,7 +487,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: result_type.clone(),
                         tail_call: false,
                     }),
@@ -503,7 +503,7 @@ impl AstToScg {
                     let uninit_id = scg.add_node(
                         NodeType::Computation,
                         NodePayload::Computation(ComputationNode {
-                            operation: "uninitialized".to_string(),
+                            kind: ComputationKind::Other("uninitialized".to_string()),
                             result_type: result_type.clone(),
                             tail_call: false,
                         }),
@@ -581,7 +581,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -796,7 +796,7 @@ impl AstToScg {
                     let id = scg.add_node(
                         NodeType::Computation,
                         NodePayload::Computation(ComputationNode {
-                            operation: desc,
+                            kind: ComputationKind::Other(desc),
                             result_type: None,
                             tail_call: false,
                         }),
@@ -1199,7 +1199,7 @@ impl AstToScg {
                     let body_id = scg.add_node(
                         NodeType::Computation,
                         NodePayload::Computation(ComputationNode {
-                            operation: format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
+                            kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
                             result_type: None,
                             tail_call: false,
                         }),
@@ -1226,7 +1226,7 @@ impl AstToScg {
                             let field_comp_id = scg.add_node(
                                 NodeType::Computation,
                                 NodePayload::Computation(ComputationNode {
-                                    operation: format!("destructure {}.{}", name, field),
+                                    kind: ComputationKind::Other(format!("destructure {}.{}", name, field),
                                     result_type: None,
                                     tail_call: false,
                                 }),
@@ -1248,7 +1248,7 @@ impl AstToScg {
                         let bind_id = scg.add_node(
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
-                                operation: format!("enum_bind {}({})", name, b),
+                                kind: ComputationKind::Other(format!("enum_bind {}({})", name, b),
                                 result_type: None,
                                 tail_call: false,
                             }),
@@ -1264,7 +1264,7 @@ impl AstToScg {
                         let range_check_id = scg.add_node(
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
-                                operation: format!(
+                                kind: ComputationKind::Other(format!(
                                     "range_check {}..={}",
                                     self.lit_to_string(start),
                                     self.lit_to_string(end)
@@ -1372,7 +1372,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -1501,7 +1501,7 @@ impl AstToScg {
                     let size_id = scg.add_node(
                         NodeType::Computation,
                         NodePayload::Computation(ComputationNode {
-                            operation: format!("sizeof({})", ty),
+                            kind: ComputationKind::Other(format!("sizeof({})", ty),
                             result_type: Some("usize".to_string()),
                             tail_call: false,
                         }),
@@ -1515,7 +1515,7 @@ impl AstToScg {
                     let align_id = scg.add_node(
                         NodeType::Computation,
                         NodePayload::Computation(ComputationNode {
-                            operation: format!("alignof({})", ty),
+                            kind: ComputationKind::Other(format!("alignof({})", ty),
                             result_type: Some("usize".to_string()),
                             tail_call: false,
                         }),
@@ -1552,7 +1552,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: desc,
+                        kind: ComputationKind::Other(desc),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -1765,7 +1765,7 @@ impl AstToScg {
                 let copy_id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: format!("copy_capture[{}]", idx),
+                        kind: ComputationKind::Other(format!("copy_capture[{}]", idx),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -1807,7 +1807,7 @@ impl AstToScg {
             let param_id = scg.add_node(
                 NodeType::Computation,
                 NodePayload::Computation(ComputationNode {
-                    operation: format!("closure_param {}", p.name),
+                    kind: ComputationKind::Other(format!("closure_param {}", p.name),
                     result_type: p.ty.as_ref().map(|t| t.to_string()),
                     tail_call: false,
                 }),
@@ -1828,7 +1828,7 @@ impl AstToScg {
                 let body_id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        operation: self.expr_to_string(e),
+                        kind: ComputationKind::Other(self.expr_to_string(e)),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -2025,7 +2025,7 @@ impl AstToScg {
         let dispatch_id = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: format!(
+                kind: ComputationKind::Other(format!(
                     "dyn_dispatch {}::{} for {}",
                     trait_name, method_name, concrete_type
                 ),
@@ -2437,6 +2437,11 @@ impl AstToScg {
             Expr::Closure { .. } => {}
             Expr::Await { .. } => {}
             Expr::Uninitialized { .. } => {}
+            Expr::CtSelect { .. } => {}
+            Expr::CtEq { .. } => {}
+            Expr::AtomicLoad { .. } => {}
+            Expr::AtomicStore { .. } => {}
+            Expr::AtomicCas { .. } => {}
         }
     }
 
@@ -2591,6 +2596,11 @@ impl AstToScg {
             Expr::Closure { .. } => "closure".to_string(),
             Expr::Await { .. } => "future".to_string(),
             Expr::Uninitialized { .. } => "uninitialized".to_string(),
+            Expr::CtSelect { .. } => "u32".to_string(),
+            Expr::CtEq { .. } => "u32".to_string(),
+            Expr::AtomicLoad { .. } => "u32".to_string(),
+            Expr::AtomicStore { .. } => "void".to_string(),
+            Expr::AtomicCas { .. } => "u32".to_string(),
         }
     }
 
@@ -2747,6 +2757,11 @@ impl AstToScg {
             Expr::Closure { .. } => "|…| …".to_string(),
             Expr::Await { expr, .. } => format!("{}.await", self.expr_to_string(expr)),
             Expr::Uninitialized { .. } => "<uninitialized>".to_string(),
+            Expr::CtSelect { .. } => "ct_select(…)".to_string(),
+            Expr::CtEq { .. } => "ct_eq(…)".to_string(),
+            Expr::AtomicLoad { .. } => "atomic_load(…)".to_string(),
+            Expr::AtomicStore { .. } => "atomic_store(…)".to_string(),
+            Expr::AtomicCas { .. } => "atomic_cas(…)".to_string(),
         }
     }
 

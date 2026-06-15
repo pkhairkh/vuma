@@ -59,6 +59,14 @@ pub enum NodeType {
     VTable,
     /// A closure environment node capturing variables.
     ClosureEnv,
+    /// A struct definition node (type declaration).
+    StructDef,
+    /// An enum definition node (type declaration).
+    EnumDef,
+    /// A pattern match node (control flow via discriminant dispatch).
+    Match,
+    /// A constant-time security operation node (ct_select, ct_eq).
+    ConstantTime,
 }
 
 impl std::fmt::Display for NodeType {
@@ -74,6 +82,10 @@ impl std::fmt::Display for NodeType {
             NodeType::Phantom => write!(f, "Phantom"),
             NodeType::VTable => write!(f, "VTable"),
             NodeType::ClosureEnv => write!(f, "ClosureEnv"),
+            NodeType::StructDef => write!(f, "StructDef"),
+            NodeType::EnumDef => write!(f, "EnumDef"),
+            NodeType::Match => write!(f, "Match"),
+            NodeType::ConstantTime => write!(f, "ConstantTime"),
         }
     }
 }
@@ -150,6 +162,72 @@ pub enum NodePayload {
     VTable(VTableNode),
     /// Payload for `NodeType::ClosureEnv`.
     ClosureEnv(ClosureEnvNode),
+    /// Payload for `NodeType::StructDef`.
+    StructDef(StructDefNode),
+    /// Payload for `NodeType::EnumDef`.
+    EnumDef(EnumDefNode),
+    /// Payload for `NodeType::Match`.
+    Match(MatchNode),
+    /// Payload for `NodeType::ConstantTime`.
+    ConstantTime(ConstantTimeNode),
+}
+
+/// The kind of computation performed by a [`ComputationNode`].
+///
+/// This enum classifies computation into broad categories. The generic
+/// `Other` variant preserves backward compatibility for arbitrary
+/// operations expressed as strings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ComputationKind {
+    /// A generic / unclassified operation (backward-compatible).
+    Other(String),
+    /// Struct field access: loads or stores a field at a known byte offset
+    /// from a struct base pointer.
+    StructAccess {
+        /// Name of the struct type.
+        struct_name: String,
+        /// Name of the field being accessed.
+        field_name: String,
+        /// Byte offset of the field within the struct.
+        field_offset: u64,
+        /// Size of the field in bytes.
+        field_size: u64,
+    },
+    /// Enum tag read: extracts the discriminant from a tagged union.
+    EnumTag {
+        /// Name of the enum type.
+        enum_name: String,
+        /// Type of the tag (discriminant), e.g. `"u32"`.
+        tag_type: String,
+        /// Size of the tag in bytes.
+        tag_size: u64,
+    },
+    /// Match dispatch: selects one of several arms based on comparing
+    /// a discriminant value. Lowered to if/else chains in the codegen.
+    MatchNode {
+        /// Number of match arms.
+        arm_count: usize,
+        /// Type of the scrutinee (subject expression).
+        subject_type: String,
+    },
+}
+
+impl ComputationKind {
+    /// Returns a human-readable name for this computation kind.
+    pub fn label(&self) -> String {
+        match self {
+            ComputationKind::Other(op) => op.clone(),
+            ComputationKind::StructAccess { struct_name, field_name, .. } => {
+                format!("struct_access::{}::{}", struct_name, field_name)
+            }
+            ComputationKind::EnumTag { enum_name, .. } => {
+                format!("enum_tag::{}", enum_name)
+            }
+            ComputationKind::MatchNode { arm_count, .. } => {
+                format!("match_dispatch({}_arms)", arm_count)
+            }
+        }
+    }
 }
 
 /// Data specific to a computation node.
@@ -158,13 +236,38 @@ pub enum NodePayload {
 /// function invocation, or data transformation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComputationNode {
-    /// A textual or symbolic representation of the operation performed.
-    pub operation: String,
+    /// The specific kind of computation performed.
+    ///
+    /// When set to `ComputationKind::Other(s)`, this is backward-compatible
+    /// with the old string-based `operation` field.
+    pub kind: ComputationKind,
     /// An optional type signature for the computation's result.
     pub result_type: Option<String>,
     /// Whether this computation is a tail call (the last action before return).
     /// Set by the TailCallOptimization transform.
     pub tail_call: bool,
+}
+
+impl ComputationNode {
+    /// Create a new ComputationNode with a generic (string) operation.
+    ///
+    /// This is a convenience constructor that wraps the operation string
+    /// in `ComputationKind::Other`.
+    pub fn new(operation: &str, result_type: Option<String>, tail_call: bool) -> Self {
+        Self {
+            kind: ComputationKind::Other(operation.to_string()),
+            result_type,
+            tail_call,
+        }
+    }
+
+    /// Returns the operation label as a string.
+    ///
+    /// For backward compatibility, this returns the inner string for
+    /// `ComputationKind::Other` and a generated label for specific kinds.
+    pub fn operation(&self) -> String {
+        self.kind.label()
+    }
 }
 
 /// Data specific to an allocation node.
@@ -327,6 +430,153 @@ pub struct ClosureEnvNode {
     pub closure_entry: Option<NodeId>,
 }
 
+/// Data specific to a struct definition node.
+///
+/// Represents a struct type declaration with named fields. Structs are lowered
+/// to flat memory layouts where fields are laid out sequentially with proper
+/// alignment padding between fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructDefNode {
+    /// Struct name.
+    pub name: String,
+    /// Fields in declaration order: (name, type_name, byte_offset, byte_size).
+    /// Offsets are computed during layout resolution.
+    pub fields: Vec<StructFieldInfo>,
+    /// Total size in bytes (including tail padding).
+    pub total_size: u64,
+    /// Alignment requirement in bytes.
+    pub alignment: u64,
+}
+
+/// Information about a single field in a struct definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructFieldInfo {
+    /// Field name.
+    pub name: String,
+    /// Type name of the field.
+    pub type_name: String,
+    /// Byte offset from the start of the struct.
+    pub offset: u64,
+    /// Size of the field in bytes.
+    pub size: u64,
+}
+
+/// Data specific to an enum definition node.
+///
+/// Represents an enum type declaration with named variants. Enums are lowered
+/// to tagged unions: a discriminant (tag) field followed by a union of the
+/// variant payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumDefNode {
+    /// Enum name.
+    pub name: String,
+    /// Variants in declaration order.
+    pub variants: Vec<EnumVariantInfo>,
+    /// Tag type (discriminant size, typically u32 or u8).
+    pub tag_type: String,
+    /// Size of the tag field in bytes.
+    pub tag_size: u64,
+    /// Size of the largest payload in bytes.
+    pub max_payload_size: u64,
+    /// Total size of the tagged union in bytes (tag + payload + padding).
+    pub total_size: u64,
+    /// Alignment requirement in bytes.
+    pub alignment: u64,
+}
+
+/// Information about a single variant in an enum definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumVariantInfo {
+    /// Variant name.
+    pub name: String,
+    /// Discriminant value (index).
+    pub discriminant: u64,
+    /// Optional payload type name.
+    pub payload_type: Option<String>,
+    /// Size of the payload in bytes (0 if no payload).
+    pub payload_size: u64,
+}
+
+/// Data specific to a pattern match node.
+///
+/// Represents a match expression that dispatches control flow based on
+/// the discriminant of an enum value, with optional payload extraction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchNode {
+    /// The expression being matched (the discriminant).
+    pub subject: String,
+    /// The match arms.
+    pub arms: Vec<MatchArmInfo>,
+    /// Type of the subject expression (for enum tag dispatch).
+    pub subject_type: String,
+}
+
+/// Information about a single arm of a match expression.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchArmInfo {
+    /// Pattern to match against.
+    pub pattern: MatchPatternInfo,
+    /// Optional guard expression.
+    pub guard: Option<String>,
+    /// Body statements for this arm.
+    pub body: Vec<String>,
+}
+
+/// Pattern information for a match arm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MatchPatternInfo {
+    /// Wildcard pattern: `_`
+    Wildcard,
+    /// Literal pattern: matches an exact integer value.
+    Lit(i64),
+    /// Identifier pattern: binds the value to a name.
+    Ident(String),
+    /// Enum variant pattern: `Some(v)` or `None`
+    Enum {
+        /// Variant name.
+        variant: String,
+        /// Optional binding for the variant payload.
+        binding: Option<String>,
+    },
+    /// Struct pattern: `Point { x, y }`
+    Struct {
+        /// Struct name.
+        name: String,
+        /// Field bindings.
+        fields: Vec<String>,
+    },
+    /// Or pattern: `1 | 2 | 3`
+    Or(Vec<MatchPatternInfo>),
+}
+
+/// Data specific to a constant-time security operation node.
+///
+/// Represents operations that execute in constant time to prevent
+/// timing side-channel attacks. These are lowered to branch-free
+/// bitwise operations in the backends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstantTimeNode {
+    /// The constant-time operation kind.
+    pub op: ConstantTimeOp,
+    /// Result variable name.
+    pub dst: String,
+    /// Operand variable names.
+    pub operands: Vec<String>,
+}
+
+/// Kinds of constant-time operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConstantTimeOp {
+    /// Constant-time conditional select: `ct_select(cond, a, b)`.
+    /// Returns `a` if `cond != 0`, else `b`, without branching.
+    /// Lowered to: `(a & mask) | (b & ~mask)` where `mask = -(cond != 0)`.
+    CtSelect,
+    /// Constant-time equality check: `ct_eq(a, b)`.
+    /// Returns 1 if `a == b`, else 0, without branching.
+    /// Lowered to: constant-time comparison using XOR.
+    CtEq,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +628,91 @@ mod tests {
             is_lossless: true,
         };
         assert!(cast.is_lossless);
+    }
+
+    #[test]
+    fn test_computation_kind_other() {
+        let kind = ComputationKind::Other("add".to_string());
+        assert_eq!(kind.label(), "add");
+    }
+
+    #[test]
+    fn test_computation_kind_struct_access() {
+        let kind = ComputationKind::StructAccess {
+            struct_name: "Point".to_string(),
+            field_name: "x".to_string(),
+            field_offset: 0,
+            field_size: 4,
+        };
+        assert_eq!(kind.label(), "struct_access::Point::x");
+    }
+
+    #[test]
+    fn test_computation_kind_enum_tag() {
+        let kind = ComputationKind::EnumTag {
+            enum_name: "Option".to_string(),
+            tag_type: "u32".to_string(),
+            tag_size: 4,
+        };
+        assert_eq!(kind.label(), "enum_tag::Option");
+    }
+
+    #[test]
+    fn test_computation_kind_match_node() {
+        let kind = ComputationKind::MatchNode {
+            arm_count: 3,
+            subject_type: "Option".to_string(),
+        };
+        assert_eq!(kind.label(), "match_dispatch(3_arms)");
+    }
+
+    #[test]
+    fn test_computation_node_new() {
+        let node = ComputationNode::new("mul", Some("i64".to_string()), false);
+        assert_eq!(node.operation(), "mul");
+        assert_eq!(node.result_type, Some("i64".to_string()));
+        assert!(!node.tail_call);
+    }
+
+    #[test]
+    fn test_computation_node_struct_access() {
+        let node = ComputationNode {
+            kind: ComputationKind::StructAccess {
+                struct_name: "Rect".to_string(),
+                field_name: "w".to_string(),
+                field_offset: 8,
+                field_size: 4,
+            },
+            result_type: Some("u32".to_string()),
+            tail_call: false,
+        };
+        assert_eq!(node.operation(), "struct_access::Rect::w");
+    }
+
+    #[test]
+    fn test_computation_node_enum_tag() {
+        let node = ComputationNode {
+            kind: ComputationKind::EnumTag {
+                enum_name: "Result".to_string(),
+                tag_type: "u32".to_string(),
+                tag_size: 4,
+            },
+            result_type: Some("u32".to_string()),
+            tail_call: false,
+        };
+        assert_eq!(node.operation(), "enum_tag::Result");
+    }
+
+    #[test]
+    fn test_computation_node_match_node() {
+        let node = ComputationNode {
+            kind: ComputationKind::MatchNode {
+                arm_count: 2,
+                subject_type: "Option".to_string(),
+            },
+            result_type: Some("i32".to_string()),
+            tail_call: false,
+        };
+        assert_eq!(node.operation(), "match_dispatch(2_arms)");
     }
 }
